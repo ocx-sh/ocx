@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Sign error types (three-layer: [`SignError`] + [`SignErrorKind`]).
-//!
-//! Per
-//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
-//! §"SignErrorKind — variant inventory": every kind below is justified by a
-//! distinct user-facing remediation *and* a distinct exit code. The kind enum
-//! is a pure discriminant (`ClassifyErrorKind`); the outer [`SignError`] carries
-//! the per-signing context (identifier) and delegates classification via
-//! `ClassifyExitCode`, which the binary carries (`ocx::exit`).
+//! Sign error types (three-layer: [`SignError`] + [`SignErrorKind`]); exit-code classification lives in `ocx::exit`.
+//! Variant inventory: [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 
 use ocx_oci::PackageRef;
 use ocx_oci::endpoint::UrlRejection;
@@ -17,363 +10,153 @@ use ocx_trust::key_ref::KeyRefError;
 
 /// Top-level sign error carrying the identifier being signed + the kind.
 ///
-/// Three-layer pattern: outer struct attaches per-object context (the
-/// identifier), inner enum carries the discriminant kind. Chain walking via
-/// `source()` surfaces the inner kind for programmatic dispatch.
-///
-/// The `Display` is the identifier alone: `kind` is `#[source]`, and every
-/// render site uses the chain-walking `{err:#}` form, which appends the source
-/// itself. Interpolating `{kind}` here as well printed the whole sentence twice.
+/// `Display` is the identifier alone: `{err:#}` appends the `#[source]` kind, so interpolating it prints it twice.
 #[derive(Debug, thiserror::Error)]
 #[error("{identifier}")]
 pub struct SignError {
-    /// PackageRef being signed when the failure occurred.
     pub identifier: PackageRef,
-    /// Discriminant kind of the failure.
     #[source]
     pub kind: SignErrorKind,
 }
 
 impl SignError {
-    /// Build a [`SignError`] from an identifier + kind.
     pub fn new(identifier: PackageRef, kind: SignErrorKind) -> Self {
         Self { identifier, kind }
     }
 }
 
-/// Discriminant kind for [`SignError`].
-///
-/// Each variant is justified by a distinct user-facing remediation AND a
-/// distinct exit code (see ADR §"Variant inventory & justification"). Variants
-/// that would map to identical remediation + exit code are merged.
+/// Discriminant kind for [`SignError`]; each variant has a distinct remediation and exit code.
 #[derive(Debug, thiserror::Error)]
 pub enum SignErrorKind {
-    /// Fulcio rejected the CSR (non-401/403) — config-side defect.
-    ///
-    /// Exit 78 (`ConfigError`). Remediation: file a bug.
+    /// Fulcio rejected the CSR (non-401/403). Exit 78.
     #[error("Fulcio rejected the CSR as malformed")]
     FulcioBadRequest,
 
-    /// Fulcio rejected the OIDC token — issuer mismatch, audience wrong, expired.
-    ///
-    /// Exit 80 (`AuthError`). Remediation: refresh token, check issuer URL.
+    /// Fulcio rejected the OIDC token (issuer, audience, expiry). Exit 80.
     #[error("Fulcio rejected OIDC token")]
     OidcTokenRejected,
 
-    /// Fulcio could not be reached, or answered with a transient fault
-    /// (429 or any 5xx).
-    ///
-    /// Exit 75 (`TempFail`). Remediation: retry. The Rekor twin is
-    /// [`Self::TransparencyLogUnavailable`] (83); the two stay separate codes
-    /// so an operator can tell which service is down, and both stay separate
-    /// from [`Self::FulcioBadRequest`] (78) so retryable is distinguishable
-    /// from terminal (PKG-28).
+    /// Fulcio unreachable, or a 429/5xx. Exit 75, apart from Rekor's 83 so the operator can tell which is down.
     #[error("Fulcio unavailable")]
     FulcioUnavailable,
 
-    /// Rekor unavailable at time of signing.
-    ///
-    /// Exit 83 (`TransparencyLogUnavailable`). Remediation: retry later.
+    /// Rekor unavailable at signing time. Exit 83.
     #[error("Rekor transparency log unavailable")]
     TransparencyLogUnavailable,
 
-    /// Rekor returned the entry but SET could not be extracted or parsed.
-    ///
-    /// Distinct from [`Self::TransparencyLogUnavailable`] because the remediation is
-    /// "file a bug," not "retry." Exit 65 (`DataError`).
+    /// Rekor answered but its SET or body is unusable; file a bug, not retry. Exit 65.
     #[error("Rekor SET malformed or missing")]
     RekorSetMalformed,
 
-    /// The Referrers API is absent **and** the tag-schema fallback write was
-    /// refused (spec D3).
-    ///
-    /// Exit 84 (`ReferrersUnsupported`). The old message — "registry does not
-    /// support the OCI Referrers API" — became false the moment the capability
-    /// gates were removed (ADR Amendment 10, C-009): an absent API is now
-    /// served by the fallback index, so reaching 84 on the write side means the
-    /// fallback could not hold the referrer either. Remediation is therefore a
-    /// registry that serves the Referrers API, which carries no such ceiling.
-    /// The outer `SignError` Display (`"{identifier}: {kind}"`) already
-    /// prefixes this with the registry host, so the message does not repeat it.
+    /// The Referrers API is absent **and** the fallback-index write was refused. Exit 84.
     #[error(
         "registry serves no OCI Referrers API and would not hold the referrers fallback index; \
          supply-chain commands are unavailable for this registry"
     )]
     ReferrersUnsupported,
 
-    /// The identifier did not resolve to a manifest for the requested platform.
-    ///
-    /// Exit 79 (`NotFound`). Previously an `Internal` (exit 1), which reported a
-    /// plain typo in `--platform` as a bug in ocx.
+    /// The identifier did not resolve to a manifest for the requested platform. Exit 79.
     #[error("no manifest for platform {platform}")]
     TargetNotFound { platform: String },
 
-    /// `--platform` was given but the reference resolved to a single manifest.
+    /// `--platform` was given but the reference resolved to a single manifest. Exit 79.
     ///
-    /// Exit 79 (`NotFound`) and a slug of its own, byte-identical to
-    /// [`VerifyErrorKind::TargetNotAnIndex`](crate::verify::VerifyErrorKind::TargetNotAnIndex)
-    /// — one refusal, one word, whichever verb reported it. Separate from
-    /// [`Self::TargetNotFound`] because the remedies differ: "this package
-    /// ships no such platform" sends you looking for a build, "this reference
-    /// has no platforms to choose from" tells you to drop the flag.
+    /// Byte-identical to [`VerifyErrorKind::TargetNotAnIndex`](crate::verify::VerifyErrorKind::TargetNotAnIndex).
     #[error("--platform {platform} was given but the reference resolved to a single manifest, not an index")]
     TargetNotAnIndex { platform: String },
 
-    /// The subject resolved to a digest OCX cannot address in a cosign
-    /// artifact. Everything the sign and attest paths write is sha256-only.
+    /// The subject digest is not sha256, which cosign artifacts require. Exit 65.
     ///
-    /// Exit 65 (`DataError`), deliberately not 64: the algorithm is a property
-    /// of the *published manifest*, not of anything the caller typed, so no
-    /// amount of retyping the reference or the `--platform` fixes it. Same
-    /// class as [`Self::PredicateNotJson`] — material OCX was handed and
-    /// cannot use.
-    ///
-    /// Raised at target resolution, before a blob, a manifest or a Rekor entry
-    /// is written, because what OCX writes cannot carry the subject and fails
-    /// *later* and worse. The in-toto Statement's DigestSet is emitted from
-    /// the subject's own algorithm while
-    /// [`binds_subject`](crate::attest::statement) accepts `sha256`
-    /// alone, so the refusal (`statement_subject_weak_algorithm`) arrives at
-    /// verify time — after a permanent transparency-log entry has been burned
-    /// and the run exited 0. cosign itself is sha256-only, so accepting a
-    /// stronger algorithm and failing later is strictly worse than refusing
-    /// up front, and the alternative — widening `binds_subject` — would
-    /// enlarge the trust surface to algorithms nothing else in the pipeline
-    /// handles.
-    ///
-    /// The sidecar tag is the reason the refusal is *not* narrowed to the
-    /// legs that build a Statement. It is
-    /// `<algorithm>-<encoded truncated to 64>.<suffix>`, so two subjects
-    /// sharing a 64-character prefix share one tag: the spec accepts that
-    /// collision for a referrers index, where the index is re-read and
-    /// filtered, but a signature parked under a colliding tag is simply the
-    /// wrong subject's. One algorithm end to end is the only shape in which
-    /// that question does not have to be asked.
+    /// Raised before any write: `binds_subject` accepts only sha256, so a later refusal follows a permanent Rekor entry.
+    /// The sidecar tag truncates the digest to 64 characters, so a colliding tag would carry another subject's signature.
     #[error("cosign artifacts address their subject by sha256; this reference resolves to a {algorithm} digest")]
-    SubjectDigestUnsupported {
-        /// The algorithm prefix the subject digest carries, e.g. `sha384`.
-        algorithm: String,
-    },
+    SubjectDigestUnsupported { algorithm: String },
 
-    /// OIDC pre-check (expiry, audience) failed client-side — token never sent to Fulcio.
-    ///
-    /// Exit 77 (`PermissionDenied`). Remediation: per-platform hint table.
+    /// OIDC pre-check failed client-side; the token never reached Fulcio. Exit 77.
     #[error("OIDC pre-check failed: {reason}")]
     OidcPreCheckFailed {
-        /// Short reason identifier (e.g., `missing_gha_permission`).
+        /// Short reason slug (e.g. `missing_gha_permission`).
         reason: String,
     },
 
-    /// The physical registry the index rewrote this reference to resolves into
-    /// a forbidden range (CWE-918).
-    ///
-    /// Exit 78 (`ConfigError`) -- the same code the pull path's dial guard
-    /// yields for the same refusal. Remediation: add the host to
-    /// `trusted_hosts` for that registry, or fix the indirection.
+    /// The index-rewritten physical registry resolves into a forbidden range (CWE-918). Exit 78.
     #[error("refusing to dial the rewritten registry: {reason}")]
-    ForbiddenRegistryTarget {
-        /// Rendered SSRF refusal: the host and the address it resolved to.
-        reason: String,
-    },
+    ForbiddenRegistryTarget { reason: String },
 
-    /// `--offline` was supplied to `ocx package sign`; S1-E policy rejects offline signing.
-    ///
-    /// Exit 77 (`PermissionDenied`) — policy rejection of the *action*, not a
-    /// passive network access.
+    /// `--offline` was supplied to `ocx package sign`. Exit 77.
     #[error("offline signing is not supported")]
     OfflineSignRefused,
 
-    /// `--identity-token-file` was readable by group or other (mode bits in
-    /// `mode & 0o077` were non-zero). Secrets must be owner-readable only.
+    /// `--identity-token-file` is readable by group or other. Exit 77.
     ///
-    /// Exit 77 (`PermissionDenied`). Remediation: `chmod 600 <path>`.
-    ///
-    /// The `Display` impl deliberately surfaces only the file's basename — the
-    /// full path can leak through CLI stderr, the JSON error envelope, or any
-    /// log sink, and a token-file path is a sensitive credential location that
-    /// should not be echoed back to whatever pipes the command output
-    /// (CWE-209). The full `PathBuf` is preserved on the variant for callers
-    /// that legitimately need it.
+    /// `Display` shows only the basename: the full path is a credential location (CWE-209).
     #[error(
         "identity token file `{}` has permissive permissions (mode {mode:#o}); expected 0600 or tighter",
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "<redacted>".into())
     )]
-    IdentityTokenFilePermissive {
-        /// Path to the token file that failed the permission check.
-        path: std::path::PathBuf,
-        /// Raw Unix mode bits (lower 12 bits: setuid/setgid/sticky + rwxrwxrwx).
-        mode: u32,
-    },
+    IdentityTokenFilePermissive { path: std::path::PathBuf, mode: u32 },
 
-    /// User-supplied Sigstore endpoint URL failed SSRF/scheme validation.
-    ///
-    /// Surfaces at the boundary where `--fulcio-url` / `--rekor-url` are
-    /// parsed. Exit 64 (`UsageError`) for a malformed flag value — a CLI
-    /// misuse, not a runtime fault — except when the host simply does not
-    /// resolve, where `reason` (a [`UrlRejection`]) carries 69
-    /// (`Unavailable`) instead: unreachable is a different failure than
-    /// malformed. The `endpoint` field carries the flag name (e.g.
-    /// `--fulcio-url`) so the envelope `error.detail` is programmatically
-    /// dispatchable.
+    /// A `--fulcio-url`/`--rekor-url` value failed validation. Exit 64, or 69 when the host does not resolve.
     #[error("invalid {endpoint} URL: {reason}")]
     InvalidEndpointUrl {
-        /// Flag name the URL was supplied via (e.g. `--fulcio-url`).
+        /// Flag name (e.g. `--fulcio-url`), so `error.detail` is dispatchable.
         endpoint: String,
-        /// Structured rejection reason from [`ocx_oci::endpoint::validate_sigstore_url`].
         #[source]
         reason: UrlRejection,
     },
 
-    /// The `--predicate` file did not parse as JSON.
-    ///
-    /// Exit 65 (`DataError`) — the *content* of a file the user named is
-    /// malformed, not the invocation. Contrast
-    /// [`Self::ProvenanceVersionUnsupported`], where the offending value came
-    /// from the command line and the code is 64.
+    /// The `--predicate` file did not parse as JSON. Exit 65.
     #[error("predicate file is not valid JSON")]
     PredicateNotJson,
 
-    /// The `--predicate` file exceeded `MAX_PREDICATE_FILE_BYTES`.
-    ///
-    /// Exit 65 (`DataError`).
+    /// The predicate or statement exceeded its byte limit. Exit 65.
     #[error("predicate payload is at least {actual} bytes, over the {limit}-byte limit")]
     PredicateTooLarge {
-        /// The configured ceiling, in bytes.
         limit: u64,
-        /// Bytes counted before the limit tripped — a lower bound, not the
-        /// size on disk. The signer passes the exact statement length; the
-        /// CLI's `--predicate` read is bounded and stops one byte past the
-        /// ceiling, so it never learns how far over the file actually is.
-        /// Hence "at least" in the message: it is true for both producers.
+        /// A lower bound: the bounded `--predicate` read stops one byte past the ceiling.
         actual: u64,
     },
 
-    /// Attach resolved a provenance predicateType below SLSA v1.0.
-    ///
-    /// Exit 64 (`UsageError`), not 65: the offending value came from the
-    /// invocation, so the fix is a different flag value rather than a
-    /// different file. The message names that value.
+    /// Attach resolved a provenance predicateType below SLSA v1.0. Exit 64.
     #[error("provenance predicate type {resolved} is below v1.0; pass --type slsaprovenance1")]
-    ProvenanceVersionUnsupported {
-        /// The predicateType the requested `--type` resolved to.
-        resolved: String,
-    },
+    ProvenanceVersionUnsupported { resolved: String },
 
-    /// `--offline` was supplied to an attestation-publishing command
-    /// (`ocx package attest`, or `ocx package push --sbom`).
-    ///
-    /// Exit 77 (`PermissionDenied`), reused verbatim from
-    /// [`Self::OfflineSignRefused`]: attesting *is* signing, and a policy
-    /// refusal must not classify differently depending on which verb reached
-    /// it. Refused before token resolution, so no credential is touched.
+    /// `--offline` was supplied to `package attest` or `push --sbom`. Exit 77, as for signing.
     #[error("offline attestation is not supported")]
     OfflineAttestRefused,
 
-    /// An unsigned attach was asked for a predicate type that has no SBOM
-    /// media type to carry it.
-    ///
-    /// Exit 64 (`UsageError`), the same code and the same reasoning as
-    /// [`Self::ProvenanceVersionUnsupported`]: the offending value came from
-    /// the invocation. An unsigned referrer records what it is in its
-    /// `artifactType` and nowhere else, so a provenance or custom predicate has
-    /// no place to state its type — the fix is to supply a signing identity,
-    /// not a different file.
+    /// An unsigned attach named a predicate type with no SBOM media type. Exit 64.
     #[error(
         "unsigned attach supports SBOM predicate types only, not {predicate_type}; \
          supply an OIDC identity to attach it as a signed attestation"
     )]
-    UnsignedTypeUnsupported {
-        /// The predicateType the requested `--type` resolved to.
-        predicate_type: String,
-    },
+    UnsignedTypeUnsupported { predicate_type: String },
 
-    /// `--signature-format simplesigning` or `both` reached an attach with no
-    /// signing identity at all.
-    ///
-    /// Exit 64 (`UsageError`), the same code and the same reasoning as
-    /// [`Self::UnsignedTypeUnsupported`]: the offending value came from the
-    /// invocation. A `sha256-<hex>.att` sidecar layer **is** a DSSE envelope,
-    /// so an unsigned attach has nothing to put in one — and quietly writing
-    /// the bundle shape instead would make `--signature-format` a flag that did
-    /// something other than what it says, which is the failure mode this
-    /// surface rejects everywhere else. Remediation: supply an OIDC identity or
-    /// a `--key`, or drop the flag.
+    /// A sidecar `--signature-format` reached an attach with no signing identity. Exit 64.
     #[error(
         "--signature-format {format} writes a sha256-<hex>.att sidecar, which carries a signed \
          DSSE envelope; supply an OIDC identity or a --key, or drop the flag"
     )]
-    SidecarRequiresSignature {
-        /// The requested format, echoed so the message names what was asked for.
-        format: crate::sign::SignatureFormat,
-    },
+    SidecarRequiresSignature { format: crate::sign::SignatureFormat },
 
-    /// A `--key` reference named a key backend OCX recognises but has not
-    /// implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
-    /// `k8s://`).
+    /// A `--key` reference named a recognised but unimplemented key backend. Exit 85.
     ///
-    /// Exit 85 (`UnsupportedKeyBackend`), with its own envelope `error.kind`
-    /// rather than a fold into `usage_error`: the invocation was well-formed
-    /// and the backend is real, so a script can branch on "not built yet"
-    /// separately from "you typed it wrong". Remediation: pass a file key, or
-    /// wait for the backend. Never reported as "no such file or directory" --
-    /// the refusal happens at the parse boundary, before anything treats the
-    /// reference as a path.
-    ///
-    /// `transparent` rather than a wrapping message: the wrapped
-    /// [`KeyRefError`] already names the scheme, and a prefix here would render
-    /// the sentence twice under `{err:#}`. Transparent forwards `source()`
-    /// *past* the value it wraps, which is harmless here for two reasons --
-    /// `KeyRefError` is a leaf with no source of its own, and `exit_code()`
-    /// answers for this variant directly instead of delegating to the chain
-    /// walker (contrast `CopyErrorKind::Registry`, which must delegate).
+    /// `transparent` skips `source()`: safe only while `KeyRefError` has no source and `exit_code()` answers
+    /// this variant directly, or the chain walker misclassifies the exit code.
     #[error(transparent)]
     UnsupportedKeyBackend(KeyRefError),
 
-    /// The key backend could not produce a signature.
-    ///
-    /// Exit code is the wrapped [`KeyBackendError`]'s own class, decided by
-    /// `SignErrorKind::exit_code`, which the binary carries (`ocx::exit`):
-    /// unreachable backend → 75 (retry), unreadable
-    /// key material → 74, malformed key → 65, recognised-but-unimplemented
-    /// backend → 85. A KMS signs over the network, so "the backend was down"
-    /// and "the key is wrong" are different operator actions and must not
-    /// collapse into one code.
-    ///
-    /// `#[from]` because the conversion is unambiguous — `KeyBackendError` has
-    /// exactly one home in this taxonomy.
+    /// The key backend could not produce a signature; exits with the wrapped error's own class.
     #[error(transparent)]
     KeyBackend(#[from] crate::sign::key_backend::KeyBackendError),
 
-    /// A `--key` reference could not be parsed: an unrecognised scheme token,
-    /// or nothing following the scheme.
-    ///
-    /// Exit 64 (`UsageError`). Remediation: fix the reference. Same
-    /// `transparent` reasoning as [`Self::UnsupportedKeyBackend`]; the two are
-    /// separate variants because their exit codes and their remedies differ,
-    /// and `From<KeyRefError>` is the single place that decides which applies.
+    /// A `--key` reference could not be parsed. Exit 64.
     #[error(transparent)]
     KeyReferenceInvalid(KeyRefError),
 
-    /// `--no-rekor-upload` was given for a keyless signature.
+    /// `--no-rekor-upload` was given for a keyless signature. Exit 64.
     ///
-    /// Exit 64 (`UsageError`) -- the flags parse, but the combination asks for
-    /// something that cannot be honoured.
-    ///
-    /// Deliberately **not** a clap `requires = "key"` (plan D-7): clap would
-    /// print "the following required arguments were not provided: --key", which
-    /// inverts the reason. The reason is the whole point. A Fulcio certificate
-    /// is valid for roughly ten minutes, so the Rekor entry's inclusion
-    /// timestamp is the only durable proof that the signature was produced
-    /// while the certificate still was. Skipping the entry does not make the
-    /// signature unverifiable now -- it makes it unverifiable forever, ten
-    /// minutes from now. So under keyless the flag is an error and never a
-    /// silent no-op.
-    ///
-    /// Carried G0 constraint, stated here so no later loop re-derives it
-    /// backwards: verification anchors certificate validity to that
-    /// *signing-time* proof -- the Rekor entry's integrated time -- and never
-    /// to wall-clock "is this certificate valid now". A golden keyless fixture
-    /// whose certificate expired ten minutes after capture must still verify.
+    /// Not a clap `requires = "key"`, whose message inverts the reason.
     #[error(
         "--no-rekor-upload requires --key: a keyless signature must be recorded in Rekor, \
          because a Fulcio certificate is valid for about ten minutes and the log entry's \
@@ -381,26 +164,14 @@ pub enum SignErrorKind {
     )]
     RekorUploadRequiredForKeyless,
 
-    /// Catch-all for Fulcio/Rekor HTTP errors outside the codes above.
-    ///
-    /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
-    /// `classify_error` chain-walking and `{err:#}` diagnostics preserve the
-    /// cause — never erase it with `.to_string()`.
+    /// Catch-all, exit 1; the cause stays a `#[source]`, never `.to_string()`.
     #[error("internal signing error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Select the sign-side variant a `--key` parse failure belongs to.
 ///
-/// The split is the whole reason two variants exist: an unimplemented backend
-/// exits 85 with its own `error.kind`, everything else is a malformed
-/// reference and exits 64. The match is exhaustive with no wildcard --
-/// `KeyRefError` is `#[non_exhaustive]`, but that binds downstream crates
-/// only, so in the crate that defines it a new rejection reason is a compile
-/// error until it is classified here.
-///
-/// The error is carried structurally, never through `.to_string()`: its
-/// `Display` is what names the offending scheme.
+/// No wildcard, and `KeyRefError` is not `#[non_exhaustive]`: a `_` arm gives a new reason an unreviewed exit code.
 impl From<KeyRefError> for SignErrorKind {
     fn from(error: KeyRefError) -> Self {
         match error {

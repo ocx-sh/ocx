@@ -1,58 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Attest pipeline — the push-side state machine for in-toto attestations.
-//!
-//! Per
-//! [`adr_sbom_attestations.md`](../../../../../.claude/artifacts/adr_sbom_attestations.md)
-//! (C-009): refuse offline → resolve and floor-check the predicate type →
-//! SSRF floor on both trust services → resolve the per-platform target → index
-//! indirection → referrers capability probe → acquire an OIDC token → build
-//! the in-toto Statement → DSSE-sign it → push the bundle blob → push the
-//! referrer manifest whose `subject` points at the target.
-//!
-//! The floor check sits at step 1 rather than after token acquisition, where
-//! the design record's narrative puts it. Deliberate: the refusal is a pure
-//! function of `--type` and exits 64, so the later position would make a user
-//! finish an OAuth flow to be told the invocation was wrong — a usage error
-//! belongs before the credential, not after it.
-//!
-//! Mirrors [`SignPipeline`](crate::sign::SignPipeline) field-for-field
-//! where the concerns are identical, so the two read as siblings. It diverges
-//! exactly where the protocols do: what is signed (an in-toto Statement, not a
-//! bare digest), what the bundle carries (`dsseEnvelope`), and the third
-//! referrer annotation (`dev.sigstore.bundle.predicateType`) that a signature
-//! has no value for.
-//!
-//! A registry with no Referrers API gets the OCI tag-schema fallback index
-//! rather than the refusal ADR S1-F specified (Amendment 10), through the same
-//! `sign::referrers` helper the sign path uses.
-//!
-//! # `--signature-format`, and why attest has no legs
-//!
-//! [`SignatureFormat`] selects where the attestation is *published*, never how
-//! many times it is signed. `bundle` writes the OCI 1.1 referrer above;
-//! `simplesigning` writes cosign's `sha256-<hex>.att` sidecar tag, whose layer
-//! is the DSSE envelope the bundle would have wrapped; `both` writes each.
-//!
-//! That is the one place this pipeline deliberately does **not** mirror
-//! [`SignPipeline`](crate::sign::SignPipeline). Sign's two legs are two
-//! *independent signatures* over two different payloads — a simplesigning claim
-//! is not a DSSE Statement — so each costs its own Fulcio certificate and its
-//! own Rekor entry, and one leg failing must not discard the other. Attest's two
-//! shapes are **one** signature at two addresses: signing twice would spend two
-//! certificates on identical content and let the two publications disagree about
-//! which identity attested. So the envelope is signed once and each requested
-//! publication propagates its failure with `?` — a half-published attestation is
-//! reported as a failure, not as a success with a hole in it.
-//!
-//! No `.sbom` sidecar is written. That tag is `cosign attach sbom`'s *unsigned*
-//! convention, holding the raw document; the spec's §SBOM is explicit that "you
-//! do not sign an SBOM, you attest it", so a signed SBOM lands on `.att` like
-//! every other attestation and no signature format can produce a `.sbom`. An
-//! unsigned attach asked for a sidecar is refused
-//! ([`SignErrorKind::SidecarRequiresSignature`]) rather than silently given the
-//! bundle shape.
+//! Attest pipeline — the push-side state machine for in-toto attestations. Per
+//! [`adr_sbom_attestations.md`](../../../../../.claude/artifacts/adr_sbom_attestations.md).
+//! No `.sbom` sidecar is written: that tag is cosign's unsigned raw-document convention.
 
 use serde_json::value::RawValue;
 use url::Url;
@@ -87,24 +38,13 @@ const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
 
 /// Whether the attach publishes a signed bundle or the raw document.
 ///
-/// Chosen by the caller from what signing material is *visible*
-/// ([`DispatchingTokenProvider::has_signing_material`](crate::sign::DispatchingTokenProvider::has_signing_material)),
-/// never from whether acquiring one succeeded: an override token or a detected
-/// ambient CI identity means [`Self::Signed`], and a failure to redeem it is a
-/// hard error. Downgrading there would publish an identity-less artifact from a
-/// job configured for OIDC, and the referrer would look attached either way.
-///
-/// [`Self::Unsigned`] is reached only when there is no signing intent at all —
-/// which is where `ocx package attest` and `ocx package push --sbom` used to
-/// exit 77 with `no_ambient_no_tty`. `ocx package sign` has no unsigned form and
-/// still refuses.
+/// Chosen from visible signing material, never from whether acquiring it succeeded: downgrading
+/// on a failed redemption publishes an identity-less artifact from an OIDC-configured job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttestMode {
-    /// DSSE-sign the in-toto Statement and publish it as a Sigstore bundle v0.3
-    /// referrer.
+    /// DSSE-sign the Statement and publish it as a Sigstore bundle v0.3 referrer.
     Signed,
-    /// Publish the predicate document itself as the referrer payload, typed by
-    /// its own SBOM media type. No Fulcio, no Rekor, no DSSE.
+    /// Publish the predicate document itself, typed by its own SBOM media type.
     Unsigned,
 }
 
@@ -112,43 +52,31 @@ pub enum AttestMode {
 pub struct AttestContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
     pub identifier: &'a PackageRef,
-    /// Narrowing selector, when one was requested — see
-    /// [`SignContext::platform`](crate::sign::SignContext::platform).
-    /// `None` acts on whatever the reference resolved to.
+    /// Narrowing selector; `None` acts on whatever the reference resolved to.
     pub platform: Option<&'a Platform>,
-    /// Whether to sign. Both dependencies below are read in
-    /// [`AttestMode::Signed`] only.
+    /// Whether to sign; `signer` and `token_provider` are read only when signed.
     pub mode: AttestMode,
-    /// Which cosign wire shape(s) to publish the attestation in — the referrer
-    /// bundle, the `sha256-<hex>.att` sidecar, or both. See the module doc for
-    /// why this multiplies publications and never signatures.
+    /// Which cosign wire shape(s) to publish the attestation in.
     pub format: SignatureFormat,
     /// Signer producing the DSSE-enveloped bundle.
     pub signer: &'a dyn Signer,
-    /// OIDC token provider (override → ambient → browser dispatch).
     pub token_provider: &'a dyn TokenProvider,
-    /// The requested predicate type; its resolved URI is what gets written.
     pub predicate_type: &'a PredicateType,
-    /// The predicate file's bytes, validated as JSON and otherwise untouched (D-b).
+    /// The predicate file's bytes, validated as JSON and otherwise untouched.
     pub predicate: &'a RawValue,
     /// When true, bypass the referrers-capability cache.
     pub no_cache: bool,
-    /// Present so the S1-E policy refusal can run here rather than being
-    /// reinvented per call site — it is step 0 of [`AttestPipeline::run`].
+    /// Refused before any credential or socket.
     pub offline: bool,
-    /// The dial-site SSRF floor, resolved for this run's logical registry —
-    /// see [`SignContext::dial`](crate::sign::SignContext::dial).
+    /// The dial-site SSRF floor for this run's logical registry.
     pub dial: DialPolicy<'a>,
-    /// The caller-supplied resolution — see
-    /// [`SubjectResolver`], which this mirrors so the `--tags` sweep costs one
-    /// manifest fetch per tag on both verbs (#373).
+    /// The caller-supplied subject resolution; see [`SubjectResolver`].
     pub resolve: Box<SubjectResolver<'a>>,
     /// Fulcio URL (validated at the CLI boundary).
     pub fulcio_url: &'a Url,
     /// Rekor URL (validated at the CLI boundary).
     pub rekor_url: &'a Url,
-    /// The signing tier of the state-root layout, owning the
-    /// referrers-capability cache.
+    /// Owns the referrers-capability cache.
     pub state: SigningStatePaths,
 }
 
@@ -157,53 +85,31 @@ pub struct AttestContext<'a> {
 pub struct AttestResult {
     /// Digest of the target manifest the attestation was attached to.
     pub subject_digest: Digest,
-    /// The RESOLVED predicateType URI (D-c) — echoed in the report so alias
-    /// resolution is visible rather than surprising.
+    /// The resolved predicateType URI.
     pub predicate_type: String,
-    /// Where the `bundle` shape landed: the payload blob (the Sigstore bundle
-    /// under [`AttestMode::Signed`], the SBOM document itself under
-    /// [`AttestMode::Unsigned`]) and the OCI referrer manifest above it.
-    ///
-    /// `None` under `--signature-format simplesigning`, which publishes the
-    /// sidecar alone. At least one of this and [`Self::sidecar`] is always
-    /// `Some` — `SignatureFormat` has no variant that writes nothing.
+    /// Where the `bundle` shape landed; `None` under `--signature-format simplesigning`.
+    /// At least one of this and [`Self::sidecar`] is always `Some`.
     pub referrer: Option<LegDigests>,
-    /// Where the `simplesigning` shape landed: the DSSE envelope blob and the
-    /// `sha256-<hex>.att` sidecar manifest above it. `None` unless the sidecar
-    /// was asked for.
+    /// Where the `simplesigning` shape landed; `None` unless asked for.
     pub sidecar: Option<LegDigests>,
-    /// Whether the referrer carries a signature. `false` means the document was
-    /// attached as-is, with no identity behind it.
+    /// `false` means the document was attached as-is, with no identity behind it.
     pub signed: bool,
-    /// Cert SAN (identity) that signed the Statement — the OIDC subject.
-    /// `None` on an unsigned attach, where no certificate was ever issued.
+    /// Cert SAN (the OIDC subject); `None` when unsigned.
     pub certificate_identity: Option<String>,
-    /// Cert issuer (`--certificate-oidc-issuer` comparand) — the OIDC issuer.
-    /// `None` on an unsigned attach.
+    /// Cert issuer (the OIDC issuer); `None` when unsigned.
     pub certificate_oidc_issuer: Option<String>,
     /// Which key model produced the signature; `None` on an unsigned attach.
     pub key_backend: Option<ocx_trust::key_ref::KeyBackendKind>,
     /// The signing key's cosign hint, in key mode only.
     pub public_key_hint: Option<String>,
-    /// The Rekor log index, when a transparency record was created.
-    ///
-    /// Reported rather than inferred: under a key `--rekor-upload` is opt-in,
-    /// so its absence is a legal outcome the operator must be able to see.
+    /// The Rekor log index; `None` is legal under a key without `--rekor-upload`.
     pub transparency_log_index: Option<u64>,
 }
 
-/// The referrer's single payload layer: the bytes, their digest, what types
-/// them, and the `artifactType` the manifest above them declares.
+/// The referrer's single payload layer.
 ///
-/// Grouped rather than passed as positionals so [`AttestPipeline::push_referrer`]
-/// stays under the argument limit and so the digest cannot drift from the bytes
-/// it was computed over — the digest is the blob's registry address, and a
-/// swapped pair of adjacent arguments would type-check.
-///
-/// `artifact_type` belongs here rather than beside it because the two are one
-/// decision: a Sigstore bundle layer under a `sigstore.bundle.v0.3` referrer, an
-/// SBOM document layer under its own type. Splitting them is how a signed
-/// bundle ends up advertised as an unsigned SBOM.
+/// Grouped so the digest cannot drift from its bytes, and `artifact_type` from `media_type`
+/// (a split advertises a signed bundle as an unsigned SBOM).
 struct ReferrerPayload {
     bytes: Vec<u8>,
     digest: Digest,
@@ -217,18 +123,11 @@ pub struct AttestPipeline;
 impl AttestPipeline {
     /// Run the push-side attest state machine.
     ///
-    /// The registry transport is derived from `client` internally, so the
-    /// public API never exposes `&dyn OciTransport` — the same seam
-    /// [`SignPipeline::run`](crate::sign::SignPipeline::run) uses.
-    ///
     /// # Errors
     ///
-    /// [`SignError`] tagged with the target identifier. Notable kinds:
-    /// [`SignErrorKind::OfflineAttestRefused`] (77) before any credential is
-    /// touched, [`SignErrorKind::ProvenanceVersionUnsupported`] (64) when the
-    /// requested `--type` resolves to provenance below v1.0, and
-    /// [`SignErrorKind::ReferrersUnsupported`] (84) on a registry without the
-    /// OCI Referrers API.
+    /// [`SignError`] tagged with the target identifier, notably
+    /// [`SignErrorKind::OfflineAttestRefused`], [`SignErrorKind::ProvenanceVersionUnsupported`]
+    /// and [`SignErrorKind::ReferrersUnsupported`].
     pub async fn run(client: &Client, ctx: AttestContext<'_>) -> Result<AttestResult, SignError> {
         let identifier = ctx.identifier.clone();
         Self::run_inner(client, ctx)
@@ -237,41 +136,18 @@ impl AttestPipeline {
     }
 
     async fn run_inner(client: &Client, ctx: AttestContext<'_>) -> Result<AttestResult, SignErrorKind> {
-        // 0. S1-E policy refusal, ahead of every credential read and every
-        //    socket. Attesting is signing, so an offline attest is a deliberate
-        //    rejection (77) rather than a passive transport failure, and it
-        //    must not depend on which verb reached here — `package attest` and
-        //    `package push --sbom` both route through this line.
+        // Ahead of every credential and socket; `package attest` and `push --sbom` both route here.
         if ctx.offline {
             return Err(SignErrorKind::OfflineAttestRefused);
         }
 
-        // 1. The attach-side SLSA floor (#102, checklist row 21). Deliberately
-        //    before the network rather than after token acquisition: the answer
-        //    is a pure function of `--type`, and exit 64 says the *invocation*
-        //    is wrong. Making the user finish an OAuth flow to be told so both
-        //    touches a credential for a run that was never going to succeed
-        //    and makes the negative fixture depend on a live Fulcio.
-        //
-        //    Dispatch is on the RESOLVED URI, so a full-URI `--type` spelling
-        //    hits the floor exactly as the alias does.
+        // Floors before the network, or a usage error costs the user an OAuth flow.
         let predicate_type = ctx.predicate_type.uri().to_owned();
-        // 1a. The unsigned floor, ahead of the provenance one because in
-        //     unsigned mode it is the more specific answer: without a DSSE
-        //     envelope the referrer's `artifactType` is the only place the
-        //     document's type can be recorded, so a type with no SBOM media
-        //     type cannot be attached at all — at any provenance version.
-        //     Pure function of `--type` and the mode, so it costs no network
-        //     and, like the floor below, no credential.
+        // Unsigned, the `artifactType` is the only record of the document's type.
         if ctx.mode == AttestMode::Unsigned && predicate::sbom_artifact_type(ctx.predicate_type).is_none() {
             return Err(SignErrorKind::UnsignedTypeUnsupported { predicate_type });
         }
-        // 1b. The sidecar floor. A `sha256-<hex>.att` layer IS a DSSE envelope,
-        //     so an unsigned attach has nothing to put in one — and quietly
-        //     publishing the bundle shape instead would make
-        //     `--signature-format` a flag that did something other than what it
-        //     says. Pure function of the mode and the flag, so like 1a it costs
-        //     no network and no credential.
+        // A `.att` layer IS a DSSE envelope, so an unsigned attach has nothing to put in one.
         if ctx.mode == AttestMode::Unsigned && ctx.format.writes_simplesigning() {
             return Err(SignErrorKind::SidecarRequiresSignature { format: ctx.format });
         }
@@ -281,19 +157,7 @@ impl AttestPipeline {
             });
         }
 
-        // 2. SSRF floor for the trust services (CWE-918). The CLI boundary
-        //    validated these URLs as *strings*; this is where we find out where
-        //    they actually resolve, before anything dials them. A signed attach
-        //    always reaches Fulcio and Rekor, so both are guarded.
-        //
-        //    Skipped in unsigned mode, and that is not a relaxation: the
-        //    unsigned tail dials neither service, so resolving them would make
-        //    an attach that touches no Sigstore endpoint depend on DNS for two
-        //    hosts it will never open a socket to. The registry-side dial guard
-        //    below is unconditional.
-        //    Within signed mode it narrows again, per endpoint the signer will
-        //    actually dial: key mode reaches no Fulcio and, by default, no
-        //    Rekor.
+        // Signed only: the unsigned tail dials neither service, and resolving them would make it depend on DNS.
         if ctx.mode == AttestMode::Signed {
             crate::sign::pipeline::guard_dialed_endpoints(
                 ctx.dial.trusted_hosts,
@@ -305,52 +169,30 @@ impl AttestPipeline {
         }
 
         let transport = client.transport();
-        // 3. Resolve the target manifest under the `--platform` optionality
-        //    rule, through the one module that owns it. This digest is the
-        //    subject — never one derived from a keep tag, which
-        //    `--no-keep-tag` may have suppressed (D-f).
-        //    The caller resolves (plan DEC-17) and follows the
-        //    index-indirection pointer with it: a logical name
-        //    (`ocx.sh/<ns>/<pkg>`) may point at a different physical registry,
-        //    so every transport-facing call below targets the physical address.
-        //    Same contract the sign pipeline reads; the SSRF floor on the
-        //    returned host is enforced upstream in the shared index choke
-        //    point. Invoked here and not earlier, so the three pre-resolution
-        //    refusals above still precede any network call.
+        // The subject is this digest, never a keep tag's (`--no-keep-tag` may suppress it); dial `physical` below.
         let ResolvedSubject {
             target: SignTarget { subject_digest, .. },
             physical,
             ..
         } = (ctx.resolve)(ctx.identifier, ctx.platform).await?;
         let resolved = ctx.identifier.clone_with_digest(subject_digest.clone());
-        // The upstream pre-flight tolerates a DNS lookup failure by design; the
-        // dial site is where the guard is fail-closed, and a request is now
-        // imminent (CWE-918).
+        // Fail-closed dial guard, in both modes: the upstream pre-flight tolerates DNS failure.
         ocx_oci::ssrf::guard_physical_dial(&ctx.dial, &resolved, &physical)
             .await
             .map_err(|error| SignErrorKind::ForbiddenRegistryTarget {
                 reason: error.to_string(),
             })?;
-        // Two seams, because attesting both reads and writes: the subject fetch
-        // may be served by a `[mirrors]` entry, but the referrer push must
-        // reach the canonical host — remote/proxy mirrors are read-only (ADR
-        // Q5), so an attestation pushed at a mirror is rejected, or lands where
-        // the canonical verifier never looks.
+        // Reads may hit a mirror; the push must reach the canonical host, as mirrors are read-only.
         let read_image = client.transport_reference(&physical);
         let write_image = client.transport_write_reference(&physical);
 
-        // Fetch the target manifest bytes for the subject descriptor's size.
-        // `clone_with_digest` drops the tag, so this stays digest-only — a
-        // `repo:tag@digest` reference keys a different registry path and 404s.
+        // Digest-only: a `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, served_digest) = transport
             .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
-        // The bytes came from the READ host but their length becomes the
-        // subject descriptor's `size` pushed to the CANONICAL one. Bind them to
-        // the digest already resolved before trusting that length — a wrong
-        // size yields an attestation strict verifiers reject.
+        // Bind the mirror-served bytes to the resolved digest, or a wrong `size` yields an attestation strict verifiers reject.
         if Digest::try_from(served_digest.as_str()).ok().as_ref() != Some(&subject_digest) {
             return Err(map_client_error(ClientError::DigestMismatch {
                 expected: subject_digest.to_string(),
@@ -358,17 +200,10 @@ impl AttestPipeline {
             }));
         }
 
-        // 4. Referrers-API capability (cache-first) of the host we will PUSH
-        //    to. A mirror's referrers support says nothing about the upstream's.
-        //
-        // The verdict decides whether the tag-schema fallback index is written
-        // alongside the manifest; it no longer decides whether attaching may
-        // happen at all.
+        // Probe the PUSH host: a mirror's referrers support says nothing about the upstream's.
         let referrers_support =
             referrers_capability(transport, &write_image, &subject_digest, &ctx.state, ctx.no_cache).await?;
 
-        // 5. Build the subject descriptor both modes attach to. Its `size` is
-        //    the length of the bytes bound to the resolved digest above.
         let subject_descriptor = Descriptor {
             media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
             digest: subject_digest.to_string(),
@@ -376,24 +211,15 @@ impl AttestPipeline {
             ..Descriptor::default()
         };
 
-        // 6. Publish. The two modes diverge here and only here: what the
-        //    referrer's one layer holds, what types it, and whether the run
-        //    touches a credential at all.
         match ctx.mode {
             AttestMode::Signed => {
-                // Acquire the OIDC token. A failure is terminal: the mode was
-                // chosen because signing material was visible, and falling back
-                // to an unsigned attach would publish an identity-less artifact
-                // from a job configured for OIDC.
+                // A failure is terminal: falling back to unsigned publishes an identity-less artifact.
                 let token = match ctx.signer.requires_identity_token() {
                     true => Some(ctx.token_provider.acquire("sigstore").await?),
                     false => None,
                 };
 
-                // Build the in-toto Statement and sign it as a DSSE envelope.
-                // One instant serves both the signed cosign wrapper and the
-                // `created` annotation below, so a `SOURCE_DATE_EPOCH` run
-                // stamps the same value in both places.
+                // One instant for the wrapper and the `created` annotation, so `SOURCE_DATE_EPOCH` stamps both alike.
                 let now = bundle_now();
                 let statement = statement::build(
                     physical.repository(),
@@ -409,17 +235,10 @@ impl AttestPipeline {
                     .sign_dsse(&statement_bytes, token.as_ref(), ctx.fulcio_url, ctx.rekor_url)
                     .await?;
 
-                // One signature, published wherever `--signature-format` asked
-                // for it. Each leg propagates with `?` rather than being
-                // collected: see the module doc for why attest has no legs.
+                // One signature for every shape, or the publications can disagree about which identity attested.
                 let referrer = match ctx.format.writes_bundle() {
                     true => {
-                        // cosign parity (ADR D1): an attestation referrer carries
-                        // the same `artifactType` a signature does and is told
-                        // apart by `content: dsse-envelope`, with the RESOLVED
-                        // predicateType as the third annotation. The set is a
-                        // one-way door — the manifest's SHA-256 *is* the
-                        // referrer's registry address.
+                        // The annotation set is a one-way door: it is hashed into the referrer's registry address.
                         let annotations =
                             bundle_annotations(&bundle_created(now), BUNDLE_CONTENT_DSSE, &predicate_type);
                         let payload = ReferrerPayload {
@@ -448,22 +267,13 @@ impl AttestPipeline {
 
                 let sidecar = match ctx.format.writes_simplesigning() {
                     true => {
-                        // The bare DSSE envelope, not the bundle: cosign's
-                        // `.att` tag predates bundles and its layer has always
-                        // been the envelope itself, typed
-                        // `application/vnd.dsse.envelope.v1+json`. The
-                        // verification material the bundle carries structurally
-                        // travels in layer annotations here instead.
+                        // The bare DSSE envelope, not the bundle: cosign's `.att` layer predates bundles.
                         let payload_digest = Algorithm::Sha256.hash(&bundle.envelope_json);
                         let layer = SidecarLayer::attestation(
                             bundle.envelope_json,
                             bundle.certificate_pem.as_deref(),
                             bundle.rekor_bundle.as_deref(),
                         );
-                        // `write_image`, never the mirrored read reference: the
-                        // append PUTs a tag through whatever host it is handed,
-                        // and an attestation written to a read-only mirror is
-                        // one the canonical verifier never looks at.
                         let manifest_digest =
                             simplesigning_write::append_layer(transport, &write_image, &subject_digest, &layer).await?;
                         Some(LegDigests {
@@ -488,20 +298,12 @@ impl AttestPipeline {
                 })
             }
             AttestMode::Unsigned => {
-                // `Some` by construction — step 1a returned early otherwise,
-                // and nothing since could have changed `--type`. Returned
-                // rather than asserted: a panic in library code is never the
-                // better half of that trade.
                 let artifact_type = predicate::sbom_artifact_type(ctx.predicate_type).ok_or_else(|| {
                     SignErrorKind::UnsignedTypeUnsupported {
                         predicate_type: predicate_type.clone(),
                     }
                 })?;
 
-                // The document travels verbatim, exactly as the signed path
-                // splices it into the Statement: whatever whitespace, key order
-                // and number spelling the predicate file held is what a reader
-                // gets back, and its SHA-256 is what addresses the blob.
                 let document = ctx.predicate.get().as_bytes().to_vec();
                 let payload = ReferrerPayload {
                     digest: Algorithm::Sha256.hash(&document),
@@ -510,11 +312,7 @@ impl AttestPipeline {
                     artifact_type,
                 };
                 let payload_digest = payload.digest.clone();
-                // No annotations at all. The three `dev.sigstore.bundle.*` keys
-                // describe a bundle this referrer does not carry, and writing
-                // them would make an unsigned document look like a signed one
-                // in a listing — the exact confusion the artifactType split
-                // exists to prevent. `cosign attach sbom` writes none either.
+                // No annotations: the `dev.sigstore.bundle.*` keys would make an unsigned document look signed.
                 let (referrer_digest, _descriptor) = Self::push_referrer(
                     transport,
                     &write_image,
@@ -533,9 +331,6 @@ impl AttestPipeline {
                         payload_digest,
                         manifest_digest: referrer_digest,
                     }),
-                    // Unreachable by construction: step 1b refuses a sidecar
-                    // request before this arm is entered, because an unsigned
-                    // attach has no DSSE envelope to put in one.
                     sidecar: None,
                     signed: false,
                     certificate_identity: None,
@@ -548,13 +343,9 @@ impl AttestPipeline {
         }
     }
 
-    /// Push the referrer's blobs, then its manifest, and return the manifest's
-    /// digest and descriptor.
+    /// Push the referrer's blobs, then its manifest, and return the manifest's digest and descriptor.
     ///
-    /// Both modes land here: a spec-strict registry (zot) rejects the manifest
-    /// with `MANIFEST_INVALID` unless the OCI empty-config blob and the payload
-    /// blob are both already present, so both are pushed before the manifest
-    /// PUT. What differs between the modes is only what the payload *is*.
+    /// Both blobs go first: a spec-strict registry (zot) rejects the manifest with `MANIFEST_INVALID` otherwise.
     async fn push_referrer(
         transport: &dyn OciTransport,
         write_image: &native::Reference,
@@ -591,26 +382,12 @@ impl AttestPipeline {
         let manifest_bytes = manifest
             .to_canonical_json()
             .map_err(|error| SignErrorKind::Internal(Box::new(error)))?;
-        // `write_image` is `transport_write_reference`'s: the fallback append
-        // PUTs a tag through whatever host it is handed, and an attestation
-        // written to a mirror is one the canonical verifier never looks at
-        // (CWE-345/367, `oci/client.rs:164-181`).
+        // `write_image` must be the canonical host: an attestation written to a mirror is never seen by verifiers.
         attach_referrer(transport, write_image, subject_digest, &manifest_bytes, support).await
     }
 
-    // The Unsupported verdict no longer refuses the operation: the OCI referrers
-    // tag-schema fallback (`list_referrers_with_fallback` /
-    // `append_referrer_fallback_index`) serves a registry without the Referrers
-    // API. See `adr_oci_referrers_signing_v1.md`, Amendment 10 — the fallback
-    // index is a mutable tag anyone with push access authors, and the residual
-    // attack surface that reverses S1-F is recorded there.
-    //
-    // This file carried its own byte-identical copy of the sign pipeline's gate.
-    // Deleting only the sign one would have left `ocx package attest` refused on
-    // exactly the registries `ocx package sign` had just started working on, with
-    // nothing in the build to notice. Both now read the verdict through
-    // `sign::referrers::referrers_capability` and write through
-    // `sign::referrers::attach_referrer`.
+    // Share `sign::referrers` (`adr_oci_referrers_signing_v1.md` § Amendment 10): a private copy of
+    // the gate would refuse `attest` where `sign` works.
 }
 
 #[cfg(test)]

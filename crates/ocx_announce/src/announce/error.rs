@@ -3,54 +3,20 @@
 
 //! Error taxonomy for the announce orchestration.
 //!
-//! Variants are structured so the CLI (`ocx package announce`) can classify
-//! them to the existing sysexits without a new code (design register C13): an
-//! SSRF refusal maps to `ConfigError` (78), a DNS resolution failure reaching
-//! the physical registry maps to `Unavailable` (69), and a curated tag that
-//! does not resolve on the physical registry maps to `NotFound` (79), and an
-//! otherwise-unchanged run whose open pull request cannot merge into the index
-//! base maps to `DataError` (65). A forge
-//! auth failure (401/403 — a bad or missing `OCX_ANNOUNCE_TOKEN`) maps to
-//! `AuthError` (80) and a forge transport failure maps to `Unavailable` (69),
-//! both via [`ForgeError`](crate::forge::ForgeError)'s own classification. The
-//! missing-token case for `--fork` with no token at all is a CLI-boundary
-//! check (never reaches this type) and also maps to `AuthError` (80) there.
-//!
-//! [`ClassifyExitCode`] is implemented here (rather than left to source-chain
-//! walking) for two independent reasons:
-//!
-//! - [`Self::Forge`] is `#[error(transparent)]`: thiserror's transparent
-//!   forwarding makes `Error::source()` skip straight past the wrapped
-//!   [`ForgeError`](crate::forge::ForgeError) to *its own* source, so the
-//!   generic chain walker in `cli::classify_error` would never see it.
-//!   [`Self::Ssrf`] delegates the same way for symmetry.
-//! - [`Self::Observe`]'s `#[source]` field is `Box<ClientError>` (a concrete
-//!   boxed type, not `Box<dyn Error>`): thiserror's generated `source()`
-//!   exposes it through the blanket `AsDynError` impl keyed on the field's
-//!   *declared* type, so the resulting trait object's `Any` identity is
-//!   `Box<ClientError>`, not `ClientError` — a `downcast_ref::<ClientError>()`
-//!   in the generic walker would silently fail to match.
-//!
-//! Delegating explicitly here keeps both mappings correct regardless of
-//! those thiserror/`Any` details.
+//! Exit classifiers must match these variants explicitly: a `source()` walk skips
+//! the transparent `Forge`, and `Observe`'s boxed source never matches
+//! `downcast_ref::<ClientError>()`.
 
 /// Failures raised by [`announce`](super::announce).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AnnounceError {
-    /// Announce reads the committed index root through a forge in every mode
-    /// (design register C10); a `None` forge cannot read it, and a fork target
-    /// additionally needs the forge to commit.
+    /// No forge was given; announce reads the committed index root through one in every mode.
     #[error("announce requires a forge to read the committed index root")]
     ForgeRequired,
 
-    /// The resolved curated tag set was empty (design register C3/C5).
-    ///
-    /// `reserved_dropped` carries the reserved names the D7 filter removed on
-    /// the way to empty. Without them the message would claim nothing was
-    /// given for a selection that named only reserved tags — and this is the
-    /// one D7 path with no [`AnnounceOutcome`](super::AnnounceOutcome) to
-    /// carry the drop notice, so the error message is where the names surface.
+    /// The resolved curated tag set was empty; `reserved_dropped` names the
+    /// reserved tags the filter removed on the way.
     #[error("{}", no_curated_tags_message(reserved_dropped))]
     NoCuratedTags { reserved_dropped: Vec<String> },
 
@@ -78,20 +44,7 @@ pub enum AnnounceError {
     RootNotObject { path: String },
 
     /// The committed root's `name` disagrees with the identifier the run
-    /// announces ([#477]).
-    ///
-    /// The identifier on the command line and the root's `name` are two
-    /// statements of the same fact, and until now nothing compared them: a
-    /// package whose root said `ocx.sh/acme/widget` accepted an announce of
-    /// `ghcr.io/acme/widget` and rewrote it. An absent `name` is a mismatch
-    /// carrying an empty `committed` — fail closed, because the index schema
-    /// requires the field of every real root, so its absence means the file is
-    /// not the root it claims to be.
-    ///
-    /// `expected` is [`crate::claim::root_name`]'s output; there is no second
-    /// spelling of the expected value anywhere.
-    ///
-    /// [#477]: https://github.com/ocx-sh/ocx/issues/477
+    /// announces; an absent `name` is a mismatch with an empty `committed`.
     #[error("{}", root_name_mismatch_message(path, committed, expected))]
     RootNameMismatch {
         path: String,
@@ -104,17 +57,12 @@ pub enum AnnounceError {
     RootMissingField { field: &'static str },
 
     /// The root's `repository` pointer is not a well-formed `oci://host/path`
-    /// reference (design register C3, strict one-way-door parse).
+    /// reference (strict parse).
     #[error("malformed physical repository pointer {value}")]
     MalformedPhysicalRepository { value: String },
 
-    /// The physical host resolved to a forbidden address or could not be
-    /// resolved (design register X1-X3, SSRF pre-flight).
-    ///
-    /// Names the `[registries."<ns>"]` entry the fix goes into: the exemption is
-    /// keyed on the package's *logical* namespace, not on the physical host it
-    /// points at, and an operator who keys it on the host sees the inner
-    /// refusal with no way to tell which entry it is reading (ocx#455).
+    /// The physical host failed the SSRF pre-flight; `namespace` is the logical
+    /// namespace the `trusted_hosts` exemption is keyed on, not the host.
     #[error(
         "the physical host of {namespace}/… was refused; list it (bare host, no port) under [registries.\"{namespace}\"].trusted_hosts"
     )]
@@ -124,15 +72,13 @@ pub enum AnnounceError {
         source: ocx_oci::ssrf::SsrfError,
     },
 
-    /// A curated tag does not resolve on the physical repository — a publisher
-    /// typo, never silently dropped (reference parity).
+    /// A curated tag does not resolve on the physical repository.
     #[error("tag {tag} does not resolve on {repository} — check for a typo")]
     UnresolvedTag { tag: String, repository: String },
 
     /// Fetching a curated tag's manifest from the physical registry failed.
     ///
-    /// The source is boxed so an otherwise-small [`AnnounceError`] does not
-    /// inherit `ClientError`'s large footprint (`clippy::result_large_err`).
+    /// Boxed, or `ClientError`'s size trips `clippy::result_large_err`.
     #[error("failed to observe tag {tag} on {repository}")]
     Observe {
         tag: String,
@@ -141,11 +87,7 @@ pub enum AnnounceError {
         source: Box<ocx_oci::client::error::ClientError>,
     },
 
-    /// Fetching or decoding the `__ocx.desc` artifact failed (D6): a transport
-    /// failure, a manifest that is not a description artifact, or one carrying
-    /// no markdown readme layer.
-    ///
-    /// Boxed for the same reason as [`Self::Observe`].
+    /// Fetching or decoding the `__ocx.desc` artifact failed.
     #[error("failed to observe the description of {repository}")]
     ObserveDesc {
         repository: String,
@@ -154,56 +96,22 @@ pub enum AnnounceError {
     },
 
     /// The committed root records a description the physical repository no
-    /// longer serves. Retraction semantics are unspecified, so announce stops
-    /// loudly rather than silently clearing `desc` back to null (reference
-    /// parity).
+    /// longer serves; retraction is unspecified, so announce never clears `desc`.
     #[error("__ocx.desc disappeared from {repository} (was {digest})")]
     DescDisappeared { repository: String, digest: String },
 
-    /// The regenerated root would delete a tag the root it was built from
-    /// carried, under a selection that never deletes.
+    /// The regenerated root would delete a committed tag under a selection that
+    /// never deletes (`adr_announce_diverged_branch_rebuild.md § The invariant,
+    /// restated`).
     ///
-    /// The invariant `adr_announce_diverged_branch_rebuild.md` states — *no tag
-    /// announced into an open pull request is ever lost* — asserted at the one
-    /// place it can be measured cheaply. #228, #399 and #436 are three routes to
-    /// breaking it, each found in production after a silent loss; this refuses
-    /// the fourth without knowing what it is.
-    ///
-    /// It reads the base root, so it means something only because
-    /// `GitWorkspace::commit_files` now refuses a fast-forward onto a head the
-    /// run did not read: that is what makes the root this was built from the
-    /// tree the commit lands on. Reserved tags (D7) and
+    /// Sound only while `GitWorkspace::commit_files` refuses a fast-forward onto
+    /// a head the run did not read. Reserved tags and
     /// [`TagSelection::Replace`](crate::announce::TagSelection::Replace) are
-    /// excluded at the call site — both delete by design.
+    /// excluded at the call site.
     #[error("regenerating {path} would drop committed tags never selected for removal: {}", tags.join(", "))]
     CommittedTagsDropped { path: String, tags: Vec<String> },
 
     /// Listing the physical repository's tags failed (`--tags-from-registry`).
-    ///
-    /// Boxed for the same reason as [`Self::Observe`].
-    ///
-    /// The producer's own type, not a root error. It was `Box<ocx_lib::Error>`,
-    /// reached by the hand-written flattening `From<ocx_package::error::Error>`
-    /// — and `Publisher::list_tags` is what raises it, so the conversion only
-    /// re-spelled a value the caller already held. WP-35 could not keep it
-    /// (`scripts/crate_map.toml` does not allow this crate `ocx_lib`, and the
-    /// root error has no successor), and dropping it costs nothing: the ladder's
-    /// arm is `Self::ListTags { source, .. } => source.classify()`, and
-    /// `ocx_package::error::Error` carries its own `downcast_arm!` rung at
-    /// `ocx_cli/src/exit/ocx_package.rs`. Verified rather than assumed, on both
-    /// axes an extraction can move an exit code on:
-    ///
-    /// * **Classification.** Every variant the flattening named agrees arm for
-    ///   arm — `File`/`InternalFile` both 74, `SerializationFailure` both 65,
-    ///   and `OciClient`, `Digest`, `Platform`, `Archive` and the two-hop
-    ///   `Index` all delegating to the same inner type either way. The
-    ///   fall-through agrees by construction: `ocx_lib::Error::Package(e)`'s arm
-    ///   is `e.as_ref().classify()`, back into this very ladder.
-    /// * **The `source()` chain**, which is what WP-33 actually broke. Walked
-    ///   from `PackageError::Index(IndexError::OciClient(Authentication(io)))`,
-    ///   both shapes terminate on the same `io::Error` and neither yields a
-    ///   `ClientError` to a `downcast_ref` — every wrapper is
-    ///   `#[error(transparent)]`, so the walk starts past it in both.
     #[error("failed to list the tags on {repository}")]
     ListTags {
         repository: String,
@@ -211,21 +119,20 @@ pub enum AnnounceError {
         source: Box<ocx_package::error::Error>,
     },
 
-    /// A curated tag resolves to a bare OCI image manifest. The index records
-    /// image indices only, and `ocx package push` always publishes one — so the
-    /// artifact behind this tag was not published by ocx.
+    /// A curated tag resolves to a bare OCI image manifest, which `ocx package
+    /// push` never publishes.
     #[error("tag {tag} on {repository} resolves to an OCI image manifest; the index records image indices only")]
     TagIsNotAnImageIndex { tag: String, repository: String },
 
-    /// A tag was named to both `--yank` and `--unyank` (design register C7).
+    /// A tag was named to both `--yank` and `--unyank`.
     #[error("tag(s) {tags:?} given to both yank and unyank")]
     YankUnyankOverlap { tags: Vec<String> },
 
-    /// A `--yank` named a tag outside the curated set (design register C7).
+    /// A `--yank` named a tag outside the curated set.
     #[error("cannot yank {tag}: not in the curated tag set")]
     YankTagNotCurated { tag: String },
 
-    /// A `--unyank` named a tag outside the curated set (design register C7).
+    /// A `--unyank` named a tag outside the curated set.
     #[error("cannot unyank {tag}: not in the curated tag set")]
     UnyankTagNotCurated { tag: String },
 
@@ -237,22 +144,14 @@ pub enum AnnounceError {
     #[error("no base ref found on {repo} to commit onto")]
     MissingBaseRef { repo: String },
 
-    /// The C4 retry re-read the head that won the race — the branch head when
-    /// accumulating, the index base when rebuilding a spent or stale branch —
-    /// but the package root is absent from it: the winning commit deleted or
-    /// never carried it.
-    /// Distinct from [`Self::MissingBaseRef`]: the ref resolved fine, the FILE
-    /// at it did not.
+    /// The retry re-read the head that won the race, but the package root is
+    /// absent from it.
     #[error("no committed root at {path} on {repo}@{sha} to retry the announce against")]
     MissingHeadRoot { repo: String, path: String, sha: String },
 
     /// An otherwise-unchanged run found its open pull request unmergeable
-    /// (ADR `adr_announce_diverged_branch_rebuild.md` D2). Every run that
-    /// commits repoints the branch with [`RefUpdate`](crate::forge::RefUpdate)
-    /// `::Reset` and makes the request mergeable by construction, so this is
-    /// the one corner announce cannot clear itself: it has no close-request or
-    /// delete-ref primitive. Nothing is lost — every tag is already on the base
-    /// — only the pull request is stuck.
+    /// (`adr_announce_diverged_branch_rebuild.md`); announce has no close-request
+    /// or delete-ref primitive to clear it.
     #[error(
         "pull request #{number} ({url}) cannot merge into the index base — close it, or delete branch {branch}, so the next announce rebuilds it"
     )]
@@ -267,10 +166,8 @@ pub enum AnnounceError {
     },
 }
 
-/// `Display` body for [`AnnounceError::RootNameMismatch`] — thiserror's format
-/// string cannot branch, and a root with no `name` at all would otherwise
-/// render as `names , not …`, which reads like a bug in the tool rather than a
-/// defect in the file.
+/// `Display` body for [`AnnounceError::RootNameMismatch`]; a root with no
+/// `name` would otherwise render as `names , not …`.
 fn root_name_mismatch_message(path: &str, committed: &str, expected: &str) -> String {
     if committed.is_empty() {
         return format!("committed root at {path} carries no name; this run announces {expected}");
@@ -278,8 +175,7 @@ fn root_name_mismatch_message(path: &str, committed: &str, expected: &str) -> St
     format!("committed root at {path} names {committed}, not the {expected} this run announces")
 }
 
-/// `Display` body for [`AnnounceError::NoCuratedTags`] — thiserror's format
-/// string cannot branch, and the two cases are genuinely different failures.
+/// `Display` body for [`AnnounceError::NoCuratedTags`].
 fn no_curated_tags_message(reserved_dropped: &[String]) -> String {
     if reserved_dropped.is_empty() {
         return "no curated tags given".to_string();

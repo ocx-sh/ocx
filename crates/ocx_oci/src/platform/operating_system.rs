@@ -3,45 +3,23 @@
 
 //! Operating system component of an OCI platform specification.
 //!
-//! This enum is a closed subset of the operating systems defined by the
-//! [OCI Image Index specification](https://github.com/opencontainers/image-spec/blob/main/image-index.md),
-//! which in turn mirrors the values from Go's `GOOS`.
-//!
-//! The full list of valid values is maintained upstream in the `oci-spec` crate
-//! (`oci_spec::image::Os`). OCX intentionally restricts this to the operating
-//! systems we actively support and test. Unsupported values are rejected at
-//! parse time rather than silently accepted via an `Other(String)` fallback.
-//!
-//! To add a new operating system: add a variant here, update [`std::fmt::Display`],
-//! [`std::str::FromStr`], [`VARIANTS`](OperatingSystem::VARIANTS), and both `From`/`TryFrom`
-//! impls for `native::Os`. Append the variant **last** — [`Ord`] derives from
-//! declaration order and `variants_is_sorted` pins it.
-//!
-//! A value upstream's `native::Os` does not name travels as `Os::Other(..)`;
-//! its `TryFrom` arm must precede the generic `Other` reject, and the pairing
-//! it is legal in belongs in [`SUPPORTED_PAIRS`](super::SUPPORTED_PAIRS).
+//! A new variant also needs `FromStr`, `TryFrom`, [`VARIANTS`](OperatingSystem::VARIANTS)
+//! and [`SUPPORTED_PAIRS`](super::SUPPORTED_PAIRS) entries (no match forces them), and
+//! goes last because [`Ord`] follows declaration order (`variants_is_sorted`).
 
 use serde::{Deserialize, Serialize};
 
 use super::error::PlatformErrorKind;
 use crate::native;
 
-// The upstream `oci_spec::image::Os` enum has no WASI variants, so both
-// spellings travel the wire as `Os::Other`. Naming them once keeps the
-// `Display`, `FromStr` and both native conversions reading from one place —
-// a typo in any single arm would otherwise break the round-trip silently.
+// Upstream `Os` has no WASI variants, so these travel as `Os::Other`; one
+// constant per spelling, or a typo in one arm silently breaks the round-trip.
 const WASIP1_STR: &str = "wasip1";
 const WASIP2_STR: &str = "wasip2";
 
 /// Supported operating systems for OCX packages.
-///
-/// Translates bidirectionally to [`native::Os`] (`oci_spec::image::Os`) at the
-/// OCI transport boundary. Only the subset that OCX supports is represented;
-/// unsupported values from the OCI spec are listed as commented-out variants
-/// for reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OperatingSystem {
-    // --- Supported ---
     Darwin,
     Linux,
     Windows,
@@ -49,31 +27,15 @@ pub enum OperatingSystem {
     Wasip1,
     /// WASI Preview 2 — a WebAssembly component targeting the `wasip2` ABI.
     Wasip2,
-    // --- Unsupported (upstream oci_spec::image::Os values from Go GOOS) ---
-    // AIX,
-    // Android,
-    // DragonFlyBSD,
-    // FreeBSD,
-    // Hurd,
-    // Illumos,
-    // iOS,
-    // Js,
-    // Nacl,
-    // NetBSD,
-    // OpenBSD,
-    // Plan9,
-    // Solaris,
-    // zOS,
+    // Unsupported upstream oci_spec::image::Os values (Go GOOS), listed at
+    // adr_platform_model_unification.md § Rationale from code: ocx_oci
 }
 
 impl OperatingSystem {
-    /// All supported variants, in the order used for error messages.
+    /// All supported variants, in error-message order.
     pub const VARIANTS: &[Self] = &[Self::Darwin, Self::Linux, Self::Windows, Self::Wasip1, Self::Wasip2];
 
-    /// Detects the operating system of the current host.
-    ///
-    /// Maps Rust's [`std::env::consts::OS`] to the corresponding OCI value.
-    /// Returns `None` if the host OS is not in [`VARIANTS`](Self::VARIANTS).
+    /// The host's operating system, or `None` when it is not supported.
     pub fn current() -> Option<Self> {
         match std::env::consts::OS {
             "linux" => Some(Self::Linux),
@@ -85,7 +47,6 @@ impl OperatingSystem {
 }
 
 impl std::fmt::Display for OperatingSystem {
-    /// Formats as the lowercase OCI string value (e.g. `"linux"`, `"darwin"`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Linux => write!(f, "linux"),
@@ -100,7 +61,6 @@ impl std::fmt::Display for OperatingSystem {
 impl std::str::FromStr for OperatingSystem {
     type Err = PlatformErrorKind;
 
-    /// Parses from the lowercase OCI string value. Case-sensitive.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "linux" => Ok(Self::Linux),
@@ -127,7 +87,6 @@ impl<'de> Deserialize<'de> for OperatingSystem {
     }
 }
 
-/// Converts to the upstream `native::Os` for OCI transport operations.
 impl From<OperatingSystem> for native::Os {
     fn from(os: OperatingSystem) -> Self {
         match os {
@@ -140,7 +99,6 @@ impl From<OperatingSystem> for native::Os {
     }
 }
 
-/// Converts from the upstream `native::Os`, rejecting unsupported values.
 impl TryFrom<native::Os> for OperatingSystem {
     type Error = PlatformErrorKind;
 
@@ -149,8 +107,7 @@ impl TryFrom<native::Os> for OperatingSystem {
             native::Os::Linux => Ok(Self::Linux),
             native::Os::Darwin => Ok(Self::Darwin),
             native::Os::Windows => Ok(Self::Windows),
-            // Must precede the generic `Other` reject below, or the two WASI
-            // spellings would round-trip out as unsupported.
+            // Before the generic reject, or both WASI spellings parse as unsupported.
             native::Os::Other(ref os) if os == WASIP1_STR => Ok(Self::Wasip1),
             native::Os::Other(ref os) if os == WASIP2_STR => Ok(Self::Wasip2),
             other => Err(PlatformErrorKind::UnsupportedOs { os: other.to_string() }),

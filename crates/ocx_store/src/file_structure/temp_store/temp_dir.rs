@@ -3,18 +3,13 @@
 
 use std::path::PathBuf;
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, one conversion later than it was.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Represents a single temp directory.
 pub struct TempDir {
     pub dir: PathBuf,
 }
 
 impl TempDir {
-    /// Returns `true` if the directory contains any files or subdirectories.
     pub(super) fn has_artifacts(&self) -> Result<bool> {
         if !self.dir.exists() {
             return Ok(false);
@@ -23,7 +18,7 @@ impl TempDir {
         Ok(entries.flatten().next().is_some())
     }
 
-    /// Removes all files and subdirectories.
+    /// Removes the contents, keeping the directory.
     pub(super) fn clear(&self) -> Result<()> {
         if !self.dir.exists() {
             return Ok(());

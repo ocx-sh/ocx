@@ -1,51 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Create-time libc lint — checks what the packaged binaries actually demand
-//! of a host's C library against what the declared platform *claims* they
-//! demand.
+//! Create-time libc lint: checks what the packaged binaries demand of a
+//! host's C library against what the declared platform's `os.features` claims.
 //!
-//! Sibling of [`super::bin_scan`] and [`super::dependency_pinning`]: the third
-//! compile step `ocx package create` runs against the content tree before
-//! archiving. Where `bin_scan` checks the `binaries` claim, this checks the
-//! `os.features` claim.
-//!
-//! ## The bug it closes
-//!
-//! `os.features` subset matching (`ocx_oci::is_compatible`) reads an **empty**
-//! feature list as "this artifact demands nothing of the host", so it matches
-//! every host. That makes an omitted `libc.glibc` a *positive claim of libc
-//! universality*, not a missing annotation. A glibc-linked binary published
-//! that way resolves happily on Alpine and then fails to execute with a bare
-//! `No such file or directory` — the kernel reporting the absent ELF
-//! interpreter, naming a file that is plainly there. Nothing in the publish
-//! path noticed, because nothing read the artifact.
-//!
-//! ## What it reads
-//!
-//! The ELF `PT_INTERP` program header — the absolute path of the dynamic
-//! loader the kernel must run to start the binary. `/lib/ld-musl-*` is musl,
-//! `/lib64/ld-linux-*` (and the other-arch `ld.so` / `ld64.so` spellings) is
-//! glibc, and no `PT_INTERP` at all means statically linked and therefore no
-//! libc requirement. Parsing is delegated to the `elf` crate, already a
-//! workspace dependency and already the ELF reader behind
-//! [`ocx_oci::host_capabilities`]'s host-side loader discovery — the same
-//! header, read from the other end of the contract.
-//!
-//! ## Scope
-//!
-//! **Linux targets only.** macOS ships exactly one C library (`libSystem`),
-//! and while Windows genuinely does have several CRT flavours (MSVCRT, UCRT,
-//! statically linked), OCX's `os.features` vocabulary has no `libc.*` tag for
-//! any of them and [`ocx_oci::HostCapabilities::detect`] returns an empty
-//! set on both platforms — a feature declared there could never be satisfied
-//! by any host, so checking for one would only manufacture false failures.
-//!
-//! **Interface binaries only.** The subjects are the files the package puts
-//! on a consumer's `PATH` — resolved by this module's own
-//! [`resolve_scan_scope`], deliberately not [`super::bin_scan`]'s, because the
-//! two answer different questions about the same metadata. What this does
-//! *not* catch is listed on [`check_declared_libc`].
+//! An omitted `libc.glibc` claims libc universality, so without this a glibc
+//! binary resolves on Alpine and fails with a bare `No such file or directory`.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -55,20 +15,11 @@ use crate::metadata::authoring::AuthoringMetadata;
 use ocx_oci::host_capabilities::LibcFlavor;
 use ocx_oci::{OperatingSystem, Platform};
 
-/// Whether this check inspects anything at all for `platform` — the lint's
-/// scope rule, and the **one** implementation of it.
+/// Whether this check inspects anything for `platform`: Linux and
+/// [`Platform::Any`] only, as no other target has a `libc.*` vocabulary.
 ///
-/// Linux targets and [`Platform::Any`] are checked; every other concrete
-/// target is not (see the module "Scope" note: macOS ships one C library, and
-/// OCX's `os.features` vocabulary has no `libc.*` tag for any Windows CRT, so
-/// a feature declared there could never be satisfied by any host).
-///
-/// Exposed because a caller that *bypasses* the check needs the same rule to
-/// know whether a bypass is worth mentioning: [`check_declared_libc`] returns
-/// `Ok(())` immediately for an out-of-scope platform, so announcing a skipped
-/// verification there would name something that was never going to be
-/// verified. Two consumers, one predicate — restating it at the call site is
-/// how the two drift apart.
+/// The single scope rule; a caller bypassing the check asks it too, so a bypass
+/// warning never names a verification that was never due.
 pub fn checks_declared_libc(platform: &Platform) -> bool {
     matches!(
         platform,
@@ -80,91 +31,46 @@ pub fn checks_declared_libc(platform: &Platform) -> bool {
     )
 }
 
-/// Checks every file the package puts on an interface `PATH` directory
-/// against `platform`'s declared `os.features`, refusing a binary that needs
-/// a libc family the declaration does not require.
+/// Refuses a file on an interface `PATH` directory whose ELF interpreter needs a
+/// libc family `platform`'s `os.features` does not declare; under
+/// [`Platform::Any`] every dynamically linked binary fails.
 ///
-/// A no-op for any platform [`checks_declared_libc`] excludes. For
-/// [`Platform::Any`] every dynamically linked native binary is a failure by
-/// construction: `any` satisfies *every* host requirement, so it is a
-/// strictly broader false claim than an empty feature list on a concrete
-/// platform.
-///
-/// # What this does not catch
-///
-/// - **Non-libc shared-object dependencies.** A binary needing `libicu`,
-///   `libatomic`, `libstdc++` or any other `DT_NEEDED` library passes this
-///   check; only the dynamic loader named by `PT_INTERP` is read. Missing
-///   those fails at runtime with a *different* message and is out of scope.
-/// - **glibc symbol versions.** A binary built against glibc 2.38 and run on
-///   glibc 2.28 satisfies `libc.glibc` and still fails. `os.features` has no
-///   version vocabulary ([`LibcFlavor`] is deliberately unit-variant).
-/// - **Files not on an interface `PATH` directory.** A private helper binary,
-///   or one reached through a wrapper script, is never scanned.
-/// - **`ocx package push` without a metadata sidecar.** The claim exists at
-///   authoring time, where the content tree does; push sees only a built
-///   archive. `--platform` on a bare push is unchecked.
+/// Reads only `PT_INTERP`: other `DT_NEEDED` libraries and glibc symbol versions go unchecked.
 ///
 /// # Errors
 ///
-/// [`LibcLintError::UndeclaredLibc`] for the mismatch above;
-/// [`LibcLintError::AgnosticPlatformClaim`] for the `any` case;
-/// [`LibcLintError::UnrecognizedInterpreter`] /
-/// [`LibcLintError::UnparseableElf`] / [`LibcLintError::Read`] for a file
-/// whose requirement could not be determined (fail-closed — see
-/// [`read_elf_libc`]); [`LibcLintError::UnresolvableScanScope`] and
-/// [`LibcLintError::ModifierBearingScanScope`] for a `PATH` segment that names
-/// this package and scopes no directory; [`LibcLintError::Scan`] for a
-/// directory-walk failure.
+/// [`LibcLintError::UndeclaredLibc`] or [`LibcLintError::AgnosticPlatformClaim`]
+/// for a mismatch; a file whose requirement cannot be determined; a `PATH` segment
+/// naming this package that scopes no directory; a directory-walk failure.
 pub async fn check_declared_libc(
     content_root: &Path,
     metadata: &AuthoringMetadata,
     platform: &Platform,
 ) -> Result<(), LibcLintError> {
-    // Single-libc or no-vocabulary targets: nothing to check.
     if !checks_declared_libc(platform) {
         return Ok(());
     }
     let declared = match platform {
-        // `Any` declares compatibility with every host, so it satisfies any
-        // libc requirement a host could state — an empty declared set makes
-        // every dynamic binary below a violation, which is the intent.
         Platform::Any => BTreeSet::new(),
-        // Linux, by the scope check above — no other concrete target reaches
-        // here.
         Platform::Specific { os_features, .. } => declared_libcs(os_features),
     };
 
     let scope = resolve_scan_scope(metadata);
-    // A shape that names this package's install path and still will not
-    // resolve leaves a directory uninspected, and a subset scan would report
-    // success over it.
+    // Refused, or a directory goes uninspected and the lint reports success over it.
     if !scope.unresolvable.is_empty() {
         return Err(LibcLintError::UnresolvableScanScope {
             values: scope.unresolvable,
         });
     }
-    // Same refusal, different cause and therefore a different remedy: the
-    // directory is just as uninspected, but the value's shape is fine.
     if !scope.modifier_bearing.is_empty() {
         return Err(LibcLintError::ModifierBearingScanScope {
             values: scope.modifier_bearing,
         });
     }
 
-    // No empty-result refusal. The invariant is that the lint may only pass
-    // when it inspected the file set it was supposed to inspect — and a
-    // resolved scope holding nothing IS that set, inspected. A package that
-    // puts no file on PATH has no libc requirement, so an empty `os.features`
-    // is true and there is nothing to contradict. Only an *unresolvable*
-    // scope (above) means the lint looked nowhere. Conflating the two refused
-    // `binaries`-declared-but-absent, which ADR §2 rules legal.
+    // An empty resolved file set passes: refusing it would reject a legal declared-but-absent binary.
     for path in collect_scan_files(content_root, metadata, &scope.directories).await? {
-        // Blocking file I/O (`ElfStream` needs `Read + Seek`), so it goes to
-        // the blocking pool. Sequential rather than fanned out: the subjects
-        // are one `PATH` directory's entries, and a `JoinSet` here would buy
-        // nothing but a sort to restore the deterministic first-offender
-        // order the candidate map already provides.
+        // Sequential, so the first offender reported stays deterministic.
         let probe = path.clone();
         let requirement = tokio::task::spawn_blocking(move || read_elf_libc(&probe))
             .await
@@ -198,35 +104,18 @@ pub async fn check_declared_libc(
 /// Where the package puts its own content on an interface `PATH`.
 #[derive(Debug)]
 struct ScanScope {
-    /// `${installPath}`-relative directories to inspect. Empty means the
-    /// package puts nothing of its own on `PATH` — nothing to check.
+    /// `${installPath}`-relative directories to inspect.
     directories: Vec<ocx_util::fs::path::RelativePath>,
-    /// Values naming this package's install path in a shape that cannot be
-    /// resolved to a directory.
+    /// Values naming this package's install path in a shape that resolves to no directory.
     unresolvable: Vec<String>,
-    /// Values whose *only* obstacle is a render modifier on the install-path
-    /// token. Kept apart from `unresolvable` because the two need different
-    /// remedies: this one has no shape problem at all, and the respelling
-    /// `unresolvable` advises would leave it exactly as unscoped as before.
+    /// Values whose only obstacle is a render modifier, which needs a different remedy.
     modifier_bearing: Vec<String>,
 }
 
-/// Resolves the lint's scan scope from the metadata alone (no filesystem).
+/// Resolves the lint's scan scope from the metadata alone.
 ///
-/// Deliberately **not** [`super::bin_scan`]'s scope. That module answers "which
-/// directories claim command names", and excludes awkward shapes best-effort
-/// because a missed name is a missed *claim*. This answers "which directories
-/// hold files a consumer will execute", where a missed directory is a binary
-/// whose loader never got read. Same metadata, different question — sharing
-/// one projection between them is what let a bare `${installPath}` be refused
-/// as illegal and a `:`-joined value be dropped in silence.
-///
-/// A `PATH` value is a separator-joined list, so each segment is classified on
-/// its own: `${installPath}/bin:${deps.other.installPath}/bin` contributes
-/// `bin` and ignores the dependency's tree rather than failing whole. Segments
-/// that never name this package's install path (`/usr/bin`, a `${deps.*}` tree)
-/// are not this package's to inspect. A bare `${installPath}` is the content
-/// root itself — a legal shape, and one this lint must scan rather than refuse.
+/// Not [`super::bin_scan`]'s scope, which drops awkward shapes best-effort: here
+/// a dropped directory is a binary whose loader was never read.
 fn resolve_scan_scope(metadata: &AuthoringMetadata) -> ScanScope {
     use crate::metadata::env::modifier::Modifier;
 
@@ -250,28 +139,11 @@ fn resolve_scan_scope(metadata: &AuthoringMetadata) -> ScanScope {
     scope
 }
 
-/// Splits a `PATH` value into its separator-joined segments.
+/// Splits a `PATH` value on `:` outside `${…}`, as a Linux target does; a value
+/// the scanner refuses is returned whole.
 ///
-/// Split on `:` rather than `std::env::split_paths`: the value is authored for
-/// the *target*, and this lint only runs for Linux targets, so the host's
-/// separator is the wrong one to use here.
-///
-/// A `:` inside a `${…}` is a render modifier's separator, not a `PATH` one —
-/// `${self.installPath:posix}/bin` is one segment, and a plain `split(':')`
-/// would tear it into `${self.installPath` and `posix}/bin`, neither of which
-/// names this package. That is the fail-open shape the whole lint exists to
-/// avoid. **Which bytes lie inside a `${…}` is
-/// [`crate::metadata::template::scanner::scan`]'s answer and never
-/// this module's** (D10): the value is scanned once, and a `:` splits only when
-/// it falls in a [`Segment::Literal`] run. A second rule for `${`/`}` extent
-/// here would be a second recogniser, free to disagree with the one that
-/// decides what actually resolves.
-///
-/// A value the scanner refuses is returned whole, so it reaches
-/// [`classify_path_segment`] as a single unresolvable segment. One
-/// unrecognised token therefore costs the whole value rather than just its own
-/// segment — the fail-closed direction, and the one this lint takes everywhere
-/// else.
+/// A plain `split(':')` would tear `${self.installPath:posix}/bin` into segments
+/// naming no package, leaving its directory unscanned.
 fn path_list_segments(value: &str) -> Vec<&str> {
     use crate::metadata::template::scanner::{Segment, scan};
 
@@ -279,12 +151,7 @@ fn path_list_segments(value: &str) -> Vec<&str> {
         return vec![value];
     };
 
-    // Cut on `value` at the offsets the scan reports, so each segment is an
-    // exact subslice of what the publisher wrote — escapes and all — rather
-    // than a re-rendering of it. The offsets are the scanner's own, which is
-    // what makes them right for a fired escape too: that run emits two bytes
-    // out of three, so the pieces' lengths do not sum to the value's and no
-    // cursor kept here could locate them.
+    // Cut at the scanner's offsets: an escape shortens the literal text, so a local cursor drifts.
     let mut segments = Vec::new();
     let mut start = 0usize;
     for piece in &scanned {
@@ -302,43 +169,14 @@ fn path_list_segments(value: &str) -> Vec<&str> {
     segments
 }
 
-/// Folds one `PATH` segment into `scope`.
-///
-/// Recognition is [`crate::metadata::template::scanner::scan`]'s, not
-/// a substring test: `${installPath}` and `${self.installPath}` are the same
-/// referent (D4), so a textual `contains("${installPath}")` both missed the
-/// alias and matched the escaped `$${installPath}` that renders as literal
-/// text.
-///
-/// Four outcomes, one scan:
-///
-/// - A lone modifier-free install-path token — the content root itself — pushes
-///   [`ocx_util::fs::path::RelativePath::default`] onto `directories`.
-/// - An install-path-rooted directory (via
-///   [`crate::metadata::template::classify_install_path_rooted_dir`])
-///   pushes that relative directory.
-/// - A segment whose only obstacle is a render modifier on the install-path
-///   token — `${self.installPath:posix}/bin` — goes to `modifier_bearing`,
-///   decided by [`modifier_is_the_only_obstacle`] over the pieces already
-///   scanned. It scopes no directory either, and is refused just as hard; it is
-///   held apart because the remedy differs, and telling a publisher with a
-///   legal, publish-validated value to respell it would be advice they cannot
-///   act on.
-/// - A segment that names the install path in any other shape — a combined
-///   value, an escaping `<rel>` — goes to `unresolvable`, and so does a segment
-///   whose scan **errors**. That last branch is defensive at the only call site
-///   there is: `ocx package create` runs `validate_for_publish` — which scans
-///   every env value — before [`check_declared_libc`], deliberately, so that a
-///   misspelt token is named as a misspelt token. A value reaching here has
-///   therefore already scanned clean. It is kept because the ordering is
-///   another module's, and because the alternative to recording an unscannable
-///   segment is dropping it.
-/// - A segment naming no install-path token at all contributes nothing.
+/// Folds one `PATH` segment into `scope`, recognising tokens through the
+/// scanner, since a textual `contains` misses the alias and matches `$${`.
 fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
     use crate::metadata::template::classify_install_path_rooted_dir;
     use crate::metadata::template::scanner::{Segment, TokenShape, scan};
     use ocx_util::fs::path::RelativePath;
 
+    // Recorded, never dropped, or its directory goes uninspected and the lint stays green.
     let Ok(scanned) = scan(segment) else {
         scope.unresolvable.push(segment.to_string());
         return;
@@ -351,8 +189,7 @@ fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
         return;
     }
 
-    // A lone modifier-free token is the content root itself — a legal shape,
-    // and one this lint must scan rather than refuse or drop.
+    // The content root itself: scanned, never refused or dropped.
     if let [Segment::Token(token)] = scanned.as_slice()
         && token.modifier.is_none()
     {
@@ -365,11 +202,7 @@ fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
         return;
     }
 
-    // Names this package and still will not resolve: recorded, never dropped.
-    // Leaving a directory uninspected while reporting success is the failure
-    // mode the whole lint exists to avoid. Which list it lands in decides which
-    // remedy the publisher is handed, and a render modifier — the one obstacle
-    // a value with no shape problem can have — needs a different one.
+    // Recorded, never dropped; the list chosen decides the remedy the publisher is given.
     if modifier_is_the_only_obstacle(&scanned) {
         scope.modifier_bearing.push(segment.to_string());
     } else {
@@ -377,17 +210,8 @@ fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
     }
 }
 
-/// Whether the only thing keeping an already-scanned segment from classifying
-/// to a directory is a render modifier on its install-path token.
-///
-/// Decided over the segments the caller already scanned: re-reading the text
-/// here would be a second recogniser, free to disagree with the one that
-/// classified it. The two shapes accepted below mirror the two that resolve —
-/// [`crate::metadata::template::classify_install_path_rooted_dir`]'s
-/// `[token][/<rel>]`, and [`classify_path_segment`]'s lone-token content root —
-/// with `modifier.is_none()` inverted: drop the modifier and each would scope a
-/// directory. Everything else (an escaping `<rel>`, a combined value, a second
-/// token) is a shape problem the modifier is not to blame for.
+/// Whether a render modifier on the install-path token is the only thing keeping
+/// an already-scanned segment from resolving to a directory.
 fn modifier_is_the_only_obstacle(scanned: &[crate::metadata::template::scanner::Segment<'_>]) -> bool {
     use crate::metadata::template::scanner::{Segment, TokenShape};
     use ocx_util::fs::path::RelativePath;
@@ -410,13 +234,6 @@ fn modifier_is_the_only_obstacle(scanned: &[crate::metadata::template::scanner::
 
 /// Every regular file under `directories`, resolved against the wildcard top
 /// level `strip_components` maps `${installPath}` onto.
-///
-/// The walk is [`bin_scan::scan_directory_files`], shared with the binaries
-/// scan. What is *not* shared is the filter over it: this keeps every file the
-/// walk yields, because the binaries scan's predicates belong to the *binaries
-/// claim* and applying them here would hide files whose loader still matters —
-/// a bundled `.so`, a name `BinaryName` rejects, a file whose exec bit a
-/// non-Unix build host cannot even read.
 async fn collect_scan_files(
     content_root: &Path,
     metadata: &AuthoringMetadata,
@@ -435,7 +252,7 @@ async fn collect_scan_files(
             let Ok(scan_dir) = join_under_root(wildcard_dir, relative.as_path()) else {
                 continue;
             };
-            // No filter — the loader of every file that ships here matters.
+            // No bin_scan filter: it would hide a bundled `.so` or a non-executable whose loader still matters.
             files.extend(
                 bin_scan::scan_directory_files(&scan_dir)
                     .await?
@@ -448,10 +265,7 @@ async fn collect_scan_files(
     Ok(files)
 }
 
-/// Decodes the `libc.*` subset of a declared `os.features` list. Non-libc
-/// features (`win32k`, and any future namespace) carry no libc meaning and
-/// are dropped, exactly as [`ocx_oci::host_capabilities::Feature`] treats
-/// them on the resolution side.
+/// Decodes the `libc.*` subset of a declared `os.features` list, dropping the rest.
 fn declared_libcs(os_features: &[String]) -> BTreeSet<LibcFlavor> {
     os_features
         .iter()
@@ -462,30 +276,18 @@ fn declared_libcs(os_features: &[String]) -> BTreeSet<LibcFlavor> {
 /// What a file on the interface `PATH` demands of the host's C library.
 #[derive(Debug, PartialEq, Eq)]
 enum ElfLibc {
-    /// Not an ELF object at all — a script, a data file, a README. Not a
-    /// subject of this lint.
+    /// Not an ELF object: out of scope.
     NotElf,
-    /// A parsed ELF carrying no `PT_INTERP`: statically linked, so it demands
-    /// no libc of the host.
+    /// A parsed ELF with no `PT_INTERP`: statically linked.
     Static,
-    /// A parsed ELF naming a dynamic loader, attributed to a libc family.
+    /// A parsed ELF naming a dynamic loader of a known libc family.
     Dynamic { interpreter: String, flavor: LibcFlavor },
 }
 
-/// Reads `path`'s libc requirement out of its ELF program headers.
+/// Reads `path`'s libc requirement from its ELF `PT_INTERP` segment.
 ///
-/// Fail-closed, with one deliberate distinction: **absence of the ELF magic
-/// is a positive identification of "not in scope", not an unknown.** A file
-/// that never claimed to be an ELF is [`ElfLibc::NotElf`] and is skipped. A
-/// file that *does* claim to be one and cannot then be read, parsed, or
-/// attributed to a libc family is an error — treating it as "no requirement"
-/// would reintroduce the exact silent-pass this lint exists to close. A
-/// successfully parsed ELF with no `PT_INTERP` is [`ElfLibc::Static`], which
-/// is a fact the parse established, not information that went missing.
-///
-/// Only the ELF headers and the `PT_INTERP` segment are read
-/// ([`elf::ElfStream`] seeks lazily), so a 400 MB binary costs a header read
-/// and one seek rather than 400 MB of resident memory.
+/// Only absent ELF magic means "not in scope": an ELF that cannot be read, parsed
+/// or attributed errors, since treating it as "needs nothing" passes it silently.
 fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
     let read_error = |source| LibcLintError::Read {
         path: path.to_path_buf(),
@@ -496,7 +298,6 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
     let mut magic = [0u8; 4];
     match file.read_exact(&mut magic) {
         Ok(()) => {}
-        // Shorter than the magic itself: definitively not an ELF.
         Err(source) if source.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(ElfLibc::NotElf),
         Err(source) => return Err(read_error(source)),
     }
@@ -508,8 +309,6 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
         path: path.to_path_buf(),
         source,
     };
-    // `open_stream` seeks from the start itself, so the four bytes consumed
-    // by the magic probe above do not need rewinding.
     let mut object = elf::ElfStream::<elf::endian::AnyEndian, _>::open_stream(file).map_err(unparseable)?;
     let Some(interpreter_header) = object
         .segments()
@@ -521,7 +320,6 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
     };
 
     let raw = object.segment_data(&interpreter_header).map_err(unparseable)?;
-    // The interpreter is a NUL-terminated string filling the segment.
     let interpreter = raw.split(|&byte| byte == 0).next().unwrap_or_default();
     let interpreter = String::from_utf8_lossy(interpreter).into_owned();
     match classify_interpreter(&interpreter) {
@@ -533,33 +331,15 @@ fn read_elf_libc(path: &Path) -> Result<ElfLibc, LibcLintError> {
     }
 }
 
-/// Attributes a `PT_INTERP` loader path to a libc family by its filename.
+/// Attributes a `PT_INTERP` loader path to a libc family by filename.
 ///
-/// The host-side counterpart in [`ocx_oci::host_capabilities`] classifies
-/// by running the loader and reading its `--version` banner, which is both
-/// stronger and unavailable here: `ocx package create` routinely runs on a
-/// glibc build host packaging a musl artifact for a foreign architecture, so
-/// the artifact's loader can be neither present nor executable. The filename
-/// is the only evidence a cross-build has, and it is the evidence every
-/// toolchain writes deliberately.
-///
-/// Do not "unify" the two. Beyond the banner probe being unrunnable here, the
-/// host module's loader-name fragments are `#[cfg]`-gated to the **build
-/// host's** architecture, so reusing them would misclassify precisely the
-/// foreign-arch artifact this exists to check. The seam the two modules do
-/// share is the one that shows up on the wire — [`LibcFlavor`] and its
-/// `os_feature_tag` / `from_os_feature_tag` round trip — not the strategy for
-/// arriving at a family.
-///
-/// Returns `None` for a loader OCX cannot attribute, which the caller turns
-/// into a hard error rather than a silent pass.
+/// Never shared with [`ocx_oci::host_capabilities`]: its loader names are gated to
+/// the build host's architecture and would misclassify a foreign-arch artifact.
 fn classify_interpreter(interpreter: &str) -> Option<LibcFlavor> {
     let name = interpreter.rsplit('/').next()?;
     if name.contains("ld-musl") {
         return Some(LibcFlavor::Musl);
     }
-    // `ld-linux-*` on x86_64/aarch64/arm, `ld.so.1` and `ld64.so.*` on the
-    // architectures whose glibc loader is not spelled `ld-linux`.
     if name.contains("ld-linux") || name.starts_with("ld.so") || name.starts_with("ld64.so") {
         return Some(LibcFlavor::Glibc);
     }
@@ -569,11 +349,7 @@ fn classify_interpreter(interpreter: &str) -> Option<LibcFlavor> {
 /// Failures of the create-time libc lint.
 #[derive(Debug, thiserror::Error)]
 pub enum LibcLintError {
-    /// A binary on the package's interface `PATH` needs a libc family the
-    /// declared platform's `os.features` does not require. Under subset
-    /// matching an undeclared family is a positive claim that no such family
-    /// is needed, so this ships an artifact that resolves on hosts unable to
-    /// execute it.
+    /// A binary on the interface `PATH` needs a libc family the declared platform's `os.features` omits.
     #[error(
         "'{}' needs {required} (dynamic loader '{interpreter}'), but the declared platform \
          {platform} requires no such libc and so resolves on hosts that cannot execute it; \
@@ -588,20 +364,12 @@ pub enum LibcLintError {
         /// The `os.features` tag it needs, e.g. `libc.glibc`.
         required: String,
         /// The declared platform, rendered.
-        ///
-        /// Rendered rather than a [`Platform`]: both this and `suggestion`
-        /// exist only to be interpolated into the message, and carrying two
-        /// `Platform` values pushes this variant past clippy's
-        /// `result_large_err` threshold, penalising every `Ok` path.
+        // A string, not `Platform`: two `Platform` values push this variant past clippy's `result_large_err`.
         platform: String,
-        /// The same platform with `required` added — paste-ready for
-        /// `--platform`.
+        /// The same platform with `required` added, paste-ready for `--platform`.
         suggestion: String,
     },
-    /// The package is declared platform-agnostic (`any`) but ships a
-    /// dynamically linked native binary. `any` satisfies every host
-    /// requirement, making it a broader false claim than an undeclared
-    /// feature on a concrete platform.
+    /// The package is declared `any` but ships a dynamically linked native binary.
     #[error(
         "'{}' is a dynamically linked ELF needing {required} (dynamic loader '{interpreter}'), \
          but the package is declared 'any'; 'any' claims every host can run it, including hosts \
@@ -617,9 +385,7 @@ pub enum LibcLintError {
         /// The `os.features` tag it needs, e.g. `libc.glibc`.
         required: String,
     },
-    /// A file carrying the ELF magic could not be parsed, so its libc
-    /// requirement is unknown. Fail-closed: an unreadable claim is never
-    /// treated as "claims nothing".
+    /// A file carrying the ELF magic could not be parsed.
     #[error("'{}' carries an ELF header but could not be parsed, so its libc requirement is unknown", path.display())]
     UnparseableElf {
         /// The file that failed to parse.
@@ -628,8 +394,7 @@ pub enum LibcLintError {
         #[source]
         source: elf::ParseError,
     },
-    /// A parsed ELF names a dynamic loader OCX cannot attribute to a libc
-    /// family, so its requirement cannot be checked against `os.features`.
+    /// A parsed ELF names a dynamic loader OCX cannot attribute to a libc family.
     #[error(
         "'{}' names dynamic loader '{interpreter}', which OCX cannot attribute to a libc family, \
          so its requirement cannot be checked against os.features",
@@ -650,9 +415,7 @@ pub enum LibcLintError {
         #[source]
         source: std::io::Error,
     },
-    /// A `PATH` segment names this package's install path in a shape that
-    /// cannot be resolved to a directory, so that directory's files were
-    /// never inspected.
+    /// A `PATH` segment names this package's install path in a shape that resolves to no directory.
     #[error(
         "cannot resolve which directory {} names, so its files could not be checked against the \
          declared os.features; write it as `${{self.installPath}}` or \
@@ -663,15 +426,8 @@ pub enum LibcLintError {
         /// The unresolvable `PATH` segments.
         values: Vec<String>,
     },
-    /// A `PATH` segment names this package's install path through a
-    /// modifier-bearing token, which scopes no directory — so that directory's
-    /// files were never inspected.
-    ///
-    /// Sibling of [`LibcLintError::UnresolvableScanScope`], separate because
-    /// the value has no shape problem: `${self.installPath:posix}/bin` is legal
-    /// and publish-validated, and the respelling that message advises would
-    /// leave it just as unscoped. Naming the modifier is what lets the
-    /// publisher act.
+    /// A `PATH` segment names this package's install path through a render
+    /// modifier, which scopes no directory.
     #[error(
         "a render modifier leaves {} unscoped, so its files could not be checked against the \
          declared os.features; write the install-path token without one — `${{self.installPath}}` \

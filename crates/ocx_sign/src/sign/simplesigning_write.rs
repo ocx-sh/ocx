@@ -3,34 +3,7 @@
 
 //! Writing a cosign sidecar tag — `sha256-<hex>.sig` and `sha256-<hex>.att`.
 //!
-//! One append loop, two layer shapes. A `.sig` layer is a simplesigning claim
-//! with a **detached** signature in its annotations; an `.att` layer is a DSSE
-//! envelope carrying its signature **inside**. [`SidecarLayer`] is where that
-//! difference lives, and its two constructors are the only way to build one, so
-//! a tag suffix can never be paired with the wrong media type.
-//!
-//! Not a re-packaging of the v0.3 bundle: a simplesigning signature covers a
-//! *different payload*. The claim
-//! (`{"critical":{"identity":…,"image":…,"type":…},"optional":…}`) is signed as
-//! opaque bytes, its Rekor entry is a `hashedrekord` over those bytes, and the
-//! verification material travels in **layer annotations** rather than in a
-//! bundle blob. Under `--signature-format both` that costs a second Fulcio
-//! certificate and a second Rekor entry per subject, which is the honest price
-//! of emitting two independent signatures.
-//!
-//! # Why re-signing appends
-//!
-//! The sidecar is one image manifest whose layers are the signatures. A second
-//! signature over the same subject — a second signer, a re-sign after a key
-//! rotation — is a second layer, not a replacement: replacing would silently
-//! delete a signature someone else published. That makes every write a
-//! read-modify-write against a mutable tag, with the same lost-update hazard
-//! decision D4 names for the referrers fallback index, and the same remedy:
-//! read, append, push, **read back**, retry.
-//!
-//! The read-back is the whole mechanism. A PUT that a concurrent writer
-//! immediately clobbered returns `Ok` and loses the layer; only re-reading
-//! catches it.
+//! Re-signing appends, never replaces: replacing would delete a signature someone else published.
 
 use std::collections::BTreeMap;
 
@@ -50,58 +23,31 @@ use ocx_oci::referrer::media_types::{
 };
 use ocx_oci::{Algorithm, Descriptor, Digest, ImageManifest, OCI_IMAGE_MEDIA_TYPE, native};
 
-/// Attempts before a concurrent writer is reported rather than silently losing
-/// the signature.
-///
-/// The same budget the referrers fallback index uses, for the same reason: two
-/// writers converge provably (the loser re-reads and sees the winner), three do
-/// not, so the bound is what turns an unbounded race into a loud, retryable
-/// failure.
+/// Bounded so a concurrent-writer race becomes a loud, retryable failure, never a lost signature.
 const MAX_APPEND_ATTEMPTS: usize = 5;
 
-/// Layers one sidecar manifest may carry.
-///
-/// A sidecar is a mutable tag anyone with push access authors, and every layer
-/// is a signature a verifier will fetch and try. Unbounded, it is a cheap way to
-/// make verification arbitrarily expensive for one subject.
+/// Layers one sidecar manifest may carry; unbounded, anyone with push access can make verification arbitrarily expensive.
 const MAX_SIDECAR_LAYERS: usize = 32;
 
-/// One sidecar layer, ready to append: which tag it belongs under, what types
-/// it, the bytes it holds, and the verification material a reader needs.
+/// One sidecar layer, ready to append.
 ///
-/// Grouped rather than passed as four positionals because the first two are one
-/// decision — a `.sig` tag carries a simplesigning claim, an `.att` tag carries
-/// a DSSE envelope — and as adjacent arguments a swapped pair would type-check
-/// and publish a layer no cosign reader accepts. The two constructors below are
-/// the only way to build one.
+/// Built only by the two constructors, or a swapped kind/media type publishes a layer no cosign reader accepts.
 pub(crate) struct SidecarLayer {
-    /// Which sidecar tag this layer belongs under.
-    ///
-    /// The reader's own enum, not a suffix string of this module's: the tag is
-    /// spelled once, in [`crate::verify::sidecar_tag`], and the writer
-    /// that formatted it by hand here disagreed with the reader about the
-    /// truncated-digest half for every non-sha256 subject.
+    /// The reader's enum: the tag is spelled once, in [`crate::verify::sidecar_tag`].
     kind: SidecarKind,
-    /// The layer descriptor's `mediaType`.
     media_type: &'static str,
-    /// The layer blob. Its SHA-256 is the layer's registry address.
     payload: Vec<u8>,
-    /// Verification material, in cosign's annotation vocabulary.
     annotations: BTreeMap<String, String>,
 }
 
 impl SidecarLayer {
-    /// The `sha256-<hex>.sig` layer for one simplesigning claim.
-    ///
-    /// `payload` is the exact claim bytes the signature covers.
+    /// The `sha256-<hex>.sig` layer; `payload` is the exact claim bytes the signature covers.
     pub(crate) fn signature(payload: Vec<u8>, signed: &SignedBlob) -> Self {
         use base64::Engine as _;
         let base64 = base64::engine::general_purpose::STANDARD;
 
         let mut annotations = BTreeMap::new();
-        // The one annotation only this shape carries: a simplesigning signature
-        // is DETACHED from the payload it covers, so the bytes alone are not
-        // the signature and the annotation is where a verifier finds it.
+        // The signature is detached from the payload, so this annotation is where a verifier finds it.
         annotations.insert(
             ANNOTATION_COSIGN_SIGNATURE.to_string(),
             base64.encode(&signed.signature),
@@ -120,34 +66,12 @@ impl SidecarLayer {
         }
     }
 
-    /// The `sha256-<hex>.att` layer for one DSSE-enveloped attestation.
+    /// The `sha256-<hex>.att` layer for one DSSE envelope, published bare.
     ///
-    /// `envelope` is the DSSE envelope's own JSON — the same document the
-    /// Sigstore bundle wraps, published bare here because that is the shape
-    /// cosign's `.att` tag has always held.
-    ///
-    /// **`dev.cosignproject.cosign/signature` is present and empty.** On a
-    /// `.sig` layer that key carries a signature *detached* from the payload;
-    /// a DSSE envelope carries its signatures inside, in `signatures[].sig`,
-    /// so there is nothing for the value to hold. The key is still written,
-    /// because on `.att` cosign reads it as a **presence marker** rather than
-    /// as material: `cosign verify-attestation` refuses a layer without it
-    /// ("signature layer sha256:… is missing dev.cosignproject.cosign/signature
-    /// annotation") and cosign's own `attach attestation` writes it empty —
-    /// pinned by the golden capture
-    /// `test/tests/fixtures/golden/attestation_sidecar_key_manifest.json`.
-    /// Omitting it, as this constructor used to, published `.att` sidecars no
-    /// cosign release can verify.
-    ///
-    /// The empty value is therefore not "material that is not there": it is the
-    /// whole of what cosign writes in this position. Everything genuinely
-    /// optional — certificate, bundle — is still omitted when absent.
+    /// The signature annotation is written present and empty: `cosign verify-attestation` refuses a layer without it.
     pub(crate) fn attestation(envelope: Vec<u8>, certificate_pem: Option<&str>, rekor_bundle: Option<&str>) -> Self {
         let mut annotations = BTreeMap::new();
         annotations.insert(ANNOTATION_COSIGN_SIGNATURE.to_string(), String::new());
-        // No chain: bundle v0.3 replaced the chain field with a single leaf and
-        // Fulcio's intermediates come from the trust root, so there is nothing
-        // a `/chain` annotation could carry that the signer produced.
         insert_present(&mut annotations, certificate_pem, None, rekor_bundle);
         Self {
             kind: SidecarKind::Attestation,
@@ -157,7 +81,6 @@ impl SidecarLayer {
         }
     }
 
-    /// The descriptor this layer occupies in the sidecar manifest.
     fn descriptor(&self) -> Descriptor {
         Descriptor {
             media_type: self.media_type.to_string(),
@@ -169,13 +92,9 @@ impl SidecarLayer {
     }
 }
 
-/// Insert the verification material cosign reads out of layer annotations,
-/// omitting whatever the signer did not produce.
+/// Insert the verification material cosign reads out of layer annotations.
 ///
-/// Absent material is **omitted**, never written empty: under a key there is no
-/// certificate, and with no transparency-log upload there is no bundle. An empty
-/// annotation would look like present-but-broken material to a reader that only
-/// checks for the key.
+/// Absent material is omitted, never empty, or a reader sees present-but-broken material.
 fn insert_present(
     annotations: &mut BTreeMap<String, String>,
     certificate_pem: Option<&str>,
@@ -193,22 +112,14 @@ fn insert_present(
     }
 }
 
-/// Append `layer` to the sidecar manifest at its tag, creating the manifest
-/// when absent.
+/// Append `layer` to the sidecar manifest at its tag, creating the manifest when absent.
 ///
-/// `image` **must** be the write reference (`Client::transport_write_reference`).
-/// This PUTs a tag through whatever host it is handed, and a signature written
-/// to a read-only mirror is one the canonical verifier never looks at — the
-/// CWE-345/367 class `oci/client.rs` documents at its addressing seams.
+/// `image` must be the write reference: a signature written to a mirror is never seen by verifiers.
 ///
 /// # Errors
 ///
-/// - Whatever the blob or manifest push raises.
-/// - [`SignErrorKind::Internal`] wrapping [`ClientError::RegistryTransient`]
-///   when concurrent writers exhaust [`MAX_APPEND_ATTEMPTS`]. Never an `Ok`
-///   that drops the signature.
-/// - [`SignErrorKind::Internal`] wrapping [`ClientError::InvalidManifest`] when
-///   the sidecar already holds [`MAX_SIDECAR_LAYERS`] layers.
+/// The push's error; [`ClientError::RegistryTransient`] when concurrent writers exhaust [`MAX_APPEND_ATTEMPTS`];
+/// [`ClientError::InvalidManifest`] when the sidecar is full. Both wrapped in [`SignErrorKind::Internal`].
 pub(crate) async fn append_layer(
     transport: &dyn OciTransport,
     image: &native::Reference,
@@ -217,13 +128,9 @@ pub(crate) async fn append_layer(
 ) -> Result<Digest, SignErrorKind> {
     let payload = layer.payload.as_slice();
     let tag = crate::verify::sidecar_tag(subject, layer.kind);
-    // The one seam that only changes the tag: registry and repository come
-    // from a reference a seam already resolved, so no host is minted here.
     let target = ocx_oci::client::sibling_tag_reference(image, tag.clone());
     let layer = layer.descriptor();
 
-    // The blob is content-addressed and identical across attempts, so it is
-    // pushed once outside the loop; only the manifest is contended.
     let no_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> = std::sync::Arc::new(|_| ());
     let payload_digest = Algorithm::Sha256.hash(payload);
     transport
@@ -245,11 +152,7 @@ pub(crate) async fn append_layer(
         if let Some((_, served_digest)) = &published
             && existing.layers.iter().any(|held| is_same_layer(held, &layer))
         {
-            // Idempotent, so a retry after an ambiguous read-back does not
-            // stack duplicates. The digest reported is the one the registry
-            // served, never a re-serialization of the parsed manifest: serde
-            // may not reproduce the published bytes, and a digest that names no
-            // manifest at the tag is worse than no digest at all.
+            // Report the served digest, never a re-serialization: serde may not reproduce the published bytes.
             return Ok(served_digest.clone());
         }
         if existing.layers.len() >= MAX_SIDECAR_LAYERS {
@@ -266,10 +169,7 @@ pub(crate) async fn append_layer(
             ))));
         }
 
-        // Constructed, never echoed: the manifest at the tag is authored by
-        // anyone with push access and this call re-publishes it under the
-        // caller's own credentials, so its header is rebuilt and its layers are
-        // re-emitted field by field from values that parsed.
+        // Rebuilt from parsed values, never echoed: we re-publish a stranger's manifest under our credentials.
         let next = rebuild_with(existing, layer.clone());
         let bytes = serde_json::to_vec(&next).map_err(serialization)?;
         let digest = Algorithm::Sha256.hash(&bytes);
@@ -278,9 +178,7 @@ pub(crate) async fn append_layer(
             .await
             .map_err(map_client_error)?;
 
-        // The only evidence the PUT survived: a concurrent writer that read the
-        // same base manifest and pushed after us produced an `Ok` above while
-        // dropping this layer.
+        // The only evidence the PUT survived: a concurrent writer's PUT returns `Ok` to us and drops our layer.
         let after = read_sidecar(transport, &target).await?;
         if after.is_some_and(|(manifest, _)| manifest.layers.iter().any(|held| is_same_layer(held, &layer))) {
             return Ok(digest);
@@ -296,67 +194,22 @@ pub(crate) async fn append_layer(
     ))))
 }
 
-/// Whether `held` is the layer `layer` carries, rather than merely a layer with
-/// the same address.
+/// Whether `held` is the layer `layer` carries, not merely a layer at the same address.
 ///
-/// **On the `.sig` shape the digest alone is not identity.**
-/// `SimpleSigningClaim::new` writes no `optional` section, so the claim bytes
-/// are a pure function of the repository and the subject digest: a second
-/// signer, or a re-sign after a key rotation, produces a **byte-identical
-/// payload under a different signature**. Deduping on the digest would return
-/// `Ok` while dropping that second signature, and — worse — the read-back would
-/// accept a concurrent writer's clobber as proof that our own layer survived,
-/// which is the one thing it exists to catch. The detached-signature annotation
-/// is what tells the two apart.
-///
-/// **On the `.att` shape the annotation is a constant, not a discriminator** —
-/// among the layers this client writes. It is cosign's presence marker and is
-/// always empty there (see [`SidecarLayer::attestation`]), so between two of our
-/// own `.att` layers the digest is what decides. One rule, because the rule is
-/// "compare whatever is detached from the payload", and on `.att` nothing is.
-///
-/// **An unannotated layer is not the same layer**, even at the same digest. A
-/// `.att` layer carrying no `dev.cosignproject.cosign/signature` key is one no
-/// cosign release can verify, so a re-attest must publish the annotated layer
-/// rather than dedupe against the broken one and report success for a tag it
-/// leaves unverifiable. `None != Some("")` is what makes that append happen.
-///
-/// Comparing the *whole* annotation map instead would be strictly wrong: the
-/// verification material is optional (a key-mode signature has no certificate),
-/// so a re-append that carried less of it than the published layer would read as
-/// a different signature and stack a duplicate.
-///
-/// A re-sign is **not** guaranteed to produce a new signature: p256's ECDSA is
-/// RFC 6979, so the file backend is deterministic (`key_backend.rs`) and
-/// re-signing one payload under one key yields the same bytes. That makes a
-/// repeat of the identical signature dedupe to `Ok` without appending, which is
-/// right — it would add a byte-identical layer. What the annotation catches is
-/// the case that matters: a *different* signer, or the same subject after a key
-/// rotation, whose signature differs over the very same claim bytes.
+/// `.sig` claim bytes repeat across signers, so the signature annotation must match too, or a clobber passes the read-back.
+/// An unannotated `.att` is a different layer: no cosign release verifies it.
 fn is_same_layer(held: &Descriptor, layer: &Descriptor) -> bool {
+    // Only the signature annotation: optional material may differ between re-appends.
     held.digest == layer.digest && signature_annotation(held) == signature_annotation(layer)
 }
 
-/// The `dev.cosignproject.cosign/signature` annotation, when the descriptor
-/// carries one.
-///
-/// `Some` with a real base64 signature on a `.sig` layer this client wrote;
-/// `Some("")` on an `.att` layer, where the key is cosign's presence marker;
-/// `None` on anything else someone pushed to the tag — and no cosign release can
-/// verify *that layer*, which is why [`is_same_layer`] treats it as a different
-/// layer rather than a match, appending the annotated one beside it.
 fn signature_annotation(descriptor: &Descriptor) -> Option<&String> {
     descriptor.annotations.as_ref()?.get(ANNOTATION_COSIGN_SIGNATURE)
 }
 
-/// Read the sidecar manifest at `target`, and the digest the registry served it
-/// under. `None` when the tag does not exist.
+/// Read the sidecar manifest at `target`, and its digest; `None` when the tag does not exist.
 ///
-/// An absent tag is the first signature's starting point, and is the one refusal
-/// reported as `Ok(None)`. Every other refusal is an error, because a caller
-/// that appends must be able to tell "there is nothing there" from "I could not
-/// read what is there" — treating the second as the first republishes an empty
-/// manifest over every signature this client did not author.
+/// Only a missing tag is `Ok(None)`: treating an unreadable one alike republishes over others' signatures.
 async fn read_sidecar(
     transport: &dyn OciTransport,
     target: &native::Reference,
@@ -371,11 +224,7 @@ async fn read_sidecar(
                     "simplesigning sidecar is not an image manifest: {error}"
                 ))))
             })?;
-            // Hashed from the bytes the registry served, not re-serialized from
-            // the parsed manifest: serde need not reproduce the published byte
-            // order, and a digest naming no manifest at the tag is worse than
-            // none. Recomputed rather than taken from the response header, so
-            // the value is the content's own address either way.
+            // Hashed from the served bytes, never a re-serialization.
             Ok(Some((manifest, Algorithm::Sha256.hash(&bytes))))
         }
         Err(ClientError::ManifestNotFound(_)) => Ok(None),
@@ -401,12 +250,7 @@ fn empty_sidecar() -> ImageManifest {
 
 /// Re-emit `existing` with `layer` appended, field by field.
 ///
-/// The config descriptor is carried over rather than reset. cosign's own `.sig`
-/// manifests point at a real image config (233 bytes in the committed golden
-/// capture), and replacing it with the OCI empty config would rewrite — and
-/// orphan — what cosign published, for an append that has no business touching
-/// it. Carried field by field like the layers, so nothing echoes a struct that
-/// merely parsed.
+/// Keep the config: cosign's `.sig` points at a real image config, and resetting it orphans what cosign published.
 fn rebuild_with(existing: ImageManifest, layer: Descriptor) -> ImageManifest {
     let mut next = empty_sidecar();
     next.config = Descriptor {
@@ -431,11 +275,7 @@ fn rebuild_with(existing: ImageManifest, layer: Descriptor) -> ImageManifest {
     next
 }
 
-/// The `dev.sigstore.cosign/bundle` annotation value for `entry`.
-///
-/// cosign's offline transparency-log material: the SET plus the log entry it
-/// covers, so a `.sig` verifies without contacting Rekor. Field names and
-/// capitalisation are Go struct tags on cosign's side and are wire, not style.
+/// The `dev.sigstore.cosign/bundle` annotation value for `entry`; the capitalized names are cosign's Go wire tags.
 ///
 /// # Errors
 ///
@@ -476,7 +316,6 @@ struct OfflineBundlePayload {
     log_id: String,
 }
 
-/// Wrap a serialization failure, which is a bug rather than a registry fault.
 fn serialization(error: serde_json::Error) -> SignErrorKind {
     SignErrorKind::Internal(Box::new(error))
 }

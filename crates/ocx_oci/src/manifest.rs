@@ -2,44 +2,19 @@
 // Copyright 2026 The OCX Authors
 
 //! OCI manifest utilities — image-index admission and platform membership.
-//!
-//! For pure manifest *construction* (assembling `ImageManifest` + config blob
-//! bytes from a `package::info::Info` + layer descriptors, with no I/O),
-//! see [`crate::manifest_builder`].
 
 use super::{Digest, ImageIndex, ImageIndexEntry, Manifest, Platform};
 
 /// An OCI image index that deserialised structurally but violates an invariant
-/// of the image spec that OCX relies on.
-///
-/// Distinct from a serde failure: the document *is* shaped like an image index
-/// (it carries `manifests`), so it can never be mistaken for a leaf manifest or
-/// a cache miss — it is malformed index data and is refused as such.
+/// of the image spec that OCX relies on — refused as malformed, never read as a miss.
 #[derive(Debug, thiserror::Error)]
 #[error("invalid OCI image index: {0}")]
 pub struct InvalidImageIndex(String);
 
 /// Validates the semantic invariants of an OCI image index at a trust boundary.
 ///
-/// [`ImageIndex`] deserialisation only proves the *shape* — `schemaVersion` is
-/// an unconstrained `u8` and every descriptor field is taken on faith, so
-/// `{"schemaVersion":1,"manifests":[]}` parses happily. Registry and
-/// public-index bytes are publisher-controlled, so the semantics are checked
-/// here instead of being assumed:
-///
-/// - `schemaVersion` is [`INDEX_SCHEMA_VERSION`](super::INDEX_SCHEMA_VERSION)
-///   — the only value the image spec allows.
-/// - every entry declares a non-empty `mediaType` and `digest` (both REQUIRED
-///   descriptor properties; either one empty leaves the child unaddressable).
-/// - every entry declares a non-negative `size` (the wire type is `i64`).
-///
-/// The digest string is checked for presence only, never parsed: an index may
-/// legitimately carry a digest algorithm this build does not implement, and
-/// child selection already treats an unparseable digest as absent.
-///
-/// This is a **semantic** check, never `deny_unknown_fields` — the fleet reads
-/// one another's documents, so an unknown sibling field a newer writer adds
-/// must ride through untouched.
+/// Never `deny_unknown_fields`: an unknown field a newer fleet writer adds must
+/// ride through, or older binaries refuse every index it publishes.
 ///
 /// # Errors
 ///
@@ -73,15 +48,9 @@ pub fn validate_image_index(index: &ImageIndex) -> Result<(), InvalidImageIndex>
 
 /// Returns `true` if the manifest contains an entry for the given platform.
 ///
-/// # Strict equality semantics
-///
-/// This function uses **intentional strict struct-equality** on the serialized
-/// `native::Platform` representation — it is testing exact manifest membership,
-/// not host compatibility. This is **distinct** from [`super::is_compatible`],
-/// which uses subset semantics on `os_features` (`offered ⊆ required`) for
-/// install-resolution. Never replace this comparison with `is_compatible` —
-/// the two functions serve different purposes. See [`super::is_compatible`]
-/// for the subset-matching relation used during index resolution.
+/// Exact membership, not host compatibility: never replace with
+/// [`super::is_compatible`], whose `os_features` subset match would report an
+/// entry the index does not hold.
 pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
     let Manifest::ImageIndex(index) = manifest else {
         return false;
@@ -93,20 +62,14 @@ pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
 
 /// Returns the digest of the manifest entry for the given platform, if present.
 ///
-/// Complements [`has_platform`] (existence only) by extracting the pinned
-/// digest, so a caller (e.g. the keep-tag push,
-/// `adr_index_indirection.md` Decision E) can address that exact platform
-/// manifest without re-deriving it from the layers/metadata that produced it.
+/// Used by the keep-tag push (`adr_index_indirection.md` Decision E).
 pub fn platform_manifest_digest(manifest: &Manifest, platform: &Platform) -> Option<Digest> {
     platform_manifest_entry(manifest, platform).and_then(|entry| Digest::try_from(&entry.digest).ok())
 }
 
 /// Returns the whole index entry for the given platform, if present.
 ///
-/// The descriptor form of [`platform_manifest_digest`], for the caller that
-/// needs the `size` alongside the digest — re-tagging an already-pushed
-/// platform manifest under a second tag requires both, and reading them from
-/// the same entry is what keeps the two from being paired wrongly.
+/// Read `size` and digest from this one entry, or a re-tag can pair them wrongly.
 pub fn platform_manifest_entry<'a>(manifest: &'a Manifest, platform: &Platform) -> Option<&'a ImageIndexEntry> {
     let Manifest::ImageIndex(index) = manifest else {
         return None;

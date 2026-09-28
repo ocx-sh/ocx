@@ -1,30 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The read half of `ocx package cascade check|repair`.
-//!
-//! One pass per package: list the registry's tags, classify them, fetch every
-//! version-ish one concurrently, and — for a logical package — read the live
-//! public index root as well. The result is a [`TagGraphObservation`], the
-//! only input the pure core in [`super::graph`] ever sees.
-//!
-//! Two rules make the observation trustworthy enough to compute verdicts from:
-//!
-//! - **Any read failure aborts the run.** This is the deliberate inverse of
-//!   the push path, which stops a cascade conservatively on a transient error.
-//!   A push that skips a level under-delivers; a check that skips one invents
-//!   a finding, and a repair acting on it would write the wrong graph.
-//! - **Absence is derived, never observed.** Only listed tags are fetched, so
-//!   an alias that was never created is simply absent from the map. A listed
-//!   tag that 404s mid-run is a race, not an absence, and aborts.
-//!
-//! Reads authenticate for pull only — `check` never probes push access.
-//!
-//! Every read here addresses the **canonical** registry
-//! ([`ReadAddressing::Canonical`]), not a configured mirror. The audit exists to
-//! judge the repository a publisher writes to, and `repair` writes there; a
-//! graph read from a mirror would be a verdict about a different, possibly
-//! stale, possibly hostile copy.
+//! The read half of `ocx package cascade check|repair`: one package's tag graph
+//! as the [`TagGraphObservation`] the pure core in [`super::graph`] folds.
 
 use std::collections::BTreeMap;
 
@@ -38,33 +16,22 @@ use ocx_index::{Index, IndexRoot, OcxIndex};
 use ocx_oci::client::ReadAddressing;
 use ocx_oci::client::error::ClientError;
 
-/// How many manifest fetches are in flight at once.
-///
-/// Latency-bound work against a single repository — the same shape, and the
-/// same reasoning, as the index's `TAG_REFRESH_CONCURRENCY`: wide enough that a
-/// package with a few hundred tags reads in roughly one round trip, narrow
-/// enough to stay a polite citizen of a registry shared with everyone else.
+/// How many manifest fetches are in flight at once against one repository.
 const CASCADE_GATHER_CONCURRENCY: usize = 64;
 
-/// Reads one package's whole tag graph.
-///
-/// `location` is the physical repository every registry read addresses —
-/// `package` routed through the index; `package` is the name the user asked
-/// for, recorded on the observation when the two name different coordinates so
-/// the report can say what was requested. `index` is the source that serves
-/// `package`'s root — `Some` turns the index-staleness layer on, `None` leaves
-/// it off.
+/// Reads one package's whole tag graph from `location`, the physical repository
+/// `package` routes to; a `Some` `index` turns the index-staleness layer on.
 ///
 /// # Errors
 ///
-/// Any registry or index read failure, and any tag the listing named that the
-/// registry then failed to serve.
+/// Any registry or index read failure, and any listed tag the registry then failed to serve.
 pub async fn gather(
     client: &ocx_oci::Client,
     location: &ocx_oci::OciIdentifier,
     package: &ocx_oci::PackageRef,
     index: Option<&OcxIndex>,
 ) -> Result<TagGraphObservation> {
+    // Canonical, never a mirror: `repair` writes there, so a mirror read judges a different copy.
     let listed = client
         .list_tags_addressed(location.clone(), ReadAddressing::Canonical)
         .await?;
@@ -75,6 +42,7 @@ pub async fn gather(
         ignored_tags.len()
     );
 
+    // Any read failure aborts: a skipped tag invents a finding, and `repair` would write the wrong graph.
     let tags = stream::iter(nodes)
         .map(|(tag, alias)| async move {
             let reference = location.clone_with_tag(&tag);
@@ -86,20 +54,12 @@ pub async fn gather(
                     alias,
                     ObservedTag {
                         digest,
-                        // The body the digest was computed over, not a
-                        // re-serialization: a repair that wraps a bare manifest
-                        // in an index entry needs the size the registry serves.
-                        // `fetch_manifest_raw_bytes` refuses anything past its
-                        // 32 MiB cap, so the conversion cannot fail.
+                        // The served body's size, not a re-serialization's: a repair's index entry needs it.
                         size: i64::try_from(bytes.len()).expect("a capped manifest body fits i64"),
                         manifest,
                     },
                 )),
-                // The listing named this tag moments ago, so its absence now is
-                // a concurrent publish or delete — not the "never created" the
-                // pure core reads as `Absent`. Recording it as a gap would make
-                // a race indistinguishable from real drift, and a repair acting
-                // on that would write the wrong graph.
+                // A concurrent delete, not drift; recording it as `Absent` would make `repair` write the wrong graph.
                 None => Err(PackageError::from(ClientError::ManifestNotFound(format!(
                     "{reference}, which the tag listing had just named"
                 )))),
@@ -123,19 +83,13 @@ pub async fn gather(
     })
 }
 
-/// Splits a registry's tag listing into the graph's nodes and the tags that are
-/// deliberately not part of it.
-///
-/// A bare variant name is that track's root only once the track exists: with no
-/// `debug-*` version published, `debug` is an ordinary tag somebody made, and
-/// promoting it would invent an alias for an empty track.
+/// Splits a registry's tag listing into graph nodes and ignored tags; a bare
+/// variant name is a root only once a version on its track exists.
 fn classify(listed: &[String]) -> (Vec<(String, AliasTag)>, Vec<String>) {
     let variants = version::variant_names(listed.iter().map(String::as_str));
     let mut nodes = Vec::new();
     let mut ignored = Vec::new();
     for tag in listed {
-        // The classification rule itself lives on `AliasTag` — one definition of
-        // what a graph node is, shared with every other reader of a tag string.
         match AliasTag::parse(tag, &variants) {
             Some(alias) => nodes.push((tag.clone(), alias)),
             None => ignored.push(tag.clone()),
@@ -147,11 +101,8 @@ fn classify(listed: &[String]) -> (Vec<(String, AliasTag)>, Vec<String>) {
 
 /// Reads the live index root that publishes `name`.
 ///
-/// Goes through [`Index::from_source`] rather than calling the source directly
-/// because `fetch_root_document` is an `IndexImpl` method and that trait is
-/// private to `ocx_index`. Wrapping this one source is also the point: a
-/// chained index inherits the trait's inert `None` default, so routing the read
-/// through the chain would silently switch the whole staleness layer off.
+/// Wraps this one source: a chained index inherits the trait's inert `None`
+/// default, which would silently switch the staleness layer off.
 async fn fetch_index_root(source: &OcxIndex, name: &ocx_oci::PackageRef) -> Result<Option<IndexRoot>> {
     Ok(Index::from_source(source.clone())
         .fetch_root_document(name)

@@ -1,37 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx patch sync` — host-level site-patch-tier refresh.
-//!
-//! This module implements Phase 5C of the infrastructure-patches feature
-//! (`adr_infrastructure_patches.md`, issue #116).
-//!
-//! ## Responsibility
-//!
-//! [`PackageManager::sync_patches`] re-fetches every descriptor source for the
-//! KNOWN SET of installed bases (symlink-store candidates) plus the global root.
-//! It does NOT crawl the whole registry; only the repos that are already in the
-//! local symlink store or that correspond to the global descriptor are queried.
-//!
-//! The KNOWN SET enumeration is shared with `resolve_site_patch_roots` in
-//! `tasks/resolve.rs` via the free function [`enumerate_installed_bases`], which
-//! is extracted here to avoid duplicating the symlink-store walk.
-//!
-//! ## Offline posture
-//!
-//! `sync_patches` is an explicit user action (`ocx patch sync`). When the manager
-//! is offline, the function returns `Err(crate::Error::OfflineMode)` rather than
-//! silently succeeding — an offline `ocx patch sync` should tell the user it
-//! cannot reach the registry, unlike lazy discovery which is a side-effect of an
-//! install and can silently defer. This matches the behaviour of other explicitly
-//! online commands that call `require_client()`.
-//!
-//! ## Thread safety
-//!
-//! `sync_patches` processes bases sequentially (not in parallel) to avoid
-//! concurrent tag-store writes for the same repo. The base set is typically
-//! small (O(tens)), so sequential throughput is acceptable and serialises
-//! atomic read-modify-write without additional locking.
+//! `ocx patch sync`: host-level site-patch-tier refresh (`adr_infrastructure_patches.md § The site tier`).
 
 use crate::{
     error::PackageErrorKind, tasks::patch_discovery::PatchDescriptorScope, tasks::patch_discovery::PatchDiscoveryMode,
@@ -43,17 +13,7 @@ use super::super::PackageManager;
 
 // ── Fatal-vs-best-effort classification ────────────────────────────────────────
 
-/// Whether a per-base discovery error must abort an explicit `ocx patch sync`.
-///
-/// `sync_patches` is best-effort per base: a transient descriptor-fetch failure
-/// for one base must not abort refreshing the others. A `RequiredCompanionFailed`
-/// is different — it means a `required = true` companion could not be installed,
-/// so the fail-closed invariant (C7) cannot be satisfied for that base. An
-/// explicit `ocx patch sync` must surface that as a non-zero exit rather than
-/// warn and return success. Every other error stays best-effort (warn + continue).
-///
-/// The piggyback caller (`index update`) wraps `sync_patches` in its own
-/// best-effort handler, so propagating here never makes `index update` fail.
+/// Whether a per-base discovery error aborts the sync: only a required companion's failure does.
 fn is_fatal_sync_error(err: &PackageErrorKind) -> bool {
     matches!(err, PackageErrorKind::RequiredCompanionFailed { .. })
 }
@@ -61,36 +21,18 @@ fn is_fatal_sync_error(err: &PackageErrorKind) -> bool {
 // ── Public report type ────────────────────────────────────────────────────────
 
 /// Summary of a completed [`PackageManager::sync_patches`] run.
-///
-/// Plain format: a short one-line summary printed by the CLI.
-///
-/// JSON format: `{ "bases_checked": N, "descriptors_updated": N, "companions_installed": N }`.
 #[derive(Debug, Clone, Default)]
 pub struct PatchSyncReport {
-    /// Total number of installed bases that were checked (including global root).
+    /// Installed bases checked, plus the global root.
     pub bases_checked: usize,
-    /// Number of descriptor blobs that were updated (upstream digest advanced).
+    /// Distinct descriptor sources whose upstream digest advanced.
     pub descriptors_updated: usize,
-    /// Number of companion packages that were installed or re-installed.
     pub companions_installed: usize,
 }
 
 // ── Shared base enumerator ────────────────────────────────────────────────────
 
-/// Enumerate every installed base identifier from the symlink store.
-///
-/// This is the canonical enumerator shared by:
-///
-/// - [`PackageManager::resolve_site_patch_roots`] (Phase 5A, GC root derivation)
-/// - [`PackageManager::sync_patches`] (Phase 5C, descriptor refresh)
-///
-/// The function walks the symlink store at `symlink_root`, calls
-/// `collect_candidates_from_dir` for each registry-slug subdirectory, and then
-/// calls `recover_base_with_real_registry` to restore port-containing hostnames
-/// that were slugified on disk.
-///
-/// Returns an empty `Vec` when the symlink store does not exist yet (no packages
-/// have been installed). Returns an error only on unexpected I/O failures.
+/// Every installed base identifier in the symlink store, with slugified registry hostnames restored.
 pub async fn enumerate_installed_bases(
     file_structure: &ocx_store::file_structure::FileStructure,
 ) -> crate::Result<Vec<ocx_oci::PackageRef>> {
@@ -122,14 +64,12 @@ pub async fn enumerate_installed_bases(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // No symlink store yet — return empty.
                 return Ok(Vec::new());
             }
             Err(error) => return Err(crate::Error::InternalFile(symlink_root.clone(), error)),
         }
     }
 
-    // Restore real registry hostnames (slug → canonical form).
     let mut real_base_ids: Vec<ocx_oci::PackageRef> = Vec::with_capacity(slug_base_ids.len());
     for slug_id in &slug_base_ids {
         real_base_ids.push(super::resolve::recover_base_with_real_registry(snapshot, slug_id).await);
@@ -140,24 +80,13 @@ pub async fn enumerate_installed_bases(
 
 // ── Descriptor-advance detection ─────────────────────────────────────────────
 
-/// Returns `true` when a descriptor state transition constitutes a digest advance.
-///
-/// A digest advance is detected when:
-/// - The `before` state was absent or had no descriptor, and `after` has a descriptor, OR
-/// - Both states have a descriptor but the stored digest string differs (upstream advanced).
-///
-/// No-ops (before == after, including identical digests) return `false`.
-/// State regressions (e.g. `LookedHasDescriptor` → `LookedNoDescriptor`, which
-/// can happen if the upstream removed the descriptor) are not counted as advances
-/// — they are logged as warnings by the discovery code.
+/// Whether a descriptor appeared or its digest changed; a removal is not an advance.
 fn descriptor_digest_advanced(before: &PatchDiscoveryState, after: &PatchDiscoveryState) -> bool {
     match (before, after) {
-        // Transition from no descriptor → has descriptor: digest appeared.
         (
             PatchDiscoveryState::NeverLooked | PatchDiscoveryState::LookedNoDescriptor,
             PatchDiscoveryState::LookedHasDescriptor { .. },
         ) => true,
-        // Digest changed: upstream advanced the descriptor.
         (
             PatchDiscoveryState::LookedHasDescriptor {
                 manifest_digest: before_digest,
@@ -166,27 +95,13 @@ fn descriptor_digest_advanced(before: &PatchDiscoveryState, after: &PatchDiscove
                 manifest_digest: after_digest,
             },
         ) => before_digest != after_digest,
-        // All other transitions (including same state, regression, offline no-ops) are not advances.
         _ => false,
     }
 }
 
 // ── Tag-state read helper ─────────────────────────────────────────────────────
 
-/// Read the patch tag-store state for `tags_path`, logging a warning and falling
-/// back to `NeverLooked` on I/O errors.
-///
-/// This differs from a bare `PatchTagMap::read(...).unwrap_or(NeverLooked)` in one
-/// important way: `PatchTagMap::read` already returns `Ok(NeverLooked)` when the
-/// file is absent (the legitimate "not yet looked" case), so an `Err` from this
-/// function is a real I/O problem (permissions, disk full, etc.) — not a missing
-/// file. We log such errors rather than silently swallowing them, because a silent
-/// coercion to `NeverLooked` on a before-read followed by a successful after-read
-/// would produce a spurious `descriptors_updated` increment.
-///
-/// Fallback to `NeverLooked` on error is best-effort: the sync continues, but the
-/// delta for the affected descriptor will be 0 (both before and after would need to
-/// succeed and differ to count as an advance).
+/// Reads the patch tag-store state for `tags_path`, warning and falling back to `NeverLooked` on an I/O error.
 async fn read_tag_state_best_effort(tags_path: &std::path::Path, id: &ocx_oci::PackageRef) -> PatchDiscoveryState {
     match PatchTagMap::read(tags_path).await {
         Ok(state) => state,
@@ -205,81 +120,28 @@ async fn read_tag_state_best_effort(tags_path: &std::path::Path, id: &ocx_oci::P
 // ── PackageManager::sync_patches ──────────────────────────────────────────────
 
 impl PackageManager {
-    /// Refresh the site-patch tier from the registry for the known installed set.
+    /// Re-fetches every descriptor for the installed bases plus the global root, never crawling the registry.
     ///
-    /// Enumerates every installed base identifier (symlink-store candidates) and
-    /// the global root descriptor, then calls `discover_and_install_patches` in
-    /// [`PatchDiscoveryMode::Sync`] for each. Sync mode force-re-fetches every
-    /// descriptor regardless of the recorded three-state (unlike the lazy
-    /// install-time hook which skips `LookedNoDescriptor` and
-    /// `LookedHasDescriptor`).
-    ///
-    /// This covers bases installed before `[patches]` was configured
-    /// (`NeverLooked` bases are re-fetched just like the others in Sync mode).
-    ///
-    /// ## Offline posture
-    ///
-    /// Returns `Err(crate::Error::OfflineMode)` when the manager is offline.
-    /// An explicit `ocx patch sync` while offline should report the error, not
-    /// silently succeed. Callers (e.g. the `index update` piggyback) wrap this
-    /// in a best-effort path and log a warning instead of propagating the error.
-    ///
-    /// ## No whole-registry crawl
-    ///
-    /// Only the KNOWN SET (symlink-store candidates + global root) is queried.
-    /// The registry is not crawled for new repos.
-    ///
-    /// # Platform fan-out
-    ///
-    /// `platforms` is an explicit enumeration of CONCRETE platforms, not a
-    /// selection tier list: discovery runs once per platform in the slice,
-    /// pinning whichever companion variant satisfies each one, so a synced
-    /// companion set is shareable across a team running mixed platforms —
-    /// this is the one exception to the single-platform resolution contract
-    /// (D4 of `adr_platform_model_unification.md`). An empty slice performs
-    /// no companion resolution at all (zero fan-out iterations); the CLI
-    /// default expands no `--platform` to the full concrete ship matrix.
+    /// One pass per concrete platform in `platforms`; an empty slice resolves no companions.
     ///
     /// # Errors
     ///
-    /// Returns `Err(crate::Error::OfflineMode)` when offline.
-    ///
-    /// A `RequiredCompanionFailed` raised while installing any base's companions
-    /// propagates (fail-closed, C7): an explicit sync that cannot install a
-    /// `required` companion must not report success. Every other discovery error
-    /// is logged as a warning and does not abort the sync (best-effort per-base
-    /// recovery — one base's transient descriptor-fetch failure must not stop the
-    /// others from refreshing).
+    /// `OfflineMode` when offline, and `RequiredCompanionFailed` from any base; other discovery errors only warn.
     pub async fn sync_patches(&self, platforms: &[ocx_oci::Platform]) -> crate::Result<PatchSyncReport> {
-        // Offline guard — sync is an explicit online action.
-        // `require_client()` produces `Err(crate::Error::OfflineMode)` when offline.
         let _client = self.require_client()?;
 
-        // No patch tier configured — nothing to sync.
         let Some(patches) = self.patches() else {
             return Ok(PatchSyncReport::default());
         };
 
-        // Enumerate the known set.
         let installed_bases = enumerate_installed_bases(self.file_structure()).await?;
         let total_checked = installed_bases.len() + 1; // +1 for the global root
 
         let file_structure = self.file_structure();
 
-        // Summed across every base's `discover_and_install_patches_with_mode`
-        // call below — each call returns the count of companions it installed.
         let mut companions_installed: usize = 0;
 
-        // ── Step 1: Snapshot the before-state of every DISTINCT descriptor source. ──
-        //
-        // A descriptor source is identified by its tag-store PATH. The global root
-        // is one source; each installed base's patch repo is another. Multiple
-        // version tags of the SAME repository (e.g. `cmake:3.28` and `cmake:3.29`)
-        // map to ONE package-specific descriptor source — the patch path template is
-        // repository-based, tag-independent — and therefore one tag-store path. Keying
-        // the before/after delta by PATH means a single descriptor advance is counted
-        // exactly once, never once per installed version tag (which would over-report
-        // `descriptors_updated`).
+        // Keyed by tag-store path: tags of one repository share a source, counted once, not once per tag.
         let global_id = global_descriptor_id(patches);
         let global_tags_path = file_structure.patch_descriptor_path(&global_id);
 
@@ -296,30 +158,8 @@ impl PackageManager {
             }
         }
 
-        // ── Step 2: Run Sync-mode discovery over the known set, once per ──────────
-        // ── concrete platform in the fan-out list. ─────────────────────────────────
-        //
-        // `platforms` is an explicit enumeration (produce N outputs), not a
-        // selection tier list: each concrete platform gets its own discovery
-        // pass so a team running mixed platforms all have their own companion
-        // variant pinned locally. An empty slice performs zero passes.
-        //
-        // Per installed base: a `Both` pass force-re-fetches the global root AND the
-        // base's package-specific descriptor and installs every matching companion
-        // (global + package-specific) so a required global companion (e.g. a corp CA
-        // matching `*`) is present locally for a later OFFLINE exec — a
-        // `PackageSpecificOnly` per-base pass would skip global companions and
-        // regress fail-closed offline behaviour. The global root is therefore
-        // re-fetched once per (platform, base) pair; that is idempotent
-        // (content-addressed blob, no-op tag write on an unchanged digest) and the
-        // redundant round-trips are a documented Phase-6 perf optimisation, not a
-        // correctness issue.
-        //
-        // With ZERO installed bases, a single `GlobalOnly` pass per platform
-        // refreshes the global descriptor WITHOUT fabricating a synthetic base — a
-        // synthetic base would expand the path template into an extra
-        // package-specific source outside the known set (a known-set violation).
         for platform in platforms {
+            // `GlobalOnly`: a synthetic base would expand into a package-specific source outside the known set.
             if installed_bases.is_empty() {
                 match self
                     .discover_and_install_patches_with_mode(
@@ -332,8 +172,6 @@ impl PackageManager {
                 {
                     Ok(count) => companions_installed += count,
                     Err(err) => {
-                        // Fail closed on a required-companion failure; warn + continue on
-                        // any transient/optional error (best-effort per-base recovery).
                         if is_fatal_sync_error(&err) {
                             return Err(err.into());
                         }
@@ -341,6 +179,7 @@ impl PackageManager {
                     }
                 }
             } else {
+                // `Both`, not `PackageSpecificOnly`, or a required global companion is absent for later offline execs.
                 for base_id in &installed_bases {
                     match self
                         .discover_and_install_patches_with_mode(
@@ -353,8 +192,6 @@ impl PackageManager {
                     {
                         Ok(count) => companions_installed += count,
                         Err(err) => {
-                            // Fail closed on a required-companion failure; warn + continue
-                            // otherwise (best-effort per-base recovery).
                             if is_fatal_sync_error(&err) {
                                 return Err(err.into());
                             }
@@ -368,7 +205,6 @@ impl PackageManager {
             }
         }
 
-        // ── Step 3: Count each DISTINCT descriptor source that advanced, once. ─────
         let mut descriptors_updated: usize = 0;
         for (tags_path, (id, before)) in &sources {
             let after = read_tag_state_best_effort(tags_path, id).await;

@@ -3,22 +3,6 @@
 
 /// Whether `ocx self setup` was explicitly told to skip modifying the user's
 /// shell profiles and session PATH.
-///
-/// Flatten into `ocx self setup` with `#[clap(flatten)]` to add the
-/// `--no-modify-path` flag. **There is deliberately no `--modify-path`** —
-/// contract C-043: the opt-out fails safe, in the direction that touches
-/// less of the user's machine, so re-enabling it is a hand edit, never a
-/// flag. `there_is_no_command_line_way_to_turn_the_path_opt_out_back_on`
-/// (`crates/ocx_cli/src/command/self_group/setup.rs`) pins this — do not add
-/// the positive flag.
-///
-/// Resolve with [`ModifyPath::explicit`] and hand the `Option<bool>` to the
-/// write seam, which fills a `None` in from
-/// [`OCX_NO_MODIFY_PATH`](ocx_config::env::keys::OCX_NO_MODIFY_PATH) and then
-/// `config.toml`, before falling through to the default (modify). This type
-/// answers only about the command line — it does not read the environment
-/// itself, so the ladder's lower tiers still get a turn for a user who typed
-/// nothing.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct ModifyPath {
     /// Write the env shims but touch neither a shell profile nor the
@@ -36,13 +20,10 @@ pub struct ModifyPath {
 }
 
 impl ModifyPath {
-    /// What the user typed, or `None` when they typed nothing.
+    /// `Some(false)` for `--no-modify-path`, else `None`.
     ///
-    /// Only ever `Some(false)` — there is no flag that could produce
-    /// `Some(true)`. `None` travels to the write seam so
-    /// [`OCX_NO_MODIFY_PATH`](ocx_config::env::keys::OCX_NO_MODIFY_PATH) and then
-    /// `config.toml` can still speak for a user who typed nothing; collapsing
-    /// absence to `false` here would make the flag's absence outrank both.
+    /// Collapsing `None` to a `bool` lets absence outrank
+    /// [`OCX_NO_MODIFY_PATH`](ocx_config::env::keys::OCX_NO_MODIFY_PATH) and `config.toml`.
     pub fn explicit(&self) -> Option<bool> {
         if self.no_modify_path { Some(false) } else { None }
     }

@@ -3,15 +3,8 @@
 
 //! The one place a recording decision can be minted.
 //!
-//! [`RecordingPolicy`] has private fields and no public constructor, and
-//! [`resolve_records`] lives in this module and nowhere else. A launching frame
-//! therefore cannot fabricate "recording is off" — only configuration can say
-//! that. Placing either item loosely in the `record` surface would degrade the
-//! guarantee to "anything in `record` can mint".
-//!
-//! The guarantee is module-scoped by design: `#[non_exhaustive]` would be
-//! useless here, since it blocks literal construction only across crates and
-//! `ocx_lib` is the crate that matters.
+//! [`RecordingPolicy`]'s fields are private and [`resolve_records`] is its only constructor, so no launching frame
+//! can fabricate "recording is off"; moving either out of this module lets anything in `record` mint one.
 
 use std::path::{Path, PathBuf};
 
@@ -20,19 +13,12 @@ use super::name_template::{DEFAULT_TEMPLATE, NameTemplate};
 use ocx_config::records::RecordsOptions;
 
 /// The resolved recording decision for one invocation.
-///
-/// "Configured off" is encoded *inside* the policy rather than as an `Option`
-/// around it — an `Option` at this boundary would leave the common case with no
-/// constructor and reintroduce a caller-visible `None` to pass.
 #[derive(Debug, Clone)]
 pub struct RecordingPolicy {
-    /// Resolved sink directory, pinned to where it really was at resolve time.
-    /// `None` is the configured-off state.
+    /// Sink directory pinned at resolve time; `None` is the configured-off state.
     dir: Option<PathBuf>,
 
-    /// Resolved and validated name template, defaulted when unset. Held parsed
-    /// so an unknown placeholder is a configuration error at resolve time rather
-    /// than a surprise filename at write time.
+    /// Validated name template, defaulted when unset.
     name: NameTemplate,
 
     /// Fail posture: abort the launch when a record cannot be written.
@@ -40,11 +26,7 @@ pub struct RecordingPolicy {
 }
 
 impl RecordingPolicy {
-    /// The sink directory, or `None` when recording is configured off.
-    ///
-    /// Resolved to its real location at [`resolve_records`], so this is the
-    /// directory the operator designated rather than the spelling they typed —
-    /// see [`pin_sink`].
+    /// The sink directory, resolved to its real location, or `None` when recording is configured off.
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()
     }
@@ -59,18 +41,11 @@ impl RecordingPolicy {
         &self.name
     }
 
-    /// The two fields a child ocx cannot re-derive on its own, in the shape
+    /// The two fields a child ocx cannot re-derive, in the shape
     /// [`OcxConfigView`](ocx_config::env::OcxConfigView) forwards.
     ///
-    /// A child re-reads the config file and the environment for itself, so those
-    /// two tiers would resolve identically without any forwarding — but the CLI
-    /// tier is per-invocation, and `Env::apply_ocx_config` is set-or-**remove**,
-    /// so a launching frame that resolved a flag must hand the result down or
-    /// the child records somewhere else, or nowhere.
-    ///
-    /// `required` and `system_locked` are deliberately absent: the posture is a
-    /// config-file decision at every tier and the lock is loader-set provenance,
-    /// so both are re-derived by the child from the config chain it resolves.
+    /// `Env::apply_ocx_config` is set-or-remove, so without these a child of a CLI-flagged frame records elsewhere
+    /// or nowhere; `required` and `system_locked` come from the config chain the child re-reads itself.
     pub fn forwarded(&self) -> RecordsOptions {
         RecordsOptions {
             dir: self.dir.clone(),
@@ -80,77 +55,39 @@ impl RecordingPolicy {
         }
     }
 
-    /// Whether a failed record aborts the launch.
-    ///
-    /// `false` warns on stderr and runs anyway; `true` exits 74 before the child
-    /// starts. A developer who typed `--records-dir` once and fat-fingered the
-    /// path should not have their build die for a policy nobody set, which is
-    /// why the fail-closed posture lives with the policy and not with the flag.
+    /// Whether a failed record aborts the launch (exit 74 before the child starts) rather than warning.
     pub fn required(&self) -> bool {
         self.required
     }
 }
 
-/// Fold the three configuration tiers into the invocation's recording decision.
+/// Fold config file, environment and CLI (highest last) into the invocation's recording decision.
 ///
-/// Precedence is default, then config file, then environment, then CLI
-/// arguments — one fold, every field, highest last.
-///
-/// The SYSTEM-scope clamp is binary and per-block, not per-field: with no
-/// operator policy the sink is the caller's, filename pattern included; the
-/// moment an operator declares one at SYSTEM scope the whole block is theirs,
-/// because a collector downstream now depends on all of it. It lives as an early
-/// return in [`RecordsOptions::merge`] rather than as a step here, so the file
-/// tiers — which fold in the config loader and never reach this function — get
-/// the same clamp from the same line.
-///
-/// `required` is read from the **config tier only**, at every level: it is
-/// absent from [`RecordsOptions`] values built from the environment or CLI
-/// flags, and this function must ignore it there rather than trusting the shape.
-/// It defaults `false` unlocked and `true` when SYSTEM-locked.
+/// A SYSTEM-scope `[records]` block locks the whole block ([`RecordsOptions::merge`]); `required` comes from the
+/// config tier only and defaults to the lock state.
 ///
 /// # Errors
 ///
-/// Returns [`RecordsError`] when a **configured** sink's name template is
-/// malformed or cannot produce a distinct name per record. With no sink there is
-/// no filename to validate and this function does not fail.
+/// [`RecordsError::RequiredWithoutSink`] for an explicit `required = true` with no sink; otherwise
+/// [`RecordsError`] when a configured sink's name template is invalid.
 pub fn resolve_records(
     config: RecordsOptions,
     env: RecordsOptions,
     args: RecordsOptions,
 ) -> Result<RecordingPolicy, RecordsError> {
     let mut merged = config;
-    // The SYSTEM clamp needs no guard here — `RecordsOptions::merge` early-returns
-    // when the accumulator is locked, which is what makes it free for the file
-    // tiers too. `required` does need one: the environment and the CLI have no
-    // channel for it by design, so it is dropped from those two layers rather
-    // than trusted to be absent.
+    // Env and CLI have no `required` channel; dropped rather than trusted absent, so only config can fail closed.
     let system_locked = merged.system_locked;
     merged.merge(RecordsOptions { required: None, ..env });
     merged.merge(RecordsOptions { required: None, ..args });
 
-    // Fail closed under an operator policy, warn otherwise. An operator who
-    // disagrees writes `required = false` in the same system-scope file.
+    // Fail closed under an operator (SYSTEM-locked) policy, warn otherwise.
     let required = merged.required.unwrap_or(system_locked);
 
-    // With no sink nothing renders a filename, so nothing validates one. Parsing
-    // it anyway would let a machine-wide `OCX_RECORDS_NAME` with no `dir` exit 78
-    // out of every `ocx exec` on the host — generated entrypoint launchers
-    // included, which take no flags and so cannot opt out — and would contradict
-    // the published contract that the variable has no effect without a sink.
+    // No sink, no name validation, or a machine-wide `OCX_RECORDS_NAME` without `dir` exits 78 on every `ocx exec`.
     let Some(dir) = merged.dir else {
-        // A tier that *wrote* `required = true` and named no sink asked for
-        // something that cannot happen. The launch path early-returns on a
-        // policy that records nothing, before any posture is applied, so
-        // resolving this to "off" would silently disable recording on every
-        // host that carries the file. Refused here rather than there, so the
-        // operator hears about it before the work — the `SinkSymlink`
-        // precedent, and a configuration fault by the same measure.
-        //
-        // The trigger is the *explicit* `Some(true)`, never the SYSTEM-locked
-        // default `required` resolves to above: a locked `[records]` block with
-        // no `dir` is plausibly an operator locking recording off for the host,
-        // and that must keep working exactly as it does.
+        // Refused, or every host carrying an explicit `required = true` without a sink silently records nothing.
+        // Explicit only: a SYSTEM-locked block with no `dir` is an operator locking recording off.
         if merged.required == Some(true) {
             return Err(RecordsError::RequiredWithoutSink);
         }
@@ -163,29 +100,15 @@ pub fn resolve_records(
 
     Ok(RecordingPolicy {
         dir: Some(pin_sink(dir)),
-        // Parsed here rather than at write time, so a bad placeholder surfaces
-        // while the operator is still looking at their config and before any
-        // child starts.
         name: NameTemplate::parse(merged.name.as_deref().unwrap_or(DEFAULT_TEMPLATE))?,
         required,
     })
 }
 
-/// Resolve the operator's sink to the directory it really names, once.
+/// Resolve the operator's sink to the directory it really names, once, at designation.
 ///
-/// This is the moment of designation, and the only filesystem touch in
-/// resolution — one path walk per invocation, on a path an operator typed.
-///
-/// Refusing a sink for merely *containing* a symlink was the wrong guard: macOS
-/// reaches `/var/log/ocx/records` through `/var` → `/private/var`, so it refused
-/// an ordinary host on every launch, and under `required = true` refused it
-/// permanently. The property worth keeping is that nobody redirects the trail
-/// **after** the operator designated it — so the designation is fixed here and
-/// [`super::sink`] refuses to write anywhere else.
-///
-/// A sink that cannot be resolved — the ordinary fat-fingered path, absent on
-/// disk — keeps the spelling as configured, so the I/O error names what the
-/// operator typed and the warn posture still merely warns.
+/// Pinned rather than refusing symlinked ancestors, which macOS's `/var` → `/private/var` would trip on every host.
+/// An unresolvable sink keeps its spelling, so the later I/O error names what the operator typed.
 fn pin_sink(dir: PathBuf) -> PathBuf {
     dunce::canonicalize(&dir).unwrap_or(dir)
 }

@@ -6,15 +6,10 @@ use std::collections::HashMap;
 /// A conflict detected when two packages set the same constant env var to different values.
 #[derive(Debug)]
 pub struct Conflict {
-    /// The env var key.
     pub key: String,
-    /// The package that previously claimed this key.
     pub previous_package: String,
-    /// The value the previous package set.
     pub previous_value: String,
-    /// The package that is now conflicting.
     pub current_package: String,
-    /// The value the current package wants to set.
     pub current_value: String,
 }
 
@@ -28,10 +23,7 @@ impl std::fmt::Display for Conflict {
     }
 }
 
-/// Tracks constant environment variable assignments across packages to detect conflicts.
-///
-/// Only constant-type vars are tracked (path-type vars are accumulated, so conflicts
-/// don't apply).
+/// Tracks constant env var assignments across packages to detect conflicts.
 #[derive(Debug, Default)]
 pub struct ConstantTracker {
     /// key → (package, value)

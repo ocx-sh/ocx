@@ -9,19 +9,9 @@ use crate::api::data::index::{RegenerateEntry, RegenerateReport};
 use crate::app::{CommandError, is_published_namespace};
 use crate::command::index_common;
 
-/// The one command that rewrites a catalog without consulting a source
-/// (`adr_servable_index_snapshot.md` C-010).
-///
-/// `c/index.json` is derived data — every entry restates a digest the root
-/// document on disk already carries — and every other writer only ever *adds*
-/// to it. That leaves one drift nothing can repair: an entry naming a package
-/// whose root is gone. This command re-derives the whole map from the `p/` walk,
-/// which is the only operation that clears such an entry.
-///
-/// `ocx_cli` builds no index source and opens no client here; it checks what
-/// only the CLI can see (that each `<REGISTRY>` is a *published* source) and
-/// calls [`ocx_index::regenerate_catalog`] per registry. The user-facing help lives
-/// on the `Index::Regenerate` variant, which is what clap renders.
+// See `adr_servable_index_snapshot.md` for why this command exists.
+/// The one command that rewrites a catalog without consulting a source: it re-derives `c/index.json`
+/// from the `p/` walk, the only operation that clears an entry whose root is gone.
 #[derive(Parser)]
 pub struct IndexRegenerate {
     #[clap(required = true, num_args = 1.., value_name = "REGISTRY")]
@@ -30,27 +20,16 @@ pub struct IndexRegenerate {
 
 impl IndexRegenerate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // C-010's published-only guard, run over EVERY argument before the first
-        // registry is touched. Pre-flighting it is the difference between
-        // refusing a mistyped invocation and refusing it after already having
-        // rewritten an earlier registry's catalog.
+        // All validated first, so a typo cannot partially rewrite an earlier registry's catalog.
         for registry in &self.registries {
             ensure_published(context.config(), context.local_mirrors(), registry)?;
         }
 
-        // No `--frozen` gate and no `--offline` gate (C-021). Both flags scope
-        // pin movement and source contact; this consults no source, changes no
-        // `tags[].content`, and touches no root's `repository`. `context` is
-        // read for its config and its index store only — never for the remote
-        // index accessor, which IS the offline gate.
+        // Consults no source, so no `--frozen`/`--offline` gate: never read the remote index accessor,
+        // which is that gate.
         let store = context.local_index().index_store();
 
-        // Sequential, one registry at a time: each call takes that source's
-        // cross-process lock for the whole critical section, and the work is
-        // local I/O. Failures still carry their input index and go through
-        // `first_failure` rather than relying on the loop's order — that
-        // ordering is a contract (C-010), and parallelising this loop is the
-        // natural next change now that `index update` next door fans out.
+        // Sequential: each source's cross-process lock is held only for local I/O.
         let mut entries = Vec::with_capacity(self.registries.len());
         let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         for (input_index, registry) in self.registries.iter().enumerate() {
@@ -58,23 +37,14 @@ impl IndexRegenerate {
                 Ok(outcome) => entries.push(RegenerateEntry::from(outcome)),
                 Err(error) => {
                     let error = anyhow::Error::from(error);
-                    // Reported HERE as well as at `main.rs`'s boundary, and the
-                    // redundancy is only apparent: `first_failure` propagates the
-                    // lowest-index error alone, so in a multi-registry run every
-                    // OTHER failure is printed on this line and never reaches the
-                    // boundary at all. `MalformedRootDocument` quotes a repository
-                    // name read off the foreign tree, so each of those chains is
-                    // untrusted. Through the shared funnel, which neutralizes both
-                    // halves at one site for all three `index` verbs.
+                    // Every failure but the returned one prints only here.
                     index_common::log_failure("Failed to regenerate the catalog for", registry, &error);
                     failures.push((input_index, error));
                 }
             }
         }
 
-        // No partial report: a nonzero exit with a SUCCESS-shaped payload on
-        // stdout is what `index catalog` and `index update` both refuse to
-        // emit, and every failure is already on stderr above.
+        // No partial report: a nonzero exit carries no SUCCESS-shaped stdout.
         if let Some(error) = index_common::first_failure(failures) {
             return Err(error);
         }
@@ -84,65 +54,15 @@ impl IndexRegenerate {
     }
 }
 
-// C-010's aggregation rule — the lowest-index failure is the process error, so
-// `classify_error` derives a deterministic exit whatever order the registries
-// completed in — is `index_common::first_failure`. It lived here too, verbatim,
-// until a review pointed out that a contract stated in two places is a contract
-// with two copies to drift: C-010 and C-024's aggregation row are the same rule,
-// so they are now the same four lines.
-
-/// C-010's published-only guard: `<REGISTRY>` must name a **published** index
-/// source — one carrying `[registries."<ns>"] index`.
-///
-/// A *derived* (plain-OCI) namespace has no `c/index.json` **by grammar**: its
-/// catalog *is* the `p/` enumeration (`adr_index_indirection.md` A2).
-/// [`ocx_index::regenerate_catalog`] would mint one anyway — it takes a store and a
-/// source name and can see no configuration at all — and under Decision A an
-/// absent `config.json` reads as format version 1, so that subtree would become
-/// both resolvable and enumerable once served: precisely what the grammar
-/// denies it.
-///
-/// The library states this as a precondition (C-007) and leaves the check here
-/// because only the CLI can make it. The published/derived split lives in
-/// configuration, which `IndexStore` has no access to, and "the subtree has no
-/// `c/index.json`" cannot serve as the test — accepting exactly such a tree is
-/// one of `regenerate_catalog`'s own preconditions.
-///
-/// The verdict comes from [`is_published_namespace`] — the **same** predicate
-/// `Context::build_index_sources` filters on, not a restatement of it. Both of
-/// its conditions matter here: a first cut tested only `index` presence and so
-/// admitted a compiled-in default that a local `[mirrors."<ns>"]` entry pins at
-/// a registry, which the resolver routes as plain-OCI while this verb minted a
-/// `c/index.json` under it.
-///
-/// **Every _configured_ namespace sharing the argument's slug must pass, not
-/// just the one named.** `regenerate_catalog` writes to `slugify(source)`, and
-/// `to_relaxed_slug` maps `[^a-zA-Z0-9._-]` to `_` — so `a:b` and `a_b` are two
-/// configured namespaces sharing one directory. Checking only the typed name
-/// would let a published one act as a key to a derived twin's subtree, which is
-/// the outcome this guard exists to prevent whatever route reaches it.
-///
-/// **Known gap, deliberately not closed here.** The walk can only see namespaces
-/// that _have_ a `[registries]` entry. A registry with no entry at all is the
-/// most derived shape there is, and `IndexStore` still keys its subtree on the
-/// same `slugify` — so a published `[registries."reg.corp:5000"]` beside an
-/// in-use unconfigured `reg.corp_5000` aliases undetected. Configuration cannot
-/// enumerate it: the store holds slugs, and the slug → name mapping is lossy.
-///
-/// The sound code-level fix is to require `slugify(registry) == registry` for a
-/// regenerate target, but that refuses every port-bearing published registry —
-/// a natural on-prem shape — and leaves its operator no remedy, since they
-/// cannot rename the host. Refusing a legitimate deployment outright is the
-/// larger harm, so the guard's scope is narrowed in this doc instead of the
-/// claim being left to overstate the check. Reaching the gap needs an operator
-/// to configure a published namespace whose slug collides with an in-use
-/// unconfigured one.
+/// `<REGISTRY>` must name a published index source: a derived namespace has no `c/index.json` by grammar,
+/// and minting one would make the subtree resolvable (`adr_index_indirection.md` § On-disk layout).
+/// [`is_published_namespace`], not an `index`-presence check, which admits a mirror-pinned default that
+/// resolves as plain-OCI. Every namespace sharing the slug must pass too, or a published name keys into a
+/// derived twin's subtree.
 ///
 /// # Errors
 ///
-/// [`CommandError`] classified [`ocx_exit::ExitCode::ConfigError`] (78) when the
-/// registry, or any configured namespace aliasing its directory, resolves to a
-/// derived source — or when it is not configured at all.
+/// [`CommandError`] (78) when the registry or a slug alias is derived, or the registry is not configured.
 fn ensure_published(
     config: &ocx_config::Config,
     local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
@@ -169,8 +89,8 @@ fn ensure_published(
         return refuse(format!("'{registry}' is not a published index source"));
     }
 
-    // Slug aliases share the subtree this would write into, so a derived one
-    // among them is a derived target reached under a published name.
+    // Known gap: an unconfigured registry sharing the slug is invisible; requiring
+    // `slugify(registry) == registry` would refuse every port-bearing published registry.
     let slug = ocx_store::file_structure::slugify(registry);
     for (namespace, entry) in registries {
         if namespace != registry
@@ -188,8 +108,8 @@ fn ensure_published(
 #[cfg(test)]
 mod tests {
     //! Specification tests for `ocx index regenerate`, written from
-    //! `design_spec_servable_index_snapshot.md` C-010 and C-021. Each names the
-    //! contract row it pins.
+    //! `design_spec_servable_index_snapshot.md`. Each names the contract row it
+    //! pins.
 
     use super::*;
     use crate::exit::ClassifyExitCode;
@@ -229,7 +149,7 @@ mod tests {
             .collect()
     }
 
-    // ── C-010 — the published-only guard ─────────────────────────────────────
+    // ── The published-only guard ─────────────────────────────────────
 
     #[test]
     fn a_published_registry_is_accepted() {
@@ -314,12 +234,12 @@ mod tests {
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
 
         // Both published is fine: they still collide, but nothing derived is
-        // reachable, so C-010's guarantee is intact.
+        // reachable, so the published-only guarantee is intact.
         let both = config_with(&[("a:b", Some("https://i.invalid")), ("a_b", Some("https://i.invalid"))]);
         assert!(ensure_published(&both, None, "a:b").is_ok());
     }
 
-    // ── C-010 — aggregation order ────────────────────────────────────────────
+    // ── Aggregation order ────────────────────────────────────────────
 
     #[test]
     fn the_lowest_input_index_failure_is_the_process_error() {
@@ -328,10 +248,9 @@ mod tests {
         // must be a property of this function rather than of the sequential
         // loop that happens to feed it today.
         //
-        // C-010's rule and C-024's aggregation row are the same rule, so they
-        // are now the same function; this test stays here because C-010 is a
-        // contract of THIS command and would otherwise be pinned only by a
-        // sibling's test.
+        // The aggregation rule lives once, in `index_common::first_failure`, so
+        // this test stays here even though the function is shared: without it,
+        // this command's own contract would be pinned only by a sibling's test.
         let failures: Vec<(usize, anyhow::Error)> = vec![
             (2, ocx_package_manager::Error::OfflineMode.into()),
             (
@@ -341,9 +260,9 @@ mod tests {
             (1, ocx_package_manager::Error::OfflineMode.into()),
         ];
         let error = index_common::first_failure(failures).expect("a non-empty failure list yields an error");
-        // Downcast rather than `matches!`: the aggregation carries `anyhow::Error`
-        // since WP-37, and the property under test is still which *concrete*
-        // error won, not merely that one did.
+        // Downcast rather than `matches!`: the aggregation now carries
+        // `anyhow::Error`, and the property under test is still which
+        // *concrete* error won, not merely that one did.
         assert!(
             matches!(
                 error.downcast_ref::<ocx_package_manager::Error>(),
@@ -356,14 +275,14 @@ mod tests {
             "no failures means no process error"
         );
         // And that this command actually uses it: a private copy beside the
-        // shared one is how C-010 and C-024 drift apart while both tests pass.
+        // shared one is how the two contracts drift apart while both tests pass.
         assert!(
             !module_code().contains("fn first_failure"),
             "the aggregation rule is stated once, in index_common.rs"
         );
     }
 
-    // ── C-010 — grammar ──────────────────────────────────────────────────────
+    // ── Grammar ──────────────────────────────────────────────────────
 
     #[test]
     fn at_least_one_registry_is_required() {
@@ -426,11 +345,11 @@ mod tests {
         }
     }
 
-    // ── C-021 — `--frozen` and `--offline` both permit `regenerate` ──────────
+    // ── `--frozen` and `--offline` both permit `regenerate` ──────────
 
     #[test]
     fn regenerate_adds_no_policy_gate() {
-        // C-021 is a contract about code that must NOT exist: `regenerate`
+        // This is a contract about code that must NOT exist: `regenerate`
         // consults no source, so neither flag applies and neither gate may be
         // added. A behavioural test cannot observe an absent branch, so this
         // asserts against the module's own source — the same shape as the
@@ -449,11 +368,11 @@ mod tests {
         }
     }
 
-    // ── C-010 — help text ────────────────────────────────────────────────────
+    // ── Help text ────────────────────────────────────────────────────
 
     #[test]
     fn the_update_variants_stale_report_line_is_gone() {
-        // C-010's help row: `regenerate`'s help must not copy `Index::Update`'s
+        // This help row: `regenerate`'s help must not copy `Index::Update`'s
         // "Packages with an update waiting are reported afterward" line, which
         // is being deleted because nothing ever reported it. Asserted against
         // the enum that carries both docs, so the line cannot come back on

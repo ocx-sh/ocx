@@ -13,163 +13,89 @@ use ocx_store::file_structure;
 use super::super::PackageManager;
 use super::common::{ClosureEnvVar, ClosureNode};
 
-/// One child manifest of an image index, surfaced in default (no-`--resolve`)
-/// mode so a caller can see which platforms a multi-platform tag offers
-/// without committing to one.
+/// One child manifest of an image index, listed by default-mode inspect.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    /// The child manifest pinned by its own digest.
     pub identifier: ocx_oci::PinnedPackageRef,
     /// Declared platform, or [`ocx_oci::Platform::any`] when the entry omits one.
     pub platform: ocx_oci::Platform,
-    /// The child descriptor's media type.
     pub media_type: String,
-    /// The child descriptor's size in bytes.
     pub size: i64,
 }
 
-/// Read-only inspection output. The variant is chosen by what sits at the
-/// requested reference and whether `--resolve` was given:
-///
-/// - [`Candidates`](InspectResult::Candidates) — default mode, the ref is an
-///   image index: list the platform children, no metadata loaded.
-/// - [`Manifest`](InspectResult::Manifest) — default mode, the ref is a single
-///   image manifest (flat tag or `@digest`): metadata plus the manifest's
-///   layer descriptors, no resolution chain.
-/// - [`Resolved`](InspectResult::Resolved) — `--resolve`: platform-select
-///   through the index, then metadata plus the full resolution chain.
-///
-/// No install or symlink side effects occur in any variant. Default mode may
-/// still populate the local index / blob cache on a tag cache miss — a
-/// `Resolve`-class read, not a write the caller asked for. "Read-only" here
-/// means "no install, no symlink mutation", not "touches no local cache".
+/// Read-only inspection output: an index's candidates, a single manifest, or a `--resolve` chain.
 #[derive(Debug)]
 pub enum InspectResult {
     Candidates {
-        /// The image-index digest the candidates came from.
         pinned: ocx_oci::PinnedPackageRef,
         candidates: Vec<Candidate>,
     },
     Manifest {
-        /// The manifest digest at the reference.
         pinned: ocx_oci::PinnedPackageRef,
         metadata: ValidMetadata,
-        /// The manifest's layer descriptors (digest, media type, size).
-        /// Already carried by the fetched manifest — surfaced so a default
-        /// inspect shows the package's content without forcing `--resolve`.
         layers: Vec<ocx_oci::Descriptor>,
-        /// The metadata-only dependency closure, present iff `--deps` was
-        /// requested. See [`InspectClosure`] / `adr_inspect_metadata_closure.md` D3.
+        /// Present iff `--deps` was requested.
         closure: Option<InspectClosure>,
     },
     Resolved {
         /// The platform-selected pinned identifier.
         pinned: ocx_oci::PinnedPackageRef,
         metadata: ValidMetadata,
-        /// Boxed — `ResolvedChain` is large relative to the other variants
-        /// (`clippy::large_enum_variant`).
         chain: Box<ResolvedChain>,
-        /// The metadata-only dependency closure, present iff `--deps` was
-        /// requested. See [`InspectClosure`] / `adr_inspect_metadata_closure.md` D3.
+        /// Present iff `--deps` was requested.
         closure: Option<InspectClosure>,
     },
 }
 
-/// Mode switch for [`PackageManager::inspect`] / [`PackageManager::inspect_all`].
-///
-/// `closure` implies platform selection on an image-index root (the walk needs
-/// a concrete root manifest to read declared deps from), so the pair is a mode,
-/// not two independent booleans — see `adr_inspect_metadata_closure.md` D1/D3
-/// (panel S1).
+/// Mode switch for [`PackageManager::inspect`]; `closure` implies platform selection on an image-index root.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InspectOptions {
-    /// Platform-select through the index and emit the OCI resolution chain
-    /// alongside metadata and layers. See [`PackageManager::inspect`] doc.
+    /// Platform-select and emit the OCI resolution chain.
     pub resolve: bool,
-    /// Compute the metadata-only dependency closure and attach it to the
-    /// report. See [`InspectClosure`].
+    /// Compute the metadata-only dependency closure.
     pub closure: bool,
 }
 
-/// A metadata-only dependency closure: the transitive set of packages reachable
-/// from an inspected root, computed from config-blob metadata alone (no install).
-///
-/// See `adr_inspect_metadata_closure.md` D2/D3 for the wire shape and the
-/// walker contract.
+/// The transitive dependency closure of an inspected root, from config-blob metadata alone.
 #[derive(Debug)]
 pub struct InspectClosure {
-    /// Flat, deduped node list in transitive-closure order (deps before
-    /// dependents, root last). Diamonds appear once with the most-open merged
-    /// visibility.
+    /// Deduped nodes, deps before dependents, root last.
     pub nodes: Vec<ClosureNode>,
-    /// The **consumer-facing** surface: binaries/entrypoints/env that reach a
-    /// consumer installing the root. Node admission by effective
-    /// `has_interface()`, per-var env crossing by `var.visibility.has_interface()`
-    /// — the composer's interface axis (`adr_declared_binaries_metadata.md` §4
-    /// Decision A).
+    /// What reaches a consumer installing the root (`ocx env`).
     pub interface: Surface,
-    /// The **internal** surface: binaries/entrypoints/env visible on the
-    /// package's own private axis. The symmetric projection — node admission by
-    /// effective `has_private()`, per-var env crossing by `has_private()`.
-    /// Public entries appear in both surfaces (public crosses both axes).
+    /// What the package itself sees (`ocx env --self`).
     pub private: Surface,
-    /// Install/compose-gate conditions detected over the interface projection:
-    /// entrypoint-name collisions + same-repo-two-digests. Empty means the
-    /// surface is realizable. Detection is pure post-processing over already-
-    /// gathered metadata; reporting is non-fatal (view, not a gate — mirrors
-    /// `composer::warn_repo_digest_conflicts`'s precedent).
+    /// Conditions install would reject; reported, never fatal here.
     pub conflicts: ClosureConflicts,
 }
 
-/// One projected surface of a closure — the aggregate of binaries, entrypoints,
-/// env keys and integration namespaces admitted on a single visibility axis.
-/// Built by [`project_surface`] for both the interface (consumer) and private
-/// (internal) axes; the two differ only in the admission + carrier-crossing
-/// predicates.
+/// The binaries, entrypoints, env keys and integration namespaces admitted on one visibility axis.
 #[derive(Debug, Default)]
 pub struct Surface {
-    /// Binary claims from every admitted node, attributed to the declaring
-    /// package.
     pub binaries: Vec<(ocx_oci::PinnedPackageRef, metadata::BinaryName)>,
-    /// Entrypoint names from every admitted node, attributed likewise.
     pub entrypoints: Vec<(ocx_oci::PinnedPackageRef, metadata::EntrypointName)>,
-    /// Env keys each admitted node exposes on this axis. The concrete VALUE is
-    /// omitted — it is `${installPath}`-templated and only known post-install;
-    /// the summary answers "which env keys would be set", not "to what".
     pub env: Vec<(ocx_oci::PinnedPackageRef, ClosureEnvVar)>,
-    /// Integration NAMESPACE keys each admitted node declares, attributed to
-    /// it. Payload-free on purpose: a closure node is not installed, so
-    /// `${installPath}` has no value and an interpolated payload would be a
-    /// half-truth — the same reason `env` omits values. Interface surface only
-    /// (`composer::integrations_cross`), so the private projection is always
-    /// empty.
+    /// Always empty on the private surface.
     pub integrations: Vec<(ocx_oci::PinnedPackageRef, String)>,
-    /// `false` iff at least one admitted node has UNDECLARED binaries
-    /// (`ClosureNode.binaries == None`). Entrypoints are always complete.
+    /// `false` iff an admitted node leaves its binaries undeclared.
     pub binaries_complete: bool,
 }
 
-/// Install/compose-gate conditions detected over the interface projection of
-/// an [`InspectClosure`]. Both arrays are always present; empty means the
-/// surface is realizable. See `adr_inspect_metadata_closure.md` D2 (Codex C2).
+/// Conditions install would reject on an [`InspectClosure`]'s interface surface; empty means realizable.
 #[derive(Debug, Default)]
 pub struct ClosureConflicts {
     pub entrypoints: Vec<EntrypointConflict>,
     pub repositories: Vec<RepositoryConflict>,
 }
 
-/// Two or more interface-admitted closure nodes declare the same entrypoint
-/// name — install/compose (`composer::check_entrypoints`) would hard-reject
-/// this closure.
+/// Two or more interface-admitted nodes declare the same entrypoint name.
 #[derive(Debug)]
 pub struct EntrypointConflict {
     pub name: metadata::EntrypointName,
     pub packages: Vec<ocx_oci::PinnedPackageRef>,
 }
 
-/// One repository resolved to two or more distinct digests on the interface
-/// projection — install/compose (`composer::check_repo_digest_conflicts`)
-/// would hard-reject this closure.
+/// One repository resolved to two or more distinct digests on the interface surface.
 #[derive(Debug)]
 pub struct RepositoryConflict {
     pub repository: ocx_oci::Repository,
@@ -177,58 +103,26 @@ pub struct RepositoryConflict {
 }
 
 impl PackageManager {
-    /// Inspects `package` without installing or creating symlinks.
-    ///
-    /// No install or symlink side effects occur. Default mode resolves the
-    /// tag through the index with `IndexOperation::Resolve`, so a tag cache
-    /// miss may populate the local index / blob cache as a side effect of
-    /// the read — intended behavior, not a write the caller requested.
-    ///
-    /// `resolve == false` (default): the manifest at the reference is fetched
-    /// **without** platform selection. An image index yields
-    /// [`InspectResult::Candidates`] (the available platforms); a single image
-    /// manifest yields [`InspectResult::Manifest`] (its declared metadata and
-    /// layer descriptors). `-p/--platform` does not apply here.
-    ///
-    /// `resolve == true`: the identifier is resolved through the index with
-    /// platform selection (honoring `platform`), returning
-    /// [`InspectResult::Resolved`] with metadata and the resolution chain.
-    ///
-    /// `deps == true`: additionally computes the metadata-only dependency
-    /// closure (see [`InspectClosure`]) and attaches it to the report. On an
-    /// image-index root `deps` implies platform selection (honoring
-    /// `platform`) even without `resolve`, because the walk needs a concrete
-    /// root manifest to read declared deps from — see
-    /// `adr_inspect_metadata_closure.md` D1/D3.
-    ///
-    /// Accepts a tag or an `@digest` identifier.
+    /// Inspects `package` without installing, symlinking or writing the local index.
     ///
     /// # Errors
     ///
     /// - [`PackageErrorKind::NotFound`] — tag/digest unknown.
-    /// - [`PackageErrorKind::OfflineManifestMissing`] — known tag but the
-    ///   manifest blob is absent from the local cache in offline mode.
-    /// - [`PackageErrorKind::Internal`] — config blob missing offline,
-    ///   wrong media type, or metadata validation failure.
+    /// - [`PackageErrorKind::OfflineManifestMissing`] — tag known, manifest blob not cached (offline).
+    /// - [`PackageErrorKind::Internal`] — config blob missing offline, wrong media type, or invalid metadata.
     pub async fn inspect(
         &self,
         package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
         options: InspectOptions,
     ) -> Result<InspectResult, PackageErrorKind> {
-        // Read-only: inspecting a package must never grow the permanent local
-        // index (`adr_index_indirection.md` — the index is deployment-managed,
-        // outside GC; only `ocx index update` / pins populate it). Resolve
-        // through a read-only view: content warms the GC-able blob cache, the
-        // index stays untouched. Every `self` below is the read-only `mgr`.
+        // Read-only view, or inspect grows the local index, which GC never reclaims; use `mgr`, never `self`.
         let mgr = self.read_only_view();
 
         if options.resolve {
             return resolve_with_closure(&mgr, package, platform, options.closure).await;
         }
 
-        // Default mode: fetch the manifest at the reference without platform
-        // selection, then adapt the result to its OCI shape.
         let (top_pinned, manifest) = fetch_top_manifest(&mgr, package).await?;
         match manifest {
             ocx_oci::Manifest::Image(img) => {
@@ -245,24 +139,12 @@ impl PackageManager {
             }
             ocx_oci::Manifest::ImageIndex(index) => {
                 if options.closure {
-                    // `--deps` on an index root always platform-selects (ADR
-                    // D1): the walk needs a concrete root manifest to read
-                    // declared deps from. Re-resolving here is accepted
-                    // redundancy — under `ChainMode::Default`/`Frozen` the
-                    // top-manifest fetch above already warmed the local CAS,
-                    // so this second round-trip is local-first (ADR D3
-                    // implementation note); under `--remote` there is no
-                    // local warm cache to hit and this is a genuine second
-                    // network fetch.
+                    // The walk needs a concrete root manifest to read deps from.
                     return resolve_with_closure(&mgr, package, platform, true).await;
                 }
 
                 let mut candidates = Vec::with_capacity(index.manifests.len());
                 for entry in index.manifests {
-                    // A child descriptor whose `digest` string does not parse
-                    // is a corrupt image index, not a "missing digest" — carry
-                    // the structured `DigestError` so the message names the
-                    // bad value (still classifies to DataError/65).
                     let digest = ocx_oci::Digest::try_from(entry.digest.as_str())
                         .map_err(|e| PackageErrorKind::Internal(crate::Error::from(e)))?;
                     let identifier =
@@ -286,13 +168,6 @@ impl PackageManager {
     }
 
     /// Inspects multiple packages in parallel, preserving input order.
-    ///
-    /// Empty input short-circuits to `Ok(vec![])`; a single package takes the
-    /// direct path; otherwise each package is inspected on its own task and the
-    /// results are drained via
-    /// [`drain_package_tasks`](super::common::drain_package_tasks), which
-    /// returns successes in input order and batch errors sorted by input index
-    /// (deterministic exit code). Mirrors [`find_all`](PackageManager::find_all).
     pub async fn inspect_all(
         &self,
         packages: Vec<ocx_oci::PackageRef>,
@@ -324,16 +199,7 @@ impl PackageManager {
     }
 }
 
-/// Fetches the top-level manifest for `package` without platform selection.
-///
-/// Thin wrapper over [`super::common::resolve_top_manifest`] pinning the
-/// default-inspect [`IndexOperation::Resolve`] routing (intended behavior —
-/// inspect deliberately uses `Resolve`, not `Query`). The shared helper
-/// mirrors the tag/digest top-id derivation and not-found discrimination of
-/// [`PackageManager::resolve`] (tag truly unknown → [`PackageErrorKind::NotFound`];
-/// known tag but blob missing offline → [`PackageErrorKind::OfflineManifestMissing`]),
-/// but stops before platform selection so callers can inspect an image index
-/// as-is.
+/// Fetches the top-level manifest for `package` without platform selection, as a `Resolve`-class read.
 async fn fetch_top_manifest(
     mgr: &PackageManager,
     package: &ocx_oci::PackageRef,
@@ -341,14 +207,7 @@ async fn fetch_top_manifest(
     super::common::resolve_top_manifest(mgr.index(), package, IndexOperation::Resolve).await
 }
 
-/// Platform-selects `package` through the index, then loads metadata and
-/// (when `deps`) the dependency closure, assembling an
-/// [`InspectResult::Resolved`]. Shared by `inspect`'s two resolve-through-the-
-/// index call sites — `options.resolve` and `--deps` on an image-index root
-/// (ADR D1) — which differ only in whether chain-blob staging is gated on
-/// `deps` or unconditional: the `--resolve` site passes `options.closure`
-/// through, the image-index-root site always passes `true` (it is only ever
-/// reached when `options.closure` already holds).
+/// Platform-selects `package`, then loads metadata and, when `deps`, the dependency closure.
 async fn resolve_with_closure(
     mgr: &PackageManager,
     package: &ocx_oci::PackageRef,
@@ -356,10 +215,7 @@ async fn resolve_with_closure(
     deps: bool,
 ) -> Result<InspectResult, PackageErrorKind> {
     let resolved = mgr.resolve(package, platform.clone()).await?;
-    // `--deps` warms the whole root chain (dispatch/index + platform
-    // manifest + config) the same way it warms each dep node — see
-    // `stage_leaf_manifest`'s doc. Plain `--resolve` without `--deps`
-    // keeps the non-persisting default (main's design, not ours).
+    // Only `--deps` stages the root chain; plain `--resolve` persists nothing.
     if deps {
         super::common::stage_chain_blobs(mgr.file_structure(), mgr.index(), &resolved).await?;
     }
@@ -374,15 +230,9 @@ async fn resolve_with_closure(
     })
 }
 
-// ── Closure projection (ADR D3) ─────────────────────────────────────────────
-//
-// The walk itself lives in `tasks/common.rs` — it has two callers now
-// (`inspect --deps` and `prepare_lazy`). What stays here is the projection of
-// its node list into a REPORT: the two `Surface`s and the conflict scan.
+// ── Closure projection ───────────────────────────────────────────────────
 
-/// Resolves `deps`, computing the closure only when requested. Thin gate so
-/// every `inspect()` call site shares one line instead of duplicating the
-/// `if options.closure { Some(walk_closure(..).await?) } else { None }` branch.
+/// Computes the closure only when `deps` is set.
 async fn maybe_walk_closure(
     mgr: &PackageManager,
     deps: bool,
@@ -395,36 +245,18 @@ async fn maybe_walk_closure(
         return Ok(None);
     }
     let (fs, index) = (mgr.file_structure(), mgr.index());
-    // The root itself is a leaf platform manifest inspect already fetched
-    // (`fetch_top_manifest`/`resolve`) but never staged (A3) — stage it too,
-    // so a `--deps` walk warms the *whole* closure including its own root,
-    // not just the deps `walk_closure` reaches (goals 4+5,
-    // `adr_inspect_metadata_closure.md`).
+    // The walk stages only the deps it reaches; the root's own leaf manifest is staged here.
     super::common::stage_leaf_manifest(fs, index, pinned).await?;
     Ok(Some(
         walk_closure(fs, index, mgr.is_offline(), pinned, metadata, config_digest, platform).await?,
     ))
 }
 
-/// Two-phase metadata-only closure walker: Phase 1 parallel metadata gather
-/// (I/O-bound, via [`gather_closure_nodes`]), Phase 2 pure visibility fold
-/// (via [`fold_effective_visibility`]), then the two [`Surface`] projections
-/// (interface + private, via [`project_surface`]) and [`ClosureConflicts`]
-/// detection over the resulting node set — all three are pure post-processing
-/// on already-gathered metadata (zero extra I/O), so they are folded into this
-/// orchestrator rather than named as their own free functions.
-///
-/// Fail-closed: any single node error aborts the whole closure — a partial
-/// closure must never render as a complete one.
+/// Walks the closure and projects both [`Surface`]s and the [`ClosureConflicts`].
 ///
 /// # Errors
 ///
-/// See `adr_inspect_metadata_closure.md` Error Taxonomy: dep manifest/config
-/// absent under offline policy → `PackageErrorKind::Internal(crate::Error::OfflineMode)`;
-/// dep genuinely absent with a source consulted → `PackageErrorKind::NotFound`;
-/// malformed / wrong-media-type / over-cap config → the existing
-/// `load_config_metadata` errors; dep image-index child with no platform
-/// match → `PackageErrorKind::FeatureMismatch`.
+/// Those of [`super::common::walk_closure_nodes`]; any node error aborts the whole closure.
 async fn walk_closure(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -445,11 +277,6 @@ async fn walk_closure(
     )
     .await?;
 
-    // Two surface projections over the same node set, built by the SAME
-    // admission walk the runtime composer uses (`composer::{dep_admitted,
-    // carrier_crosses}`): interface (consumer axis, `ocx env`, `self_view=false`)
-    // and private (self axis, `ocx env --self`, `self_view=true`). Inspect never
-    // re-derives the rule, so a surface here equals what the composer emits.
     let interface = project_surface(&nodes, false);
     let private = project_surface(&nodes, true);
 
@@ -463,30 +290,13 @@ async fn walk_closure(
     })
 }
 
-/// Projects one surface of the closure — the aggregate of binaries,
-/// entrypoints, env keys and integration namespaces admitted on a single
-/// visibility axis. `self_view` selects the surface exactly as it does for the
-/// composer: `false` = interface (consumer, `ocx env`), `true` = private (self,
-/// `ocx env --self`).
+/// Projects one surface (`self_view`: `ocx env --self`, else `ocx env`).
 ///
-/// Every admission / crossing decision is delegated to the shared
-/// `composer::{dep_admitted, carrier_crosses, integrations_cross}`
-/// predicates — the SAME surface algebra the runtime env command uses (see the
-/// module comment on `composer.rs`) — so a surface here equals what the
-/// composer emits. Inspect adds only the metadata-only concern the env command
-/// has no need for: `binaries_complete`. Node admission is
-/// [`admitted_on_surface`] (root always, dep iff `dep_admitted`); each carrier
-/// then crosses under its visibility — env vars their declared one, entry
-/// points [`metadata::Entrypoints::IMPLICIT_VISIBILITY`], binaries claims
-/// [`metadata::Binaries::IMPLICIT_VISIBILITY`] — except integrations, whose
-/// crossing is structural rather than visibility-derived and therefore routes
-/// through `composer::integrations_cross` instead.
+/// Every decision goes through the `composer` predicates; re-deriving one here lets inspect disagree with `ocx env`.
 fn project_surface(nodes: &[ClosureNode], self_view: bool) -> Surface {
     let mut binaries = Vec::new();
     let mut entrypoints = Vec::new();
     let mut env = Vec::new();
-    // Populated under `composer::integrations_cross(self_view)` — the shared
-    // predicate `compose` uses, so the two views cannot disagree.
     let mut integrations = Vec::new();
     let mut binaries_complete = true;
     for node in nodes.iter().filter(|node| admitted_on_surface(node, self_view)) {
@@ -495,8 +305,7 @@ fn project_surface(nodes: &[ClosureNode], self_view: bool) -> Surface {
                 Some(claimed) => {
                     binaries.extend(claimed.iter().map(|name| (node.identifier.clone(), name.clone())));
                 }
-                // Undeclared binaries on an admitted node: "couldn't determine"
-                // must not silently read as "determined zero".
+                // "Undeclared" must not read as "declared zero".
                 None => binaries_complete = false,
             }
         }
@@ -513,13 +322,6 @@ fn project_surface(nodes: &[ClosureNode], self_view: bool) -> Surface {
                 .filter(|var| composer::carrier_crosses(var.visibility, node.is_root, self_view))
                 .map(|var| (node.identifier.clone(), var.clone())),
         );
-        // The edge term stays algebraic (ADR `adr_package_integrations.md`
-        // §4.4): a dep contributes integrations iff `dep_admitted(effective,
-        // /* self_view = */ false)`. Reaching this loop already required
-        // `admitted_on_surface(node, self_view)`, and `integrations_cross` is
-        // false whenever `self_view` is true — so the surviving case is exactly
-        // the interface edge, with no second gate to drift from the first. The
-        // identical composition `compose` performs at its two collection sites.
         if composer::integrations_cross(self_view) {
             integrations.extend(
                 node.integrations
@@ -537,13 +339,7 @@ fn project_surface(nodes: &[ClosureNode], self_view: bool) -> Surface {
     }
 }
 
-/// Whether `node` is admitted to a surface: the root unconditionally (it has no
-/// edge visibility), a dependency iff `composer::dep_admitted` accepts its
-/// composed-from-root visibility on this axis. The single admission rule shared
-/// by the aggregate build in [`walk_closure`], conflict detection in
-/// [`detect_closure_conflicts`] and the shim name set in
-/// [`prepare_lazy`](super::prepare_lazy), and identical to the composer's own
-/// dep gate.
+/// Whether `node` is admitted to a surface: the root always, a dependency per `composer::dep_admitted`.
 pub(super) fn admitted_on_surface(node: &ClosureNode, self_view: bool) -> bool {
     node.is_root
         || node
@@ -551,12 +347,8 @@ pub(super) fn admitted_on_surface(node: &ClosureNode, self_view: bool) -> bool {
             .is_some_and(|effective| composer::dep_admitted(effective, self_view))
 }
 
-/// Codex C2: install/compose-gate conditions detected over the interface
-/// projection — entrypoint-name collisions and same-repository-two-digests.
-/// Pure post-processing on already-gathered metadata (zero extra I/O).
-/// Mirrors `composer::check_entrypoints` / `collect_repo_digest_conflicts`'s
-/// admission and exclusion rules, adapted to read from [`ClosureNode`]s
-/// instead of installed [`ocx_package::install_info::InstallInfo`].
+/// Entrypoint collisions and repositories at two digests, by the rules of `composer::check_entrypoints`
+/// and `collect_repo_digest_conflicts`.
 fn detect_closure_conflicts(nodes: &[ClosureNode]) -> ClosureConflicts {
     let mut entrypoint_owners: BTreeMap<metadata::EntrypointName, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
     let mut repository_digests: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::Digest>> = BTreeMap::new();
@@ -572,8 +364,7 @@ fn detect_closure_conflicts(nodes: &[ClosureNode]) -> ClosureConflicts {
             .entry(ocx_oci::Repository::from(node.identifier.as_identifier()))
             .or_default();
         let digest = node.identifier.digest();
-        // Dedup by digest: the same node reached via two paths, or two tags
-        // resolving to the same digest, is not a conflict.
+        // Two tags at one digest are not a conflict.
         if !digests.contains(&digest) {
             digests.push(digest);
         }
@@ -868,9 +659,9 @@ mod spec_tests {
         );
     }
 
-    /// D14 / C-036 (unit legs), both sides asserted over **one** document.
+    /// Both the read-only and the compose legs, asserted over **one** document.
     ///
-    /// `inspect` is on the read-only side of D14's table: a token this binary
+    /// `inspect` is on the read-only side: a token this binary
     /// does not recognise must not stop anyone looking at the package, and the
     /// stored value is shown verbatim because there is no resolved value to
     /// show and OCX invents none. The compose leg on the *same* value must
@@ -881,7 +672,7 @@ mod spec_tests {
     /// This is the leg the stub could not keep.
     /// `inspect_default_malformed_metadata_is_internal` above kept its name and
     /// had its fixture swapped to a structurally unreadable document, which
-    /// correctly preserves *that* contract but no longer pins the D14
+    /// correctly preserves *that* contract but no longer pins the read/compose
     /// inversion: on `main` the fixture below is refused by
     /// `ValidMetadata::try_from` on every ingress path, inspect included.
     #[tokio::test(flavor = "multi_thread")]
@@ -980,11 +771,11 @@ mod spec_tests {
         );
     }
 
-    // ── Metadata-only dependency closure walker (ADR D2/D3, plan Test Strategy) ─
+    // ── Metadata-only dependency closure walker (ADR D2/D3, Test Strategy) ─────
     //
     // Specification tests for `walk_closure` / `gather_closure_nodes` /
     // `fold_effective_visibility`, written against `adr_inspect_metadata_closure.md`
-    // and `plan_inspect_binaries_closure.md` — NOT against the stub bodies.
+    // § Test Strategy Skeleton — NOT against the stub bodies.
     // Every call into the walker below is expected to panic with
     // `unimplemented!()` until the Implement phase fills the three free
     // functions; that panic is the gate this Specify phase must pass.

@@ -3,13 +3,8 @@
 
 //! Hidden `ocx launcher exec` subcommand — stable entry-point from generated launchers.
 //!
-//! Generated launcher scripts call:
-//!   `ocx launcher exec '<pkg-root>' -- "$(basename "$0")" "$@"`
-//!
-//! This subcommand is the sole path from an installed launcher into the OCX runtime.
-//! It hides all presentation flags, self-view selection, and binary pinning behind
-//! the stable `launcher exec` name pair, reducing the launcher ABI surface from
-//! 8 wire commitments to 2 (the `launcher` + `exec` subcommand names and positional shape).
+//! Generated launchers call `ocx launcher exec '<pkg-root>' -- "$(basename "$0")" "$@"`. The two
+//! subcommand names and that positional shape are the whole launcher ABI: installed launchers bake it.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -45,151 +40,70 @@ impl LauncherExec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let fs = context.file_structure();
         let [packages_root, package_test_root, patch_test_root] = launcher_pkg_root_allow_list(fs);
-        // Each scratch root is paired with the recording exemption of the command that
-        // owns it, and that pairing is the whole mechanism: those commands
-        // declare `Launch::exempt` at their own spawn sites, but a package that
-        // declares an entrypoint re-enters HERE through a generated launcher,
-        // and this is a fresh process that reads `[records]` from its own config
-        // chain — so not forwarding the sink would not stop it recording. The
-        // exemption has to be inherited from the pkg-root the launcher was baked
-        // with, which is the one carrier that survives the hop. The roots stay
-        // separate entries so the two reasons stay distinguishable.
+        // The scratch root the baked pkg-root sits under is the only exemption carrier that survives the
+        // hop into this fresh process.
         let scratch_roots = [
             (package_test_root, ExemptionReason::PackageTest),
             (patch_test_root, ExemptionReason::PatchTest),
         ];
         let manager = context.manager();
 
-        // Validate: pkg_root must be absolute, under $OCX_HOME/packages/ or one
-        // of the scratch roots above, and contain metadata.json. Errors surface
-        // as UsageError (exit 64). A matched scratch root also names the
-        // exemption this launch inherits.
         let (validated, exemption) = validate_launcher_pkg_root(&self.pkg_root, &packages_root, &scratch_roots).await?;
-        // Fold `[records]` before the metadata load and the env composition
-        // below — the same point its two siblings (`ocx exec`, `ocx package
-        // exec`) fold at, and for the same reason: a malformed name template is
-        // a configuration error, and the operator should hear about it before
-        // the work rather than after. This frame has no flag tier — `launcher
-        // exec` is a wire ABI with two positionals and no options — so the sink
-        // comes from the config and the environment the outer frame forwarded.
-        //
-        // The fold runs on the exempt path too, and that is load-bearing: the
-        // exemption is granted on the strength of a caller-supplied pkg-root
-        // sitting under `$OCX_HOME/temp/…`, which is inside the invoking user's
-        // own home. Skipping the fold meant an operator's `required = true`
-        // policy was never even consulted for a frame that any caller could put
-        // itself into. Folding it lets `Launch::exempt` refuse.
+        // Folded before any work, so a malformed name template fails first as a config error; skipping
+        // it on the exempt path would let a caller-supplied `$OCX_HOME/temp/…` pkg-root bypass a
+        // `required = true` policy.
         let recording = Recording {
             exemption,
             policy: context.records(ocx_package_manager::record::RecordsOptions::default())?,
         };
-        // Wrap the validated package root in a PackageDir so every per-package
-        // path (`content/`, `metadata.json`, ...) comes from the file-structure
-        // layout accessors — the single source of truth for the package layout —
-        // instead of hand-rolled `.join("content")` / `.join("metadata.json")`.
         let package_dir = PackageDir::with_root(validated);
 
-        // Resolve env with self_view=true — the launcher always runs in the
-        // package's own env (public + private surface). This is equivalent to
-        // the former `--self` flag that was baked into every launcher template.
+        // A launcher always composes its package's self view (public + private surface).
         let info = manager.install_info_from_package_root(package_dir.root()).await?;
-        // Thread the project `no-patches` opt-out forwarded over `OCX_PATCHES`
-        // into env resolution. `ocx exec` injects the project opt-out into the
-        // forwarded patch tier; here — the launcher re-entry — we decode that
-        // opt-out DIRECTLY from the env (the same decoder `Context` uses for the
-        // tier). Decoding at the consumption site keeps the opt-out scoped to
-        // THIS launcher re-entry: it is never grafted onto the global manager
-        // tier, so it cannot leak as ambient inherited state into unrelated
-        // nested `ocx` commands (which each compute their own opt-out).
-        //
-        // AF1: `install_info_from_package_root` mints a synthetic
-        // `file-url-mode/<content-digest>` identifier here — packages are
-        // content-shared and carry no root registry/repository (see
-        // `ResolvedPackage`) — so a repo-key never matches this base. `ocx exec`
-        // additionally forwards each opted-out base's content digest, and the
-        // resolver's opt-out check (`resolve.rs`) matches on repo-key OR digest,
-        // so the digest leg is what suppresses a re-injected companion here.
-        //
-        // A DIRECT launcher invocation (`ocx package exec` → launcher) has no
-        // forwarded `OCX_PATCHES` → `patches_from_env()` is `None` → `Project(empty)`,
-        // byte-identical to the former project-free scope. A system-required
-        // tier still overlays regardless (the resolver enforces C7).
+        // Scoped to this re-entry, never grafted onto the global manager tier, so it cannot leak into
+        // nested `ocx` commands.
         let no_patches = ocx_config::patch::patches_from_env()
             .map_err(anyhow::Error::new)?
             .map(|forwarded| forwarded.no_patches)
             .unwrap_or_default();
-        // Decode the project/group `[env]` (+ `ocx exec --env`) the parent
-        // composed, forwarded over `OCX_ENV` for the same reason as the
-        // `no-patches` opt-out: this process has no `ProjectConfig` and cannot
-        // re-derive them. Without the forward, `Env::new()` below inherits the
-        // parent's values and then `apply_entries` re-applies the package's own
-        // entries ON TOP, silently reverting the project's overrides — the
-        // failure R1 exists to close, and the primary path for any package that
-        // declares entrypoints.
-        //
-        // Untrusted input: `forwarded_env` fails closed on the whole payload
-        // (reserved key, invalid key, unrecognized modifier kind), never
-        // filtering the bad entry and keeping the rest. A direct launcher
-        // invocation with no `ocx exec` parent has no payload and gets an empty
-        // vector — identical to the pre-forwarding behaviour.
+        // The parent's `[env]` and `--env` via `OCX_ENV`: without them the package's own entries would
+        // silently revert the project's overrides. Fails closed on the whole payload, never one entry.
         let project_env = forwarded_env().map_err(anyhow::Error::new)?;
-        // `info` is retained rather than moved into the resolve call: it is the
-        // only package this frame resolved, and the record names it.
         let packages = [std::sync::Arc::new(info)];
-        // `resolve_env_with_attribution` rather than the attribution-dropping
-        // wrapper: the record names which package claimed each executable on
-        // `PATH`, and that derivation already exists here.
-        // The patch provenance is kept, not dropped: the record names every
-        // companion the site tier overlaid onto this composition, and this call
-        // is the only place that attribution exists.
+        // The attribution-keeping variant: the record names who claimed each `PATH` executable and every
+        // patch companion, and this call is the only place either exists.
         let (mut entries, _, patch_companions, admitted) = manager
             .resolve_env_with_attribution(
                 &packages,
                 true,
                 ocx_package_manager::EnvScope::Project {
+                    // The synthetic `file-url-mode/<digest>` id leaves only the digest leg of the opt-out;
+                    // `ocx exec` forwards each opted-out base's digest for it.
                     no_patches,
                     env: project_env.clone(),
-                    // No link lane here, and not for want of an input: this
-                    // frame composes the package its baked `pkg_root` names,
-                    // which is a digest path chosen when the launcher was
-                    // generated. It is pinned by construction, so following a
-                    // `<group>/<entry>` link would compose a *different*
-                    // package than the one this trampoline was written for
-                    // (RUL-82).
+                    // No link lane: a `<group>/<entry>` link could compose a different package than the
+                    // digest-pinned one this trampoline was written for.
                     toolchain: None,
                 },
-                // The launcher runs on the host, for the package materialized
-                // there — there is no target-platform question to carry.
+                // The launcher runs on the host its package is materialized on.
                 &ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any),
             )
             .await?;
-        // Same per-key list-separator agreement `ocx exec` and `ocx package
-        // exec` settle before applying. A launcher re-entry composes the
-        // package's own entries afresh, so two contributors disagreeing on one
-        // key's separator has to fail here too — otherwise the same package
-        // exits 65 through `exec` and folds with a silently-chosen separator
-        // through its own launcher.
+        // As in `ocx exec`: without it the launcher folds a silently-chosen separator where `exec` exits
+        // 65 for the same package.
         reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
 
-        // argv[0] is the launcher's own filename — the invocable entrypoint
-        // name. argv[1..] are the user args.
         let (argv0, args) = self
             .argv
             .split_first()
             .expect("clap required=true guarantees at least one argv element");
 
-        // Map the invocable name to its dispatch command. Absent `command`
-        // (the common case) leaves `argv0` unchanged, so packages that do not
-        // declare a divergent command keep the existing resolve-name-on-PATH
-        // behaviour byte-for-byte.
+        // Absent `command` leaves `argv0` unchanged, keeping resolve-name-on-PATH behaviour byte-for-byte.
         let metadata = Metadata::read_json(&package_dir.metadata()).await?;
         let command = metadata
             .entrypoints()
             .map_or(argv0.as_str(), |eps| eps.dispatch_command(argv0));
 
-        // Resolve baked args (if any declared for this entrypoint) and prepend
-        // them before user-supplied args. The content path comes from the
-        // PackageDir layout accessor, not a hand-rolled join.
         let content_path = package_dir.content();
         let baked: &[String] = metadata
             .entrypoints()
@@ -197,25 +111,13 @@ impl LauncherExec {
             .map(|e| e.args())
             .unwrap_or(&[]);
 
-        // `argv` as invoked: the launcher's own filename, then what the child
-        // receives — baked args first, then the user's. Built as one vector
-        // because the launch seam derives the child's arguments from the record's
-        // own `argv`, so the two cannot disagree.
-        //
-        // Index 0 is `argv0`, not `command`: the dispatch remap is internal, and
-        // keeping the invoked name here is what lets the outer `ocx exec` record
-        // and this re-entry's record read as a pair. `process.executable` names
-        // what actually ran.
+        // One vector: the launch seam derives the child's args from the record's `argv`, so they cannot
+        // disagree. Index 0 stays `argv0`, not `command`, so this record pairs with the outer one.
         let mut argv = Vec::with_capacity(1 + baked.len() + args.len());
         argv.push(argv0.clone());
         if !baked.is_empty() {
-            // Pass an empty dep_contexts map — the Usage::EntryPointArgs
-            // capability gate refuses a ${deps.*} token on the classified
-            // scanner output, before any substitution is attempted, so there is
-            // nothing for the map to answer. The gate is the safety mechanism;
-            // `validate_entrypoint_args` refused such args at publish time, and
-            // under D14 this runtime gate is what still refuses them in an
-            // already-published package.
+            // Empty dep contexts: the `Usage::EntryPointArgs` gate refuses any `${deps.*}` token before
+            // substitution, which is what still refuses one in an already-published package.
             let dep_contexts = std::collections::HashMap::new();
             let resolver = TemplateResolver::new(&content_path, &dep_contexts).usage(Usage::EntryPointArgs);
             for baked_arg in baked {
@@ -249,10 +151,7 @@ impl LauncherExec {
 
 /// What this frame's env composition resolved, as the record needs to name it.
 ///
-/// Three slices that always travel together and are all borrowed from the one
-/// `resolve_env_with_attribution` call — grouped so the launch seam takes one
-/// parameter for "the composition" rather than three that could be assembled
-/// from different resolutions.
+/// Grouped so the launch seam cannot take slices from different resolutions.
 struct Resolved<'a> {
     /// The package roots this frame composed — here, always exactly one.
     packages: &'a [std::sync::Arc<InstallInfo>],
@@ -264,10 +163,8 @@ struct Resolved<'a> {
 
 /// What this launch records, decided once in [`LauncherExec::execute`].
 ///
-/// One value rather than two parameters that could disagree. It carries both
-/// halves because they are no longer exclusive: an exemption is *claimed* from
-/// the pkg-root, but whether it is granted is the resolved policy's call — a
-/// fail-closed posture grants none (see [`Launch::exempt`]).
+/// The pkg-root only claims an exemption; the policy decides whether it is granted
+/// ([`Launch::exempt`]).
 struct Recording {
     /// Set when the pkg-root sits under a command-scratch root, so this launch
     /// claims that command's recording exclusion.
@@ -278,34 +175,9 @@ struct Recording {
 
 /// Run the resolved entrypoint with the given env.
 ///
-/// `child_env` pairs the composed entries with the validated payload decoded
-/// from `OCX_ENV` — the project/group `[env]` (+ `ocx exec --env`) already folded
-/// into the composed entries as stages 4-6. The payload is deliberately NOT
-/// chained into the caller's `reconcile_list_separators` pass: the `OCX_ENV`
-/// decode gate already refuses a list entry without a settled separator, and any
-/// conflict reds through the composed copies these entries were folded into. It
-/// is re-emitted onto the child env so a *nested* launcher (an entrypoint that
-/// itself invokes a generated launcher) can re-apply it after its own package
-/// entries, instead of letting a package value beat the project override at the
-/// second hop.
-///
-/// Presentation flags are forced here (not baked in the launcher template):
-/// - log_level=off, color=never, format=plain were previously baked into the
-///   launcher script; now they are applied on the *inner* ocx invocation from
-///   within this subcommand (i.e. if this subcommand itself spawns child ocx,
-///   which it does not — it execs the entrypoint binary directly).
-///
-/// `launch::exec` diverges on success on every platform — Unix `execvp(2)`s,
-/// Windows spawns + waits + `process::exit`s — so this function only returns
-/// when start-up itself fails, or when a record the policy marked `required`
-/// could not be written.
-/// `command` is the dispatch command to resolve on `PATH`, which is `argv[0]`
-/// remapped through the package's entrypoint table; `argv` is the invocation as
-/// the launcher received it. They differ only for a package that declares a
-/// divergent `command`, and the record publishes both.
-///
-/// `recording` was decided by the caller, before any of this frame's work, so a
-/// malformed forwarded `OCX_RECORDS_NAME` fails the invocation up front.
+/// Returns only when start-up fails or a `required` record could not be written: `launch::exec`
+/// diverges on success. `command` is `argv[0]` remapped through the entrypoint table; the record
+/// publishes both.
 async fn run_with_env(
     context: &crate::app::Context,
     resolved: Resolved<'_>,
@@ -320,37 +192,16 @@ async fn run_with_env(
         patch_companions,
     } = resolved;
     let mut process_env = env::Env::new();
-    // Composed entries + forwarded ocx config (for any grandchild ocx) +
-    // the re-emitted payload, in the one order that is correct — see
-    // `Env::apply_child_env`. Re-emitting matters here because an entrypoint
-    // may itself invoke another generated launcher: without the payload at
-    // that second hop the package value would beat the project override
-    // stage 4-6 precedence promises.
+    // Re-emits `OCX_ENV` after the package entries, or a nested launcher's package value beats the
+    // project override at the second hop. No separator reconcile: the `OCX_ENV` decode gate refuses one.
     process_env.apply_child_env(child_env, context.config_view());
-    // No PATHEXT manipulation: the Windows launcher is now a native
-    // `<name>.exe` shim resolved via the default Windows PATHEXT.
-
-    // Resolved once, then handed to both the record and the launch: a second
-    // resolution could disagree with the first and make the audit trail name a
-    // binary other than the one that ran.
-    //
-    // The shadow rule has to hold at this hop too: a package that declares
-    // entrypoints resolves THROUGH its generated launcher, so a plain
-    // `resolve_command` here would let a host copy win in the fresh
-    // `ocx launcher exec` process and defeat the check the parent made.
+    // Resolved once for record and launch, or the record could name the wrong binary. A plain
+    // `resolve_command` would let a host copy shadow the package's launcher. No PATHEXT edit: the
+    // Windows launcher is a native `<name>.exe`.
     let executable = process_env.resolve_test_command(command)?;
 
-    // A launcher baked with a command-scratch pkg-root inherits its command's
-    // exclusion. `ocx package test` and `ocx patch test` preview local
-    // unpublished artifacts, so a record from this hop would describe something
-    // that was never published — and a collector could not filter it out, since
-    // it is indistinguishable from a legitimate direct-launcher invocation.
-    //
-    // The pkg-root is caller-supplied and both scratch roots live in the
-    // invoking user's own `$OCX_HOME`, so the claim is forgeable by placement
-    // alone. `Launch::exempt` is where that is bounded: under `required = true`
-    // it refuses rather than granting an exemption the operator's policy
-    // contradicts.
+    // A scratch pkg-root inherits its command's recording exclusion, since no collector can tell this
+    // hop from a direct invocation. Placement alone forges the claim, so `required = true` refuses it.
     let Recording { exemption, policy } = recording;
     if let Some(reason) = exemption {
         let (_argv0, args) = argv
@@ -372,15 +223,11 @@ async fn run_with_env(
             argv,
             config: context.config_view(),
             insecure_registries: context.insecure_hosts(),
-            // Already in memory: the snapshot is read once at `try_init` and
-            // identity-gated there, so naming it here costs no I/O on the exec
-            // path.
+            // Read and identity-gated once at `try_init`; no I/O on the exec path.
             managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
             // Likewise read once at `try_init`, alongside the pins it describes.
             patch_snapshot_digest: context.patch_snapshot_digest(),
-            // A launcher re-entry has no platform context of its own: it was
-            // handed a package root, not an identifier to resolve. The record
-            // states that as an explicit null rather than guessing from the host.
+            // Handed a package root, not an identifier: an explicit null, never a guess from the host.
             platform: None,
             clean_env: false,
             auto_installed: &[],
@@ -392,22 +239,12 @@ async fn run_with_env(
     Err(anyhow::Error::from(launch::exec(launch).await))
 }
 
-/// The complete set of package roots a launcher's baked `pkg-root` may resolve
-/// inside: the install store, plus the two command-scratch roots
-/// (`ocx package test` and `ocx patch test` both materialise packages there,
-/// and a launcher inside such a package bakes that path).
+/// Package roots a launcher's baked `pkg-root` may resolve inside: the install store and the
+/// `ocx package test`/`ocx patch test` scratch roots. Explicit, since "anything under `temp/`"
+/// would admit in-progress downloads.
 ///
-/// An explicit enumeration on purpose — widening the guard to "anything under
-/// `temp/`" would defeat it, since `temp/` also holds in-progress download
-/// directories.
-///
-/// Named and returned as one fixed-arity array rather than composed inline at
-/// the call site because it has a **second producer in another crate**:
-/// `ocx_shim::core::pkg_root_allowed` restates the same three roots for the
-/// native Windows shim's E3 containment check. `ocx_lib` cannot depend on
-/// `ocx_shim` (a binary crate), so no compiler link binds the two — the entire
-/// binding is a pair of tests restating the literals, one on each side (C-018).
-/// This function is what makes the CLI half of that pair possible.
+/// `ocx_shim::core::pkg_root_allowed` restates these roots and only a test on each side binds
+/// them: change both together.
 fn launcher_pkg_root_allow_list(fs: &ocx_store::file_structure::FileStructure) -> [PathBuf; 3] {
     [
         fs.packages.root().to_path_buf(),
@@ -416,29 +253,11 @@ fn launcher_pkg_root_allow_list(fs: &ocx_store::file_structure::FileStructure) -
     ]
 }
 
-/// Validate a package root path for use from a launcher.
+/// Validate a launcher's package root: absolute, canonically inside `packages_root` or one of
+/// `extra_roots`, and holding `metadata.json`.
 ///
-/// The path must:
-/// - Be absolute
-/// - Canonicalize to a location inside `packages_root` OR one of `extra_roots`
-/// - Contain `metadata.json`
-///
-/// `extra_roots` carries the command-scratch materialization paths
-/// (`$OCX_HOME/temp/test/` for `ocx package test`, `$OCX_HOME/temp/patch-test/`
-/// for `ocx patch test`): launchers baked into a package materialized there
-/// carry the scratch path as their pkg-root, which is equally OCX-controlled and
-/// equally safe to allow. It is a short explicit list, never a rule like
-/// "anything under `temp/`" — the guard's value is exactly that the accepted set
-/// is enumerated.
-///
-/// Each entry is paired with the recording exemption of the command that owns
-/// that root, and the matched one comes back with the validated path: a launcher
-/// re-entry cannot recover which command spawned it from anything else, and its
-/// pkg-root is exactly that fact.
-///
-/// This mirrors the former `validate_package_root` from `options/package_ref.rs`,
-/// now inlined here (its only remaining caller) with error messages updated to
-/// reference `launcher exec` instead of `file://`.
+/// Returns the matched scratch root's exemption: a re-entry cannot learn its spawning command
+/// any other way.
 async fn validate_launcher_pkg_root(
     dir: &std::path::Path,
     packages_root: &std::path::Path,
@@ -451,8 +270,7 @@ async fn validate_launcher_pkg_root(
         )));
     }
 
-    // Canonicalize both sides so symlinks and `..` components cannot smuggle
-    // a path outside the allowed roots.
+    // Canonicalized so symlinks and `..` cannot smuggle a path outside the allowed roots.
     let canonical_dir = tokio::fs::canonicalize(dir).await.map_err(|e| {
         UsageError::new(format!(
             "launcher exec: pkg-root '{}' cannot be resolved: {e}",
@@ -460,17 +278,10 @@ async fn validate_launcher_pkg_root(
         ))
     })?;
 
-    // Use `.ok()` for packages_root so that a non-existent store (fresh
-    // OCX_HOME with no packages/ dir yet, as in `ocx package test` on a clean
-    // host) does not hard-fail here. When packages_root is absent it simply
-    // cannot match as a prefix — the extra_root check below covers the
-    // package-test case. Security boundary unchanged: an absent root matches
-    // nothing.
+    // An absent store (fresh `OCX_HOME`) matches nothing, so `.ok()` keeps the boundary.
     let canonical_root = tokio::fs::canonicalize(packages_root).await.ok();
 
-    // Canonicalize each extra root; `.ok()` so that a non-existent one (the
-    // scratch roots are created lazily by their command) is simply skipped and
-    // cannot match as a prefix of canonical_dir.
+    // Scratch roots are created lazily; one that does not exist yet is skipped.
     let mut exemption = None;
     for (extra, reason) in extra_roots {
         if let Ok(canonical_extra) = tokio::fs::canonicalize(extra).await
@@ -484,9 +295,6 @@ async fn validate_launcher_pkg_root(
     let under_packages = canonical_root.as_ref().is_some_and(|r| canonical_dir.starts_with(r));
 
     if !under_packages && exemption.is_none() {
-        // Build a display path for the error. When packages_root does not
-        // exist yet (fresh OCX_HOME), fall back to the raw path so the error
-        // message still names a useful location.
         let root_display = canonical_root.as_deref().unwrap_or(packages_root).display();
         return Err(UsageError::new(format!(
             "launcher exec: pkg-root must point inside {} (got {})",
@@ -495,7 +303,6 @@ async fn validate_launcher_pkg_root(
         )));
     }
 
-    // Existence check on metadata.json — canonical signal that this is a package root.
     let metadata = canonical_dir.join("metadata.json");
     if !tokio::fs::try_exists(&metadata).await.unwrap_or(false) {
         return Err(UsageError::new(format!(

@@ -3,14 +3,9 @@
 
 //! The in-process CLI seam: drive `ocx <argv>` inside the test process.
 //!
-//! For a case whose contract *is* the CLI surface — flag grammar, the report a
-//! verb prints, the exit code it returns — and which would otherwise need the
-//! built binary and a subprocess. Everything else ports to the lowest crate
-//! whose API exercises the behaviour; a case that needs a registry, a shell, a
-//! pty or a process of its own stays an acceptance test.
-//!
-//! Test-only: the module is gated `cfg(any(test, feature = "__testing"))`, so a
-//! release build does not contain it.
+//! For a case whose contract is the CLI surface (flag grammar, report, exit
+//! code); one that needs a registry, shell, pty or its own process stays an
+//! acceptance test.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -27,24 +22,18 @@ use tracing::instrument::WithSubscriber as _;
 
 use super::{App, Cli};
 
-/// The complete environment one [`run`] executes in. Nothing falls through to
-/// the test process: a variable not in `vars` reads as unset, and
-/// `ocx_util::env::current_dir` — where project discovery starts — answers
-/// `cwd`. A non-UTF-8 key or value reads as unset, as `ocx_util::env::var`
-/// treats one.
+/// The complete environment one [`run`] executes in: a variable not in `vars`
+/// (or not UTF-8) reads as unset, and `ocx_util::env::current_dir` answers `cwd`.
 ///
-/// `cwd` is not the process working directory: that is a process global the
-/// seam leaves alone. A relative path *argument* a command opens directly (the
-/// `config test` candidate) therefore resolves against the test process's own
-/// directory — pass absolute paths.
+/// `cwd` is not the process working directory, so a relative path argument a
+/// command opens directly resolves against the test process's own — pass
+/// absolute paths.
 pub struct Environment {
     pub vars: BTreeMap<OsString, OsString>,
     pub cwd: PathBuf,
 }
 
-/// Run `ocx` with `argv` (program name first) inside this process and return
-/// the exit code `main` would return; the command's stdout lands in `out`, its
-/// stderr in `err`.
+/// Run `ocx` on `argv` (program name first) in-process: `main`'s exit code, stdout to `out`, stderr to `err`.
 ///
 /// ```ignore
 /// let home = tempfile::tempdir()?;
@@ -55,31 +44,9 @@ pub struct Environment {
 /// assert_eq!(serde_json::from_slice::<serde_json::Value>(&out)?["lock"]["present"], false);
 /// ```
 ///
-/// Contract, each pinned by a test in this module:
-///
-/// 1. **No ambient environment.** `env` is installed through
-///    `ocx_util::env::overrides` in hermetic mode. Readers that bypass that
-///    layer are caught by the poisoned `env` of the `ocx_cli_seam_test` Bazel
-///    target, not by this function.
-/// 2. **No network.** A registry transport is refused where it would be built
-///    (`ocx_oci::client::network_refusal`), and so is an index fetch
-///    (`ocx_index::ReqwestIndexTransport`); a run that tried returns 64. The
-///    Sigstore client (sign/verify) and the forge clients (announce) are not
-///    refused — their verbs are not admitted.
-/// 3. **No process exit, exec or spawn.** Only the verbs in `ADMITTED` run;
-///    any other is refused with 64 before dispatch, and `--help` renders into
-///    `out` instead of exiting. An exit during a run fails the test process
-///    (an `atexit` tripwire) rather than ending it with the command's status.
-/// 4. **No global installs.** No global subscriber, no signal handler, no
-///    `console` colour override; tracing goes to a subscriber scoped to the
-///    call. `log`-facade records are not bridged — that bridge is itself a
-///    process global — so a diagnostic logged through `log::` never reaches
-///    `err`; the final error line does.
-/// 5. **Output only through `out`/`err`.**
-///
-/// Runs on the caller's Tokio runtime. Serialised under `ocx_util`'s
-/// `EnvLock`, which it acquires — a caller holding that lock deadlocks. The
-/// future is not `Send` for the same reason.
+/// `env` is the whole environment; registry and index transports are refused (64); a verb outside
+/// `ADMITTED` gets 64 before dispatch, and an exit mid-run fails the test process. The run holds the
+/// `EnvLock` across its awaits, so the future is `!Send` and a caller already holding one deadlocks.
 pub async fn run(
     argv: &[OsString],
     env: &Environment,
@@ -89,9 +56,7 @@ pub async fn run(
     run_admitting(ADMITTED, argv, env, out, err).await
 }
 
-/// Canonical command names (`app::canonical_command_name`) a [`run`] may
-/// dispatch — verbs whose whole effect is reading local state and printing a
-/// report. Everything else is refused with 64 before dispatch.
+/// Canonical command names a [`run`] may dispatch: verbs that only read local state and print.
 const ADMITTED: &[&str] = &["status", "config test"];
 
 /// The allowlist of the run in progress; `None` when no run is.
@@ -109,9 +74,7 @@ async fn run_admitting(
     err: &mut (dyn Write + Send),
 ) -> ExitCode {
     // ponytail: serialised via EnvLock; per-invocation env threading when concurrency matters.
-    // The guard is held across every `.await` below on purpose — it is what
-    // serialises seam runs — so the future is `!Send` and nothing inside the
-    // run may take the lock again.
+    // Held across every `.await` below to serialise runs; taking it again inside the run deadlocks.
     let lock = ocx_util::env::overrides::lock();
     for (key, value) in &env.vars {
         if let (Some(key), Some(value)) = (key.to_str(), value.to_str()) {
@@ -121,10 +84,7 @@ async fn run_admitting(
     lock.hermetic(env.cwd.clone());
 
     let session = Session::begin(admitted);
-    // Boxed: the whole CLI future is large enough that, moved through the
-    // caller's poll frames in a debug build, one run needed ~1.9 MiB of a
-    // 2 MiB test-thread stack and overflowed it on Windows. On the heap the
-    // same run needs ~1.4 MiB (measured with `RUST_MIN_STACK` on Linux).
+    // Boxed, or the CLI future overflows a 2 MiB Windows test-thread stack in debug builds.
     let code = Box::pin(App::drive(argv)).with_subscriber(subscriber(argv)).await;
     let (stdout, mut stderr, refused) = session.finish();
     let code = if refused {
@@ -141,8 +101,7 @@ async fn run_admitting(
     code
 }
 
-/// The process globals a run swaps in, undone on drop so a panicking command
-/// cannot leave the next run armed.
+/// The process globals a run swaps in, undone on drop so a panicking command cannot leave the next run armed.
 struct Session;
 
 impl Session {
@@ -174,26 +133,22 @@ impl Drop for Session {
 /// Whether a run is between [`Session::begin`] and its drop.
 static IN_RUN: AtomicBool = AtomicBool::new(false);
 
-/// A `process::exit` during a run ends the test binary with the status the
-/// command chose — 0 for `--help` — and a harness reads a clean exit as a
-/// pass. This `atexit` hook turns any exit during a run into a failure. An
-/// `execvp` runs no exit hook; the admission check is what keeps it out.
+/// Turns a `process::exit` during a run into a failure; unhooked, an exit 0 (`--help`) reads as a pass.
+/// `execvp` runs no exit hook — admission is what keeps it out.
 #[cfg(unix)]
 fn arm_exit_tripwire() {
     extern "C" fn tripwire() {
         if IN_RUN.load(Ordering::SeqCst) {
             // Best effort: at exit there is nowhere left to report a failure to.
             let _ = std::io::stderr().write_all(b"in-process seam: the command exited the test process\n");
-            // SAFETY: `_exit` ends the process at once, without re-entering
-            // the exit sequence this hook is running inside.
+            // SAFETY: `_exit` ends the process without re-entering the exit sequence this hook runs in.
             unsafe { libc::_exit(1) };
         }
     }
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(|| {
         // SAFETY: `tripwire` is an `extern "C" fn` with no captured state.
-        // A non-zero return (allocation failure) leaves the tripwire unarmed,
-        // which loses the diagnostic and nothing else.
+        // A non-zero return only leaves the tripwire unarmed.
         let _ = unsafe { libc::atexit(tripwire) };
     });
 }
@@ -201,9 +156,8 @@ fn arm_exit_tripwire() {
 #[cfg(not(unix))]
 fn arm_exit_tripwire() {}
 
-/// A fmt subscriber writing into the capture's stderr, at the level `argv`
-/// asks for. `OCX_LOG`/`RUST_LOG` are not consulted — the production filter
-/// reads them from the process environment.
+/// A call-scoped fmt subscriber into the capture's stderr at `argv`'s level. `OCX_LOG`/`RUST_LOG`
+/// are not read, and `log::` records are unbridged, so a `log::` diagnostic never reaches `err`.
 fn subscriber(argv: &[OsString]) -> impl tracing::Subscriber + Send + Sync {
     let level = Cli::try_parse_from(argv)
         .ok()
@@ -233,17 +187,15 @@ impl Write for CapturedStderr {
 }
 
 impl App {
-    /// `main`, minus the process: the same boundary, logging through whatever
-    /// subscriber is current.
+    /// `main`, minus the process, logging through the current subscriber.
     async fn drive(argv: &[OsString]) -> ExitCode {
         let (color_mode, color_config) = color(argv);
         super::boundary::finish(App::new().run_from(argv.to_vec(), color_mode, color_config).await)
     }
 }
 
-/// `--color` from `argv` rather than the process's own arguments. `auto`
-/// resolves to off without probing a terminal — the capture is not one — and
-/// the `console` crate's global colour state is left alone.
+/// `--color` from `argv`; `auto` resolves to off without probing a terminal, and the `console`
+/// crate's global colour state is left alone.
 fn color(argv: &[OsString]) -> (ocx_console::ColorMode, ocx_console::ColorModeConfig) {
     use ocx_console::ColorMode;
 

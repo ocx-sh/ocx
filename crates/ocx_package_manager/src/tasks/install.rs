@@ -9,21 +9,7 @@ use ocx_package::install_info::InstallInfo;
 use super::super::PackageManager;
 
 impl PackageManager {
-    /// Downloads a package and creates install symlinks.
-    ///
-    /// Delegates to [`PackageManager::pull`] for the actual download and
-    /// transitive dependency resolution (see that method for concurrency
-    /// safety), then optionally creates:
-    ///
-    /// - A **candidate** symlink at `symlinks/{repo}/candidates/{tag}` when
-    ///   `candidate` is `true` — pins this version as an installed candidate.
-    /// - A **current** symlink at `symlinks/{repo}/current` when `select` is
-    ///   `true` — makes this version the active selection.
-    ///
-    /// Both symlinks target the package root; consumers traverse into
-    /// `<symlink>/content/`, `<symlink>/entrypoints/`, or `<symlink>/metadata.json`.
-    /// Symlinks are managed via [`ReferenceManager::link`] which also creates
-    /// back-references in the object store for GC tracking.
+    /// Pulls a package, then creates its candidate and/or current symlinks and discovers patches.
     pub async fn install(
         &self,
         package: &ocx_oci::PackageRef,
@@ -35,15 +21,8 @@ impl PackageManager {
 
         create_install_symlinks(self, package, &install_info, candidate, select).await?;
 
-        // Fire patch discovery after the base install and its symlinks are
-        // materialized. This is the user-requested-install boundary — the only
-        // site that triggers discovery. Companion installs (install_companion)
-        // and transitive-dep pulls (setup_dependencies) do NOT call this.
-        //
-        // Discovery is a side effect of the install, so a non-required patch tier
-        // whose server is empty or unreachable must not abort the base install:
-        // gate the failure on the tier posture (see `install_discovery_error_is_fatal`).
         if let Err(error) = self.discover_and_install_patches(package, &platform).await {
+            // A non-required patch tier that is empty or unreachable must not abort the base install.
             if super::patch_discovery::install_discovery_error_is_fatal(self.patches(), &error) {
                 return Err(error);
             }
@@ -56,28 +35,7 @@ impl PackageManager {
         Ok(install_info)
     }
 
-    /// Installs multiple packages in parallel using a shared singleflight
-    /// group for cross-package diamond dependency deduplication.
-    ///
-    /// Phase 1: [`pull_all`](PackageManager::pull_all) downloads all packages
-    /// and their transitive deps with a shared singleflight group.
-    /// Phase 2: Install symlinks are created in parallel via a [`JoinSet`].
-    /// Candidate symlinks land at distinct per-tag paths
-    /// (`candidates/{tag}`), so concurrent writes never collide on the same
-    /// file (same-tag duplication is prevented upstream by pull singleflight).
-    /// Only the floating `current` symlink is contended; that write is guarded
-    /// by the per-repo `.select.lock` inside
-    /// [`super::common::wire_selection`]. Results are collected in completion
-    /// order and all errors are gathered before returning.
-    ///
-    /// ## `skip_discovery` flag
-    ///
-    /// When `skip_discovery` is `true`, Phase 3 (patch discovery) is skipped
-    /// entirely. Pass `true` for internal-engine paths — `self_update`,
-    /// `bootstrap` — where discovery is nonsensical (the package being
-    /// installed is `ocx` itself, not a user-requested tool). Pass `false`
-    /// at the user-facing `ocx package install` boundary so companions are
-    /// discovered after every user-requested install.
+    /// Installs multiple packages in parallel, deduplicating shared dependencies.
     pub async fn install_all(
         &self,
         packages: Vec<ocx_oci::PackageRef>,
@@ -85,14 +43,12 @@ impl PackageManager {
         candidate: bool,
         select: bool,
         concurrency: Concurrency,
+        // `true` for internal installs of `ocx` itself (self update, bootstrap), which discover no patches.
         skip_discovery: bool,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
-        // Phase 1: Pull all packages with shared singleflight group.
-        // Clone the platform so Phase 3 (patch discovery) can still use it
-        // after pull_all() consumes the owned value.
         let infos = self.pull_all(&packages, platform.clone(), concurrency).await?;
 
-        // Phase 2: Create symlinks in parallel.
+        // Parallel is safe: candidate paths are per-tag and `current` is guarded by `.select.lock`.
         if candidate || select {
             let mut tasks: JoinSet<(usize, Result<(), PackageErrorKind>)> = JoinSet::new();
 
@@ -106,13 +62,6 @@ impl PackageManager {
                 });
             }
 
-            // `JoinSet::join_next` yields in completion order, which is
-            // nondeterministic. The exit-code classifier
-            // (`crate::error::Error::classify`) derives the code from
-            // the first `PackageError`, so an unsorted collection would make the
-            // exit code depend on a race when ≥2 packages fail at once. Keep the
-            // spawn index with each error and sort by it before building the
-            // batch error, restoring deterministic input-order classification.
             let mut indexed_errors: Vec<(usize, PackageError)> = Vec::new();
             while let Some(join_result) = tasks.join_next().await {
                 match join_result {
@@ -121,7 +70,6 @@ impl PackageManager {
                     }
                     Ok((_, Ok(()))) => {}
                     Err(panic) => {
-                        // A task panicked — abort remaining and propagate.
                         tasks.abort_all();
                         std::panic::resume_unwind(panic.into_panic());
                     }
@@ -134,38 +82,9 @@ impl PackageManager {
             }
         }
 
-        // Phase 3: Patch discovery — run after all base installs and their
-        // symlinks are materialized. This is the user-requested-install
-        // boundary for install_all(); each package gets its own discovery
-        // call so the tag-store three-state is recorded per-identifier.
-        // Discovery runs in parallel via a `JoinSet` (mirrors the Phase 2
-        // symlink loop): `discover_and_install_patches` takes `&self`, tag
-        // writes go through cross-process-atomic `LockedJsonFile`, and
-        // concurrent same-digest companion installs dedup via the pull
-        // singleflight + content-addressed writes, so the tasks are safe to
-        // fan out without additional locking.
-        //
-        // Skipped when skip_discovery=true — internal-engine paths
-        // (self_update, bootstrap) pass true because looking up a patch
-        // descriptor for ocx itself is nonsensical and could trigger spurious
-        // required-companion errors that abort the self-update. No JoinSet is
-        // built in that case.
-        //
-        // Required-companion failures collected with spawn index and sorted by
-        // it before building the batch error, so input-order classification is
-        // stable across the nondeterministic `JoinSet` completion order —
-        // matching the symlink-error pattern above.
-        //
-        // Capped by the same `concurrency` limit as Phase 1's `pull_all` —
-        // mirrors the outer-dispatch semaphore pattern in `pull.rs::pull_all`
-        // so an uncapped fan-out of discovery calls (each doing index + patch
-        // metadata lookups) can't outrun the pull concurrency the caller asked
-        // for.
         if !skip_discovery {
+            // Capped, or the discovery fan-out outruns the concurrency the caller asked for.
             let semaphore = concurrency.semaphore();
-            // Ok payload is the per-package companion-install count; install_all's
-            // callers don't report it (only `ocx patch sync` does), so it's
-            // discarded below — the type just has to match `discover_and_install_patches`.
             let mut tasks: JoinSet<(usize, Result<usize, PackageErrorKind>)> = JoinSet::new();
 
             for (index, pkg) in packages.iter().enumerate() {
@@ -174,13 +93,8 @@ impl PackageManager {
                 let platform = platform.clone();
                 let sem = semaphore.clone();
                 tasks.spawn(async move {
-                    // Permit lives for the full discovery call; drop happens
-                    // after the await returns, releasing the slot for the
-                    // next queued discovery task.
+                    // Named, not `_`: the permit must span the whole discovery call.
                     let _permit = concurrency::acquire_permit(&sem).await;
-                    // Gate discovery failure on the tier posture: a non-required
-                    // patch tier whose server is empty/unreachable warns and
-                    // continues without companions rather than failing the install.
                     let result = match mgr.discover_and_install_patches(&pkg, &platform).await {
                         Err(error)
                             if !super::patch_discovery::install_discovery_error_is_fatal(mgr.patches(), &error) =>
@@ -205,7 +119,6 @@ impl PackageManager {
                     }
                     Ok((_, Ok(_))) => {}
                     Err(panic) => {
-                        // A task panicked — abort remaining and propagate.
                         tasks.abort_all();
                         std::panic::resume_unwind(panic.into_panic());
                     }
@@ -223,11 +136,6 @@ impl PackageManager {
 }
 
 /// Creates candidate and/or current symlinks for a single package.
-///
-/// Delegates to [`super::common::wire_selection`] for the `current` symlink
-/// update plus the per-registry entry-points index update. Collision
-/// detection, lock acquisition, and rollback all live in the shared helper so
-/// this path and the `command/select.rs` path stay byte-equivalent.
 #[allow(clippy::result_large_err)]
 async fn create_install_symlinks(
     mgr: &PackageManager,
@@ -240,15 +148,7 @@ async fn create_install_symlinks(
     Ok(())
 }
 
-/// Sorts `(spawn_index, error)` pairs by index and unwraps them into a plain
-/// `Vec<PackageError>`.
-///
-/// `JoinSet::join_next` yields in completion order, which is nondeterministic.
-/// The exit-code classifier derives the code from the *first* `PackageError`
-/// in a batch, so an unsorted collection would make the exit code depend on
-/// a race whenever ≥2 packages fail concurrently. Shared by the Phase 2
-/// (symlink) and Phase 3 (patch discovery) error-collection loops in
-/// `install_all` — both need the identical restore-input-order step.
+/// Sorts errors back into input order, or the exit code (taken from the first error) depends on a completion race.
 fn finalize_indexed_errors(mut indexed_errors: Vec<(usize, PackageError)>) -> Vec<PackageError> {
     indexed_errors.sort_by_key(|(index, _)| *index);
     indexed_errors.into_iter().map(|(_, error)| error).collect()

@@ -8,11 +8,6 @@ use super::{LogLevel, ProgressLogWriter};
 
 /// Tracing subscriber configuration for this binary.
 ///
-/// Supports the following environment variable cascade for log filtering:
-/// `OCX_LOG_CONSOLE` → `OCX_LOG` → `RUST_LOG` → default level (INFO).
-///
-/// # Usage
-///
 /// **With progress indicators** (auto-detected via stderr TTY):
 /// ```ignore
 /// LogSettings::default()
@@ -64,13 +59,10 @@ impl LogSettings {
         self.console_events
     }
 
-    /// Initialize a simple tracing subscriber (fmt layer to stderr, no progress bars).
+    /// Installs a plain fmt subscriber on stderr.
     ///
-    /// Use this for tools that don't need `tracing-indicatif`. For tools that do,
-    /// call [`Self::build_env_filter`] and compose the subscriber manually.
-    ///
-    /// Returns an error if a global subscriber is already installed (safe to call
-    /// `.ok()` on at sites where double-init is expected, e.g. plugin dispatch).
+    /// # Errors
+    /// When a global subscriber is already installed, or the filter env var is invalid.
     pub fn init(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
@@ -89,15 +81,10 @@ impl LogSettings {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
-    /// Initialize a tracing subscriber whose fmt layer writes through the
-    /// given span-free [`ProgressManager`].
+    /// Installs a fmt subscriber writing through `progress`, so log lines never tear an active bar.
     ///
-    /// Log lines are flushed inside `MultiProgress::suspend` so they never
-    /// tear active progress bars. A disabled manager writes straight to
-    /// stderr (the non-TTY path), so callers do not branch on TTY state —
-    /// the manager already encodes it. There is no `tracing-indicatif`
-    /// layer: progress is driven by RAII guards, not spans
-    /// (ADR adr_progress_architecture).
+    /// # Errors
+    /// As [`Self::init`].
     pub fn init_with_progress(
         self,
         progress: &ProgressManager,
@@ -127,14 +114,10 @@ impl LogSettings {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
-    /// Build an `EnvFilter` using the OCX env var cascade.
-    ///
-    /// Checks in order: `OCX_LOG_{extra_name}` → `OCX_LOG` → `RUST_LOG` → default level.
-    /// The `extra_filter` iterator allows adding additional filter directives.
+    /// Builds an `EnvFilter` from `OCX_LOG_{extra_name}` → `OCX_LOG` → `RUST_LOG` → the default level.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the resolved env var contains an invalid filter directive.
+    /// When the resolved env var holds an invalid filter directive.
     pub fn build_env_filter<'a>(
         &'a self,
         extra_name: &str,

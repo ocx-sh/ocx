@@ -1,49 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Lazy three-state patch discovery and companion install.
-//!
-//! This module implements Phase 3 of the infrastructure-patches feature
-//! (`adr_infrastructure_patches.md`, milestone #111, issue #114).
-//!
-//! ## Responsibility
-//!
-//! After a user-requested base install completes,
-//! [`PackageManager::discover_and_install_patches`] runs once per user-facing
-//! base identifier. It:
-//!
-//! 1. Looks up the three-state discovery record for the base package's patch
-//!    repository in the tag store.
-//! 2. On cache miss (state = `NeverLooked`), fetches the `__ocx.patch`
-//!    descriptor from the patch registry.
-//! 3. Persists the descriptor blobs and records the new state.
-//! 4. Collects companions from the global and package-specific descriptors.
-//! 5. Installs each companion through the base-install primitive.
-//!    Required-companion failures fail closed (`RequiredCompanionFailed`);
-//!    optional-companion failures warn and continue.
-//!
-//! ## Recursion guard
-//!
-//! Discovery fires **only** at the user-requested-install boundary. Companion
-//! installs go through [`PackageManager::install_companion`], which calls
-//! `pull` directly WITHOUT calling `discover_and_install_patches`. This makes
-//! companions non-patched by design — a companion cannot itself trigger further
-//! discovery, preventing infinite recursion.
-//!
-//! ## Three-state tag store
-//!
-//! The persisted discovery state for a given `(patch_registry, patch_repo)`
-//! pair lives in the tag-store JSON file for that repo:
-//!
-//! | File state | `__ocx.patch` key | Meaning |
-//! |---|---|---|
-//! | File absent | — | `NeverLooked` — no discovery attempt yet |
-//! | File present, key absent | — | `LookedNoDescriptor` — looked, no `__ocx.patch` at this registry |
-//! | File present, key present | `"<manifest_digest>"` | `LookedHasDescriptor` — descriptor persisted |
-//!
-//! Reads and atomic writes use [`LockedJsonFile<BTreeMap<String,String>>`] so
-//! concurrent processes (parallel `ocx package install`) cannot corrupt the
-//! three-state map.
+//! Lazy three-state patch discovery and companion install
+//! (`adr_infrastructure_patches.md § Three-state discovery`).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -61,50 +20,22 @@ use super::super::{PackageManager, error::PackageErrorKind};
 
 // ── Safety limits ─────────────────────────────────────────────────────────────
 
-/// Maximum total number of companions that may be collected across ALL
-/// descriptor sources (global + package-specific) for a single base install.
-///
-/// The per-descriptor limits ([`crate::patch::descriptor::MAX_RULES`] ×
-/// [`crate::patch::descriptor::MAX_PACKAGES_PER_RULE`]) guard against a single
-/// malformed descriptor; this cap guards against the cross-product when both
-/// descriptors independently hit their limits and share no identifiers (so
-/// dedup provides no reduction). `256 × 64 × 2 = 32 768` without this cap —
-/// unreasonable for a companion list that is normally a handful of entries.
-///
-/// Defense-in-depth against a compromised or misconfigured patch registry.
-/// Exceeding this limit causes [`PackageErrorKind::PatchDiscovery`] with a
-/// [`crate::patch::PatchError::DescriptorTooLarge`] error.
+/// Maximum companions across all descriptor sources for one base install; the per-descriptor limits
+/// alone allow `256 × 64 × 2 = 32 768` from a compromised registry.
 pub const MAX_TOTAL_COMPANIONS: usize = 256;
 
 // ── Three-state discovery state ───────────────────────────────────────────────
 
-/// Three-state discovery record for a single `(patch_registry, patch_repo)` pair.
-///
-/// Encoded in the tag-store JSON map at the key [`InternalTag::PATCH_TAG`]
-/// (`"__ocx.patch"`):
-///
-/// - File **absent** → [`NeverLooked`](PatchDiscoveryState::NeverLooked).
-/// - File present, key **absent** → [`LookedNoDescriptor`](PatchDiscoveryState::LookedNoDescriptor).
-/// - File present, key present → [`LookedHasDescriptor`](PatchDiscoveryState::LookedHasDescriptor)
-///   with the manifest digest as value.
+/// Three-state discovery record for one patch repository, keyed [`InternalTag::PATCH_TAG`] in its tag-store file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchDiscoveryState {
-    /// The tag store file for this repo does not exist yet.
-    ///
-    /// The discovery routine has never contacted the patch registry for this
-    /// (registry, repo) pair. Should trigger a network lookup when online.
+    /// No tag-store file.
     NeverLooked,
 
-    /// The tag store file exists, but the `__ocx.patch` key is absent.
-    ///
-    /// The discovery routine looked and found no `__ocx.patch` descriptor at
-    /// the patch registry for this (registry, repo) pair.
+    /// File present, key absent.
     LookedNoDescriptor,
 
-    /// The tag store file exists and the `__ocx.patch` key holds the
-    /// manifest digest string of the persisted descriptor.
-    ///
-    /// The descriptor blob is already in the CAS blob store.
+    /// The key holds the manifest digest of the descriptor persisted in the CAS.
     LookedHasDescriptor {
         /// Manifest digest string (e.g. `"sha256:<64hex>"`).
         manifest_digest: String,
@@ -113,25 +44,11 @@ pub enum PatchDiscoveryState {
 
 // ── PatchTagMap helper ────────────────────────────────────────────────────────
 
-/// Atomic read-modify-write helper for a patch-tier tag→digest JSON file.
-///
-/// The file maps tag strings to digest strings (`BTreeMap<String, String>`),
-/// backed by [`LockedJsonFile`] so concurrent processes cannot corrupt it. Two
-/// stores share the shape:
-///
-/// - the descriptor discovery record ([`ocx_store::file_structure::FileStructure::patch_descriptor_path`]),
-///   whose single `__ocx.patch` key encodes the three-state
-///   [`PatchDiscoveryState`] — see the `*_descriptor` wrappers;
-/// - the companion pin record ([`ocx_store::file_structure::FileStructure::patch_companion_path`]),
-///   one ordinary tag key per pinned companion tag — see
-///   [`read_tag`](Self::read_tag) / [`write_tag`](Self::write_tag).
+/// Locked read-modify-write for a patch-tier tag→digest JSON file: descriptor records and companion pins.
 pub struct PatchTagMap;
 
 impl PatchTagMap {
-    /// Read one tag's recorded digest string, or `None` when the file or the
-    /// key is absent.
-    ///
-    /// Uses a shared lock — multiple concurrent readers are safe.
+    /// Reads one tag's recorded digest, or `None` when the file or key is absent.
     pub async fn read_tag(path: &std::path::Path, tag: &str) -> crate::Result<Option<String>> {
         let Some(mut locked) = LockedJsonFile::<BTreeMap<String, String>>::open_shared(path).await? else {
             return Ok(None);
@@ -139,8 +56,7 @@ impl PatchTagMap {
         Ok(locked.read().await?.unwrap_or_default().get(tag).cloned())
     }
 
-    /// Atomically record `tag` → `digest`, creating the file (and its parent
-    /// directories) when absent and leaving every other key untouched.
+    /// Atomically records `tag` → `digest`, leaving every other key untouched.
     pub async fn write_tag(path: &std::path::Path, tag: &str, digest: &str) -> crate::Result<()> {
         let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(path).await?;
         let mut map = locked.read().await?.unwrap_or_default();
@@ -148,13 +64,7 @@ impl PatchTagMap {
         locked.write(&map).await.map_err(Into::into)
     }
 
-    /// Atomically record `tag` → `digest` **only if `tag` has no entry yet**,
-    /// reporting whether the write happened.
-    ///
-    /// One exclusive lock spans the read and the write, so two concurrent
-    /// fill-ins cannot both decide the key is absent. A key that is already
-    /// present keeps its value: this is for filling a gap, never for advancing
-    /// a binding (that is a sync's job).
+    /// Atomically records `tag` → `digest` only if `tag` has no entry yet; returns whether it wrote.
     pub async fn write_tag_if_absent(path: &std::path::Path, tag: &str, digest: &str) -> crate::Result<bool> {
         let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(path).await?;
         let mut map = locked.read().await?.unwrap_or_default();
@@ -166,37 +76,21 @@ impl PatchTagMap {
         Ok(true)
     }
 
-    /// Read the discovery state for the given tag-store path.
-    ///
-    /// - Path absent → [`PatchDiscoveryState::NeverLooked`].
-    /// - Path present, `__ocx.patch` key absent →
-    ///   [`PatchDiscoveryState::LookedNoDescriptor`].
-    /// - Path present, key present →
-    ///   [`PatchDiscoveryState::LookedHasDescriptor`].
-    ///
-    /// Uses a shared lock for read — multiple concurrent readers are safe.
+    /// Reads the discovery state for the given tag-store path.
     pub async fn read(tags_path: &std::path::Path) -> crate::Result<PatchDiscoveryState> {
-        // State (a): file absent → never looked.
         let Some(mut locked) = LockedJsonFile::<BTreeMap<String, String>>::open_shared(tags_path).await? else {
             return Ok(PatchDiscoveryState::NeverLooked);
         };
-        // File present — read the map.
         let map = locked.read().await?.unwrap_or_default();
         match map.get(InternalTag::PATCH_TAG) {
-            // State (c): key present → looked, has descriptor.
             Some(digest) => Ok(PatchDiscoveryState::LookedHasDescriptor {
                 manifest_digest: digest.clone(),
             }),
-            // State (b): key absent → looked, no descriptor.
             None => Ok(PatchDiscoveryState::LookedNoDescriptor),
         }
     }
 
-    /// Atomically record the "looked, no descriptor" state for a repo.
-    ///
-    /// Acquires an exclusive lock, reads the existing map (creates an empty map
-    /// if the file is new), removes the `__ocx.patch` key if present, and
-    /// writes back. Idempotent if the key was already absent.
+    /// Atomically records the "looked, no descriptor" state.
     pub async fn write_no_descriptor(tags_path: &std::path::Path) -> crate::Result<()> {
         let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(tags_path).await?;
         let mut map = locked.read().await?.unwrap_or_default();
@@ -204,11 +98,7 @@ impl PatchTagMap {
         locked.write(&map).await.map_err(Into::into)
     }
 
-    /// Atomically record the "looked, has descriptor" state for a repo.
-    ///
-    /// Acquires an exclusive lock, reads the existing map, inserts (or
-    /// updates) the `__ocx.patch` key with the given manifest digest string,
-    /// and writes back.
+    /// Atomically records the "looked, has descriptor" state.
     pub async fn write_has_descriptor(tags_path: &std::path::Path, manifest_digest: &str) -> crate::Result<()> {
         Self::write_tag(tags_path, InternalTag::PATCH_TAG, manifest_digest).await
     }
@@ -216,115 +106,32 @@ impl PatchTagMap {
 
 // ── PatchDiscoveryMode ────────────────────────────────────────────────────────
 
-/// Controls whether a discovery pass may skip already-recorded states.
-///
-/// - [`Lazy`](PatchDiscoveryMode::Lazy): the normal install-time behaviour.
-///   Skips `LookedNoDescriptor` and `LookedHasDescriptor` repos — only
-///   `NeverLooked` entries trigger a network fetch.
-/// - [`Sync`](PatchDiscoveryMode::Sync): the `ocx patch sync` behaviour.
-///   Re-fetches EVERY descriptor source (global root + per-base) regardless
-///   of the recorded state. Used to advance descriptor blobs when the
-///   upstream registry has published a new version.
-///
-/// Prefer this enum over a boolean parameter per the project style guide
-/// (quality-core: boolean parameters should be enums for two-state flags).
+/// Whether a discovery pass may skip already-recorded states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchDiscoveryMode {
-    /// Normal lazy mode: skip already-recorded states; only fetch on `NeverLooked`.
+    /// Install time: fetch only on `NeverLooked`.
     Lazy,
-    /// Force-recheck mode: re-fetch every descriptor source regardless of state.
+    /// `ocx patch sync`: re-fetch every descriptor source regardless of state.
     Sync,
 }
 
 /// Which descriptor sources a discovery pass consults.
-///
-/// `ocx patch sync` re-checks only the KNOWN SET — the installed base repos
-/// plus the single global root descriptor. This selector keeps the global
-/// root from being probed through a *synthetic* package-specific sub-path:
-///
-/// - [`Both`](PatchDescriptorScope::Both): the global root descriptor AND the
-///   package-specific descriptor for `base_id`. The normal install-time and
-///   per-installed-base path — companion matching for a real base must union
-///   both sources, otherwise a required global companion (e.g. a corp CA that
-///   matches `*`) would never be installed for that base and a later offline
-///   `exec` would fail closed.
-/// - [`GlobalOnly`](PatchDescriptorScope::GlobalOnly): only the global
-///   descriptor. Used by the sync path when there are zero installed bases so
-///   the global descriptor is still refreshed WITHOUT fabricating a synthetic
-///   base whose path-template expansion would probe an extra package-specific
-///   source outside the known set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PatchDescriptorScope {
-    /// Global root descriptor + the package-specific descriptor for `base_id`.
+    /// Global root and `base_id`'s own descriptor, or a required global companion is never installed for it.
     Both,
-    /// Only the global root descriptor (`base_id` is not used to derive a
-    /// package-specific source — no synthetic probe).
+    /// Global root only, so a synthetic `base_id` probes no source outside the known set.
     GlobalOnly,
 }
 
 // ── PackageManager::discover_and_install_patches ──────────────────────────────
 
 impl PackageManager {
-    /// Lazy patch discovery and companion install for a user-requested base install.
-    ///
-    /// Called from the user-facing install boundary (after the base package and
-    /// its transitive deps have been materialized). NOT called from companion
-    /// installs or transitive-dep pulls — those paths go through
-    /// [`install_companion`](PackageManager::install_companion), which bypasses
-    /// this method to prevent recursive discovery.
-    ///
-    /// ## Short-circuits
-    ///
-    /// Returns `Ok(())` immediately when:
-    /// - `self.patches` is `None` (no patch tier configured), or
-    /// - `self.is_offline()` (discovery requires a network call).
-    ///
-    /// ## Discovery protocol (online, patch tier active)
-    ///
-    /// For each of the two descriptor sources (global root, then package-specific):
-    ///
-    /// 1. Read the three-state tag-store record via [`PatchTagMap::read`].
-    /// 2. On `NeverLooked` or `LookedNoDescriptor` (first discovery): call
-    ///    [`fetch_and_persist_descriptor`] with [`DescriptorCommit::Eager`]. On a
-    ///    `None` result, record `LookedNoDescriptor`; on `Some`, persist the blobs
-    ///    to the CAS and commit the `LookedHasDescriptor` pointer EAGERLY. There is
-    ///    no prior good digest to preserve, and recording the descriptor keeps a
-    ///    later offline compose fail-closed on a missing required companion.
-    /// 3. On `LookedHasDescriptor` in [`PatchDiscoveryMode::Sync`] (re-sync): call
-    ///    [`fetch_and_persist_descriptor`] with [`DescriptorCommit::Deferred`] — the
-    ///    pointer advance is held in a pending accumulator and committed only after
-    ///    every required companion installs, so a transient re-sync failure keeps
-    ///    the last-known-good digest.
-    /// 4. On `LookedHasDescriptor` in [`PatchDiscoveryMode::Lazy`]: the descriptor
-    ///    blob is already in the CAS; load it for companion collection.
-    ///
-    /// After both descriptors are resolved, collect companions, then install each
-    /// via [`install_companion`]. This is per-descriptor deferral, NOT a cross-tag
-    /// transaction: eager commits (step 2) are already durable before companion
-    /// install, and the deferred commit loop (step 3) writes each pending tag entry
-    /// in its own non-atomic `write_has_descriptor` call. A required-companion
-    /// failure returns before the deferred loop runs, so only the deferred (re-sync)
-    /// advances roll back; a crash mid-loop can leave some deferred advances
-    /// committed and others not — a benign window that self-heals on the next sync
-    /// (idempotent re-fetch).
-    ///
-    /// ## Recursion guard
-    ///
-    /// This method is NOT on the companion-install code path. Companion installs
-    /// flow through [`install_companion`], which calls `pull` directly. There is
-    /// no `discover_and_install_patches` call there.
+    /// Discovers patches for an installed base and installs its companions; returns how many were installed.
     ///
     /// # Errors
     ///
-    /// Returns `Err(PackageErrorKind::RequiredCompanionFailed { .. })` when a
-    /// companion marked `required = true` fails to install. Optional companions
-    /// are logged as warnings and do not produce an error.
-    ///
-    /// # Returns
-    ///
-    /// The number of companion packages successfully installed (or re-installed)
-    /// on this call. `0` when no patch tier is configured, the manager is
-    /// offline, or no companion matched.
+    /// `RequiredCompanionFailed` when a `required = true` companion fails to install; optional ones only warn.
     pub async fn discover_and_install_patches(
         &self,
         base_id: &PackageRef,
@@ -339,17 +146,7 @@ impl PackageManager {
         .await
     }
 
-    /// Inner implementation of patch discovery, parameterised by
-    /// [`PatchDiscoveryMode`].
-    ///
-    /// [`discover_and_install_patches`](Self::discover_and_install_patches) is the
-    /// public entry point and always passes [`PatchDiscoveryMode::Lazy`].
-    /// [`sync_patches`](Self::sync_patches) drives this with
-    /// [`PatchDiscoveryMode::Sync`] to force-recheck every descriptor source.
-    ///
-    /// Returns the number of companion packages successfully installed —
-    /// [`sync_patches`](Self::sync_patches) sums this across every base to
-    /// populate `PatchSyncReport::companions_installed`.
+    /// Patch discovery parameterised by mode and scope; returns the companions installed.
     pub(super) async fn discover_and_install_patches_with_mode(
         &self,
         base_id: &PackageRef,
@@ -357,52 +154,27 @@ impl PackageManager {
         mode: PatchDiscoveryMode,
         scope: PatchDescriptorScope,
     ) -> Result<usize, PackageErrorKind> {
-        // Short-circuit 1: no patch tier configured.
         let Some(patches) = self.patches() else {
             return Ok(0);
         };
 
-        // Short-circuit 2: offline — discovery requires a network call.
-        //
-        // Unlike lazy discovery (a side-effect of install where offline is
-        // silently accepted), sync mode is an explicit user action. The offline
-        // posture in Sync mode is identical structurally — return Ok(0) here
-        // and let the caller (sync_patches) report the offline condition to the
-        // user. The manager's offline guard stays here rather than in the caller
-        // so that library consumers that call discover_and_install_patches_with_mode
-        // directly also benefit from the guard.
+        // Here, not in the caller, so every caller is guarded.
         if self.is_offline() {
             return Ok(0);
         }
 
-        // At this point we know we're online and patches are configured.
-        // The OCI client is available — require_client() will succeed.
-        // Individual sub-functions call require_client() at their call sites.
         let file_structure = self.file_structure();
         let blob_store = &file_structure.blobs;
 
-        // Build identifiers for the two descriptor sources:
-        // (a) global descriptor — reserved `global` repository at the patch registry
-        // (b) package-specific descriptor — per-identifier sub-path
-        // Build the descriptor source list per the requested scope. Under
-        // `GlobalOnly` the package-specific id is NEVER computed, so a synthetic
-        // `base_id` cannot probe an extra source outside the known set.
         let global_id = global_descriptor_id(patches);
         let descriptor_ids: Vec<PackageRef> = match scope {
-            // Global first (lower precedence for dedup); package-specific second
-            // (higher precedence — its companions override on the same identifier).
+            // Order is precedence: package-specific last, so its companions win on dedup.
             PatchDescriptorScope::Both => vec![global_id, patch_descriptor_id(patches, base_id)],
             PatchDescriptorScope::GlobalOnly => vec![global_id],
         };
 
         let mut descriptors: Vec<PatchDescriptor> = Vec::new();
-        // A1 hybrid commit accumulator: holds ONLY the deferred (re-sync)
-        // `LookedHasDescriptor` advances — those overwriting an existing descriptor
-        // pointer. First-discovery advances (prior NeverLooked / LookedNoDescriptor)
-        // are committed eagerly inside `fetch_and_persist_descriptor` and never land
-        // here. The deferred advances are committed after every required companion
-        // installs, so a transient re-sync failure preserves each source's
-        // last-known-good digest.
+        // Re-sync advances only, committed after every required companion installs to keep last-known-good.
         let mut pending_tag_writes: Vec<PendingDescriptorCommit> = Vec::new();
 
         for descriptor_id in &descriptor_ids {
@@ -413,9 +185,7 @@ impl PackageManager {
 
             match state {
                 PatchDiscoveryState::NeverLooked => {
-                    // Never looked — attempt network fetch (both Lazy and Sync modes).
-                    // First discovery: commit the descriptor pointer EAGERLY (A1) so a
-                    // later offline compose fails closed on a missing required companion.
+                    // Eager, so a later offline compose fails closed on a missing required companion.
                     match fetch_and_persist_descriptor(
                         self,
                         descriptor_id,
@@ -429,21 +199,17 @@ impl PackageManager {
                             descriptors.push(descriptor);
                         }
                         None => {
-                            // No patch descriptor at this registry — record looked-no-patch.
-                            // (fetch_and_persist_descriptor already wrote the state.)
+                            // The helper already recorded "looked, no descriptor".
                         }
                     }
                 }
                 PatchDiscoveryState::LookedNoDescriptor => {
                     if mode == PatchDiscoveryMode::Sync {
-                        // Sync mode: force-recheck even though we previously found nothing.
-                        // The upstream registry may have added a descriptor since the last look.
                         log::debug!(
                             "patch discovery (sync): re-fetching '{}' — previously no descriptor, force-rechecking",
                             descriptor_id
                         );
-                        // Prior state carried no descriptor pointer — this is a first
-                        // discovery, so commit EAGERLY (A1) if one appears upstream.
+                        // A descriptor appearing now is a first discovery: eager.
                         match fetch_and_persist_descriptor(
                             self,
                             descriptor_id,
@@ -457,11 +223,10 @@ impl PackageManager {
                                 descriptors.push(descriptor);
                             }
                             None => {
-                                // Still no descriptor — state already written by the helper.
+                                // The helper already recorded "looked, no descriptor".
                             }
                         }
                     } else {
-                        // Lazy mode: previously looked; confirmed no descriptor — skip.
                         log::debug!(
                             "patch discovery: skipping '{}' — previously looked, no descriptor found",
                             descriptor_id
@@ -470,18 +235,12 @@ impl PackageManager {
                 }
                 PatchDiscoveryState::LookedHasDescriptor { manifest_digest } => {
                     if mode == PatchDiscoveryMode::Sync {
-                        // Sync mode: force-recheck even though we already have a descriptor.
-                        // If the upstream digest has advanced, fetch_and_persist_descriptor
-                        // will overwrite the tag-store entry and persist the new blobs.
-                        // If unchanged, the function is effectively a no-op (blobs already
-                        // in CAS; write_has_descriptor is idempotent on the same digest).
                         log::debug!(
                             "patch discovery (sync): re-fetching '{}' — force-rechecking existing descriptor (recorded digest: {})",
                             descriptor_id,
                             manifest_digest
                         );
-                        // Re-sync over an existing LookedHasDescriptor: DEFER the advance
-                        // (A1) so a required-companion failure preserves the recorded digest.
+                        // Deferred, so a required-companion failure preserves the recorded digest.
                         match fetch_and_persist_descriptor(
                             self,
                             descriptor_id,
@@ -495,38 +254,21 @@ impl PackageManager {
                                 descriptors.push(descriptor);
                             }
                             None => {
-                                // Descriptor vanished from upstream — state written as LookedNoDescriptor.
+                                // Vanished upstream; the helper recorded "looked, no descriptor".
                             }
                         }
                         continue;
                     }
-                    // Descriptor already persisted — load it from the CAS.
                     let digest = match ocx_oci::Digest::try_from(manifest_digest.as_str()) {
                         Ok(d) => d,
                         Err(error) => {
+                            // A failed re-fetch must leave the state intact, or a transient error records "no patch".
                             log::warn!(
                                 "patch discovery: invalid cached manifest digest '{}' for '{}': {error}; re-fetching",
                                 manifest_digest,
                                 descriptor_id
                             );
-                            // Re-fetch without pre-clearing the tag-store entry.
-                            // Only transition state after a definitive result:
-                            // - re-fetch succeeds → the EAGER advance (below) commits the new
-                            //   digest immediately.
-                            // - re-fetch finds no descriptor → fetch_and_persist_descriptor
-                            //   writes LookedNoDescriptor.
-                            // - re-fetch fails (network/auth) → we leave the existing
-                            //   LookedHasDescriptor entry intact (stale but not regressed)
-                            //   so the next install attempt can retry. We do NOT downgrade
-                            //   to LookedNoDescriptor on a transient failure because that
-                            //   would cause a permanent "no patch" state for a package
-                            //   that previously had a descriptor.
-                            //
-                            // Prior state is LookedHasDescriptor but its cached digest is
-                            // CORRUPT (unparseable) — there is no last-known-good blob to
-                            // preserve, so commit EAGERLY. The tag then points at the freshly
-                            // persisted valid blobs, restoring fail-closed compose under a
-                            // non-required tier carrying a rule-level required:true companion.
+                            // No last-known-good exists to keep, so eager.
                             if let Some(descriptor) = fetch_and_persist_descriptor(
                                 self,
                                 descriptor_id,
@@ -541,9 +283,6 @@ impl PackageManager {
                             continue;
                         }
                     };
-                    // Read the layer blob from CAS using the manifest digest to locate
-                    // the manifest, then parse the descriptor JSON from the layer blob.
-                    // We read the manifest blob to get the layer digest, then read the layer.
                     match load_descriptor_from_cas(blob_store, descriptor_id.registry(), &digest).await {
                         Ok(descriptor) => {
                             descriptors.push(descriptor);
@@ -553,12 +292,7 @@ impl PackageManager {
                                 "patch discovery: failed to load cached descriptor for '{}': {error}; re-fetching",
                                 descriptor_id
                             );
-                            // Re-fetch if CAS read fails. Prior state is LookedHasDescriptor
-                            // but its cached blob is CORRUPT or MISSING — there is no
-                            // last-known-good blob to preserve, so commit EAGERLY. The tag
-                            // then points at the freshly persisted valid blobs, restoring
-                            // fail-closed compose under a non-required tier carrying a
-                            // rule-level required:true companion.
+                            // The cached blob is corrupt or missing: no last-known-good to keep, so eager.
                             if let Some(descriptor) = fetch_and_persist_descriptor(
                                 self,
                                 descriptor_id,
@@ -576,45 +310,23 @@ impl PackageManager {
             }
         }
 
-        // Collect companions from all resolved descriptors (global first, then
-        // package-specific). Dedup by identifier — PACKAGE-SPECIFIC wins over
-        // global when the same companion identifier appears in both descriptors.
-        //
-        // Algorithm: use an ordered map (IndexMap-style via Vec+HashMap) to
-        // preserve first-seen insertion order while allowing a later
-        // package-specific entry to override a global entry's `required` flag
-        // for the same identifier. The map is keyed by identifier; the value
-        // is overwritten whenever a later (more-specific) entry appears,
-        // matching the spec: "package-specific rule wins for the `required`
-        // flag and is installed once."
-        //
-        // Insertion order is preserved in `companion_order` (Vec of identifiers
-        // in first-seen order); `companion_map` holds the current winning entry.
+        // A later package-specific entry overwrites the global one's `required`; order stays first-seen.
         let mut companion_order: Vec<ocx_oci::PackageRef> = Vec::new();
         let mut companion_map: HashMap<ocx_oci::PackageRef, crate::patch::CompanionEntry> = HashMap::new();
         for descriptor in &descriptors {
             let entries = descriptor.collect_companions(base_id, patches.required);
             for entry in entries {
                 if !companion_map.contains_key(&entry.identifier) {
-                    // First time: record insertion order.
                     companion_order.push(entry.identifier.clone());
                 }
-                // Always overwrite: later (package-specific) descriptor wins.
                 companion_map.insert(entry.identifier.clone(), entry);
             }
         }
-        // Reconstruct the final list in first-seen order with the winning entry.
         let companions: Vec<crate::patch::CompanionEntry> = companion_order
             .into_iter()
             .filter_map(|id| companion_map.remove(&id))
             .collect();
 
-        // Defense-in-depth: cap total companions across all descriptors.
-        // Per-descriptor limits (MAX_RULES × MAX_PACKAGES_PER_RULE) are enforced
-        // at parse time, but with two descriptors and no shared identifiers the
-        // combined count could reach 2 × 256 × 64 = 32 768. This cap (256) is
-        // well above any legitimate use case and guards against a compromised or
-        // misconfigured operator-controlled patch registry.
         if companions.len() > MAX_TOTAL_COMPANIONS {
             return Err(PackageErrorKind::PatchDiscovery(
                 crate::patch::PatchError::DescriptorTooLarge {
@@ -627,16 +339,6 @@ impl PackageManager {
             ));
         }
 
-        // Install each companion through the recursion-guard primitive.
-        //
-        // Cross-registry companion warning (defense-in-depth, trust-model note):
-        // The operator owns the patch registry and the descriptor. A companion
-        // referencing a different registry host than the patch registry is
-        // ALLOWED — the operator may legitimately cross-reference packages from
-        // any registry. However, off-registry companions are surfaced as WARNs
-        // so an operator can notice unexpected cross-registry references caused
-        // by a misconfigured or compromised descriptor. This is advisory only;
-        // discovery is NOT blocked. See adr_infrastructure_patches.md §"Trust model".
         let mut installed_count: usize = 0;
         if companions.is_empty() {
             log::debug!("patch discovery: no companions for '{}'", base_id);
@@ -647,9 +349,7 @@ impl PackageManager {
                 base_id
             );
             for companion in companions {
-                // Warn if the companion's registry host differs from the patch
-                // registry's host. A cross-registry companion is permitted but
-                // surfaced so the operator can notice unusual descriptor content.
+                // Allowed, but surfaced so a compromised descriptor is noticeable.
                 if companion.identifier.registry() != patch_registry_host(patches) {
                     log::warn!(
                         "patch discovery: companion '{}' is hosted on registry '{}' which differs from the configured patch registry '{}'; this is allowed but unexpected — verify your patch descriptor",
@@ -666,10 +366,7 @@ impl PackageManager {
                     }
                     Err(kind) => {
                         if companion.required {
-                            // Fail-closed: required companion failed → abort BEFORE the
-                            // deferred commit loop, so each re-sync source keeps its prior
-                            // digest. Eager first-discovery advances were already committed
-                            // (intended — they keep offline compose fail-closed).
+                            // Before the deferred commit loop, so each re-sync source keeps its prior digest.
                             return Err(PackageErrorKind::RequiredCompanionFailed {
                                 companion: companion_id,
                                 source: Box::new(kind),
@@ -678,15 +375,12 @@ impl PackageManager {
                             kind,
                             PackageErrorKind::PatchDiscovery(crate::patch::PatchError::PolicyBlocked { .. })
                         ) {
-                            // Fail-open, benign: an optional companion with no pin
-                            // is the steady state of every offline build. A warning
-                            // here would fire on every single invocation.
+                            // Debug, not warn: the steady state of every offline build.
                             log::debug!(
                                 "patch discovery: optional companion '{}' is unpinned and offline mode may not resolve it; skipping",
                                 companion_id
                             );
                         } else {
-                            // Fail-open: optional companion failed → warn and continue.
                             log::warn!(
                                 "patch discovery: optional companion '{}' failed (skipping): {}",
                                 companion_id,
@@ -698,17 +392,6 @@ impl PackageManager {
             }
         }
 
-        // A1 hybrid commit — deferred leg: now that every required companion
-        // installed, commit the deferred re-sync advances. A required-companion
-        // failure returned above without reaching here, so each deferred source
-        // keeps its prior digest and a later offline compose still resolves the
-        // previously installed companion. Optional-companion failures warn and fall
-        // through — their advance still commits (fail-open contract).
-        //
-        // This loop is NOT atomic across sources: each `write_has_descriptor` is its
-        // own tag-store write, so a crash mid-loop can leave some deferred advances
-        // committed and others not. That window is pre-existing and benign — the next
-        // `ocx patch sync` re-fetches and re-commits idempotently.
         for commit in &pending_tag_writes {
             PatchTagMap::write_has_descriptor(&commit.tags_path, &commit.manifest_digest)
                 .await
@@ -718,63 +401,19 @@ impl PackageManager {
         Ok(installed_count)
     }
 
-    /// Install a companion package through the base-install primitive, pinning
-    /// it in patch state instead of the shared local index.
+    /// Installs a companion into the object store, pinned in patch state, never in the local index.
     ///
-    /// A companion is a package the user never named, so its tag→digest
-    /// binding is patch-tier state ([`ocx_store::file_structure::FileStructure::patch_companion_path`]),
-    /// never a package-tier pin in the local index (`subsystem-oci`: a pin
-    /// moves only when named). Two paths:
-    ///
-    /// - **Pin hit** ([`PatchDiscoveryMode::Lazy`] only) — pull the recorded
-    ///   digest directly. No tag resolution at all, so a steady-state install
-    ///   is one lookup cheaper AND cannot drift. A pin that came from the
-    ///   active snapshot rather than the record is written back
-    ///   ([`backfill_companion_pin`](Self::backfill_companion_pin)) so freeze
-    ///   and garbage collection can still see it.
-    /// - **No pin, or [`PatchDiscoveryMode::Sync`]** — resolve the tag through
-    ///   [`ocx_index::Index::remote_view`] (live, `ReadOnly`), pull the
-    ///   resulting digest pinned, and record the pin on success.
-    ///
-    /// The recorded digest is the TOP manifest digest (image index where the
-    /// companion is multi-platform) — platform-independent, so compose's own
-    /// platform selection stays unchanged.
-    ///
-    /// **Both paths pull through [`PackageManager::read_only_view`]**, so a
-    /// companion install leaves the local index at zero bytes. Resolving no
-    /// tag is not enough on its own: a `tag@digest` pull skips the root-tag
-    /// commit but still persists the DISPATCH OBJECT (the image index the
-    /// digest names) into the companion repository's `o/` under
-    /// `LocalWritePolicy::Full`, which is the same package-tier directory the
-    /// pin move was taken out of. The content chain is unaffected — every
-    /// blob still lands in `$OCX_HOME/blobs` and is ref-linked from the
-    /// installed package (`stage_and_link_chain_blobs`), which is where
-    /// compose and garbage collection read it back from.
-    ///
-    /// This method calls `pull` directly, bypassing
-    /// [`discover_and_install_patches`]. This is the recursion guard:
-    /// companions are never themselves patched (no recursive discovery).
-    ///
-    /// `candidate` and `select` are both `false` for companions — they are
-    /// materialized into the object store only (no install symlinks).
-    ///
-    /// # Recursion guard regression test
-    ///
-    /// The `#[cfg(test)]` module at the bottom of this file contains a test
-    /// that verifies a companion install does NOT invoke discovery.
+    /// Never calls `discover_and_install_patches`, or discovery recurses into companions.
     pub async fn install_companion(
         &self,
         companion_id: &PackageRef,
         platform: ocx_oci::Platform,
         mode: PatchDiscoveryMode,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        // Every companion pull runs on a view that cannot write the local
-        // index (see the method doc). Bound once so both paths share it and
-        // neither can be changed back to the ambient manager in isolation.
+        // Both paths pull through this, or even a `tag@digest` pull writes a dispatch object into the index.
         let store_only = self.read_only_view();
 
-        // Pin hit: pull the recorded digest, no tag resolution. `Sync` skips
-        // this — its whole point is seeing the tag move.
+        // `Sync` skips the pin: it exists to see the tag move.
         if mode == PatchDiscoveryMode::Lazy
             && let Some(digest) = self
                 .companion_pin(companion_id)
@@ -792,12 +431,7 @@ impl PackageManager {
             return Ok(installed);
         }
 
-        // Unpinned and offline: raised HERE rather than left to the resolver
-        // below, whose refusal is the package-tier one — it names `ocx index
-        // update`, and an index update deliberately never writes a companion
-        // pin. The caller's existing required/optional split turns this into
-        // exit 81 for a `required` companion and a debug-level skip for an
-        // optional one.
+        // Here, not by the resolver, whose refusal names `ocx index update`, which never writes a companion pin.
         if self.is_offline() {
             return Err(PackageErrorKind::PatchDiscovery(
                 crate::patch::PatchError::PolicyBlocked {
@@ -806,20 +440,7 @@ impl PackageManager {
             ));
         }
 
-        // No pin, or a sync that must see the tag move: resolve LIVE through
-        // `remote_view` (`ChainMode::Remote` + `LocalWritePolicy::ReadOnly`),
-        // then pull that digest pinned (a `tag@digest` pull skips tag growth
-        // too).
-        //
-        // The view is deliberately mode-INDEPENDENT. Patches float by design:
-        // `--frozen` scopes to the package tier, so a companion must resolve
-        // even when the ambient chain is `ChainMode::Frozen` — routing this
-        // through the ambient chain is what made `ocx --frozen config setup`
-        // fail to deliver its payload's companions (issue #293). The ambient
-        // chain would also answer a known tag from the local index first,
-        // which is the stale answer a sync exists to replace. `ReadOnly` keeps
-        // it incapable of moving a package-tier pin either way; `--offline` is
-        // gated above, before any view is built.
+        // `remote_view`, not the ambient chain, which fails under `--frozen` and serves stale local tags.
         let top_digest = self
             .index()
             .remote_view()
@@ -828,13 +449,11 @@ impl PackageManager {
             .map_err(|error| PackageErrorKind::Internal(error.into()))?
             .ok_or(PackageErrorKind::NotFound)?;
 
-        // No call to discover_and_install_patches — this is the recursion guard.
         let installed = store_only
             .pull(&companion_id.clone_with_digest(top_digest.clone()), platform)
             .await?;
 
-        // Record the pin only once the companion is materialized: a pin naming
-        // a digest that was never pulled would compose as "not installed".
+        // Only once materialized, or the pin composes as "not installed".
         PatchTagMap::write_tag(
             &self.file_structure().patch_companion_path(companion_id),
             companion_id.tag_or_latest(),
@@ -845,29 +464,9 @@ impl PackageManager {
         Ok(installed)
     }
 
-    /// Record a companion pin the active [`PatchSnapshot`](crate::patch::PatchSnapshot)
-    /// supplied, when the patch tier has no record of its own for that tag.
+    /// Records a snapshot-supplied companion pin the patch tier lacks, or freeze and GC read an empty record.
     ///
-    /// A machine that only ever installs under a snapshot — a cold CI runner
-    /// with a committed `patches.snapshot.json` — never reaches the resolve
-    /// that writes the record, yet the record is what `ocx patch freeze` and
-    /// record-scoped garbage collection read. Left empty, a freeze there
-    /// replaces the good snapshot with `companions: {}` and an `ocx clean`
-    /// collects the package the next frozen build composes.
-    ///
-    /// Fill-in only, never an overwrite: a recorded digest is the machine's
-    /// LIVE binding and an `ocx patch sync` is the only thing allowed to
-    /// advance it. Writing the snapshot's digest over a synced one would make
-    /// a snapshot-driven install roll the machine back.
-    ///
-    /// The digest recorded here is the snapshot's, which pins the PLATFORM
-    /// manifest where the record normally holds the top one. Both read back
-    /// correctly — the readers select a platform only when the manifest at the
-    /// pin turns out to be an image index — and a freeze on this machine
-    /// reproduces the same value.
-    ///
-    /// No-op with no snapshot loaded: the pin then came from the record by
-    /// construction, so there is nothing to fill in and no lock to take.
+    /// Fill-in only: the record is the live binding only `ocx patch sync` may advance.
     async fn backfill_companion_pin(
         &self,
         companion_id: &PackageRef,
@@ -895,26 +494,10 @@ impl PackageManager {
 
 // ── Free functions (discovery helpers) ───────────────────────────────────────
 
-/// Compute the patch-registry `PackageRef` for the package-specific descriptor.
-///
-/// Applies `expand_patch_path` to the base identifier's registry host and
-/// repository, then constructs an `PackageRef` rooted at `patches.registry`
-/// tagged with [`InternalTag::PATCH_TAG`].
-///
-/// The global descriptor identifier uses the reserved single-segment
-/// [`GLOBAL_PATCH_REPOSITORY`] repository. The default path template always
-/// produces a two-or-more-segment sub-path, so the two identifiers never
-/// collide. A custom template can break that assumption (e.g. `path = "global"`,
-/// or `{repository}` for a base repository named `global`); the reservation
-/// guard below detects such a collapse and falls back to the default
-/// two-segment form so a per-package descriptor can never address — and thus
-/// overwrite or shadow — the reserved global slot.
+/// The patch-registry `PackageRef` for `base_id`'s package-specific descriptor.
 pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &PackageRef) -> PackageRef {
     let sub_path = expand_patch_path(&patches.path_template, base_id.registry(), base_id.repository());
-    // Reservation guard: a custom `path` template must never collapse a
-    // per-package descriptor onto the reserved single-segment `global` slot.
-    // Fall back to the default `<registry-slug>/<repository>` form, which is
-    // always two or more segments and so can never equal the reserved name.
+    // A custom template landing on `global` falls back to the default, or it overwrites the global descriptor.
     let sub_path = if sub_path == GLOBAL_PATCH_REPOSITORY {
         expand_patch_path(
             PatchConfig::DEFAULT_PATH_TEMPLATE,
@@ -927,21 +510,11 @@ pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &PackageRef) 
     patch_registry_identifier(patches, &sub_path)
 }
 
-/// Build the patch-registry `PackageRef` for a descriptor repository, keeping the
-/// identifier's registry field a *bare host authority*.
+/// The patch-registry `PackageRef` for a descriptor repository.
 ///
-/// The configured patch registry (`patches.registry`) MAY carry a path prefix
-/// after the host authority — e.g. `registry.corp.example/ocx-patches`. An
-/// [`PackageRef`]'s registry field, however, must be a bare `host[:port]`: the
-/// OCI transport builds request URLs as `https://<registry>/v2/<repository>/…`,
-/// so any path prefix left in the registry field produces the malformed
-/// `https://host/ocx-patches/v2/<repo>/…` (which 404s) instead of the correct
-/// `https://host/v2/ocx-patches/<repo>/…`. Split the configured registry at the
-/// first `/` and fold the prefix in front of `repository` so the transport URL,
-/// the CAS blob namespace, and the tag-store path are all well-formed.
+/// A path prefix in `patches.registry` moves onto the repository, or the transport URL 404s.
 fn patch_registry_identifier(patches: &ResolvedPatchConfig, repository: &str) -> PackageRef {
     let (registry, repository) = match patches.registry.split_once('/') {
-        // `host/prefix…` → registry is the bare host; the prefix precedes the repo.
         Some((host, prefix)) => {
             let prefix = prefix.trim_matches('/');
             let repository = if prefix.is_empty() {
@@ -951,17 +524,12 @@ fn patch_registry_identifier(patches: &ResolvedPatchConfig, repository: &str) ->
             };
             (host.to_string(), repository)
         }
-        // Bare host, no path prefix — the repository stands alone.
         None => (patches.registry.clone(), repository.to_string()),
     };
     PackageRef::new_registry(repository, registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 
-/// The bare host authority of the configured patch registry — the portion
-/// before any `/` path prefix (e.g. `registry.corp.example/ocx-patches` →
-/// `registry.corp.example`). Companion identifiers carry only the bare host in
-/// their registry field, so cross-registry comparisons must use the host, not
-/// the path-prefixed `patches.registry` string.
+/// The patch registry's bare host, what companion identifiers carry; a path prefix would never compare equal.
 fn patch_registry_host(patches: &ResolvedPatchConfig) -> &str {
     patches
         .registry
@@ -969,53 +537,15 @@ fn patch_registry_host(patches: &ResolvedPatchConfig) -> &str {
         .map_or(patches.registry.as_str(), |(host, _)| host)
 }
 
-/// The reserved repository name for the global patch descriptor.
-///
-/// The global descriptor applies to every base. It lives at this single fixed
-/// repository under the patch registry — `<patch-registry>/global` — tagged
-/// with `__ocx.patch`. A single path segment cannot collide with the default
-/// package-specific sub-path, which always has two or more segments
-/// (`<registry-slug>/<repository>`). [`patch_descriptor_id`] additionally
-/// enforces the reservation for custom templates: if an expanded per-package
-/// path would equal this name, it falls back to the default two-segment form,
-/// so the global slot is never reachable through the per-package path. Unlike
-/// an empty repository (the former encoding), a normal repository name is a
-/// valid OCI path component accepted by every registry, including Docker
-/// `registry:2`.
+/// The reserved repository of the global patch descriptor, which applies to every base.
 pub const GLOBAL_PATCH_REPOSITORY: &str = "global";
 
-/// Compute the global patch-registry `PackageRef`.
-///
-/// The global descriptor lives at the reserved [`GLOBAL_PATCH_REPOSITORY`]
-/// repository under the patch registry, tagged with `__ocx.patch`. It is
-/// structurally distinct from any package-specific sub-path (which always has
-/// two or more segments), so the two identifiers never collide.
+/// The global descriptor's `PackageRef`, at [`GLOBAL_PATCH_REPOSITORY`].
 pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> PackageRef {
     patch_registry_identifier(patches, GLOBAL_PATCH_REPOSITORY)
 }
 
-/// Whether a lazy patch-discovery failure must abort a user-requested base install.
-///
-/// Lazy discovery is a side effect of `install` / `install_all`, not an explicit
-/// user action. Its fatality is gated on the patch tier's fail posture, mirroring
-/// the compose-time gating in
-/// [`build_site_patch_set`](PackageManager::build_site_patch_set) and the
-/// best-effort model of [`sync_patches`](PackageManager::sync_patches):
-///
-/// - **Required tier** (`patches.required == true`): fatal. An unreachable or
-///   erroring patch server means we cannot confirm that no mandated companion
-///   (e.g. a corporate CA overlay) applies to this base, so the install fails
-///   closed rather than silently proceed without the overlay (C7).
-/// - **`RequiredCompanionFailed`**: fatal regardless of the tier posture — a
-///   rule-level `required = true` companion that failed to install is a
-///   fail-closed event even under a non-required tier.
-/// - **Otherwise** (non-required tier, e.g. a descriptor fetch/parse failure
-///   against an empty or unreachable patch server): NOT fatal. The caller warns
-///   and continues installing the base without companions.
-///
-/// `patches` is `None` only when no tier is configured, in which case discovery
-/// short-circuits before it can error; the `false` result then keeps the
-/// function total.
+/// Whether a discovery failure aborts a base install: under a required tier, or on a failed required companion.
 pub(super) fn install_discovery_error_is_fatal(
     patches: Option<&ResolvedPatchConfig>,
     error: &PackageErrorKind,
@@ -1023,57 +553,22 @@ pub(super) fn install_discovery_error_is_fatal(
     patches.is_some_and(|patches| patches.required) || matches!(error, PackageErrorKind::RequiredCompanionFailed { .. })
 }
 
-/// A deferred `LookedHasDescriptor` tag-store advance (A1 hybrid commit — deferred leg).
-///
-/// A re-sync over an existing `LookedHasDescriptor` records its pointer advance
-/// here instead of committing it immediately. The caller applies the accumulated
-/// commits only after every required companion installs successfully, so a
-/// required-companion failure leaves each re-synced source's prior digest intact.
-/// First-discovery advances are NOT deferred — see [`DescriptorCommit`].
+/// A re-sync's `LookedHasDescriptor` advance, held until every required companion installs.
 struct PendingDescriptorCommit {
     tags_path: std::path::PathBuf,
     manifest_digest: String,
 }
 
-/// When [`fetch_and_persist_descriptor`] commits a freshly fetched descriptor's
-/// `LookedHasDescriptor` tag-store advance (A1 hybrid commit strategy).
-///
-/// The choice is driven by the PRIOR three-state at the descriptor source:
-///
-/// - [`Eager`](DescriptorCommit::Eager) — prior state was `NeverLooked` or
-///   `LookedNoDescriptor` (first discovery). Commit the pointer immediately: there
-///   is no prior good digest to preserve, and recording the descriptor keeps a
-///   later offline compose fail-closed on a missing required companion. A
-///   first-discovery required-companion failure still errors, but the tag has
-///   already advanced — the intended fail-closed posture, not a regression.
-/// - [`Deferred`](DescriptorCommit::Deferred) — prior state was
-///   `LookedHasDescriptor` (re-sync). Defer the advance into
-///   [`PendingDescriptorCommit`] until every required companion installs, so a
-///   transient re-sync failure preserves the last-known-good digest.
+/// When [`fetch_and_persist_descriptor`] commits a `LookedHasDescriptor` advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DescriptorCommit {
-    /// Commit the tag-store advance immediately (first discovery).
+    /// First discovery: commit now, so a later offline compose fails closed on a missing required companion.
     Eager,
-    /// Defer the tag-store advance until required companions install (re-sync).
+    /// Re-sync: defer, so a failed required companion keeps the last-known-good digest.
     Deferred,
 }
 
-/// Fetch and persist the blobs for one descriptor source, recording its
-/// discovery state.
-///
-/// Returns `Some(PatchDescriptor)` when a descriptor was found and its blobs
-/// were successfully persisted; `None` when the patch tag does not exist at the
-/// registry (the "looked, no patch" state).
-///
-/// Side effects:
-/// - Calls [`fetch_patch_descriptor_blobs`] once.
-/// - On success, calls [`persist_patch_descriptor`] to write blobs to the CAS,
-///   then commits the `LookedHasDescriptor` tag-store advance per `commit`:
-///   [`DescriptorCommit::Eager`] writes it now; [`DescriptorCommit::Deferred`]
-///   pushes a [`PendingDescriptorCommit`] onto `pending` for the caller to commit
-///   after required companions install (A1 hybrid commit strategy).
-/// - On the "no patch" result, calls [`PatchTagMap::write_no_descriptor`]
-///   eagerly (there are no companions to fail, so the state is safe to record).
+/// Fetches and persists one descriptor source and records its state; `None` when there is no patch tag.
 async fn fetch_and_persist_descriptor(
     manager: &PackageManager,
     descriptor_id: &PackageRef,
@@ -1081,20 +576,16 @@ async fn fetch_and_persist_descriptor(
     commit: DescriptorCommit,
     pending: &mut Vec<PendingDescriptorCommit>,
 ) -> Result<Option<PatchDescriptor>, PackageErrorKind> {
-    // Require client — we already checked is_offline() in the caller but
-    // require_client() is the canonical guard here.
     let client = manager.require_client().map_err(PackageErrorKind::Internal)?;
     let blob_store = &manager.file_structure().blobs;
     let registry = descriptor_id.registry();
 
-    // Fetch the descriptor blobs from the registry.
     let fetched = fetch_patch_descriptor_blobs(client, descriptor_id)
         .await
         .map_err(PackageErrorKind::PatchDiscovery)?;
 
     match fetched {
         None => {
-            // No __ocx.patch at this registry — record "looked, no patch".
             log::debug!("patch discovery: no descriptor at '{}'", descriptor_id);
             PatchTagMap::write_no_descriptor(tags_path)
                 .await
@@ -1107,7 +598,6 @@ async fn fetch_and_persist_descriptor(
             manifest_digest,
             layer_digest,
         }) => {
-            // Persist both blobs to the CAS and parse the descriptor.
             let (descriptor, persisted) = persist_patch_descriptor(
                 blob_store,
                 registry,
@@ -1119,23 +609,14 @@ async fn fetch_and_persist_descriptor(
             .await
             .map_err(PackageErrorKind::PatchDiscovery)?;
 
-            // A1 hybrid commit: the blobs are already in the CAS above. Commit the
-            // "looked, has descriptor" tag-store advance per the prior-state policy.
             let persisted_digest = persisted.manifest_digest.to_string();
             match commit {
                 DescriptorCommit::Eager => {
-                    // First discovery (prior NeverLooked / LookedNoDescriptor): commit
-                    // now. No prior good digest to preserve, and recording the descriptor
-                    // keeps a later offline compose fail-closed on a missing required
-                    // companion.
                     PatchTagMap::write_has_descriptor(tags_path, &persisted_digest)
                         .await
                         .map_err(PackageErrorKind::Internal)?;
                 }
                 DescriptorCommit::Deferred => {
-                    // Re-sync (prior LookedHasDescriptor): defer the advance so the caller
-                    // commits it only after every required companion installs. An
-                    // uncommitted advance leaves a harmless orphan blob for GC.
                     pending.push(PendingDescriptorCommit {
                         tags_path: tags_path.to_path_buf(),
                         manifest_digest: persisted_digest,
@@ -1153,20 +634,10 @@ async fn fetch_and_persist_descriptor(
     }
 }
 
-/// Load a persisted `PatchDescriptor` from the CAS blob store.
+/// Loads a persisted `PatchDescriptor` from the CAS, re-verifying both blobs' digests.
 ///
-/// Reads the manifest blob to find the layer digest, then reads the layer
-/// blob and parses it as a `PatchDescriptor`. Used when the three-state
-/// tag-store entry is `LookedHasDescriptor` (descriptor already on disk).
-///
-/// # Content-address verification
-///
-/// After reading each blob, this function recomputes the SHA-256 digest of
-/// the returned bytes and compares it to the expected digest. A mismatch
-/// indicates on-disk tampering or corruption of the cached blob and is
-/// returned as a [`crate::patch::PatchError::ManifestDigestMismatch`] or
-/// [`crate::patch::PatchError::LayerDigestMismatch`] error, ensuring the
-/// tampered blob is rejected rather than silently trusted.
+/// A mismatch returns [`crate::patch::PatchError::ManifestDigestMismatch`] or
+/// [`crate::patch::PatchError::LayerDigestMismatch`].
 pub(super) async fn load_descriptor_from_cas(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
@@ -1174,14 +645,11 @@ pub(super) async fn load_descriptor_from_cas(
 ) -> Result<PatchDescriptor, crate::Error> {
     use crate::patch::PatchError;
 
-    // Read the manifest blob — returns None if not present in the CAS.
     let manifest_bytes = blob_store.read_blob(registry, manifest_digest).await?.ok_or_else(|| {
         let path = blob_store.data(registry, manifest_digest);
         crate::error::file_error(&path, std::io::Error::other("manifest blob not found in CAS"))
     })?;
 
-    // Content-address re-verification: recompute SHA-256 of the manifest bytes
-    // and compare to the expected digest. Detects on-disk tampering/corruption.
     let computed_manifest_digest = ocx_oci::Algorithm::Sha256.hash(&manifest_bytes);
     if &computed_manifest_digest != manifest_digest {
         return Err(crate::Error::from(crate::error::PackageErrorKind::PatchDiscovery(
@@ -1192,12 +660,9 @@ pub(super) async fn load_descriptor_from_cas(
         )));
     }
 
-    // Parse the manifest to find the layer digest.
-    // The manifest is a plain OCI image manifest JSON; parse minimally.
     let manifest_value: serde_json::Value =
         serde_json::from_slice(&manifest_bytes).map_err(crate::Error::SerializationFailure)?;
 
-    // Extract the first (and only) layer digest.
     let layer_digest_str = manifest_value
         .get("layers")
         .and_then(|layers| layers.get(0))
@@ -1210,15 +675,11 @@ pub(super) async fn load_descriptor_from_cas(
 
     let layer_digest = ocx_oci::Digest::try_from(layer_digest_str).map_err(crate::Error::Digest)?;
 
-    // Read and parse the layer blob.
     let layer_bytes = blob_store.read_blob(registry, &layer_digest).await?.ok_or_else(|| {
         let path = blob_store.data(registry, &layer_digest);
         crate::error::file_error(&path, std::io::Error::other("descriptor layer blob not found in CAS"))
     })?;
 
-    // Content-address re-verification: recompute SHA-256 of the layer bytes
-    // and compare to the digest declared in the manifest. Detects tampering or
-    // corruption of the cached layer blob independently of the manifest check.
     let computed_layer_digest = ocx_oci::Algorithm::Sha256.hash(&layer_bytes);
     if computed_layer_digest != layer_digest {
         return Err(crate::Error::from(crate::error::PackageErrorKind::PatchDiscovery(
@@ -1230,10 +691,7 @@ pub(super) async fn load_descriptor_from_cas(
     }
 
     PatchDescriptor::from_json_bytes(&layer_bytes).map_err(|error| {
-        // Preserve the structured PatchError chain instead of erasing it via
-        // `.to_string()`. `InvalidDescriptorJson` carries a `serde_json::Error`
-        // source; use `PackageErrorKind::PatchDiscovery` so the full chain is
-        // walkable for exit-code classification and diagnostics.
+        // Structured, never `.to_string()`, or exit-code classification loses the chain.
         crate::Error::from(crate::error::PackageErrorKind::PatchDiscovery(error))
     })
 }

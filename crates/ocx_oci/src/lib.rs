@@ -3,21 +3,15 @@
 
 //! OCI/distribution-spec-generic registry work: references, digests, manifests, transport, referrers, layer-placement annotations, SSRF guard, registry auth.
 //!
-//! # [`OciTransport`](client::OciTransport) is sealed
+//! Two compile-time contracts, each pinned by a `compile_fail` example below:
+//! [`OciTransport`](client::OciTransport) is sealed, and a [`PackageRef`] never
+//! converts to or from an [`OciIdentifier`] (`adr_index_indirection.md` § Layer 2).
+//! Each refusal is complete or has a compiling twin, or it keeps failing to compile
+//! for an unrelated reason and the doctest stays green after the contract breaks.
 //!
-//! Every registry read and write crosses that trait, and the SSRF guard, the
-//! retry ladder, the mirror routing and the referrers-fallback write all hang
-//! off implementing it correctly — several of the trait's own default methods
-//! are load-bearing security behaviour, not conveniences. An outside
-//! implementor could silently opt out of all of it while still satisfying
-//! `Client::with_transport`, so the trait carries a private supertrait and only
-//! this crate can implement it. Consumers that need a double take one from
-//! `testing` instead — `__testing`-gated, so a release build has no module
-//! here to link to.
+//! # Examples
 //!
-//! The doctest below is a **complete** implementation — every required method
-//! is there — so the only thing that refuses it is the supertrait. Drop the
-//! seal and it compiles, and this test goes red.
+//! A complete transport impl is refused by the seal alone:
 //!
 //! ```compile_fail,E0277
 //! use std::path::Path;
@@ -49,20 +43,6 @@
 //! }
 //! ```
 //!
-//! # A package identifier cannot be dialled
-//!
-//! [`PackageRef`] names a package; [`OciIdentifier`] names the registry
-//! location a request goes to. An index may serve the first from somewhere
-//! else entirely, so dialling it as-is reaches whatever host shares its
-//! spelling (ocx#504). Every [`Client`] read and write takes the second, and
-//! the two types have no conversion in either direction — the way across is
-//! routing through the index, or one of the explicit `OciIdentifier`
-//! constructors a workspace ratchet counts. Each refusal below has a twin that compiles
-//! with the right type, so each one fails for the reason it names. A twin
-//! differs from its refusal in exactly one expression and names the same
-//! types, so renaming either type turns the twin red instead of letting the
-//! refusal pass on an unresolved name.
-//!
 //! A package identifier handed to the client is a type mismatch:
 //!
 //! ```compile_fail,E0308
@@ -91,8 +71,7 @@
 //! }
 //! ```
 //!
-//! And a package identifier does not become a location without routing,
-//! neither by `into` nor by `from`:
+//! Nor does a package identifier become a location, by `into` or `from`:
 //!
 //! ```compile_fail,E0277
 //! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
@@ -118,15 +97,9 @@
 //! }
 //! ```
 
-/// The seal on [`client::OciTransport`].
-///
-/// The module is private, so `Sealed` is unnameable outside this crate and
-/// nothing outside it can write the impl the supertrait bound demands. Every
-/// in-crate implementor of `OciTransport` writes a one-line `impl Sealed`
-/// beside its own — deliberately manual, so adding a transport is a decision
-/// taken in this crate rather than a trait anyone can pick up.
+/// The seal on [`client::OciTransport`]: a private module, so no crate outside
+/// this one can implement the transport and skip its guarded defaults.
 mod sealed {
-    /// Supertrait of [`crate::client::OciTransport`]; see the module docs.
     pub trait Sealed {}
 }
 
@@ -174,29 +147,15 @@ pub const INDEX_SCHEMA_VERSION: u8 = 2;
 
 pub mod annotations;
 
-// Registry credentials: the store, the login flow, the `OCX_AUTH_*` env form and
-// the canonical registry key both halves agree on.
 pub mod auth;
 
-// The OCI layer and manifest media-type vocabulary, and the archive-extension
-// inference that picks one.
 pub mod media_type;
 
-// The registry-wire tag conventions: the `__ocx` namespace, the frozen legacy
-// keep-tag form, and the OCI Referrers fallback / cosign sidecar tags. A peer
-// of `client` and `index`, and deliberately not part of `package`: these are
-// names a registry holds, not versions a package publishes. `package::tag::Tag`
-// classifies on top of them.
 pub mod tag;
 
 pub mod layer_layout;
 pub use layer_layout::{LayerLayoutError, LayerLayoutSpec, resolve_layer_placement};
 
-// What a publisher names a layer by on the wire — a local archive path or a
-// digest already in the registry, plus the per-layer strip/prefix tail. A peer
-// of `layer_layout` (which reads the same intent back off a manifest
-// descriptor), and deliberately not part of `publisher`: the push path is the
-// only *writer*, but the vocabulary is the client's argument type.
 pub mod layer_ref;
 pub use layer_ref::{ArchiveMediaType, LayerRef, LayerRefParseError};
 
@@ -217,14 +176,9 @@ pub use manifest_builder::{ManifestArtifacts, ManifestBuilder};
 
 pub mod referrer;
 
-// The `--platform` optionality rule sign, attest and verify share. A peer of
-// all three: a pure decision over a resolution outcome, deliberately holding no
-// I/O, so the one rule cannot fork three ways.
 pub mod resolve_target;
 
-// Shared Sigstore endpoint URL validation (`UrlRejection`, `validate_sigstore_url`).
-// Lifted here as a peer of `sign`/`verify` so verify does not depend on sign for a
-// primitive both use (ADR `adr_oci_referrers_signing_v1.md` Amendment 2).
+// A peer of `sign`/`verify`, not part of either (`adr_oci_referrers_signing_v1.md` Amendment 2).
 pub mod endpoint;
 
 pub mod package_ref;
@@ -250,7 +204,6 @@ pub use digest::Digest;
 pub mod pinned_package_ref;
 pub use pinned_package_ref::PinnedPackageRef;
 
-// The physical side of the identifier split (ocx#504): what `Client` dials.
 pub mod oci_identifier;
 pub use oci_identifier::{OciIdentifier, PinnedOciIdentifier};
 
@@ -260,7 +213,5 @@ pub use repository::Repository;
 mod file_storage;
 pub use file_storage::FileStorage;
 
-// The transport doubles and client seams this crate lends its consumers; see
-// the module docs for why they are gated rather than plain `pub`.
 #[cfg(any(test, feature = "__testing"))]
 pub mod testing;

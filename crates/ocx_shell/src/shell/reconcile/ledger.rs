@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The `__OCX_ENV_STATE` carrier format ([ocx-sh/ocx#345](https://github.com/ocx-sh/ocx/issues/345)):
-//! [`LedgerEntry`], [`ScopeId`], [`Verdict`], [`Prior`], [`ProjectScope`],
-//! [`Scopes`], [`Ledger`], and the envelope codec
-//! ([`Ledger::decode`]/[`Ledger::encode`]).
-//!
-//! The carrier is **untrusted input** (C-007): its only permitted effects are
-//! naming the revert set and supplying the equality operand for the exit
-//! guard. Nothing here constructs a path from it, re-grants consent, or
-//! selects a value for a key it is not reverting.
+//! The `__OCX_ENV_STATE` carrier format and its envelope codec; the carrier is **untrusted input**.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,81 +16,57 @@ use ocx_package::metadata::env::modifier::ModifierKind;
 
 /// The private session carrier holding the encoded [`Ledger`].
 ///
-/// C-012 documents `unset __OCX_ENV_STATE` as *the* repair gesture, which makes
-/// this spelling user-facing contract — it sits inside the reserved `__OCX_*`
-/// namespace [`ocx_util::env::is_reserved_ocx_key`] gates, and C-036's resolver
-/// gate exists so no package can declare it. One constant so the emitter
-/// (`shell::hook`), the gate (`env`) and the reader here cannot drift.
+/// The spelling is user-facing: `unset __OCX_ENV_STATE` is the documented repair gesture.
 pub const CARRIER_KEY: &str = "__OCX_ENV_STATE";
 
-/// The schema version [`Ledger::empty`] writes and [`Ledger::decode`] accepts.
+/// The payload-shape version [`Ledger::empty`] writes and [`Ledger::decode`] accepts.
 ///
-/// Describes the payload **shape**; the envelope tag describes the encoding
-/// (C-003). Additive-only: a new field is optional and never moves this number
-/// (A-04).
+/// Additive-only: a new field is optional and never moves this number.
 pub const LEDGER_VERSION: u8 = 1;
 
-/// The size ceiling on the whole `__OCX_ENV_STATE` value, in bytes (C-003, C-004).
+/// The size ceiling on the whole `__OCX_ENV_STATE` value, in bytes.
 pub const MAX_CARRIER_BYTES: usize = 16 * 1024;
 
-/// The ceiling on the recorded config-tier list ([`Ledger::tiers`]).
+/// The ceiling on [`Ledger::tiers`], each a `stat` on every prompt; a hand-set carrier could list ~2400.
 ///
-/// [`MAX_CARRIER_BYTES`] bounds the envelope, not the array inside it — and
-/// `tiers` is the one field that turns array length into **per-prompt syscalls**:
-/// every path in it becomes a `stat` in `watch_paths`' set, on every prompt, and
-/// `next_ledger` carries the list forward for the shell's whole life.
-/// ~12 KiB of short JSON strings fits ~2400 of them inside the 16 KiB envelope,
-/// so a carrier the user is invited to `unset` (C-012) — and can therefore also
-/// hand-set — buys ~2400 `stat` calls per prompt, permanently.
-///
-/// Eight is headroom over the five `ConfigLoader::load_with_local_view` can
-/// actually emit: the three candidate tiers (system, user, home) plus
-/// `OCX_CONFIG` and `--config`. Nothing legitimate is ever truncated, so the
-/// A-13 guarantee that a grant added to any tier expires the cached verdict is
-/// untouched.
+/// Must stay above the five tiers the config loader emits, or a grant in a truncated tier never
+/// expires the cached verdict.
 pub const MAX_RECORDED_TIERS: usize = 8;
 
 /// The envelope tag naming encoder 1: base64url of compact JSON, uncompressed.
-///
-/// Private: nothing outside this file has any business writing an envelope.
 const ENCODER_TAG: &str = "1";
 
 /// One env-var binding the reconciler applied, recorded literally.
 ///
-/// C-001 — the wire field is **`type`, never `kind`**: the spelling
-/// `ocx_cli::api::data::env::EnvEntry` already emits and the nushell shim
-/// already parses. Values are raw and unescaped (C-009, invariant L-2) and
-/// byte-exact copies of what ocx wrote (C-008, invariant L-1).
+/// Values are raw, unescaped, byte-exact copies of what ocx wrote.
 ///
-/// A-08 — `separator` holds the **effective** separator, resolved once at
-/// record time: always `Some` for [`ModifierKind::List`] (defaulting to
-/// [`DEFAULT_SEPARATOR`]), and `None` reserved for path-kind, where it means
-/// [`ocx_util::env::PATH_SEPARATOR`].
+/// `separator` holds the **effective** separator, resolved once at record time: always
+/// present for `list` (defaulting to a single space), omitted otherwise; for `path` it
+/// means the platform's `PATH` separator.
+// `type`, not `kind`: the spelling `EnvEntry` emits and the nushell shim parses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct LedgerEntry {
     /// Environment-variable name.
     pub key: String,
     /// The exact string ocx wrote, byte for byte.
     pub value: String,
-    /// How the value combines — re-derived from D for every key D declares
-    /// (C-007 rule (b)); L's copy is used only for the revert set.
+    /// How the value combines.
+    // Only the revert set reads this copy; D's kind wins for every key D declares.
     #[serde(rename = "type")]
     pub kind: ModifierKind,
-    /// The effective list separator; `None` is path-kind only (A-08).
+    /// The effective list separator; omitted unless `type` is `list`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
 }
 
 impl From<&Entry> for LedgerEntry {
-    /// Infallible, and copies `value` byte for byte (C-008, C-009).
     fn from(entry: &Entry) -> Self {
         Self {
             key: entry.key.clone(),
             value: entry.value.clone(),
             kind: entry.kind.clone(),
             separator: match entry.kind {
-                // A-08 resolves the default here, at record time, so no revert
-                // path ever has to guess one back.
+                // Resolved at record time so no revert path has to guess the default back.
                 ModifierKind::List => Some(effective_separator(entry)),
                 ModifierKind::Path | ModifierKind::Constant => None,
             },
@@ -106,10 +74,10 @@ impl From<&Entry> for LedgerEntry {
     }
 }
 
-/// Which scope a ledger datum belongs to. Wire spelling `global` / `project`.
+/// Which scope a ledger datum belongs to: `global` or `project`.
 ///
-/// C-018 — exactly two slots. A project nested inside a project does not layer;
-/// the inner one *replaces* the outer, so moving between them is a switch.
+/// Exactly two slots. A project nested inside a project does not layer; the inner
+/// one *replaces* the outer, so moving between them is a switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeId {
@@ -119,45 +87,31 @@ pub enum ScopeId {
     Project,
 }
 
-/// The cached activation verdict (C-002).
+/// The cached activation verdict.
 ///
-/// **No positive verdict is ever written.** An `Activate` verdict is re-derived
-/// every prompt and never read back from the carrier — caching it would make the
-/// ledger a consent input, which C-007 forbids. The variant exists so the
-/// vocabulary is total and the wire value is checkable. The two cached verdicts
-/// are both *negative*: they can only ever cause ocx to do less, which is the
-/// fail-safe direction, and the watch set expires both (A-13).
+/// `activate` is never written; the watch set expires both cached verdicts, `inert` and
+/// `noproject`.
+// Only negative verdicts are cached, so a stale one can only make ocx do less.
+// Never cache `Activate`, or the untrusted ledger becomes a consent input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// Never written to the carrier; present so the enum is total.
+    /// Never written to the carrier.
     Activate,
-    /// The negative-consent cache, expired by the watch set (C-019, C-042).
+    /// The negative-consent cache, expired by the watch set.
     Inert,
-    /// The walk resolved no project at all. Not consent-derived — there is no
-    /// project to consent to — so caching it leaves C-007 untouched;
-    /// `project_dir` is folded into the fingerprint, so entering any project
-    /// expires it.
+    // Kept apart from `Inert`, or carrier and report cannot tell refused consent from no project.
+    /// The walk resolved no project at all; wire spelling `"noproject"`.
     ///
-    /// Distinct from [`Verdict::Inert`] rather than folded into it: `inert`
-    /// means *a project was resolved and consent refused it*, which
-    /// `ocx shell state` reports and which a later grant must expire through the
-    /// project's consent stamp — a stamp there is no key for when no project was
-    /// resolved. Overloading one variant would make the two indistinguishable in
-    /// the carrier and in that report.
-    ///
-    /// Wire spelling `"noproject"`. A binary predating this variant fails
-    /// [`Ledger::decode`] on it and treats the ledger as absent (C-006, the
-    /// fail-safe direction) — reachable only across a `self update` mid-session,
-    /// and the very next prompt re-derives everything from scratch.
+    /// Entering any project expires it.
+    // Expiry relies on the project directory being folded into `fp`.
     NoProject,
 }
 
-/// What a scope's previous value was, for the constant revert path (C-015).
+/// What a scope's previous value was, for the constant revert path.
 ///
-/// A-05 — capture reads set-ness through `std::env::var_os`, so a set-but-empty
-/// variable is `Value("")` and **never** `Unset`. Reverting `Value("")` emits
-/// that arm's `export_constant(key, "")`, never `Shell::unset`.
+/// A set-but-empty variable is `value` with an empty string and **never** `unset`, so
+/// reverting it restores the empty value rather than removing the variable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Prior {
@@ -167,79 +121,45 @@ pub enum Prior {
     Value(String),
 }
 
-/// The entries one scope applied, in emission order (C-021).
+/// The entries one scope applied, in emission order.
 pub type Applied = Vec<LedgerEntry>;
 
 /// Pre-apply values for one scope's constants, keyed by env key.
 ///
-/// C-002 — a `BTreeMap` rather than an inline field on [`LedgerEntry`]: a prior
-/// must survive a constant that is later retired out of `applied` (C-016), and
-/// the sorted map keeps the encoded payload byte-stable for the fingerprint.
+/// Not a [`LedgerEntry`] field, since a prior must outlive its retired entry; sorted, so the payload stays byte-stable.
 pub type Priors = BTreeMap<String, Prior>;
 
-/// The project scope's record (C-002).
+/// The project scope's record.
 ///
-/// `key` and `dir` are **advisory identity labels** (C-007 rule (a), A-03):
-/// both are re-derived from the CWD walk every prompt, neither may construct a
-/// path, and `dir` never gates a revert — any value other than the walk's own
-/// result means the scope has been left.
-///
-/// # The one exception
-///
-/// A-11's determinacy probe
-/// (`walk_is_indeterminate`) is the
-/// single sanctioned use of `dir` as a path, and it is a *retention* of the
-/// already-applied scope rather than a revert — the fail-safe direction. It is
-/// bounded three ways: `dir` must be absolute (A-30 makes an honest one
-/// canonical), it must be an ancestor-or-self of the live CWD, and the only
-/// effect is one `symlink_metadata` on `<dir>/ocx.toml`. So a carrier can name
-/// no path outside the process's own working-directory ancestry, and still
-/// selects no value, re-grants no consent, and names no revert.
-///
-/// Everywhere else the rule above holds verbatim.
+/// `key` and `dir` are **advisory identity labels**, re-derived from the CWD walk every
+/// prompt: any `dir` other than the walk's own result means the scope has been left.
+// Neither may build a path beyond one bounded probe of `<dir>/ocx.toml`, and `dir` never gates a revert.
+// `walk_is_indeterminate` is the one use of `dir` as a path, and it can only retain a scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct ProjectScope {
-    /// `ReferenceManager::name_for_path` of the canonical project directory.
+    /// The project key derived from the canonical project directory.
     pub key: String,
     /// The canonical project directory, advisory only.
     pub dir: PathBuf,
     /// What this scope applied.
     pub applied: Applied,
-    /// Pre-apply constant values, captured against the **post-global**
-    /// environment (C-018), so reverting the project leaves the global scope
-    /// standing.
-    ///
-    /// That is also why a prior here can hold a value the *global* scope owns
-    /// rather than the user's own — [`Ledger::prior`] hops to
-    /// [`Scopes::global_priors`] when it does.
+    /// Pre-apply constant values, captured against the **post-global** environment, so
+    /// reverting the project leaves the global scope standing.
+    // May hold global's value, not the user's; `Ledger::prior` then hops to `global_priors`.
     pub priors: Priors,
 }
 
-/// The two scope slots (C-018).
+/// The two scope slots.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct Scopes {
     /// The global toolchain tier's applied entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global: Option<Applied>,
-    /// Pre-apply values for the **global** scope's constants (R1).
+    // A sibling of `global`, not a member: reshaping that array fails every live carrier's decode.
+    /// Pre-apply values for the **global** scope's constants.
     ///
-    /// A **sibling** field rather than a `priors` member inside `global`,
-    /// because turning that JSON array into an object would fail every live
-    /// carrier's decode — the fleet-wide `priors` loss A-04 exists to forbid.
-    /// As an optional additive field it bumps neither `v` nor the envelope tag
-    /// (A-04), and an older binary simply ignores it.
-    ///
-    /// The design spec justified having no global priors with "the global tier
-    /// is the user's own file and is never *left*". That conflates *the scope is
-    /// never exited* with *a key is never removed from it*, and
-    /// `ocx remove --global <pkg>` removes keys: without this map a retired
-    /// global constant had no prior to restore and ocx's value stayed in the
-    /// shell for its whole life, and a project constant shadowing a global one
-    /// restored **global's** value on a two-scope retirement — the project prior
-    /// is captured after global applied (C-018), so that is what it holds.
-    ///
-    /// Captured against the **pre-global** environment, which only the ledger's
-    /// producer sees.
+    /// Captured against the **pre-global** environment. Omitted when empty.
+    // Without it, a constant `ocx remove --global` retires has no prior and stays in the shell for its life.
     #[serde(default, skip_serializing_if = "Priors::is_empty")]
     pub global_priors: Priors,
     /// The resolved project tier.
@@ -247,98 +167,48 @@ pub struct Scopes {
     pub project: Option<ProjectScope>,
 }
 
-/// The decoded payload of `__OCX_ENV_STATE` (C-002).
-///
-/// `v` describes **shape**; the envelope tag describes **encoding** (C-003). A
-/// change that is both bumps both. A-04 — `v` is additive-only, and a shape
-/// break ships a `v-1` revert-read arm in the same release.
+/// The decoded payload of `__OCX_ENV_STATE`.
+// `v` versions shape, the envelope tag encoding: a change that is both bumps both; `v` is additive-only.
+// A shape break must ship a `v-1` revert-read arm in the same release, or live shells lose their revert set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct Ledger {
     /// Schema version of the payload shape.
     pub v: u8,
-    /// Watch-set fingerprint (C-019). A-13 folds the raw `OCX_CONSENT_*`
-    /// values, the recorded config-tier paths and the project's consent stamp
-    /// into it, which is what makes `verdict` expirable.
+    /// Watch-set fingerprint.
+    ///
+    /// Folds the raw `OCX_CONSENT_*` values, the recorded config-tier paths and the
+    /// project's consent stamp; `verdict` expires when it changes.
     pub fp: String,
-    /// The cached negative verdict; [`Verdict::Inert`] or
-    /// [`Verdict::NoProject`], never [`Verdict::Activate`].
+    /// The cached negative verdict: `inert` or `noproject`, never `activate`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Verdict>,
-    /// The config-tier paths that were in effect at compose time (A-13).
+    // Recorded, not re-derived: `--reconcile` never sees `--config`, so a grant there would never expire `inert`.
+    /// The config-tier paths in effect at compose time.
     ///
-    /// Recorded rather than re-derived, and that distinction is the whole
-    /// point: the `--config` / `OCX_CONFIG` explicit tier is a
-    /// **consent-bearing channel** (A-33), but the emitted hook body invokes
-    /// `--reconcile` with no `--config`, so a per-prompt process re-deriving
-    /// the list can never see it — and a grant added to that file would never
-    /// expire the cached `inert` verdict. Seeded by the shell-start
-    /// `ConfigLoader` pass, which is the one run that knows it, and carried
-    /// forward unchanged from there.
-    ///
-    /// Additive (A-04): optional on the wire, so it moves neither `v` nor the
-    /// envelope tag, and an absent list simply falls back to re-derivation.
+    /// An absent list falls back to re-deriving the paths. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tiers: Vec<PathBuf>,
 
-    /// The **membership** of the watch set baked into the shell's emitted gate
-    /// ([ocx-sh/ocx#347](https://github.com/ocx-sh/ocx/issues/347)).
+    // The shell gates on the watch list baked into its hook body; without `ws` a stale list is never redefined.
+    /// Digest of the ordered watch-path list baked into the shell's emitted gate.
     ///
-    /// Not a second [`Ledger::fp`]. `fp` folds every member's presence, size and
-    /// mtime and answers *"did anything move?"*; this folds the ordered path
-    /// list alone and answers *"is the shell watching the right files?"*. The
-    /// two are independent: a project's `ocx.lock` can move `fp` on every edit
-    /// while `ws` never budges, and entering a project moves both.
-    ///
-    /// It exists because the gate is **baked at emission time**, not read per
-    /// prompt: [`registration`] writes one newer-than term per watch path into
-    /// the hook body, and that list then decides whether ocx is invoked at all.
-    /// A reconcile recomputes the watch set every prompt, but the shell keeps
-    /// gating on the list it was given — so a project entered mid-session was
-    /// composed correctly and then never noticed again, and an `ocx add` inside
-    /// it could not reach the next prompt.
-    ///
-    /// Written by, and only by, the emission that redefines the gate
-    /// ([`redefinition`]); a value that ran ahead of the emission would describe
-    /// a gate the shell does not have. `next_ledger` therefore carries it
-    /// forward unchanged, exactly as it does [`Ledger::tiers`].
-    ///
-    /// Additive (A-04): optional on the wire, so it moves neither `v` nor the
-    /// envelope tag. A carrier written by a binary that did not know the field
-    /// decodes as empty, which no real membership digest equals — one redundant
-    /// redefinition, never a missed one, which is the fail-safe direction.
-    ///
-    /// [`registration`]: crate::shell::hook::registration
-    /// [`redefinition`]: crate::shell::hook::redefinition
+    /// Omitted when empty.
+    // Distinct from `fp`: an `ocx.lock` edit moves `fp` while the watched paths stay the same.
+    // Absent decodes as empty, which no real digest equals: one redundant redefinition, never a missed one.
+    // Written only by the emission that redefines the gate, or it describes a gate the shell does not have.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ws: String,
 
-    /// A digest of the deferred diagnostics the previous prompt printed (A-21).
+    // Without it every deferred message re-prints on every prompt while its cause holds.
+    /// A digest of the deferred diagnostics the previous prompt printed.
     ///
-    /// Deliberately **not** the messages themselves. The only question the next
-    /// prompt asks is *"is this line new"*, and 16 hex characters answer it in
-    /// the carrier budget the direnv-yield line alone would spend 70 bytes of —
-    /// the `[env]` hint another 150.
-    ///
-    /// Without it, every message in `Outcome::messages` re-prints on **every**
-    /// prompt for as long as its cause holds. For a directory direnv manages
-    /// that is the shell's whole life, and neither of the two verdicts a message
-    /// rides with is cacheable: an `Activate` verdict never is (C-007), and a
-    /// yield hangs off an env sentinel `fp` does not fold. The summary line
-    /// solved the same problem for itself by being a delta against the ledger;
-    /// this is the rest of A-21's output getting the same treatment, in the same
-    /// shape as `over_cap`'s "already announced on the prompt that did it" rule.
-    ///
-    /// Additive (A-04): optional on the wire, so it moves neither `v` nor the
-    /// envelope tag, and a binary that does not know it re-prints once. It
-    /// survives the over-cap marker alongside `fp`, or an over-cap shell would
-    /// re-announce on every prompt for exactly the reason this field exists.
-    ///
+    /// Kept alongside `fp` when the carrier is over cap. Omitted when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub messages_fp: String,
 
-    /// Scopes the 16 KiB cap dropped (C-004, A-01). An additive field on this
-    /// schema — it bumps neither `v` nor the envelope tag — and a scope it
-    /// names is reconciled exactly as an absent scope. Omitted when empty.
+    /// Scopes the 16 KiB cap dropped; omitted when empty.
+    ///
+    /// A scope it names is reconciled exactly as an absent scope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub over_cap: Vec<ScopeId>,
     /// What each scope applied.
@@ -346,30 +216,14 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Parse the `<tag> "." <payload>` envelope (C-003).
+    /// Parse the `<tag> "." <payload>` envelope; `None` (treat as absent) on every failure.
     ///
-    /// Encoder `1` is base64url of compact JSON, uncompressed, and is the only
-    /// encoder this design defines. Returns `None` — meaning *treat the ledger
-    /// as absent*, C-006 — for **every** failure, with no distinction at the
-    /// type level: unrecognised tag, missing `.`, a tag that is not a single
-    /// ASCII digit, a payload that is not valid base64url, JSON that does not
-    /// match the schema, an unrecognised `v`, or a raw value over 16 KiB.
-    ///
-    /// A-02 — decode also discards any ledger recording `PATH` or `PATHEXT` as
-    /// [`ModifierKind::Constant`], or carrying priors for either key.
-    ///
-    /// The excess of an over-long [`Ledger::tiers`] is **truncated, not
-    /// rejected**: same direction as A-02's forged-constant strip, and for the
-    /// same reason — the rest of the record is still usable, and refusing the
-    /// whole carrier over one oversized field would discard a live shell's
-    /// revert set. See [`MAX_RECORDED_TIERS`] for what the field costs per
-    /// prompt.
+    /// Strips `PATH`/`PATHEXT` constant claims and truncates [`Ledger::tiers`] rather than rejecting,
+    /// since refusing the carrier discards a live shell's revert set.
     pub fn decode(raw: &str) -> Option<Ledger> {
         if raw.len() > MAX_CARRIER_BYTES {
             return None;
         }
-        // `.` is absent from the base64url alphabet, so the first one is the
-        // only one and the split needs no length prefix.
         let (tag, payload) = raw.split_once('.')?;
         if tag != ENCODER_TAG {
             return None;
@@ -384,13 +238,10 @@ impl Ledger {
         Some(ledger)
     }
 
-    /// Encode to `1.<base64url(compact json)>` (C-004).
+    /// Encode to `1.<base64url(compact json)>`.
     ///
-    /// Over the 16 KiB cap this MUST NOT omit the variable: it emits a
-    /// **marker-only** ledger — `{ v, fp, verdict, over_cap }` with both scope
-    /// payloads dropped — which still carries the fingerprint and still
-    /// decodes (A-01). `None` means *omit the variable entirely* and is
-    /// reachable only when even the marker fails to encode.
+    /// Over the 16 KiB cap it emits a marker-only ledger with both scope payloads dropped;
+    /// `None` (omit the variable) only when even the marker fails.
     pub fn encode(&self) -> Option<String> {
         let full = envelope(self)?;
         if full.len() <= MAX_CARRIER_BYTES {
@@ -399,30 +250,21 @@ impl Ledger {
         let marker = Ledger {
             v: self.v,
             fp: self.fp.clone(),
-            // Survives the cap on `fp`'s reasoning inverted: dropping it would
-            // make an over-cap shell redefine its gate on every single prompt,
-            // for as long as the scope stays over the cap.
+            // Dropping it makes an over-cap shell redefine its gate on every prompt.
             ws: self.ws.clone(),
             verdict: self.verdict,
-            // The tier list is what makes the next prompt's fingerprint
-            // comparable at all, so it survives the cap alongside `fp`.
+            // Without it the next prompt's fingerprint is not comparable.
             tiers: self.tiers.clone(),
-            // Same reasoning one field down: dropping it here would make an
-            // over-cap shell re-announce every deferred diagnostic on every
-            // prompt, which is the state the field exists to stop.
+            // Dropping it makes an over-cap shell re-announce every deferred message on every prompt.
             messages_fp: self.messages_fp.clone(),
             over_cap: self.dropped_scopes(),
             scopes: Scopes::default(),
         };
-        // One rule, not a ladder: the marker keeps `fp`, which is what stops the
-        // next prompt recomposing and re-overflowing for the shell's whole life.
+        // The marker keeps `fp`, or every prompt recomposes and re-overflows.
         envelope(&marker).filter(|encoded| encoded.len() <= MAX_CARRIER_BYTES)
     }
 
-    /// The ledger the first prompt of a shell plans against (C-005).
-    ///
-    /// Required because [`Ledger::decode`] returns `Option` while [`plan`]
-    /// takes `&Ledger` — without it the absent-ledger call is unrepresentable.
+    /// The ledger the first prompt of a shell plans against.
     pub fn empty() -> Ledger {
         Ledger {
             v: LEDGER_VERSION,
@@ -436,8 +278,7 @@ impl Ledger {
         }
     }
 
-    /// Every scope this ledger carries a payload for, plus any already named
-    /// over-cap, in emission order.
+    /// Scopes with a payload or already named over-cap, in emission order.
     fn dropped_scopes(&self) -> Vec<ScopeId> {
         let mut scopes = Vec::new();
         if self.scopes.global.is_some() || self.over_cap.contains(&ScopeId::Global) {
@@ -449,9 +290,7 @@ impl Ledger {
         scopes
     }
 
-    /// A-02's decode-side half: a carrier claiming `PATH`/`PATHEXT` as a
-    /// constant, or carrying a prior for either, is stripped of exactly that
-    /// claim. The rest of the record still acts.
+    /// Strip only the `PATH`/`PATHEXT` constant claims and priors; the rest of the record still acts.
     fn discard_forged_path_constants(&mut self) {
         let retain = |applied: &mut Applied| {
             applied.retain(|entry| !(matches!(entry.kind, ModifierKind::Constant) && is_never_constant(&entry.key)));
@@ -466,34 +305,17 @@ impl Ledger {
         }
     }
 
-    /// The applied entries of both scopes in emission order — global first,
-    /// project second (C-018).
+    /// The applied entries of both scopes, global first.
     pub(super) fn applied_in_emission_order(&self) -> impl Iterator<Item = &LedgerEntry> {
         let global = self.scopes.global.iter().flatten();
         let project = self.scopes.project.iter().flat_map(|scope| scope.applied.iter());
         global.chain(project)
     }
 
-    /// The recorded pre-apply value for `key` (R1).
+    /// The recorded pre-apply value for `key`.
     ///
-    /// Two sources, and the project one does **not** simply win. A project prior
-    /// is captured against the post-global environment (C-018), so where it
-    /// holds the exact value the global scope recorded as its own constant for
-    /// the same key, it is global's value and not the user's — restoring it on a
-    /// two-scope retirement writes back a value no scope declares any more.
-    /// In that one case the lookup **chains** to
-    /// [`Scopes::global_priors`], which was captured against the pre-global
-    /// environment and holds what the user actually had.
-    ///
-    /// Chaining is safe precisely because it is unreachable while global still
-    /// declares the key: `retire_recorded_constant` returns early for a key
-    /// `desired` still declares, so a project prior is only ever consulted once
-    /// **both** scopes have stopped declaring it.
-    ///
-    /// Falls back to the global map outright when the project scope has no prior
-    /// for the key — the retired-global-constant half of R1 — and to the project
-    /// prior when the global scope recorded none, which is what an older
-    /// carrier, written before `global_priors` existed, looks like.
+    /// A project prior equal to global's own constant is global's value, so the lookup chains to
+    /// [`Scopes::global_priors`]; safe only because `retire_recorded_constant` skips keys `desired` still declares.
     pub(super) fn prior(&self, key: &str) -> Option<&Prior> {
         let global = || self.scopes.global_priors.get(key);
         let Some(project) = self.scopes.project.as_ref().and_then(|scope| scope.priors.get(key)) else {
@@ -505,13 +327,9 @@ impl Ledger {
         Some(project)
     }
 
-    /// Whether the global scope recorded `prior`'s value as its own constant for
-    /// `key` — i.e. whether the project captured global's value rather than the
-    /// user's.
+    /// Whether the project captured global's constant for `key` rather than the user's value.
     fn global_owns(&self, key: &str, prior: &Prior) -> bool {
         let Prior::Value(value) = prior else {
-            // `Unset` means the key did not exist when the project captured it,
-            // so global cannot have been holding it either.
             return false;
         };
         self.scopes.global.iter().flatten().any(|entry| {
@@ -527,7 +345,7 @@ fn envelope(ledger: &Ledger) -> Option<String> {
     Some(format!("{ENCODER_TAG}.{}", BASE64_URL.encode(json)))
 }
 
-/// The carrier format's own safety net (C-003/C-004): the envelope codec, the
+/// The carrier format's own safety net: the envelope codec, the
 /// 16 KiB cap, and the forged-`PATH` discard.
 ///
 /// These lived in `plan.rs`'s test module, behind a `pub(super) ENCODER_TAG`

@@ -1,16 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Sigstore bundle v0.3 assembly + parsing.
-//!
-//! Produces the canonical `application/vnd.dev.sigstore.bundle.v0.3+json`
-//! payload (cert chain + DSSE envelope + Rekor transparency-log entry)
-//! using the official `sigstore_protobuf_specs` types, so the output is a
-//! genuine cosign-compatible bundle. The bundle is the referrer's payload
-//! layer (see [`super::pipeline::SignPipeline`]).
+//! Sigstore bundle v0.3 assembly + parsing, via the official `sigstore_protobuf_specs` types.
 
-// The `Bundle` type is re-exported by the `sigstore` crate (its bundle feature);
-// the remaining protobuf message types come from `sigstore_protobuf_specs`.
 use sigstore::bundle::Bundle;
 use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{VerificationMaterial, bundle, verification_material};
 use sigstore_protobuf_specs::dev::sigstore::common::v1::{LogId, PublicKeyIdentifier, X509Certificate};
@@ -37,73 +29,32 @@ use ocx_trust::key_ref::KeyBackendKind;
 pub(crate) const BUNDLE_V03_MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
 
 /// Serialized Sigstore bundle v0.3 payload.
-///
-/// Carries the raw JSON bytes plus the digest of those bytes. Bytes are pushed
-/// as a blob; the digest is referenced by the referrer manifest's `layers[0]`.
 #[derive(Debug, Clone)]
 pub struct SignedBundle {
-    /// Canonical JSON bytes of the bundle v0.3 document.
     pub bytes: Vec<u8>,
-    /// SHA-256 digest of `bytes`.
     pub digest: Digest,
-    /// SubjectAltName of the issued Fulcio leaf — the identity a verifier
-    /// matches, read back off the certificate rather than off the token that
-    /// bought it. Fulcio derives the SAN from the `email` claim for a human
-    /// identity, so the token's `sub` (an opaque provider id for dex, Google
-    /// and every other email provider) names something no `--certificate-identity`
-    /// and no `[[trust.policy]]` will ever match. Empty when the leaf carries
-    /// no SAN, which is a certificate the verify side rejects anyway.
+    /// SubjectAltName read off the issued leaf, never the token: an email issuer's `sub` matches no
+    /// `--certificate-identity`. Empty when the leaf carries no SAN.
     pub certificate_identity: String,
-    /// OIDC issuer from the leaf's Fulcio issuer extension (`.1.8`), for the
-    /// same reason: the certificate is what verification reads.
+    /// OIDC issuer from the leaf's Fulcio issuer extension (`.1.8`).
     pub certificate_oidc_issuer: String,
-    /// Which key model produced this signature. Reported so a consumer can tell
-    /// a `file`-backed signature from a keyless one — and from a future KMS one
-    /// — without parsing the bundle.
+    /// Which key model produced this signature.
     pub key_backend: KeyBackendKind,
-    /// The signing key's cosign hint (`base64(sha256(SPKI DER))`), present in
-    /// key mode only. Keyless carries a certificate instead, and the identity
-    /// fields above are read off it.
+    /// The signing key's cosign hint (`base64(sha256(SPKI DER))`), key mode only.
     pub public_key_hint: Option<String>,
-    /// The Rekor log index, when a transparency record was created.
-    ///
-    /// `None` is a legal outcome under a key (`--rekor-upload` is opt-in there,
-    /// see the spec's Rekor-upload default), and never under keyless. Carried
-    /// so the sign result can **state** whether a record exists rather than
-    /// leaving the operator to infer it from an omission.
+    /// The Rekor log index; `None` is legal under a key (`--rekor-upload` is opt-in), never keyless.
     pub transparency_log_index: Option<u64>,
-    /// The DSSE envelope's own bytes — the ones the bundle wraps, and the ones
-    /// a cosign `sha256-<hex>.att` sidecar layer holds verbatim.
+    /// The DSSE envelope's own bytes, which a `.att` sidecar layer holds verbatim.
     ///
-    /// Carried rather than re-derived: the sidecar publishes the *same*
-    /// signature the bundle does, and digging the envelope back out of
-    /// [`Self::bytes`] would make the sidecar's layer depend on this file's
-    /// serialization of a document it already had in hand.
+    /// Carried, never dug back out of [`Self::bytes`], so the sidecar publishes the same signature.
     pub envelope_json: Vec<u8>,
-    /// PEM leaf certificate, keyless only — the sidecar's
-    /// `dev.sigstore.cosign/certificate` annotation.
-    ///
-    /// The bundle carries the same certificate in its `verificationMaterial`;
-    /// a sidecar has no bundle to carry it in, so the annotation is the only
-    /// place a reader can find it. Absent under a key, where there is no
-    /// certificate at all — the same legal shape
-    /// [`SignedBlob`](super::signer::SignedBlob) documents.
+    /// PEM leaf certificate for the sidecar's `dev.sigstore.cosign/certificate` annotation; keyless only.
     pub certificate_pem: Option<String>,
-    /// The offline Rekor bundle for the sidecar's `dev.sigstore.cosign/bundle`
-    /// annotation, when an entry was created.
-    ///
-    /// Same value, same derivation and same absence rule as
-    /// [`SignedBlob::rekor_bundle`](super::signer::SignedBlob::rekor_bundle):
-    /// under a key with no `--rekor-upload` there is no entry and no
-    /// annotation.
+    /// The offline Rekor bundle for the sidecar's `dev.sigstore.cosign/bundle` annotation.
     pub rekor_bundle: Option<String>,
 }
 
-/// Convert Rekor's API-shaped inclusion proof into the bundle's protobuf form.
-///
-/// Returns `None` when any hex field is malformed. The caller turns that into a
-/// hard sign failure: ocx's verifier requires the inclusion proof, so shipping a
-/// bundle without one would publish an artifact this tool cannot verify.
+/// Convert Rekor's API-shaped inclusion proof into the bundle's protobuf form; `None` on malformed hex.
 fn proto_inclusion_proof(api: &sigstore::rekor::models::log_entry::RekorInclusionProof) -> Option<InclusionProof> {
     let hashes: Option<Vec<Vec<u8>>> = api.hashes.iter().map(|h| hex::decode(h).ok()).collect();
     Some(InclusionProof {
@@ -117,12 +68,7 @@ fn proto_inclusion_proof(api: &sigstore::rekor::models::log_entry::RekorInclusio
     })
 }
 
-/// The transparency-log entry, the verification material, the serialization and
-/// the identity read back off the leaf.
-///
-/// Kept separate from [`build_dsse_bundle`] because `kind_version` and
-/// `content` are the only things a second bundle shape would vary, and this
-/// half is where the inclusion-proof rule and the v0.3 certificate shape live.
+/// The transparency-log entry, verification material, serialization, and identity read back off the leaf.
 fn assemble(
     material: SigningMaterial<'_>,
     kind_version: (&str, &str),
@@ -130,12 +76,8 @@ fn assemble(
     content: bundle::Content,
     envelope_json: Vec<u8>,
 ) -> Result<SignedBundle, SignErrorKind> {
-    // A transparency record is mandatory under keyless and opt-in under a key
-    // (spec §Rekor-upload default), so the entry list is built from what the
-    // run actually produced rather than assumed to hold one.
     let tlog_entries = match rekor {
         Some(rekor) => {
-            // The Rekor log id is hex; the protobuf LogId carries the raw key-id bytes.
             let log_id_raw = hex::decode(&rekor.log_id).unwrap_or_default();
             vec![TransparencyLogEntry {
                 log_index: rekor.log_index as i64,
@@ -148,10 +90,7 @@ fn assemble(
                 inclusion_promise: Some(InclusionPromise {
                     signed_entry_timestamp: rekor.signed_entry_timestamp.clone(),
                 }),
-                // Mandatory, not best-effort: the verifier refuses a bundle carrying no
-                // inclusion proof (`VerifyErrorKind::RekorInclusionProofAbsent`), so a
-                // log that returns no usable proof must fail the sign rather than
-                // publish an unverifiable artifact. Exit 83 — retrying may help.
+                // Mandatory: the verifier refuses a bundle without it, so fail the sign rather than publish.
                 inclusion_proof: Some(
                     rekor
                         .inclusion_proof
@@ -180,15 +119,10 @@ fn assemble(
     let bytes = serde_json::to_vec(&bundle).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
     let digest = Algorithm::Sha256.hash(&bytes);
 
-    // `certificate_pem` rides this same match rather than a second one: it is
-    // the *same* certificate the `verificationMaterial` above was built from,
-    // and a sidecar annotation naming a different one than the bundle would be
-    // a signature two readers disagree about.
+    // One match, so the sidecar annotation and the bundle can never name different certificates.
     let (certificate_identity, certificate_oidc_issuer, key_backend, public_key_hint, certificate_pem) = match material
     {
-        // Report what the verifier will read. The extractors are the verify
-        // side's own, so the two commands cannot drift into disagreeing about
-        // one cert.
+        // The verify side's own extractors, so sign and verify cannot disagree about one cert.
         SigningMaterial::Certificate(cert) => {
             let leaf = X509Cert::from_der(&cert.leaf_der).ok();
             (
@@ -199,9 +133,6 @@ fn assemble(
                 Some(cert.leaf_pem.clone()),
             )
         }
-        // A key-mode signature carries no certificate, so it carries no
-        // identity and no issuer. Empty strings rather than invented ones: the
-        // absence is the fact, and the hint is what identifies the signer.
         SigningMaterial::PublicKey { hint, kind, .. } => {
             (String::new(), String::new(), kind, Some(hint.to_owned()), None)
         }
@@ -221,44 +152,23 @@ fn assemble(
     })
 }
 
-/// What a bundle's `verificationMaterial` holds: a Fulcio leaf, or a bare
-/// public key.
-///
-/// `sigstore::bundle::sign` hardcodes `Content::X509CertificateChain`, so the
-/// key-mode arm is hand-assembled here (spec §WP9). Modelling it as one enum
-/// keeps the two arms in a single `match` the compiler keeps total, rather than
-/// as two near-copies of `assemble`.
+/// What a bundle's `verificationMaterial` holds: a Fulcio leaf, or a bare public key.
 pub(super) enum SigningMaterial<'a> {
-    /// Keyless: the ephemeral leaf Fulcio issued.
     Certificate(&'a FulcioCertificate),
-    /// Key mode: the cosign hint for the signing key's public half, plus the
-    /// backend that holds the private half.
-    ///
-    /// The SPKI DER itself is deliberately absent — `PublicKeyIdentifier`
-    /// carries only the hint, and a verifier resolves it against a key it was
-    /// given out of band. Deriving the hint stays
-    /// [`public_key_hint`](crate::sign::public_key_hint)'s job so the
-    /// derivation lives in exactly one place.
-    PublicKey { hint: &'a str, kind: KeyBackendKind },
+    /// Key mode: the key's cosign hint; the key itself is delivered to verifiers out of band.
+    PublicKey {
+        hint: &'a str,
+        kind: KeyBackendKind,
+    },
 }
 
 impl SigningMaterial<'_> {
-    /// The protobuf `verificationMaterial.content` oneof for this material.
     fn verification_content(&self) -> verification_material::Content {
         match self {
-            // `certificate`, not `x509CertificateChain`: bundle v0.3 replaced
-            // the chain field with a single leaf, and a verifier that enforces
-            // the profile refuses a document carrying the older shape under the
-            // newer media type. Fulcio's intermediates come from the trust
-            // root, so the leaf is all a chain could have carried anyway.
+            // `certificate`, not `x509CertificateChain`: a v0.3-profile verifier refuses the older shape.
             Self::Certificate(cert) => verification_material::Content::Certificate(X509Certificate {
                 raw_bytes: cert.leaf_der.clone(),
             }),
-            // `PublicKeyIdentifier` carries the hint and nothing else — the key
-            // itself is delivered out of band and a verifier resolves the hint
-            // against a key it was already given (`--key`, or a `kind = "key"`
-            // signers entry). Matches `key_bundle.json`, which cosign v3.1.1
-            // wrote with `--key`.
             Self::PublicKey { hint, .. } => verification_material::Content::PublicKey(PublicKeyIdentifier {
                 hint: (*hint).to_owned(),
             }),
@@ -268,50 +178,31 @@ impl SigningMaterial<'_> {
 
 /// A DSSE envelope and the exact bytes it serialized to.
 ///
-/// One value rather than two parameters: the sign-side hash checks cover the
-/// payload only, so a struct and a byte string supplied separately could
-/// disagree about `signatures` or `payloadType` and still pass both. Private
-/// fields and a serializing constructor make the mismatched pair
-/// unconstructible instead of merely untested.
+/// Private fields: the hash checks cover the payload only, so a separately supplied pair could disagree unnoticed.
 pub(super) struct SignedEnvelope {
     envelope: DsseEnvelope,
     json: Vec<u8>,
 }
 
 impl SignedEnvelope {
-    /// Serialize `envelope`, keeping the bytes alongside it.
     pub(super) fn new(envelope: DsseEnvelope) -> Result<Self, SignErrorKind> {
         let json = serde_json::to_vec(&envelope).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         Ok(Self { envelope, json })
     }
 
-    /// The bytes to upload — never a re-serialization of [`Self::envelope`].
+    /// The bytes to upload — never a re-serialization of the envelope.
     pub(super) fn json(&self) -> &[u8] {
         &self.json
     }
 }
 
-/// Assemble a Sigstore bundle v0.3 carrying a DSSE envelope.
-///
-/// The one bundle builder. `KindVersion` is `dsse:0.0.1` and the content oneof
-/// is `dsseEnvelope`; the `messageSignature` form OCX used to write for image
-/// signatures is gone (spec D2) — cosign v3 wraps an image signature in a DSSE
-/// Statement too, so a second shape bought nothing but a third arm in the
-/// discovery merge.
-///
-/// `signed` carries the envelope and the exact byte string uploaded to Rekor
-/// as one value — see [`SignedEnvelope`] for why they may not be passed
-/// separately.
+/// Assemble a Sigstore bundle v0.3 carrying a DSSE envelope (`dsse:0.0.1`).
 pub(super) fn build_dsse_bundle(
     material: SigningMaterial<'_>,
     signed: &SignedEnvelope,
     rekor: Option<&RekorEntry>,
 ) -> Result<SignedBundle, SignErrorKind> {
     let envelope = &signed.envelope;
-    // Only checkable against a body the log returned. Under a key with no
-    // upload there is no body, and therefore nothing this check could compare
-    // against — its absence is the legal `--no-rekor-upload` shape, not a
-    // skipped verification.
     if let Some(rekor) = rekor {
         assert_body_records_our_envelope(&rekor.canonicalized_body, envelope, &signed.json)?;
     }
@@ -332,24 +223,9 @@ pub(super) fn build_dsse_bundle(
     assemble(material, TLOG_KIND_WRITTEN, rekor, content, signed.json().to_vec())
 }
 
-/// The sign-side half of the D-g tlog binding: the log recorded the envelope
-/// this process uploaded, and not some other one.
+/// Check the log recorded the envelope this process uploaded.
 ///
-/// This check exists **only** here. A verifier holds a structured
-/// protobuf-JSON `dsseEnvelope`, not the byte string that was uploaded, so it
-/// cannot recompute `envelopeHash` at all — it binds on `payloadHash` and the
-/// signatures instead. The sign side does hold those exact bytes, which makes
-/// this the one place the comparison is honest rather than a re-serialization
-/// guess about key order and base64 padding.
-///
-/// `payloadHash` is checked alongside it because `dsse:0.0.1` hashes the
-/// **decoded payload**, while Rekor v2's `hashedrekord:0.0.2` hashes the PAE.
-/// The two are both 32 plausible bytes, so a body carrying the v2 regime would
-/// otherwise be published and only fail at some future verifier.
-///
-/// A `2xx` from the log with hashes that disagree is `RekorSetMalformed`, not
-/// `TransparencyLogUnavailable`: the log is reachable and what it returned is
-/// unusable, so waiting does not help.
+/// Only the signer can recompute `envelopeHash`; a mismatch is `RekorSetMalformed`, as retrying cannot help.
 fn assert_body_records_our_envelope(
     canonicalized_body: &[u8],
     envelope: &DsseEnvelope,
@@ -357,11 +233,9 @@ fn assert_body_records_our_envelope(
 ) -> Result<(), SignErrorKind> {
     let body: DsseCanonicalBody =
         serde_json::from_slice(canonicalized_body).map_err(|_| SignErrorKind::RekorSetMalformed)?;
+    // Check `payloadHash` too, or a Rekor v2 body (hashing the PAE) publishes and fails at a later verifier.
     let ours = envelope_hashes(envelope_json, &envelope.payload);
 
-    // The `algorithm` label is deliberately not compared: a matching sha256 hex
-    // already proves the log hashed these bytes, and a body that agreed on the
-    // value while disagreeing on the label would be refused for nothing.
     if body.spec.envelope_hash.value != ours.envelope.hex() || body.spec.payload_hash.value != ours.payload.hex() {
         return Err(SignErrorKind::RekorSetMalformed);
     }
@@ -370,9 +244,7 @@ fn assert_body_records_our_envelope(
 
 /// The `dsse:0.0.1` canonicalized body, narrowed to the two hashes.
 ///
-/// A missing field is a deserialization failure rather than a skipped
-/// comparison — an absent hash read as "nothing to check" is how a binding
-/// assertion becomes a no-op.
+/// Fields are required: an absent hash read as "nothing to check" makes the binding a no-op.
 #[derive(Deserialize)]
 struct DsseCanonicalBody {
     spec: DsseCanonicalSpec,
@@ -391,25 +263,13 @@ struct RekorHashValue {
     value: String,
 }
 
-/// Maximum accepted size of a Sigstore bundle v0.3 payload, in bytes.
-///
-/// Bundles are dominated by certificate chains (~10 KB) and a Rekor SET
-/// (~5 KB); 512 KiB leaves headroom while preventing a hostile referrer from
-/// forcing a large allocation before the parser can reject it. This check runs
-/// BEFORE `serde_json::from_slice` so the attacker's bytes never hit the parser.
+/// Maximum accepted size of a Sigstore signature bundle v0.3 payload, in bytes.
 pub(crate) const MAX_BUNDLE_SIZE_BYTES: usize = 512 * 1024;
 
-/// Parse (size-capped) a Sigstore bundle v0.3 document.
+/// Parse a Sigstore bundle v0.3 document, checking `max_bytes` before the parser sees it.
 ///
-/// `max_bytes` is the caller's cap rather than [`MAX_BUNDLE_SIZE_BYTES`]
-/// directly: an attestation bundle carries a whole SBOM and is bounded by
-/// `MAX_ATTESTATION_ENVELOPE_BYTES` instead, and a cap hardcoded here would
-/// refuse at 512 KiB whatever the fetch path had already accepted. The check
-/// runs BEFORE `serde_json::from_slice` so the attacker's bytes never hit the
-/// parser.
-///
-/// Returns `None` when the payload exceeds `max_bytes` or does not deserialize;
-/// the verify pipeline maps `None` to `VerifyErrorKind::BundleParseFailed`.
+/// `max_bytes` is the caller's: attestation bundles are bounded by `MAX_ATTESTATION_ENVELOPE_BYTES`.
+/// Returns `None` when over the cap or not deserializable.
 pub(crate) fn parse_bundle(bytes: &[u8], max_bytes: usize) -> Option<Bundle> {
     if bytes.len() > max_bytes {
         return None;

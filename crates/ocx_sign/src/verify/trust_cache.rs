@@ -1,20 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Trust-root cache for offline / air-gapped verify.
-//!
-//! A successful **online** `ocx package verify` captures the trust MATERIAL it
-//! used — the Fulcio CA certificate(s) and the Rekor public key — so a later
-//! **offline** verify can reuse it without contacting the Sigstore trust
-//! services. The cache mirrors the shape of the referrers capability cache
-//! (`oci/referrer/capability.rs`): an atomic tempfile+rename write, a TTL-gated
-//! fail-open read, and a host-scoped key.
-//!
-//! Layout: `{ocx_home}/state/trust_root/{rekor_authority_slug}.json`. Keyed by
-//! the Rekor URL authority so public and private Sigstore instances never
-//! collide; the cache is per-`OCX_HOME`.
-//!
-//! See [`adr_offline_verify_trust_cache.md`](../../../../../.claude/artifacts/adr_offline_verify_trust_cache.md).
+//! Trust material captured by an online verify, reused by a later offline one
+//! (`adr_offline_verify_trust_cache.md` § Trust-root cache).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -26,52 +14,29 @@ use url::Url;
 use super::trust_root::TrustRoot;
 use crate::sign::state::SigningStatePaths;
 
-/// Cache TTL: 24 hours.
-///
-/// Trust roots rotate on the order of weeks; 24h bounds how stale offline
-/// material may be while still surviving a "verified yesterday, on a plane
-/// today" gap. TUF metadata expiry is enforced on the online path by
-/// `sigstore`'s client ([`TrustRoot::load_embedded`]); this ceiling is the *offline*
-/// freshness bound, where by construction no fresh metadata can be fetched to
-/// consult. The two are separate limits, not one deferred behind the other.
+/// Offline freshness bound; TUF metadata expiry is a separate limit, enforced only online.
 const TTL_SECS: u64 = 24 * 3600;
 
-/// Cached Sigstore trust material for one Rekor instance.
-///
-/// Stored at `{ocx_home}/state/trust_root/{rekor_authority_slug}.json`. The
-/// cache is advisory and fail-open: a corrupt or mismatched file is treated as
-/// a miss, so a bad cache never turns into a verification failure — the caller
-/// falls back to an online fetch (or, offline, to an actionable error).
+/// Cached Sigstore trust material for one Rekor instance; fail-open, so a corrupt or mismatched file is a miss.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustRootCache {
     /// Rekor URL authority (host[:port]) this material belongs to.
     pub rekor_authority: String,
 
-    /// Fulcio CA certificate(s), DER-encoded — the chain anchors the online
-    /// verify validated against.
+    /// Fulcio CA certificate(s), DER-encoded.
     pub fulcio_der_certs: Vec<Vec<u8>>,
 
-    /// CTFE (certificate-transparency) log keys, `logId` hex -> DER SPKI.
-    ///
-    /// Required, deliberately: `sigstore`'s verifier checks the SCT embedded in
-    /// the signing certificate against these, so an entry without them cannot
-    /// verify anything. No `serde(default)` -- an entry written before this
-    /// field existed fails to deserialize, which the fail-open reader below
-    /// turns into a cache miss and a refetch. That is the version bump.
+    /// CTFE log keys, `logId` hex -> DER SPKI.
+    // No `serde(default)`: an entry without CTFE keys cannot check the SCT, so it must fail to parse and refetch.
     pub ctfe_keys: BTreeMap<String, Vec<u8>>,
 
-    /// Rekor public key (PEM) used to verify the Signed Entry Timestamp.
-    ///
-    /// Always `Some` for a written entry (offline verify needs it); `Option`
-    /// only so a hand-authored/partial file degrades to a miss rather than a
-    /// deserialize error.
+    /// Rekor public key (PEM) used to verify the Signed Entry Timestamp; `Some` in every written entry.
     pub rekor_public_key_pem: Option<String>,
 
     /// Wall-clock time the material was cached (UTC).
     pub cached_at: SystemTime,
 
-    /// TTL in seconds, clamped to `TTL_SECS` on read; the reader compares
-    /// `cached_at + min(ttl, TTL_SECS)` against now.
+    /// TTL in seconds, clamped to `TTL_SECS` on read.
     pub ttl_seconds: u64,
 }
 
@@ -94,12 +59,6 @@ impl TrustRootCache {
     }
 
     /// Persist the record atomically to [`SigningStatePaths::trust_root_file`].
-    ///
-    /// Writes a `0o600` temp file, then publishes it via
-    /// [`ocx_util::fs::persist_temp_file`] (replace-existing on every
-    /// platform, Windows transient-lock retry) so a concurrent reader never sees
-    /// a partially-written file — identical to the referrers capability cache
-    /// write.
     pub async fn write_cache(&self, state: &SigningStatePaths) -> io::Result<()> {
         let target = state.trust_root_file(&self.rekor_authority);
         let dir = target
@@ -118,9 +77,7 @@ impl TrustRootCache {
 
     /// Read a cached entry for `rekor_authority` without any network.
     ///
-    /// Returns `Ok(None)` when the file is missing, expired, corrupt, or belongs
-    /// to a different authority (fail-open). Returns `Ok(Some(_))` for a fresh,
-    /// matching entry.
+    /// `Ok(None)` when the file is missing, expired, corrupt, or belongs to another authority.
     pub async fn from_cache(rekor_authority: &str, state: &SigningStatePaths) -> io::Result<Option<Self>> {
         let path = state.trust_root_file(rekor_authority);
         let bytes = match tokio::fs::read(&path).await {
@@ -141,16 +98,9 @@ impl TrustRootCache {
         Ok(Some(cached))
     }
 
-    /// Returns `true` if the entry is within TTL.
-    ///
-    /// Both halves of the lifetime come off disk, so neither is trusted. A
-    /// rewound wall clock (`cached_at` in the future) is stale, and the file's
-    /// own `ttl_seconds` is clamped to `TTL_SECS` — the record holds Fulcio CA
-    /// anchors, CTFE keys and the pinned Rekor key, so one write declaring
-    /// `u64::MAX` would otherwise pin whatever it contains for the life of the
-    /// machine, online runs included. Clamping leaves the field able to shorten
-    /// a lifetime and never to extend one.
+    /// Returns `true` if the entry is within TTL; a `cached_at` in the future is stale.
     pub fn is_fresh(&self) -> bool {
+        // Clamp: the file's own `ttl_seconds` of `u64::MAX` would otherwise pin its trust anchors forever.
         match SystemTime::now().duration_since(self.cached_at) {
             Ok(elapsed) => elapsed < Duration::from_secs(self.ttl_seconds.min(TTL_SECS)),
             Err(_) => false,
@@ -159,29 +109,20 @@ impl TrustRootCache {
 
     /// Build a [`TrustRoot`] from the cached material.
     ///
-    /// The result carries the pinned Rekor key, so a verify driven by it needs
-    /// no Sigstore-services network. Callers that require offline verification
-    /// must check [`TrustRoot::rekor_public_key_pem`] is `Some` before relying on
-    /// it — a partial/legacy cache entry without a key cannot verify the SET
-    /// offline.
+    /// Offline callers must check [`TrustRoot::rekor_public_key_pem`] is `Some`: without it the SET cannot verify.
     pub fn into_trust_root(self) -> TrustRoot {
         let root = TrustRoot::from_material(self.fulcio_der_certs, self.ctfe_keys, BTreeMap::new());
         match self.rekor_public_key_pem {
-            // A cached PEM that no longer parses is a corrupt entry, and the
-            // cache is fail-open: hand back the keyless root so the caller
-            // refetches rather than failing a verify on cache damage.
+            // An unparseable PEM yields the keyless root, so cache damage refetches instead of failing the verify.
             Some(pem) => root.clone().with_rekor_key_pem(&pem).unwrap_or(root),
             None => root,
         }
     }
 }
 
-/// The trust-root cache key for a Rekor URL: its authority (`host[:port]`).
+/// The trust-root cache key for a Rekor URL: its authority (`host[:port]`), or the whole URL when host-less.
 ///
-/// Single source of truth so the pipeline (which writes the cache after a
-/// successful online verify) and the CLI (which reads it) always agree. Falls
-/// back to the whole URL string for a host-less URL so distinct instances still
-/// get distinct keys.
+/// The pipeline writes and the CLI reads under this key, so both must derive it here.
 pub fn cache_key_for_rekor(rekor_url: &Url) -> String {
     match rekor_url.host_str() {
         Some(host) => match rekor_url.port() {

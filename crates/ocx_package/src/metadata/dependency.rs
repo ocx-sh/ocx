@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::slug::{SLUG_MAX_LEN, SLUG_PATTERN, SLUG_PATTERN_STR};
 use super::visibility::Visibility;
 
-/// A validated dependency name used for `${deps.NAME.field}` interpolation.
-///
-/// Must match `^[a-z0-9][a-z0-9_-]*$` and be at most [`SLUG_MAX_LEN`] bytes.
-/// Enforced at construction and deserialization.
+/// A dependency name for `${deps.NAME.field}` interpolation, matching
+/// `^[a-z0-9][a-z0-9_-]*$` and at most [`SLUG_MAX_LEN`] bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct DependencyName(String);
@@ -78,20 +76,8 @@ impl schemars::JsonSchema for DependencyName {
     }
 }
 
-/// Derives a dependency's default interpolation name from an OCI repository
-/// basename (the last path segment, [`ocx_oci::PackageRef::name`]).
-///
-/// OCI repository grammar is a strict superset of the slug grammar
-/// (`^[a-z0-9][a-z0-9_-]*$`, see [`SLUG_PATTERN`]): it also permits `.`
-/// (e.g. a repository named `open.jdk`), which the slug pattern rejects.
-/// Disallowed characters are mapped to `-` and the result is truncated to
-/// [`SLUG_MAX_LEN`]. If the sanitized basename still cannot form a valid
-/// [`DependencyName`] (empty, or a leading character the slug pattern
-/// disallows), falls back to the fixed default `"dep"`.
-///
-/// Infallible by design — callers deriving a *default* name never need to
-/// propagate a name-derivation error; an explicit `name` field remains the
-/// escape hatch for publishers who want a specific interpolation name.
+/// Derives a default interpolation name from a repository basename: disallowed
+/// characters map to `-`, truncated to [`SLUG_MAX_LEN`], falling back to `"dep"`.
 pub(crate) fn default_dependency_name(basename: &str) -> DependencyName {
     let mut sanitized: String = basename
         .to_ascii_lowercase()
@@ -123,8 +109,8 @@ pub struct Dependency {
     pub identifier: ocx_oci::PinnedPackageRef,
 
     /// Controls how this dependency's environment variables propagate.
-    /// Default: `Sealed` — no env contribution. See [`Visibility`] for the
-    /// four levels and their semantics.
+    /// Default: `sealed` — no env contribution. One of four levels: `sealed`,
+    /// `private`, `public`, `interface`.
     #[serde(default)]
     pub visibility: Visibility,
 
@@ -137,13 +123,7 @@ pub struct Dependency {
 }
 
 impl Dependency {
-    /// Returns the interpolation name for this dependency.
-    ///
-    /// Returns the explicit `name` when set; otherwise a slugified form of the last path
-    /// segment of the OCI repository (e.g. `"cmake"` for `"myorg/cmake"`, `"open-jdk"` for
-    /// `"myorg/open.jdk"`). OCI repository grammar permits characters (notably `.`) the slug
-    /// grammar does not, so the basename is sanitized via [`default_dependency_name`] rather
-    /// than asserted — this never panics.
+    /// The interpolation name: explicit `name`, else [`default_dependency_name`] of the basename.
     pub fn name(&self) -> DependencyName {
         if let Some(n) = &self.name {
             return n.clone();
@@ -152,35 +132,17 @@ impl Dependency {
     }
 }
 
-/// Ordered list of package dependencies.
+/// Ordered list of package dependencies; array position is the environment import order.
 ///
-/// Serializes as a JSON array. Array position defines the canonical
-/// environment import order. This avoids relying on JSON object key
-/// ordering, which is unordered per RFC 8259 and not preserved by
-/// all parsers (e.g., Go encoding/json, jq).
-///
-/// Deserialization validates that each identifier contains an explicit
-/// registry (no default registry fallback) and that no repository
-/// appears more than once.
+/// Holds at most [`Self::MAX_DEPENDENCIES`] entries with unique repositories and names.
 #[derive(Debug, Clone, Default)]
 pub struct Dependencies {
     entries: Vec<Dependency>,
 }
 
 impl Dependencies {
-    /// Maximum number of dependencies permitted in one package's metadata.
-    ///
-    /// `ocx package push`'s pre-push gate (`verify_dependency_pins`) issues
-    /// one authenticated registry GET per dependency pin, driven by a
-    /// sidecar file anyone with write access can edit. Bounding the count
-    /// here bounds push-time network fan-out, so a maliciously (or
-    /// accidentally) edited sidecar cannot be used to sweep thousands of
-    /// internal hosts/ports (SSRF/DoS mitigation).
-    ///
-    /// The cap lives on the **published** collection because that is the form
-    /// push reads; [`AuthoringDependencies`](super::authoring::AuthoringDependencies)
-    /// applies the same constant so the limit is reported at authoring time
-    /// too, rather than only on the projection.
+    /// Maximum dependencies per package; bounds the one-GET-per-pin fan-out of
+    /// `ocx package push`'s pre-push gate, or an edited sidecar can sweep internal hosts (SSRF).
     pub const MAX_DEPENDENCIES: usize = 256;
 
     pub fn new(entries: Vec<Dependency>) -> Result<Self, DependencyError> {
@@ -198,7 +160,6 @@ impl Dependencies {
             {
                 return Err(DependencyError::DuplicateName { name: name.to_string() });
             }
-            // Validate unique (registry, repository).
             let key = (
                 dep.identifier.registry().to_string(),
                 dep.identifier.repository().to_string(),
@@ -260,26 +221,16 @@ pub enum DependencyError {
     /// A dependency identifier appears more than once.
     #[error("duplicate dependency identifier: '{identifier}'")]
     DuplicateIdentifier { identifier: ocx_oci::PinnedPackageRef },
-    /// A name is not a valid slug (`^[a-z0-9][a-z0-9_-]*$`, max 64 chars).
+    /// A name is not a valid slug.
     #[error("invalid dependency name '{name}': must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars)")]
     InvalidName { name: String },
     /// Two dependencies share the same explicit name.
     #[error("duplicate dependency name '{name}'")]
     DuplicateName { name: String },
-    /// Two dependencies share the same `(registry, repository)` pair.
-    ///
-    /// Authoring-form counterpart of [`DependencyError::DuplicateIdentifier`]:
-    /// an authoring duplicate may be digest-less, so it cannot carry a
-    /// [`ocx_oci::PinnedPackageRef`].
+    /// Two authoring-form dependencies share the same `(registry, repository)` pair.
     #[error("duplicate dependency repository '{repository}'")]
     DuplicateRepository { repository: String },
-    /// The dependency count exceeds the maximum allowed.
-    ///
-    /// Bounds push-time network fan-out: `ocx package push`'s pre-push gate
-    /// (`verify_dependency_pins`) issues one authenticated registry GET per
-    /// unique dependency pin, driven by an externally-editable sidecar. An
-    /// unbounded dependency list is an SSRF/DoS vector for a maliciously (or
-    /// accidentally) edited sidecar sweeping internal hosts/ports.
+    /// The dependency count exceeds [`Dependencies::MAX_DEPENDENCIES`].
     #[error("too many dependencies: {count} exceeds the maximum of {max}")]
     TooManyDependencies { count: usize, max: usize },
 }

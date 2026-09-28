@@ -8,25 +8,12 @@ use clap::Subcommand;
 /// OCI-tier package commands.
 ///
 /// These commands operate on OCI identifiers directly and never consult
-/// `ocx.toml`.  They own the `candidate`/`current` floating symlinks.
-///
-/// The former root commands `ocx install`, `ocx uninstall`, `ocx select`,
-/// `ocx exec`, and `ocx deselect` are moved here (C1 — handshake §2 / §7).
-/// The toolchain-tier counterparts (`ocx env`, `ocx exec`) remain at root.
-///
-/// `Announce` and `Claim` carry **no** doc comment on purpose, the same way
-/// [`CascadeGroup`](super::package_cascade::CascadeGroup)'s variants do: clap
-/// renders a variant's own doc as the subcommand's help and ignores the
-/// argument struct's whenever one is present, so a doc here would silently
-/// replace the multi-paragraph text those two commands need — which is exactly
-/// how both shipped with a `--help` that named no credential. The user-facing
-/// text lives with the flags it describes, in `package_announce.rs` and
-/// `package_claim.rs`, and
-/// `package_announce::tests::both_write_commands_render_the_credential_guidance`
-/// asserts over the *rendered* help so a doc re-added here reds rather than
-/// silently winning.
+/// `ocx.toml`.  They own the `candidate`/`current` floating symlinks. The
+/// toolchain-tier counterparts (`ocx env`, `ocx exec`) stay at root.
 #[derive(Subcommand)]
 pub enum Package {
+    // No doc: a variant doc replaces the struct's help and would drop the credential guidance, which
+    // `package_announce::tests::both_write_commands_render_the_credential_guidance` asserts.
     Announce(super::package_announce::PackageAnnounce),
     /// Attach an in-toto attestation to a published package manifest.
     ///
@@ -42,6 +29,7 @@ pub enum Package {
     /// already holds.
     #[command(subcommand)]
     Cascade(super::package_cascade::CascadeGroup),
+    // No doc comment: see `Announce` above.
     Claim(super::package_claim::PackageClaim),
     /// Promote an already-published package to another registry or repository.
     ///

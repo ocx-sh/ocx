@@ -32,10 +32,7 @@ impl OciIndex {
         }
     }
 
-    /// One tags-API listing, with the reserved names filtered out.
-    ///
-    /// D7 at the derived listing boundary: this seeds the tag cache, so a tag
-    /// that slips the filter here is wrong for the rest of the invocation.
+    /// One tags-API listing, reserved names filtered out before they seed the tag cache.
     async fn fetch_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Vec<String>> {
         Ok(self
             .client
@@ -69,9 +66,7 @@ impl index_impl::IndexImpl for OciIndex {
             return Ok(Some(cached));
         }
 
-        // Coalesce the cold misses: this is a read-check-then-fetch, so a
-        // fan-out over one repository has every task miss and every task call
-        // the tags API.
+        // Coalesce cold misses, or a fan-out over one repository calls the tags API once per task.
         let handle = match self
             .cache
             .tag_group()
@@ -126,8 +121,7 @@ impl index_impl::IndexImpl for OciIndex {
             Acquisition::Leader(handle) => handle,
             Acquisition::Resolved(digest) => return Ok(Some(digest)),
         };
-        // Deriving an index from a registry's tags API backs no write, so the
-        // mirror is the right host to ask (Invariant #5).
+        // A mirror may answer only because this read backs no write.
         match self
             .client
             .fetch_manifest_digest_addressed(
@@ -151,9 +145,7 @@ impl index_impl::IndexImpl for OciIndex {
         Ok(Some(bytes))
     }
 
-    /// Returns the verbatim manifest bytes the registry served, digest
-    /// recompute-verified by the client — the trust anchor an index store
-    /// persists without re-serialisation (`adr_index_indirection.md` A3).
+    /// Returns the verbatim, digest-verified manifest bytes the registry served.
     async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &ocx_oci::PackageRef,

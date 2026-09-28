@@ -11,29 +11,13 @@ use crate::api::Printable;
 
 /// What `cascade check` found, one entry per package in input order.
 ///
-/// Holds the library's report values as they are rather than re-modelling
-/// them: the finding vocabulary belongs to the algebra that produced it, and a
-/// second copy of the same fields here would be a second thing to keep in
-/// step.
-///
-/// Plain format: one row per (tag, platform) slot, plus one row per index
-/// finding and per unrepairable item, folded into the same table (they are
-/// findings about the same graph, not tables of their own).
-///
-/// JSON format: `{ "reports": [...] }` — one library report object per
-/// package, each carrying that package's alias states, slot rows, index
-/// findings and ignored tags.
+/// `reports` holds one report object per package, carrying that package's
+/// alias states, slot rows, index findings and ignored tags.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeCheck {
     pub reports: Vec<CascadeReport>,
-    /// Packages a configured index source claims but has no root document for
-    /// yet - never announced, so the staleness layer had nothing to compare
-    /// against and produced no findings. Plain-mode only: an empty
-    /// `index_findings` means "agrees" for every other package, and a reader
-    /// deserves to be told which of the two silences this is.
-    ///
-    /// Not serialized. The JSON key set is what a `--format json` consumer
-    /// parses and stays pinned; this is a note, not a finding.
+    /// Packages an index source claims but has no root for yet, so the index layer compared nothing;
+    /// plain only, to tell that silence from "agrees". Not serialized: the JSON key set is pinned.
     #[serde(skip)]
     pub index_layer_skipped: Vec<ocx_oci::PackageRef>,
 }
@@ -46,12 +30,7 @@ impl PackageCascadeCheck {
         }
     }
 
-    /// The plain table's cells, row-major, before styling.
-    ///
-    /// Split out from [`Printable::print_plain`] so the row set is assertable
-    /// without a terminal: what belongs in the table (every slot, plus the
-    /// index and unrepairable findings folded in as their own rows) is the part
-    /// worth pinning, and styling is not.
+    /// The plain table's cells, row-major, before styling, so tests can assert them without a terminal.
     fn table_rows(&self) -> Vec<[String; 5]> {
         let mut rows = Vec::new();
         for report in &self.reports {
@@ -68,10 +47,6 @@ impl PackageCascadeCheck {
                     digest_transition(row.observed.as_deref(), row.expected.as_deref()),
                 ]);
             }
-            // The index layer and the unrepairable set are findings about the
-            // same graph, so they are rows of the same table rather than
-            // tables of their own; they carry no platform, which is what the
-            // empty cell says.
             for finding in &report.index_findings {
                 let (tag, status, detail) = match finding {
                     IndexFinding::Stale { tag, committed, live } => (
@@ -94,9 +69,7 @@ impl PackageCascadeCheck {
                     Unrepairable::ChildManifestMissing { tag, digest } => {
                         (tag, format!("child manifest gone: {}", short_digest(digest)))
                     }
-                    // Not "gone" - nothing was observed to be missing. The
-                    // algorithm is one this build cannot address, so whether
-                    // the child is still there could not be checked at all.
+                    // Not "gone": this build cannot address the algorithm, so presence was never checked.
                     Unrepairable::ChildDigestUnaddressable { tag, digest } => {
                         (tag, format!("unaddressable digest algorithm: {}", short_digest(digest)))
                     }
@@ -127,9 +100,7 @@ impl Printable for PackageCascadeCheck {
             columns[3].push(Cell::from(status));
             columns[4].push(Cell::from(theme.digest(&detail)));
         }
-        // The Package column repeats one constant for the ordinary
-        // single-package run, and a column whose every value is the same
-        // string is noise the plain table pays width for.
+        // The Package column is dropped for a single-package run, where it would repeat one value.
         let headers: [ocx_console::Column; 5] = [
             "Package".into(),
             "Tag".into(),
@@ -140,10 +111,7 @@ impl Printable for PackageCascadeCheck {
         let first = usize::from(self.reports.len() < 2);
         data.print_table(&headers[first..], &columns[first..]);
 
-        // `check` never writes, so index staleness it found is always the
-        // announce hop's to fix - the repair-side `--tags-file` form has
-        // no file to name here. The local copy is a second hop after that:
-        // announcing publishes the index, it does not sync this machine's.
+        // `check` never writes, so its index staleness is the announce hop's to fix, then a local sync.
         for report in &self.reports {
             if report.index_findings.is_empty() {
                 continue;
@@ -166,39 +134,15 @@ impl Printable for PackageCascadeCheck {
     }
 }
 
-/// The remediation line both cascade subcommands print when the index is
-/// behind the registry.
-///
-/// A pure builder rather than an inline `format!` argument, and the reason is
-/// testability rather than reuse (DX-70, the same shape as the claim report's
-/// `plain_table`): [`ocx_console::DataInterface::print_hint`] writes the real
-/// stdout, so the four remediation strings the cascade commands print at an
-/// operator were covered by **no** assertion at all — migrating them to the
-/// positional `ocx package announce` grammar would have reded nothing. They are
-/// the reason C-062's sweep is correctness and not housekeeping: after the
-/// rename, ocx's own output would tell a user to run a form ocx warns about,
-/// and at 0.7 a form that does not exist.
-///
-/// Shared with `package_cascade_repair.rs`, which prints the byte-identical
-/// line, rather than duplicated there: one string means one migration, so
-/// "check migrated but repair did not" is unrepresentable instead of merely
-/// asserted against. Lives here because a stale index is a *finding*, and
-/// repair reports findings too.
-///
-/// The package is rendered **before** the flags here and in the two repair
-/// hints, which reads against C-057's "flags precede the positional" and is
-/// correct anyway (DX-84): C-057 governs the grammar the CLI accepts and how
-/// usage is documented, while a remediation hint is a line an operator
-/// copy-pastes — clap accepts flags after a positional, and the hint reads
-/// naturally with its subject first. Stated so it is not "fixed" into
-/// disagreement with the tests that pin it.
+/// The remediation line both cascade subcommands print when the index lags the registry; shared
+/// with `package_cascade_repair.rs` so the two lines cannot drift.
+/// The package precedes the flags on purpose: a hint is copy-pasted, clap accepts it, tests pin it.
 #[must_use]
 pub fn stale_index_hint(package: &str) -> String {
     format!("index behind the registry - run: ocx package announce {package} --refresh")
 }
 
-/// The wire spelling of a slot status, matching its `Serialize` form so a
-/// reader sees the same word in both output modes.
+/// A slot status's `Serialize` spelling, so both output modes show the same word.
 fn slot_status_label(status: SlotStatus) -> &'static str {
     match status {
         SlotStatus::Ok => "ok",
@@ -209,8 +153,7 @@ fn slot_status_label(status: SlotStatus) -> &'static str {
     }
 }
 
-/// `observed -> expected` in short digests, collapsing to whichever side exists
-/// when the slot is missing on one of them.
+/// `observed -> expected` in short digests, or whichever side exists.
 fn digest_transition(observed: Option<&str>, expected: Option<&str>) -> String {
     match (observed, expected) {
         (Some(observed), Some(expected)) if observed == expected => short_digest(observed),
@@ -220,9 +163,8 @@ fn digest_transition(observed: Option<&str>, expected: Option<&str>) -> String {
     }
 }
 
-/// A wire digest string in its canonical short form. Falls back to the verbatim
-/// string when it does not parse - an index may legitimately name an algorithm
-/// this build does not implement, and the report still has to show it.
+/// A digest in short form, verbatim when it does not parse: an index may name an algorithm this
+/// build lacks.
 fn short_digest(digest: &str) -> String {
     ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }

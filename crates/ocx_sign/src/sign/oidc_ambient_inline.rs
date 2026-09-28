@@ -1,18 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Inline env-inspection ambient OIDC provider.
-//!
-//! Fallback that survives `ambient-id` archival / drift by inspecting CI
-//! environment variables directly:
-//!
-//! - **GitHub Actions** — `ACTIONS_ID_TOKEN_REQUEST_URL` + `ACTIONS_ID_TOKEN_REQUEST_TOKEN`
-//!   (fetches an audience-scoped id-token from the runner's token endpoint)
-//! - **GitLab CI** — `SIGSTORE_ID_TOKEN` (set via an `id_tokens:` block)
-//! - **CircleCI** — `CIRCLE_OIDC_TOKEN_V2`
-//!
-//! Other platforms return `None` so the dispatcher falls through to the
-//! browser path (or a typed pre-check failure under `--no-tty`).
+//! Inline env-inspection ambient OIDC provider: GitHub Actions (token exchange),
+//! GitLab CI (`SIGSTORE_ID_TOKEN`), CircleCI (`CIRCLE_OIDC_TOKEN_V2`).
 
 use async_trait::async_trait;
 use zeroize::Zeroizing;
@@ -27,10 +17,7 @@ const CIRCLE_TOKEN: &str = "CIRCLE_OIDC_TOKEN_V2";
 
 /// Inline env-inspection ambient token provider.
 pub struct InlineAmbientProvider {
-    /// Hosts the operator allowed onto otherwise-forbidden ranges, so a
-    /// self-hosted runner whose token endpoint lives on a private address is
-    /// configured through the same `trusted_hosts` list as Fulcio, Rekor and
-    /// the registry — not through a carve-out unique to this dial.
+    /// The shared `trusted_hosts` list; this dial gets no carve-out of its own.
     trusted_hosts: Vec<String>,
 }
 
@@ -38,34 +25,19 @@ fn env_present(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
 }
 
-/// Which ambient token source a set of set-and-non-empty variables selects.
+/// Which ambient token source the environment selects.
 ///
-/// Carries the *variable name*, never the token: this type is `Debug`, and a
-/// variant holding the credential would print it into any trace that touched
-/// it (API-02).
+/// Carries the variable name, never the token: this type is `Debug`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AmbientSource {
-    /// The CI hands the token over under this variable — no round trip, and no
-    /// endpoint to guard.
+    /// The token sits in this variable; no round trip, no endpoint to guard.
     Direct(&'static str),
-    /// GitHub Actions: exchange the request token at the runner's endpoint.
     GithubExchange,
 }
 
 /// Pick the ambient source, given which variables are set and non-empty.
 ///
-/// **The order is the contract, not an implementation detail.** A runner can
-/// legitimately set more than one — a GitLab job with `SIGSTORE_ID_TOKEN`
-/// running on a self-hosted executor that also exports the Actions pair, or a
-/// composite CI image carrying leftovers from another platform. Direct tokens
-/// come first because they need no network round trip and no SSRF guard, so
-/// preferring them removes a dial rather than adding one; between the two
-/// direct sources the order is arbitrary but fixed, because a reorder silently
-/// changes which identity signs on a runner that sets both.
-///
-/// Split out of [`InlineAmbientProvider::acquire`] so the precedence is
-/// decidable from values (ARCH-12): asserting it through `acquire` would mean
-/// mutating the process environment, which races every parallel test (TEST-05).
+/// The order is the contract: a reorder silently changes which identity signs on a runner that sets several.
 fn select_source(gitlab: bool, circle: bool, gha: bool) -> Option<AmbientSource> {
     if gitlab {
         Some(AmbientSource::Direct(GITLAB_TOKEN))
@@ -78,14 +50,9 @@ fn select_source(gitlab: bool, circle: bool, gha: bool) -> Option<AmbientSource>
     }
 }
 
-/// The three presence facts [`select_source`] decides on, read from the
-/// process environment.
+/// The three presence facts [`select_source`] decides on, from the process environment.
 ///
-/// One reader for both [`AmbientProvider::detect`] and
-/// [`TokenProvider::acquire`]: they previously applied the emptiness rule
-/// differently — `detect` required a non-empty `ACTIONS_ID_TOKEN_REQUEST_URL`
-/// while `acquire` accepted a set-but-empty one — so a runner exporting the
-/// variable empty was detected as absent yet acquired as present.
+/// The one reader for `detect` and `acquire`, or they disagree on a set-but-empty variable.
 fn ambient_env() -> (bool, bool, bool) {
     (
         env_present(GITLAB_TOKEN),
@@ -96,41 +63,14 @@ fn ambient_env() -> (bool, bool, bool) {
 
 /// Append the audience and apply both endpoint gates before anything dials.
 ///
-/// The same two, in the same order, as every `--fulcio-url` / `--rekor-url`
-/// endpoint — and they belong here most: this request carries a bearer
-/// credential, and its target comes from the process environment rather than
-/// from a flag, so it is the dial most easily pointed somewhere else and the
-/// least likely to be noticed.
-///
-/// 1. [`validate_sigstore_url`](ocx_oci::endpoint::validate_sigstore_url) is
-///    the scheme rule — HTTPS anywhere, HTTP only on a literal loopback host —
-///    and it parses, so it stands in for the bare `Url::parse` this used to do.
-///    Without it a runner exporting a plaintext `ACTIONS_ID_TOKEN_REQUEST_URL`
-///    for a non-loopback host sent the bearer token in the clear: the SSRF
-///    guard below judges the *address*, never the scheme, so nothing else on
-///    this path ever looked.
-/// 2. [`resolve_sigstore_url`](ocx_oci::endpoint::resolve_sigstore_url) is
-///    the SSRF floor (CWE-918). `trusted_hosts` is the escape hatch a
-///    self-hosted runner uses, identical to Fulcio and Rekor — and it buys a
-///    private *address*, never cleartext, because gate 1 has already run.
-///
-/// One [`SignErrorKind::OidcPreCheckFailed`] with a reason per gate, because
-/// the two remedies are different and only the reason distinguishes them:
-/// `..._forbidden` is fixed by adding the host to `trusted_hosts`, and
-/// `..._insecure_scheme` cannot be — an operator handed the `forbidden` wording
-/// for a plaintext URL would add the host, get a byte-identical refusal, and
-/// have no way to tell the scheme was the problem. An unparseable URL keeps the
-/// scheme reason: it fails the same gate, and neither is fixed by a config
-/// entry.
-///
-/// Split out from [`InlineAmbientProvider::acquire`] so it is reachable from a
-/// test without mutating the process environment, which is a data race across
-/// parallel tests.
+/// The request carries a bearer to an environment-supplied URL, so it gets the `--fulcio-url` gates.
 async fn guarded_request_url(url: &str, audience: &str, trusted_hosts: &[String]) -> Result<String, SignErrorKind> {
     let refused = |reason: &str| SignErrorKind::OidcPreCheckFailed {
         reason: reason.to_string(),
     };
     let request_url = format!("{url}&audience={audience}");
+    // Scheme gate first: the SSRF guard never judges schemes, so plaintext would leak the bearer.
+    // Keep the reasons distinct: only `..._forbidden` is fixed by `trusted_hosts`.
     let parsed = ocx_oci::endpoint::validate_sigstore_url(&request_url, GHA_URL)
         .map_err(|_| refused("gha_id_token_url_insecure_scheme"))?;
     ocx_oci::endpoint::resolve_sigstore_url(&parsed, trusted_hosts)
@@ -159,15 +99,10 @@ impl TokenProvider for InlineAmbientProvider {
         let (gitlab, circle, gha) = ambient_env();
         match select_source(gitlab, circle, gha) {
             None => return Err(no_token()),
-            // The variable was non-empty a moment ago and nothing in this
-            // process mutates the environment, so a failed re-read is the
-            // no-token case rather than a distinct failure worth its own
-            // variant.
             Some(AmbientSource::Direct(key)) => return Ok(OidcToken::new(std::env::var(key).map_err(|_| no_token())?)),
             Some(AmbientSource::GithubExchange) => {}
         }
 
-        // GitHub Actions: exchange the request token for an audience-scoped id-token.
         {
             let (url, bearer) = (
                 std::env::var(GHA_URL).map_err(|_| no_token())?,
@@ -192,8 +127,7 @@ impl TokenProvider for InlineAmbientProvider {
             struct IdTokenResponse {
                 value: String,
             }
-            // Capped: a JWT is kilobytes; the request-URL comes from the
-            // runner environment, which a compromised job controls.
+            // Capped: the endpoint comes from the runner environment, which a compromised job controls.
             let raw = ocx_oci::endpoint::read_body_capped(response).await.ok_or_else(|| {
                 SignErrorKind::OidcPreCheckFailed {
                     reason: "gha_id_token_malformed".to_string(),

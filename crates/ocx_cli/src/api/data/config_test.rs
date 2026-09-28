@@ -75,7 +75,7 @@ pub struct ConfigTestData {
     /// candidate declaring `[patches]` therefore outranks an ambient
     /// `OCX_PATCHES`, exactly as it would once adopted.
     pub(crate) patches: Option<PatchesView>,
-    /// The machine's `[managed]` tier posture — see [`ManagedView`].
+    /// The machine's `[managed]` tier posture.
     pub(crate) managed: Option<ManagedView>,
     /// Dotted paths of keys the config schema ignores, sorted. Advisory: the
     /// loader ignores unknown keys by design, so these are equally typos and

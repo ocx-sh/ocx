@@ -1,63 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Central sharded lock directory: cross-process advisory locks keyed by the
-//! *file identity* of a guarded directory rather than by a sidecar written next
-//! to the guarded data.
+//! Central sharded lock directory: cross-process advisory locks keyed by a guarded directory's file identity.
 //!
-//! [`lock_scoped`] hashes `(file-identity, scope, discriminator)` into a
-//! content-addressed path under a machine-global `locks/` root, so a lock file
-//! never lands inside the directory it protects. That matters when the guarded
-//! tree may be a user-committed or read-only shipped copy (e.g. a project's
-//! `.ocx/index/`): a lock sidecar there would be in-tree litter or an outright
-//! write failure. One machine-global `locks/` root (`$OCX_HOME/locks`) serves
-//! every guarded location.
-//!
-//! **File identity, not path.** The primary key is the guarded directory's
-//! `(device, inode)` on Unix / `(volume serial, file index)` on Windows, so two
-//! path aliases of one directory (a symlink, a bind mount) contend on the same
-//! lock. When the identity cannot be read the key falls back to the
-//! canonicalized path bytes ([`dunce::canonicalize`]), logged at debug — correct
-//! for the common case, weaker only across path aliases the fallback cannot see.
-//!
-//! **Caveats (documented, not fixed).**
-//! - An NFS export double-mounted at two mount points can report *distinct*
-//!   `st_dev` for the same files, splitting the key. `flock` semantics over NFS
-//!   are themselves unreliable, so this split is accepted rather than worked
-//!   around.
-//! - Lock files are permanent — never unlinked. Unlinking on release would race
-//!   a second acquirer that has already opened the same path, so the empty files
-//!   are left in place; they are safe to delete when no ocx process is running.
+//! Never a sidecar inside the guarded directory, which may be read-only or committed (a project's `.ocx/index/`).
 
 use std::path::Path;
 use std::time::Duration;
 
 use super::LockedFile;
 
-/// Acquire an exclusive cross-process lock scoped to `guarded_dir`'s file
-/// identity, plus `scope` and `discriminator`, under the machine-global
-/// `locks_root`. Blocks until the lock is acquired or `timeout` elapses.
+/// Acquire an exclusive lock on `guarded_dir`'s identity plus `scope` and `discriminator`, waiting up to `timeout`.
 ///
-/// The returned [`LockedFile`] holds the advisory lock for its lifetime; drop
-/// releases it. The lock file lives at
-/// `locks_root/<first-2-hex>/<remaining-hex>.lock`, where the hex is the
-/// SHA-256 of the composed key — so it is never written inside `guarded_dir`.
+/// `guarded_dir` must already exist: its identity is the key, and a missing one keys off the path instead, so it will
+/// not contend with lockers of the real directory.
 ///
-/// `guarded_dir` must already exist: its `(device, inode)` identity is the
-/// primary key material. A caller that may need to create the directory should
-/// `create_dir_all` it before locking. If the identity cannot be read the key
-/// falls back to the canonicalized path (see the module docs).
-///
-/// `scope` names the lock's purpose (e.g. `"index-catalog"`); `discriminator`
-/// distinguishes locks that share a `guarded_dir` and `scope` (e.g. the
-/// specific file being guarded). A different `scope` or `discriminator` yields
-/// an independent lock on the same directory.
+/// Lock files are never unlinked: unlinking on release races an acquirer that already opened the path.
 ///
 /// # Errors
 ///
-/// Returns an error only when the lock file cannot be created or the lock
-/// cannot be acquired within `timeout` (see
-/// [`LockedFile::open_exclusive_with_timeout`]).
+/// When the lock file cannot be created or the lock is not acquired within `timeout`.
 pub async fn lock_scoped(
     locks_root: &Path,
     scope: &str,
@@ -71,11 +33,7 @@ pub async fn lock_scoped(
     LockedFile::open_exclusive_with_timeout(lock_path, timeout).await
 }
 
-/// Compose the SHA-256 pre-image for the lock key. The primary form binds the
-/// directory's filesystem identity
-/// (`{device}:{inode}:{scope}:{discriminator}`); the fallback binds its
-/// canonicalized path (`path:{canonical}:{scope}:{discriminator}`) when the
-/// identity is unreadable.
+/// Compose the lock key's SHA-256 pre-image, keyed off the canonical path when the identity is unreadable.
 async fn key_material(guarded_dir: &Path, scope: &str, discriminator: &str) -> String {
     if let Some((device, inode)) = file_identity(guarded_dir).await {
         return format!("{device}:{inode}:{scope}:{discriminator}");
@@ -90,8 +48,6 @@ async fn key_material(guarded_dir: &Path, scope: &str, discriminator: &str) -> S
     format!("path:{}:{scope}:{discriminator}", canonical.to_string_lossy())
 }
 
-/// Canonicalize `path` off the async runtime (the syscall is blocking).
-/// `None` on any failure — the caller then keys off the raw path.
 async fn canonicalize(path: &Path) -> Option<std::path::PathBuf> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || dunce::canonicalize(&path).ok())
@@ -108,8 +64,7 @@ async fn file_identity(dir: &Path) -> Option<(u64, u64)> {
     Some((metadata.dev(), metadata.ino()))
 }
 
-/// The `(volume serial, file index)` identity of `dir`, or `None` if it cannot
-/// be read.
+/// The `(volume serial, file index)` identity of `dir`, or `None` if it cannot be read.
 #[cfg(windows)]
 async fn file_identity(dir: &Path) -> Option<(u64, u64)> {
     let dir = dir.to_path_buf();
@@ -128,9 +83,7 @@ fn file_identity_blocking(dir: &Path) -> Option<(u64, u64)> {
         BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
     };
 
-    // FILE_FLAG_BACKUP_SEMANTICS is required to open a *directory* handle;
-    // a plain read open of a directory fails on Windows. The RAII `File`
-    // closes the handle on drop.
+    // Without FILE_FLAG_BACKUP_SEMANTICS a directory open fails and the key silently falls back to the path.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
@@ -138,9 +91,7 @@ fn file_identity_blocking(dir: &Path) -> Option<(u64, u64)> {
         .ok()?;
 
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: `file.as_raw_handle()` is a valid open handle that outlives this
-    // call, and `&mut info` points to a writable, correctly-sized structure.
-    // On a zero (failure) return we discard `info` untouched.
+    // SAFETY: `file` holds a valid handle across the call and `info` is a valid, aligned out-pointer.
     let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
     if ok == 0 {
         return None;

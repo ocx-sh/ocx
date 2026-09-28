@@ -3,36 +3,15 @@
 
 //! Fulcio CSR client — `POST /api/v2/signingCert`.
 //!
-//! Keyless signing exchanges a short-lived OIDC identity token plus an
-//! ephemeral P-256 public key for a Fulcio-issued signing certificate whose
-//! SAN is the OIDC subject. This module speaks the Fulcio v2 `publicKeyRequest`
-//! shape directly rather than via `sigstore::fulcio::FulcioClient`. The reason
-//! is not SCT support — the local TesseraCT stack mints one and the issued leaf
-//! carries the embedded `1.3.6.1.4.1.11129.2.4.2` extension. It is that
-//! `request_cert_v2` constructs `reqwest::Client::new()` internally, so a
-//! delegated Fulcio call would carry no connect or request timeout and could
-//! not be routed through the shared, guarded client (ADR
-//! `adr_real_sigstore_stack_and_delegation.md` D4; upstream sigstore-rs#176).
-//!
-//! HTTP failures map to typed [`SignErrorKind`]s: 401/403 →
-//! [`SignErrorKind::OidcTokenRejected`], other 4xx →
-//! [`SignErrorKind::FulcioBadRequest`], and the retryable set (429, any 5xx,
-//! and a transport-level connect or timeout failure) →
-//! [`SignErrorKind::FulcioUnavailable`], which is exit 75 so a caller reading
-//! `$?` can retry it. Fulcio states the actual cause only in the response
-//! body, which the typed kinds cannot carry, so it is logged.
+//! Not `sigstore::fulcio::FulcioClient`: it builds an unguarded, timeout-free `reqwest::Client`
+//! (`adr_real_sigstore_stack_and_delegation.md`).
 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::error::SignErrorKind;
 
-/// Fulcio-issued signing certificate leaf.
-///
-/// `leaf_der` holds DER bytes (the bundle embeds the leaf as
-/// `X509Certificate.raw_bytes`; Sigstore bundles omit the root, which lives in
-/// the trust root). `leaf_pem` is retained because the Rekor `hashedrekord`
-/// entry references the certificate as base64-encoded PEM.
+/// Fulcio-issued signing certificate leaf; the PEM form is what the Rekor `hashedrekord` entry references.
 pub(super) struct FulcioCertificate {
     pub(super) leaf_der: Vec<u8>,
     pub(super) leaf_pem: String,
@@ -42,8 +21,6 @@ pub(super) struct FulcioCertificate {
 pub(super) struct FulcioClient {
     url: Url,
 }
-
-// ── Fulcio v2 request/response wire types (subset we use) ────────────────────
 
 #[derive(Serialize)]
 struct SigningCertRequest<'a> {
@@ -69,12 +46,7 @@ struct PublicKeyRequest<'a> {
 #[derive(Serialize)]
 struct PublicKeyField<'a> {
     algorithm: &'a str,
-    /// The ephemeral public key as a PEM string, verbatim.
-    ///
-    /// NOT base64: `PublicKey.content` is a protobuf `string`, and protobuf-JSON
-    /// renders a string as itself. Only `proofOfPossession` is a `bytes` field,
-    /// which is why that one is base64 and this one is not. Sending base64 here
-    /// makes real Fulcio answer 400 "malformed CSR".
+    /// The PEM verbatim, NOT base64 (a protobuf `string`): base64 here makes real Fulcio answer 400.
     content: &'a str,
 }
 
@@ -103,10 +75,7 @@ impl FulcioClient {
 
     /// Exchange an OIDC token + ephemeral public key for a signing certificate.
     ///
-    /// `public_key_pem` is the SubjectPublicKeyInfo PEM of the ephemeral P-256
-    /// key; `proof_of_possession` is base64 of the ephemeral key's signature
-    /// over the token subject (the public-good Fulcio validates it; the offline
-    /// fake ignores it, but we send a real one for interop fidelity).
+    /// `proof_of_possession` is base64 of the ephemeral key's signature over the token subject.
     pub(super) async fn request_certificate(
         &self,
         token: &str,
@@ -135,29 +104,17 @@ impl FulcioClient {
             .json(&body)
             .send()
             .await
-            // Connect refused, DNS failure, TLS handshake, read timeout: every
-            // one of these is a transient outage of a remote service, not a
-            // defect in this request. `Internal` (exit 1) reported them as a
-            // bug in ocx and made them unretryable.
+            // Transport failures are a retryable outage, never `Internal`.
             .map_err(|_| SignErrorKind::FulcioUnavailable)?;
 
         let status = response.status();
         if !status.is_success() {
-            // Fulcio puts the actionable cause ("invalid audience", "issuer not
-            // configured") only in the body. Without it every failure reads as a
-            // bare slug, which is unactionable in CI. The typed kinds carry no
-            // payload, so log it rather than reshape the error contract.
-            // Read the body before the macro: an `.await` inside the argument
-            // list holds a `!Send` `dyn Value` across the suspension point and
-            // makes the whole `sign` future non-`Send`.
+            // The cause is only in the body, so it is logged.
+            // Read before the macro: an `.await` in its arguments makes `sign` non-`Send`.
             let body = ocx_oci::endpoint::read_body_capped(response)
                 .await
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()); // LOSSY-OK: display
-            // `classify_rejection` reads the body to tell an identity-token
-            // rejection from a generic bad request, so an unreadable or
-            // over-cap body silently downgrades the slug. Say so on the log
-            // line rather than letting the operator read `fulcio_bad_request`
-            // as a positive finding.
+            // Say when the body was unreadable, or `fulcio_bad_request` reads as a positive finding.
             tracing::warn!(
                 status = status.as_u16(),
                 detail = %body.as_deref().map_or_else(
@@ -170,8 +127,7 @@ impl FulcioClient {
             return Err(classify_rejection(status.as_u16(), &body));
         }
 
-        // Capped: a certificate chain is kilobytes, and this endpoint is
-        // operator-supplied (`--fulcio-url`).
+        // Capped: the endpoint is operator-supplied (`--fulcio-url`).
         let raw = ocx_oci::endpoint::read_body_capped(response)
             .await
             .ok_or_else(|| SignErrorKind::Internal("Fulcio response unreadable or over the size cap".into()))?;
@@ -194,39 +150,17 @@ impl FulcioClient {
     }
 }
 
-/// Decode a PEM `CERTIFICATE` block into DER bytes.
 /// The fragment Fulcio puts in its body when the OIDC token itself is bad.
 ///
-/// Fulcio collapses every client-side rejection to HTTP 400 with gRPC status
-/// code 3 (`INVALID_ARGUMENT`) and never uses 401/403, so the status line
-/// alone cannot separate "your token is not acceptable" (exit 80, AuthError)
-/// from "your CSR is malformed" (exit 78, ConfigError). The message is the
-/// only discriminator the API offers; these are Fulcio's own public error
-/// constants (`pkg/api/error.go`), the same strings cosign surfaces.
-///
-/// Measured against Fulcio v1.8.8 on the local stack:
-///
-/// | request defect | message |
-/// |---|---|
-/// | token signed by a foreign key, or not a JWT | `There was an error processing the identity token` |
-/// | bad proof-of-possession | `The signature supplied in the request could not be verified` |
-/// | unparseable public key | `The public key supplied in the request could not be parsed` |
-///
-/// Matched as a substring so a future prefix or suffix change does not silently
-/// reclassify an auth failure as a config error. A miss is not a security
-/// failure -- it degrades exit 80 to exit 78, and the request is refused either
-/// way.
+/// Fulcio answers every client rejection with 400, so this is the only auth-vs-config discriminator;
+/// matched as a substring, and a miss degrades exit 80 to 78.
 const FULCIO_IDENTITY_TOKEN_ERROR: &str = "error processing the identity token";
 
 /// Map a Fulcio rejection onto the sign error it is.
-///
-/// A pure seam over the status line plus the body, so the status-to-exit-code
-/// contract is testable without an HTTP round-trip.
 fn classify_rejection(status: u16, body: &str) -> SignErrorKind {
     match status {
         401 | 403 => SignErrorKind::OidcTokenRejected,
-        // 429 is a 4xx by number and a transient fault by meaning; it leads the
-        // 4xx arms deliberately (PKG-16's retryable set is {429, 5xx}).
+        // 429 leads the 4xx arms: it is retryable.
         429 => SignErrorKind::FulcioUnavailable,
         400..=499 if body.contains(FULCIO_IDENTITY_TOKEN_ERROR) => SignErrorKind::OidcTokenRejected,
         400..=499 => SignErrorKind::FulcioBadRequest,
@@ -236,19 +170,11 @@ fn classify_rejection(status: u16, body: &str) -> SignErrorKind {
 }
 
 /// Longest Fulcio error body we will put on a log line.
-///
-/// Fulcio's own error payloads are a short JSON object; anything past this is a
-/// misconfigured proxy's HTML, which helps nobody and floods the log.
 const MAX_FULCIO_DETAIL: usize = 512;
 
 /// Render an untrusted Fulcio response body as one safe log line.
 ///
-/// The body is remote-controlled text on its way to a terminal, and
-/// `tracing-subscriber` forwards control bytes verbatim (CWE-150), so this
-/// keeps a printable-ASCII allowlist rather than stripping a blocklist: every
-/// C0/C1 control, every escape introducer and the whole bidi and zero-width
-/// range fall outside it by construction. Truncation is by byte on an
-/// already-ASCII string, so it cannot split a character.
+/// A printable-ASCII allowlist, never a blocklist: `tracing-subscriber` forwards control bytes verbatim (CWE-150).
 fn detail_snippet(body: &str) -> String {
     let mut out: String = body
         .chars()

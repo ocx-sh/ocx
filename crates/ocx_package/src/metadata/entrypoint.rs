@@ -9,24 +9,13 @@ use serde::{Deserialize, Serialize};
 use super::slug::{SLUG_MAX_LEN, SLUG_PATTERN, SLUG_PATTERN_STR};
 use super::visibility::Visibility;
 
-/// A validated entrypoint name.
-///
-/// Must match `^[a-z0-9][a-z0-9_-]*$` and be at most
-/// [`EntrypointName::MAX_LEN`] bytes. Enforced at construction and
-/// deserialization.
+/// An entrypoint name matching `^[a-z0-9][a-z0-9_-]*$`, at most [`EntrypointName::MAX_LEN`] bytes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct EntrypointName(String);
 
 impl EntrypointName {
-    /// Maximum byte length of an entrypoint name.
-    ///
-    /// Caps publisher-supplied names so generated launcher filenames stay
-    /// well under platform path limits (Windows `MAX_PATH = 260`, including
-    /// the `.exe`/`.shim` suffix and the surrounding install directory). 64
-    /// chars is generous for human-readable command names while leaving headroom.
-    ///
-    /// Mirrors [`slug::SLUG_MAX_LEN`] — both newtypes share the same upper bound.
+    /// Maximum byte length, keeping launcher filenames under Windows `MAX_PATH`.
     pub const MAX_LEN: usize = SLUG_MAX_LEN;
 
     pub fn as_str(&self) -> &str {
@@ -38,7 +27,6 @@ impl TryFrom<String> for EntrypointName {
     type Error = EntrypointError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        // Length checked first to avoid running the regex on pathologically long input.
         if value.len() > Self::MAX_LEN {
             return Err(EntrypointError::InvalidName { name: value });
         }
@@ -104,16 +92,12 @@ impl schemars::JsonSchema for EntrypointName {
 
 /// A single named entrypoint for a package.
 ///
-/// The map key in [`Entrypoints`] supplies the *invocable name* — the
-/// filename of the generated launcher. This struct holds the per-entry
-/// value.
-///
-/// The launcher generated for each entry re-enters via
-/// `ocx launcher exec '<package-root>' -- <name> [args...]`, preserving
-/// clean-env execution semantics. `ocx launcher exec` resolves the
-/// *dispatch command* against the composed `PATH` from the package's `env`
-/// block: [`Entrypoint::command`] when set, otherwise the invocable name
-/// itself (the common case where they coincide).
+/// The map key in `entrypoints` supplies the *invocable name* — the filename
+/// of the generated launcher; this object holds the per-entry value. The
+/// launcher re-enters via `ocx launcher exec '<package-root>' -- <name> [args...]`,
+/// preserving clean-env execution semantics, and resolves the *dispatch
+/// command* against the composed `PATH` from the package's `env` block:
+/// `command` when set, otherwise the invocable name itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Entrypoint {
     /// Dispatch target resolved on the composed `PATH`, when it differs from
@@ -127,25 +111,19 @@ pub struct Entrypoint {
     /// own arguments. Each element may carry `${installPath}` — or its alias
     /// `${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`
     /// and `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected
-    /// (write `$${` for a literal `${`). Absent/empty serializes to nothing
-    /// (wire-compatible with the pre-`args` shape).
+    /// (write `$${` for a literal `${`). Absent/empty serializes to nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     args: Vec<String>,
 }
 
 impl Entrypoint {
-    /// The dispatch command, or `None` when it coincides with the invocable
-    /// name. Callers wanting the effective command should fall back to the
-    /// entrypoint's map key — see [`Entrypoints::dispatch_command`].
+    /// The dispatch command, or `None` when it is the invocable name; see
+    /// [`Entrypoints::dispatch_command`].
     pub fn command(&self) -> Option<&EntrypointName> {
         self.command.as_ref()
     }
 
-    /// Fixed leading arguments prepended before user-supplied arguments when
-    /// the generated launcher dispatches this entrypoint. Each element is one
-    /// argv token; an install-path token is interpolated to the package's
-    /// content directory at runtime. Returns an empty slice when no baked args
-    /// are declared.
+    /// Fixed leading argv tokens the launcher prepends before the user's arguments.
     pub fn args(&self) -> &[String] {
         &self.args
     }
@@ -153,58 +131,23 @@ impl Entrypoint {
 
 /// Map of entrypoint names to entrypoint definitions for a package.
 ///
-/// Serializes as a JSON object keyed by entrypoint name (e.g.
-/// `{"cmake": {}, "ctest": {}}`). The map shape mirrors the Cargo
-/// `[dependencies.X]`, Compose `services:`, and GitHub Actions `jobs:`
-/// idioms — uniqueness within a package is given by JSON object key
-/// semantics.
-///
-/// `#[serde(default)]` on the containing field means an absent
-/// `entrypoints` field deserializes to an empty map;
-/// `skip_serializing_if = "Entrypoints::is_empty"` means an empty map is
-/// omitted on serialization (additive-optional, forward-compat).
-///
-/// Deserialization uses a custom `MapAccess` visitor that rejects duplicate
-/// keys with [`EntrypointError::DuplicateName`]. The `serde_json` default of
-/// silently last-wins on duplicate keys is unsafe for a registry where
-/// duplicate names indicate publisher error.
+/// Deserialization rejects duplicate keys ([`EntrypointError::DuplicateName`])
+/// that `serde_json` would silently resolve last-wins.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entrypoints {
     entries: BTreeMap<EntrypointName, Entrypoint>,
 }
 
 impl Entrypoints {
-    /// The visibility entry points carry as a surface carrier.
-    ///
-    /// Entry points have no publisher-declared visibility field; they are
-    /// launchers a *consumer* invokes the package through, while the
-    /// package's own runtime bypasses them and calls `bin/` directly. That
-    /// is exactly [`Visibility::INTERFACE`]: consumer axis yes, self axis
-    /// no. The composer's surface algebra
-    /// (`package_manager::composer::carrier_crosses`) derives everything
-    /// else from this one constant — a root's launchers appear on its
-    /// interface surface only, and a dependency's launchers cross the edge
-    /// like any interface-side carrier (they are how the parent invokes it).
+    /// The visibility entry points carry as a surface carrier: consumers invoke
+    /// them, while the package's own runtime calls `bin/` directly.
     pub const IMPLICIT_VISIBILITY: Visibility = Visibility::INTERFACE;
 
-    /// Constructs an `Entrypoints` from a name-keyed map.
-    ///
-    /// Uniqueness is given by `BTreeMap` key semantics; this constructor is
-    /// infallible. The custom `Deserialize` impl is the only path that can
-    /// observe duplicate keys (raw JSON), and it surfaces them as
-    /// [`EntrypointError::DuplicateName`].
     pub fn new(entries: BTreeMap<EntrypointName, Entrypoint>) -> Self {
         Self { entries }
     }
 
-    /// Convenience constructor for tests that pass known-valid name literals.
-    ///
-    /// Each name is validated by [`EntrypointName::try_from`]. Panics on an
-    /// invalid name — callers must pass slug-valid literals. This is acceptable
-    /// here because all callers are test helpers constructing compile-time
-    /// constants; invalid input is a programming error, not a runtime condition.
-    // On the `__testing` seam rather than `pub`: every caller is a test helper,
-    // and the composer's tests are in `ocx_lib` now, one crate boundary away.
+    /// Test constructor from slug-valid name literals; panics on an invalid name.
     #[cfg(any(test, feature = "__testing"))]
     pub fn from_names<I, S>(names: I) -> Self
     where
@@ -230,29 +173,20 @@ impl Entrypoints {
         self.entries.len()
     }
 
-    /// Iterates `(name, entry)` pairs in name-sorted order.
     pub fn iter(&self) -> impl Iterator<Item = (&EntrypointName, &Entrypoint)> + use<'_> {
         self.entries.iter()
     }
 
-    /// Iterates declared entrypoint names in name-sorted order.
     pub fn names(&self) -> impl Iterator<Item = &EntrypointName> + use<'_> {
         self.entries.keys()
     }
 
-    /// Returns the [`Entrypoint`] registered under `name`, or `None` if no
-    /// entry with that name exists.
     pub fn get(&self, name: &str) -> Option<&Entrypoint> {
         self.entries.get(name)
     }
 
-    /// Resolves the dispatch command for an invocable entrypoint `name`.
-    ///
-    /// Returns the entry's [`Entrypoint::command`] when set, otherwise `name`
-    /// itself. `name` is returned verbatim when it is not a declared
-    /// entrypoint, so callers that already validated the name (e.g.
-    /// `ocx launcher exec`, where the launcher filename is the name) keep
-    /// today's "resolve the name on PATH" behaviour with no special-casing.
+    /// The dispatch command for `name`: its [`Entrypoint::command`] when set,
+    /// otherwise `name` itself, also when `name` is not declared.
     pub fn dispatch_command<'a>(&'a self, name: &'a str) -> &'a str {
         self.get(name)
             .and_then(Entrypoint::command)
@@ -290,9 +224,6 @@ impl<'de> Deserialize<'de> for Entrypoints {
                 let mut entries: BTreeMap<EntrypointName, Entrypoint> = BTreeMap::new();
                 while let Some(key) = map.next_key::<EntrypointName>()? {
                     let value: Entrypoint = map.next_value()?;
-                    // serde_json's default behaviour silently last-wins on
-                    // duplicate keys. Reject them so publishers see the
-                    // mistake rather than a silently dropped entry.
                     match entries.entry(key) {
                         Entry::Occupied(occ) => {
                             return Err(serde::de::Error::custom(EntrypointError::DuplicateName {
@@ -335,14 +266,11 @@ impl schemars::JsonSchema for Entrypoints {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EntrypointError {
-    /// An entrypoint name fails the slug regex `^[a-z0-9][a-z0-9_-]*$`
-    /// or exceeds [`EntrypointName::MAX_LEN`].
-    // The literal `64` must stay in sync with `EntrypointName::MAX_LEN` (= slug::SLUG_MAX_LEN);
-    // serde/thiserror `#[error]` attributes cannot interpolate a const at compile time.
+    /// An entrypoint name fails the slug regex or exceeds [`EntrypointName::MAX_LEN`].
+    // The literal `64` must track `EntrypointName::MAX_LEN`; `#[error]` cannot interpolate a const.
     #[error("invalid entrypoint name '{name}': must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars)")]
     InvalidName { name: String },
-    /// A JSON object contains the same entrypoint name twice. Surfaced by
-    /// the custom [`Entrypoints`] deserializer.
+    /// A JSON object contains the same entrypoint name twice.
     #[error("duplicate entrypoint name '{name}'")]
     DuplicateName { name: String },
 }

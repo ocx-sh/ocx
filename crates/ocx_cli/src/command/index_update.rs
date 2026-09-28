@@ -9,14 +9,8 @@ use ocx_index;
 use crate::command::index_common;
 use crate::options;
 
-/// The one command that moves a pin for the packages you name.
-///
-/// The local index copy binds a tag to a digest and a package to a physical
-/// registry; resolving, installing and running all read it as it stands. This
-/// command changes it, and only for the packages named on the command line —
-/// `ocx index sync` is the same work over a registry's whole catalog, sharing
-/// this command's refresh loop ([`index_common`]). The user-facing help lives
-/// on the `Index::Update` variant, which is what clap renders.
+/// The one command that moves a pin for the packages you name; `ocx index sync` is the same work
+/// over a registry's whole catalog.
 #[derive(Parser)]
 pub struct IndexUpdate {
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -25,54 +19,29 @@ pub struct IndexUpdate {
 
 impl IndexUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // `ocx index update` refreshes tags via `LocalIndex::refresh_tags`
-        // (`adr_index_indirection.md` Decision H): writes the tag → digest root document plus each tag's
-        // dispatch object (`o/<algo>/<hex>.json`) into the local index
-        // collection — never the leaf platform manifest, which is fetched
-        // into the machine-global blob store on demand (A3) — so a version
-        // choice resolves fully offline afterwards.
-        // Offline is checked first — the accessor IS the offline gate and
-        // constructs nothing — so `--offline --frozen` keeps reporting the
-        // stricter posture.
+        // The offline gate, checked first so `--offline --frozen` reports the stricter posture
+        // (`adr_index_indirection.md` Decision H).
         let remote_index = context.oci_index()?;
 
-        // `--frozen` refuses the package tier's discovery verb — the one verb
-        // the flag scopes to. An index update exists to learn a NEW tag →
-        // digest binding and write it into the local index; a freeze exists to
-        // stop exactly that, so reporting success while moving pins would make
-        // the flag meaningless where it applies most directly. Placed before
-        // any index-source or refresh work so nothing is fetched and no pin can
-        // move. Read straight off the invocation's policy view: the package
-        // manager carries no frozen posture, because no other tier consults one.
-        //
-        // This is the ONLY frozen gate in this command; a second gate beside it
-        // is what `exactly_one_frozen_gate` exists to refuse.
+        // Before any fetch: moving pins is what `--frozen` exists to stop. The only frozen gate here;
+        // `exactly_one_frozen_gate` fails a second one.
         if context.config_view().frozen {
             return Err(index_common::policy_blocked("`ocx index update`", "frozen").into());
         }
 
         let oci_index = ocx_index::Index::from_remote(remote_index.clone());
-        // Per-namespace static-file index sources, when online. A package in an
-        // index-bearing namespace refreshes through the two-hop index path
-        // rather than the registry (`adr_index_indirection.md` F5a — kind per
-        // NAMESPACE); every other package refreshes against the registry.
+        // Index-bearing namespaces refresh through their index source, the rest against the registry
+        // (`adr_index_indirection.md` § `[registries."<ns>"] index`).
         let index_sources = context.index_sources();
 
         let packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
 
-        // Any failure → the input-order-first error, so `classify_error`
-        // (main.rs) derives a deterministic nonzero exit. No stdout report: this
-        // is an action command with no payload; the aggregated error on stderr
-        // is the batch signal.
         if let Some(error) =
             index_common::refresh_packages(context.local_index(), index_sources, &oci_index, &packages).await
         {
             return Err(error);
         }
 
-        // Piggyback: keep the patch tier's descriptors in step with the index
-        // this command just refreshed. Best-effort and non-fatal; see
-        // [`index_common::sync_patch_descriptors`].
         index_common::sync_patch_descriptors(context.manager()).await;
 
         Ok(ExitCode::SUCCESS)
@@ -81,8 +50,10 @@ impl IndexUpdate {
 
 #[cfg(test)]
 mod tests {
-    //! Specification tests for `ocx index update`'s CLI contract, written from
-    //! `design_spec_servable_index_snapshot.md` C-012 and C-024.
+    //! Specification tests for `ocx index update`'s CLI contract
+    //! (`design_spec_servable_index_snapshot.md` § CLI contract) and
+    //! that it owns no fan-out of its own (`design_spec_servable_index_snapshot.md`
+    //! § One bounded loop for both input shapes).
     //!
     //! The refresh fan-out itself is `index_common.rs`'s, and its guards live
     //! there; what is pinned here is this command's grammar and that it grew no
@@ -98,7 +69,7 @@ mod tests {
         IndexUpdate::command().try_get_matches_from(argv)
     }
 
-    // ── C-012 — grammar ──────────────────────────────────────────────────────
+    // ── grammar ──────────────────────────────────────────────────────────────
 
     #[test]
     fn at_least_one_package_is_required() {
@@ -129,7 +100,7 @@ mod tests {
         parse(&["update", "--dry-run", "cmake"]).expect_err("--dry-run went with it");
     }
 
-    // ── C-012 — exactly one `--frozen` gate ─────────────────────────────────
+    // ── exactly one `--frozen` gate ──────────────────────────────────────────
 
     #[test]
     fn exactly_one_frozen_gate() {
@@ -146,7 +117,7 @@ mod tests {
         );
     }
 
-    // ── C-024 — this command owns no fan-out of its own ─────────────────────
+    // ── this command owns no fan-out of its own ──────────────────────────────
 
     #[test]
     fn the_refresh_loop_is_the_shared_one() {

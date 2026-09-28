@@ -3,30 +3,7 @@
 
 //! Project-tier `ocx exec` command.
 //!
-//! `ocx exec` is the project-tier counterpart to the OCI-tier
-//! `ocx package exec` — one verb, two addressing modes, the same way
-//! `ocx pull` pairs with `ocx package pull`. The module is named
-//! `toolchain_exec` for the same reason `toolchain_env` is: two commands share
-//! a CLI name across the tiers, so the project-tier one carries the prefix.
-//! Symbols are binding names from `ocx.toml`, not OCI identifiers. The
-//! command selects the bindings in the requested groups (resolution-free),
-//! narrows that selection to the requested `NAME`s, resolves the host leaf of
-//! **only** the named subset through `ocx.lock` (digest-pinned), composes the
-//! child environment from those packages, and execs the given `ARGV` in that
-//! environment — mirroring `ocx exec`'s child-spawn mechanics but driven
-//! entirely by the project toolchain declaration.
-//!
-//! Both validations are scoped to the named subset: a tool elsewhere in scope
-//! that ships no leaf for the current host (`NoHostLeaf`, exit 78) or that two
-//! selected groups resolve differently (`DuplicateToolAcrossSelectedGroups`,
-//! exit 64) only aborts the run when it is among the composed tools — the named
-//! subset, or every tool in scope when no `NAME` is given.
-//!
-//! # NOTE: clap floor
-//!
-//! The `value_terminator = "--"` on `names` combined with `last = true` on
-//! `argv` requires clap ≥ 4.5.57. clap 4.5.55 introduced a regression in
-//! this combination; 4.5.57 fixed it. The floor is set in `Cargo.toml`.
+//! `value_terminator = "--"` plus `last = true` on `argv` needs clap 4.5.57 or later (4.5.55 regressed it).
 
 use std::process::ExitCode;
 
@@ -48,18 +25,12 @@ use ocx_shell::shell::reconcile;
 
 /// Run a command with the composed environment from the project toolchain.
 ///
-/// Loads the nearest `ocx.toml` together with its sibling `ocx.lock`, selects
-/// the tool bindings in the requested groups, composes their environment, and
-/// execs `ARGV` with that environment.
-///
-/// `--` is mandatory: everything before `--` is a binding name filter; everything
-/// after is the command and arguments forwarded to the child process unchanged.
-///
-/// # Composition order
-///
-/// Group-selection order (the order of `-g` flags after `all` expansion,
-/// deduplicated); then alphabetical by binding name within each group
-/// (lock-file order).
+/// Loads the nearest `ocx.toml` and its `ocx.lock`, selects the tool bindings
+/// in the requested groups, composes their environment, and execs `ARGV` with
+/// it. `--` is mandatory: before it is a binding name filter, after it the
+/// command and arguments, forwarded unchanged. Composition order is the group
+/// selection order (`-g` flags after `all` expansion, deduplicated), then
+/// alphabetical by binding name within each group (lock-file order).
 #[derive(Parser, Clone)]
 pub struct ToolchainExec {
     #[clap(flatten)]
@@ -85,20 +56,14 @@ pub struct ToolchainExec {
     pub lazy_mode: options::LazyMode,
 
     /// Top tier of the `pinned` ladder for the environment this command
-    /// composes for the child (C-055, C-066).
-    ///
-    /// Declared before `names` and `argv`, per the project's
-    /// flags-before-positional-arguments convention.
+    /// composes for the child.
     #[clap(flatten)]
     pub pinned: options::Pinned,
 
     #[clap(flatten)]
     pub records: options::Records,
 
-    // `--consent` (the default) / `--no-consent`. Declared before `names` and
-    // `argv`, per the project's flags-before-positional-arguments convention.
-    // A `///` here would be dead text: clap renders the flattened struct's own
-    // field docs, not this one.
+    // `--consent` (the default) / `--no-consent`; clap renders the flattened struct's docs, not a `///` here.
     #[clap(flatten)]
     pub consent: options::Consent,
 
@@ -107,147 +72,74 @@ pub struct ToolchainExec {
     /// tools are resolved to a host leaf, so an unrelated tool in scope
     /// that ships no leaf for this host does not block the run. An empty
     /// list means "every binding in scope"; then every tool must resolve.
-    ///
-    /// `value_terminator = "--"` so clap stops collecting names at the
-    /// mandatory `--` separator without trying to interpret subsequent
-    /// hyphen-prefixed argv as more names.
+    // Stops name collection at `--`, so hyphen-prefixed argv is never read as more names.
     #[arg(num_args = 0.., value_terminator = "--")]
     pub names: Vec<String>,
 
     /// Command to execute, with arguments. The command runs with the
     /// composed package env. `--` is mandatory and at least one argv
-    /// token is required (`required = true` + `num_args = 1..`).
-    ///
-    /// `allow_hyphen_values = true` so flag-prefixed argv like
-    /// `--format json` is forwarded to the child unchanged. `last = true`
-    /// makes clap parse everything before the first `--` into `names`
-    /// and everything after into `argv`. `required = true` ensures
-    /// clap rejects `ocx exec` / `ocx exec NAME` / `ocx exec NAME --` with
-    /// a usage error (exit 2) instead of letting an empty argv slip
-    /// through to a runtime panic on `split_first`.
+    /// token is required.
+    // `allow_hyphen_values`: flag-prefixed argv like `--format json` reaches the child unchanged.
+    // `required` + `num_args = 1..`: an empty argv is a usage error, not a panic on `split_first`.
     #[arg(allow_hyphen_values = true, last = true, num_args = 1.., required = true)]
     pub argv: Vec<String>,
 }
 
 impl ToolchainExec {
-    /// Execute the `ocx exec` command.
-    ///
-    /// # Behavior
-    ///
-    /// Resolves the project context (ocx.toml + ocx.lock), expands `-g all`
-    /// to the full group union, selects the expanded scope via
-    /// `select_tool_set` (resolution-free), narrows the selection to the
-    /// requested `names`, validates the narrowed set via
-    /// `check_duplicate_selection`, resolves its host leaves via
-    /// `resolve_selected_tools`, and execs `argv` with the resulting package
-    /// environment. Exit code is forwarded byte-for-byte from the child process
-    /// on success.
-    ///
-    /// Composition order: group-selection order (the order of `-g` flags
-    /// after `all` expansion, deduplicated), then alphabetical by binding
-    /// name within each group (lock-file order).
+    /// Execute the `ocx exec` command; the child's exit code is forwarded byte-for-byte.
     ///
     /// # Errors
     ///
-    /// - Exit 64 (`UsageError`): no `ocx.toml` found, unknown group, unknown
-    ///   or ambiguous binding name, empty `-g` segment.
-    /// - Exit 78 (`ConfigError`): `ocx.lock` absent.
-    /// - Exit 65 (`DataError`): `ocx.lock` stale (hash mismatch).
-    /// - Other exit codes from package-manager / registry errors forwarded
-    ///   via the existing `ClassifyExitCode` chain.
+    /// Exit 64 for no `ocx.toml`, an unknown group, an unknown or ambiguous name, or an empty `-g`
+    /// segment; 78 for an absent `ocx.lock`; 65 for a stale one.
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Strict isolation (C2.6): `exec` composes exactly the in-effect
-        // project file. Root `--global` only re-targets which single file
-        // that is (the global one) — `select_tool_set` below is still fed
-        // one tier (`&ctx.config`/`&ctx.lock`), never a union with a project.
+        // Strict isolation: only the in-effect project file composes, never a union of tiers.
 
         // ── Phase A: parse-time validation ───────────────────────────────
 
-        // Reject empty comma segments (`-g ci,,lint`) BEFORE any filesystem
-        // or network work. `clap`'s `value_delimiter = ','` splits the value
-        // into `["ci", "", "lint"]`; an empty string is a user-typing error.
+        // Before any filesystem or network work: a typing error, not a resolution fault.
         crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
 
-        // Reject a malformed `--env` before any filesystem or network work,
-        // for the same reason as the group check above. Bound here; the
-        // composition stage that appends these as the highest-precedence
-        // entries consumes them alongside the project/group env.
-        //
-        // A relative `:path` value anchors to the invocation directory — the
-        // one base a calling script can compute — not the project root the
-        // `ocx.toml` form uses.
+        // A relative `:path` anchors to the invocation directory, not the project root.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
 
-        // Fold `[records]` with `OCX_RECORDS_*` and this invocation's flags, for
-        // the same reason and at the same point: a malformed name template is a
-        // configuration error, and the operator should hear about it before any
-        // filesystem or network work rather than after the tools are installed.
+        // Before any I/O too, so a malformed record template is heard before tools install.
         let records = context.records(self.records.options())?;
 
         // ── Phase B: project context ──────────────────────────────────────
-        // Errors propagate to the `main.rs` boundary: logged once and
-        // classified by `app::classify_error` from `ProjectContextError`'s
-        // `ClassifyExitCode` impl (NoProjectIn→64, LockMissing→78, StaleLock→65).
-        // Consent write seam (C-024, A-29): `run` is one of the commands
-        // that opt in. `load_project_with_lock`, which four read-only callers
-        // share, stamps nothing.
-        // C-068 — a rendered trampoline re-enters as
-        // `ocx --project '<baked home>' exec` from whatever directory the user
-        // was in, so a failure to resolve must name the **selection**, not the
-        // working directory the walk happened to start at.
-        //
-        // The tri-state travels rather than a resolved bool: a generated
-        // launcher re-enters as `ocx --project <baked home> exec` on a machine
-        // whose operator never chose that checkout, so `OCX_NO_CONSENT` must be
-        // able to suppress the stamp — but only where no flag spoke
-        // (ocx-sh/ocx#400). The seam resolves the ladder.
+        // A resolve failure must name the selection, not CWD: a trampoline re-enters as `ocx --project '<home>' exec`.
+        // The consent tri-state travels unresolved, so `OCX_NO_CONSENT` speaks only where no flag did.
         let ctx = load_project_with_lock_consenting(&context, self.consent.explicit())
             .await
             .map_err(|error| attribute_to_selected_project(context.project_path(), error))?;
 
-        // Phase B.3: validate `-g` groups against the loaded config.
-        // `default` and `all` are always valid (all is expanded later).
-        // Anything else must appear in config.groups.
         crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
 
         // ── Phase C: `all` expansion + default scope ───────────────────────
 
         let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
-        // Default scope: if groups is empty (no -g flags) or expansion produced
-        // an empty list, scope = [DEFAULT_GROUP] — matches pull semantics.
         if expanded.is_empty() {
             expanded = vec![DEFAULT_GROUP.to_owned()];
         }
 
         // ── Phase D: resolution-free selection ────────────────────────────
-        // `select_tool_set` neither resolves host leaves nor reports a
-        // duplicate binding, so an unnamed sibling — whether it ships no leaf
-        // for this host or collides with another selected group — cannot abort
-        // a narrowly-named run. The host platform is computed here but consumed
-        // in Phase F.
+        // Resolution-free, so an unnamed sibling (no host leaf, a group collision) cannot abort a narrowly-named run.
         let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let selected = select_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[])?;
 
         // ── Phase E: NAME filter, then duplicate validation ───────────────
-        // Order is load-bearing: the check runs over the narrowed set, so a
-        // collision between two selected groups only fails the run when the
-        // colliding binding is actually being composed.
+        // Order is load-bearing: the duplicate check must run over the narrowed set only.
         let filtered = filter_by_names(selected, &self.names)?;
         check_duplicate_selection(&filtered)?;
 
         // ── Phase F: resolve host leaves (named subset) + install ─────────
-        // Resolve host leaves for the named subset ONLY — `NoHostLeaf` (78)
-        // can fire here solely for a tool actually being composed.
+        // Named subset only, so `NoHostLeaf` (78) fires solely for a composed tool.
         let resolved = resolve_selected_tools(&filtered, &host)?;
 
         let manager = context.manager();
 
-        // One entry point for both halves of the lazy split: a tool whose
-        // resolved `lazy-mode` is `always` reaches the child's `PATH` as a
-        // generated shim with no content downloaded; every other tool is
-        // installed-on-miss exactly as before.
         let requests: Vec<ComposeRequest> = resolved
             .iter()
             .map(|tool| ComposeRequest {
@@ -270,32 +162,15 @@ impl ToolchainExec {
             context.ui().warn(advisory.to_string());
         }
         let install_infos = composed.roots;
-        // Which tools this invocation materialized on the spot — half of the drift
-        // signal an execution record publishes. Reported by `compose_roots`
-        // itself, which is the only layer that sees the per-root `Cached`/`Pulled`
-        // outcome: `composer::Materialization` is the policy going in,
-        // `ComposeRoots::pulled` the answer coming out.
+        // Tools materialized on the spot: half of the execution record's drift signal.
         let auto_installed = composed.pulled;
-        // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
-        // opted-out bases get no companion overlay unless the tier is
-        // system-required. `toolchain_exec.rs` does not need the patch boundary index.
-        // Bound once here: it drives the parent resolve below AND is forwarded
-        // into the child's patch tier (Phase G) so a generated launcher's
-        // re-entry (`ocx launcher exec`) honours the same opt-out.
+        // Bound once: drives the parent resolve and is forwarded, so a launcher's re-entry honours the same opt-out.
         let no_patches = ctx.config.no_patches_repositories();
-        // Stages 4-6 of the composition order: the project's `[env]`, then each
-        // selected group's `[env]` in `-g` order, then `--env` last. Bound once
-        // — the same vector both feeds the parent's own composition and is
-        // forwarded over `OCX_ENV` (Phase G) so a generated launcher's re-entry
-        // re-applies it after the package entries instead of reverting to them.
+        // Stages 4-6 (`[env]`, group `[env]`, `--env`), also forwarded over `OCX_ENV`, or a launcher's re-entry
+        // reverts them to the package entries.
         let mut project_env = ocx_project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         project_env.extend(env_overrides);
-        // C-065/C-070: the groups this invocation selected, healed and probed
-        // once inside `resolve_env_with_attribution` before any link path is
-        // emitted. Derived here rather than below because the same scope and
-        // home answer the trampoline-exclusion question further down — one
-        // derivation, so the composition and the `PATH` exclusion cannot
-        // disagree about which tree this project has.
+        // Derived here, so composition and the trampoline exclusion below agree on this project's tree.
         let toolchain = crate::app::project_context::toolchain_links(
             &context,
             &ctx.config_path,
@@ -311,32 +186,13 @@ impl ToolchainExec {
             env: project_env.clone(),
             toolchain: Some(Box::new(toolchain)),
         };
-        // Always the consumer surface. `--self` is package vocabulary: it
-        // selects a package's own private surface, which by construction
-        // DROPS that package's `entrypoints/` from PATH — the launchers exist
-        // for consumers, and a package running itself calls `bin/` directly.
-        // A toolchain consumer is a consumer of every tool it declares, so the
-        // self view would compose a strictly worse toolchain. The flag belongs
-        // on `ocx package exec` / `ocx package env`, and only there.
-        //
-        // `resolve_env_with_attribution` rather than the attribution-dropping
-        // wrapper: the record names which package claimed each executable on
-        // `PATH`, and that derivation already exists here.
-        // The patch provenance is kept, not dropped: the record names every
-        // companion the site tier overlaid onto this composition, and this call
-        // is the only place that attribution exists.
+        // Never the self view: dropping each package's own `entrypoints/` from PATH is a strictly worse toolchain.
         let (mut entries, _, patch_companions, admitted) = manager
             .resolve_env_with_attribution(&install_infos, false, scope, &host)
             .await?;
 
-        // W-11: `entries` and `project_env` are disjoint `Vec`s (the latter is
-        // ALSO forwarded raw over `OCX_ENV` below) — reconcile them together so
-        // a package-established `list` separator reaches the forwarded copy.
-        // This is the motivating case: without it, a package appending
-        // `GODEBUG` with `","` plus this project's own `GODEBUG` entry (which
-        // may omit the separator) would forward the project's copy with `None`,
-        // and a re-entrant launcher would fold it with the bare `" "` default
-        // instead of the separator the package actually established.
+        // Together, or a forwarded project `GODEBUG` keeps `None`
+        // and a re-entrant launcher folds it with `" "`, not `","`.
         reconcile_run_entries(&mut entries, &mut project_env)?;
 
         // ── Phase G: spawn child ──────────────────────────────────────────
@@ -346,20 +202,7 @@ impl ToolchainExec {
         } else {
             reconcile::inherited_env()
         };
-        // Inject the project `no-patches` opt-out into the forwarded patch tier:
-        // the base `config_view().patches` carries only the config-file tier
-        // (empty `no_patches`). Forwarding the opt-out over `OCX_PATCHES` lets a
-        // child launcher's `Context` reconstruct it. Only `patches.is_some()`
-        // tiers forward — an absent tier has no companions to re-inject.
-        //
-        // A generated launcher resolves its base via `install_info_from_package_root`,
-        // which mints a synthetic content-addressed identifier with no real
-        // `registry/repository` (see `launcher/exec.rs`), so a repo-key alone
-        // never matches there. Also forward each opted-out base's resolved
-        // content digest (from the already-resolved `install_infos`) so the
-        // launcher's digest-matching leg (`resolve.rs`) can recognise it. The
-        // digest string form (`Digest::to_string()`, e.g. `sha256:<hex>`) must
-        // match exactly what the resolver compares against.
+        // Opted-out bases also go by digest: a generated launcher's base has a synthetic identifier.
         let mut forwarded_no_patches = no_patches.clone();
         for info in &install_infos {
             let id = info.identifier().as_identifier();
@@ -372,23 +215,11 @@ impl ToolchainExec {
         if let Some(patches) = forwarded_config.patches.as_mut() {
             patches.no_patches = forwarded_no_patches;
         }
-        // Hand the resolved sink down. The config and environment tiers a child
-        // re-derives for itself; the flag tier it cannot, so without this a
-        // generated launcher's re-entry (`ocx launcher exec`) would record
-        // somewhere else — or, since `apply_ocx_config` is set-or-remove,
-        // nowhere — and the entrypoint pair would lose its inner half.
+        // A child cannot re-derive the flag tier, so without this a launcher's re-entry records elsewhere or nowhere.
         forwarded_config.records = records.forwarded();
-        // Same move, for the consent refusal: argv does not cross a spawn, so
-        // without this a `--no-consent` would stop at this process and a nested
-        // ocx the child launches would stamp the very project the caller
-        // declined. Refusal inherits downward; permission does not, which is
-        // why a `--consent` leaves this false rather than clearing an inherited
-        // OCX_NO_CONSENT.
+        // argv does not cross a spawn: a refusal inherits downward, and `--consent` never clears an inherited one.
         forwarded_config.no_consent = self.consent.explicit() == Some(false);
-        // Composed entries + forwarded ocx config + forwarded stages 4-6, in the
-        // one order that is correct — see `Env::apply_child_env`. `project_env`
-        // (stages 4-6) is the forwarded slice, NOT the whole composed set: the
-        // launcher re-derives the package entries itself.
+        // Only stages 4-6 are forwarded: the launcher re-derives the package entries itself.
         process_env.apply_child_env(
             ChildEnv {
                 composed: &entries,
@@ -396,39 +227,18 @@ impl ToolchainExec {
             },
             &forwarded_config,
         );
-        // No PATHEXT manipulation: the Windows launcher is now a native
-        // `<name>.exe` shim and `.EXE` is unconditionally in the default
-        // Windows PATHEXT, so the child resolves it via the OS default.
-
-        // Project-tier facts the record's `scope` block names. The lock's
-        // declaration hash is reused verbatim rather than recomputed: it is the
-        // canonicalization the project tier already defines, and re-deriving it
-        // would need the project config plus file I/O on the exec path.
+        // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
         let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
         let bindings = project_bindings(&resolved, &install_infos);
 
-        // clap enforces `last = true, num_args = 1.., required = true` on the
-        // `argv` field — `self.argv` is always non-empty at this point.
         let (command, _) = self
             .argv
             .split_first()
             .expect("clap last=true + num_args=1.. + required=true guarantees non-empty argv");
 
-        // Resolved once, then handed to both the record and the launch: a second
-        // resolution could disagree with the first and make the audit trail name
-        // a binary other than the one that ran.
-        // C-057/S-010: a name the composition does not provide is now an error
-        // propagated here rather than a bare name handed to `execvp`, which
-        // would have repeated the lookup against the ambient `PATH`.
-        // `CommandResolutionError` already classifies to `DataError`, so this
-        // `?` is the whole of exit 65 — and nothing is spawned on the way out.
-        // C-058/C-010 — the lookup copy of `PATH` excludes both trampoline
-        // directories, derived from the resolvers that produced the trees. The
-        // child's own `PATH` is untouched: a tool that spawns a sibling tool
-        // still resolves it through a trampoline, which is the re-entry the
-        // trampolines exist to provide. C-069's `is_ocx_trampoline` re-check
-        // over the resolved answer is the second, independent guard.
+        // Resolved once for record and launch, or the audit trail can name a different binary.
+        // Only this lookup copy of `PATH` excludes the trampoline dirs; the child's keeps them for sibling re-entry.
         let excluded = trampoline_lookup_exclusions(context.file_structure(), &toolchain_home);
         let executable = process_env.resolve_command_excluding(command, &excluded)?;
         let launch = Launch::recording(
@@ -443,12 +253,7 @@ impl ToolchainExec {
                 argv: &self.argv,
                 config: context.config_view(),
                 insecure_registries: context.insecure_hosts(),
-                // Already in memory: the snapshot is read once at `try_init` and
-                // identity-gated there, so naming it here costs no I/O on the
-                // exec path.
                 managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
-                // Likewise read once at `try_init`, alongside the pins it
-                // describes.
                 patch_snapshot_digest: context.patch_snapshot_digest(),
                 platform: Some(&host),
                 clean_env: self.clean,
@@ -464,26 +269,14 @@ impl ToolchainExec {
             &records,
         )?;
 
-        // Replace this process with the child on Unix (PID inherited via
-        // `execvp(2)`); on Windows spawn+wait then `process::exit`, since
-        // `CreateProcess` has no exec equivalent. Either way the seam diverges
-        // on success — only start-up failures fall through to the
-        // error-wrapping path below.
+        // Diverges on success (`execvp` on Unix, spawn+wait+exit on Windows); only start-up failures return.
         Err(anyhow::Error::from(launch::exec(launch).await))
     }
 }
 
 /// Pair each root package with the `ocx.toml` binding it was selected under.
 ///
-/// `compose_roots` returns one root per request in request order, and under
-/// `Materialization::Install` every request yields one, so the two slices line
-/// up index-for-index — the pinned identifier comes from the composition rather
-/// than from the selection, because only the former is digest-complete.
-///
-/// A tool selected as a positional rather than through a group carries no group
-/// name and is skipped: the record emits `sh.ocx.binding` and `sh.ocx.group`
-/// together or not at all. `ocx exec` passes no positionals to `select_tool_set`,
-/// so today the skip is unreachable.
+/// Zipped by index: under `Materialization::Install` `compose_roots` yields one root per request, in order.
 fn project_bindings(
     resolved: &[ocx_project::ResolvedTool],
     install_infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
@@ -502,87 +295,26 @@ fn project_bindings(
         .collect()
 }
 
-/// Settles every `list` entry's separator across `entries` (composed, applied
-/// to this process) and `project_env` (forwarded raw over `OCX_ENV` for a
-/// re-entrant launcher) in one pass (W-11).
-///
-/// The two are disjoint `Vec`s holding independent [`Entry`] copies: without
-/// chaining them through one [`reconcile_list_separators`] call, a
-/// package's explicit separator would settle `entries` alone and leave
-/// `project_env`'s own copy at whatever separator it was declared with —
-/// `None` inherits nothing, and a re-entrant launcher would fold it with the
-/// bare default instead of the separator the package actually established.
-/// Extracted from [`ToolchainExec::execute`] so this exact wiring is unit-testable
-/// without a full project/registry fixture.
+/// Settles `list` separators across the composed `entries` and the forwarded `project_env` in one pass.
 ///
 /// # Errors
 ///
-/// [`ListSeparatorError`] when two entries for one key declare different
-/// explicit separators, or when the separator an entry settles on edges its
-/// value.
+/// [`ListSeparatorError`] for conflicting explicit separators on one key, or a separator that edges its value.
 fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Result<(), ListSeparatorError> {
     reconcile_list_separators(entries.iter_mut().chain(project_env.iter_mut()))
 }
 
-/// The trampoline directories this invocation's **lookup** `PATH` excludes
-/// (C-058, C-010) — **four** paths: the PATH-facing `<home>/toolchain/active/bin`
-/// and the physical `<home>/toolchain/shells/default/bin`, for the project tree
-/// and for the global one.
+/// The trampoline dirs the lookup `PATH` excludes, for both the project and global tree.
 ///
-/// # Derived, never joined
-///
-/// Every entry comes from the resolver that produced the home —
-/// [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin) and
-/// [`ToolchainStore::shell_bin`](ocx_store::file_structure::ToolchainStore::shell_bin)
-/// for the global tree, the matching
-/// [`ToolchainHome`](ocx_store::file_structure::ToolchainHome) accessors for the
-/// project's, the latter through
-/// [`PackageManager::toolchain_home`](ocx_package_manager::PackageManager::toolchain_home)
-/// so `toolchain_dir` is honoured. A literal `join("toolchain").join("bin")`
-/// would compile, pass every fixture, and drift silently the day the tree shape
-/// moves — which is the whole of what C-010 forbids.
-///
-/// # Why both spellings per home (C-078)
-///
-/// The two are equal only *through* the `active` link, never by string
-/// equality, and this exclusion is **segment-exact**:
-/// `utility::path::remove_segment` compares segments and "is therefore not a
-/// containment check and must not be read as one". A composed `PATH` carrying
-/// the *physical* spelling — from a hand-written `.envrc`, an IDE recipe, or a
-/// `$GITHUB_PATH` line — would otherwise survive the exclusion, so this lookup
-/// could answer with a trampoline and that trampoline would re-enter itself:
-/// the fork loop asdf#2166, opencodex#1439 and claude-code#47978 each shipped.
-/// Listing one spelling would also leave C-069's `is_ocx_trampoline` as the
-/// only guard, against this record's rule that deleting either guard must leave
-/// the other observably firing.
-///
-/// # Why only the lookup copy
-///
-/// The child's `PATH` is untouched: a tool that spawns a sibling tool still
-/// resolves it through a trampoline, which is the re-entry the trampolines exist
-/// to provide. Excluding the directories here only stops **this** lookup from
-/// answering with one. C-069's `is_ocx_trampoline` re-check over the resolved
-/// answer — already shipped inside `Env::resolve_command_in` — is the second,
-/// independent guard that closes the alias gap.
-///
-/// # Why the two homes arrive as values (RUL-69)
-///
-/// Neither is looked up here. `Context` is only constructible through the async
-/// `Context::try_init`, which installs the global tracing subscriber, so a
-/// signature taking one puts this derivation out of reach of every unit test —
-/// and a derivation no test can reach is indistinguishable from the literal
-/// join it exists to forbid. The caller resolves the project home (through
-/// `PackageManager::toolchain_home`, the one derivation `ocx pull` also uses)
-/// and hands both trees in.
+/// Both spellings per home: the exclusion is segment-exact, so a `PATH` carrying the physical one would
+/// otherwise resolve to a self-re-entering trampoline.
 fn trampoline_lookup_exclusions(
     file_structure: &ocx_store::file_structure::FileStructure,
     project_home: &ocx_store::file_structure::ToolchainHome,
 ) -> Vec<std::path::PathBuf> {
-    // Spelled out rather than imported: a function-local `use` would go unused
-    // the moment either physical entry is dropped, so the drop would red as an
-    // unused-import lint before this function's own test could red on the
-    // answer — a check whose red state is the compiler's, not the check's.
+    // Spelled out, not imported, so dropping an entry reds this function's test, not an unused-import lint.
     vec![
+        // From the store's resolver, never a literal `join`, or the list drifts silently from the tree shape.
         file_structure.toolchain.bin(),
         project_home.bin(),
         file_structure
@@ -592,25 +324,9 @@ fn trampoline_lookup_exclusions(
     ]
 }
 
-/// Re-attribute a project-resolution failure to the project the invocation
-/// **selected**, rather than to the directory it happened to run from (C-068).
+/// Re-attribute a missing selected project to [`ProjectContextError::NoProjectIn`] (64), not the config tier's 79.
 ///
-/// A toolchain trampoline re-enters as `ocx --project '<baked home>' exec`, from
-/// whatever working directory the user was in. When the baked home is gone
-/// altogether, the shipped path answers about the wrong tier: an explicit
-/// `--project` that is missing is a `config::Error::FileNotFound` (exit 79),
-/// while C-068 requires the three-way contract `ocx exec` already states —
-/// [`ProjectContextError::NoProjectIn`] → **64**,
-/// [`LockCurrency::Missing`](ocx_project::LockCurrency::Missing) → **78**,
-/// [`LockCurrency::Stale`](ocx_project::LockCurrency::Stale) → **65** —
-/// with the baked path named in each.
-///
-/// The two lock arms already classify correctly and already carry a path, and
-/// a baked home that exists but holds no `ocx.toml` already arrives as
-/// `NoProjectIn` naming it, so this maps only the first: an absent selection
-/// becomes `NoProjectIn` naming the selection. Everything else passes through
-/// unchanged — a parse error in a project file that *does* exist is not a
-/// missing project.
+/// A trampoline re-enters with its baked home as `--project`; every other error passes through unchanged.
 fn attribute_to_selected_project(
     selected: Option<&std::path::Path>,
     error: crate::app::project_context::ProjectContextError,
@@ -619,15 +335,8 @@ fn attribute_to_selected_project(
 
     let Some(selected) = selected else { return error };
     match error {
-        // An explicit selection naming a path that is not there: `FileNotFound`,
-        // exit 79. For `ocx exec` the baked home *is* the project, so its
-        // absence is `no project` (64) — the same answer the directory branch
-        // gives for a home whose `ocx.toml` was deleted. The variant is not
-        // discriminated by tier because only one tier can produce it here:
-        // `load_project_with_lock`'s single `ConfigError` source is
-        // `ProjectConfig::resolve`, which resolves the project tier and nothing
-        // else — the `--config` tier was resolved in `Context::try_init`, long
-        // before this call.
+        // Sound only while `ProjectConfig::resolve` is this path's sole `Config` source: a new
+        // `FileNotFound` elsewhere would be misremapped to 64.
         ProjectContextError::Config(ocx_config::error::Error::FileNotFound { .. }) => {
             ProjectContextError::NoProjectIn {
                 dir: selected.to_path_buf(),
@@ -650,7 +359,7 @@ mod tests {
         std::iter::repeat_n(c, 64).collect()
     }
 
-    // ── W-11: reconcile_run_entries (chained-vector wiring) ────────────────────
+    // ── reconcile_run_entries (chained-vector wiring) ───────────────────────────
 
     fn list_entry(key: &str, value: &str, separator: Option<&str>) -> Entry {
         Entry {
@@ -751,7 +460,7 @@ mod tests {
         );
     }
 
-    // ── C4: no-strip clap surface ────────────────────────────────────────────
+    // ── no-strip clap surface ────────────────────────────────────────────
     //
     // `--global` is no longer a per-command flag — it is a single root-level
     // selector on `ContextOptions` (peer of `--project`), so `ToolchainExec` carries no
@@ -760,7 +469,7 @@ mod tests {
     // exclusivity is covered by `app::context` unit tests and the acceptance
     // suite (`test/tests/test_run_global_isolation.py`).
 
-    /// C4 (no-strip contract): the `ToolchainExec` struct exposes no strip mechanism
+    /// The no-strip contract: the `ToolchainExec` struct exposes no strip mechanism
     /// (`--strip-global`, `--emit-global-path-strip`).
     ///
     /// Compile-and-parse structural proof: if a strip flag were re-introduced
@@ -797,9 +506,9 @@ mod tests {
         );
     }
 
-    // ── C-058 / RUL-69 — the exclusion set is derived, never joined ──────────
+    // ── the exclusion set is derived, never joined ───────────────────────────
 
-    /// **C-058 / C-010 / C-078** — four entries, all from the resolvers that
+    /// Four entries, all from the resolvers that
     /// produced the trees, so the exclusion cannot drift from the tree shape.
     ///
     /// Two homes x two spellings. The PATH-facing `active/bin` is what this
@@ -813,7 +522,7 @@ mod tests {
     /// in `toolchain` — which is exactly what a `toolchain_dir` relocation
     /// produces at `<root>/<project-key>/toolchain`, and what a
     /// `join("toolchain").join("bin")` at the call site would answer wrongly
-    /// for. Reachable only because RUL-69 took `&Context` out of the signature:
+    /// for. Testable only because this helper's signature takes no `&Context`:
     /// a `Context` is constructible solely through the async `try_init`, which
     /// installs the global tracing subscriber.
     ///
@@ -875,7 +584,7 @@ mod tests {
         );
     }
 
-    // ── C-068 — a trampoline's baked home, re-attributed ─────────────────────
+    // ── a trampoline's baked home, re-attributed ──────────────────────────────
 
     use crate::app::project_context::ProjectContextError;
     use ocx_exit::ExitCode;
@@ -898,7 +607,7 @@ mod tests {
             .expect_err("an explicit --project naming an absent path is an error")
     }
 
-    /// The defect C-068 names, pinned as a **control** so the mapping below is
+    /// The defect this test names, pinned as a **control** so the mapping below is
     /// not asserted against a state that was already correct: a trampoline
     /// re-entering with a baked home that no longer exists classifies as
     /// `NotFound` (79) today, not as the 64 `ocx exec`'s own contract states.
@@ -914,7 +623,7 @@ mod tests {
         );
     }
 
-    /// **C-068** — an explicit selection that did not resolve becomes
+    /// An explicit selection that did not resolve becomes
     /// `NoProjectIn`, **naming the selection**, and classifies as **64**.
     ///
     /// This is the trampoline's own path: a rendered body re-enters as
@@ -942,7 +651,7 @@ mod tests {
         );
     }
 
-    /// C-068's boundary: with **no** explicit selection there is nothing to
+    /// The boundary: with **no** explicit selection there is nothing to
     /// re-attribute to, so the error passes through unchanged.
     ///
     /// Mutation that reds it: re-attributing unconditionally, which would turn
@@ -968,7 +677,7 @@ mod tests {
         );
     }
 
-    /// C-068 — a project file that **does exist** but does not parse is not a
+    /// A project file that **does exist** but does not parse is not a
     /// missing project, even under an explicit selection.
     ///
     /// Mutation that reds it: a blanket `_ => NoProjectIn { dir: selection }`,
@@ -1009,7 +718,7 @@ mod tests {
         );
     }
 
-    /// C-068's two lock arms, both under an explicit selection: they already
+    /// The two lock arms, both under an explicit selection: they already
     /// classify correctly and already carry a path, so re-attribution must
     /// leave them alone.
     ///

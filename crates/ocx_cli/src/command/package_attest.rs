@@ -1,17 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package attest` — attach an in-toto attestation to a published
-//! package manifest as a DSSE-enveloped Sigstore bundle, via OCI Referrers.
+//! `ocx package attest` — attach a DSSE-enveloped in-toto attestation to a published package
+//! manifest via OCI Referrers, using `ocx package sign`'s keyless machinery.
 //!
-//! The keyless machinery is `ocx package sign`'s, unchanged: same Fulcio/Rekor
-//! endpoints, same OIDC token precedence, same referrers publish. What differs
-//! is the payload — a signed in-toto Statement wrapping a caller-supplied
-//! predicate document, rather than a signature over the manifest digest.
-//!
-//! Token handling is reused verbatim from `package_sign_common`: there is
-//! deliberately NO `--identity-token <VALUE>` flag, because a raw token on the
-//! command line leaks into shell history and `ps`.
+//! No `--identity-token <VALUE>` flag: a raw token on the command line leaks into shell history and `ps`.
 
 use std::process::ExitCode;
 
@@ -69,8 +62,7 @@ pub struct PackageAttest {
     #[clap(long = "type", required = true, value_name = "TYPE")]
     predicate_type: PredicateType,
 
-    // `Option`, not a clap default: `execute` has to tell an explicit flag
-    // from an absent one, because `[trust.sigstore]` sits between them.
+    // `Option`, not a clap default, or `[trust.sigstore]` can never apply to an unset flag.
     /// Fulcio CA endpoint (the keyless certificate issuer)
     ///
     /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
@@ -140,9 +132,7 @@ impl PackageAttest {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
-        // SSRF hardening (CWE-918) at the boundary, before either URL becomes
-        // an HTTP target. Precedence, guard and refusal kind are the shared
-        // ladder's — see `resolve_sigstore_pair`.
+        // SSRF-checked (CWE-918) here, before either URL becomes an HTTP target.
         let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
             &identifier,
@@ -150,20 +140,12 @@ impl PackageAttest {
             self.rekor_url.as_deref(),
         )?;
 
-        // Attesting is signing, so an offline attest is a deliberate refusal
-        // (77), not a transport failure. Runs before the predicate read and
-        // before token resolution, so a refused run touches no credential.
-        //
-        // WATCH: offline-before-token is S-002's contract, pinned end to end in
-        // WP10a. Moving this below `resolve_override_token` still exits 77 and
-        // still passes every unit test, while reading a credential for a run
-        // that was already refused.
+        // Before token resolution, or a refused run still reads a credential (no unit test notices).
         package_sign_common::refuse_when_offline(&context, &identifier, SignErrorKind::OfflineAttestRefused)?;
 
         let predicate = package_sign_common::read_predicate(&self.predicate, &identifier).await?;
 
-        // Token precedence: file > stdin > OCX_IDENTITY_TOKEN. Held under
-        // `Zeroizing`; never logged, never surfaced in error context.
+        // Never logged and never put in error context.
         let identity_token = package_sign_common::resolve_override_token(
             self.identity_token_file.as_deref(),
             self.identity_token_stdin,
@@ -171,11 +153,7 @@ impl PackageAttest {
         )
         .await?;
 
-        // Parsed once, here: `KeyRefError` decides between an unimplemented
-        // backend (exit 85) and a malformed reference (exit 64). Wrapped in
-        // `SignError` before it reaches `anyhow` for the reason `sign` states
-        // at the same call: `classify_error` downcasts the outer error, so a
-        // bare kind exits 1 and carries no identifier.
+        // Wrapped in `SignError`, or `classify_error` misses the bare kind and exits 1 with no identifier.
         let key = self
             .key
             .reference()
@@ -201,12 +179,8 @@ impl PackageAttest {
             no_tty: self.no_tty,
             offline: context.is_offline(),
         };
-        // The sweep branches here, once the option set is complete, so every
-        // step above is byte-identical on both paths.
-        // `is_sweep`, not "the resolved list is non-empty": an empty
-        // `--tags-file` is still a sweep of zero tags, and falling through to
-        // the single-reference path there would sign the reference the caller
-        // named instead of the nothing the file asked for.
+        // `is_sweep`, not a non-empty list: an empty `--tags-file` sweeps nothing rather than
+        // attesting the named reference.
         if self.tags.is_sweep() {
             let tags = self.tags.resolve().await?;
             return self.sweep(&context, &identifier, &tags, &options).await;
@@ -224,12 +198,7 @@ impl PackageAttest {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Attest the index each swept tag resolves to, one row per tag.
-    ///
-    /// The reporting half of [`PackageManager::attest_tags`]; the loop itself
-    /// runs to completion there, so nothing here can abort early.
-    ///
-    /// [`PackageManager::attest_tags`]: ocx_package_manager::PackageManager::attest_tags
+    /// Attests the index each swept tag resolves to and reports one row per tag.
     async fn sweep(
         &self,
         context: &crate::app::Context,
@@ -257,9 +226,6 @@ impl PackageAttest {
                 }
                 SweptOutcome::Done(report) => SweptTagReport::completed(
                     entry.tag.clone(),
-                    // `None` for the platform: a sweep acts on the index
-                    // itself, which is why `--platform` is refused alongside
-                    // `--tags`.
                     AttestationReport::new(identifier.clone_with_tag(entry.tag).to_string(), None, report.result),
                 ),
             };

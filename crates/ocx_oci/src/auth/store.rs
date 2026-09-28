@@ -3,12 +3,8 @@
 
 //! Docker-compatible credential store at `~/.docker/config.json`.
 //!
-//! Atomic read-modify-write under exclusive flock. Resolution order matches
-//! `oras-go` `DynamicStore`:
-//! 1. `credHelpers[registry]` — per-registry helper (highest)
-//! 2. `credsStore` — global default helper
-//! 3. `detectedCredsStore` — auto-detected platform default (sticky on first put)
-//! 4. `auths[registry]` — plaintext base64 fallback (lowest, gated by `allow_plaintext_put`)
+//! Resolution order, as oras-go's `DynamicStore`: `credHelpers[registry]` ▸ `credsStore` ▸
+//! detected platform helper ▸ plaintext `auths[registry]` (only with `allow_plaintext_put`).
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -25,29 +21,14 @@ use crate::auth::registry_url::canonicalize_registry;
 
 use ocx_util::fs::LockedFile;
 
-/// The `__testing`-gated seam that replaces the credential helper's subprocess
-/// budget, in **milliseconds**.
-///
-/// Why it exists: the budget is 30 s, and
-/// `test/tests/test_login.py::test_login_helper_timeout_exits_75` can only
-/// observe that a hung helper becomes exit 75 by waiting it out — 30 s of the
-/// acceptance suite's wall clock for a claim about a `recv_timeout` argument,
-/// which is identical at 30 s and at 200 ms. The shipped value is asserted in
-/// the fork instead, at `docker_credential::helper::tests::helper_timeout_is_thirty_seconds`.
-///
-/// Compile-gated and `__OCX_TESTING_*`-named: absent from release builds,
-/// reserved out of `Env::apply_ocx_config` (see `env::is_reserved_ocx_key`), and
-/// undocumented in `website/src/docs/reference/environment.md`.
+/// Test seam replacing the credential helper's subprocess budget, in milliseconds.
+/// Seam convention: `subsystem-tests.md` § Test-Only Seams.
 #[cfg(any(test, feature = "__testing"))]
 const TESTING_HELPER_TIMEOUT_ENV: &str = "__OCX_TESTING_HELPER_TIMEOUT_MS";
 
-/// The credential helper's subprocess budget: the fork's shipped
-/// [`docker_credential::HELPER_TIMEOUT`], or the [`TESTING_HELPER_TIMEOUT_ENV`]
-/// override.
+/// The helper budget: [`docker_credential::HELPER_TIMEOUT`], or the [`TESTING_HELPER_TIMEOUT_ENV`] override.
 ///
-/// **Panics** on a malformed value rather than falling back to the shipped
-/// budget: a seam that silently ignores what it was handed turns a typo into a
-/// row that quietly out-waits the real deadline and still passes.
+/// Panics on a malformed value, or a typo silently out-waits the real deadline and the test still passes.
 #[cfg(any(test, feature = "__testing"))]
 fn helper_timeout() -> Duration {
     let Ok(raw) = std::env::var(TESTING_HELPER_TIMEOUT_ENV) else {
@@ -65,28 +46,17 @@ fn helper_timeout() -> Duration {
     docker_credential::HELPER_TIMEOUT
 }
 
-/// Local RAII guard wrapping the locked `config.json`. Dropping the guard
-/// releases the advisory lock and closes the lock-owning handle.
-///
-/// The guard owns the read+write fd through which all I/O on `config.json`
-/// must route (Windows `LockFileEx` is per-handle; opening a second fd on
-/// the locked range from the same process hits `ERROR_LOCK_VIOLATION`).
+/// Serialises access to `config.json` until dropped.
 struct ConfigGuard {
-    /// The lock, held on `config.json.lock` — never on the data file. See
-    /// [`acquire_config_guard`] for why the sidecar is not optional.
+    /// Held on the `config.json.lock` sidecar, never the data file (see [`acquire_config_guard`]).
     _locked: LockedFile,
-    /// The data file this guard serialises access to.
     path: std::path::PathBuf,
 }
 
-/// Credential persisted to docker config / credential helper.
+/// Credential persisted to docker config or a credential helper.
 ///
-/// Flat struct (matches `oras-go` `auth.Credential` 1:1 with the docker helper
-/// wire format `{ServerURL, Username, Secret}`). Population pattern selects
-/// auth mode at the call site:
-/// - `username + password` → HTTP Basic
-/// - `refresh_token` alone → OAuth2 identity token (wire-encoded with `username = "<token>"`)
-/// - `access_token` alone → short-lived bearer (NOT helper-storable; runtime-only)
+/// The populated fields pick the mode: `username` + `password` Basic, `refresh_token` an identity
+/// token, `access_token` a runtime-only bearer that is never stored.
 #[derive(Debug, Default)]
 pub struct Credential {
     pub username: String,
@@ -96,7 +66,7 @@ pub struct Credential {
 }
 
 impl Credential {
-    /// Convenience constructor for basic auth (most common CLI case).
+    /// Basic-auth credential.
     pub fn basic(username: impl Into<String>, password: SecretString) -> Self {
         Self {
             username: username.into(),
@@ -106,7 +76,7 @@ impl Credential {
         }
     }
 
-    /// Convenience constructor for identity-token auth (OAuth2 refresh).
+    /// Identity-token (OAuth2 refresh) credential.
     pub fn identity_token(token: SecretString) -> Self {
         Self {
             username: String::new(),
@@ -116,7 +86,7 @@ impl Credential {
         }
     }
 
-    /// True when all fields are empty (matches oras-go `EmptyCredential` zero-value semantics).
+    /// True when every field is empty.
     pub fn is_empty(&self) -> bool {
         self.username.is_empty()
             && self.password.expose_secret().is_empty()
@@ -128,37 +98,27 @@ impl Credential {
 /// Options controlling `DockerCredentialStore` behavior.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StoreOptions {
-    /// Allow `put` to fall through to plaintext `auths[reg]` when no helper is configured.
-    /// Default: false — matches oras-go safe default. Exposed as `--allow-insecure-store`
-    /// on `ocx login` for headless CI environments without a native keychain daemon.
+    /// Allow `put` to fall back to plaintext `auths[reg]` when no helper is configured.
     pub allow_plaintext_put: bool,
-    /// Probe PATH for platform default helper when config is empty at load time.
-    /// On first successful `put`, the detected helper is persisted to `credsStore`.
+    /// Probe PATH for a platform helper when none is configured; persisted to `credsStore` on the first
+    /// successful `put`.
     pub detect_default_native_store: bool,
 }
 
-/// Three-verb store trait matching the Docker credential helper protocol.
-///
-/// Mirrors oras-go `credentials.Store` interface. `get` returns `Option` instead
-/// of a zero-value sentinel; `put` and `delete` return `Result<(), _>` only.
+/// Credential store with the Docker credential helper protocol's three verbs.
 #[async_trait::async_trait]
 pub trait CredentialStore: Send + Sync {
     /// Fetch a credential for `registry`. Returns `Ok(None)` if nothing stored.
     async fn get(&self, registry: &str) -> Result<Option<Credential>, AuthError>;
 
-    /// Persist a credential for `registry`. Resolution order: `credHelpers[reg]` →
-    /// `credsStore` → `detectedCredsStore` → plaintext (if `allow_plaintext_put`).
+    /// Persist a credential for `registry`.
     async fn put(&self, registry: &str, cred: &Credential) -> Result<(), AuthError>;
 
     /// Remove a credential for `registry`. Returns `Ok(())` for both "removed" and "noop".
     async fn delete(&self, registry: &str) -> Result<(), AuthError>;
 }
 
-/// Docker-compatible credential store (concrete impl).
-///
-/// Owns the path to `~/.docker/config.json` (resolved via `DOCKER_CONFIG` env or
-/// `~/.docker/config.json` default) and acquires a `FileLock` for the duration
-/// of each mutating operation.
+/// [`CredentialStore`] over docker's `config.json`, locked for each operation.
 pub struct DockerCredentialStore {
     config_path: PathBuf,
     allow_plaintext_put: bool,
@@ -175,8 +135,7 @@ impl DockerCredentialStore {
         })
     }
 
-    /// Constructs a store pointed at an explicit path. Used by tests and by the
-    /// CLI layer when the user has not set `DOCKER_CONFIG`.
+    /// Store over an explicit `config.json` path.
     pub fn with_path(config_path: PathBuf, opts: StoreOptions) -> Self {
         Self {
             config_path,
@@ -196,15 +155,10 @@ impl DockerCredentialStore {
     }
 }
 
-/// Resolve the docker config path from environment / home defaults.
+/// Resolves `$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`.
 ///
-/// Reads `DOCKER_CONFIG` via the project-wide `env::var` shim so unit tests
-/// can inject overrides through `test::env::lock`.
-///
-/// The home fallback goes through [`ocx_util::env::home_dir`],
-/// the one home resolver — `dirs::home_dir` ignores `%USERPROFILE%`, which is
-/// what a Windows CI runner or container overrides and what docker itself
-/// reads, so the two could name different `config.json` files (#381).
+/// Home via [`ocx_util::env::home_dir`], not `dirs::home_dir`, which ignores `%USERPROFILE%` and could name a
+/// different file than docker reads.
 fn resolve_config_path() -> Result<PathBuf, AuthError> {
     if let Some(dir) = ocx_util::env::var("DOCKER_CONFIG") {
         return Ok(PathBuf::from(dir).join("config.json"));
@@ -235,7 +189,7 @@ struct AuthEntry {
     /// base64(`username:password`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auth: Option<String>,
-    /// Bearer / OAuth identity token. Mutually exclusive with `auth` in practice.
+    /// Bearer / OAuth identity token.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "identitytoken")]
     identity_token: Option<String>,
     #[serde(flatten)]
@@ -247,14 +201,12 @@ impl CredentialStore for DockerCredentialStore {
     async fn get(&self, registry: &str) -> Result<Option<Credential>, AuthError> {
         let canonical = canonicalize_registry(registry);
         let path = self.config_path.clone();
-        // Read under exclusive lock to coexist with concurrent writers.
         let blocking = tokio::task::spawn_blocking(move || -> Result<Option<Credential>, AuthError> {
             let mut guard = acquire_config_guard(&path)?;
             let config = guard.read()?;
             let resolution = resolve_helper(&config, &canonical, false);
             match resolution {
                 HelperResolution::Helper(helper) => {
-                    // Helper lookup via the patched fork.
                     match docker_credential::credential_from_helper_with_timeout(&canonical, &helper, helper_timeout())
                     {
                         Ok(docker_credential::DockerCredential::UsernamePassword(u, p)) => {
@@ -289,7 +241,6 @@ impl CredentialStore for DockerCredentialStore {
             let mut guard = acquire_config_guard(&path)?;
             let mut config = guard.read()?;
 
-            // Decide store tier from current config.
             let mut detected_helper: Option<String> = None;
             let tier = if let Some(h) = config.cred_helpers.get(&canonical).cloned() {
                 StoreTier::Helper(h)
@@ -321,7 +272,6 @@ impl CredentialStore for DockerCredentialStore {
                     )
                     .map_err(AuthError::Helper)?;
                     if let Some(detected) = detected_helper {
-                        // Sticky-detected helpers are persisted on first successful put.
                         config.creds_store = Some(detected);
                         guard.write(&config)?;
                     }
@@ -329,7 +279,6 @@ impl CredentialStore for DockerCredentialStore {
                 StoreTier::Plaintext => {
                     let entry = config.auths.entry(canonical.clone()).or_default();
                     if !cred_copy.refresh_token.expose_secret().is_empty() {
-                        // OAuth identity token path: stored as `identitytoken`.
                         entry.identity_token = Some(cred_copy.refresh_token.expose_secret().to_string());
                         entry.auth = None;
                     } else {
@@ -356,7 +305,6 @@ impl CredentialStore for DockerCredentialStore {
             let mut guard = acquire_config_guard(&path)?;
             let mut config = guard.read()?;
 
-            // Helper erase (consult per-registry helper, then credsStore).
             let helper = config
                 .cred_helpers
                 .get(&canonical)
@@ -370,7 +318,6 @@ impl CredentialStore for DockerCredentialStore {
                 return Err(AuthError::Helper(err));
             }
 
-            // Remove plaintext entry.
             let auths_changed = config.auths.remove(&canonical).is_some();
             if auths_changed {
                 guard.write(&config)?;
@@ -441,22 +388,9 @@ fn clone_credential(cred: &Credential) -> Credential {
     }
 }
 
-/// Acquire the docker-config write lock, held on a `config.json.lock`
-/// sidecar, and return a guard over the data file.
+/// Takes the `config.json.lock` sidecar lock (blocking) and returns a guard over the data file.
 ///
-/// Every read-modify-write op of the docker config routes its I/O through
-/// this guard so concurrent `ocx login` invocations serialise. Sync — runs
-/// inside a `spawn_blocking` task.
-///
-/// **The sidecar is not a style choice.** `ConfigGuard::write` publishes by
-/// renaming a tempfile over `config.json`, and on Windows `MoveFileEx` needs
-/// delete access to the destination, which a `LockFileEx` lock on that same
-/// file denies — every `put` fails with `ERROR_ACCESS_DENIED`. Locking the
-/// data file and atomically replacing it are mutually exclusive there, so the
-/// lock target and the data file have to be different files. On Unix the
-/// conflict does not arise (`flock` is advisory, `rename(2)` ignores it), but
-/// one arrangement for both platforms beats a `cfg` split down the middle of
-/// a credential path.
+/// A sidecar, not the data file: on Windows a `LockFileEx` lock denies the rename `ConfigGuard::write` publishes by.
 fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
     let mut lock_name = path.as_os_str().to_os_string();
     lock_name.push(".lock");
@@ -467,13 +401,7 @@ fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
             source: std::io::Error::other(e),
         }
     })?;
-    // Tighten file permissions to owner-only on Unix. Re-applied on every
-    // acquire so an externally-relaxed mode is restored before a read exposes
-    // credentials to anyone who widened it. On a freshly created file the
-    // umask default applies for the brief window between open and
-    // `set_permissions`; this is acceptable because no credentials are written
-    // to that inode at all — `ConfigGuard::write` publishes a fresh `0o600`
-    // tempfile over the path.
+    // Re-applied on every acquire, or an externally-relaxed mode keeps exposing credentials.
     #[cfg(unix)]
     if path.exists() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -491,16 +419,10 @@ fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
 }
 
 impl ConfigGuard {
-    /// Read the docker config, under the lock but not through it.
+    /// Read the docker config; an absent or empty file (first login) yields the default.
     ///
-    /// The lock lives on the sidecar, so this is an ordinary read of the data
-    /// file — and it is safe precisely because every writer publishes by
-    /// rename: a reader either sees the whole previous document or the whole
-    /// new one. An absent or empty file yields [`DockerConfig::default()`];
-    /// that is the first-login case, since the guard no longer creates
-    /// `config.json` as a side effect of taking the lock. Unparseable JSON
-    /// surfaces as [`AuthError::WriteConfigFailed`] with
-    /// `ErrorKind::InvalidData`.
+    /// # Errors
+    /// Unparseable JSON is [`AuthError::WriteConfigFailed`] with `ErrorKind::InvalidData`.
     fn read(&mut self) -> Result<DockerConfig, AuthError> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -521,33 +443,16 @@ impl ConfigGuard {
         })
     }
 
-    /// Publish the docker config by writing a sibling tempfile and renaming it
-    /// over `config.json`, the same way the docker CLI itself saves the file.
+    /// Publish the docker config by tempfile + rename, as the docker CLI does.
     ///
-    /// **Not** an in-place rewrite. The lock serialises `ocx` against `ocx`,
-    /// but `config.json` has readers that hold no lock — docker, and any
-    /// script — and a buffered read of it is several `read(2)` calls. Writing
-    /// through the locked handle lets a rewrite land between two of them, so
-    /// the reader splices a complete old document onto the tail of the longer
-    /// new one and sees trailing bytes after valid JSON. A rename leaves the
-    /// reader's descriptor on the inode it opened, so every reader observes
-    /// one whole document. It also removes the truncated-file window a SIGKILL
-    /// used to leave behind.
-    ///
-    /// The lock is held on the `config.json.lock` sidecar, not on this file, so
-    /// the rename replaces no inode anyone holds and the guard stays valid
-    /// afterwards. That separation is what makes the publish work on Windows at
-    /// all — see [`acquire_config_guard`].
-    ///
-    /// The path is resolved first so a symlinked `config.json` keeps its link
-    /// (and the tempfile lands on the link target's filesystem, not the
-    /// link's).
+    /// Never in place: lock-free readers (docker, scripts) could read an old document spliced onto a new one.
     fn write(&mut self, config: &DockerConfig) -> Result<(), AuthError> {
         let path = self.path.clone();
         let serialized = serde_json::to_vec_pretty(config).map_err(|err| AuthError::WriteConfigFailed {
             path: path.clone(),
             source: std::io::Error::new(ErrorKind::InvalidData, err),
         })?;
+        // Resolved first, or a symlinked `config.json` is replaced by a regular file.
         let target = std::fs::canonicalize(&path).unwrap_or(path.clone());
         ocx_util::fs::write_bytes_atomic(&target, &serialized)
             .map_err(|source| AuthError::WriteConfigFailed { path, source })

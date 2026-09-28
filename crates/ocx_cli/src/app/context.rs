@@ -25,35 +25,13 @@ pub struct Context {
     project_path: Option<PathBuf>,
     remote_client: Option<ocx_oci::Client>,
     oci_index: Option<ocx_index::OciIndex>,
-    /// One `index.ocx.sh`-protocol source per index-bearing namespace, built
-    /// when online from every merged `[registries."<ns>"]` entry that carries
-    /// an `index` field (`adr_index_indirection.md` F5a — kind per NAMESPACE,
-    /// see `build_index_sources`). Each is chained ahead of the plain-OCI
-    /// `oci_index`; empty under `--offline` or when no namespace is configured
-    /// as index-kind.
+    /// One `index.ocx.sh`-protocol source per index-bearing namespace (`adr_index_indirection.md`),
+    /// chained ahead of `oci_index`; empty under `--offline`.
     index_sources: Vec<ocx_index::OcxIndex>,
-    /// Registry client available in every mode (including `--offline`), built
-    /// lazily on first read via [`Self::verify_client`].
-    ///
-    /// Exists so `ocx package verify` can read the artifact + its signature
-    /// referrer from the registry even offline — verify's offline semantics
-    /// scope to Sigstore trust services, not the artifact registry (see
-    /// `verify_client`). `remote_client` stays offline-gated for every other
-    /// command.
-    ///
-    /// The cell predates `ocx_oci::Client`'s own laziness and is now **redundant
-    /// for cost, load-bearing for identity**. Constructing a `Client` no longer
-    /// builds a TLS trust store — that moved inside `ocx_oci::Client`, onto the
-    /// first request — so the cell no longer saves the ~28 ms it was introduced
-    /// for. What it still does is hand every caller the *same* client, and
-    /// therefore the same auth store, token cache and connection pool, rather
-    /// than a fresh one per `verify_client()` call. Kept for that; not to be
-    /// read as a cost optimisation any more.
-    /// `Arc` makes the cell cloneable alongside the rest of `Context`.
+    /// Registry client built lazily by [`Self::verify_client`], present even under `--offline`,
+    /// which blocks only the Sigstore trust services. Shared so every caller reuses one auth
+    /// store, token cache and connection pool.
     registry_client_cell: std::sync::Arc<std::sync::OnceLock<ocx_oci::Client>>,
-    /// Registry mirror map threaded into [`Self::registry_client_cell`]'s
-    /// on-demand build — kept so `verify_client()` can construct the client
-    /// without re-deriving it from `Config`.
     mirror_map: ocx_oci::MirrorMap,
     local_index: ocx_index::LocalIndex,
     file_structure: file_structure::FileStructure,
@@ -64,94 +42,52 @@ pub struct Context {
     default_registry: String,
     config_trust: ocx_trust::TrustConfig,
     config_view: env::OcxConfigView,
-    /// The effective `toolchain_dir` root, past every C-017–C-019 refusal, or
-    /// `None` when no tier declared one (the in-project `.ocx/toolchain`
-    /// default). Resolved once in [`Self::try_init`]; see the comment there for
-    /// why the refusal belongs to config load rather than to rendering.
+    /// The `toolchain_dir` root, already past every refusal; `None` for the in-project default.
     toolchain_root: Option<ocx_config::ToolchainRoot>,
     concurrency: ocx_package_manager::Concurrency,
     progress: ocx_console::progress::ProgressManager,
-    /// The fully merged config (every tier). Exposed so `ocx config update`
-    /// and the background-refresh hook can resolve the `[managed]` tier
-    /// themselves via `resolve_managed_target` (which never enforces the
-    /// required-snapshot gate `try_init` itself applies below).
+    /// The fully merged config (every tier).
     config: ocx_config::Config,
-    /// The two tiers a managed payload folds BETWEEN: `config_base` (built-in
-    /// defaults, system, user, `$OCX_HOME`) and the explicit `OCX_CONFIG` /
-    /// `--config` `config_overlay`. Kept from the one `load_with_local_view`
-    /// call rather than re-loaded on demand — a second load would re-emit the
-    /// loader's discovery warnings. `ocx config test` folds a candidate payload
-    /// between them, reproducing the adoption order exactly.
+    /// The tiers a managed payload folds between: `config_base` below it, `config_overlay`
+    /// (`OCX_CONFIG` / `--config`) above it. Kept from the one load, since a second load would
+    /// re-emit the loader's discovery warnings.
     config_base: ocx_config::Config,
     config_overlay: ocx_config::Config,
-    /// The **locally-authored** `[mirrors]` table (the loader's `local_only`
-    /// view), kept because [`is_published_namespace`] needs it and
-    /// `ocx index regenerate` asks that question after init. The merged view
-    /// would be wrong here for the reason `build_index_sources` documents: a
-    /// managed payload may redirect traffic, but it may not revoke the verified
-    /// index path.
+    /// The locally-authored `[mirrors]` table [`is_published_namespace`] needs after init; never
+    /// the merged view, or a managed payload could revoke the verified index path.
     local_mirrors: Option<std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
-    /// The effective `OCX_MANAGED_CONFIG` override, already hermetic-gated by
-    /// `OCX_NO_CONFIG` and empty-string-is-unset — resolved once here so every
-    /// consumer (the required-gate below, `config update`, the refresh hook)
-    /// agrees on the same value.
+    /// Resolved once so every consumer (the required gate, `config update`, the refresh hook)
+    /// agrees on one value.
     managed_config_env_override: Option<String>,
-    /// Every host that may be contacted over plain HTTP: the union of
-    /// `[registries."<name>"].insecure` and `OCX_INSECURE_REGISTRIES`, resolved
-    /// once so the registry protocol, the mirror-role gate, the index base URL
-    /// and `ocx login`'s probe cannot disagree about a host.
+    /// Hosts reachable over plain HTTP, resolved once so every plain-HTTP gate agrees on a host.
     insecure_hosts: Vec<String>,
-    /// The on-disk managed-config snapshot, read once at `try_init` and
-    /// **identity-gated** there (W2): `Some` only when it matches the
-    /// effective source via the shared `snapshot_matches_source` predicate.
-    /// Any I/O/parse failure is treated as absent (benign-state rule).
+    /// `Some` only when the snapshot identity-matches the effective source.
     managed_config_snapshot: Option<ocx_config::managed_config::ManagedConfigSnapshot>,
-    /// Digest of the active patch snapshot's own file bytes, from the same read
-    /// at `try_init` that handed the manager its pins. `None` when
-    /// `OCX_PATCH_SNAPSHOT` designated nothing.
+    /// Digest of the active patch snapshot's file bytes.
     patch_snapshot_digest: Option<ocx_oci::Digest>,
-    /// The `[records]` config-file tier, already SYSTEM-clamped by the loader.
-    ///
-    /// Held as the raw tier rather than a resolved policy because the fold's
-    /// third layer is a per-command flag pair: a resolved policy could not be
-    /// re-folded without losing the clamp, which is precisely what the clamp
-    /// exists to prevent.
+    /// The `[records]` config tier, already SYSTEM-clamped by the loader. Held raw because a
+    /// resolved policy re-folded with the per-command flags would lose the clamp.
     records_config: ocx_package_manager::record::RecordsOptions,
     /// The `OCX_RECORDS_*` tier, read once so every frame of one invocation
     /// folds the same values.
     records_env: ocx_package_manager::record::RecordsOptions,
-    /// The tiered view (env ▸ every `config.toml` tier, C-005): pre-applied
-    /// by [`Self::client_builder`] to every registry client, and passed to
-    /// the index transport and every forge client. Whether the merged and
-    /// local-only configs agree on the extra-CA keys decides which of this
-    /// and [`Self::extra_roots_local`] the Sigstore client gets (D-7) — that
-    /// view is installed process-wide by [`Self::try_init`]
-    /// ([`ocx_util::tls::install_sigstore_roots`]) and never stored here.
+    /// Extra-CA roots across env and every `config.toml` tier, pre-applied to every registry,
+    /// index and forge client.
     extra_roots_merged: ExtraRoots,
-    /// The local-only view (env ▸ system/user/`$OCX_HOME` — never a managed
-    /// payload, D-6): passed to [`build_managed_config_client`] so the channel
-    /// that fetches the managed tier can never be secured by material it just
-    /// delivered.
+    /// Extra-CA roots from env and the local tiers only, so the managed-tier fetch is never
+    /// secured by material that tier delivered.
     extra_roots_local: ExtraRoots,
 }
 
-/// The two `[managed]` tier gates `Context::try_init` needs, wrapped in a named
-/// struct so the two adjacent `bool`s can never be transposed at the call site.
+/// The two `[managed]` gates `Context::try_init` needs, named so the adjacent `bool`s cannot
+/// be transposed.
 pub struct ManagedConfigGate {
-    /// Gates the `[managed]` tier's required-snapshot check
-    /// (`adr_managed_config_tier.md` Decision E,
-    /// criterion 6): `true` for ordinary commands (fails closed with
-    /// `SnapshotRequired`, exit 78, when `required = true` and no matching
-    /// snapshot exists); `false` for `ocx config update` and the `self`/static
-    /// commands, which must remain reachable to fix (or simply do not touch)
-    /// exactly that missing state. See
-    /// `app::should_enforce_managed_config_required`.
+    /// Fail closed with `SnapshotRequired` (exit 78) when `required = true` and no matching
+    /// snapshot exists (`adr_managed_config_tier.md` Decision E). `false` for `ocx config update`
+    /// and the `self`/static commands, which must stay reachable to fix that state.
     pub enforce_required: bool,
-    /// Narrower than `enforce_required`: `true` only for the two commands that
-    /// can adopt a brand-new managed-config source with no seed present (`ocx
-    /// config update`, `ocx self setup`) — they get the managed-fetch client
-    /// even when no source resolves yet. See
-    /// `app::is_managed_config_onboarding_command`.
+    /// `true` only for `ocx config setup`, `ocx config update` and `ocx self setup`, which can adopt
+    /// a new managed source with no seed and so need the fetch client even when none resolves.
     pub onboarding: bool,
 }
 
@@ -161,18 +97,8 @@ impl Context {
         color_config: ColorModeConfig,
         managed_config_gate: ManagedConfigGate,
     ) -> anyhow::Result<Context> {
-        // Shared span-free progress manager (ADR adr_progress_architecture).
-        // Created before the subscriber so its `MultiProgress` backs the
-        // fmt log writer (log lines flush inside `suspend`, never tearing
-        // bars). Threaded into the OCI client (transfer bars) and the
-        // package manager. Disabled when stderr is not a TTY so
-        // non-interactive runs pay no cost, and under `--quiet`, which is the
-        // one switch a wrapper has to silence a bar on a terminal stderr.
-        //
-        // The in-process seam skips each process-global below — the terminal
-        // probes, the global subscriber, the host libc detection (it spawns a
-        // loader and fills a process cache) — and brings its own subscriber,
-        // scoped to the call.
+        // Created before the subscriber, or log lines can tear a rendered bar. `in_seam` brings its
+        // own scoped subscriber, so it skips every process-global below.
         let in_seam = super::in_seam();
         let progress = if !in_seam && ocx_console::ProgressMode::detect().stderr && !options.quiet {
             ocx_console::progress::ProgressManager::stderr()
@@ -190,19 +116,7 @@ impl Context {
 
         log::debug!("Creating context with options: {:?}", options);
 
-        // Detect the host libc once and populate the process-wide cache that
-        // `Platform::current()` reads during index resolution. Detection failure
-        // is not fatal — an undetected libc caches as `None`, a valid state that
-        // restricts matching to entries with empty `os.features`.
-        //
-        // Cheap on all but the first invocation per host per TTL: the answer is
-        // recorded at `$OCX_HOME/state/host/capabilities.json` and re-read from
-        // there, so the loader-discovery walk no longer runs per process. Left
-        // ahead of the `options.offline` branch deliberately — detection reads
-        // only the local filesystem and spawns only local loaders, so it is not
-        // network work and offline has nothing to say about it. See the
-        // `host_capabilities` module's "Cache lifecycle" note for what
-        // invalidates the record.
+        // Fills the host-libc cache `Platform::current()` reads; local-only, so it runs offline too.
         if !in_seam {
             ocx_oci::HostCapabilities::detect_and_cache(
                 ocx_config::home::default_ocx_root()
@@ -213,21 +127,13 @@ impl Context {
         }
 
         if options.offline && options.remote {
-            // `--offline --remote` = pinned-only mode. Both flags accepted
-            // together because the routing matrix collapses cleanly:
-            // `--offline` overrides `--remote` to no-source-contact, and
-            // any tag-addressed resolution must succeed locally or error.
-            // Documented in user-guide §Routing and command-line.md.
+            // `--offline` overrides `--remote`, so the pair is accepted as pinned-only mode.
             log::info!(
                 "--offline --remote: pinned-only mode - tag and catalog lookups will not contact a source. \
                  Tag-addressed resolution attempts must be satisfied locally or by digest-pinned identifiers."
             );
         }
 
-        // Capture the explicit project path before consuming `options` into other
-        // init calls. `lock` and similar commands need it for the precedence
-        // chain: `--global`/`OCX_GLOBAL` selector ▸ `--project` ▸ `OCX_PROJECT`
-        // ▸ CWD walk ▸ None.
         let project_path = options.project.clone();
 
         let cwd = ocx_util::env::current_dir()?;
@@ -239,87 +145,37 @@ impl Context {
         .await?;
         let config = loaded_config.merged;
         let local_only_config = loaded_config.local_only;
-        // The unmerged halves of `local_only_config`, kept for `ocx config test`
-        // (see the field docs) — one load, no second discovery pass.
         let config_base = loaded_config.base;
         let config_overlay = loaded_config.overlay;
-        // The loader's own raw read of snapshot.json (pre-identity-gate) —
-        // reused below instead of a second read of the same file.
         let managed_config_snapshot = loaded_config.managed_config_snapshot;
-        // The loader's single `[managed]` target resolution (from the local-only
-        // view) — reused below for the required gate and the snapshot identity
-        // gate instead of resolving the same target two more times.
         let resolved_managed_config = loaded_config.resolved_managed_config;
-        // What that snapshot actually contributed to `config` — identity gate
-        // AND payload parse, as observed by the tier that did the folding.
         let managed_snapshot_state = loaded_config.managed_snapshot_state;
 
-        // Which hosts may be reached over plain HTTP, resolved ONCE: the union
-        // of the `[registries."<name>"].insecure` entries and the inherited
-        // `OCX_INSECURE_REGISTRIES`, less anything the system scope locked shut.
-        // Every gate below is handed this same set — the OCI client's protocol
-        // choice, the mirror-role gate, each index base URL, and `ocx login`'s
-        // probe — so one resolution answers for all of them.
-        //
-        // They compare it against their own resolved host string, and those
-        // strings are not all the same: see `insecure_hosts`' doc for the one
-        // name (Docker Hub) where they diverge, and why that divergence is
-        // closed in the safe direction.
+        // Every plain-HTTP gate below shares this one set.
         let insecure_hosts = ocx_config::insecure::insecure_hosts(&config, &env::insecure_registries());
 
-        // Resolve the per-host mirror map once via the lib resolver
-        // (`ocx_config::mirror::resolve_mirror_map`): `[mirrors]` config merged with the
-        // inherited `OCX_MIRRORS` env (env wins per-host key), every entry parsed
-        // and the plain-HTTP gate enforced in one place, split by traffic role.
-        // The registry role feeds the OCI client (transport rewrite) ONLY; the
-        // merged (pre-role-parse) union feeds the `OcxConfigView` (subprocess
-        // forwarding), so parent and forwarded children agree on the mirror map
-        // and a forwarded child re-parses + re-validates it the same way a
-        // `[mirrors]` TOML entry would. The lib `thiserror` error is re-wrapped
-        // into `anyhow` at this CLI boundary.
+        // The registry role feeds only the OCI client's transport rewrite.
         let resolved_mirrors = ocx_config::mirror::resolve_mirror_map(&config, env::mirrors()?, &insecure_hosts)
             .map_err(anyhow::Error::new)?;
         let mirror_map = ocx_oci::MirrorMap::new(resolved_mirrors.registry.clone());
 
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let ui = UserInterface::new(printer, !in_seam && console::Term::stderr().is_term(), options.quiet);
-        // `ContextOptions::build_api` owns the printer + format-default +
-        // quiet wiring. Shared with the Context-free static-command bypass
-        // (`ocx version`) so both paths honour `--color` and the
-        // `None → Plain` format default identically (handshake §3 amended
-        // 2026-05-19: format is a context-only concern, no per-command
-        // divergence).
+        // Shared with the Context-free `ocx version` bypass so both pick the same default format.
         let api = options.build_api(color_config);
 
-        // C-005: the three extra-CA-roots views (`ocx_config::tls`'s ladder),
-        // computed once, ahead of every client builder that threads one of
-        // them. `merged` feeds the registry/index/forge clients; `local` feeds
-        // [`build_managed_config_client`] (D-6); `sigstore` is installed
-        // process-wide (D-9: fail-closed before any client is built) via
-        // `install_sigstore_roots`, ahead of the first Sigstore-capable client
-        // constructed below.
-        //
-        // One `spawn_blocking` for both walks (DX-11): each reads a file and
-        // runs `parse_pem`'s probe build, and the two configs travel in and
-        // back out rather than being cloned for the pool. A `JoinError` is a
-        // panicking pool task — an I/O-class failure, never `NotFound`.
-        //
-        // The hop is skipped when there is nothing to walk (no env value, no
-        // config key — every process that never configured a CA, trampolines
-        // included), and the local walk is skipped when it could only repeat
-        // the merged one: the env var set (it outranks every tier in both
-        // views), or no managed payload having set a key (the loader's tier
-        // record, DX-16 — the same predicate `sigstore_extra_roots` folds on).
-        // That is every run but "unpinned managed payload sets a CA", so the
-        // configured case pays one probe build, not two.
+        // Fail-closed: a CA error aborts before any client is built.
         let extra_ca_env = ocx_util::env::var(env::keys::OCX_EXTRA_CA_CERTS).filter(|value| !value.is_empty());
         let (extra_ca_tier_merged, extra_ca_tier_local) = (
             loaded_config.extra_ca_certs_tier,
             loaded_config.extra_ca_certs_tier_local,
         );
+        // The local view differs from the merged one only when no env CA is set and the managed
+        // tier supplied the key; otherwise it is a clone.
         let needs_walk =
             extra_ca_env.is_some() || config.extra_ca_certs.is_some() || config.extra_ca_certs_pem.is_some();
         let (config, local_only_config, extra_roots_merged, extra_roots_local) = if needs_walk {
+            // A `JoinError` here is a panicked pool task, an I/O-class failure, never `NotFound`.
             tokio::task::spawn_blocking(move || {
                 let merged = resolve_extra_roots(&config, extra_ca_env.as_deref(), extra_ca_tier_merged)?;
                 let views_agree =
@@ -345,23 +201,11 @@ impl Context {
                 .is_some_and(|resolved| resolved.source.digest().is_some()),
         ));
 
-        // Explicit builder so the config-derived
-        // `MirrorMap` is threaded in; `OCX_MIRRORS` env precedence is already
-        // folded into `mirror_map` by `resolve_mirrors`. A plain-HTTP mirror
-        // requires its host declared insecure (the mirror host is what gets
-        // contacted) — either `[registries."<host>"] insecure = true` or
-        // `OCX_INSECURE_REGISTRIES`, unioned; composition with the existing
-        // plain-HTTP set, no implicit scheme-driven opt-out
-        // (`adr_oci_registry_mirror.md`, Implementation Plan step 3 "Auth + insecure").
-        //
-        // `verify` reads the artifact + signature from the registry in every
-        // mode (its `--offline` scopes to Sigstore trust services, not the
-        // registry) — see `registry_client_cell`'s field doc. Offline yields
-        // `remote_client: None` (the cell stays unbuilt), so the manager and
-        // `remote_client()` keep their offline behavior; online forces the
-        // cell here since a network client is needed regardless.
+        // A plain-HTTP mirror needs its own host declared insecure; the scheme alone opts nothing
+        // out (`adr_oci_registry_mirror.md`).
         let registry_client_cell: std::sync::Arc<std::sync::OnceLock<ocx_oci::Client>> =
             std::sync::Arc::new(std::sync::OnceLock::new());
+        // Offline leaves the cell unbuilt, so `remote_client` is `None` and the manager stays offline.
         let (remote_client, oci_index) = if options.offline {
             (None, None)
         } else {
@@ -374,51 +218,30 @@ impl Context {
             )
         };
         let file_structure = file_structure::FileStructure::new();
-        // Index home precedence (`adr_index_indirection.md` A1): `--index` ▸
-        // `OCX_INDEX` ▸ `$OCX_HOME/index`. This redirects the whole
-        // collection — every configured source's subtree (root documents +
-        // dispatch-object CAS), not a single source in isolation.
-        // A redirected index home may be a user-committed or read-only shipped
-        // copy, so its cross-process locks stay machine-global under
-        // `$OCX_HOME/locks` (never inside the redirected home).
+        // `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index` (`adr_index_indirection.md`). A redirected
+        // home may be read-only, so its locks stay under `$OCX_HOME/locks`.
         let index_store = options
             .index
             .clone()
             .or_else(|| ocx_util::env::var(env::keys::OCX_INDEX).map(std::path::PathBuf::from))
             .map(|home| ocx_index::IndexStore::new(home).with_locks_root(file_structure.locks.clone()))
             .unwrap_or_else(|| ocx_index::IndexStore::machine_local(&file_structure));
-        // The yanked opt-in (`OCX_ALLOW_YANKED`) gates OFFLINE status surfacing:
-        // a committed root's yanked tag is refused on a local resolve unless it is
-        // set (`adr_index_indirection.md` F3) — the offline counterpart to the
-        // `OcxIndex` `allow_yanked` the index sources below read.
+        // Also gates the offline path: a committed root's yanked tag is refused on a local resolve.
         let allow_yanked = ocx_util::env::flag(env::keys::OCX_ALLOW_YANKED, false);
         let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
             index_store: index_store.clone(),
         })
         .with_allow_yanked(allow_yanked)
-        // The SSRF exemption for physical pointers this local copy mints
-        // (ocx#218). Threaded here, not at each chain construction, so every
-        // chain built from this local index — default, lock-scoped `ocx update`,
-        // `ocx patch test`'s scratch chain, `PackageManager::offline_view` —
-        // reads the same operator config. `--offline` builds no sources at all,
-        // so without this the floor would have no exemption to read there.
+        // Set on the local index, not per chain, so every chain built from it reads one SSRF
+        // exemption; `--offline` builds no sources to carry it.
         .with_trusted_hosts(trusted_hosts_by_namespace(&config))
-        // Which registries an index owns, from config rather than from the
-        // built sources: `--offline` builds none, and a name there must still
-        // never be read at the host it spells (ocx#504).
+        // From config, not the built sources: `--offline` builds none, and an index-owned name must
+        // still never be read at the host it spells.
         .with_index_namespaces(index_namespaces(&config, local_only_config.mirrors.as_ref()))
-        // The authorities dialled over plain HTTP, for the same reason and by
-        // the same route: the dial-site SSRF guard has to know a physical
-        // pointer's scheme to know which proxy setting covers it (ocx#407).
-        // The one value every client builder already passes as
-        // `plain_http_registries` — never a second copy of that predicate.
+        // The dial-site SSRF guard needs a physical pointer's scheme to pick the proxy covering it.
         .with_insecure_hosts(insecure_hosts.clone());
 
-        // Single `Index::from_chained` entry point; see
-        // `chain_mode_and_sources` for the offline/online derivation.
-        // Precedence (offline wins by producing no oci_index): frozen ▸
-        // remote ▸ default. Frozen keeps the remote source so digest-pinned
-        // content still fetches; only unpinned-tag resolution is refused.
+        // Frozen keeps the remote source so digest-pinned content still fetches.
         let online_mode = Self::online_chain_mode(options.frozen, options.remote);
         let index_sources = Self::build_index_sources(
             remote_client.is_some(),
@@ -431,12 +254,8 @@ impl Context {
             &extra_roots_merged,
         )?;
         let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, online_mode);
-        // Attach the machine-global blob store so an installed tool's leaf
-        // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
-        // never the local index, A3) resolves offline with zero network: an
-        // an absent dispatch object is recovered from the blob store before any
-        // source walk
-        // (`adr_index_indirection.md` A3 step 2 / B2).
+        // The blob store lets an installed tool's leaf manifest resolve offline: an absent dispatch
+        // object recovers from it before any source walk.
         let selected_index = ocx_index::Index::from_chained_with_content_store(
             local_index.clone(),
             sources,
@@ -452,36 +271,14 @@ impl Context {
                 .unwrap_or_else(|| ocx_oci::DEFAULT_REGISTRY.into()),
         );
 
-        // Resolve the [patches] site-tier config before constructing the manager
-        // so the resolved form can be threaded in at construction time.
-        // The two-step resolution (config-file tier then env fallback) must happen
-        // here — the manager constructor receives the already-resolved form and does
-        // not read config itself.
-        //
-        // The `no_patches` opt-out is a forwarded project-runtime concern, never
-        // a `[patches]` config field, and MUST NOT be grafted onto a
-        // config-file-sourced tier here: doing so makes a project-local opt-out
-        // ambient inherited process state — it lands in `manager.patches()` AND
-        // (via `config_view.patches` below) is re-forwarded over `OCX_PATCHES`
-        // into unrelated child processes. The forwarded opt-out is meaningful
-        // only at the launcher re-entry (`ocx launcher exec`), which decodes it
-        // directly from the env at consumption time. Every other command computes
-        // its own opt-out from its own project (`EnvScope::Project(...)`) or is
-        // OCI-tier (`EnvScope::Package`). The env-fallback branch below still
-        // forwards a pure env-sourced tier verbatim (there is no config tier to
-        // be authoritative), which is correct.
+        // `no_patches` is never grafted onto this tier, or it turns ambient and is re-forwarded over
+        // `OCX_PATCHES` into unrelated children.
         let resolved_patches = match ocx_config::patch::resolve_patch_config(&config).map_err(anyhow::Error::new)? {
             Some(resolved) => Some(resolved),
             None => ocx_config::patch::patches_from_env().map_err(anyhow::Error::new)?,
         };
 
-        // Resolve the active patch snapshot (if any) from `OCX_PATCH_SNAPSHOT`.
-        // Reading happens before manager construction so the snapshot can be
-        // threaded in at construction time — mirrors the resolved_patches flow
-        // above. The env var is the sole selector: adopting a snapshot is a
-        // deliberate opt-in, orthogonal to `--frozen` (which scopes to the
-        // package tier). A future `--patch-snapshot` flag would populate it
-        // here first.
+        // `OCX_PATCH_SNAPSHOT` is the sole selector, orthogonal to `--frozen`.
         let patch_snapshot_path = ocx_util::env::var(env::keys::OCX_PATCH_SNAPSHOT).map(std::path::PathBuf::from);
         let loaded_patch_snapshot = if let Some(ref path) = patch_snapshot_path {
             ocx_package_manager::patch::PatchSnapshot::read(path)
@@ -490,25 +287,16 @@ impl Context {
         } else {
             None
         };
-        // Split here rather than at the read: the manager takes the pins, the
-        // execution record takes the digest of the bytes those pins came from,
-        // and one read produced both.
         let (patch_snapshot, patch_snapshot_digest) = match loaded_patch_snapshot {
             Some((snapshot, digest)) => (Some(snapshot), Some(digest)),
             None => (None, None),
         };
 
-        // The two lower `[records]` tiers, captured once. They are kept raw
-        // rather than resolved here because the fold's top layer is a per-command
-        // flag pair (`--records-dir` / `--records-name`), and a policy resolved
-        // now could not absorb them without losing the SYSTEM clamp that
-        // `RecordsOptions::merge` enforces by early-returning on the accumulator.
-        // The config tier arrives already clamped from the loader.
+        // Captured raw: the per-command flags fold on top later (see the `records_config` field).
         let records_config = config.records.clone().unwrap_or_default();
         let records_env = ocx_package_manager::record::RecordsOptions::from_env();
 
-        // `OCX_NO_CONFIG=1` is hermetic: it suppresses both the loader's
-        // managed-config candidate AND the env-override read here.
+        // `OCX_NO_CONFIG=1` is hermetic: it also suppresses the env override read here.
         let no_config = ocx_util::env::flag("OCX_NO_CONFIG", false);
         let managed_config_env_override = if no_config {
             None
@@ -516,24 +304,8 @@ impl Context {
             ocx_util::env::var(env::keys::OCX_MANAGED_CONFIG)
         };
 
-        // Managed-config tier (ADR "Mirror posture"): the fetch client for the
-        // artifact itself is built from the LOCAL-ONLY mirror view — the
-        // managed payload's own `[mirrors]` is excluded from the route used to
-        // fetch it (no-cycle, no self-brick). `local_only_config` is the
-        // pre-managed-tier merged view `ConfigLoader::load_with_local_view`
-        // returns alongside `merged`. Building the client (and resolving its
-        // local-only mirror map) costs a bundled-CA conversion — gated on a
-        // source actually resolving (env override, else the seed) so the vast
-        // majority of invocations with no managed tier configured pay nothing.
-        // `managed_config_onboarding` also needs the client: it names exactly
-        // `ocx config update` and `ocx self setup` (`app.rs`'s
-        // `is_managed_config_onboarding_command`), the only commands that can
-        // ONBOARD a brand-new source with no seed yet (`ocx self setup
-        // --managed-config <ref>`) — those need the client even though
-        // `has_managed_source` is false. Deliberately NARROWER than the
-        // required-gate exemption: `ocx self activate` runs on every shell
-        // startup and must never pay the client-build cost for an
-        // unconfigured tier.
+        // The fetch client uses the local-only mirror view, or the payload's own `[mirrors]` could
+        // redirect its own fetch. Built only when a source resolves: it costs a bundled-CA conversion.
         let has_managed_source = managed_config_env_override
             .as_deref()
             .is_some_and(|source| !source.is_empty())
@@ -542,6 +314,8 @@ impl Context {
                 .as_ref()
                 .and_then(|managed| managed.source.as_deref())
                 .is_some_and(|source| !source.is_empty());
+        // Onboarding commands need the client with no source yet; `ocx self activate` is not one,
+        // since it runs on every shell startup.
         let needs_managed_config_client = has_managed_source || managed_config_gate.onboarding;
         let managed_config_client = if options.offline || !needs_managed_config_client {
             None
@@ -555,14 +329,9 @@ impl Context {
             )?)
         };
 
-        // `adr_managed_config_tier.md` Decision A (identity-gated merge): the
-        // `[managed]` target is resolved ONCE in the loader, from the local-only
-        // view — the payload can never redirect the tier that fetched it — and
-        // threaded here. Reuse it. The loader swallows a
-        // resolution ERROR for its best-effort fold, so a configured-but-
-        // unresolvable seed re-resolves HERE only to surface the authoritative
-        // typed error (malformed seed/env ref, bad interval → exit 78); the
-        // happy path never re-resolves.
+        // Resolved once in the loader from the local-only view (`adr_managed_config_tier.md`
+        // Decision A). The loader swallows a resolution error, so a configured-but-unresolvable seed
+        // re-resolves here only to surface the typed error (exit 78).
         let resolved_managed_target = match resolved_managed_config {
             Some(resolved) => Some(resolved),
             None if has_managed_source => {
@@ -571,22 +340,12 @@ impl Context {
             None => None,
         };
 
-        // W2: the loader reports what the snapshot actually contributed ONCE
-        // (identity gate plus payload parse) and both consumers below read that
-        // single value, so no CLI consumer — `config update --check` included —
-        // reads an identity-mismatched snapshot as if it belonged to the current
-        // tier, and the required gate can never drift from the merge.
+        // One loader-reported state feeds both consumers below, so no consumer reads an
+        // identity-mismatched snapshot as current and the required gate cannot drift from the merge.
         let snapshot_identity_matches = managed_snapshot_state != ocx_config::managed::ManagedSnapshotState::Unmatched;
 
-        // Required gate: fails closed (exit 78) for ordinary commands; `ocx
-        // config update` and the `self`/static commands are exempted here
-        // (`enforce_required = false`) because their entire job is to create or
-        // inspect exactly the missing state. Applied via the lib
-        // `enforce_required_snapshot` so the `#[non_exhaustive]`
-        // `ManagedConfigError` is constructed inside `ocx_lib`. Identity alone
-        // is NOT the gate: a snapshot whose payload failed to parse is on disk
-        // but contributes nothing, and a `required` tier must not read as
-        // satisfied by a payload none of whose settings are in force.
+        // Identity alone is not the gate: a payload that failed to parse contributes nothing, so it
+        // must not satisfy a required tier.
         let managed_config = match resolved_managed_target {
             None => None,
             Some(resolved) => match ocx_config::managed::enforce_required_snapshot(resolved, managed_snapshot_state) {
@@ -596,10 +355,8 @@ impl Context {
             },
         };
 
-        // The required gate above already consumed the raw value; from here on
-        // only the identity-matched snapshot is exposed to CLI consumers — an
-        // unusable payload still surfaces, so `config update --check` can report
-        // the state it is there to diagnose.
+        // Only the identity-matched snapshot is exposed; an unparseable one still surfaces so
+        // `config update --check` can diagnose it.
         let managed_config_snapshot = managed_config_snapshot.filter(|_| snapshot_identity_matches);
 
         let manager = ocx_package_manager::PackageManager::new(
@@ -612,28 +369,13 @@ impl Context {
         .with_patches(resolved_patches.clone())
         .with_patch_snapshot(patch_snapshot)
         .with_managed_config_client(managed_config_client)
-        // Guaranteed-local companion / site-patch lookups must read the same
-        // (`--index` / `OCX_INDEX` redirected) snapshot the main index uses.
+        // Companion and site-patch lookups must read the same (`--index`-redirected) store.
         .with_index(index_store);
 
-        // Attach policy-gated auto-verify ONCE on the shared manager so EVERY
-        // install surface inherits it fail-closed — not just `install`/`pull`
-        // but every `find_or_install_all` path (`package exec`, `package env`,
-        // `run`, patch discovery). `None` when no operator `[[trust.policy]]` is
-        // configured. install/pull refine the opt-out from their
-        // `--verify`/`--no-verify` flag via `conventions::manager_with_verify_flag`.
+        // Attached once on the shared manager so every install surface inherits auto-verify.
         let operator_policies = config.trust_policies().to_vec();
-        // Resolve the `OCX_NO_VERIFY` opt-out ONCE here; both the auto-verify
-        // config below and the forwarding `config_view` further down read this
-        // single value (the per-command `--verify`/`--no-verify` flag refines it
-        // in `conventions::manager_with_verify_flag`).
+        // Read once: auto-verify and the forwarded `config_view` must see the same value.
         let no_verify_env = ocx_util::env::flag(env::keys::OCX_NO_VERIFY, false);
-        // Only build the registry client when a policy actually needs it. The
-        // TLS-store cost this branch was written against now lives inside
-        // `ocx_oci::Client` (built on the first request, not on construction), so
-        // what the branch saves today is the client's own allocation and the
-        // `build_auto_verify` work behind it — kept because an empty policy set
-        // has nothing to verify, not because construction is expensive.
         let auto_verify = if operator_policies.is_empty() {
             None
         } else {
@@ -652,59 +394,25 @@ impl Context {
         };
         let manager = manager.with_auto_verify(auto_verify);
 
-        // Capture the absolute path of the running ocx so subprocess spawns
-        // can pin the inner ocx binary via `OCX_BINARY_PIN` instead of relying
-        // on whatever `$PATH` resolves at the launcher site. Falling back to
-        // the canonical `ocx` name lets ocx still operate when `current_exe()`
-        // fails (e.g. binary deleted under a long-running process); the child
-        // launcher's `${OCX_BINARY_PIN:-ocx}` form then degrades to `$PATH`-lookup.
+        // Pins child spawns to this binary via `OCX_BINARY_PIN`; on failure the child's
+        // `${OCX_BINARY_PIN:-ocx}` degrades to a `$PATH` lookup.
         let self_exe = std::env::current_exe().unwrap_or_else(|e| {
             log::warn!("Could not resolve current exe: {e}");
             std::path::PathBuf::from("ocx")
         });
         let mut config_view = options.as_view(self_exe);
-        // Feed the same resolved (merged, pre-role-parse) mirror map into the
-        // forwarding view so a child ocx inherits `OCX_MIRRORS` matching the
-        // parent's transport rewrite.
+        // The merged pre-role-parse map, so a child re-parses what the parent's transport used.
         config_view.mirrors = resolved_mirrors.merged.into_iter().collect();
-        // Thread the already-resolved patches into the config forwarding view
-        // so child ocx processes (launcher exec) inherit the same patch tier
-        // via `OCX_PATCHES` (C5 — forwarding across process boundaries).
-        // `resolved_patches` was resolved above (config-file tier then env
-        // fallback) before being passed to the manager constructor.
         config_view.patches = resolved_patches;
-        // Forward the already-resolved patch snapshot path into the config view
-        // so child processes (launcher exec) inherit the same snapshot via
-        // `OCX_PATCH_SNAPSHOT` — mirrors how `resolved_patches` is forwarded
-        // above. No `--patch-snapshot` flag exists yet; the env var is the
-        // sole selector for now.
         config_view.patch_snapshot = patch_snapshot_path;
-        // Forward the effective managed-config source so a child ocx (launcher
-        // re-entry) resolves the same managed tier via `OCX_MANAGED_CONFIG`.
         config_view.managed_config_source = managed_config.as_ref().map(|resolved| resolved.source.to_string());
-        // Forward the auto-verify opt-out so a launcher-spawned child install
-        // inherits the same CI-wide `OCX_NO_VERIFY`. Pure env passthrough — the
-        // per-command `--no-verify` flag is a one-shot choice and is not
-        // forwarded. (`env::keys::OCX_NO_VERIFY`, see `subsystem-cli.md`.)
+        // Only the env opt-out is forwarded; `--no-verify` is a one-shot choice.
         config_view.no_verify = no_verify_env;
-        // Forward the hermetic-config opt-out for the same reason: without it
-        // the parent prunes the discovered config chain and the child — a fresh
-        // process — re-reads it in full, so the two frames of one launch chain
-        // resolve against different configuration. Read here, at the same seam
-        // the loader read it, rather than ambiently inside `apply_ocx_config`.
+        // Forwarded, or the child re-reads the config chain the parent pruned and the two frames
+        // of one launch resolve against different configuration.
         config_view.no_config = ocx_util::env::flag(env::keys::OCX_NO_CONFIG, false);
-        // Forward the sink and filename pattern the two lower tiers resolve to,
-        // so every frame of one launch chain records into the same place. This
-        // cannot be left to the child to re-derive: `apply_ocx_config` is
-        // set-or-**remove**, so an unforwarded `OCX_RECORDS_DIR` inherited from
-        // this process's own environment would be stripped from the child.
-        //
-        // A launching command that carries `--records-dir` / `--records-name`
-        // overwrites this on its own forwarded copy, which is the only tier a
-        // child cannot re-derive for itself.
-        // The clamp is applied by the merge itself, so the lock must still be on
-        // the accumulator here; only afterwards are the two non-forwarded fields
-        // cleared.
+        // Forwarded because `apply_ocx_config` is set-or-remove and would strip `OCX_RECORDS_DIR`.
+        // The clamp applies during `merge`, so the lock clears only after it.
         let mut forwarded_records = records_config.clone();
         forwarded_records.merge(records_env.clone());
         forwarded_records.required = None;
@@ -712,14 +420,8 @@ impl Context {
         config_view.records = forwarded_records;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
-        // The `toolchain_dir` funnel, run once per invocation at config-load
-        // time (C-017–C-019, RUL-51). Resolving here — rather than at the one
-        // site that builds a home — is what makes the refusal a property of the
-        // *configuration* instead of a property of rendering: every command
-        // exits 78 on a refused root, including the read-only ones, and
-        // `ocx shell state` therefore never has to report a home it could not
-        // spell. Mapped through `ConfigError` so `classify_error` reaches the
-        // refusal's own `ClassifyExitCode` down the `source()` chain.
+        // Resolved here so a refused root exits 78 on every command, read-only ones included; mapped
+        // through `ConfigError` so `classify_error` reaches it via `source()`.
         let toolchain_root = ocx_config::ToolchainRoot::resolve(&config).map_err(ocx_config::error::Error::from)?;
         let concurrency = resolve_concurrency(options.jobs);
 
@@ -738,9 +440,6 @@ impl Context {
             default_index: selected_index,
             manager,
             default_registry,
-            // Narrow projection (ISP): verify pools these with the project
-            // ocx.toml's trust policies; the rest of `config` is already
-            // extracted into `default_registry` / mirrors / patches above.
             config_trust: config.trust.clone().unwrap_or_default(),
             config_view,
             toolchain_root,
@@ -761,19 +460,13 @@ impl Context {
         })
     }
 
-    /// Fold this invocation's `[records]` tiers into a recording policy.
-    ///
-    /// `args` is the launching command's own `--records-dir` / `--records-name`
-    /// contribution — [`options::Records::options`](crate::options::Records) —
-    /// or [`RecordsOptions::default`] for a frame that takes no flags. The
-    /// config and environment tiers were captured at `try_init`, so two frames
-    /// of one invocation cannot disagree about them.
+    /// Fold this invocation's `[records]` tiers with `args` (the command's `--records-dir` /
+    /// `--records-name`, or [`RecordsOptions::default`]) into a recording policy.
     ///
     /// # Errors
     ///
-    /// Returns [`RecordsError`](ocx_package_manager::record::RecordsError) when the winning
-    /// filename template is malformed — a configuration error (exit 78) raised
-    /// here, before any child starts, rather than at write time.
+    /// [`RecordsError`](ocx_package_manager::record::RecordsError) (exit 78) when the winning
+    /// filename template is malformed, raised before any child starts.
     pub fn records(
         &self,
         args: ocx_package_manager::record::RecordsOptions,
@@ -781,9 +474,7 @@ impl Context {
         ocx_package_manager::record::resolve_records(self.records_config.clone(), self.records_env.clone(), args)
     }
 
-    /// Shared span-free progress manager (ADR adr_progress_architecture).
-    /// Commands wrap long operations in guards from this manager
-    /// (`spinner`/`bytes`) instead of emitting tracing-indicatif spans.
+    /// Shared span-free progress manager; wrap long operations in its guards.
     pub fn progress(&self) -> &ocx_console::progress::ProgressManager {
         &self.progress
     }
@@ -792,44 +483,28 @@ impl Context {
         self.offline
     }
 
-    /// Returns the explicit `--project` / `OCX_PROJECT` override path, if
-    /// one was supplied. Commands that need project-level resolution (e.g. `lock`)
-    /// should pass this to `ProjectConfig::resolve` as the explicit override so
-    /// the flag is not silently discarded.
+    /// The explicit `--project` / `OCX_PROJECT` path, if any; pass it to `ProjectConfig::resolve`
+    /// so the flag is not silently discarded.
     pub fn project_path(&self) -> Option<&Path> {
         self.project_path.as_deref()
     }
 
-    /// The validated `toolchain_dir` root, or `None` for the in-project
-    /// `<project>/.ocx/toolchain` default (C-002, C-016, R-W20).
-    ///
-    /// The only way to reach a root from a command, and it is already past the
-    /// containment, system-prefix, directory-ness and ownership refusals — which
-    /// is what makes [`resolve_toolchain_home`](ocx_project::resolve_toolchain_home)'s
-    /// `Option<&ToolchainRoot>` parameter a funnel rather than a suggestion.
-    /// Ignored by the global tier, whose home never relocates.
+    /// The validated `toolchain_dir` root, or `None` for the in-project `<project>/.ocx/toolchain`
+    /// default. Ignored by the global tier.
     #[must_use]
     pub fn toolchain_root(&self) -> Option<&ocx_config::ToolchainRoot> {
         self.toolchain_root.as_ref()
     }
 
-    /// Which toolchain tree this invocation renders, and — for a project — the
-    /// **canonical** project directory (C-054, D-V13).
+    /// Which toolchain tree this invocation renders and, for a project, its canonical directory.
     ///
-    /// One derivation for all five rendering commands (`pull` and the four
-    /// mutators), because the `Project` arm's path is also the render stamp's
-    /// key and the consent stamp's, and a second spelling of it would file one
+    /// That path keys both the render and consent stamps, so a second spelling would file one
     /// project under two `state/projects/<key>/` directories.
-    ///
-    /// `--global` selects [`RenderStampScope::Global`] outright: the global home
-    /// is `$OCX_HOME/toolchain`, has no project key, and never relocates
-    /// (C-016).
     ///
     /// # Errors
     ///
-    /// The canonicalisation's own I/O failure, with the offending path
-    /// attached. Callers derive the scope **before** committing anything, so a
-    /// failure here leaves nothing half-done.
+    /// The canonicalisation's I/O failure, with the path attached. Derive the scope before
+    /// committing anything, so a failure leaves nothing half-done.
     pub async fn toolchain_render_scope(
         &self,
         config_path: &Path,
@@ -839,9 +514,6 @@ impl Context {
         if self.global() {
             return Ok(RenderStampScope::Global);
         }
-        // Two `stat`-walking syscalls, so the same blocking hop
-        // `project_context::record_activation_consent` makes around the very
-        // same call.
         let path = config_path.to_path_buf();
         let directory = tokio::task::spawn_blocking(move || {
             ocx_project::consent::canonical_project_dir(&path)
@@ -851,13 +523,8 @@ impl Context {
         Ok(RenderStampScope::Project(directory))
     }
 
-    /// Whether the global toolchain (`$OCX_HOME/ocx.toml`) was selected
-    /// via the root `--global` flag or `OCX_GLOBAL`. Passed to
-    /// `ProjectConfig::resolve` so project-tier prologues select the
-    /// global file instead of walking the CWD. Mutually exclusive with an
-    /// explicit `--project` / `OCX_PROJECT` (enforced by clap
-    /// `conflicts_with` for the flag pair and by
-    /// [`check_global_project_exclusivity`] for the env-sourced gaps).
+    /// Whether `--global` / `OCX_GLOBAL` selected `$OCX_HOME/ocx.toml`; exclusive with an
+    /// explicit project (see [`check_global_project_exclusivity`]).
     pub fn global(&self) -> bool {
         self.config_view.global
     }
@@ -876,11 +543,7 @@ impl Context {
         &self.local_index
     }
 
-    /// Every configured `index.ocx.sh`-protocol source — one per index-bearing
-    /// `[registries."<ns>"]` namespace, when online. Empty under `--offline` or
-    /// when no namespace is configured as index-kind. Used by `ocx index
-    /// update` to route a package to its namespace's source and to sync each
-    /// source's catalog.
+    /// Every `index.ocx.sh`-protocol source; empty under `--offline`.
     pub fn index_sources(&self) -> &[ocx_index::OcxIndex] {
         &self.index_sources
     }
@@ -889,34 +552,17 @@ impl Context {
         &self.default_index
     }
 
-    /// The default-mode resolution chain — every index source ahead of the
-    /// plain-OCI registry — for callers that must build their own [`Index`]
-    /// over a different content store than [`Self::default_index`]'s
-    /// (`ocx patch test`'s scratch root).
+    /// The default-mode resolution chain, for callers building an [`Index`] over another content
+    /// store (`ocx patch test`'s scratch root).
     ///
-    /// Sharing the wiring is the point: a scratch chain assembled from the
-    /// registry alone would resolve an index-bearing namespace as plain OCI
-    /// while every other resolution in the same invocation goes through its
-    /// index, so one identifier could name two different artifacts.
-    /// `Offline` with no sources when there is no remote index.
-    ///
-    /// Carries the invocation's own policy ceiling rather than assuming
-    /// `Default`: now that this chain reaches every index-bearing namespace's
-    /// source, a hardcoded `Default` would let `ocx --frozen patch test`
-    /// resolve the BASE off an unindexed tag — dialling the index and then the
-    /// physical host — which is exactly what `--frozen` refuses everywhere else
-    /// (`ocx --frozen pull` on the same identifier exits 81). A companion is a
-    /// different tier and is deliberately unaffected: `install_companion`
-    /// resolves through `Index::remote_view`, which ignores this ceiling.
+    /// Sharing it keeps one identifier from naming two artifacts in one invocation, and it keeps
+    /// the invocation's ceiling so `--frozen` still refuses an unindexed tag (exit 81).
     pub fn chain_sources(&self) -> (ocx_index::ChainMode, Vec<ocx_index::Index>) {
         let online_mode = Self::online_chain_mode(self.config_view.frozen, self.config_view.remote);
         Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode)
     }
 
-    /// The policy ceiling for an online chain: `--frozen` ▸ `--remote` ▸
-    /// default. `--offline` is not an arm — it is applied upstream by leaving
-    /// the remote index unbuilt, which [`Self::chain_mode_and_sources`] turns
-    /// into `Offline` with no sources at all.
+    /// The online policy ceiling. `--offline` is not an arm: it leaves the remote index unbuilt.
     fn online_chain_mode(frozen: bool, remote: bool) -> ocx_index::ChainMode {
         if frozen {
             ocx_index::ChainMode::Frozen
@@ -927,12 +573,8 @@ impl Context {
         }
     }
 
-    /// Verb-intent index for the update family (`ocx update`): resolves tags
-    /// live against the registry by default (`Remote`), capped by the policy
-    /// ceilings (`--offline` wins over `--frozen`, same ladder as
-    /// [`Self::try_init`] minus the `Default` arm), and never commits tag
-    /// pointers into the shared local index — the caller's `ocx.lock` is the
-    /// canonical record. See `adr_toolchain_update_family.md`.
+    /// Index for `ocx update`: resolves tags live under the `--offline` / `--frozen` ceilings and
+    /// never commits tag pointers to the shared local index (`adr_toolchain_update_family.md`).
     pub fn update_index(&self) -> ocx_index::Index {
         let online_mode = if self.config_view.frozen {
             ocx_index::ChainMode::Frozen
@@ -943,12 +585,7 @@ impl Context {
         ocx_index::Index::from_chained_lock_scoped(self.local_index.clone(), sources, mode)
     }
 
-    /// Shared chain wiring for [`Self::try_init`] and [`Self::update_index`]:
-    /// no remote index (`--offline`) forces `Offline` with no sources; online
-    /// wraps the remote as the single chain source under the caller-chosen
-    /// mode. Deriving mode and sources from the same value prevents the
-    /// `(offline, oci_index = Some)` contradiction a bool-based match
-    /// could produce.
+    /// Mode and sources come from one value, so `--offline` never pairs with a built remote.
     fn chain_mode_and_sources(
         oci_index: Option<&ocx_index::OciIndex>,
         index_sources: &[ocx_index::OcxIndex],
@@ -958,17 +595,8 @@ impl Context {
             None => (ocx_index::ChainMode::Offline, Vec::new()),
             Some(remote) => {
                 let mut sources = Vec::with_capacity(index_sources.len() + 1);
-                // Every index-bearing namespace's static-file source is
-                // registered BEFORE the registry so a logical reference in that
-                // namespace always resolves through the verified two-hop path
-                // (root -> sha256-verified obs -> physical) and the yank gate —
-                // never bypassed by a registry that happens to serve the same
-                // name (`adr_index_indirection.md` F, Codex R3). `jurisdiction`
-                // routes each source to its own namespace and stops fall-through,
-                // so exactly one remote resolves any given namespace (Decision H).
-                // A namespace nobody configured as index-kind is absent here and
-                // chains the registry alone, so an index-site outage can never
-                // hard-block it.
+                // Index sources register before the registry, so an index-bearing namespace resolves through
+                // the verified two-hop path and yank gate, never a same-named registry.
                 for source in index_sources {
                     sources.push(ocx_index::Index::from_source(source.clone()));
                 }
@@ -978,64 +606,11 @@ impl Context {
         }
     }
 
-    /// Builds one `index.ocx.sh`-protocol source per index-bearing namespace,
-    /// when online (`adr_index_indirection.md` F5a — kind per NAMESPACE).
+    /// One `index.ocx.sh`-protocol source per [`is_published_namespace`] namespace, sorted for a
+    /// deterministic chain order.
     ///
-    /// `[registries."<ns>"] index` presence is the sole protocol-kind marker
-    /// (Decision H): every merged `[registries]` entry carrying a non-empty
-    /// `index` field resolves via the ocx-index protocol against that base
-    /// URL — not just `ocx.sh`. A namespace with no `index` field resolves as
-    /// plain OCI and gets no source here, so [`Self::chain_mode_and_sources`]
-    /// chains the registry alone for it and an index-site outage can never
-    /// hard-block a namespace nobody configured as index-kind. Sources are
-    /// returned sorted by namespace so the chain order is deterministic.
-    ///
-    /// Each source's base URL honours its `[registries."<ns>"] index` value
-    /// plus the `[mirrors."<host>"] index` role override for that base's
-    /// traffic host (F5c); the yanked opt-in reads
-    /// [`OCX_ALLOW_YANKED`](env::keys::OCX_ALLOW_YANKED). This is the single
-    /// place the index clients are minted. A plain-`http://` final target is
-    /// refused unless its host is in `insecure_hosts`
-    /// (`OCX_INSECURE_REGISTRIES`), the same gate the registry role applies.
-    ///
-    /// **Mirror suppression.** A namespace whose `index` came from the
-    /// compiled-in defaults tier (`index_is_compiled_default`) is dropped when
-    /// a **locally-authored** `[mirrors."<ns>"]` entry pins its REGISTRY role.
-    /// `[mirrors]` is keyed by traffic host and applied against the PHYSICAL
-    /// identifier the index mints, so it does not follow a namespace through
-    /// the index path: a firewalled site that pinned `ocx.sh` at its own
-    /// registry would otherwise start dialling `index.ocx.sh` — a host it
-    /// never allow-listed — with no config change of its own. An operator who
-    /// declared where a namespace's traffic goes has answered the question;
-    /// one who wants both writes `[registries."<ns>"] index` explicitly, which
-    /// clears the compiled-default provenance and so wins here.
-    ///
-    /// Two scoping rules keep the trigger honest, and both are load-bearing:
-    ///
-    /// - **Locally-authored only** (`local_mirrors`, the loader's `local_only`
-    ///   view: compiled-in ▸ discovered ▸ `OCX_CONFIG`/`--config`). The merged
-    ///   config also carries the managed tier — a remote, operator-published
-    ///   payload the loader itself calls untrusted. Honouring a `[mirrors]`
-    ///   entry from there would let whoever controls that package revoke the
-    ///   sha256-verified two-hop path AND the yank gate fleet-wide, then take
-    ///   every `ocx.sh` request. A remote payload may redirect traffic (that is
-    ///   its job); it may not revoke the verified path. `OCX_MIRRORS` is
-    ///   excluded for the same reason — a parent ocx folds the managed tier
-    ///   into the map it forwards, so trusting the env would re-open the same
-    ///   hole one process hop later. Site-wide mirror policy lives in
-    ///   `/etc/ocx/config.toml`, which every process reads directly.
-    /// - **Registry role only.** The index role is applied keyed on the index
-    ///   base's OWN host (`OcxIndex::resolve_base_url`, e.g. `index.ocx.sh`),
-    ///   never on the namespace, so `[mirrors."<ns>"] index` cannot redirect
-    ///   anything for `<ns>` — suppressing on it would leave the operator with
-    ///   neither the index nor their mirror. A `[mirrors."index.ocx.sh"]`
-    ///   entry does not suppress either: that operator redirected the index
-    ///   rather than replacing it, and gets the verified path against their
-    ///   own host (F5c).
-    ///
-    /// This is the only seam that can see both halves: the compiled-in tier is
-    /// folded in `ConfigLoader`, but the mirror map is not resolved until
-    /// `try_init`.
+    /// The single place index clients are minted: a plain-`http://` base is refused unless its
+    /// host is in `insecure_hosts`.
     #[expect(
         clippy::too_many_arguments,
         reason = "the resolved inputs one invocation settles once: the mode, both mirror views, the two trust sets and the progress sink"
@@ -1050,7 +625,6 @@ impl Context {
         progress: &ocx_console::progress::ProgressManager,
         extra_roots: &ExtraRoots,
     ) -> anyhow::Result<Vec<ocx_index::OcxIndex>> {
-        // Offline or no `[registries]` table ⇒ no sources.
         if !online {
             return Ok(Vec::new());
         }
@@ -1058,8 +632,6 @@ impl Context {
             return Ok(Vec::new());
         };
 
-        // Deterministic chain order: sort namespaces so the built sources — and
-        // therefore the resolution chain — are stable across runs.
         let mut namespaces: Vec<&String> = registries
             .iter()
             .filter(|(namespace, entry)| is_published_namespace(entry, namespace, local_mirrors))
@@ -1070,21 +642,13 @@ impl Context {
         let allow_yanked = ocx_util::env::flag(env::keys::OCX_ALLOW_YANKED, false);
         let mut sources = Vec::with_capacity(namespaces.len());
         for namespace in namespaces {
-            // Per-namespace physical-fetch client: same mirror + plain-HTTP +
-            // progress config as the shared remote client, PLUS an SSRF
-            // `GuardedResolver` seeded with THIS namespace's `trusted_hosts`
-            // (X1-X3, ocx#218). The resolver pins the connect address to the one
-            // `physical_identifier` validated, so a root `repository` host cannot
-            // rebind to a forbidden range between validate and connect. The trust
-            // set is per-namespace (never a union) so one namespace's exemption
-            // can never widen another's.
+            // Pins the connect address so a root `repository` host cannot rebind between validate and
+            // connect; per namespace, never unioned, so one exemption cannot widen another's.
             let trusted_hosts = trusted_hosts_for(config, namespace);
             let client = client_builder(registry_mirrors, progress, insecure_hosts, extra_roots)
                 .ssrf_guard(trusted_hosts.clone())
                 .build();
-            // The base URL and its transport are one decision, taken inside
-            // `resolve_base_url` — picking a transport here would re-derive the
-            // scheme the gate there already settled.
+            // `resolve_base_url` settles the transport with the scheme; choosing one here re-derives it.
             let base =
                 ocx_index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts, extra_roots)?;
             sources.push(ocx_index::OcxIndex::new(ocx_index::OcxIndexConfig {
@@ -1105,48 +669,35 @@ impl Context {
         &self.default_registry
     }
 
-    /// Operator-tier trust policies from the merged `config.toml` (system /
-    /// user / `$OCX_HOME`, array-appended). `ocx package verify` treats these
-    /// as authoritative over the project `ocx.toml` (`ocx_trust::resolve_tiered`).
+    /// Operator-tier trust policies from the merged `config.toml`, authoritative over the
+    /// project `ocx.toml` in `ocx package verify`.
     pub fn config_trust_policies(&self) -> &[ocx_trust::TrustPolicy] {
         &self.config_trust.policy
     }
 
-    /// Operator-tier `[trust.sigstore]` from the merged `config.toml` — the
-    /// self-hosted Fulcio/Rekor trust root a fleet ships instead of every
-    /// machine carrying a file or an env var.
+    /// Operator-tier `[trust.sigstore]` from the merged `config.toml`.
     pub fn config_trust_sigstore(&self) -> Option<&ocx_trust::SigstoreTrust> {
         self.config_trust.sigstore.as_ref()
     }
 
-    /// Hosts this invocation may contact over plain HTTP — the resolved union
-    /// of `[registries."<name>"].insecure` and `OCX_INSECURE_REGISTRIES`.
-    /// Commands that build their own registry connection take this rather than
-    /// re-deriving it, so every path agrees on the same set.
+    /// Hosts this invocation may contact over plain HTTP; take this rather than re-deriving it.
     pub fn insecure_hosts(&self) -> &[String] {
         &self.insecure_hosts
     }
 
-    /// The tiered extra-CA-roots view (C-005) — pass to a hand-rolled client
-    /// this invocation builds outside [`Self::try_init`] itself (the forge
-    /// clients, `ForgeKind::client`'s `extra_roots` parameter).
+    /// The merged extra-CA view, for clients built outside [`Self::try_init`] (the forge clients).
     pub fn extra_roots_merged(&self) -> &ExtraRoots {
         &self.extra_roots_merged
     }
 
-    /// The local-only extra-CA-roots view (D-6) — the managed-config fetch
-    /// client's trust set, never the managed payload's own.
+    /// The local-only extra-CA view: the managed-config fetch client's trust set.
     pub fn extra_roots_local(&self) -> &ExtraRoots {
         &self.extra_roots_local
     }
 
-    /// The one recipe every registry client of this invocation is built
-    /// from: the resolved mirror map, plain-HTTP set, progress sink and merged
-    /// extra-CA view (C-006) pre-applied, so a command that needs its own
-    /// client — `ocx package announce`'s SSRF-pinned publisher — adds only
-    /// what differs and cannot drift from [`Self::remote_client`] on the rest.
-    /// The managed-config fetch client is the one deliberate exception and is
-    /// built from the local view by [`build_managed_config_client`] (D-6).
+    /// The recipe every registry client of this invocation is built from, so a command's own
+    /// client adds only what differs and cannot drift from [`Self::remote_client`]. Only the
+    /// managed-config fetch client uses the local view ([`build_managed_config_client`]).
     #[must_use]
     pub fn client_builder(&self) -> ocx_oci::ClientBuilder {
         client_builder(
@@ -1157,26 +708,16 @@ impl Context {
         )
     }
 
-    /// The SSRF escape hatch `registry` declares, or none (ocx#218, design
-    /// register X2). The merged config is the single source of truth and there
-    /// is no CLI flag to widen it, so every caller that needs the set — the
-    /// announce/claim request field and [`Self::guarded_publisher`] below —
-    /// reads it through here rather than re-spelling the lookup.
+    /// The SSRF exemption `registry` declares in the merged config, or none.
     #[must_use]
     pub fn trusted_hosts_for(&self, registry: &str) -> Vec<String> {
         trusted_hosts_for(&self.config, registry)
     }
 
-    /// A [`Publisher`] on the invocation's shared client recipe, pinned through
-    /// the `ocx_oci::ssrf::GuardedResolver` seam with exactly `registry`'s
-    /// exemption.
+    /// A [`Publisher`] on the shared client recipe, SSRF-pinned with exactly `registry`'s exemption.
     ///
-    /// The one constructor for both publisher sites (`ocx package announce`,
-    /// `ocx package claim`): each observes a physical repository taken from
-    /// remote-controlled data — a root `repository` pointer, or an
-    /// operator-typed one on a first claim — so the connect-time pin belongs on
-    /// every one of them, and a second spelling of the recipe is a place for
-    /// one of them to lose it.
+    /// The one constructor for `ocx package announce` and `ocx package claim`, which both dial a
+    /// repository taken from remote-controlled data; a second recipe could lose the pin.
     #[must_use]
     pub fn guarded_publisher(&self, registry: &str) -> Publisher {
         Publisher::new(
@@ -1202,97 +743,68 @@ impl Context {
         &self.manager
     }
 
-    /// Resolution-affecting policy snapshot to forward to subprocess spawns
-    /// via [`env::Env::apply_ocx_config`]. Built from parsed `ContextOptions`
-    /// at init time — beats stale parent-shell `OCX_*` exports.
+    /// Resolution-affecting policy to forward to subprocesses via [`env::Env::apply_ocx_config`].
     pub fn config_view(&self) -> &env::OcxConfigView {
         &self.config_view
     }
 
-    /// Concurrency cap for parallel pulls, derived from `--jobs` (CLI),
-    /// `OCX_JOBS` (env), or unbounded by default.
+    /// Parallel-pull cap: `--jobs` ▸ `OCX_JOBS` ▸ unbounded.
     pub fn concurrency(&self) -> ocx_package_manager::Concurrency {
         self.concurrency
     }
 
-    /// The fully merged config (every tier). `ocx config update` and the
-    /// background-refresh hook use this with
-    /// `ocx_config::managed::resolve_managed_target` to resolve the
-    /// `[managed]` tier WITHOUT the required-snapshot gate `try_init` itself
-    /// enforces for ordinary commands.
+    /// The fully merged config. Resolving `[managed]` from it skips the required-snapshot gate
+    /// `try_init` enforces for ordinary commands.
     pub fn config(&self) -> &ocx_config::Config {
         &self.config
     }
 
-    /// The discovered tiers alone (built-in defaults, system, user,
-    /// `$OCX_HOME`) — what a managed payload folds ONTO. Paired with
-    /// [`Self::config_overlay`] so `ocx config test` can reproduce the adoption
-    /// order for a candidate payload.
+    /// The discovered tiers alone, which a managed payload folds onto; with
+    /// [`Self::config_overlay`] it lets `ocx config test` reproduce the adoption order.
     pub fn config_base(&self) -> &ocx_config::Config {
         &self.config_base
     }
 
-    /// The explicit `OCX_CONFIG` / `--config` tier alone — what merges ON TOP
-    /// of a managed payload, and therefore on top of a previewed candidate.
+    /// The explicit `OCX_CONFIG` / `--config` tier alone, which merges on top of a managed payload.
     pub fn config_overlay(&self) -> &ocx_config::Config {
         &self.config_overlay
     }
 
-    /// The locally-authored `[mirrors]` table, for callers that must re-ask
-    /// [`is_published_namespace`] after init — `ocx index regenerate`'s
-    /// published-only guard is the only one today.
+    /// The locally-authored `[mirrors]` table, for re-asking [`is_published_namespace`] after init.
     pub fn local_mirrors(&self) -> Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>> {
         self.local_mirrors.as_ref()
     }
 
-    /// The effective `OCX_MANAGED_CONFIG` override — already hermetic-gated
-    /// by `OCX_NO_CONFIG` and with an empty string treated as unset.
+    /// The effective `OCX_MANAGED_CONFIG`, gated by `OCX_NO_CONFIG`, with an empty value unset.
     pub fn managed_config_env_override(&self) -> Option<&str> {
         self.managed_config_env_override.as_deref()
     }
 
-    /// The on-disk managed-config snapshot, read once at `try_init` and
-    /// identity-gated against the effective source (W2) — `Some` only when it
-    /// belongs to the current tier. Absent on any I/O or parse failure
-    /// (benign-state rule) or identity mismatch.
+    /// The managed-config snapshot belonging to the current tier; `None` on an identity mismatch
+    /// or any I/O or parse failure.
     pub fn managed_config_snapshot(&self) -> Option<&ocx_config::managed_config::ManagedConfigSnapshot> {
         self.managed_config_snapshot.as_ref()
     }
 
-    /// Digest of the patch snapshot in force, over the bytes `try_init` parsed
-    /// it from. `None` when `OCX_PATCH_SNAPSHOT` named nothing, which is the
-    /// common case — the patch tier resolves live unless a freeze is adopted.
+    /// Digest of the patch snapshot in force; `None` when `OCX_PATCH_SNAPSHOT` named nothing.
     pub fn patch_snapshot_digest(&self) -> Option<&ocx_oci::Digest> {
         self.patch_snapshot_digest.as_ref()
     }
 
-    /// Returns the registry [`ocx_oci::Client`] `ocx package verify` reads through,
-    /// in every mode — including `--offline`. Built on first call and cached
-    /// (see [`Self::registry_client_cell`] doc) — never gated on
-    /// `[[trust.policy]]` configuration, so an unconfigured trust set with
-    /// explicit `--certificate-identity`/`--certificate-oidc-issuer` flags
-    /// still gets a client under `--offline`.
+    /// The registry client `ocx package verify` reads through, built on first call and present
+    /// even under `--offline`.
     ///
-    /// Unlike the offline-gated [`Self::remote_client`], this never fails on
-    /// `--offline`: verify inherently reads the artifact and its signature
-    /// referrer from the registry where they live (a local mirror in air-gapped
-    /// deployments), so its `--offline` semantics scope to the Sigstore trust
-    /// services (the Rekor key fetch and TUF), not the artifact registry. Pair
-    /// it with [`Self::is_offline`], which the verify pipeline uses to forbid
-    /// trust-services network and require cached/supplied trust material.
+    /// Offline blocks only the Sigstore trust services (check [`Self::is_offline`]); the artifact
+    /// and its signature referrer still come from the registry.
     pub fn verify_client(&self) -> &ocx_oci::Client {
         self.registry_client_cell.get_or_init(|| self.client_builder().build())
     }
 }
 
-/// One namespace's `[registries."<ns>"].trusted_hosts` SSRF exemption, or none
-/// when it declares no entry or no hosts (ocx#218).
+/// One namespace's `[registries."<ns>"].trusted_hosts` SSRF exemption, or none.
 ///
-/// Free rather than a method because [`Context::build_index_sources`] runs
-/// before a `Context` exists and must read the field the same way; the
-/// inherent [`Context::trusted_hosts_for`] delegates here so the three sites
-/// that need one namespace's set — the index sources, announce, claim — cannot
-/// drift apart on which config the set comes from.
+/// Free so [`Context::build_index_sources`], which runs before a `Context` exists, reads it
+/// the same way announce and claim do.
 fn trusted_hosts_for(config: &ocx_config::Config, registry: &str) -> Vec<String> {
     config
         .registries
@@ -1302,17 +814,10 @@ fn trusted_hosts_for(config: &ocx_config::Config, registry: &str) -> Vec<String>
         .unwrap_or_default()
 }
 
-/// Every namespace's `[registries."<ns>"].trusted_hosts` SSRF exemption
-/// (ocx#218), keyed by namespace and skipping namespaces that declare none.
+/// Every namespace's declared `trusted_hosts`, for the chained index.
 ///
-/// Config is the single source of truth for the exemption:
-/// [`Context::build_index_sources`] reads the same field into each `OcxIndex`
-/// and each per-namespace `ssrf_guard`, and this map is that same value read
-/// once more for the chained index. It deliberately covers EVERY namespace, not
-/// only the index-bearing ones `build_index_sources` builds a source for — an
-/// operator who declared where a namespace's traffic may go has answered the
-/// question for that namespace, whether or not it also declares an `index`, and
-/// a namespace with no source has no other place to carry the exemption.
+/// Covers every namespace, not only index-bearing ones: a source-less namespace has nowhere
+/// else to carry its exemption.
 fn trusted_hosts_by_namespace(config: &ocx_config::Config) -> std::collections::HashMap<String, Vec<String>> {
     let Some(registries) = config.registries.as_ref() else {
         return std::collections::HashMap::new();
@@ -1326,25 +831,15 @@ fn trusted_hosts_by_namespace(config: &ocx_config::Config) -> std::collections::
         .collect()
 }
 
-/// Builds the client that FETCHES the managed-config payload.
-///
-/// Every input is the LOCAL-ONLY view or the raw environment — the merged
-/// config, and the process-wide `insecure_hosts` derived from it, are
-/// deliberately out of scope here rather than merely unused.
-/// `adr_managed_config_tier.md`, "Mirror posture (AMENDED)": the managed
-/// fetch's route derives from local tiers only, so the payload can never
-/// influence its own refresh route — and dropping TLS *is* a redirection on
-/// the transport axis. A managed snapshot declaring
-/// `[registries."<its own host>"] insecure = true` would otherwise downgrade
-/// the fetch of the NEXT snapshot to plaintext, which is exactly the
-/// self-authorization the mirror half of this client was already written to
-/// prevent.
+/// Builds the client that fetches the managed-config payload, from the local-only tiers and
+/// the raw environment only (`adr_managed_config_tier.md`, "Mirror posture"). The merged
+/// config would let a snapshot declaring its own host `insecure` downgrade the next
+/// snapshot's fetch to plaintext.
 ///
 /// # Errors
 ///
-/// Propagates [`ocx_config::mirror::MirrorConfigError`] when the
-/// local-only `[mirrors]` plus the forwarded `OCX_MIRRORS` do not resolve —
-/// including an `http://` mirror this view licenses nothing for.
+/// [`ocx_config::mirror::MirrorConfigError`] when the local `[mirrors]` plus `OCX_MIRRORS` do
+/// not resolve, including an `http://` mirror nothing here licenses.
 fn build_managed_config_client(
     local_only_config: &ocx_config::Config,
     env_mirrors: Vec<(String, ocx_config::mirror::MirrorConfig)>,
@@ -1355,8 +850,7 @@ fn build_managed_config_client(
     let insecure_hosts = ocx_config::insecure::insecure_hosts(local_only_config, env_insecure_registries);
     let mirrors = ocx_config::mirror::resolve_mirror_map(local_only_config, env_mirrors, &insecure_hosts)
         .map_err(anyhow::Error::new)?;
-    // C-006: `extra_roots` is the `local` view (D-6) — the one input here
-    // that is not a local-only *mirror* input, threaded by the caller.
+    // `extra_roots` must be the caller's local view too.
     Ok(client_builder(
         &ocx_oci::MirrorMap::new(mirrors.registry),
         progress,
@@ -1366,11 +860,8 @@ fn build_managed_config_client(
     .build())
 }
 
-/// The one `ocx_oci::ClientBuilder` recipe behind every registry client of an
-/// invocation: plain-HTTP hosts, mirror map, progress sink and extra-CA roots
-/// (C-006). [`Context::client_builder`] applies it to the merged view for
-/// commands; [`Context::try_init`] and [`build_managed_config_client`] call it
-/// directly, before a `Context` exists, the latter with the local view (D-6).
+/// The shared `ClientBuilder` recipe; [`Context::client_builder`] wraps it, and init-time
+/// callers use it before a `Context` exists.
 fn client_builder(
     mirror_map: &ocx_oci::MirrorMap,
     progress: &ocx_console::progress::ProgressManager,
@@ -1384,21 +875,10 @@ fn client_builder(
         .extra_roots(extra_roots.clone())
 }
 
-/// Build the shared policy-gated auto-verify inputs, or `None` when no operator
-/// `[[trust.policy]]` is configured.
+/// The policy-gated auto-verify input, or `None` with no operator `[[trust.policy]]`.
 ///
-/// Returns the `AutoVerifyInput` rather than the wrapped `AutoVerify` so the
-/// resolved endpoint stays readable — `AutoVerify` keeps its fields private,
-/// and a test that cannot see the Rekor URL cannot pin it.
-///
-/// Attached once on the manager (every install surface inherits it). Carries the
-/// always-available registry client (verify reads the signature referrer from
-/// the registry even under `--offline`), the offline flag, the
-/// `OCX_SIGSTORE_TRUSTED_ROOT` override, the operator `[trust.sigstore]` block,
-/// the `$OCX_HOME/sigstore/trusted-root.json` convention path, and the
-/// `OCX_NO_VERIFY` opt-out default (install/pull refine it from their flag).
-/// OCI-tier gating uses the operator `config.toml` set only; the project
-/// `ocx.toml` pool stays empty (no new OCI-tier carve-out).
+/// Returns `AutoVerifyInput` rather than `AutoVerify` so tests can read the resolved
+/// endpoint. Only operator `config.toml` policies gate it; the project pool stays empty.
 fn build_auto_verify(
     operator_policies: Vec<ocx_trust::TrustPolicy>,
     sigstore_trust: Option<ocx_trust::SigstoreTrust>,
@@ -1410,34 +890,21 @@ fn build_auto_verify(
     if operator_policies.is_empty() {
         return Ok(None);
     }
-    // Endpoint precedence, minus the flag tier install/pull do not have:
-    // `[trust.sigstore].rekor_url` > builtin default. Auto-verify keys its
-    // trust-root cache by this URL, so an operator on a self-hosted stack whose
-    // auto-verify still said `rekor.sigstore.dev` cached their private root
-    // under the public-good key.
-    //
-    // Validated (not parsed by name) so the CLI never names `url::Url`, and
-    // fallible now that the value can come from config: a bad
-    // `[trust.sigstore].rekor_url` must fail the run, not panic and not
-    // silently fall back to the public good. Unused when the trust root pins
-    // the Rekor key (the `OCX_SIGSTORE_TRUSTED_ROOT` / offline path).
+    // Auto-verify keys its trust-root cache by this URL, so a bad URL fails the run: falling
+    // back to the default would cache a self-hosted root under the public-good key.
     let rekor = resolve_endpoint(None, sigstore_trust.as_ref(), SigstoreEndpoint::Rekor);
     let rekor_url = ocx_oci::endpoint::validate_sigstore_url(&rekor, "[trust.sigstore].rekor_url")?;
     Ok(Some(ocx_package_manager::AutoVerifyInput {
         operator_policies,
-        // ponytail: seam for the deferred project-tier auto-verify (#99 known gap
-        // — `ocx.toml` policies not yet read on OCI-tier install/pull/exec/env/run
-        // surfaces, operator `config.toml` only today). Wire real project policies
-        // here once that follow-up is scheduled; until then, always empty.
+        // ponytail: project `ocx.toml` policies are not read on OCI-tier surfaces yet; wire them
+        // here when that follow-up lands.
         project_policies: Vec::new(),
         registry_client: registry_client.clone(),
         rekor_url,
         offline,
         state,
-        // Through the same door `ocx package verify` reads it at, so one env
-        // value cannot mean a bare path here and a `file://` one there.
-        // Through the same door `ocx package verify` reads it at, so one env
-        // value cannot mean a bare path here and a `file://` one there.
+        // Through the same door `ocx package verify` reads it at, so one env value cannot mean a
+        // bare path here and a `file://` one there.
         trusted_root_env: std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT")
             .map(PathBuf::from)
             .map(explicit_trust_root_path),
@@ -1448,23 +915,24 @@ fn build_auto_verify(
     }))
 }
 
-/// Condition 2 of [`is_published_namespace`], without its warning — so
-/// [`index_namespaces`] can reach the same verdict a second time in one
-/// invocation without warning twice.
+/// Condition 2 of [`is_published_namespace`] without its warning, so [`index_namespaces`]
+/// can reuse it silently.
 fn index_suppressed_by_local_mirror(
     entry: &ocx_config::RegistryConfig,
     namespace: &str,
     local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
 ) -> bool {
-    // A bare-string `[mirrors]` entry sets `registry`, so it counts too.
+    // Only the REGISTRY role suppresses: the index role is keyed on the base's
+    // own host, so `[mirrors."<ns>"] index` redirects nothing for `<ns>`, and
+    // suppressing on it would leave neither the index nor the mirror. A
+    // bare-string `[mirrors]` entry sets `registry`, so it counts too.
     let locally_pinned_at_a_mirror =
         local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()));
     entry.index_is_compiled_default && locally_pinned_at_a_mirror
 }
 
-/// Every namespace [`is_published_namespace`] would admit, silently: the
-/// registries an index owns, handed to the local index so ownership holds
-/// under `--offline`, where no source is built to claim them.
+/// Every namespace [`is_published_namespace`] admits, without warning, so ownership holds
+/// under `--offline` where no source is built.
 fn index_namespaces(
     config: &ocx_config::Config,
     local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
@@ -1481,29 +949,13 @@ fn index_namespaces(
         .collect()
 }
 
-/// Whether `<namespace>` resolves through the ocx-index protocol — the single
-/// published/derived test, shared by every consumer that needs the answer.
+/// Whether `namespace` resolves through the ocx-index protocol: `index` is non-empty (`""` is
+/// the kill switch) and not a compiled-in default a locally-authored `[mirrors]` entry pins at
+/// a registry.
 ///
-/// Two conditions, and **both** are load-bearing:
-///
-/// 1. `index` present and non-empty. `index = ""` is the documented kill
-///    switch: an empty base URL is not a kind marker, so the namespace resolves
-///    as plain OCI.
-/// 2. Not a compiled-in default that a **locally-authored** `[mirrors."<ns>"]`
-///    entry pins at a registry. That operator declared where the namespace's
-///    traffic goes, and honouring both would start dialling a host they never
-///    allow-listed — see [`Context::build_index_sources`]'s doc for the full
-///    scoping argument.
-///
-/// It is a free function rather than a closure inside `build_index_sources`
-/// because `ocx index regenerate`'s published-only guard (C-010) must reach the
-/// same verdict, and it cannot consult the built sources instead: those are
-/// empty under `--offline`, which C-021 requires `regenerate` to permit. A
-/// guard that restated only condition 1 would mint a `c/index.json` under a
-/// mirror-pinned namespace the resolver routes as derived — the exact outcome
-/// C-010 exists to prevent.
-///
-/// [`Context::build_index_sources`]: Context
+/// Never the merged tier or `OCX_MIRRORS`, or a managed payload could revoke the verified
+/// path fleet-wide. `ocx index regenerate` calls this without built sources, so restating only
+/// the first condition there would mint a `c/index.json` the resolver treats as derived.
 pub fn is_published_namespace(
     entry: &ocx_config::RegistryConfig,
     namespace: &str,
@@ -1513,9 +965,7 @@ pub fn is_published_namespace(
         return false;
     }
     if index_suppressed_by_local_mirror(entry, namespace, local_mirrors) {
-        // `build_index_sources` feeds this from the MERGED config, so a
-        // namespace key can come from the managed tier rather than from the
-        // operator — neutralized for the same reason the report payloads are.
+        // The key can come from the managed tier, so it is sanitized before reaching the terminal.
         let namespace = crate::api::data::sanitize_for_terminal(namespace);
         log::warn!(
             "[mirrors.\"{namespace}\"] pins this namespace at a mirror, so the compiled-in index \
@@ -1528,11 +978,8 @@ pub fn is_published_namespace(
     true
 }
 
-/// Resolves `--jobs` / `OCX_JOBS` into a `Concurrency` value.
-///
-/// Precedence: CLI flag > env var > unbounded. `0` (from either source)
-/// resolves to logical-core count (GNU Parallel convention). Invalid env
-/// values are logged and ignored — the env path is best-effort.
+/// Resolves `--jobs` ▸ `OCX_JOBS` ▸ unbounded; `0` means the logical-core count, and an
+/// invalid env value is warned about and ignored.
 fn resolve_concurrency(jobs: Option<usize>) -> ocx_package_manager::Concurrency {
     use std::num::NonZeroUsize;
 
@@ -1554,30 +1001,17 @@ fn resolve_concurrency(jobs: Option<usize>) -> ocx_package_manager::Concurrency 
     }
 }
 
-/// Enforce mutual exclusion of the global toolchain selector and an
-/// explicit project selection.
+/// Refuse `--global` alongside an explicit `--project` / `OCX_PROJECT`.
 ///
-/// `--global` / `OCX_GLOBAL` and an explicit project (`--project` flag or
-/// `OCX_PROJECT` env) both pick a project file. clap's
-/// `conflicts_with = "project"` on [`ContextOptions::global`] already
-/// rejects the explicit `--global` + `--project` *flag* pair at parse
-/// time. This guard closes the gaps clap cannot see: `OCX_GLOBAL` reaches
-/// `view.global` through the arg default (not a CLI-provided value, so
-/// clap's conflict does not fire), and `OCX_PROJECT` is not a clap arg at
-/// all. A project merely discovered by the CWD walk is *not* explicit —
-/// `--global` from inside a project tree is legal and the global tier
-/// wins by precedence (adr_global_toolchain_tier.md §Decision 2), so the
-/// CWD walk deliberately sets neither `view.project` nor `OCX_PROJECT`.
+/// clap rejects the flag pair; this closes the env-sourced gaps (`OCX_GLOBAL` via the arg
+/// default, `OCX_PROJECT` not a clap arg). A CWD-discovered project is not explicit, so
+/// `--global` inside a project tree is legal (`adr_global_toolchain_tier.md`).
 ///
 /// # Errors
 ///
-/// Returns [`UsageError`](crate::error::UsageError) (exit `64`) when the
-/// global selector is set alongside an explicit `--project` / `OCX_PROJECT`
-/// selection.
+/// [`UsageError`](crate::error::UsageError) (exit `64`) on the conflict.
 fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), crate::error::UsageError> {
-    // `OCX_PROJECT=""` is the loader's escape hatch (treated as unset);
-    // mirror that here so an explicitly-cleared env var is not misread as
-    // an explicit selection.
+    // `OCX_PROJECT=""` means unset to the loader, so it is no explicit selection here.
     let explicit_project =
         view.project.is_some() || ocx_util::env::var(env::keys::OCX_PROJECT).is_some_and(|v| !v.is_empty());
     if view.global && explicit_project {
@@ -1588,24 +1022,14 @@ fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), cra
     Ok(())
 }
 
-/// Enforce mutual exclusion of `--frozen` and `--remote`.
+/// Refuse `--frozen` alongside `--remote`, which contradict each other.
 ///
-/// `--frozen` freezes tag resolution to the local index; `--remote` forces
-/// every mutable lookup to the source. They are directly contradictory.
-/// clap's `conflicts_with = "remote"` on [`ContextOptions::frozen`] already
-/// rejects the explicit `--frozen` + `--remote` *flag* pair at parse time.
-/// This guard closes the env-sourced gap clap cannot see: both `OCX_FROZEN`
-/// and `OCX_REMOTE` reach `view` through the arg defaults (not CLI-provided
-/// values, so clap's conflict does not fire).
-///
-/// `--frozen` + `--offline` is deliberately **allowed**: offline is the
-/// stronger constraint and wins the mode precedence, so the combination
-/// collapses cleanly to offline.
+/// clap rejects the flag pair; this closes the env-sourced gap (`OCX_FROZEN` / `OCX_REMOTE`
+/// via the arg defaults). `--frozen` + `--offline` stays allowed: offline wins.
 ///
 /// # Errors
 ///
-/// Returns [`UsageError`](crate::error::UsageError) (exit `64`) when both the
-/// frozen and remote policies are set.
+/// [`UsageError`](crate::error::UsageError) (exit `64`) when both are set.
 fn check_frozen_remote_exclusivity(view: &env::OcxConfigView) -> Result<(), crate::error::UsageError> {
     if view.frozen && view.remote {
         return Err(crate::error::UsageError::new(
@@ -1776,7 +1200,7 @@ mod tests {
     }
 
     // ── `registries."<ns>".index` presence gates `OcxIndex` construction,
-    //    per NAMESPACE (`adr_index_indirection.md` F5a) ──────────────────────
+    //    per NAMESPACE (`adr_index_indirection.md`) ─────────────────────────
     //
     // `build_index_sources` constructs one `OcxIndex` per merged
     // `[registries."<ns>"]` entry that carries a non-empty `index` field —
@@ -1834,7 +1258,7 @@ mod tests {
     fn build_index_sources_is_empty_without_an_index_bearing_registry() {
         // No `[registries]` table, and an entry with no `index` field at all,
         // both yield no index sources — presence of `index` specifically is
-        // the sole selector (ADR F5a).
+        // the sole selector.
         let mirrors = std::collections::BTreeMap::new();
 
         let empty = build_test_sources(true, &ocx_config::Config::default(), &mirrors).unwrap();
@@ -1884,7 +1308,7 @@ mod tests {
     #[test]
     fn build_index_sources_never_leaks_trusted_hosts_across_namespaces() {
         // Two index-bearing namespaces, each with its OWN, DIFFERENT
-        // `trusted_hosts` set (X2, the SSRF escape hatch). Pins that a built
+        // `trusted_hosts` set (the SSRF escape hatch). Pins that a built
         // `OcxIndex` carries exactly its own namespace's set — never the
         // other namespace's, and never the union — so a future "share one
         // client across namespaces" refactor cannot silently widen one
@@ -1950,7 +1374,7 @@ mod tests {
         );
     }
 
-    /// C-006 / C-007 at the index seam: the per-namespace physical-fetch
+    /// At the index seam: the per-namespace physical-fetch
     /// client `build_index_sources` stores on each `OcxIndex` — the one
     /// `fetch_manifest` / `fetch_blob` pull a resolved package through —
     /// carries the merged extra-CA view, not only the index HTTP transport
@@ -2038,10 +1462,9 @@ mod tests {
         );
     }
 
-    // ── `build_index_sources` threads `mirrors_index` (F5c) ──────────────────
+    // ── `build_index_sources` threads `mirrors_index` ─────────────────────────
     //
-    // Traces: mirror-invariant audit 2026-07-19, gap G8. `build_index_sources`
-    // hands its `mirrors_index` and `insecure_hosts` parameters straight
+    // `build_index_sources` hands its `mirrors_index` and `insecure_hosts` parameters straight
     // through to `OcxIndex::resolve_base_url` per namespace — the same
     // parameters, unmodified, not an empty stand-in. `OcxIndex` exposes no
     // base-URL accessor (by design — see `ocx_index.rs`'s own
@@ -2197,7 +1620,8 @@ mod tests {
 
     /// Builds sources with a mirror map that is present in the MERGED views
     /// (what the OCI client and index-role resolver see) but attributed to a
-    /// caller-chosen local view — the seam N1 turns on.
+    /// caller-chosen local view — the seam the locally-authored-only guard
+    /// turns on.
     fn build_with_views(
         config: &ocx_config::Config,
         local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
@@ -2248,7 +1672,7 @@ mod tests {
         );
     }
 
-    /// **N1, the attack.** The managed tier is a remote, operator-published
+    /// **The attack this guards against.** The managed tier is a remote, operator-published
     /// payload the loader itself calls untrusted; it merges as a full `Config`,
     /// `[mirrors]` included. Whoever controls that package must not be able to
     /// revoke the sha256-verified two-hop path and the yank gate fleet-wide and
@@ -2274,7 +1698,7 @@ mod tests {
         );
     }
 
-    /// **N2.** The index role is only ever applied keyed on the index base's
+    /// The index role is only ever applied keyed on the index base's
     /// OWN host (`OcxIndex::resolve_base_url`), never on the namespace, so
     /// `[mirrors."ocx.sh"] index` cannot redirect anything for `ocx.sh`.
     /// Suppressing on it would strand the operator with neither the index nor
@@ -2323,7 +1747,7 @@ mod tests {
     }
 
     /// Host-keyed precision: the mirror entry that routes the INDEX's own
-    /// traffic host (`index.ocx.sh`, the F5c override) redirects the index
+    /// traffic host (`index.ocx.sh`) redirects the index
     /// rather than replacing it — that operator gets the verified path against
     /// their own host, so suppressing would delete what they asked for.
     #[test]
@@ -2481,7 +1905,7 @@ mod tests {
         );
     }
 
-    // ── ocx#448: extra CA roots — C-005 ladder, S-006, D-7 ───────────────────
+    // ── extra CA roots: the tiered view ladder ───────────────────────────────
 
     /// A real self-signed CA (the test stack's Fulcio root, `basicConstraints
     /// CA:TRUE`) — the parser runs a real X.509 parse and a probe build, so
@@ -2495,7 +1919,7 @@ mod tests {
         }
     }
 
-    /// S-006 (D-6): the managed-config fetch client is built from
+    /// The managed-config fetch client is built from
     /// [`Context::extra_roots_local`], never [`Context::extra_roots_merged`] —
     /// the refresh channel must not be secured by material it just delivered.
     ///
@@ -2617,9 +2041,9 @@ mod tests {
         home
     }
 
-    /// D-6 / D-7 end to end: an UNPINNED managed payload's `extra_ca_certs_pem`
+    /// End to end: an UNPINNED managed payload's `extra_ca_certs_pem`
     /// reaches the merged view only — the local view (the managed-fetch
-    /// client's, S-006) stays empty, and so does the set `try_init` installs
+    /// client's) stays empty, and so does the set `try_init` installs
     /// process-wide for the Sigstore client (the fold's `local` arm, not the
     /// merged view).
     #[tokio::test]
@@ -2634,11 +2058,11 @@ mod tests {
         );
         assert!(
             context.extra_roots_local().is_empty(),
-            "the payload's root must never reach the local view (D-6)"
+            "the payload's root must never reach the local view"
         );
         assert!(
             ocx_util::tls::sigstore_roots().is_empty(),
-            "an unpinned managed root must not reach the Sigstore view (D-7)"
+            "an unpinned managed root must not reach the Sigstore view"
         );
         // merged = 1 / local = 0 is what makes the recipe's view observable:
         // swapping `extra_roots_merged` for `extra_roots_local` or a default
@@ -2647,11 +2071,11 @@ mod tests {
         assert_eq!(
             context.verify_client().extra_root_count(),
             1,
-            "Context::client_builder pre-applies the merged view (C-006)"
+            "Context::client_builder pre-applies the merged view"
         );
     }
 
-    /// C-005 / C-007 end to end: a `$OCX_HOME/config.toml` `extra_ca_certs_pem`
+    /// End to end: a `$OCX_HOME/config.toml` `extra_ca_certs_pem`
     /// resolves into all three views, and `try_init` installs it process-wide
     /// for the Sigstore client — an install that never ran reads as empty here.
     #[tokio::test]
@@ -2674,7 +2098,7 @@ mod tests {
         );
     }
 
-    /// S-006 (D-6) at the client boundary: the managed-config fetch client
+    /// At the client boundary: the managed-config fetch client
     /// `try_init` builds carries the LOCAL view's roots (none — the payload's
     /// root is managed material), while the registry client built beside it
     /// carries the merged view's. The pair is what makes a swap of the two

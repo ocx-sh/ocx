@@ -9,33 +9,14 @@ use ocx_setup::VersionSpec;
 
 /// Refresh the managed-config snapshot from the registry.
 ///
-/// Fetches the configured managed-config package, persists a new snapshot,
-/// and reports what changed. Always bypasses the background-refresh throttle
-/// (explicit user intent) — mirrors `ocx self update`.
+/// Fetches the configured package, persists a new snapshot and reports what
+/// changed, always bypassing the background-refresh throttle, as `ocx self
+/// update` does. VERSION pins the sync (rollback = an older version).
+/// `--pause` holds the background tick only, never the required gate, for up to
+/// 7 days; with VERSION it pauses only after the sync succeeds, and any update
+/// without it clears the pause. `--check` only reports, locally when offline.
 ///
-/// An optional VERSION positional pins the sync to a specific tag, digest, or
-/// `tag@digest` combination (rollback = `ocx config update <older-version>`).
-/// `--pause <duration>` holds the background tick for up to 7 days (with a
-/// VERSION: sync first, pause only after success); `--resume` clears the
-/// pause and syncs. Any explicit update without `--pause` clears an active
-/// pause. Pause affects the background tick only — never the required gate.
-///
-/// With `--check`, only reports the tier's current status (source, digest,
-/// tag, fetched-at, refresh policy, pause state, active kill switches, and
-/// live drift against the registry when reachable) — never fetches or swaps.
-/// Offline degrades to a local-state-only report.
-///
-/// # Exit codes
-///
-/// | Outcome | Exit |
-/// |---|---|
-/// | `not_configured` / `already_current` / `checked` / `check_unavailable` / `updated` | 0 |
-/// | conflicting flags, malformed VERSION, or `--pause` over the 7d cap | 64 |
-/// | `tag@digest` mismatch (immutability assertion failed) | 65 |
-/// | registry unreachable | 69 |
-/// | resolved source not found in registry | 79 |
-/// | invalid managed-config source or interval | 78 |
-/// | authentication failed | 80 |
+/// Exit codes: <https://ocx.sh/docs/reference/command-line#config-update>
 #[derive(Parser)]
 pub struct ConfigUpdateArgs {
     /// Version to sync: tag, `sha256:<hex>`, or `tag@sha256:<hex>`.
@@ -68,9 +49,7 @@ pub struct ConfigUpdateArgs {
     resume: bool,
 }
 
-/// Clap value parser for `--pause`: the shared `\d+[smhd]?` interval grammar
-/// plus the `MAX_PAUSE_INTERVAL` ceiling. Malformed or over-cap → clap error
-/// (exit 64).
+/// Clap value parser for `--pause`: the interval grammar, capped at `MAX_PAUSE_INTERVAL`.
 fn parse_pause_duration(value: &str) -> Result<std::time::Duration, String> {
     let duration = ocx_config::managed::parse_interval(value).map_err(|e| e.to_string())?;
     if duration > ocx_config::managed_config::MAX_PAUSE_INTERVAL {
@@ -88,9 +67,7 @@ impl ConfigUpdateArgs {
 
         use crate::api::data::config_update::{ConfigUpdateData, ConfigUpdateStatus};
 
-        // `resolve_managed_target` never enforces the required-snapshot gate
-        // `Context::try_init` applies to ordinary commands — `config update`'s
-        // entire job is to satisfy (or inspect) exactly that missing state.
+        // No required-snapshot gate here: this command exists to satisfy exactly that missing state.
         let resolved = resolve_managed_target(context.config(), context.managed_config_env_override())?;
 
         let Some(resolved) = resolved else {
@@ -115,10 +92,8 @@ impl ConfigUpdateArgs {
 
         let managed_paths = context.file_structure().state.managed_config();
 
-        // `--pause` without a VERSION freezes the on-disk state as-is: write
-        // the pause, fetch nothing. The report is the same local-state shape
-        // an offline `--check` produces (`check_unavailable` — no probe ran),
-        // extended with the fresh pause window.
+        // `--pause` without VERSION writes the pause and fetches nothing, reported in offline
+        // `--check`'s shape.
         if let Some(duration) = self.pause
             && self.version.is_none()
         {
@@ -140,11 +115,8 @@ impl ConfigUpdateArgs {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // Fetch leg: bare update / --resume / VERSION / --pause+VERSION.
-        //
-        // For `tag@digest` the fetch runs on the TAG-ONLY reference with the
-        // digest as a fail-closed assertion (fetching by digest would satisfy
-        // the pin trivially without verifying the tag).
+        // `tag@digest` fetches the tag with the digest as a fail-closed assertion; fetching by digest
+        // would never verify the tag.
         let (fetch_source, expected_digest) = match &self.version {
             None => (resolved.source.clone(), None),
             Some(VersionSpec::TagAndDigest { tag, digest }) => {
@@ -163,9 +135,8 @@ impl ConfigUpdateArgs {
             .update_managed_config(&target, expected_digest.as_ref())
             .await?;
 
-        // Pause bookkeeping AFTER the persist succeeded: `--pause <d> <V>`
-        // records the pause (with the pin visible for `--check`); every other
-        // explicit update clears any active pause (`--resume` included).
+        // Only after the persist succeeded: `--pause` with VERSION records the pause, any other update
+        // clears it.
         let paused_until = if let Some(duration) = self.pause {
             let pause = ocx_config::managed_config::ManagedConfigPause::for_duration(
                 duration,
@@ -185,9 +156,8 @@ impl ConfigUpdateArgs {
             ManagedConfigUpdateResult::Updated { digest } => (ConfigUpdateStatus::Updated, Some(digest.to_string())),
         };
 
-        // A digest-pinned seed binds the required gate to that exact digest —
-        // syncing a different VERSION would fail closed on the very next
-        // command. Warn loudly instead of leaving a bricked-looking tier.
+        // A digest-pinned seed binds the required gate to that digest, so syncing another fails the
+        // next command closed.
         if self.version.is_some()
             && let Some(seed_pin) = resolved.source.digest()
             && let ManagedConfigUpdateResult::Updated { digest } | ManagedConfigUpdateResult::AlreadyCurrent { digest } =
@@ -217,12 +187,8 @@ impl ConfigUpdateArgs {
     }
 }
 
-/// Probe-only report (`--check`): reports source/digest/tag/fetched-at/
-/// policy/kill-switches/pause state, plus live drift when the registry is
-/// reachable. Never fetches the full payload for persistence and never swaps
-/// state — offline (or any fetch failure) degrades to a local-state-only
-/// report. The pause file is read but never modified (`--check` is a pure
-/// observer).
+/// `--check`: the local state plus live drift when the registry is reachable. Never persists,
+/// swaps or modifies the pause; any probe failure degrades to the local state.
 async fn execute_check(
     context: &crate::app::Context,
     resolved: &ocx_config::managed::ResolvedManagedConfig,
@@ -237,10 +203,7 @@ async fn execute_check(
     let policy = resolved.refresh.to_string();
     let pause = ocx_config::managed_config::read_pause(&context.file_structure().state.managed_config()).await;
 
-    // `probe_managed_config_digest` returns `None` for every case where the
-    // probe did NOT run (offline / no client / source absent / auth / registry
-    // error) as well as a genuine not-found — `derive_check_status` never turns
-    // a probe that did not run into `already_current` (finding #3).
+    // `None` also covers a probe that never ran.
     let registry_digest = context.manager().probe_managed_config_digest(resolved).await;
     let (status, drift) = derive_check_status(registry_digest.as_ref(), snapshot.map(|snapshot| &snapshot.digest));
 
@@ -259,16 +222,8 @@ async fn execute_check(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Derives the `--check` status and drift flag from the registry probe result
-/// and the local snapshot digest.
-///
-/// Pure decision function, extracted so the finding-#3 invariant is unit
-/// testable without a live registry: **`already_current` is reported only when
-/// the probe actually ran and its digest matched the local snapshot.** A probe
-/// that did not run (`registry_digest == None` — offline / no client / source
-/// absent / auth / registry error) yields
-/// [`ConfigUpdateStatus::CheckUnavailable`], never a false-healthy
-/// `already_current`.
+/// `--check` status and drift flag. `already_current` only when the probe ran and matched the
+/// snapshot; a probe that did not run is `CheckUnavailable`, never a false-healthy `already_current`.
 fn derive_check_status(
     registry_digest: Option<&ocx_oci::Digest>,
     snapshot_digest: Option<&ocx_oci::Digest>,
@@ -289,8 +244,7 @@ fn derive_check_status(
     }
 }
 
-/// Names the active kill switches relevant to the managed-config tier, for
-/// `--check`'s report.
+/// The active kill switches relevant to the managed-config tier.
 fn active_kill_switches() -> Vec<String> {
     let mut switches = Vec::new();
     if ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONFIG_REFRESH, false) {
@@ -313,7 +267,7 @@ mod tests {
         Digest::Sha256(seed.to_string().repeat(64))
     }
 
-    /// Finding #3 regression: a probe that did NOT run (`registry_digest ==
+    /// Regression: a probe that did NOT run (`registry_digest ==
     /// None` — offline / no client / source absent / auth / registry error)
     /// must NEVER report `already_current`. It surfaces `check_unavailable` so
     /// operators can tell "verified current" from "couldn't check".

@@ -2,13 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Shared slug pattern used by dependency and entrypoint names.
-//!
-//! The interpolation scanner reaches this pattern indirectly: it validates the
-//! `NAME` segment of `${deps.NAME.installPath}` by `DependencyName::try_from`,
-//! which applies [`SLUG_PATTERN`] *and* [`SLUG_MAX_LEN`]. So the grammar cannot
-//! drift from `DependencyName` — it has no second spelling of the rule to drift
-//! from — and a name that satisfies the pattern but exceeds the length bound is
-//! refused by the scanner too.
 
 use std::sync::LazyLock;
 

@@ -14,13 +14,9 @@ use ocx_store::file_structure::BlobStore;
 
 use ocx_util::singleflight;
 
-/// Whether `err` reports a present-but-corrupt dispatch object — its on-disk
-/// bytes no longer hash to the digest that names them (`adr_index_indirection.md`
-/// A3, CWE-345), or they do hash correctly but are not a valid OCI image index.
-/// Distinct from an absent object, which the local read path reports as
-/// `Ok(None)`. `ChainedIndex` uses this to decide whether a corrupt local read
-/// can be healed by a source re-fetch (online `Resolve`) or must be escalated to
-/// a hard `DataError` (`--offline`, or any pure `Query`).
+/// Whether `err` reports a present-but-corrupt dispatch object: bytes that fail their digest
+/// (`adr_index_indirection.md § The object store holds dispatch objects only`) or are not an OCI
+/// image index. An absent object reads as `Ok(None)` instead.
 fn is_corrupt_index_object(err: &super::error::Error) -> bool {
     matches!(
         err,
@@ -29,28 +25,12 @@ fn is_corrupt_index_object(err: &super::error::Error) -> bool {
     )
 }
 
-/// Whether `err` is a local-read **refusal** rather than a miss — a verdict the
-/// walk must not downgrade to "not cached here" by falling through to a source
-/// that would serve the same name and silently bypass it. Unlike a corrupt
-/// object (healable by a source re-fetch) or a plain miss, every member is a
-/// hard `DataError` straight out of the local read. The offline counterpart to
-/// the authoritative-source refusal `fetch_and_persist_chain` already stops the
-/// walk on.
+/// Whether `err` is a local-read refusal (yank, unsupported format, unreadable `config.json`) the walk
+/// must propagate: read as a miss, a source would serve the same name and bypass it
+/// (`adr_servable_index_snapshot.md § The unrecognized-version path, both readers`).
 ///
-/// Three shapes, one rule:
-///
-/// - **Yanked without the opt-in** (`adr_index_indirection.md` F3) — an
-///   authoritative publisher signal from the COMMITTED local root.
-/// - **An unsupported `format_version`** (`adr_servable_index_snapshot.md`
-///   C-005) — fail-closed, and identically so on either side of the trust
-///   boundary. Swallowed here it would be advisory: the walk would go on to
-///   *grow* the very tree whose declared version this ocx cannot read.
-/// - **A `config.json` that could not be read at all** — unparseable, or
-///   present-but-unreadable (EACCES/EISDIR). A gate that cannot be evaluated
-///   fails closed; reading either as absence is what C-003 exists to prevent.
-///   Scoped to that one document on purpose: a blanket `InternalFile` match
-///   would also catch a root read or a lock timeout, which the walk legitimately
-///   recovers from by re-fetching.
+/// Only `config.json` file errors match: a blanket file match would also catch a root read or lock
+/// timeout, which the walk recovers from by re-fetching.
 fn is_local_read_refusal(err: &super::error::Error) -> bool {
     match err {
         super::error::Error::YankedRefused { .. }
@@ -61,30 +41,12 @@ fn is_local_read_refusal(err: &super::error::Error) -> bool {
     }
 }
 
-/// Whether `err` is a source **outage** — a transport-layer failure reaching the
-/// index site — as opposed to a **refusal**, where the source reached its verdict
-/// and that verdict is "no".
+/// Whether `err` is a source transport outage, which [`ChainedIndex::physical_reference`] holds while it
+/// tries the local root; every other error propagates.
 ///
-/// [`ChainedIndex::physical_reference`] holds an outage and tries to answer from
-/// the local root instead; anything else propagates immediately. The set is
-/// deliberately a single variant rather than a "not these" exclusion list, so a
-/// newly added error class fails **closed** (propagates) instead of silently
-/// joining the held set: an `SsrfError` held here would be a guard that fires and
-/// is then discarded, and a `MalformedPhysicalRef` held here would answer around
-/// malformed publisher data with a stale local pointer.
-///
-/// **Peel before matching.** That fail-closed argument covers a new *sibling*
-/// variant and says nothing about a **wrapper around the existing one**, which
-/// is the direction the defect actually came from: coalescing the source's
-/// `config.json` / root fetches made a leader return its transport error inside
-/// a transparent `SourceFetchFailed`, so a bare `matches!` stopped recognising
-/// an outage it had recognised for the whole life of the offline fallback, and
-/// a warm machine with the index site unreachable started exiting 69. The
-/// wrapper is invisible to `Display` and to exit-code classification, so
-/// nothing else in the chain reported the change. Every structural test of a
-/// source error therefore runs against
-/// [`error::coalesced_cause`](super::error::coalesced_cause), never against the
-/// error as returned.
+/// One variant, not a "not these" list, so a new error class fails closed.
+/// Peeled via [`error::coalesced_cause`](super::error::coalesced_cause), or a coalesced
+/// `SourceFetchFailed` hides the outage and a warm machine with the index site unreachable exits 69.
 fn is_source_outage(err: &super::error::Error) -> bool {
     matches!(
         super::error::coalesced_cause(err),
@@ -92,46 +54,23 @@ fn is_source_outage(err: &super::error::Error) -> bool {
     )
 }
 
-/// Whether a *failed* host lookup may be tolerated by [`ChainedIndex::guard_local_physical`].
+/// Whether a failed host lookup may be tolerated by [`ChainedIndex::guard_local_physical`]: only for a
+/// genuine DNS name.
 ///
-/// Only a genuine DNS name qualifies: for one of those, a lookup failure means
-/// the machine has no working resolver, which is the steady state of the very
-/// warm-store-no-network case the local fallback exists to serve — and a connect
-/// would fail the same way. Anything **address-shaped** stays fail-closed:
-/// [`ocx_oci::ssrf::split_host_port`](ocx_oci::ssrf::split_host_port)
-/// deliberately leaves a bracketed IPv6 authority bracketed, `getaddrinfo`
-/// refuses `[::1]`, but a URL parser accepts those brackets natively — so
-/// tolerating that lookup failure would hand the pull a loopback target the
-/// guard never actually judged.
+/// An address-shaped host stays fail-closed: `getaddrinfo` refuses a bracketed `[::1]` that a URL parser
+/// accepts, so tolerating it would hand the pull a loopback target the guard never judged.
 fn is_plain_dns_name(host: &str) -> bool {
     !host.starts_with('[') && host.parse::<std::net::IpAddr>().is_err()
 }
 
-/// Recompute-verify: does `bytes` genuinely hash to `digest`?
-///
-/// `BlobStore` is a stateless CAS — it does not self-verify on read or write
-/// (see its own doc comment's "Trust" section) — so every caller reading
-/// content out of it is responsible for checking the bytes against the digest
-/// that names them (CWE-345 trust-boundary check). Shared by
-/// [`ChainedIndex::recover_absent_dispatch`] (dispatch-object recovery) and
-/// [`index_impl::IndexImpl::fetch_blob`] (config-blob cache-first read and
-/// post-fetch verify) so the recompute logic lives in exactly one place.
+/// Whether `bytes` hash to `digest`; [`BlobStore`] never self-verifies, so every read out of it must
+/// check (CWE-345).
 fn digest_matches(bytes: &[u8], digest: &ocx_oci::Digest) -> bool {
     digest.algorithm().hash(bytes) == *digest
 }
 
-/// A digest-addressed walk must come back with the digest it asked for.
-///
-/// The requested digest is a pin — the committed root's `content`, or a lock's
-/// leaf — so a source answering with a different one moves it, which is exactly
-/// what addressing the walk by digest exists to prevent. `fetch_manifest_raw_bytes`
-/// only proves a source's bytes are self-consistent with the digest that source
-/// computed from them, never that either matches what the caller requested; the
-/// same gap `common.rs::verify_requested_digest` closes for the staging path.
-///
-/// This is integrity, not a drift comparison: it never consults remote state the
-/// caller did not already name, so the silence principle is untouched. A
-/// tag-addressed walk carries no requested digest and passes through.
+/// A digest-addressed walk must come back with the digest it asked for, or a source could move a pin:
+/// a source's bytes are only proven to match the digest that source computed.
 fn verify_walked_digest(
     identifier: &ocx_oci::PackageRef,
     head: Option<(ocx_oci::Digest, ocx_oci::Manifest)>,
@@ -148,48 +87,10 @@ fn verify_walked_digest(
     Ok(head)
 }
 
-/// A curated local index plus an ordered list of upstream sources
-/// queried on miss for `Resolve` callers.
+/// How much a resolve may write into the local index; blob-store writes are never gated.
 ///
-/// The local index is **not** a transparent cache: it is populated only
-/// by explicit paths (`ocx index update`) or `Resolve` callers
-/// (install / pull). Concurrent identical cache misses are deduplicated
-/// via [`singleflight`](ocx_util::singleflight) — only the leader
-/// task performs the fetch; waiters reuse its result.
-///
-/// `ChainMode` controls how mutable lookups (tag listings, catalog) are
-/// routed:
-///
-/// - `Default` reads the persisted local index. `Resolve` callers walk
-///   the chain and persist on miss; `Query` callers return `None` and
-///   never contact a source.
-/// - `Remote` queries sources directly for mutable lookups and never
-///   consults the local index. A pure query in Remote mode never mutates
-///   local state — `--remote` is a read-through-to-source flag, not a
-///   write-through cache fill. If every source errors the failure is
-///   propagated rather than silently falling back to the local index.
-/// - `Offline` reads the local index only; sources are never consulted.
-///
-/// Digest-addressed reads still consult the local index first in any
-/// mode because immutable content cannot be wrong. The query/resolve
-/// split is encoded by the [`super::IndexOperation`] argument:
-/// `Query` callers never trigger a chain walk, `Resolve` callers do.
-/// How much a resolve is allowed to write into the **local index** (never the
-/// blob store — content-addressed blob writes are unaffected by this policy).
-///
-/// The three levels form a strict descending ladder of index mutation:
-///
-/// - [`Full`](LocalWritePolicy::Full) — a normal resolve: persist the dispatch
-///   object AND grow the root-document tag pointer. `ocx package install` and
-///   the default resolve path.
-/// - [`NoTag`](LocalWritePolicy::NoTag) — persist the dispatch object but never
-///   commit a tag pointer; the caller's own record (e.g. `ocx.lock`) is
-///   canonical. The update-verb family (`ocx update`), see
-///   `adr_toolchain_update_family.md`.
-/// - [`ReadOnly`](LocalWritePolicy::ReadOnly) — write nothing at all: no
-///   dispatch object, no tag pointer, no AbsentDispatch self-heal. A read-only
-///   view (`ocx package inspect`) resolves content-addressed (index -> blobs ->
-///   source) and warms the blob cache, but never grows the permanent index.
+/// `Full` persists the dispatch object and grows the tag pointer; `NoTag` skips the tag pointer, since
+/// the caller's `ocx.lock` is canonical (`adr_toolchain_update_family.md`); `ReadOnly` writes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalWritePolicy {
     Full,
@@ -197,60 +98,28 @@ enum LocalWritePolicy {
     ReadOnly,
 }
 
+/// A local index plus ordered sources that `Resolve` callers walk, and persist from, on a miss;
+/// `Query` callers never walk the chain.
+///
+/// `ChainMode::Remote` reads mutable lookups from the sources and propagates their failure rather than
+/// falling back to the local index; `Offline` reads the local index only.
 pub struct ChainedIndex {
-    /// The curated, persisted local index. Not a transparent cache — see
-    /// the struct doc for the lifecycle. Renamed from `cache` to make
-    /// "this is data we deliberately wrote, not opportunistic cache fill"
-    /// the obvious mental model at every access site.
     local_index: LocalIndex,
     sources: Vec<Index>,
     mode: ChainMode,
-    /// Singleflight group for de-duplicating concurrent cache-miss fetches
-    /// against the same (mode, identifier) key. Shared across clones so all
-    /// `box_clone` spawned waiters converge on the same leader. Carries the
-    /// full resolved `(digest, manifest)` — not just the digest — because a
-    /// leaf platform manifest is never written into the local index (A3), so
-    /// a post-walk local read-back cannot recover it; the walk's own fetch is
-    /// the only place the manifest bytes ever exist locally.
+    /// Carries the manifest, not just the digest: a leaf manifest never lands in the local index, so a
+    /// waiter cannot read it back after the walk.
     singleflight: singleflight::Group<String, Option<(ocx_oci::Digest, ocx_oci::Manifest)>>,
-    /// How much this index may write into the local index on a resolve — see
-    /// [`LocalWritePolicy`]. `Full` for a normal resolve, `NoTag` for the
-    /// update-verb family ([`Self::new_lock_scoped`]), `ReadOnly` for a
-    /// read-only view ([`Self::read_only`]). Content-addressed blob writes are
-    /// never gated by this.
     write_policy: LocalWritePolicy,
-    /// The machine-global blob store (`$OCX_HOME/blobs`) that holds installed
-    /// **content** — leaf platform manifests and their layers — distinct from
-    /// the local index, which holds resolution **dispatch** only
-    /// (`adr_index_indirection.md` B2). A leaf platform manifest is never
-    /// written into the local index (A3), but it is cached here at install time
-    /// (`stage_and_link_chain_blobs`), so a [`DispatchResolution::AbsentDispatch`]
-    /// (content absent from `o/`) is recovered from this store **before** any
-    /// source walk — the step that makes offline exec of an installed tool
-    /// resolve with zero network (A3 step 2). `None` for constructions that
-    /// have no machine-global content to consult (unit fakes, the lock-scoped
-    /// update index); the store lives here rather than on [`LocalIndex`] because
-    /// it is machine-global content the chain orchestrates over, not part of the
-    /// travels-with-a-copy local index (Decision H).
-    ///
-    /// Also the sole route [`index_impl::IndexImpl::fetch_blob`] uses for
-    /// config-blob content — the index-home flat blob CAS has been retired
-    /// (`adr_index_indirection.md` B2). `content_store: None` is a **test-only
-    /// affordance**: production always attaches `fs.blobs` via
-    /// [`super::Index::from_chained_with_content_store`] (`context.rs`).
+    /// Machine-global blob store holding leaf manifests, consulted on `AbsentDispatch` before any source
+    /// so an installed tool resolves offline; `None` only in test constructions.
     content_store: Option<BlobStore>,
-    /// Proxy-route rules for [`Self::guard_local_physical`]. Defaults to the
-    /// process-wide [`ocx_oci::ssrf::proxy_rules`]; replaced via
-    /// [`index_impl::IndexImpl::set_proxy_rules`] (test seam).
     rules: Arc<ocx_oci::ssrf::ProxyRules>,
 }
 
-/// Max in-flight singleflight keys. Scoped per ChainedIndex instance —
-/// generous because each key maps to one package identifier under refresh.
 const SINGLEFLIGHT_MAX_KEYS: usize = 1024;
 
-/// Max time waiters block for the leader. Matches the blob-store write
-/// timeout so a stuck leader surfaces rather than stalling the CLI forever.
+/// Matches the blob-store write timeout, so a stuck leader surfaces instead of stalling the CLI.
 const SINGLEFLIGHT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl ChainedIndex {
@@ -266,10 +135,7 @@ impl ChainedIndex {
         }
     }
 
-    /// Like [`Self::new`], but tag resolution never commits a tag pointer
-    /// into the local index — the caller's lock is the canonical record.
-    /// Used by the update-verb family (`ocx update`), which resolves tags
-    /// live without mutating the shared tag store.
+    /// Like [`Self::new`], but a tag resolve never commits a tag pointer: the caller's lock is the record.
     pub fn new_lock_scoped(local_index: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
             write_policy: LocalWritePolicy::NoTag,
@@ -277,19 +143,10 @@ impl ChainedIndex {
         }
     }
 
-    /// A read-only clone of `self` that writes nothing into the local index
-    /// (no dispatch object, no tag pointer, no AbsentDispatch self-heal) — the
-    /// [`LocalWritePolicy::ReadOnly`] policy. Shares the same sources and
-    /// content store; only the write policy differs.
+    /// A clone that writes nothing into the local index ([`LocalWritePolicy::ReadOnly`]).
     ///
-    /// A **fresh** singleflight group (not the parent's) is deliberate: the
-    /// singleflight key encodes `(mode, identifier)` but NOT the write policy,
-    /// so sharing the parent's group could coalesce a read-only resolve onto a
-    /// persisting leader (or vice versa) and apply the wrong write behaviour.
-    /// A distinct group keeps read-only resolves coalescing only among
-    /// themselves — `box_clone` then shares THIS group across the view's own
-    /// clones. Backs [`index_impl::IndexImpl::read_only_view`] for
-    /// `ocx package inspect`.
+    /// Gets a fresh singleflight group: the key omits the write policy, so a shared group could coalesce
+    /// a read-only resolve onto a persisting leader and apply its writes.
     fn read_only(&self) -> Self {
         Self {
             local_index: self.local_index.clone(),
@@ -302,31 +159,17 @@ impl ChainedIndex {
         }
     }
 
-    /// Attach the machine-global blob store so an [`DispatchResolution::AbsentDispatch`]
-    /// recovers its leaf platform manifest from `$OCX_HOME/blobs` before any
-    /// source walk (`adr_index_indirection.md` A3 step 2 / B2). Consuming
-    /// builder — keeps the `new` / `from_chained` signatures unchanged so the
-    /// blob store is opt-in at the one production construction site
-    /// (`context.rs`) without churning every caller.
+    /// Attach the machine-global blob store an [`DispatchResolution::AbsentDispatch`] recovers from.
     pub fn with_content_store(mut self, content_store: BlobStore) -> Self {
         self.content_store = Some(content_store);
         self
     }
 
-    /// Provenance for `registry` (`adr_index_indirection.md` A2/H) — the
-    /// configured source that owns it, if any, asked for its cheap, synchronous
-    /// [`Index::source_kind`]. No configured source claims the registry (e.g.
-    /// `--offline`, where `self.sources` is empty by construction) defaults to
-    /// [`SourceKind::Derived`]: the uncatalogued read shares the exact
-    /// root-document path with the catalogued one and only skips the catalog
-    /// cross-check/self-heal, never resolution correctness.
+    /// Provenance of the configured source owning `registry`, or [`SourceKind::Derived`] when none does
+    /// (e.g. `--offline`).
     ///
-    /// Keyed on the registry, not a name: the local subtree layout
-    /// (`c/index.json` catalog vs `p/` enumeration) is per-source and never
-    /// per-name, so a name the owning index's grammar cannot express still
-    /// reports that source's provenance. Routing it through per-name
-    /// jurisdiction instead would flip such a name to `Derived` and silently
-    /// drop the published root's catalog cross-check.
+    /// Keyed on the registry, not the name: per-name jurisdiction would flip a name the index grammar
+    /// cannot express to `Derived` and silently drop the published root's catalog cross-check.
     fn kind_for_registry(&self, registry: &str) -> SourceKind {
         self.sources
             .iter()
@@ -335,20 +178,12 @@ impl ChainedIndex {
             .unwrap_or(SourceKind::Derived)
     }
 
-    /// [`Self::kind_for_registry`] for an identifier — provenance is per
-    /// registry, so this is a pure delegation with no placeholder identifier
-    /// anywhere in the path.
     fn kind_for(&self, identifier: &ocx_oci::PackageRef) -> SourceKind {
         self.kind_for_registry(identifier.registry())
     }
 
-    /// The sources that have **not** declared themselves unable to express
-    /// `identifier`, each paired with whether its refusal (or clean miss) stops
-    /// the chain.
-    ///
-    /// One place asks the jurisdiction question, so a source that declined a
-    /// name is never fetched from — the declaration is honoured before any
-    /// request, not after a 404 has already been read as a terminal stop.
+    /// Sources not declaring `identifier` `Outside`, each paired with whether its miss or refusal stops
+    /// the chain; a declining source is filtered out before any request is made to it.
     async fn candidate_sources(&self, identifier: &ocx_oci::PackageRef) -> Vec<(&Index, bool)> {
         let mut candidates = Vec::with_capacity(self.sources.len());
         for source in &self.sources {
@@ -361,76 +196,28 @@ impl ChainedIndex {
         candidates
     }
 
-    /// SSRF floor for a physical target the **local copy** minted.
+    /// SSRF floor for a physical target the local copy minted: the layer pull runs on the unguarded
+    /// shared client, so without it a copied index tree is an unvalidated transport target.
     ///
-    /// [`super::OcxIndex::physical_identifier`] pre-flights its own answer before
-    /// the first physical registry request, and its client additionally pins the
-    /// validated address at connect time. The local read has neither, and the
-    /// layer pull that consumes the result runs on the shared, **unguarded**
-    /// `PackageManager` client — so without this the local root is an
-    /// unvalidated transport target. It is not hypothetical input: an `rsync` /
-    /// `wget --mirror` copy of an index site into the index home is a supported
-    /// distribution mechanism (`adr_index_indirection.md` A2), so a committed
-    /// root's `repository` is remote-controlled data.
-    ///
-    /// One carve-out, narrow and load-bearing: **not a rewrite**
-    /// (`physical.registry() == logical.registry()`). Every OCX-authored
-    /// *derived* root names the identifier's own registry, as does a published
-    /// root for a registry-backed package. The pull was always going to that
-    /// host — with no index in the picture at all — so there is nothing the
-    /// index added and nothing to judge. Guarding it would refuse every private
-    /// registry that has worked since before indices existed, including ones
-    /// whose namespace declares no `index` and therefore has no source to carry
-    /// a `trusted_hosts` exemption.
-    ///
-    /// **`ChainMode::Offline` is NOT a carve-out.** It used to be, on the
-    /// premise that offline builds no OCI client (so nothing could follow the
-    /// answer) and no sources (so `trusted_hosts` was unreachable). Both halves
-    /// are false now: `context.rs` builds the registry client in every mode so
-    /// `ocx package verify` can read a signature referrer under `--offline`
-    /// (verify's offline semantics scope to the Sigstore trust services, not the
-    /// artifact registry), and the exemption reaches this type straight from
-    /// config on the local index ([`LocalIndex::with_trusted_hosts`]) rather
-    /// than only through a source.
-    /// Offline is in fact the shape with the *weakest* other protection — no
-    /// source answer to prefer, so the local root always decides — and an
-    /// air-gapped deployment pointing at a private mirror is served by declaring
-    /// `[registries."<ns>"].trusted_hosts`, exactly as online.
-    ///
-    /// Called **after** the local read, never before: an early return placed
-    /// ahead of it returns `Ok(None)`, which the caller reads as "no rewrite" and
-    /// turns into the logical identifier — the silent lie this branch exists to
-    /// fix.
-    ///
-    /// A host admitted here by the tolerated-lookup-failure arm is **not** an
-    /// admitted transport target: [`Index::guard_physical_dial`] re-validates it,
-    /// fail-closed, at the dial site before any request uses it. That split is
-    /// what makes the tolerance safe — this pre-flight runs on every resolve,
-    /// including ones that will never fetch, so it cannot fail on a missing
-    /// resolver; the dial-site half runs only when a request is imminent, so it
-    /// can.
+    /// Call it after the local read: an early return ahead of it yields `Ok(None)`, which the caller
+    /// turns into the logical identifier.
     ///
     /// # Errors
     ///
-    /// [`Error::Ssrf`](super::error::Error::Ssrf) when the physical host resolves
-    /// into a forbidden range without a `trusted_hosts` entry, or — on a direct
-    /// dial only — when a lookup failure cannot be tolerated
-    /// ([`is_plain_dns_name`]).
+    /// [`Error::Ssrf`](super::error::Error::Ssrf) when the host resolves into a forbidden range without a
+    /// `trusted_hosts` entry, or, on a direct dial, when its lookup failure is not tolerable.
     async fn guard_local_physical(
         &self,
         logical: &ocx_oci::PackageRef,
         physical: &ocx_oci::OciIdentifier,
     ) -> Result<()> {
+        // Not a rewrite, so nothing to judge; guarding it would refuse every private registry whose
+        // namespace has no source to carry a `trusted_hosts` exemption.
         if physical.registry() == logical.registry() {
             return Ok(());
         }
+        // No `Offline` carve-out: the registry client is built in every mode, so an offline dial needs the floor too.
         let (host, port) = ocx_oci::ssrf::split_host_port(physical.registry());
-        // Route-aware (ocx#407): on a proxied dial `guard_destination` performs
-        // no lookup, so it can only return `ForbiddenTarget` — the textual
-        // literal refusal — and the two `is_plain_dns_name` arms below are
-        // unreachable on that route. They keep their meaning on a direct dial,
-        // which is the only route that resolves and so the only one that can
-        // fail to.
         let scheme = ocx_oci::ssrf::DialScheme::for_registry(self.insecure_hosts(), physical.registry());
         match ocx_oci::ssrf::guard_destination(
             scheme,
@@ -454,6 +241,8 @@ impl ChainedIndex {
                     source,
                 },
             }),
+            // Tolerable only because `Index::guard_physical_dial` re-judges the host fail-closed before the
+            // first request; this pre-flight runs on every resolve, so it must not fail on a missing resolver.
             Err(error) => {
                 log::debug!(
                     "Physical host '{host}' for '{logical}' did not resolve, so the SSRF pre-flight could not \
@@ -464,20 +253,10 @@ impl ChainedIndex {
         }
     }
 
-    /// The committed local root's physical pointer for `identifier`, SSRF-guarded
-    /// — the local half of [`Self::physical_reference`], in whichever order that
-    /// method's mode split puts it.
+    /// The committed local root's physical pointer for `identifier`, SSRF-guarded.
     ///
-    /// A local-index read **failure** is a miss, never fatal — the same tolerance
-    /// [`Self::walk_chain`] gives its own local read. An unreadable or
-    /// half-written index home (a broken `OCX_INDEX`, a shipped copy on a failing
-    /// mount) must not turn a resolve that was already going to succeed into a
-    /// hard error; without this the physical lookup would be the one place a
-    /// damaged cache is fatal.
-    ///
-    /// A guard **refusal** is not a miss and propagates: a forbidden local pointer
-    /// must not be papered over by then asking a source, which would turn the
-    /// guard into a no-op for exactly the caller it exists to stop.
+    /// A local read failure is a miss, so a broken index home cannot fail a resolve that would succeed;
+    /// a guard refusal propagates, since asking a source next would make the guard a no-op.
     ///
     /// # Errors
     ///
@@ -500,18 +279,9 @@ impl ChainedIndex {
         }
     }
 
-    /// Policy probe for no-resolve modes: an unpinned identifier whose
-    /// tag/digest is absent from the local index raises
-    /// `PolicyResolutionBlocked`. Genuine local-index I/O / parse errors
-    /// propagate (must not be masked as a policy block).
-    ///
-    /// Called from `walk_chain` for both `Offline` (unpinned path) and
-    /// `Frozen` (all unpinned paths). Each mode decides what to do after
-    /// the probe returns `Ok(())` — Offline early-returns; Frozen falls
-    /// through to the source walk. A dispatch object being present is not
-    /// required — [`DispatchResolution::AbsentDispatch`] still names a known
-    /// digest, so it counts as locally resolvable too; only a genuinely
-    /// unknown root/tag (`Ok(None)`) is a policy block.
+    /// Raises `PolicyResolutionBlocked` when the local index does not know the tag; local I/O and parse
+    /// errors propagate unmasked. An [`DispatchResolution::AbsentDispatch`] still names a known digest,
+    /// so it does not block.
     async fn ensure_locally_resolvable(&self, identifier: &ocx_oci::PackageRef) -> Result<()> {
         let kind = self.kind_for(identifier);
         let locally_resolvable = self.local_index.resolve_dispatch(identifier, kind).await?.is_some();
@@ -525,34 +295,10 @@ impl ChainedIndex {
         Ok(())
     }
 
-    /// Recover an [`DispatchResolution::AbsentDispatch`]'s `content` from the
-    /// machine-global blob store (`adr_index_indirection.md` A3 step 2 / B2).
+    /// Recover an [`DispatchResolution::AbsentDispatch`]'s `content` from the machine-global blob store,
+    /// self-healing a recovered image index back into the local index.
     ///
-    /// A leaf platform manifest is never written into the local index (A3), so a
-    /// tag/digest whose `content` is absent from `o/` reports `AbsentDispatch`.
-    /// That content is not lost: it was cached into `$OCX_HOME/blobs` at install time
-    /// (`stage_and_link_chain_blobs`, `ChainRole::Manifest`). This read is tried
-    /// **before** the source walk so an installed tool resolves offline with
-    /// zero network — the "installed-tool offline exec is unaffected by A3"
-    /// guarantee (B2).
-    ///
-    /// The read is digest-verified (`sha256(bytes) == content`, A4): a
-    /// content-addressed store should hash to its key, and re-verifying keeps a
-    /// corrupt or truncated blob from masquerading as a valid leaf. A verify or
-    /// decode failure returns `Ok(None)` (a clean recovery miss) so the caller
-    /// falls through to the source walk (online) or the offline/policy path,
-    /// exactly as if the blob were absent — never a hard error swallowing a
-    /// genuine miss.
-    ///
-    /// If the recovered bytes decode as an **image index** rather than a leaf
-    /// (an incomplete snapshot whose dispatch object was evicted from `o/` but
-    /// still lingers in the blob store), the object self-heals back into the
-    /// local index (`stage_dispatch_bytes`) so the next dispatch reads it
-    /// locally (A3 step 2 fallback), then is returned so the current resolve
-    /// proceeds without a network round-trip.
-    ///
-    /// Returns `Ok(None)` when no blob store is attached (unit fakes, the
-    /// lock-scoped update index) or the content is not cached locally.
+    /// `Ok(None)` when no store is attached or the blob is absent, corrupt, or not a manifest.
     async fn recover_absent_dispatch(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -564,22 +310,13 @@ impl ChainedIndex {
         let Some(bytes) = content_store.read_blob(identifier.registry(), content).await? else {
             return Ok(None);
         };
-        // Digest-verify the recovered bytes against the content digest they are
-        // keyed by (A4).
         if !digest_matches(&bytes, content) {
             log::warn!(
                 "blob-store manifest for '{content}' failed digest verification (recomputed {}); \
                  removing the corrupt object and falling through to the source walk",
                 content.algorithm().hash(&bytes)
             );
-            // Remove the present-but-corrupt blob before returning the miss
-            // (subsystem-oci.md: a corrupt entry is removed before the source
-            // walk so the write-through that follows a successful fetch heals
-            // it). Leaving it in place would let `write_blob`'s check-first fast
-            // path re-accept the corrupt file on the next resolve, so an offline
-            // resolve would keep loading tampered bytes. Best-effort — a removal
-            // failure must not fail the resolve, whose manifest the source walk
-            // still supplies; the install-staging shortcut re-verifies too.
+            // Removed, or `write_blob`'s check-first fast path re-accepts the corrupt file on the next resolve.
             if let Err(error) = content_store.remove_blob(identifier.registry(), content).await {
                 log::warn!("failed to remove corrupt blob-store object '{content}': {error}");
             }
@@ -588,20 +325,10 @@ impl ChainedIndex {
         let manifest: ocx_oci::Manifest = match serde_json::from_slice(&bytes) {
             Ok(manifest) => manifest,
             Err(error) => {
-                // Not an OCI manifest — a content digest that happens to name a
-                // cached blob of another shape. Not a recovery; fall through so
-                // the source walk decides.
                 log::debug!("blob-store object for '{content}' is not an OCI manifest ({error}); not a recovery");
                 return Ok(None);
             }
         };
-        // Self-heal an incomplete snapshot: an image index present in the blob
-        // store but missing from `o/` is staged back so the next dispatch reads
-        // it locally (A3 step 2 fallback). Best-effort — a heal failure must not
-        // fail the resolve, whose manifest is already in hand. A `ReadOnly`
-        // policy suppresses the heal write entirely: a read-only view never
-        // grows the local index (the next resolve simply re-recovers from the
-        // blob store).
         if self.write_policy != LocalWritePolicy::ReadOnly
             && matches!(manifest, ocx_oci::Manifest::ImageIndex(_))
             && let Err(error) = self.local_index.stage_dispatch_bytes(identifier, content, &bytes).await
@@ -611,90 +338,32 @@ impl ChainedIndex {
         Ok(Some((content.clone(), manifest)))
     }
 
-    /// Walk the source chain for an identifier — fetch the manifest (by tag
-    /// or digest) and persist the dispatch object into the local index.
-    /// Wrapped in a singleflight guard so concurrent waiters share the
-    /// leader's result.
+    /// Walk the source chain for `identifier`; concurrent waiters share the singleflight leader's result.
     ///
-    /// `grow_root` distinguishes the two miss shapes a caller can observe
-    /// locally before walking (`adr_index_indirection.md` "Grow ≠ refresh"):
-    /// a genuinely unknown root/tag (`true` — the walk also grows the local
-    /// copy, symmetric across published/derived) versus an already-known
-    /// root whose dispatch object is merely absent
-    /// ([`DispatchResolution::AbsentDispatch`], `false` — recovery only, the
-    /// root is never re-copied). Invariant 1 (a published root is never
-    /// auto-refreshed under Default) is preserved because `grow_root` is
-    /// only ever `true` on a genuine first-time miss, never on an
-    /// AbsentDispatch recovery of an already-present root.
-    ///
-    /// Returns `Ok(Some((digest, manifest)))` when one source successfully
-    /// resolved the identifier — the manifest is returned directly, not
-    /// re-read from local storage, because a leaf platform manifest is never
-    /// written into the local index (A3) and a read-back would find nothing
-    /// for that shape — or `Ok(None)` when nothing was fetched (not found,
-    /// no sources, or an Offline early-return). Returns `Err(_)` when every
-    /// source errored — preserves the trust boundary between "not found"
-    /// (cache retry → `None`) and "registry outage".
+    /// `grow_root` is false for a known root whose dispatch object is merely absent, so a published root
+    /// is never re-copied. `Err` means every source errored, kept distinct from a clean `Ok(None)` miss.
     async fn walk_chain(
         &self,
         identifier: &ocx_oci::PackageRef,
         grow_root: bool,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
-        // No-resolve policies (offline, frozen) refuse to resolve an unpinned
-        // (tag-only) reference whose tag→digest mapping is genuinely absent from
-        // the local index. A digest-bearing identifier is an already-known
-        // version, so it is exempt here — Offline still blocks its *content*
-        // fetch just below; Frozen lets it walk the chain like Default.
-        //
-        // The block fires only on a true *resolution* miss. A tag pointer that
-        // DOES resolve locally — even when its manifest blob is missing from the
-        // cache — is not a policy block: that is a content-fetch concern handled
-        // downstream (offline → `OfflineManifestMissing` naming the digest).
-        // `fetch_manifest` reaches `walk_chain` for both "tag absent" and "tag
-        // present, blob missing"; probing the tag pointer (no source contact —
-        // `LocalIndex::fetch_manifest_digest` needs only the tag store) tells the
-        // two apart.
-        //
-        // Errors from the probe are propagated with `?` — a corrupt or unreadable
-        // local index must surface as a real I/O error, not be silently treated
-        // as "tag absent" which would incorrectly raise PolicyResolutionBlocked.
         match self.mode {
-            // Offline never contacts a source. For unpinned (tag-only) identifiers,
-            // first check whether the tag IS locally resolvable — a true miss raises
-            // PolicyResolutionBlocked; a hit lets through and falls to the early-return.
-            // For digest-bearing identifiers the check is skipped: the early-return fires
-            // immediately (content stays unfetched; the resulting `None` is a policy error
-            // at the content boundary).
+            // Never contacts a source: an unpinned miss is a policy block, and the `None` a pinned
+            // identifier gets is refused at the content boundary.
             ChainMode::Offline => {
                 if identifier.digest().is_none() {
-                    // Probe the local tag store; raises PolicyResolutionBlocked if
-                    // the tag is genuinely absent. I/O errors propagate unchanged.
                     self.ensure_locally_resolvable(identifier).await?;
                 }
-                // Digest-addressed offline miss: no source contact, content stays
-                // unfetched (the resulting `None` becomes a policy error at the
-                // content boundary).
                 return Ok(None);
             }
-            // Frozen refuses to resolve an unpinned reference from a source, but
-            // digest-addressed (already-known) content is still fetched like Default.
+            // Frozen blocks only unknown-tag resolution; a known tag falls through to fetch its content.
             ChainMode::Frozen if identifier.digest().is_none() => {
-                // Probe the local tag store; raises PolicyResolutionBlocked if
-                // the tag is genuinely absent. I/O errors propagate unchanged.
                 self.ensure_locally_resolvable(identifier).await?;
-                // Tag is locally resolvable: fall through to source walk so the
-                // missing content blob is fetched (only unknown-tag *resolution* is
-                // blocked; content fetches for known tags are allowed).
             }
             ChainMode::Default | ChainMode::Remote | ChainMode::Frozen => {}
         }
 
-        // Digest-bearing inputs (digest-only OR tag+digest pinned-id pulls)
-        // are fetched directly via `GET /v2/<repo>/manifests/<digest>`. The
-        // tag-pointer commit decision lives in `fetch_and_persist_chain`:
-        // tag+digest skips the commit because `ocx.lock` is canonical.
-        // Bare or tag-only inputs normalise to `tag_or_latest()` so the
-        // singleflight key collapses concurrent waiters.
+        // Bare names normalise to `:latest` so they share a singleflight key with explicit `:latest`.
         let walked = if identifier.digest().is_some() {
             identifier.clone()
         } else {
@@ -702,21 +371,7 @@ impl ChainedIndex {
         };
         let key = format!("{}|{}|{}", self.mode as u8, walked.registry(), walked);
 
-        // Singleflight: one leader fetches, concurrent waiters block on the
-        // watch channel and reuse the result. The leader's own error path
-        // returns `SourceWalkFailed(ArcError)`, preserving the full typed
-        // `crate::Error` source chain. Waiters receive the leader's failure
-        // via `singleflight::Error::Failed(SharedError)`, which we surface
-        // as `SingleflightFailed`; its `source()` walks the leader's
-        // original error chain for diagnostics, but the variant is erased
-        // to `dyn Error` at the broadcast boundary — downcasting back to
-        // `Error::SourceWalkFailed` is not possible because `SharedError`
-        // holds `Arc<dyn Error + Send + Sync>`, not a typed `crate::Error`.
         use singleflight::Acquisition;
-        // Singleflight infrastructure failures (capacity, timeout,
-        // abandonment) are distinct from source-walk failures — keep them
-        // in their own variant so callers can distinguish coordination
-        // problems from upstream registry errors.
         let acquisition = self
             .singleflight
             .try_acquire(key)
@@ -724,17 +379,10 @@ impl ChainedIndex {
             .map_err(super::error::Error::SingleflightFailed)?;
         let handle = match acquisition {
             Acquisition::Leader(h) => h,
-            // A waiter reuses the leader's answer, so it must pass the same
-            // check — the leader verified its own, but this is the same
-            // untrusted answer reaching a second caller.
+            // Same check as the leader: a shared answer is still untrusted for this caller.
             Acquisition::Resolved(head) => return verify_walked_digest(&walked, head),
         };
 
-        // Leader path: walk sources and persist on first success. On
-        // failure, wrap the leader's typed error in `ArcError` and broadcast
-        // the same `SourceWalkFailed(ArcError)` variant to waiters. The
-        // leader also propagates that wrapped variant to its caller so both
-        // ends see a consistent, typed error with the original source chain.
         match self.fetch_and_persist_chain(&walked, grow_root).await {
             Ok(head) => {
                 handle.complete(head.clone());
@@ -749,18 +397,11 @@ impl ChainedIndex {
         }
     }
 
-    /// Leader-side chain walk: iterates sources, fetches + persists the
-    /// dispatch object from the first success, then (kind-routed, `grow_root`
-    /// gated) grows the local root.
+    /// Leader-side walk: persist the dispatch object from the first source that resolves `identifier`,
+    /// then grow the local root when `grow_root` allows.
     ///
-    /// Sources are tried sequentially in priority order; the first success short-circuits.
-    /// Parallel-peer fallback is intentionally not supported — peer registries are out of scope.
-    ///
-    /// Returns `Ok(Some((digest, manifest)))` when one source resolved the
-    /// identifier, or `Ok(None)` when every source returned a clean
-    /// not-found with no errors. Returns `Err(_)` when any source errored
-    /// and no source succeeded — we do not treat a later `Ok(false)` as
-    /// disproving an earlier failure.
+    /// `Err` when any source errored and none succeeded: a later clean miss does not disprove an earlier
+    /// failure.
     async fn fetch_and_persist_chain(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -768,10 +409,6 @@ impl ChainedIndex {
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         let mut last_error: Option<super::error::Error> = None;
         for (source, authoritative) in self.candidate_sources(identifier).await {
-            // `ReadOnly` fetches + decodes the dispatch object WITHOUT staging
-            // it into `o/` — a read-only view never grows the local index. Every
-            // other policy persists the dispatch object as usual (an image index
-            // is written to `o/`; a leaf manifest writes nothing there anyway).
             let fetched = if self.write_policy == LocalWritePolicy::ReadOnly {
                 self.local_index.fetch_dispatch_only(source, identifier).await
             } else {
@@ -779,54 +416,20 @@ impl ChainedIndex {
             };
             match fetched {
                 Ok(Some((bytes, digest, manifest))) => {
-                    // A leaf platform manifest belongs in the machine-global blob
-                    // store, not the index (A3/B2) — an image index is already in
-                    // `o/`. Caching it here is what lets the NEXT resolve of this
-                    // pin recover locally with zero network
-                    // (`recover_absent_dispatch`), which is the whole reason that
-                    // read exists. GC treats it as a cache: an installed package
-                    // roots it through its own `refs/blobs/`, and an evicted copy
-                    // is refetched by digest, byte-identical.
+                    // Cached so the next resolve of this pin recovers a leaf manifest with zero network.
                     if let (Some(store), ocx_oci::Manifest::Image(_)) = (&self.content_store, &manifest)
                         && let Err(error) = store.write_blob(identifier.registry(), &digest, &bytes).await
                     {
                         log::debug!("could not cache the leaf manifest for '{identifier}' ({digest}): {error}");
                     }
-                    // Root growth gated on identifier shape (same contract as
-                    // the legacy tag-pointer commit):
-                    //   - tag-only (`cmake:1.0`)            → grow
-                    //   - digest-only (`cmake@sha256:...`)  → skip (no tag to pin)
-                    //   - tag+digest (`cmake:1.0@sha256:`)  → skip (pinned-id pull;
-                    //                                        `ocx.lock` is canonical)
-                    //   - bare repo (`cmake`)               → normalised to `latest`
-                    //                                        in walk_chain → grows
-                    // The `tag+digest` skip is the post-pin contract change: the
-                    // caller already has the digest pinned in `ocx.lock`, so a
-                    // root write here is redundant and silently shadows the lock.
-                    // See `adr_index_routing_semantics.md`.
-                    // Only a `Full` write policy grows the root: `NoTag` resolves
-                    // on behalf of a lock (`ocx update`,
-                    // `adr_toolchain_update_family.md`) and `ReadOnly` views
-                    // (`ocx package inspect`) both leave the tag pointer untouched.
-                    // `grow_root` further gates on the miss shape the caller
-                    // observed locally — an AbsentDispatch recovery of an
-                    // already-known root must never re-copy it (Invariant 1).
+                    // A pinned tag+digest pull grows no root, or the write would shadow the canonical `ocx.lock`.
                     if grow_root
                         && self.write_policy == LocalWritePolicy::Full
                         && identifier.tag().is_some()
                         && identifier.digest().is_none()
                     {
                         match source.source_kind() {
-                            // C2 policy: a Default write-through resolve of a
-                            // published package ALSO grows the local copy —
-                            // symmetric with derived, removing the
-                            // install→offline asymmetry. It grows by exactly the
-                            // tag it resolved and nothing else, first sight
-                            // included: sibling pins and the `repository`
-                            // pointer are not this resolve's to write, silently
-                            // (`RootScope::Tag`). Adopting a whole package is
-                            // `ocx index update <pkg>`, which the user runs
-                            // naming what they want moved.
+                            // Exactly this tag: sibling pins and `repository` are not this resolve's to move.
                             SourceKind::Published => {
                                 let tag = identifier
                                     .tag()
@@ -837,13 +440,8 @@ impl ChainedIndex {
                                         .await?;
                                 }
                             }
-                            // The same gate the update path applies
-                            // (`LocalIndex::refresh_derived`), on the same rule:
-                            // a tag that resolves to a bare manifest writes
-                            // nothing to `o/`, and a reserved tag is not a
-                            // version. Neither may become a root entry — and
-                            // neither write path consults `list_tags`, so the
-                            // listing filters cannot catch it downstream.
+                            // A bare-manifest or reserved tag must not become a root entry: no write path
+                            // consults `list_tags`, so its filters cannot catch it downstream.
                             SourceKind::Derived => {
                                 let tag = identifier
                                     .tag()
@@ -858,29 +456,9 @@ impl ChainedIndex {
                     return Ok(Some((digest, manifest)));
                 }
                 Ok(None) => {
-                    // A clean miss from the one source authoritative for this
-                    // identifier's namespace (Decision H) is terminal — it must
-                    // never fall through to a lower, non-authoritative source
-                    // (the `OciIndex` catch-all) that could answer the same
-                    // name over a different protocol. Falling through here
-                    // would re-introduce the index->OCI-tags fallback chain
-                    // `adr_index_indirection.md` Decision H dissolved. Mirrors
-                    // the `Err` arm's authoritative-stop just below; a
-                    // non-authoritative source's miss keeps the fall-through
-                    // behaviour so foreign-namespace routing is unaffected.
-                    //
-                    // Kept as a SEPARATE arm from `Err` below, and it must stay
-                    // that way: this arm is "the index answered, and it does not
-                    // hold this name"; that one is "the index could not be read
-                    // at all". Folding them would turn an index outage into a
-                    // confident wrong answer instead of a loud failure.
+                    // An authoritative miss is terminal, or the `OciIndex` catch-all answers the same name.
+                    // Kept apart from the `Err` arm, or an index outage becomes a confident "not in index".
                     if authoritative {
-                        // A configured index names itself, so the user learns
-                        // WHICH index refused rather than reading a bare "not
-                        // found" (ocx#251 — the error is the deliverable). A
-                        // source with no base URL to name is not a configured
-                        // index (a fake, a nested chain); it keeps the plain
-                        // terminal `None` so no message has to be degraded.
                         if let Some(base_url) = source.index_base_url() {
                             return Err(super::error::Error::NotInIndex {
                                 identifier: identifier.to_string(),
@@ -894,12 +472,7 @@ impl ChainedIndex {
                     log::debug!("Source has no '{}' — trying next source.", identifier);
                 }
                 Err(e) => {
-                    // An authoritative source's refusal (yanked tag, obs tamper,
-                    // fail-closed format) must STOP the walk — never fall through
-                    // to a lower source that could answer the same name and both
-                    // bypass the refusal and leak induced-error traffic to it
-                    // (`adr_index_indirection.md` F3). Transient errors from a
-                    // non-authoritative source keep the fall-through behaviour.
+                    // An authoritative refusal stops the walk, or a lower source answers the same name and bypasses it.
                     if authoritative {
                         log::warn!("Authoritative source refused '{}': {e}", identifier);
                         return Err(e);
@@ -911,27 +484,15 @@ impl ChainedIndex {
         }
 
         if let Some(e) = last_error {
-            // At least one source errored. We don't trust a later Ok(false)
-            // to disprove an earlier Err — a clean "not found" from a mirror
-            // does not contradict a transient failure on the primary.
             return Err(e);
         }
-        // All sources either replied Ok(false) or there were no sources.
         Ok(None)
     }
 
-    /// Remote-mode pure-query manifest read: consult the source chain directly
-    /// and return the first hit **without persisting**.
+    /// Remote-mode `Query` read-through: the first source hit, never persisted.
     ///
-    /// `--remote` is a read-through-to-source flag, not a write-through cache
-    /// fill, so a tag-addressed `Query` must reach the live registry (the same
-    /// routing `list_tags` already uses in Remote mode) yet never mutate the
-    /// local index. First `Some` wins; if every source errors the failure is
-    /// propagated rather than masked as a clean miss (trust boundary — a
-    /// registry outage must not look like "not found"). A clean miss from the
-    /// source authoritative for `identifier`'s namespace is likewise terminal —
-    /// it never falls through to a lower, non-authoritative source (Decision
-    /// H: exactly one remote per namespace). See `adr_index_routing_semantics.md`.
+    /// Errors propagate rather than masking as a miss; an authoritative miss is terminal
+    /// (`adr_index_routing_semantics.md`).
     async fn query_sources_manifest(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -940,9 +501,6 @@ impl ChainedIndex {
         for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest(identifier, IndexOperation::Query).await {
                 Ok(Some(result)) => return Ok(Some(result)),
-                // Same authoritative-stop as `fetch_and_persist_chain`: a clean
-                // miss from the namespace's one authoritative source is
-                // terminal, never a fall-through to the `OciIndex` catch-all.
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
@@ -954,14 +512,12 @@ impl ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
-    /// Digest counterpart to [`Self::query_sources_manifest`] — same Remote-mode
-    /// read-through-without-persist contract.
+    /// Digest counterpart to [`Self::query_sources_manifest`].
     async fn query_sources_manifest_digest(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::Digest>> {
         let mut last_error: Option<super::error::Error> = None;
         for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest_digest(identifier, IndexOperation::Query).await {
                 Ok(Some(digest)) => return Ok(Some(digest)),
-                // Same authoritative-stop as `query_sources_manifest`.
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
@@ -977,15 +533,7 @@ impl ChainedIndex {
 #[async_trait]
 impl index_impl::IndexImpl for ChainedIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
-        // Catalog routes by mode. Default and Offline read the persisted
-        // cache; Remote queries sources only and never falls back to the
-        // cache — the whole point of `--remote` is to bypass cached state,
-        // and silently serving stale repos on a registry outage would hide
-        // the failure from --remote callers. First Ok wins; if every source
-        // errors we propagate the last error. Empty `sources` in Remote
-        // mode (only possible via misconfiguration: `Context::try_init`
-        // pairs Remote with a remote source) returns an empty catalog
-        // rather than reading cache.
+        // Remote never falls back to the local index: stale repos on a registry outage would hide it.
         if self.mode == ChainMode::Remote {
             let mut last_error: Option<super::error::Error> = None;
             for source in &self.sources {
@@ -1005,39 +553,20 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 
     async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
-        // Tag listings route by mode. Default and Offline read the local
-        // index only; Remote queries sources directly without write-through.
-        // A pure query must never mutate local state — write paths live on
-        // `LocalIndex::refresh_tags` (called from `ocx index update`) and
-        // the `persist_dispatch` + root-growth pair driven by
-        // `fetch_and_persist_chain` (called from install / pull). First Ok
-        // wins; if every source errors we propagate.
-        //
-        // Trust-boundary: in Remote mode, if every configured source fails
-        // we propagate the last error rather than silently falling back to
-        // the local index. `--remote` forces live lookups — collapsing a
-        // registry outage into stale local data would hide the real problem
-        // from callers and break retry policy.
+        // Remote never falls back to the local index: stale local tags on an outage would hide it and
+        // break retry policy.
         if self.mode == ChainMode::Remote {
             let mut last_error: Option<super::error::Error> = None;
             for (source, authoritative) in self.candidate_sources(identifier).await {
                 match source.list_tags(identifier).await {
                     Ok(Some(tags)) => return Ok(Some(tags)),
-                    // Same authoritative-stop as `query_sources_manifest`: a clean
-                    // miss from the namespace's one authoritative source is
-                    // terminal, never a fall-through to the `OciIndex` catch-all.
                     Ok(None) if authoritative => {
                         log::debug!("Authoritative source lists no tags for '{}' — stopping.", identifier);
                         return Ok(None);
                     }
                     Ok(None) => {}
-                    // And the same stop on a refusal as `fetch_and_persist_chain`:
-                    // an authoritative source's error must never fall through to a
-                    // lower source that would answer the same name over a different
-                    // protocol. A published index outage would otherwise be served
-                    // by the registry catch-all listing the LITERAL name's tags —
-                    // for `ocx.sh/ocx/cli` a stale, capped release list that reads
-                    // as "no newer version" instead of "could not determine".
+                    // An authoritative refusal stops here, or the registry catch-all lists the literal name's
+                    // tags: for `ocx.sh/ocx/cli` a stale, capped list that reads as "no newer version".
                     Err(e) if authoritative => {
                         log::warn!("Authoritative source refused a tag listing for '{}': {e}", identifier);
                         return Err(e);
@@ -1060,35 +589,20 @@ impl index_impl::IndexImpl for ChainedIndex {
         identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
-        // Digest-addressed reads are local-first in every mode — immutable
-        // content cannot be wrong. Mutable (tag-based) reads in `Remote`
-        // mode go straight to the chain walk, skipping the local read.
+        // Digest-addressed reads are local-first in every mode: immutable content cannot be stale.
         let is_digest_addressed = identifier.digest().is_some();
         let kind = self.kind_for(identifier);
-        // Set only when the local read hit a *recoverable* corrupt dispatch
-        // object (root/tag already known, only the object is tampered) — the
-        // walk below must heal ONLY that object, never re-copy/re-grow an
-        // already-known root (Invariant 1, F1 never-auto-refreshed).
+        // A corrupt object under a known root: the walk heals that object only, never re-grows the root.
         let mut corrupt_known = false;
         let local = if is_digest_addressed || self.mode != ChainMode::Remote {
             match self.local_index.resolve_dispatch(identifier, kind).await {
                 Ok(resolution) => resolution,
                 Err(e) => {
-                    // A refusal from the local read — a yanked tag (F3), or a
-                    // version gate that refused or could not be evaluated
-                    // (C-005) — propagates straight out rather than falling
-                    // through to a source that would serve the same name and
-                    // bypass it.
                     if is_local_read_refusal(&e) {
                         return Err(e);
                     }
-                    // A present-but-corrupt dispatch object is only recoverable
-                    // by a Resolve walk that actually re-fetches and overwrites
-                    // it. A pure Query never persists, and Offline consults no
-                    // source — surface the corruption as a hard error (DataError)
-                    // rather than a silent cache miss. Default/Remote/Frozen
-                    // Resolve fall through: the walk re-fetches and self-heals
-                    // the object.
+                    // Only an online Resolve can re-fetch and heal a corrupt object; elsewhere it is a hard
+                    // error, never a silent miss.
                     let corrupt = is_corrupt_index_object(&e);
                     if corrupt && !(op == IndexOperation::Resolve && self.mode != ChainMode::Offline) {
                         return Err(e);
@@ -1104,54 +618,24 @@ impl index_impl::IndexImpl for ChainedIndex {
         } else {
             None
         };
-        // A locally-cached dispatch object answers the read directly; an
-        // `AbsentDispatch` (the digest/tag is known but its bytes are not
-        // locally cached, A3) falls through to source recovery below, same
-        // as a genuine local miss.
         if let Some(DispatchResolution::Dispatch { content, index }) = local {
             return Ok(Some((content, ocx_oci::Manifest::ImageIndex(*index))));
         }
-        // Order: local index dispatch → blob store → sources
-        // (`adr_index_indirection.md` A3 step 2). An `AbsentDispatch` names a known
-        // `content` digest whose bytes are absent from `o/` — a leaf platform
-        // manifest, which is CONTENT cached into `$OCX_HOME/blobs` at install
-        // (B2), never the local index. Consult that store before any source
-        // walk so an installed tool resolves offline with zero network. A miss
-        // (or no attached store) falls through unchanged.
         if let Some(DispatchResolution::AbsentDispatch { content }) = &local
             && let Some(recovered) = self.recover_absent_dispatch(identifier, content).await?
         {
             return Ok(Some(recovered));
         }
-        // Remote-mode pure queries read through to the source without
-        // persisting — `--remote` forces a live lookup for mutable
-        // (tag-addressed) reads, the same as `list_tags`, but a query must
-        // never write the local index. Digest-addressed reads stay local-first
-        // (handled above) because immutable content cannot be wrong.
         if self.mode == ChainMode::Remote && op == IndexOperation::Query && !is_digest_addressed {
             return self.query_sources_manifest(identifier).await;
         }
-        // Pure queries never walk the chain. The local index's role is to
-        // cache resolved data; populating it on a query call would silently
-        // mutate state from a read-only command.
+        // A query never walks the chain, or a read-only command would mutate the local index.
         match op {
             IndexOperation::Query => Ok(None),
             IndexOperation::Resolve => {
-                // `AbsentDispatch` or a recoverable corrupt object both mean the
-                // root/tag is already known locally — recover ONLY the
-                // dispatch content (`grow_root = false`, Invariant 1: never
-                // re-copy an already-present published root). Only a genuine
-                // miss (`None`, no corruption) grows the local root on
-                // success (C2 policy).
                 let grow_root = !corrupt_known && !matches!(local, Some(DispatchResolution::AbsentDispatch { .. }));
-                // The committed root ALREADY pins this tag to `content`, so the
-                // walk asks for that digest, never for the tag. Asking the tag
-                // would answer with whatever it points at now — moving a pin the
-                // user never named, which is exactly what the local copy exists
-                // to prevent. The sibling `fetch_manifest_digest` short-circuits
-                // from the same pin with zero network; addressing the walk by
-                // digest is what keeps the two answers identical. Digest-addressed
-                // callers already carry their own pin, so nothing changes for them.
+                // Walk the pinned digest, not the tag: the tag answers whatever it points at now, moving a
+                // pin the user never named.
                 let pinned = match &local {
                     Some(DispatchResolution::AbsentDispatch { content }) if !is_digest_addressed => {
                         Some(identifier.clone_with_digest(content.clone()))
@@ -1170,28 +654,15 @@ impl index_impl::IndexImpl for ChainedIndex {
     ) -> Result<Option<ocx_oci::Digest>> {
         let is_digest_addressed = identifier.digest().is_some();
         let kind = self.kind_for(identifier);
-        // See `fetch_manifest`'s identical flag — a recoverable corrupt
-        // dispatch object means the root/tag is already known, so the walk
-        // must not re-grow the root.
         let mut corrupt_known = false;
         if is_digest_addressed || self.mode != ChainMode::Remote {
             match self.local_index.resolve_dispatch(identifier, kind).await {
                 Ok(Some(DispatchResolution::Dispatch { content, .. })) => return Ok(Some(content)),
-                // Unlike `fetch_manifest`, a TAG-addressed digest read is
-                // answerable from `AbsentDispatch` too — the root lookup already
-                // confirmed the tag exists and names this content, only the
-                // dispatch bytes are uncached. A DIGEST-addressed `AbsentDispatch`
-                // is just the caller's own input echoed back with no existence
-                // confirmation, so it needs the object locally present, a
-                // cached leaf blob, or a source to confirm existence.
+                // Tag-addressed only: the root confirmed the tag names this content. A digest-addressed one
+                // is the caller's input echoed back and must be confirmed below.
                 Ok(Some(DispatchResolution::AbsentDispatch { content })) if !is_digest_addressed => {
                     return Ok(Some(content));
                 }
-                // A DIGEST-addressed `AbsentDispatch`: confirm existence from the
-                // machine-global blob store (installed content, A3 step 2 / B2)
-                // before falling through to the source walk, so an offline
-                // digest query resolves with zero network when the leaf is
-                // cached. A miss falls through unchanged.
                 Ok(Some(DispatchResolution::AbsentDispatch { content })) => {
                     if let Some((digest, _)) = self.recover_absent_dispatch(identifier, &content).await? {
                         return Ok(Some(digest));
@@ -1199,16 +670,9 @@ impl index_impl::IndexImpl for ChainedIndex {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    // Same refusal propagation as `fetch_manifest`: a yanked tag
-                    // (F3) or a version gate that refused or could not be
-                    // evaluated (C-005) is a hard `DataError`, never a
-                    // fall-through to a source.
                     if is_local_read_refusal(&e) {
                         return Err(e);
                     }
-                    // Same corrupt-object routing as `fetch_manifest`: escalate a
-                    // present-but-corrupt local object to a hard error unless an
-                    // online Resolve walk can re-fetch and heal it.
                     let corrupt = is_corrupt_index_object(&e);
                     if corrupt && !(op == IndexOperation::Resolve && self.mode != ChainMode::Offline) {
                         return Err(e);
@@ -1226,11 +690,6 @@ impl index_impl::IndexImpl for ChainedIndex {
         }
         match op {
             IndexOperation::Query => Ok(None),
-            // Reaches the walk either on a genuine local miss (`AbsentDispatch`
-            // already answered above for the tag-addressed case) or a
-            // recoverable corrupt object — root growth applies only for the
-            // former (C2 policy); a corrupt-object recovery must not re-grow
-            // an already-known root (Invariant 1).
             IndexOperation::Resolve => Ok(self
                 .walk_chain(identifier, !corrupt_known)
                 .await?
@@ -1238,46 +697,13 @@ impl index_impl::IndexImpl for ChainedIndex {
         }
     }
 
-    /// Fetches genuine content-addressed blob bytes (config blobs) through the
-    /// machine-global blob store (`$OCX_HOME/blobs`), never the local index —
-    /// the index-home flat blob CAS has been retired (`adr_index_indirection.md`
-    /// B2). `content_store: None` (unit-test constructions via [`super::Index::from_chained`])
-    /// skips the local read and write-through silently, matching the pre-B2
-    /// no-cache contract for those callers.
+    /// Config-blob bytes via the machine-global blob store, digest-verified on every path (CWE-345).
     ///
-    /// - **Cache-first**: an attached store's local hit is digest-verified
-    ///   (`BlobStore` does not self-verify — [`digest_matches`]). A verified
-    ///   hit returns immediately; a corrupt hit escalates to a hard
-    ///   `DigestMismatch` under `--offline` (no source to heal with), or online
-    ///   warns and falls through to the source walk, marking the entry for an
-    ///   atomic in-place heal (`BlobStore::replace_blob` — see below).
-    /// - **Offline + local miss** → `Ok(None)` (the `OfflineManifestMissing` →
-    ///   exit 81 contract lives downstream at the policy boundary).
-    /// - **Source walk (online)**: first `Some` wins. Fetched bytes are
-    ///   digest-verified against `blob_ref.digest()` BEFORE being returned
-    ///   (CWE-345 — never trust unverified remote bytes), then written
-    ///   through to the content store — `BlobStore::replace_blob` (unconditional
-    ///   atomic tempfile+rename, no existence check) when the cache-first read
-    ///   found a corrupt entry, `BlobStore::write_blob` (idempotent fast path)
-    ///   otherwise. A **remove-then-`write_blob`** two-step was tried and
-    ///   rejected in review: a removal failure would leave the corrupt file in
-    ///   place while the subsequent `write_blob` fast path re-accepts it
-    ///   unchanged, so the heal silently never happens. `replace_blob` has no
-    ///   such window — one atomic rename replaces whatever is there. A
-    ///   write-through/replace failure is logged, not fatal — the fetch still
-    ///   returns the verified bytes to the caller; a stuck heal is retried on
-    ///   the next online fetch. Propagates the last error if every source
-    ///   erred (trust boundary). A clean miss from the
-    ///   source authoritative for `identifier`'s namespace is likewise terminal —
-    ///   it ends the walk as `Ok(None)`, discarding any earlier
-    ///   non-authoritative source's error (Decision H: exactly one remote per
-    ///   namespace).
+    /// A corrupt cached copy is a hard `DigestMismatch` under `--offline` (no source to heal it), else it is
+    /// re-fetched; an offline miss is `Ok(None)`.
     async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         let digest = blob_ref.digest();
-        // Set when the cache-first read found a present-but-corrupt entry —
-        // the write-through below must heal it via an unconditional atomic
-        // replace, not `write_blob`'s existence-checked fast path (which would
-        // silently re-accept the still-corrupt file untouched).
+        // A corrupt entry needs `replace_blob`: `write_blob`'s existence check would re-accept it untouched.
         let mut heal_corrupt = false;
         if let Some(content_store) = &self.content_store
             && let Some(bytes) = content_store.read_blob(blob_ref.registry(), &digest).await?
@@ -1285,9 +711,6 @@ impl index_impl::IndexImpl for ChainedIndex {
             if digest_matches(&bytes, &digest) {
                 return Ok(Some(bytes));
             }
-            // Present-but-corrupt: only a source re-fetch can heal it. Offline
-            // has no source, so escalate to a hard error rather than silently
-            // discarding tampered content.
             if self.mode == ChainMode::Offline {
                 return Err(ocx_store::file_structure::error::Error::DigestMismatch {
                     claimed: digest.clone(),
@@ -1301,10 +724,6 @@ impl index_impl::IndexImpl for ChainedIndex {
         if self.mode == ChainMode::Offline {
             return Ok(None);
         }
-        // Walk sources; first `Some` wins. Verify BEFORE returning or
-        // write-through — a source must never smuggle unverified bytes past
-        // this boundary. Propagate last error if every source erred (trust
-        // boundary).
         let mut last_error: Option<super::error::Error> = None;
         for (source, authoritative) in self.candidate_sources(blob_ref.as_identifier()).await {
             match source.fetch_blob(blob_ref).await {
@@ -1317,10 +736,6 @@ impl index_impl::IndexImpl for ChainedIndex {
                         .into());
                     }
                     if let Some(content_store) = &self.content_store {
-                        // `replace_blob` (unconditional atomic rename) heals a
-                        // known-corrupt entry in one step; `write_blob`
-                        // (existence-checked fast path) is the ordinary,
-                        // cheaper write-through for a genuine cache miss.
                         let write_through = if heal_corrupt {
                             content_store.replace_blob(blob_ref.registry(), &digest, &bytes).await
                         } else {
@@ -1332,9 +747,6 @@ impl index_impl::IndexImpl for ChainedIndex {
                     }
                     return Ok(Some(bytes));
                 }
-                // Same authoritative-stop as `query_sources_manifest`: a clean
-                // miss from the namespace's one authoritative source is
-                // terminal, never a fall-through to the `OciIndex` catch-all.
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
@@ -1346,23 +758,10 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
-    /// Fetches verbatim manifest bytes straight from the source chain —
-    /// never through the local dispatch-object cache. That cache holds
-    /// bytes only for dispatch-shaped digests (an image index
-    /// object); a leaf platform manifest is never copied into it
-    /// (`adr_index_indirection.md` A3/B2 — leaf manifests are content,
-    /// fetched on demand). The trait default re-serialises the parsed
-    /// manifest instead of returning wire-exact bytes, which is wrong for a
-    /// caller (chain-blob staging) that persists the result under the
-    /// source-claimed digest — a re-serialised JSON body will not, in
-    /// general, hash back to that digest.
+    /// Verbatim manifest bytes straight from the sources, bypassing the local dispatch cache.
     ///
-    /// First `Some` wins; if every source errors the failure is propagated
-    /// rather than masked as a clean miss (trust boundary). A clean miss from
-    /// the source authoritative for `identifier`'s namespace is likewise
-    /// terminal — it ends the walk as `Ok(None)`, discarding any earlier
-    /// non-authoritative source's error (Decision H: exactly one remote per
-    /// namespace).
+    /// Overrides the trait default, whose re-serialised body would not hash back to the source-claimed
+    /// digest the staging caller persists it under.
     async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -1374,9 +773,6 @@ impl index_impl::IndexImpl for ChainedIndex {
         for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest_raw_bytes(identifier).await {
                 Ok(Some(result)) => return Ok(Some(result)),
-                // Same authoritative-stop as `query_sources_manifest`: a clean
-                // miss from the namespace's one authoritative source is
-                // terminal, never a fall-through to the `OciIndex` catch-all.
                 Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
@@ -1388,104 +784,25 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
-    /// The physical transport identifier for `identifier` (`adr_index_indirection.md`
-    /// C2): the local copy's committed root first, the sources on a miss — except
-    /// under [`ChainMode::Remote`], where the order is inverted.
-    ///
-    /// This reads a *pointer* living in remote-controlled data, not
-    /// digest-verified *content* like [`Self::fetch_manifest`] and
-    /// [`Self::fetch_blob`] — a copied index tree is a supported distribution
-    /// mechanism (A2), and the layer pull that consumes the answer runs on the
-    /// shared, **unguarded** client. What makes local-first sound is therefore
-    /// not that the local root is trusted: it is that the local answer carries
-    /// its own SSRF floor ([`Self::guard_local_physical`],
-    /// [`ocx_oci::ssrf::resolve_and_validate`](ocx_oci::ssrf::resolve_and_validate),
-    /// ocx#218) applied with the **same** `trusted_hosts` set `OcxIndex` applies
-    /// to its own — and that whatever that floor had to admit unjudged (a lookup
-    /// that failed) is judged again, fail-closed, by
-    /// [`Index::guard_physical_dial`] before the pull's first request reaches it.
-    /// That guarded local path is already the *ordinary* one in
-    /// production: a source declaring the name outside its jurisdiction is
-    /// skipped entirely ([`Self::candidate_sources`]) and the live
-    /// `index.ocx.sh` declares `Outside` for every flat `ocx.sh/<tool>` name, so
-    /// for those the source loop has never executed. Local-first extends that
-    /// path to the indirected names; it does not open a new one.
-    ///
-    /// The committed tree is therefore the **authority** for the pointer on the
-    /// warm path: its *provenance* is delegated to the local tree deliberately,
-    /// as trusted deployment-managed input in the same trust domain as
-    /// `$OCX_HOME` (A2). The two trust senses are distinct — the *bytes* are
-    /// remote-authored and stay untrusted (hence the floor), while their
-    /// *placement* into the tree is the operator's act and is what the
-    /// delegation trusts. The SSRF floor below is a floor on what that
-    /// authority may name, not a substitute for the provenance it is trusted
-    /// with.
-    ///
-    /// What it buys is that a warm resolve costs **no** requests. Asking the
-    /// sources first spends a `GET <base>/config.json` (the jurisdiction
-    /// declaration) plus a `GET <base>/p/<ns>/<pkg>.json` per source, on every
-    /// invocation of every identifier-resolving command, to re-derive a pointer
-    /// the committed root already carries. The former justification for paying
-    /// it — that the resolve had already fetched and memoized that root anyway —
-    /// is false on precisely the common case: [`Self::fetch_manifest`] is
-    /// local-first, so a warm resolve answers from [`LocalIndex`] and the
-    /// source-side memo is empty.
-    ///
-    /// [`ChainMode::Remote`] keeps source-first. There the tag resolution
-    /// genuinely did go to the source (so the root really is memoized), and the
-    /// update family asking it wants the **live** pointer, not the snapshotted
-    /// one — its whole purpose is to observe upstream movement.
-    ///
-    /// Two shapes reach the local read with no source able to answer:
-    ///
-    /// - **`--offline`** — `self.sources` is empty by construction. This is why
-    ///   there is **no** `ChainMode::Offline` early return here, unlike
-    ///   [`Self::fetch_manifest_raw_bytes`]: ahead of the local read it would
-    ///   reproduce the bug it looks like it guards — `Ok(None)` reads as "no
-    ///   rewrite", so an indirected package reports the LOGICAL identifier as
-    ///   its own transport, indistinguishable from a genuinely registry-backed
-    ///   one; after the local read it is unreachable.
-    /// - **the index site is unreachable** — reached only on a local miss under
-    ///   the local-first modes, and ahead of the local read under `Remote`. A
-    ///   source's *transport* failure ([`is_source_outage`]) is held rather than
-    ///   propagated, so a `Remote` walk still falls back to the committed root
-    ///   instead of exiting 69. It is re-raised when no local root answers, so a
-    ///   genuine outage still fails loudly. Every **other** source error is a
-    ///   refusal, not an outage, and propagates immediately: an `SsrfError` says
-    ///   "this target is forbidden", and answering around it — from the local
-    ///   root, or by falling through to a second source — would turn the guard
-    ///   into a no-op. Symmetrically, a **local** guard refusal propagates
-    ///   without consulting a source, so the local-first order cannot launder a
-    ///   forbidden local pointer either.
-    ///
-    /// The local read runs exactly once per call: on a local-first miss the
-    /// source walk's own failure is final, never re-checked against a local copy
-    /// that already said no.
-    ///
-    /// `Ok(None)` = no rewrite, physical == logical. That is deliberately not
-    /// distinguished from "indirected, but no local root": for a registry-backed
-    /// package a present root names the identifier itself, so `Some(physical)`
-    /// there is equal to the input and the two outcomes are observationally
-    /// identical. The remaining combination cannot produce a usable wrong
-    /// answer — an unpinned resolve without the local root is already refused
-    /// upstream ([`Self::ensure_locally_resolvable`] → `PolicyResolutionBlocked`,
-    /// exit 81), and a source outage re-raises above.
+    /// The physical transport identifier (`adr_index_indirection.md § Structural enforcement`): committed
+    /// local root first, sources on a miss; source-first under [`ChainMode::Remote`], which wants the live
+    /// pointer. `Ok(None)` means no rewrite (physical == logical).
     async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
-        // `Remote` is the one mode that wants the live pointer; every other mode
-        // answers from the committed root when it has one.
         let source_first = self.mode == ChainMode::Remote;
+        // Local-first is sound only because the local answer carries its own SSRF floor and
+        // `Index::guard_physical_dial` re-judges it fail-closed before the first request.
         if !source_first && let Some(physical) = self.local_physical_answer(identifier).await? {
             return Ok(Some(physical));
         }
+        // No `Offline` early return: ahead of the local read, `Ok(None)` would report an indirected
+        // package's logical identifier as its transport.
         let mut last_error: Option<super::error::Error> = None;
         for (source, _) in self.candidate_sources(identifier).await {
             match source.physical_reference(identifier).await {
                 Ok(Some(physical)) => return Ok(Some(physical)),
                 Ok(None) => {}
-                // A refusal is not an outage. Holding one and then answering
-                // from the local root would discard the very verdict the source
-                // was asked for — an `SsrfError` in particular means "must not
-                // answer, this target is forbidden".
+                // A refusal propagates, or the local root would discard the source's SSRF verdict; an outage
+                // is held so `Remote` can fall back to the committed root instead of exiting 69.
                 Err(e) if !is_source_outage(&e) => return Err(e),
                 Err(e) => {
                     log::warn!("Source physical_reference failed for '{identifier}': {e}");
@@ -1499,11 +816,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
-    /// The committed local root's answer, and only that — the source walk of
-    /// [`Self::physical_reference`] is skipped entirely, in every mode.
-    ///
-    /// Same guard, same refusal semantics as the local half of that method:
-    /// an unreadable local index is a miss, an SSRF refusal propagates.
+    /// The committed local root's answer only, with [`Self::physical_reference`]'s guard and refusal semantics.
     async fn physical_reference_local(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -1511,59 +824,21 @@ impl index_impl::IndexImpl for ChainedIndex {
         self.local_physical_answer(identifier).await
     }
 
-    /// Record the routing pointer for `identifier`, so the next invocation
-    /// reads it off disk instead of paying a source for it again (#424).
+    /// Record the routing pointer for `identifier` so the next invocation reads it off disk.
     ///
-    /// A digest-addressed resolve grows no root — [`Self::fetch_and_persist_chain`]'s
-    /// grow branch needs a tag to pin — so without this a machine that only ever
-    /// pulls and execs against a committed lock re-asks the source where the
-    /// content lives on every single invocation, forever.
-    ///
-    /// **Only the resolve path calls this, and that is the gate.** The write
-    /// used to live inside [`Self::physical_reference`], which was wrong in a
-    /// way one test caught and four callers would have suffered: `ocx package
-    /// cascade check`, `package verify`, `package sign` and `package attest`
-    /// all ask for a physical address without materializing anything, and a
-    /// pure read must not snapshot one. Creating `p/<ns>/<pkg>.json` **is** a
-    /// snapshot of the physical address even with no tag in it, because a later
-    /// invocation routes by it having never re-asked. Keeping the call in
-    /// `resolve_transport_pinned` makes that unreachable from a read by
-    /// construction, for the four callers today and any added later.
-    ///
-    /// **Best-effort.** A cache write on a path whose real work has already
-    /// succeeded: a lost catalog-lock race or a read-only index home is logged
-    /// and swallowed, the same tolerance the leaf-manifest blob cache gets in
-    /// `fetch_and_persist_chain`. Failing a resolve because a cache write lost
-    /// a race would be a worse defect than the dial it removes.
-    ///
-    /// Four gates, each load-bearing:
-    ///
-    /// - [`LocalWritePolicy::Full`] — a `NoTag` view (`ocx update`, resolving on
-    ///   behalf of a lock) and a `ReadOnly` view (`ocx package inspect`) write
-    ///   nothing into the local index, and a routing pointer is no exception.
-    /// - **not [`ChainMode::Frozen`]** — `--frozen` promises the invocation
-    ///   changes nothing. The consequence is deliberate: a frozen invocation
-    ///   against a cold index may still dial, and the non-frozen pull that
-    ///   populated the store is where the pointer gets recorded.
-    /// - **the local copy already answers** — nothing to repair, and every
-    ///   write here would be a routing migration. Checked *before* the source
-    ///   is asked, so a warm machine spends no request.
-    /// - [`SourceKind::Published`] — [`LocalIndex::commit_published_root`] is
-    ///   the published writer; a derived source's root is OCX-authored and has
-    ///   its own path.
-    ///
-    /// [`RootScope::Routing`] carries the rest: package-level fields only, no
-    /// tags, and nothing at all when a root is already committed.
+    /// Only the resolve path may call this: `cascade check`, `verify`, `sign` and `attest` must not snapshot
+    /// `p/<ns>/<pkg>.json` from a pure read. Best-effort: a failed write is logged, never fails the resolve.
     async fn record_routing_pointer(&self, identifier: &ocx_oci::PackageRef) {
+        // Not under `--frozen`, which promises the invocation changes nothing.
         if self.write_policy != LocalWritePolicy::Full || self.mode == ChainMode::Frozen {
             return;
         }
-        // A committed root already answers locally — no repair to make, and no
-        // request to spend finding that out.
+        // A committed root already answers: any write here would be a routing migration.
         if matches!(self.local_physical_answer(identifier).await, Ok(Some(_))) {
             return;
         }
         for (source, _) in self.candidate_sources(identifier).await {
+            // A derived source's root is OCX-authored and written elsewhere.
             if !matches!(source.source_kind(), SourceKind::Published) {
                 continue;
             }
@@ -1588,11 +863,6 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 
     fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> Jurisdiction {
-        // Fold the chain: one authoritative source makes the whole chain
-        // authoritative; otherwise any source that would still be asked makes it
-        // a fall-through. `Outside` needs EVERY source to have declined — in
-        // production the chain always ends with the `OciIndex` catch-all, which
-        // declines nothing, so a chain is never `Outside`.
         let mut jurisdiction = Jurisdiction::Outside;
         for source in &self.sources {
             match source.jurisdiction(identifier) {
@@ -1608,10 +878,8 @@ impl index_impl::IndexImpl for ChainedIndex {
         self.sources.iter().any(|source| source.serves_registry(registry))
     }
 
-    /// An index owns the registry by config, but no source for it is in the
-    /// chain — only under `--offline`, which builds none — so there is no one
-    /// to ask where the name lives: refused under the chain's policy, the way
-    /// an offline tag miss is. Never a pass-through to the host the name spells.
+    /// Refuse a name whose registry an index owns by config but no chained source serves (`--offline`),
+    /// rather than dialling the host the name spells.
     fn refuse_unrouted(&self, identifier: &ocx_oci::PackageRef) -> Option<super::error::Error> {
         let registry = identifier.registry();
         (self.local_index.is_index_namespace(registry) && !self.serves_registry(registry)).then(|| {
@@ -1629,27 +897,11 @@ impl index_impl::IndexImpl for ChainedIndex {
             .find_map(|source| source.authoritative_index_base_url(identifier))
     }
 
-    /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
-    /// the operator declared for that namespace, or empty when they declared
-    /// none.
+    /// The `[registries."<ns>"].trusted_hosts` set for `registry`: the local index's copy first, so it
+    /// answers with no source to ask (`--offline`), then the owning source's.
     ///
-    /// Read from the local index's own config-threaded set first
-    /// ([`LocalIndex::with_trusted_hosts`]), then from the owning source's
-    /// construction input. Both are copies of the SAME
-    /// `[registries."<ns>"].trusted_hosts` value — `context.rs` reads it from
-    /// config and hands one copy to `OcxIndex`, one to that namespace's
-    /// `ssrf_guard`, and one to the local index — so for a namespace that has a
-    /// source they answer identically. The local index's copy is what makes the
-    /// answer available when there is **no** source to ask: `--offline` builds
-    /// none at all, and a source that declared a name outside its jurisdiction
-    /// is never consulted. It travels with the local index precisely because
-    /// every chain that can mint a local answer is built from one, so no
-    /// construction site can forget it. The source scan stays for chains whose
-    /// local index threads no config (unit fakes).
-    ///
-    /// Keyed on the registry (ownership) like [`Self::kind_for_registry`], never
-    /// on per-name jurisdiction — a name the owning index's grammar cannot
-    /// express is still that operator's namespace and must keep their exemption.
+    /// Keyed on the registry, not per-name jurisdiction, so a name the index grammar cannot express keeps
+    /// its operator's exemption.
     fn trusted_hosts_for(&self, registry: &str) -> &[String] {
         let configured = self.local_index.trusted_hosts_for(registry);
         if !configured.is_empty() {
@@ -1661,11 +913,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             .map_or(&[], |source| source.trusted_hosts())
     }
 
-    /// The plain-HTTP authorities, read from the local index's config-threaded
-    /// set — not registry-keyed, because `OCX_INSECURE_REGISTRIES` is one flat
-    /// list of authorities rather than a per-namespace setting. It rides on the
-    /// local index for the reason [`Self::trusted_hosts_for`] gives: every
-    /// chain is built from one.
+    /// The plain-HTTP authorities (`OCX_INSECURE_REGISTRIES`), a flat list, not registry-keyed.
     fn insecure_hosts(&self) -> &[String] {
         self.local_index.insecure_hosts()
     }
@@ -1692,8 +940,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 
     fn remote_view(&self) -> Box<dyn index_impl::IndexImpl> {
-        // The read-only view with the mode flipped to `Remote` — including its
-        // fresh singleflight group, for the reason documented on `read_only`.
+        // Keeps `read_only`'s fresh singleflight group.
         Box::new(Self {
             mode: ChainMode::Remote,
             ..self.read_only()
@@ -1701,10 +948,9 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 }
 
-// ── Specification tests — plan_resolution_chain_refs.md tests 22-32 ─────
+// ── Specification tests ───────────────────────────────────────────────────
 //
-// Tests 22-32: ChainMode routing, singleflight dedup, disk-persistence
-// properties.
+// ChainMode routing, singleflight dedup, disk-persistence properties.
 #[cfg(test)]
 mod chain_refs_tests {
     use std::collections::HashMap;
@@ -5534,20 +4780,9 @@ mod chain_refs_tests {
 
 // ── Specification tests ───────────────────────────────────────────────────
 //
-// Written from the design record (plan_tag_fallback.md) in specification mode.
-// These tests encode the expected ChainedIndex behaviour.
-//
-// Test → design-record traceability:
-//   cache_hit_*           → "Tag in cache → Return immediately (no source walked)"
-//   cache_miss_source_*   → "Tag not cached, source has it → update_tag persists it"
-//   cache_miss_source_no  → "Tag not cached, source doesn't have it → warn, NotFound"
-//   cache_miss_network_*  → "Tag not cached, network failure → warn, NotFound"
-//   digest_only_*         → "PackageRef with digest but no tag → no fallback"
-//   box_clone_*           → "`box_clone` shares caches across cloned chain"
-//   list_tags_*           → "`list_tags` delegates to cache only"
-//   list_repos_*          → "`list_repositories` delegates to cache only"
-//   multi_source_*        → "Multi-source chain proves the Vec shape works"
-//   empty_sources_*       → "Empty sources Vec → behaves like LocalIndex alone"
+// Expected ChainedIndex behaviour: a cached tag returns without walking a source; a miss persists what
+// a source has; a source miss or network failure warns and reports not found; a digest-only ref never
+// falls back; `box_clone` shares caches; listings read the local index only; empty sources act like `LocalIndex`.
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

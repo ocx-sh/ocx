@@ -1,21 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Verify error types (three-layer: [`VerifyError`] + [`VerifyErrorKind`]).
-//!
-//! Variant inventory is the ADR-canonical set per C-S1-2. Each variant maps
-//! to a distinct exit code via `ClassifyErrorKind`, which the binary carries
-//! (`ocx::exit`).
+//! Verify error types ([`VerifyError`] + [`VerifyErrorKind`]); exit codes are classified in the binary (`ocx::exit`).
 
 use ocx_oci::PackageRef;
 use ocx_oci::endpoint::UrlRejection;
 use ocx_trust::key_ref::KeyRefError;
 
 /// Top-level verify error carrying the identifier being verified + the kind.
-///
-/// The `Display` is the identifier alone: `kind` is `#[source]`, and every
-/// render site uses the chain-walking `{err:#}` form, which appends the source
-/// itself. Interpolating `{kind}` here as well printed the whole sentence twice.
+// `Display` is the identifier alone: `kind` is `#[source]`, so interpolating it prints it twice under `{err:#}`.
 #[derive(Debug, thiserror::Error)]
 #[error("{identifier}")]
 pub struct VerifyError {
@@ -34,198 +27,115 @@ impl VerifyError {
 }
 
 /// Discriminant kind for [`VerifyError`].
-///
-/// Canonical ADR names per C-S1-2: `IdentityMismatch`, `IssuerMismatch`,
-/// `BundleParseFailed`, `RekorSetInvalid`, etc.
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyErrorKind {
-    /// No referrers found for target manifest.
-    ///
-    /// Exit 79 (`NotFound`). Publisher has not signed, or signed a different platform.
+    /// No referrers found for target manifest. Exit 79 (`NotFound`).
     #[error("no signatures found for target")]
     NoSignaturesFound,
 
     /// The identifier did not resolve to a manifest for the requested platform.
     ///
-    /// Exit 79 (`NotFound`), the same code as [`Self::NoSignaturesFound`] — but
-    /// never the same slug. "This package is unsigned" and "this package is not
-    /// here" are opposite conclusions for someone deciding whether to trust an
-    /// artifact, and reporting the first for the second is how a typo becomes a
-    /// belief about supply-chain posture.
+    /// Exit 79 (`NotFound`), with its own slug: "unsigned" and "not here" must never read alike.
     #[error("no manifest for platform {platform}")]
     TargetNotFound { platform: String },
 
-    /// `--platform` was given but the reference resolved to a single manifest.
-    ///
-    /// Exit 79 (`NotFound`) and a slug of its own, for the reason
-    /// [`Self::TargetNotFound`] states: "this package ships no such platform"
-    /// and "this reference has no platforms to choose from" have different
-    /// remedies — drop the flag, rather than go looking for a build that was
-    /// never missing.
+    /// `--platform` was given but the reference resolved to a single manifest. Exit 79 (`NotFound`), own slug.
     #[error("--platform {platform} was given but the reference resolved to a single manifest, not an index")]
     TargetNotAnIndex { platform: String },
 
-    /// Referrer(s) found but none has a recognized Sigstore bundle artifactType.
-    ///
-    /// Exit 79. May be a legacy tag-based signature (Slice 2) or a non-Sigstore attestation.
+    /// Referrer(s) found but none has a recognized Sigstore bundle artifactType. Exit 79.
     #[error("no usable Sigstore bundle among referrers")]
     NoUsableBundle,
 
-    /// The examination cap was reached with candidates still unexamined and
-    /// none of the examined candidates passed.
+    /// The examination cap was reached with candidates unexamined and none of the examined passed.
     ///
-    /// Exit 65 (`DataError`). Fail-closed: the candidate order is by digest
-    /// (no trust significance), so a valid signature may sort past the cap. This
-    /// is reported distinctly instead of an examined candidate's error — which
-    /// would misleadingly attribute the failure to a specific (unrelated)
-    /// referrer. Not 79: candidates exist, so "no signatures found" would be
-    /// wrong; the operator must reduce the referrer count or raise the cap.
+    /// Exit 65 (`DataError`), not 79: candidates exist, and a valid one may sort past the cap.
     #[error("signature candidate limit reached: {unexamined} referrer(s) beyond the examination cap left unchecked")]
     CandidateLimitExhausted {
         /// Number of candidate referrers not examined before the cap was hit.
         unexamined: usize,
     },
 
-    /// Cert SAN does not match `--certificate-identity`.
-    ///
-    /// Exit 77 (`PermissionDenied`).
+    /// Cert SAN does not match `--certificate-identity`. Exit 77 (`PermissionDenied`).
     #[error("certificate identity mismatch")]
     IdentityMismatch,
 
-    /// Cert issuer does not match `--certificate-oidc-issuer`.
-    ///
-    /// Exit 77 (`PermissionDenied`).
+    /// Cert issuer does not match `--certificate-oidc-issuer`. Exit 77 (`PermissionDenied`).
     #[error("certificate OIDC issuer mismatch")]
     IssuerMismatch,
 
     /// An SBOM was attached with no signature, and this run demands one.
     ///
-    /// Exit 77 (`PermissionDenied`), the same code as an identity mismatch and
-    /// for the same reason: the policy names who must have signed, and a raw
-    /// attachment has no signer at all. `DataError` would be wrong — the
-    /// document may be perfectly well-formed; it is the trust class that the
-    /// policy refuses.
+    /// Exit 77 (`PermissionDenied`), not 65: the document may be well-formed; its missing signer is refused.
     #[error(
         "SBOM referrer is attached without a signature, and verification is required; \
          pass --no-verify to list it unverified"
     )]
     UnsignedRejectedByPolicy,
 
-    /// Cert chain does not verify against TUF root.
-    ///
-    /// Exit 65 (`DataError`). TUF root out of date, or cert is forged.
+    /// Cert chain does not verify against the trust root. Exit 65 (`DataError`).
     #[error("certificate chain does not verify against trust root")]
     CertChainInvalid,
 
-    /// Signature does not verify over subject digest.
-    ///
-    /// Exit 65 (`DataError`). Strongest possible failure — bundle contents tampered.
+    /// Signature does not verify over subject digest. Exit 65 (`DataError`).
     #[error("signature does not verify over subject digest")]
     SignatureInvalid,
 
-    /// The registry served subject-manifest bytes that do not hash to the
-    /// digest the index resolved.
+    /// The registry served subject-manifest bytes that do not hash to the resolved digest.
     ///
-    /// Exit 65 (`DataError`). Verification needs the signed artifact's bytes,
-    /// not just its digest, so the pipeline fetches the subject manifest and
-    /// re-hashes it. A mismatch means the registry served something other than
-    /// the resolved manifest -- corrupt or hostile. Never retryable.
+    /// Exit 65 (`DataError`); never retryable.
     #[error("registry served a subject manifest that does not match its digest")]
     SubjectDigestMismatch,
 
     /// Rekor SET does not verify against Rekor public key.
     ///
-    /// Exit 65 (`DataError`). A cryptographically invalid SET is a data integrity
-    /// failure — the bundle has been tampered with. This is distinct from
-    /// [`Self::TransparencyLogUnavailable`] (service down, retry may help): no amount of
-    /// retrying will fix a tampered SET, and callers must not treat this as a
-    /// transient failure.
+    /// Exit 65 (`DataError`); unlike [`Self::TransparencyLogUnavailable`], retrying never helps.
     #[error("Rekor SET does not verify")]
     RekorSetInvalid,
 
-    /// The Rekor transparency-log entry body does not bind to this bundle.
+    /// A valid SET spliced onto another subject (GHSA-whqx-f9j3-ch6m). Exit 65 (`DataError`).
     ///
-    /// Exit 65 (`DataError`). The SET verifies over the log entry body, but that
-    /// body's hashed subject digest, signature, or certificate does not match the
-    /// bundle's — a previously-valid SET/body spliced onto a different subject
-    /// (GHSA-whqx-f9j3-ch6m class). Like [`Self::SignatureInvalid`] this is a
-    /// tampered-bundle failure, not a service fault: retrying never heals it.
-    ///
-    /// **Currently unproduced.** The check is `sigstore`'s since the verifier
-    /// took over bundle content verification, and it models the failure in an
-    /// enum whose payload type it does not export — so the splice arrives here
-    /// as [`Self::SignatureInvalid`]. Same exit code (65), different slug. The
-    /// variant stays because the slug is a frozen contract (C-S1-1) and
-    /// removing it would break a consumer matching on it.
+    /// Produced by the sidecar path's `bind_logged_body`; on the bundle path `sigstore` reports the splice as
+    /// [`Self::SignatureInvalid`].
     #[error("Rekor transparency-log body does not bind to the bundle")]
     TransparencyBodyMismatch,
 
-    /// Bundle carries no Merkle inclusion proof.
-    ///
-    /// Exit 65. The Signed Entry Timestamp is only a *promise* to include; the
-    /// inclusion proof is the evidence that the entry is in a tree whose root
-    /// the log signed. `sigstore`'s own online branch refuses a bundle without
-    /// one, and ocx runs its verifier with `offline: true`, so this check is
-    /// what keeps the two branches at parity instead of silently weaker.
+    /// Bundle carries no Merkle inclusion proof. Exit 65.
     #[error("bundle carries no Rekor Merkle inclusion proof (re-sign against a log that returns one)")]
     RekorInclusionProofAbsent,
 
-    /// Rekor v2 transition: bundle has no SET but has an RFC 3161 TSA timestamp.
-    ///
-    /// Exit 83. v1 cannot verify TSA; full Rekor v2 support deferred until
-    /// sigstore-rs ships a v2 client.
+    /// Bundle has no SET but an RFC 3161 TSA timestamp (Rekor v2), which this build cannot verify. Exit 83.
     #[error("Rekor SET absent but TSA timestamp present (Rekor v2 transition)")]
     RekorSetAbsentTsaPresent,
 
-    /// Rekor unavailable during verify.
-    ///
-    /// Exit 83. Distinct from [`Self::RekorSetInvalid`] — retry is appropriate.
+    /// Rekor unavailable during verify. Exit 83; retryable, unlike [`Self::RekorSetInvalid`].
     #[error("Rekor transparency log unavailable")]
     TransparencyLogUnavailable,
 
-    /// Bundle parse failed (not v0.3, corrupted JSON).
-    ///
-    /// Exit 65 (`DataError`).
+    /// Bundle parse failed (not v0.3, corrupted JSON). Exit 65 (`DataError`).
     #[error("bundle parse failed")]
     BundleParseFailed,
 
-    /// Trust root could not be loaded (embedded asset missing, TUF fetch failed).
-    ///
-    /// Exit 78 (`ConfigError`).
+    /// Trust root could not be loaded. Exit 78 (`ConfigError`).
     #[error("trust root unavailable")]
     TrustRootUnavailable,
 
-    /// Trust root PEM failed to load (malformed PEM, no certificate blocks,
-    /// TUF fetch failed, etc.).
-    ///
-    /// Exit 78 (`ConfigError`). The reason is encoded as a typed discriminant
-    /// (`TrustRootLoadReason`) so callers can distinguish actionable failure
-    /// modes without parsing stderr.
+    /// Trust material failed to load, for the reason given. Exit 78 (`ConfigError`) unless the reason says otherwise.
     #[error("trust root load failed: {0}")]
     TrustRootLoad(TrustRootLoadReason),
 
-    /// The physical registry the index rewrote this reference to resolves into
-    /// a forbidden range (CWE-918).
+    /// The registry the index rewrote this reference to resolves into a forbidden range (CWE-918).
     ///
-    /// Exit 78 (`ConfigError`) -- the same code the pull path's dial guard
-    /// yields for the same refusal. Remediation: add the host to
-    /// `trusted_hosts` for that registry, or fix the indirection.
+    /// Exit 78 (`ConfigError`), matching the pull path's dial guard.
     #[error("refusing to dial the rewritten registry: {reason}")]
     ForbiddenRegistryTarget {
         /// Rendered SSRF refusal: the host and the address it resolved to.
         reason: String,
     },
 
-    /// User-supplied Sigstore endpoint URL failed SSRF/scheme validation.
+    /// A user-supplied Sigstore endpoint URL failed SSRF/scheme validation.
     ///
-    /// Surfaces at the boundary where `--rekor-url` is parsed by `ocx package
-    /// verify`. Exit 64 (`UsageError`) for a malformed flag value — a CLI
-    /// misuse, not a runtime fault — except when the host simply does not
-    /// resolve, where `reason` (a [`UrlRejection`]) carries 69
-    /// (`Unavailable`) instead: unreachable is a different failure than
-    /// malformed. The `endpoint` field carries the flag name (e.g.
-    /// `--rekor-url`) so the envelope `error.detail` is programmatically
-    /// dispatchable.
+    /// Exit 64 (`UsageError`), or 69 (`Unavailable`) when the host does not resolve.
     #[error("invalid {endpoint} URL: {reason}")]
     InvalidEndpointUrl {
         /// Flag name the URL was supplied via (e.g. `--rekor-url`).
@@ -235,43 +145,22 @@ pub enum VerifyErrorKind {
         reason: UrlRejection,
     },
 
-    /// No signing identity to verify against: neither the
-    /// `--certificate-identity` + `--certificate-oidc-issuer` flags nor a
-    /// `[[trust.policy]]` whose scope covers the target supplied one.
-    ///
-    /// Exit 64 (`UsageError`) — mirrors the prior "omitted required flag"
-    /// behavior. Verification is meaningless without knowing whose signature to
-    /// trust.
+    /// Neither the identity flags nor a `[[trust.policy]]` covering the target named a signer. Exit 64 (`UsageError`).
     #[error(
         "no trusted identity: pass --certificate-identity with --certificate-oidc-issuer, \
          or add a matching [trust.policy]"
     )]
     NoIdentityProvided,
 
-    /// A `[[trust.policy]]` entry is malformed: an empty or absent `signers`
-    /// array, an incomplete keyless signer (identity or issuer unset, both or
-    /// neither identity form set), an `identity_regexp` that does not compile,
-    /// or a key signer whose material is unreadable, unparseable, or names a
-    /// backend this build cannot resolve.
-    ///
-    /// Exit 78 (`ConfigError`).
+    /// A `[[trust.policy]]` entry is malformed. Exit 78 (`ConfigError`).
     #[error(transparent)]
     TrustPolicyInvalid(#[from] ocx_trust::TrustPolicyError),
 
-    /// The attestation scan ended with zero verified matches.
-    ///
-    /// Exit 79 (`NotFound`). Either no referrer is an attestation, or none
-    /// whose *signed* predicateType matches the requested `--type`. Narrowing
-    /// happens on the verified payload after fetch-and-parse: a referrer
-    /// annotation never excludes a candidate, because an annotation is
-    /// unsigned and a hostile publisher controls it.
+    /// The attestation scan ended with zero verified matches for the signed predicateType. Exit 79 (`NotFound`).
     #[error("no attestation found for target")]
     AttestationNotFound,
 
-    /// The signed predicateType is not the one requested, or disagrees with
-    /// the referrer's annotation.
-    ///
-    /// Exit 65 (`DataError`).
+    /// The signed predicateType is not the requested one, or disagrees with the referrer's annotation. Exit 65.
     #[error("predicate type mismatch: expected {expected}, found {actual}")]
     PredicateTypeMismatch {
         /// predicateType the caller requested, or the referrer annotation claimed.
@@ -280,50 +169,28 @@ pub enum VerifyErrorKind {
         actual: String,
     },
 
-    /// No subject in the signed Statement binds the target digest.
-    ///
-    /// Exit 65 (`DataError`). The attestation verifies cryptographically but
-    /// attests to a *different* artifact — the splice this check exists for.
+    /// No subject in the signed Statement binds the target digest. Exit 65 (`DataError`).
     #[error("statement subject does not bind the target digest: expected {expected}, found {actual}")]
     StatementSubjectMismatch {
         /// Digest of the artifact being verified.
         expected: String,
-        /// Subject digests the Statement actually carries, capped at
-        /// `attest::statement::MAX_REPORTED_SUBJECTS` with an `and N more`
-        /// tail — the Statement's subject count is attacker-chosen.
+        /// Subject digests the Statement carries, capped at `attest::statement::MAX_REPORTED_SUBJECTS`.
         actual: String,
     },
 
-    /// The signed Statement carries zero subjects.
-    ///
-    /// Exit 65 (`DataError`). A subject-less Statement binds nothing, so it
-    /// can never be evidence about this artifact. Distinct from
-    /// [`Self::StatementSubjectMismatch`]: there is nothing to compare.
+    /// The signed Statement carries zero subjects. Exit 65 (`DataError`).
     #[error("statement carries no subject")]
     StatementSubjectAbsent,
 
-    /// A subject's DigestSet carries no `sha256` entry.
-    ///
-    /// Exit 65 (`DataError`). Matching on a weaker algorithm would let a
-    /// collision stand in for the binding, so an unusable DigestSet is
-    /// refused rather than matched on what it does carry.
-    // The {:?} interpolation is deliberate: Debug-escaping the registry-sourced
-    // strings IS the CWE-150 terminal-injection protection. Do not "clean up" to {}.
+    /// A subject's DigestSet carries no `sha256` entry. Exit 65 (`DataError`).
+    // `{:?}` Debug-escapes registry-sourced strings against terminal injection (CWE-150); never `{}`.
     #[error("statement subject carries no sha256 digest (found: {algorithms:?})")]
     StatementSubjectWeakAlgorithm {
-        /// Digest algorithms present on the subject, capped at
-        /// `attest::statement::MAX_REPORTED_SUBJECTS` — a hostile Statement
-        /// carries hundreds of thousands of them, and this field crosses into
-        /// `--json` unrendered.
+        /// Digest algorithms present on the subject, capped at `attest::statement::MAX_REPORTED_SUBJECTS`.
         algorithms: Vec<String>,
     },
 
-    /// A policy `builder` pin did not match the provenance predicate.
-    ///
-    /// Exit 65 (`DataError`). Covers all three shapes of failure — the
-    /// builder identity is absent, unparseable, or simply different. A pin
-    /// that cannot be evaluated is a refusal, never a skip: silently passing
-    /// an unpinnable predicate is how a policy stops being a policy.
+    /// A policy `builder` pin did not match the provenance's builder, or none could be read. Exit 65 (`DataError`).
     #[error(
         "builder identity mismatch: policy pins {expected}, provenance names {}",
         found.as_deref().unwrap_or("none")
@@ -335,19 +202,14 @@ pub enum VerifyErrorKind {
         found: Option<String>,
     },
 
-    /// The Statement's `_type` is outside `ACCEPTED_STATEMENT_TYPES`.
-    ///
-    /// Exit 65 (`DataError`).
+    /// The Statement's `_type` is outside `ACCEPTED_STATEMENT_TYPES`. Exit 65 (`DataError`).
     #[error("unsupported in-toto statement type: {statement_type}")]
     StatementTypeUnsupported {
         /// The `_type` value the Statement declared.
         statement_type: String,
     },
 
-    /// The DSSE envelope's `payloadType` is not `application/vnd.in-toto+json`.
-    ///
-    /// Exit 65 (`DataError`). Checked before the payload is parsed: the
-    /// declared type is what says how to read the bytes.
+    /// The DSSE envelope's `payloadType` is not `application/vnd.in-toto+json`. Exit 65 (`DataError`).
     #[error("unsupported DSSE payload type: {payload_type}")]
     PayloadTypeUnsupported {
         /// The `payloadType` value the envelope declared.
@@ -355,56 +217,35 @@ pub enum VerifyErrorKind {
     },
 
     /// A cosign simplesigning payload's `critical.type` is not
-    /// [`SIMPLESIGNING_CLAIM_TYPE`](crate::simplesigning::SIMPLESIGNING_CLAIM_TYPE).
-    ///
-    /// Exit 65 (`DataError`). `critical` is by definition the part a verifier
-    /// must understand, so a payload declaring another claim type is not an
-    /// image signature and must never be read as one — refused rather than
-    /// skipped, or a registry could relabel a signature into "none found".
-    // The {:?} interpolation is deliberate: Debug-escaping the registry-sourced
-    // string IS the CWE-150 terminal-injection protection. Do not "clean up" to {}.
+    /// [`SIMPLESIGNING_CLAIM_TYPE`](crate::simplesigning::SIMPLESIGNING_CLAIM_TYPE). Exit 65 (`DataError`).
+    // `{:?}` Debug-escapes registry-sourced strings against terminal injection (CWE-150); never `{}`.
     #[error("unsupported simplesigning claim type: {claim_type:?}")]
     SimpleSigningClaimUnsupported {
         /// The `critical.type` value the payload declared.
         claim_type: String,
     },
 
-    /// The bundle's DSSE envelope carries other than exactly one signature.
-    ///
-    /// Exit 65 (`DataError`). Verifying one signature out of several would
-    /// report "verified" for an envelope whose other signatures nobody checked.
+    /// The bundle's DSSE envelope carries other than exactly one signature. Exit 65 (`DataError`).
     #[error("DSSE envelope carries {count} signatures, expected exactly 1")]
     MultipleSignatures {
         /// Number of signatures on the envelope.
         count: usize,
     },
 
-    /// More than one verified attestation matched.
-    ///
-    /// Exit 65 (`DataError`). `ocx package sbom --output` writes one document;
-    /// picking one of several verified candidates would make which SBOM a
-    /// consumer receives depend on referrer ordering.
-    // The {:?} interpolation is deliberate: Debug-escaping the registry-sourced
-    // strings IS the CWE-150 terminal-injection protection. Do not "clean up" to {}.
+    /// More than one verified attestation matched. Exit 65 (`DataError`).
+    // `{:?}` Debug-escapes registry-sourced strings against terminal injection (CWE-150); never `{}`.
     #[error(
         "multiple attestations match the target: {referrer_digests:?}; {}",
         narrow_by_type_hint(.predicate_types)
     )]
     MultipleAttestations {
-        /// Every distinct predicateType across the matches, sorted and
-        /// deduplicated. All of them, not the first: a mixed-type match set
-        /// named by one type tells the operator something untrue about the
-        /// other candidates, and `--type` is unusable advice without the list
-        /// of values it accepts here.
+        /// Every distinct predicateType across the matches, sorted and deduplicated.
         predicate_types: Vec<String>,
         /// Digests of the referrers that matched.
         referrer_digests: Vec<String>,
     },
 
-    /// The transparency-log entry's `kindVersion` is outside `ACCEPTED_TLOG_KINDS`.
-    ///
-    /// Exit 65 (`DataError`). Each kind has its own canonicalization, so an
-    /// unrecognized one cannot be re-derived and compared at all.
+    /// The transparency-log entry's `kindVersion` is outside `ACCEPTED_TLOG_KINDS`. Exit 65 (`DataError`).
     #[error("unsupported transparency-log entry kind: {kind} v{version}")]
     UnsupportedTlogEntryKind {
         /// The entry `kind` (e.g. `hashedrekord`).
@@ -413,23 +254,13 @@ pub enum VerifyErrorKind {
         version: String,
     },
 
-    /// The canonicalized log-entry body does not match the received envelope.
-    ///
-    /// Exit 65 (`DataError`). Deliberately *not* named `EnvelopeHashMismatch`:
-    /// verify never recomputes an envelope hash, so a name promising that
-    /// comparison would describe a check that does not exist. What is compared
-    /// is the body's `payloadHash` and `signatures[]` against the envelope
-    /// actually received.
+    /// The log body's `payloadHash` or `signatures[]` do not match the received envelope. Exit 65 (`DataError`).
     #[error("transparency-log entry does not bind to the received envelope")]
     TlogBindingMismatch,
 
-    /// The log entry's `integratedTime` falls outside the leaf certificate's
-    /// validity window.
+    /// The log entry's `integratedTime` falls outside the leaf certificate's validity window (CVE-2024-55655).
     ///
-    /// Exit 65 (`DataError`). CVE-2024-55655: without this check an expired
-    /// certificate's signature stays acceptable forever, because the log entry
-    /// alone does not prove the signature was made while the cert was valid.
-    /// All three fields are RFC 3339 with an explicit `Z`.
+    /// Exit 65 (`DataError`). All three fields are RFC 3339 with an explicit `Z`.
     #[error(
         "transparency-log integrated time {integrated_time} is outside the certificate validity window {not_before} to {not_after}"
     )]
@@ -442,28 +273,16 @@ pub enum VerifyErrorKind {
         not_after: String,
     },
 
-    /// An **unsigned** SBOM referrer's payload layer declared a media type
-    /// outside the SBOM set.
+    /// An **unsigned** SBOM referrer's payload layer declared a media type outside the SBOM set.
     ///
-    /// Exit 65 (`DataError`). An unsigned referrer records what it carries in
-    /// its `artifactType` and its layer's `mediaType`, and nothing signs either
-    /// — so a layer typed outside the set is the one structural claim the read
-    /// path can check, and an unreadable blob under an SBOM `artifactType` is
-    /// refused rather than listed as an SBOM.
-    ///
-    /// Distinct from [`Self::PayloadTypeUnsupported`], which is the DSSE
-    /// envelope's `payloadType` inside a *signed* bundle: same shape of
-    /// complaint, different document, and a script that conflated them would
-    /// draw the wrong conclusion about whether a signature was involved.
+    /// Exit 65 (`DataError`); the signed-bundle counterpart is [`Self::PayloadTypeUnsupported`].
     #[error("unsupported SBOM payload media type: {media_type}")]
     SbomMediaTypeUnsupported {
         /// The layer `mediaType` the referrer declared.
         media_type: String,
     },
 
-    /// The attestation envelope exceeded `MAX_ATTESTATION_ENVELOPE_BYTES`.
-    ///
-    /// Exit 65 (`DataError`).
+    /// The attestation envelope exceeded `MAX_ATTESTATION_ENVELOPE_BYTES`. Exit 65 (`DataError`).
     #[error("attestation envelope is {actual} bytes, over the {limit}-byte limit")]
     AttestationTooLarge {
         /// The configured ceiling, in bytes.
@@ -472,11 +291,7 @@ pub enum VerifyErrorKind {
         actual: u64,
     },
 
-    /// The Statement payload (estimated pre-decode from the base64 length) exceeded `MAX_STATEMENT_PAYLOAD_BYTES`.
-    ///
-    /// Exit 65 (`DataError`). Separate from [`Self::AttestationTooLarge`]
-    /// because base64 in the envelope and the decoded payload are two
-    /// different sizes, and the decode is where the expansion happens.
+    /// The Statement payload (estimated pre-decode) exceeded `MAX_STATEMENT_PAYLOAD_BYTES`. Exit 65 (`DataError`).
     #[error("attestation payload is {actual} bytes, over the {limit}-byte limit")]
     AttestationPayloadTooLarge {
         /// The configured ceiling, in bytes.
@@ -485,81 +300,37 @@ pub enum VerifyErrorKind {
         actual: u64,
     },
 
-    /// The referrer list held more than `MAX_ATTESTATION_CANDIDATES` entries.
-    ///
-    /// Exit 65 (`DataError`). Fail-closed, like
-    /// [`Self::CandidateLimitExhausted`] on the signature path: candidates
-    /// exist, so reporting "not found" would misreport a possibly-attested
-    /// artifact.
+    /// The referrer list held more than `MAX_ATTESTATION_CANDIDATES` entries. Exit 65 (`DataError`), not 79.
     #[error("more than {limit} attestation candidates for target")]
     TooManyAttestations {
         /// The configured candidate ceiling.
         limit: usize,
     },
 
-    /// Cumulative attestation bytes exceeded `MAX_TOTAL_ATTESTATION_BYTES`.
-    ///
-    /// Exit 65 (`DataError`). Per-envelope caps bound one candidate; this
-    /// bounds the scan, which is what a thousand small envelopes attack.
+    /// Cumulative attestation bytes exceeded `MAX_TOTAL_ATTESTATION_BYTES`. Exit 65 (`DataError`).
     #[error("attestation fetch exceeded the {limit}-byte total budget")]
     AttestationBudgetExhausted {
         /// The configured total-bytes ceiling.
         limit: u64,
     },
 
-    /// A `--key` reference named a key backend OCX recognises but has not
-    /// implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
-    /// `k8s://`).
-    ///
-    /// Exit 85 (`UnsupportedKeyBackend`). Verify parses `--key` on its own
-    /// path, so it reaches 85 on its own rather than borrowing the sign-side
-    /// error: one vocabulary, two taxonomies. The slug is byte-identical to
-    /// `SignErrorKind`'s so a script reads one word for one failure.
-    ///
-    /// Remediation: pass a file key, or wait for the backend. Never reported as
-    /// "no such file or directory" -- the refusal happens at the parse
-    /// boundary, before anything treats the reference as a path.
-    ///
-    /// `transparent` rather than a wrapping message: the wrapped
-    /// [`KeyRefError`] already names the scheme, and a prefix here would render
-    /// the sentence twice under `{err:#}`. Transparent forwards `source()`
-    /// *past* the value it wraps, which is harmless here -- `KeyRefError` is a
-    /// leaf with no source of its own, and `exit_code()` answers for this
-    /// variant directly instead of delegating to the chain walker.
+    /// A `--key` reference named a recognised but unimplemented key backend (KMS, Vault, `k8s://`). Exit 85.
+    // `transparent` makes `source()` skip `KeyRefError`, so this variant must be classified directly, never by chain
+    // walk.
     #[error(transparent)]
     UnsupportedKeyBackend(KeyRefError),
 
-    /// A `--key` reference could not be parsed: an unrecognised scheme token,
-    /// or nothing following the scheme.
-    ///
-    /// Exit 64 (`UsageError`). Remediation: fix the reference. Same
-    /// `transparent` reasoning as [`Self::UnsupportedKeyBackend`]; the two are
-    /// separate variants because their exit codes and their remedies differ,
-    /// and `From<KeyRefError>` is the single place that decides which applies.
+    /// A `--key` reference could not be parsed. Exit 64 (`UsageError`).
     #[error(transparent)]
     KeyReferenceInvalid(KeyRefError),
 
-    /// Catch-all for verify-side failures outside the codes above (index
-    /// resolution, digest parse, malformed URL join).
-    ///
-    /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
-    /// `classify_error` chain-walking and `{err:#}` diagnostics preserve the
-    /// cause — never erase it with `.to_string()`.
+    /// Catch-all for verify-side failures outside the codes above. Exit 1 (`Failure`).
     #[error("internal verification error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// The disambiguation advice carried by [`VerifyErrorKind::MultipleAttestations`].
-///
-/// `--type` narrows a scan by predicate type, so it is a remedy only when the
-/// matches disagree about type. Two CycloneDX SBOMs attested by two CI runs
-/// are the other case, and sending that operator round `--type cyclonedx`
-/// returns them exactly where they started — so the single-type set says so
-/// instead of naming a flag that cannot help.
-///
-/// `{:?}` on every interpolated value is deliberate and load-bearing: these
-/// strings are read out of a registry-served payload and rendered to a
-/// terminal, and Debug-escaping them IS the CWE-150 protection.
+/// The disambiguation advice for [`VerifyErrorKind::MultipleAttestations`]; `--type` cannot narrow a single-type set.
+// `{:?}` Debug-escapes registry-sourced strings against terminal injection (CWE-150); never `{}`.
 fn narrow_by_type_hint(predicate_types: &[String]) -> String {
     match predicate_types {
         [single] => format!("every match carries {single:?}, so --type cannot narrow further"),
@@ -567,28 +338,17 @@ fn narrow_by_type_hint(predicate_types: &[String]) -> String {
     }
 }
 
-/// Typed discriminant for [`VerifyErrorKind::TrustRootLoad`].
-///
-/// Each variant maps to a distinct user-facing remediation; replacing the
-/// previous free-form `String reason` with this enum lets callers (and
-/// integration tests) pattern-match on the failure mode without string
-/// matching, and prevents accidental introduction of paths or other
-/// sensitive content into the reason text.
+/// Typed discriminant for [`VerifyErrorKind::TrustRootLoad`], one remediation per variant.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TrustRootLoadReason {
-    /// `TrustRoot::load_embedded` invoked but the compile-time TUF asset is
-    /// not present (Slice 1: not yet shipped).
+    /// The compile-time TUF asset is not bundled in this build.
     #[error("embedded trust-root asset is not bundled in this build")]
     EmbeddedAssetMissing,
 
-    /// I/O error reading a trust-root asset (filesystem or embedded source).
+    /// A trust-root asset no operator named could not be read (TUF fetch, assembled root). Exit 78.
     ///
-    /// Not a file an operator named — the two sites that raise it are
-    /// `TrustRoot::load_embedded` (the TUF fetch did not produce a root) and
-    /// `Verifier::new` (the assembled root is unusable). Both stay
-    /// `ConfigError` (78). A path the operator typed raises
-    /// [`Self::TrustRootUnreadable`] instead.
+    /// An operator-typed path raises [`Self::TrustRootUnreadable`] instead.
     #[error("trust-root asset read failed")]
     AssetReadFailed {
         /// Underlying I/O / source error.
@@ -596,28 +356,8 @@ pub enum TrustRootLoadReason {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// A trust-root file an operator named could not be read.
-    ///
-    /// The doors are `--sigstore-trusted-root`, `OCX_SIGSTORE_TRUSTED_ROOT`,
-    /// `[trust.sigstore] trusted_root`, and the
-    /// `$OCX_HOME/sigstore/trusted-root.json` convention path when it is
-    /// present but unusable.
-    ///
-    /// Split from [`Self::AssetReadFailed`] because it exits 74 `io_error`
-    /// rather than 78 `config_error`: a path the operator typed that is
-    /// missing, is not a regular file, or is past the read ceiling is a
-    /// filesystem failure, and `--key file:<missing>` has always answered 74
-    /// for the identical shape. Its own `kind_detail` slug follows, so the
-    /// exit code and the word in the JSON envelope tell one story — the
-    /// `key_unreadable` precedent.
-    ///
-    /// The message interpolates its source, which is where the path is: the
-    /// verify error's own `Display` renders this reason and stops, so a
-    /// message that named no file left an operator with exit 74 and nothing to
-    /// act on — the shape `AssetReadFailed` still has, and the reason the
-    /// exit-code table's row for this flag can assert the path at all. A
-    /// trusted-root path is not a credential; `--key file:<missing>` has always
-    /// printed its own.
+    /// A trust-root file an operator named could not be read. Exit 74 (`io_error`), matching `--key file:<missing>`.
+    // Interpolates `source` because it carries the path and the verify error's `Display` stops here.
     #[error("trust-root file could not be read: {source}")]
     TrustRootUnreadable {
         /// What the bounded read raised.
@@ -639,17 +379,11 @@ pub enum TrustRootLoadReason {
     /// PEM bytes parsed but did not yield a valid certificate body.
     #[error("PEM parse failed: {detail}")]
     PemParseFailed {
-        /// Short detail (e.g., `"unexpected block label"`). Never embed file
-        /// paths or other sensitive content here.
+        /// Short detail; never a file path or other sensitive content.
         detail: String,
     },
 
-    /// The trust root carries Fulcio anchors but no CT log key.
-    ///
-    /// Sigstore certificates carry an embedded SCT that the verifier checks
-    /// against the CT log's key, so anchors alone cannot verify anything. A
-    /// trusted-root document that declares only a certificate authority hits
-    /// this; the remedy is one that carries the log keys alongside the anchors.
+    /// The trust root carries Fulcio anchors but no CT log key, so no embedded SCT can verify.
     #[error(
         "trust root carries no CT log key: supply a trusted-root JSON via --sigstore-trusted-root \
          (see `cosign trusted-root create`, or test/sigstore/generate-trusted-root.py for a self-hosted stack)"
@@ -661,34 +395,21 @@ pub enum TrustRootLoadReason {
     NoCertificateBlocks,
 
     /// `[trust.sigstore]` declared both `trusted_root` and `trusted_root_json`.
-    ///
-    /// One trust root, two spellings: taking either would silently discard the
-    /// other, and which one wins is not something an operator can predict from
-    /// the file. The message names both keys and asks for one.
     #[error(
         "[trust.sigstore] declares both trusted_root and trusted_root_json: keep one \
          (trusted_root_json is what `ocx config push` publishes; trusted_root names a local file)"
     )]
     AmbiguousTrustRootConfig,
 
-    /// Offline verify found no usable trust material: no `--sigstore-trusted-root` /
-    /// cached trust root supplying a pinned Rekor key, and the online
-    /// fetch/embedded fallback is forbidden offline. The message names the remedy.
+    /// Offline verify found no trust material carrying a pinned Rekor key.
     #[error(
         "offline verify has no pinned Rekor key: supply --sigstore-trusted-root, or run an online verify first to populate the trust-root cache"
     )]
     OfflineTrustMaterialUnavailable,
 }
 
-/// Select the verify-side variant a `--key` parse failure belongs to.
-///
-/// Byte-identical split to the sign-side twin, and deliberately duplicated
-/// rather than shared: the two taxonomies are separate enums by design, and a
-/// shared helper returning "the kind" could only do so by erasing which one.
-/// The match is exhaustive with no wildcard -- `KeyRefError` is
-/// `#[non_exhaustive]`, but that binds downstream crates only, so in the crate
-/// that defines it a new rejection reason is a compile error until it is
-/// classified here.
+/// Select the verify-side variant a `--key` parse failure belongs to; keep the split identical to the sign side's.
+// Exhaustive, no `_`: a new `KeyRefError` variant must fail the build until classified here.
 impl From<KeyRefError> for VerifyErrorKind {
     fn from(error: KeyRefError) -> Self {
         match error {

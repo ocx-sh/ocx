@@ -1,31 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Report type for `ocx package sbom` output.
-//!
-//! Named apart from the lib-side `SbomReport`, following the existing pair
-//! convention (lib `SignReport` / CLI `SignatureReport`, lib `VerifyResult` /
-//! CLI [`VerificationReport`](super::verification::VerificationReport)).
-//!
-//! Unlike `package verify`, this command reports a **list**: `sbom_one` is
-//! collect-all because "which SBOMs does this artifact carry" does not have
-//! one answer (`adr_sbom_attestations.md` D-e). Refusals travel beside the
-//! matches — a scan that returns three attestations having refused two is the
-//! observation worth acting on, and dropping the refusals makes it
-//! indistinguishable from a clean three.
-//!
-//! # CWE-150
-//!
-//! Every plain-format value here is registry-sourced by construction: the
-//! certificate SAN and issuer are read out of a Fulcio cert carried in a
-//! bundle a registry served, `predicate_type` is read out of the signed
-//! payload, `RefusedCandidate::referrer_digest` is the registry's own listing
-//! string (never a parsed [`ocx_oci::Digest`]), and a refusal reason's Display
-//! text embeds it. All of them route through
-//! [`sanitize_for_terminal`](super::sanitize_for_terminal) in
-//! [`SbomListingReport::plain_rows`], which is the single render boundary this
-//! module has. `--format json` stays verbatim, matching the crate-wide
-//! contract stated on [`sanitize_for_terminal`] — that is a machine channel.
+//! Report type for `ocx package sbom`; a refused candidate is reported beside the matches, not
+//! dropped (`adr_sbom_attestations.md` D-e). Every plain value is registry-sourced (CWE-150).
 
 use ocx_console::{Cell, Column};
 use serde::Serialize;
@@ -33,14 +10,14 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
 
-/// Plain-format refusal head, per PKG-26. `--format json` is never truncated.
+/// Plain-format refusal head; `--format json` is never truncated.
 const MAX_PLAIN_REFUSALS: usize = 20;
 
 /// Every verified attestation a package carries, plus what was refused.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SbomListingReport {
     /// One-glance counts, so a consumer branches on a field instead of
-    /// measuring an array (PKG-25).
+    /// measuring an array.
     pub summary: ListingSummary,
     /// One entry per verified attestation, in listing order.
     pub entries: Vec<SbomEntry>,
@@ -49,18 +26,13 @@ pub struct SbomListingReport {
     pub refused: Vec<RefusedEntry>,
 }
 
+// Same vocabulary as the per-entry `verified` flag, so one word means one thing at both levels.
 /// Which trust contract the whole listing was produced under.
 ///
-/// A script needs this to read the rows correctly: `unverified` rows mean two
-/// different things depending on it. Under [`Self::Verified`] an unverified row
-/// cannot occur at all (an unsigned attachment is refused, not listed), so
-/// every entry carries a checked signature. Under [`Self::Unverified`] nothing
-/// was checked and every entry is unverified regardless of whether a publisher
-/// signed it — a signed SBOM read this way is reported exactly like an
-/// unsigned one, because this run has no evidence to tell them apart.
-///
-/// Deliberately the same vocabulary as the per-entry `verified` flag rather
-/// than the internal mode names, so one word means one thing at both levels.
+/// Under `verified` an unverified row cannot occur (an unsigned attachment is
+/// refused, not listed), so every entry carries a checked signature. Under
+/// `unverified` nothing was checked and every entry is unverified, even one a
+/// publisher signed: this run has no evidence to tell them apart.
 #[derive(Debug, Serialize, schemars::JsonSchema, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum ListingVerification {
@@ -75,8 +47,7 @@ pub enum ListingVerification {
 pub struct ListingSummary {
     /// `success` when nothing was refused, `partial_failure` otherwise.
     pub status: &'static str,
-    /// Which trust contract produced this listing. See
-    /// [`ListingVerification`].
+    /// Which trust contract produced this listing: `verified` or `unverified`.
     pub verification: ListingVerification,
     /// Mirrors the process exit code. Always 0 here, as a posture rather than
     /// as an unreachability claim: a refusal beside a listing is a partial
@@ -91,7 +62,7 @@ pub struct ListingSummary {
     /// Attestations that passed every check.
     pub verified: usize,
     /// Documents no signature was checked for. Counted apart from
-    /// [`Self::verified`] so a script branches on the trust class instead of
+    /// `verified` so a script branches on the trust class instead of
     /// filtering the array — an unverified document is a real answer to "what
     /// SBOMs does this carry" and not a real answer to "who vouches for them".
     pub unverified: usize,
@@ -102,8 +73,8 @@ pub struct ListingSummary {
 /// One verified attestation.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SbomEntry {
-    /// predicateType. Read out of the **signed** payload when
-    /// [`Self::verified`]; derived from the referrer's `artifactType`
+    /// predicateType. Read out of the **signed** payload when `verified`;
+    /// derived from the referrer's `artifactType`
     /// otherwise, since an unsigned referrer states its type nowhere else.
     pub predicate_type: String,
     /// Whether a signature was verified over this document.
@@ -116,36 +87,23 @@ pub struct SbomEntry {
     /// supersedes this index-level one. A shadowed entry stays listed under
     /// `--format json`; only the human default collapses to the preferred one.
     ///
-    /// Emitted unconditionally, unlike the optional fields below and unlike
-    /// `VerificationReport::signatures`: `false` is a *true* statement here —
-    /// nothing supersedes this document — where an omitted-while-empty array
-    /// would be a claim that we had looked. A consumer can therefore branch on
-    /// the key without first testing for its presence.
+    /// Emitted unconditionally: `false` is a *true* statement — nothing
+    /// supersedes this document — so a consumer can branch on the key without
+    /// first testing for its presence.
     pub shadowed: bool,
     /// The target digest. Proven bound by the signed Statement when
-    /// [`Self::verified`]; claimed by the referrer otherwise.
+    /// `verified`; claimed by the referrer otherwise.
     pub subject_digest: String,
-    /// What carried the document — and **not always a manifest**. Almost
-    /// always the OCI referrer manifest's digest; the **layer** blob's digest
-    /// in exactly one case, a verified attestation read off a cosign
-    /// `sha256-<hex>.att` sidecar tag, where one layer is one document and the
-    /// manifest digest would name all of them at once. A consumer that
-    /// addresses it as `GET /v2/<name>/manifests/<digest>` therefore 404s on
-    /// that case.
+    /// What carried the document — **not always a manifest**.
     ///
-    /// Narrower than the verify side's rule, and for a structural reason: an
-    /// SBOM scan runs under `VerifyContentMode::Attestation`, which leaves
-    /// `discover_simplesigning` false, so the `.sig` sidecar door — the one
-    /// that reports a layer digest while claiming `referrers_api`, because it
-    /// inherits the *listing's* discovery method — is never opened here. The
-    /// only layer digest reachable is the `.att` reader's, and that door is
-    /// tag-addressed by construction.
-    ///
-    /// This row carries neither `signature_format` nor `discovery_method`, so
-    /// there is nothing here to branch on: a consumer that must address the
-    /// digest reads the same subject through
+    /// Almost always the OCI referrer manifest's digest; the **layer** blob's
+    /// digest in exactly one case, a verified attestation read off a cosign
+    /// `sha256-<hex>.att` sidecar tag (one layer is one document), where
+    /// `GET /v2/<name>/manifests/<digest>` 404s. This row carries no
+    /// discriminator: to address the digest, read the same subject through
     /// `ocx package verify --attestation --format json`, whose `signatures[]`
-    /// rows carry the discriminator.
+    /// rows carry `signature_format`.
+    // Only the `.att` reader yields a layer digest here: an SBOM scan never enables `discover_simplesigning`.
     pub referrer_digest: String,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,7 +113,7 @@ pub struct SbomEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
-    /// Rekor integrated time, RFC 3339 with an explicit `Z` (PLAT-31).
+    /// Rekor integrated time, RFC 3339 with an explicit `Z`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signed_at: Option<String>,
@@ -201,28 +159,19 @@ pub struct RefusedEntry {
     /// Why this candidate was refused, as prose for a human. Registry-sourced
     /// either way: several kinds quote a field read off the wire.
     pub reason: String,
-    /// The same refusal as a frozen slug (`VerifyErrorKind::kind_detail`).
+    /// The same refusal as a frozen slug.
     ///
-    /// PKG-25: a script branches on this, never on [`Self::reason`] — the
-    /// prose is English, it is free to be reworded, and substring-matching it
-    /// is how a consumer silently stops matching. `&'static str` on purpose:
-    /// the only values that fit are the ones the frozen table produces.
+    /// Branch on this, never on `reason`: the prose is English and free to be
+    /// reworded, and substring-matching it is how a consumer silently stops
+    /// matching.
+    // `&'static str`: only the frozen `VerifyErrorKind::kind_detail` table fits.
     pub reason_kind: &'static str,
 }
 
 impl SbomListingReport {
-    /// Assemble a listing from already-rendered entries and refusals.
     pub fn new(verification: ListingVerification, entries: Vec<SbomEntry>, refused: Vec<RefusedEntry>) -> Self {
         let verified = entries.iter().filter(|entry| entry.verified).count();
-        // An asserted invariant, not a derivation: `verification` names the
-        // mode that *ran*, so an empty demanded listing still says `verified`
-        // and deriving the field from the rows would silently rename it
-        // `unverified`. What must never happen is the reverse — a demanded run
-        // emitting an unverified row — because the summary would then vouch for
-        // a document nothing checked. True by construction today (a demanded
-        // scan refuses unsigned attachments rather than listing them, and its
-        // `unverified` vector is always empty), and this makes a regression
-        // that quietly changes that loud in test and debug builds.
+        // Asserted, not derived: derived, an empty demanded listing would read `unverified`.
         debug_assert!(
             verification == ListingVerification::Unverified || verified == entries.len(),
             "a demanded listing must carry no unverified rows",
@@ -237,9 +186,7 @@ impl SbomListingReport {
             exit_code: 0,
             total: entries.len() + refused.len(),
             verified,
-            // Subtraction rather than a second filter pass: the two counts
-            // partition `entries` by construction, so deriving one from the
-            // other is what keeps them summing to `entries.len()`.
+            // Derived, so the two counts always sum to `entries.len()`.
             unverified: entries.len() - verified,
             refused: refused.len(),
         };
@@ -250,36 +197,16 @@ impl SbomListingReport {
         }
     }
 
-    /// The plain-format cells, column-major, exactly as `print_plain` renders
-    /// them — plus the truncation trailer when one is due.
-    ///
-    /// Extracted from `print_plain` for the reason
-    /// [`VerificationReport::plain_fields`](super::verification::VerificationReport)
-    /// was: `Printer` writes to the real process stdout with no injectable
-    /// writer, so rendered bytes cannot be captured in-process. This pure
-    /// helper carries the same value list with no `Printer` dependency, which
-    /// is what makes the CWE-150 neutralization assertable.
-    ///
-    /// **Every** value is routed through the sanitizer, including the ones
-    /// whose current source cannot carry a control character. A filter applied
-    /// per field has to be re-argued for every field added later, and the
-    /// neutralization is identity on hex, on an ISO-8601 stamp and on an
-    /// ordinary URI — pinned by `ordinary_values_pass_through_verbatim`.
+    /// The plain cells, column-major, plus the truncation trailer; a pure helper so the CWE-150
+    /// neutralization is testable. Every value is sanitized, including ones that cannot yet carry a
+    /// control character, so a field added later is covered.
     fn plain_rows(&self) -> [Vec<String>; 4] {
         let mut kind = Vec::new();
         let mut subject = Vec::new();
         let mut referrer = Vec::new();
         let mut detail = Vec::new();
 
-        // C-011: the human-readable default is the one rendering that collapses.
-        // A shadowed document is superseded, not absent — `--format json` still
-        // carries it, marked — so an operator reading a table gets the document
-        // that wins and a script still gets the whole picture.
-        //
-        // The rows arrive already grouped by subject (the scan reads one subject
-        // to completion before the next), which is what makes the short subject
-        // digest a legend rather than a column to sort by: adjacent rows sharing
-        // one value say "these describe the same object" at a glance.
+        // Shadowed rows stay in JSON, marked; plain shows only the winner.
         for entry in self.entries.iter().filter(|entry| !entry.shadowed) {
             kind.push(sanitize_for_terminal(&entry.predicate_type));
             subject.push(sanitize_for_terminal(&short_digest(&entry.subject_digest)));
@@ -287,10 +214,7 @@ impl SbomListingReport {
             detail.push(sanitize_for_terminal(&entry.describe_plain()));
         }
 
-        // PKG-26: a fixed head plus a count, never the whole fan-out. A hostile
-        // registry can list thousands of refusable referrers, and the terminal
-        // is where that costs an operator their scrollback; `--format json`
-        // keeps every one.
+        // A fixed head plus a count: a hostile registry can list thousands of refusals.
         for refusal in self.refused.iter().take(MAX_PLAIN_REFUSALS) {
             kind.push("refused".to_string());
             subject.push(String::new());
@@ -308,41 +232,24 @@ impl SbomListingReport {
     }
 }
 
-/// A wire digest string in its canonical short form (`sha256:` + 12 hex).
-///
-/// Short because the plain-format budget allows a full 71-column digest at most
-/// once per view, and `Referrer` already spends it. Falls back to the verbatim
-/// string when the value does not parse — the row still has to render.
+/// A wire digest in short form (`sha256:` + 12 hex), verbatim when it does not parse; `Referrer`
+/// already spends the view's one full digest.
 fn short_digest(digest: &str) -> String {
     ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }
 
 impl SbomEntry {
-    /// The plain-format detail column: identity, issuer, signed-at, and the
-    /// component count when `--summary` populated one.
-    ///
-    /// Joined here rather than at the call site so `plain_rows` has exactly one
-    /// sanitizer call per column — the count-form guard's known evasion is two
-    /// sanitized values paying for a third raw one in the same expression.
+    /// The plain detail column: identity, issuer, signed-at and, under `--summary`, the component
+    /// count, joined here so `plain_rows` sanitizes each column exactly once.
     fn describe_plain(&self) -> String {
-        // An unverified row leads with what it is, because the only thing an
-        // operator must not do is read it as one of the signed ones. A blank
-        // identity column would read as a rendering failure instead.
-        //
-        // Keyed on `verified`, which IS the trust class, never on whether the
-        // three signing fields happen to be populated: those are a projection
-        // of the trust class, so deriving it back from them would let one
-        // missing field silently relabel a verified document as unverified.
+        // Keyed on `verified`, never on the signing fields, or one missing field relabels a verified document.
         let mut detail = match (self.verified, &self.certificate_identity, &self.certificate_oidc_issuer) {
             (true, Some(identity), Some(issuer)) => {
                 let signed_at = self.signed_at.as_deref().unwrap_or("an unknown time");
                 format!("{identity} ({issuer}) signed {signed_at}")
             }
             (true, _, _) => "verified".to_string(),
-            // Not "attached without a signature": under --no-verify a signed
-            // publisher's bundle reads out here too, and nothing distinguishes
-            // it from a raw attachment because nothing checked either. What
-            // was and was not done is the only claim that holds for both.
+            // Not "unsigned": under `--no-verify` a signed bundle lands here too, since nothing checked it.
             (false, _, _) => "UNVERIFIED - no signature was checked".to_string(),
         };
         if let Some(summary) = &self.summary {
@@ -367,8 +274,7 @@ impl Printable for SbomListingReport {
         data.print_table(&columns, &rows);
     }
 
-    /// Emit a success envelope:
-    /// `{"schema_version":1,"command":"package sbom","exit_code":0,"data":{...}}`.
+    /// Emits the success envelope `{"schema_version":1,"command":"package sbom","exit_code":0,"data":{...}}`.
     fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,

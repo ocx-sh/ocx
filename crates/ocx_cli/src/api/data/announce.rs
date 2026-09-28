@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The `ocx package announce` report (C-061).
-//!
-//! Six of its keys — `forge`, `transport`, `credential_kind`,
-//! `push_credential_kind`, `branch` and `capability_checks` — are the same keys
-//! and the same value vocabularies C-060 contracts for the claim report, so
-//! they render through the neutral [`forge_report`](super::forge_report) module
-//! (DX-59) and never through [`claim`](super::claim). `owners` and `author` are
-//! **not** among them: announce records no governance, and C-061 names their
-//! absence.
+//! The `ocx package announce` report; keys shared with the claim report render through
+//! [`forge_report`](super::forge_report). It carries no `owners` or `author`: announce records no governance.
 
 use ocx_announce::announce::{AnnounceOutcome, AnnounceStatus};
 use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
@@ -24,46 +17,13 @@ use crate::api::Printable;
 /// Result of a successful `ocx package announce`.
 ///
 /// Plain format: a one-row table (`Package`, `Status`, `Pull Request`, `Fork`,
-/// `Written Paths`) — a dash marks a field the mode did not produce, and
-/// `Written Paths` is how many were written, not the list (it is unbounded by
-/// construction: one path per tag). Dropped reserved tags have no column; the
-/// command warns about them on stderr when there are any.
+/// `Written Paths`); a dash marks a field the mode did not produce, and
+/// `Written Paths` is a count, not the list. Every other key is JSON-only; the
+/// command warns about dropped reserved tags on stderr when there are any.
 ///
-/// **C-061's six new keys are JSON-only**, the way `desc_status` already is.
-/// The plain table is at its five-column budget, and the only room for
-/// `Transport` or `Branch` would come from dropping `Fork` or `Written Paths` —
-/// an uncontracted break of a shape scripts already read. C-061 contracts keys,
-/// not columns; that this is a decision and not an oversight is why it is
-/// written here.
-///
-/// JSON format:
-/// `{ "package", "status", "desc_status", "forge", "transport",
-/// "credential_kind", "push_credential_kind", "branch", "pull_request_url",
-/// "pull_request_number", "fork", "written_paths", "capability_checks",
-/// "reserved_tags_dropped" }`, in that order.
-/// `status` and `desc_status` are each exactly `"unchanged"` or `"updated"`;
-/// `forge` is `"github"` or `"gitlab"`; `transport` is `"api"` or `"git"`;
-/// `credential_kind` is `"job-token"`, `"token"` or `"none"`;
-/// `push_credential_kind` is `"job-token"`, `"token"`, `"git-helper"` or
-/// `null`, and always `null` under the `api` transport. `capability_checks` is
-/// non-empty on every run, inapplicable rows carrying `"skipped"`, ordered by
-/// `CapabilityName`'s declaration order so the array is stable across runs.
-/// `pull_request_url` /
-/// `pull_request_number` / `fork` are always `null` for `--out`; in `--fork`
-/// mode they are `null` only when the run made no pull request — an unchanged
-/// run whose announce branch is ahead of the index base still ensures, and
-/// therefore reports, one. So does an unchanged run whose branch has
-/// diverged from the index base but still holds an open, mergeable pull
-/// request: that pull request is reported too, not dropped. `written_paths`
-/// is empty outside `--out`.
-/// `reserved_tags_dropped` is an array, empty rather than absent.
-///
-/// **The closed vocabularies are held typed, never as `String`.** The report is
-/// a published schema (`report_roots!`), so a stringly-typed field would promise
-/// an open string where C-060 closes the set. The two pre-existing `status`
-/// fields stay `String` — they are `AnnounceStatus` rendered through
-/// [`status_label`], which predates this report's schema and is unchanged by
-/// C-061.
+/// JSON format: an object with one key per field below, in that order; every
+/// value vocabulary is closed as its field states.
+// The forge keys are JSON-only: the plain table is at its five-column budget, and scripts read its shape.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AnnounceReport {
     /// The announced `<namespace>/<package>` identifier.
@@ -74,6 +34,8 @@ pub struct AnnounceReport {
     /// ahead of the index base, and still reports one when the branch has
     /// diverged from the index base but its open pull request can still
     /// merge.
+    // `status`/`desc_status` stay `String` (`AnnounceStatus` via `status_label`); every other closed
+    // vocabulary here is typed, since a `String` would publish an open set.
     pub status: String,
     /// `"updated"` when the package's `__ocx.desc` artifact moved, so the
     /// root's `desc` object was rebuilt and its readme (and logo) written as
@@ -99,50 +61,42 @@ pub struct AnnounceReport {
     pub push_credential_kind: Option<PushCredentialKind>,
     /// The announce branch, or `null` under `--out`, which opens no request and
     /// so has no branch.
-    ///
-    /// An `Option`, not a `String`, precisely because of that (DX-40.3):
-    /// [`AnnounceOutcome::branch`] is empty on the `--out` arm, and `""` is a
-    /// value C-060's vocabulary has no meaning for — a consumer cannot tell it
-    /// from a branch whose name failed to render. Unlike the claim report,
-    /// whose branch is derived from the package and therefore populated on
-    /// every path.
     pub branch: Option<String>,
-    /// The opened/updated pull request's web URL.
+    /// The opened or updated pull request's web URL.
+    ///
+    /// Always `null` for `--out`. In `--fork` mode `null` only when the run made
+    /// no pull request: an unchanged run whose announce branch is ahead of the
+    /// index base still ensures, and therefore reports, one. So does an unchanged
+    /// run whose branch has diverged from the index base but still holds an open,
+    /// mergeable pull request.
     pub pull_request_url: Option<String>,
-    /// The opened/updated pull request's number.
+    /// The opened or updated pull request's number; `null` under the same
+    /// conditions as `pull_request_url`.
     pub pull_request_number: Option<u64>,
-    /// The verified fork, as `owner/repo`.
+    /// The verified fork, as `owner/repo`; `null` for `--out`, and in `--fork`
+    /// mode only when the run made no pull request.
     pub fork: Option<String>,
-    /// The relative paths written under the `--out` directory.
+    /// The relative paths written under the `--out` directory; empty outside `--out`.
     pub written_paths: Vec<String>,
-    /// Every preflight row, including the ones that did not apply. Non-empty on
-    /// every run, so a pipeline can assert the preflight ran rather than
-    /// trusting a bare success.
+    /// Every preflight row, including the ones that did not apply.
+    ///
+    /// Non-empty on every run, so a pipeline can assert the preflight ran rather
+    /// than trusting a bare success. Inapplicable rows carry `"skipped"`; rows
+    /// follow a fixed capability order, so the array is stable across runs.
     pub capability_checks: Vec<CapabilityCheckEntry>,
-    /// Tags dropped from the curated set because they are reserved: the
-    /// OCX-internal `__ocx` namespace (which carries the keep tag) and the
-    /// frozen legacy `<algorithm>.<hex>` keep tags.
-    /// Neither names a version, so announce drops them and reports them here
-    /// rather than failing the run.
+    /// Tags dropped from the curated set because they are reserved.
+    ///
+    /// The OCX-internal `__ocx` namespace (which carries the keep tag) and the
+    /// frozen legacy `<algorithm>.<hex>` keep tags. Neither names a version, so
+    /// announce drops them and reports them here rather than failing the run.
+    /// Always an array, empty rather than absent.
     pub reserved_tags_dropped: Vec<String>,
 }
 
 impl AnnounceReport {
-    /// Build the report from an announce outcome and the boundary-resolved
-    /// values the outcome does not carry.
-    ///
-    /// `forge`, `transport` and `credentials` are passed in for the same reason
-    /// the claim report takes them: all three are decided at the CLI boundary —
-    /// the forge never reads the environment for itself — and the outcome
-    /// describes only what the announce did. `forge` is the kind
-    /// [`ForgeWriteOptions::validate`](crate::options::ForgeWriteOptions::validate)
-    /// already resolved, never a second `ForgeKind::resolve` free to disagree.
-    ///
-    /// The two credential kinds render through
-    /// [`forge_report`](super::forge_report), off the credential the **ladder**
-    /// resolved — never off a direct `OCX_ANNOUNCE_TOKEN` read, which misses
-    /// the job-token rung and would report `none` for a run that authenticated
-    /// perfectly well.
+    /// Builds the report from an announce outcome plus the forge, transport and credentials the CLI
+    /// boundary resolved. Credential kinds render off the ladder's credential, never a direct
+    /// `OCX_ANNOUNCE_TOKEN` read, which misses the job-token rung and reports `none`.
     #[must_use]
     pub fn from_outcome(
         outcome: AnnounceOutcome,
@@ -157,14 +111,9 @@ impl AnnounceReport {
             forge,
             transport,
             credential_kind: credential_kind(credentials),
-            // The transport is passed on rather than derived from the
-            // credential: `resolve` populates the push half whenever an API
-            // credential exists, so a mapper reading the credential alone
-            // reports a push kind for a REST run that pushed nothing.
+            // Takes the transport: the credential alone reports a push kind for a REST run that pushed nothing.
             push_credential_kind: push_credential_kind(credentials, transport),
-            // DX-40.3: the `Out` arm leaves `branch` empty, and `""` is a value
-            // C-060's vocabulary has no meaning for — a consumer could not tell
-            // it from a branch name that failed to render.
+            // `--out` leaves `branch` empty, and `""` would read as a branch name that failed to render.
             branch: (!outcome.branch.is_empty()).then_some(outcome.branch),
             pull_request_url: outcome
                 .pull_request
@@ -173,28 +122,14 @@ impl AnnounceReport {
             pull_request_number: outcome.pull_request.as_ref().map(|pull_request| pull_request.number),
             fork: outcome.fork.map(|fork| fork.full_path),
             written_paths: outcome.written_paths,
-            // Every row, `Skipped` ones included: filtering the inapplicable
-            // ones out is what S-011 forbids, and `PushAccess` owns the vector
-            // so non-emptiness is unrepresentable-otherwise (C-069).
+            // Every row, `Skipped` included: the report contract forbids filtering them out.
             capability_checks: CapabilityCheckEntry::from_checks(outcome.capability_checks.checks()),
             reserved_tags_dropped: outcome.reserved_tags_dropped,
         }
     }
 
-    /// The plain table's headers and its single row's cells, as text.
-    ///
-    /// A seam for testability rather than reuse, the same shape the claim
-    /// report already carries: [`ocx_console::DataInterface::print_table`]
-    /// writes to the real stdout and neither [`Column`] nor [`Cell`] exposes its
-    /// text, so a test that calls [`Printable::print_plain`] can assert nothing
-    /// at all — a green indistinguishable from the check never having run
-    /// (`quality-core.md` § Unchecked Green). This report **was** that
-    /// counter-example.
-    ///
-    /// [`Printable::print_plain`] below is a pure adapter over this, so the
-    /// sequence a test asserts is the one an operator sees. Both halves are
-    /// returned together because the contract is their **pairing**: five headers
-    /// and five cells, in one order.
+    /// The plain table's headers and single row as paired text: the seam tests assert on, since
+    /// `print_table` writes real stdout and neither [`Column`] nor [`Cell`] exposes its text.
     fn plain_table(&self) -> (Vec<&'static str>, Vec<String>) {
         (
             vec!["Package", "Status", "Pull Request", "Fork", "Written Paths"],
@@ -215,8 +150,7 @@ impl AnnounceReport {
     }
 }
 
-/// The wire spelling of a status — the same two words for the root and for the
-/// description, so a consumer parses one vocabulary.
+/// The wire spelling of a status, shared by the root and the description.
 fn status_label(status: AnnounceStatus) -> &'static str {
     match status {
         AnnounceStatus::Unchanged => "unchanged",
@@ -226,9 +160,7 @@ fn status_label(status: AnnounceStatus) -> &'static str {
 
 impl Printable for AnnounceReport {
     fn print_plain(&self, data: &ocx_console::DataInterface) {
-        // One `print_table` call, never two (single-table rule). `print_table`
-        // reads its rows column-major — one `Vec<Cell>` per column — so a
-        // one-row table is one cell per column.
+        // `print_table` is column-major, so a one-row table is one cell per column.
         let (headers, cells) = self.plain_table();
         let columns: Vec<Column> = headers.into_iter().map(Column::from).collect();
         let rows: Vec<Vec<Cell>> = cells.into_iter().map(|cell| vec![Cell::from(cell)]).collect();

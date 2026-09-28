@@ -30,14 +30,7 @@ pub enum Modifier {
 }
 
 impl<'de> Deserialize<'de> for Modifier {
-    /// Reads the `type` tag through [`ModifierKind`]'s grammar first, so a tag
-    /// this binary does not know becomes [`Modifier::Unknown`] carrying its
-    /// spelling instead of a serde `unknown variant` blob. A known tag is then
-    /// handed to the derive, which owns every message about the variant's own
-    /// fields.
-    ///
-    /// The buffer is a [`serde_json::Value`]: metadata is a JSON wire format,
-    /// and no public serde API buffers an unknown-tagged map without one.
+    /// An unknown `type` tag becomes [`Modifier::Unknown`]; a known one goes to the derive.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -68,15 +61,11 @@ impl<'de> Deserialize<'de> for Modifier {
 }
 
 /// How a declared value combines with the variable's existing value.
-// This doc line is published verbatim as the schema's `ModifierKind`
-// description, so it stays a user sentence. Rationale belongs here: the
-// `JsonSchema` derive exists so schemas `$ref` one vocabulary instead of
-// hand-spelling the type names beside it.
-// `Deserialize` rides here for the reconciler's `LedgerEntry` (C-001), whose
-// wire field is `type` and whose payload is read back out of
-// `__OCX_ENV_STATE` every prompt. An unknown `type` value fails the whole
-// `Ledger::decode` — deliberately, so a ledger degrades to absent rather than
-// to a partial record (C-003).
+// The doc line above is the schema's `ModifierKind` description verbatim, so it
+// stays a user sentence. `JsonSchema` lets schemas `$ref` one vocabulary.
+// `Deserialize` serves the reconciler's `LedgerEntry` (`type` field, read from
+// `__OCX_ENV_STATE` each prompt): an unknown `type` fails the whole
+// `Ledger::decode`, so a ledger degrades to absent, never to a partial record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModifierKind {
@@ -85,12 +74,7 @@ pub enum ModifierKind {
     List,
 }
 
-/// A [`Modifier`] whose `type` tag this binary does not know, so it names no
-/// [`ModifierKind`].
-///
-/// `ValidMetadata::try_from` rejects such a modifier before any consumer of
-/// `ModifierKind` runs, so this error only escapes on the paths that convert
-/// without that gate.
+/// A [`Modifier`] whose `type` tag this binary does not know.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("env modifier declares a type this ocx does not support")]
 pub struct UnknownModifierError;
@@ -118,31 +102,17 @@ impl fmt::Display for ModifierKind {
     }
 }
 
-/// The spelling `str` carried, when it named no [`ModifierKind`].
-///
-/// Carries `found` structurally rather than pre-formatting a message, so each
-/// caller can fold it into its own typed error: the `ocx.toml` parser into
-/// `ProjectErrorKind::EnvUnknownModifier` (exit 78 — a config-shape fault in a
-/// file), the `ocx exec --env` parser into `cli::UsageError` (exit 64 — CLI
-/// misuse). One grammar, two exit codes.
-///
-/// The remedy clause matters most to the reader who typed a type name a newer
-/// ocx does define: without it, "expected `path`, `constant` or `list`" reads
-/// as a typo report for what is really a version gap.
+/// A spelling that names no [`ModifierKind`]; each caller folds `found` into its own error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown modifier type '{found}'; expected `path`, `constant` or `list` (a newer ocx may support it)")]
 pub struct ParseModifierKindError {
-    /// The unrecognized spelling, verbatim.
     pub found: String,
 }
 
 impl FromStr for ModifierKind {
     type Err = ParseModifierKindError;
 
-    /// The inverse of [`ModifierKind`]'s [`fmt::Display`], so the pair
-    /// round-trips. Both spellings are consumer-authored — in a `{ type = … }`
-    /// table and in `ocx exec --env KEY:TYPE=VALUE` — and a second hand-rolled
-    /// match would let the two surfaces drift.
+    /// The inverse of [`ModifierKind`]'s [`fmt::Display`].
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
             "path" => Ok(ModifierKind::Path),

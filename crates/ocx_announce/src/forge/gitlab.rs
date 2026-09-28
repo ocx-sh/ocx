@@ -1,37 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! GitLab REST v4 forge client.
-//!
-//! The second [`Forge`] implementation, holding the identical announce contract
-//! against a very different API. Three differences shape the whole file:
-//!
-//! 1. **A commit is one request.** GitLab's commits API takes a batch of file
-//!    actions, so the five-step blob/tree/commit/ref dance the GitHub client
-//!    performs collapses into a single atomic POST (design register C15, more
-//!    directly than on GitHub).
-//! 2. **Concurrency is per file, not per ref.** GitLab has no compare-and-swap
-//!    on a branch ref; it has `last_commit_id` on a file action, which refuses
-//!    the commit when that file moved since the version being edited. Since every
-//!    announce commit rewrites the package's root document, that guard is exactly
-//!    the C4 protection [`RefUpdate::FastForward`] promises, expressed on the one
-//!    file whose staleness matters. It is **not** a force-push: `grim`, the donor,
-//!    force-pushes here and silently clobbers a concurrent announce.
-//! 3. **Everything is addressed by project.** Paths are one percent-encoded `:id`
-//!    segment (so nested groups need no special casing), numeric project ids are
-//!    what cross-project operations name, and a fork's parent is verified by
-//!    immutable id rather than by a path that a rename can change.
-//!
-//! A GitLab client is built for one [`WriteTransport`], and the choice shows
-//! in exactly three places: [`Forge::compare_branch`] is computed from the
-//! clone under `git` while every other read stays REST, the two fork
-//! operations refuse under `git`, and the preflight's job-token rows are
-//! consulted only for a run that will actually push with a job token. Header
-//! selection is **not** one of them (C-026).
-//!
-//! The X5 invariants are re-proved here rather than inherited: no-redirect
-//! client, credential in a header only, fork parent verified against the
-//! upstream, identity read from response bodies, bounded readiness wait.
+//! GitLab REST v4 [`Forge`] client: a commit is one atomic POST of file actions, concurrency is
+//! per file (`last_commit_id`), and a project path travels as one percent-encoded segment.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -58,88 +29,37 @@ use super::{
     WriteTransport,
 };
 
-/// Canonical GitLab host — every other host is a self-managed instance.
 const DEFAULT_HOST: &str = "gitlab.com";
-/// JSON media type.
 const ACCEPT_JSON: &str = "application/json";
-/// Total per-request timeout for ordinary forge calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The Developer access level — the lowest that may push a branch.
+/// The lowest access level that may push a branch.
 const ACCESS_LEVEL_DEVELOPER: u64 = 30;
-/// Page size for fork enumeration, and the page ceiling that bounds it.
 const FORKS_PER_PAGE: u32 = 100;
-/// Pages of forks the 409-reuse path will walk before giving up. A user forks a
-/// project once into their own namespace, and the listing is filtered to what
-/// the credential owns, so the answer is on page one in every realistic case;
-/// the ceiling exists so a pathological account cannot spin forever.
 const FORKS_MAX_PAGES: u32 = 10;
-/// Page size for the job-token allowlist walk, and the page ceiling that
-/// bounds it.
-///
-/// The endpoint is offset-paginated and its own default page is 20, so a
-/// publishing project on page two of an unpaged read is a page-one *miss* — and
-/// a miss refuses the run at 86 before any push. The walk therefore asks for the
-/// largest page the API serves and continues until a short one, with the same
-/// bounded shape the fork enumeration already uses.
+/// Walked to a short page: an unpaged read (default 20) misses page two and refuses the run at 86.
 const ALLOWLIST_PER_PAGE: u32 = 100;
-/// Pages of allowlist entries the preflight will walk before giving up. A walk
-/// that exhausts this without a hit is **unknown**, never a miss: an incomplete
-/// answer must not refuse a run.
+/// Exhausting this without a hit is `Unreadable`, never a miss, or an incomplete walk refuses the run.
 const ALLOWLIST_MAX_PAGES: u32 = 10;
-/// GitLab's own name for the project setting that governs a job-token push.
 const JOB_TOKEN_PUSH_FIELD: &str = "ci_push_repository_for_job_token_allowed";
-/// GitLab's own name for the variable the publishing project comes from.
 const PUBLISHING_PROJECT_VARIABLE: &str = "CI_PROJECT_PATH";
-/// The allowlist endpoint, named as a `detail` when it cannot be read.
 const ALLOWLIST_ENDPOINT: &str = "job_token_scope/allowlist";
-/// GitLab's **second** admission list, read when the first does not admit.
-///
-/// A group entry admits every project under that group at any depth, so an index
-/// that admits its publishers by group — one entry for a whole `packages/` group
-/// rather than one per publisher — carries nobody in the projects list ([#430]).
-/// Same shape as the first: offset-paginated, Maintainer or Owner to read.
-///
-/// [#430]: https://github.com/ocx-sh/ocx/issues/430
 const GROUPS_ALLOWLIST_ENDPOINT: &str = "job_token_scope/groups_allowlist";
-/// The path segment every GitLab group URL carries before its full path.
 const GROUP_URL_MARKER: &str = "/groups/";
-/// The Projects API, named as a `detail` when the credential cannot read it.
 const PROJECT_ENDPOINT: &str = "projects/:id";
-/// Backoff delays before each replay of a failed commit.
 const COMMIT_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(27)];
 
-/// Everything that is not unreserved must be escaped in a path segment.
-///
-/// A project path (`group/subgroup/project`) and a file path (`p/acme/pkg.json`)
-/// each travel as **one** URL segment, so their own slashes and dots must be
-/// encoded — `NON_ALPHANUMERIC` minus the RFC 3986 unreserved marks, which is
-/// stricter than necessary and therefore never wrong.
+/// Project and file paths each travel as one URL segment, so their `/` and `.` must be encoded.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
 
-/// Page size for the `branch_sha` prefix search, and the page ceiling that
-/// bounds its walk.
+/// `search=^term` is a prefix filter, so a page-one miss would read as "no such branch" (exit 1).
 ///
-/// `search=^term` is a prefix filter, so the exact name can be on any page —
-/// and a page-one miss reads as "no such branch", which the caller reports as
-/// `MissingBaseRef` and exits 1. The walk therefore asks for the largest page
-/// the API serves and continues until a short one, the same bounded shape the
-/// fork enumeration and the allowlist walk already use.
-///
-/// ponytail: a walk, not `regex=^…$`. Exact on the server would need no page at
-/// all, at the cost of re2-escaping a ref name — and ref names may carry `.`,
-/// `+`, `(`, `|` and `$`. Upgrade there if a thousand prefix collisions ever
-/// becomes a state an index reaches.
+/// ponytail: a walk, not `regex=^…$`, which needs a re2-escaped ref name; upgrade if an index
+/// ever reaches a thousand prefix collisions.
 const BRANCH_SEARCH_PER_PAGE: u32 = 100;
-/// Pages of prefix matches `branch_sha` will walk before reporting absence.
 const BRANCH_SEARCH_MAX_PAGES: u32 = 10;
-/// Page size for the open-merge-request lookup.
-///
-/// The lookup filters by source branch but no longer by source project, so more
-/// than one entry can come back and GitLab's own default page is 20. A page-one
-/// miss opens a duplicate request.
+/// Several open requests can share a source branch; a miss on GitLab's default page of 20 opens a duplicate.
 const MERGE_REQUEST_PER_PAGE: u32 = 100;
 
-/// Percent-encode one path segment.
 fn encode_segment(value: &str) -> String {
     utf8_percent_encode(value, SEGMENT).to_string()
 }
@@ -149,65 +69,24 @@ pub struct GitLabForge {
     client: reqwest::Client,
     credentials: ForgeCredentials,
     base_url: String,
-    /// Which write path this client was built for.
     transport: WriteTransport,
-    /// The `git` the argv-boundary gate resolved and version-checked. Present
-    /// exactly when `transport` is [`WriteTransport::Git`].
+    /// `Some` exactly when `transport` is [`WriteTransport::Git`].
     git: Option<GitBinary>,
-    /// The temporary clone, created on the first git-half operation and living
-    /// until this forge is dropped.
-    ///
-    /// Lazy rather than built in the constructor: an `api` run must never pay
-    /// for a clone, and a `git` run that turns out to have nothing to write
-    /// should not either — an unchanged announce whose merge request is already
-    /// open (C-042) returns without ever starting `git`.
-    ///
-    /// [`tokio::sync::OnceCell`] rather than a `std` guard because the
-    /// initialiser is an `async fn` and no `std` guard may cross an `.await`
-    /// (DX-25).
+    /// The temporary clone, created lazily so an `api` run, or a `git` run with nothing to write, never clones.
     workspace: tokio::sync::OnceCell<GitHalf>,
-    /// What the git half carries between trait calls within one run.
-    ///
-    /// The transport must stay invisible to the caller, so the two facts a push
-    /// needs — the preflight it must classify a refusal against, and whether
-    /// [`Forge::commit_files`] left a commit to publish — cannot travel as
-    /// parameters. See [`GitRun`].
     git_run: tokio::sync::Mutex<GitRun>,
-    /// `namespace/project` -> numeric project id.
-    ///
-    /// Cross-project operations (a fork's merge request, a commit based on the
-    /// upstream) name projects by id, and a path lookup is a whole round trip.
-    /// The mapping is immutable for the life of a run — a project's id never
-    /// changes, only its path can — so caching it is safe and saves a request per
-    /// repeat reference.
+    /// `namespace/project` -> numeric id; safe to cache because a project's id never changes.
     project_ids: RwLock<HashMap<String, u64>>,
 }
 
 impl GitLabForge {
-    /// Build a client for `host` — `None` for gitlab.com, `Some` for a
-    /// self-managed instance.
+    /// Build a client for `host`: `None` for gitlab.com, `Some` for a self-managed instance.
     ///
-    /// Unlike GitHub, both cases share one shape: the API always lives at
-    /// `/api/v4` on the instance itself, so gitlab.com is not a special case
-    /// beyond supplying the default hostname.
-    ///
-    /// `git` is the binary the argv-boundary gate resolved and version-checked;
-    /// it is `Some` exactly when `transport` is [`WriteTransport::Git`], which
-    /// [`super::ForgeKind::client`] guarantees before it calls here.
+    /// `git` must be `Some` exactly when `transport` is [`WriteTransport::Git`].
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
-    /// be constructed.
-    ///
-    /// The REST client is built with `extra_roots` already trusted (ocx#448,
-    /// C-007): [`super::ForgeKind::client`], the one caller, always has the
-    /// operator's merged root set in hand before a client is needed, so
-    /// there is no default-then-rebuild. The REST client only: under
-    /// [`WriteTransport::Git`] the push is a spawned `git` with libcurl's
-    /// own trust, which `GIT_SSL_CAINFO` REPLACES rather than extends — so
-    /// the bundle is deliberately not materialised for it (D-2); the parent
-    /// environment's `GIT_SSL_CAINFO` / `SSL_CERT_FILE` pass through as-is.
+    /// Returns [`ForgeError::ClientBuild`] when the HTTP client cannot be constructed.
     pub fn new(
         credentials: ForgeCredentials,
         transport: WriteTransport,
@@ -215,22 +94,16 @@ impl GitLabForge {
         host: Option<&str>,
         extra_roots: &ocx_util::tls::ExtraRoots,
     ) -> Result<Self, ForgeError> {
+        // REST only: a `git` push keeps libcurl's own trust, where `GIT_SSL_CAINFO` replaces the roots.
         let base_url = testing_base_url_override().unwrap_or_else(|| api_base_url(host));
         Self::build(credentials, transport, git, base_url, extra_roots)
     }
 
     /// Build a client against an explicit base URL (acceptance fake-forge seam).
     ///
-    /// Carries the transport and the resolved `git` because C-026's header
-    /// choice is transport-**in**dependent and the preflight's job-token rows
-    /// are not: a seam that could only build an `api` client would leave a
-    /// build that gated the `JOB-TOKEN` arm on the transport passing every
-    /// header test, and would leave the whole DX-35 conjunction untestable.
-    ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
-    /// be constructed.
+    /// Returns [`ForgeError::ClientBuild`] when the HTTP client cannot be constructed.
     #[cfg(any(test, feature = "__testing"))]
     pub fn with_base_url(
         credentials: ForgeCredentials,
@@ -270,119 +143,53 @@ impl GitLabForge {
         format!("{}{path}", self.base_url)
     }
 
-    /// The git remote for `repo` on this instance.
-    ///
-    /// Derived from the API base rather than from the coordinate's host, so the
-    /// acceptance seam's `with_base_url` reaches the same instance the REST half
-    /// does — a remote built from `RepoCoordinate::host` would dial gitlab.com
-    /// while every read went to the fixture.
-    ///
-    /// The `.git` suffix is GitLab's own clone URL and is deliberately kept:
-    /// git matches `http.<url>.*` component-wise, so `…/index` is not a prefix
-    /// of `…/index.git` and a shortened remote would silently stop matching the
-    /// credential scope C-034 places the `Authorization` header under.
+    /// The git remote for `repo`, from the API base: `RepoCoordinate::host` would dial gitlab.com past the
+    /// acceptance seam.
     fn repository_url(&self, repo: &RepoCoordinate) -> String {
         let instance = self.base_url.strip_suffix("/api/v4").unwrap_or(&self.base_url);
+        // Keep `.git`: git matches `http.<url>.*` per component, so a shortened remote loses the credential header.
         format!("{instance}/{}.git", repo.full_path())
     }
 
-    /// The project endpoint for a coordinate, addressed by its encoded path.
     fn project_url(&self, repo: &RepoCoordinate, suffix: &str) -> String {
         self.url(&format!("/projects/{}{suffix}", encode_segment(&repo.full_path())))
     }
 
-    /// The project endpoint for a numeric id.
     fn project_id_url(&self, id: u64, suffix: &str) -> String {
         self.url(&format!("/projects/{id}{suffix}"))
     }
 
-    /// An authorized request builder.
-    ///
-    /// **Three-way header selection, and it does not depend on the write
-    /// transport** (C-026): an empty credential sends no authorization header at
-    /// all, a credential that *is* this environment's own `CI_JOB_TOKEN` travels
-    /// as `JOB-TOKEN`, and anything else travels as `PRIVATE-TOKEN`.
-    ///
-    /// A CI job token **does** have read access — repository files, branches,
-    /// commits, tags and merge requests are all reachable with one — under its
-    /// own header. What it cannot do is *write* through the API, which is
-    /// precisely why the git write transport exists: the same token that cannot
-    /// POST a commit can push over HTTP. An earlier version of this comment
-    /// claimed a job token was not an option here at all, and that claim was
-    /// wrong.
-    ///
-    /// `PRIVATE-TOKEN` carries every other credential — personal, project and
-    /// group access tokens alike. `Authorization: Bearer` would accept those
-    /// too; it is not narrower, and it is not chosen here only because the rest
-    /// of this client already speaks `PRIVATE-TOKEN` and one spelling is easier
-    /// to reason about than two.
-    ///
-    /// The credential never enters a URL or a query string (design register X6).
-    /// The header is omitted entirely when the token is empty (the tokenless
-    /// `--out` path) so the request reads as unauthenticated rather than sending
-    /// a rejected empty credential.
+    /// An authorized request: the credential travels only as a header, and an empty one sends none so
+    /// the tokenless `--out` path reads unauthenticated.
     fn request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
         let builder = self.client.request(method, url).header(ACCEPT, ACCEPT_JSON);
         let credential = self.credentials.api().0.as_str();
         if credential.is_empty() {
             builder
         } else if self.credentials.api_is_job_token() {
+            // Not `PRIVATE-TOKEN`: a job token has read access only under its own header.
             builder.header("JOB-TOKEN", credential)
         } else {
             builder.header("PRIVATE-TOKEN", credential)
         }
     }
 
-    /// Whether a rejected users-API read means the credential may not call the
-    /// endpoint **at all**, rather than that it was refused.
-    ///
-    /// The status alone cannot answer it, and getting this wrong is expensive in
-    /// both directions. [`ForgeError::UsersApiUnavailable`] classifies to
-    /// `UsageError` and tells the operator to write the owner as `LOGIN:ID`;
-    /// [`ForgeError::Status`] classifies to `AuthError` and tells them to
-    /// replace the credential. A status-only gate gives the first answer to a
-    /// revoked personal access token, whose real fix is a new token.
-    ///
-    /// Both 401 and 403 are needles: GitLab's documentation does not say which
-    /// one a job token earns on the users API, so handling one alone would ship
-    /// a coin flip.
+    /// Whether a rejected users-API read means the endpoint is closed to a job token rather than a
+    /// refused credential, which would exit 80 and tell the user to replace a working token.
+    /// Both 401 and 403 count: GitLab does not document which one a job token earns.
     fn users_api_is_out_of_reach(&self, status: StatusCode) -> bool {
         (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN) && self.credentials.api_is_job_token()
     }
 
-    /// Whether this run will push with a CI job token.
-    ///
-    /// The **only** circumstance in which GitLab's job-token project settings
-    /// govern anything ocx does, and therefore the guard on both job-token
-    /// preflight rows. Unconditional, the readable-`false` refusal C-029
-    /// specifies would exit 86 on every ordinary `--transport api` announce
-    /// against a project that simply has the setting off — a setting with no
-    /// bearing whatever on an API commit.
-    ///
-    /// The credential half is [`ForgeCredentials::push_is_job_token`], **not**
-    /// `api_is_job_token`: `OCX_ANNOUNCE_GIT_TOKEN` replaces the push half while
-    /// the API half stays the job token, so the two genuinely differ and it is
-    /// the pushing credential these settings govern.
+    /// Whether this run pushes with a CI job token; ungated, the readable-`false` refusal would exit 86
+    /// on every `--transport api` announce against a project with the setting off.
     fn job_token_push_applies(&self) -> bool {
+        // The push half, not `api_is_job_token`: `OCX_ANNOUNCE_GIT_TOKEN` replaces only the push half.
         self.transport == WriteTransport::Git && self.credentials.push_is_job_token()
     }
 
-    /// Whether the index project's job-token scope admits `publishing`.
-    ///
-    /// **Two lists, because GitLab has two.** A project may be admitted by name
-    /// in `job_token_scope/allowlist`, or by any of its ancestor groups in
-    /// `job_token_scope/groups_allowlist` — the setting an organisation reaches
-    /// for when it has a whole group of publishers ([#430]). Reading only the
-    /// first refused, at 86, announces GitLab would have accepted, and told the
-    /// operator to add a project entry their group entry already covered.
-    ///
-    /// The groups list is read only when the projects list came back **readable
-    /// and without a hit**, which is exactly the rule that a refusal needs both
-    /// lists to have answered. An unreadable first list short-circuits: `Unknown`
-    /// and `Passed` both proceed to the push, so a second request could not
-    /// change the outcome.
-    ///
-    /// [#430]: https://github.com/ocx-sh/ocx/issues/430
+    /// Whether the index project's job-token scope admits `publishing`, by name or by an ancestor group;
+    /// reading only the projects list refuses, at 86, announces GitLab accepts.
     async fn job_token_allowlist_admits(
         &self,
         repo: &RepoCoordinate,
@@ -396,30 +203,15 @@ impl GitLabForge {
                 self.allowlist_walk(repo, GROUPS_ALLOWLIST_ENDPOINT, group_entry_admits, publishing)
                     .await
             }
-            // Spelled out rather than caught: `AllowlistAnswer` omits
-            // `#[non_exhaustive]` so a new variant breaks every match
-            // (`arch-principles.md`), and a catch-all here would silently route
-            // it to "already answered, skip the groups list".
+            // No catch-all: a new variant must not silently skip the groups list.
             other @ (AllowlistAnswer::Admits | AllowlistAnswer::Unreadable(_)) => Ok(other),
         }
     }
 
-    /// One admission list, walked to a verdict.
+    /// One admission list, walked to a short page or the ceiling.
     ///
-    /// Walks the offset-paginated endpoint to a short page or the ceiling. Every
-    /// answer that is not a readable list is [`AllowlistAnswer::Unreadable`],
-    /// because the false-refusal direction is the one that costs a user a
-    /// working run: a 403 is the *production-common* answer (both endpoints want
-    /// Maintainer or Owner on the index project, while this preflight's own bar
-    /// is Developer), a **401 under a job token** is the same closed door wearing
-    /// the other status (see below), a 404 is an instance older than the
-    /// endpoint, and a body whose entries carry no name this client understands
-    /// is a shape it cannot read. A 5xx is not a capability answer and propagates.
-    ///
-    /// `admits` is a plain `fn` pointer rather than a closure or a type
-    /// parameter: it keeps one monomorphisation of a method `async_trait` must
-    /// box as a `Send` future, and the two implementations differ only in which
-    /// field of an entry they read.
+    /// Anything but a readable list (403 below Maintainer, 404 on an older instance, an unknown entry
+    /// shape) is [`AllowlistAnswer::Unreadable`], since a false refusal costs a working run; a 5xx propagates.
     async fn allowlist_walk(
         &self,
         repo: &RepoCoordinate,
@@ -432,15 +224,8 @@ impl GitLabForge {
         for page in 1..=ALLOWLIST_MAX_PAGES {
             let url = self.project_url(repo, &format!("/{endpoint}?per_page={ALLOWLIST_PER_PAGE}&page={page}"));
             let (status, body) = self.send(self.request(Method::GET, &url), &url).await?;
-            // A job token earns 401, not 403, on an endpoint outside the set
-            // GitLab opens to it -- observed on a self-hosted 19.3, where both
-            // scope lists answer `401 Unauthorized` to a `JOB-TOKEN` header, the
-            // same status the users API gives it (`users_api_is_out_of_reach`).
-            // Under a job token that 401 is a closed door, not a rejected
-            // credential, and reading it as one exits 80 naming a credential
-            // that is fine (#432). The `api_is_job_token` gate is what keeps a
-            // revoked personal access token on the `AuthError` path where it
-            // belongs.
+            // A job token earns 401 here, a closed door rather than a bad credential (exit 80); the
+            // `api_is_job_token` gate keeps a revoked PAT on the `AuthError` path.
             let closed_to_job_token = status == StatusCode::UNAUTHORIZED && self.credentials.api_is_job_token();
             if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND || closed_to_job_token {
                 return Ok(AllowlistAnswer::Unreadable(endpoint));
@@ -448,9 +233,7 @@ impl GitLabForge {
             if !status.is_success() {
                 return Err(self.status_error(&url, status, &body));
             }
-            // Deliberately not `get_json_optional`: it maps 404 to `Ok(None)`,
-            // which is byte-identical to an empty allowlist for any caller that
-            // reads `None` as `[]` — and an empty allowlist IS a miss.
+            // Not `get_json_optional`: its 404 `None` reads as an empty list, which is a miss and refuses.
             let Some(entries) = Self::parse_json(&url, &body)?.as_array().cloned() else {
                 return Ok(AllowlistAnswer::Unreadable(endpoint));
             };
@@ -494,11 +277,6 @@ impl GitLabForge {
         Ok((status, body))
     }
 
-    /// A non-success status as an error, carrying GitLab's own reason.
-    ///
-    /// GitLab reports the cause in the body (`{"message": ...}` or
-    /// `{"error": ...}`) and nowhere else. Keeping it is the difference between
-    /// "HTTP 400" and "you are attempting to update a file that has changed".
     fn status_error(&self, url: &str, status: StatusCode, body: &[u8]) -> ForgeError {
         ForgeError::Status {
             url: url.to_string(),
@@ -526,12 +304,10 @@ impl GitLabForge {
         Ok(Some(Self::parse_json(url, &body)?))
     }
 
-    /// The project document for a coordinate, or `None` when it is not visible.
     async fn project(&self, repo: &RepoCoordinate) -> Result<Option<Value>, ForgeError> {
         self.get_json_optional(&self.project_url(repo, "")).await
     }
 
-    /// The numeric project id for a coordinate, cached for the run.
     async fn project_id(&self, repo: &RepoCoordinate) -> Result<u64, ForgeError> {
         let key = repo.full_path();
         if let Some(id) = self.project_ids.read().await.get(&key) {
@@ -551,7 +327,6 @@ impl GitLabForge {
         Ok(id)
     }
 
-    /// The authenticated account's username — the default fork namespace.
     async fn authenticated_username(&self) -> Result<String, ForgeError> {
         let url = self.url("/user");
         let body = self
@@ -570,26 +345,11 @@ impl GitLabForge {
             })
     }
 
-    /// The head commit of `branch`, or `None` when the branch does not exist.
-    ///
-    /// **The one guard every consumer of a forge-supplied object name routes
-    /// through.** `get_ref_sha`, the branch-existence read and the git half's
-    /// opening read all land here, so the shape is checked once rather than at
-    /// each caller — and the value goes on to be a positional argument of
-    /// `git read-tree` and the right-hand side of a `--force-with-lease`. A
-    /// response is forge-controlled input at a trust boundary, and this is the
-    /// boundary.
-    ///
-    /// Reads the branch **list**, never `…/branches/<name>`. A CI job token may
-    /// call only the list form — the single-branch endpoint is not on GitLab's
-    /// [job-token endpoint list] and answers 404, which this method would read as
-    /// "no such branch" and the caller as `MissingBaseRef` ([#429]). One path for
-    /// every credential rather than a job-token arm: a posture-conditional read
-    /// is exercised in exactly the rare posture that already shipped broken.
-    ///
-    /// [job-token endpoint list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
-    /// [#429]: https://github.com/ocx-sh/ocx/issues/429
+    /// The head commit of `branch`, or `None` when absent; every forge-supplied sha bound for git argv
+    /// passes this shape check.
     async fn branch_sha(&self, repo: &RepoCoordinate, branch: &str) -> Result<Option<String>, ForgeError> {
+        // The branch LIST, never `…/branches/<name>`: that endpoint 404s for a CI job token
+        // (https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access), read as `MissingBaseRef`.
         for page in 1..=BRANCH_SEARCH_MAX_PAGES {
             let url = self.project_url(
                 repo,
@@ -601,10 +361,7 @@ impl GitLabForge {
             let Some(body) = self.get_json_optional(&url).await? else {
                 return Ok(None);
             };
-            // `search=^term` is a PREFIX filter, so the exact name is selected
-            // here rather than by taking `[0]`: `main` and `maintenance` both
-            // match `^main` and GitLab does not promise an order — which is also
-            // why the search is walked rather than read one page deep.
+            // The exact name, never `[0]`: `^main` also matches `maintenance`, in no promised order.
             let entries = body.as_array().ok_or_else(|| ForgeError::MissingField {
                 url: url.clone(),
                 field: "branches[]".to_string(),
@@ -632,13 +389,8 @@ impl GitLabForge {
         Ok(None)
     }
 
-    /// The commit that last touched `path` at `r#ref`, or `None` when the path
-    /// does not exist there.
-    ///
-    /// This is the value a file action's `last_commit_id` must carry: GitLab
-    /// compares it against the file's current last commit, **not** against the
-    /// branch head, so passing a branch sha would reject every commit whose head
-    /// did not happen to touch that exact file.
+    /// The commit that last touched `path` at `r#ref` (`None` if absent), the value `last_commit_id`
+    /// needs: a branch sha would reject every commit whose head did not touch that file.
     async fn file_last_commit(&self, id: u64, path: &str, r#ref: &str) -> Result<Option<(String, String)>, ForgeError> {
         let url = self.project_id_url(
             id,
@@ -661,11 +413,8 @@ impl GitLabForge {
         Ok(Some((last_commit_id.to_string(), path.to_string())))
     }
 
-    /// How many commits `to` carries that `from` does not, comparing directly
-    /// (never through a merge base).
-    ///
-    /// `from` is read in `from_project`, `to` in `project` — the parameter split
-    /// that makes a fork-versus-upstream comparison possible at all.
+    /// How many commits `to` (in `project`) carries that `from` (in `from_project`) does not, compared
+    /// directly, never through a merge base.
     async fn ahead_count(&self, project: u64, to: &str, from_project: u64, from: &str) -> Result<usize, ForgeError> {
         let url = self.project_id_url(
             project,
@@ -682,25 +431,15 @@ impl GitLabForge {
                 detail: String::new(),
             });
         };
-        // `compare_timeout: true` means GitLab gave up part-way. Its docs say
-        // `commits` stays complete even then and only `diffs` is truncated — so
-        // refusing here is stricter than the documented contract requires, and
-        // that is deliberate. The claim is unverified against a real timeout on a
-        // large repository, the commit list is the ONLY input to the ahead/behind
-        // verdict, and being wrong in the permissive direction classifies a live
-        // branch as spent and force-rebuilds it, discarding unmerged work. A
-        // hard error costs a retry; the other answer costs someone's commits.
+        // A timed-out compare may truncate `commits`, and an undercount force-rebuilds a live branch,
+        // discarding unmerged commits.
         if body.get("compare_timeout").and_then(Value::as_bool) == Some(true) {
             return Err(ForgeError::UnknownCompareStatus {
                 url,
                 status: "compare_timeout".to_string(),
             });
         }
-        // An absent or non-array `commits` is the same hazard one step earlier:
-        // `map_or(0, …)` would read a response that cannot classify ancestry as
-        // "no commits", and a `(0, 0)` verdict reads as `Identical`, which is
-        // what condemns a live branch to be force-rebuilt. A comparison that
-        // did not come back in the documented shape is refused, not counted.
+        // Absent `commits` is refused, not counted as 0: `(0, 0)` reads `Identical` and force-rebuilds a live branch.
         body.get("commits")
             .and_then(Value::as_array)
             .map(Vec::len)
@@ -711,10 +450,6 @@ impl GitLabForge {
     }
 
     /// Bounded readiness wait on a freshly created fork.
-    ///
-    /// GitLab imports a fork in a background job and reports progress on the
-    /// project's `import_status`. A `failed` import is terminal, so it fails fast
-    /// rather than burning the whole deadline on a state that can never change.
     async fn wait_fork_ready(&self, id: u64) -> Result<(), ForgeError> {
         let schedule = PollSchedule::default();
         let url = self.project_id_url(id, "");
@@ -732,9 +467,7 @@ impl GitLabForge {
         })
     }
 
-    /// One readiness probe: `Ok(true)` when the import finished, `Ok(false)` when
-    /// it is still running or the probe did not answer, `Err` when it failed
-    /// terminally.
+    /// `Ok(false)` while importing or unanswered; `Err` on a terminal `failed` import.
     async fn probe_import(&self, url: &str, request_timeout: Duration) -> Result<bool, ForgeError> {
         let Ok(response) = self.request(Method::GET, url).timeout(request_timeout).send().await else {
             return Ok(false);
@@ -746,21 +479,15 @@ impl GitLabForge {
             return Ok(false);
         };
         match body.get("import_status").and_then(Value::as_str) {
-            // `none` is what a project that was never imported reports, and
-            // `finished` what a completed import reports. Both mean ready.
+            // `none` is what a never-imported project reports.
             Some("finished" | "none") | None => Ok(true),
             Some("failed") => Err(ForgeError::ForkNotReady { deadline_secs: 0 }),
             Some(_) => Ok(false),
         }
     }
 
-    /// Find the authenticated account's own fork of `upstream_id` by enumerating
-    /// the upstream's forks — never by guessing a path.
-    ///
-    /// The 409 reuse path. A fork that was renamed, or created concurrently under
-    /// a path the caller did not predict, is found here and nowhere else; the
-    /// listing is the authoritative answer to "where is my fork", and a
-    /// `{username}/{basename}` guess is not.
+    /// The account's own fork of `upstream_id`, found by listing forks, never by guessing a path that a
+    /// rename or concurrent create invalidates.
     async fn find_owned_fork(
         &self,
         upstream_id: u64,
@@ -788,9 +515,7 @@ impl GitLabForge {
                     continue;
                 };
                 if identity.namespace.eq_ignore_ascii_case(expected_namespace) {
-                    // The listing is scoped to forks OF the upstream, but the
-                    // parent guard is re-run from the project's own document
-                    // rather than trusted from the listing's context.
+                    // Re-verify the parent from the project's own document; the listing's context is not trusted.
                     let coordinate = RepoCoordinate {
                         host: None,
                         namespace: identity.namespace.clone(),
@@ -810,60 +535,24 @@ impl GitLabForge {
         Ok(None)
     }
 
-    /// The temporary clone, opened on first use and reused afterwards.
-    ///
-    /// `base` and `branch` are the refs this run reads; the branch is named as a
-    /// second refspec **only** when it exists (C-036), which is why the
-    /// existence read happens here rather than being inferred from the fetch.
-    /// It reuses [`Self::branch_sha`] — the same Branches API call `get_ref_sha`
-    /// makes — rather than introducing a client method of its own (DV-6).
-    ///
-    /// Reading it at open time, not at push time, is also what makes C-040's
-    /// lease honest: `--force-with-lease` against a sha re-read just before the
-    /// push would name whatever a concurrent writer had just pushed, which is
-    /// the classic way a lease is degraded into a plain force.
-    ///
-    /// **A later caller's `(repo, base, branch)` is not discarded.** A
-    /// [`tokio::sync::OnceCell`] runs its initialiser once and hands every
-    /// subsequent caller the value the *first* one produced, so the three call
-    /// sites here — the comparison, the commit and the publish — silently agreed
-    /// with whichever ran first. Two of those arguments decide what the clone can
-    /// see, so the failure is not theoretical: a second `base` that was never
-    /// fetched resolves to nothing, and `commit_files` then parents the commit on
-    /// a sha the clone does not hold. The tuple is recorded on [`GitHalf`] and
-    /// each later call is checked against it.
-    ///
-    /// The two answers differ because the two disagreements differ. A different
-    /// **repository** cannot be served at all — the clone's remote, its
-    /// credential scope and its objects all belong to the first one — so it is
-    /// refused rather than papered over. A different **base or branch** is a
-    /// missing fetch and nothing more, so it is fetched: `fetch` names both
-    /// refspecs, and by the time a second base is asked for, the branch exists
-    /// (it is the state a retry lands in).
-    ///
-    /// The recorded tuple is the *initializing* one and is never rewritten, which
-    /// is what keeps [`GitHalf`] immutable behind the cell's shared reference. The
-    /// cost is one redundant fetch if a caller asks twice for the same second
-    /// base; a fetch is idempotent, and interior mutability to save it would be a
-    /// second source of truth about what the clone holds.
+    /// The temporary clone, opened on first use; a later call for another base or branch fetches it,
+    /// one for another repository is refused.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::GitUnavailable`] when the transport was selected
-    /// without a resolved `git`, when the clone cannot be created, or when a
-    /// later call names a different repository; propagates the branch-existence
-    /// read's and the re-fetch's own failures otherwise.
+    /// Returns [`ForgeError::GitUnavailable`] without a resolved `git`, when the clone cannot be
+    /// created, or for a different repository; propagates read and fetch failures otherwise.
     async fn git_half(&self, repo: &RepoCoordinate, base: &str, branch: &str) -> Result<&GitHalf, ForgeError> {
+        // `OnceCell` hands every caller the first caller's clone, so each call is checked against
+        // `opened_for`, or `commit_files` parents on a sha the clone never fetched.
         let half = self
             .workspace
             .get_or_try_init(|| async {
-                // `ForgeKind::client` refuses a `git` transport with no binary
-                // (C-017), so this is unreachable in production and is a real
-                // error rather than an `expect` for exactly that reason: the
-                // acceptance seam can build the pair directly.
+                // An error, not `expect`: the acceptance seam can build a `git` transport without a binary.
                 let git = self.git.as_ref().ok_or_else(|| ForgeError::GitUnavailable {
                     reason: "the git write transport was selected without a resolved git binary".to_string(),
                 })?;
+                // Read at open time: a sha re-read at push time degrades `--force-with-lease` to a plain force.
                 let branch_head = self.branch_sha(repo, branch).await?;
                 let workspace = GitWorkspace::open(
                     git,
@@ -901,22 +590,12 @@ impl GitLabForge {
         Ok(half)
     }
 
-    /// The preflight a push is classified against, running one if this run has
-    /// not.
-    ///
-    /// [`super::git_workspace::GitWorkspace::push`] promotes a refusal to
-    /// [`ForgeError::WriteCapabilityUnavailable`] (86) **only** when the
-    /// preflight reported `job-token-push: unknown` (C-044), so a push handed
-    /// [`PushAccess::skipped_all`] lands every capability refusal on 77 —
-    /// silently, since the two differ by an exit code and nothing else. The
-    /// claim's unchanged-branch-without-an-open-request path reaches the push
-    /// with no preflight behind it, so the fallback is to **perform** one, never
-    /// to substitute an empty answer (DX-35).
+    /// The recorded preflight, or a fresh one: a push handed [`PushAccess::skipped_all`] instead
+    /// would classify every capability refusal as 77, not 86.
     ///
     /// # Errors
     ///
-    /// Propagates [`Forge::ensure_push_access`], including its own refusals —
-    /// which is the C-029 "before any push" guarantee on that path.
+    /// Propagates [`Forge::ensure_push_access`], including its refusals.
     async fn push_preflight(&self, repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
         let recorded = self.git_run.lock().await.preflight.clone();
         match recorded {
@@ -925,40 +604,13 @@ impl GitLabForge {
         }
     }
 
-    /// The git half of [`Forge::open_or_update_pull_request`] — the only place
-    /// this client writes to the network over `git`.
-    ///
-    /// Three paths, and which one runs is decided by whether
-    /// [`Forge::commit_files`] left a commit behind:
-    ///
-    /// 1. **A pending commit** — push it, carrying C-040's lease for a rebuild
-    ///    and nothing for an ordinary advance, then confirm the merge request
-    ///    the push options asked the server to open (C-041).
-    /// 2. **No pending commit, a request already open** — return it. **No write
-    ///    of any kind happens, and no clone is even created** (C-042): the REST
-    ///    read comes first precisely so an unchanged run costs no `git`.
-    /// 3. **No pending commit, no open request** — the content is stranded, so
-    ///    the ref is made to advance with a refresh commit and pushed. A server
-    ///    processes push options only for a push that genuinely moves a ref.
-    ///
-    /// **Path 2 also absorbs the widened non-fast-forward retry** (the C-042
-    /// amendment). `announce`'s retry re-reads the winning head and, when the
-    /// winner already carries our bytes, skips `commit_files` and calls straight
-    /// through to here. The temporary clone then still holds the commit the
-    /// server has already rejected, so a second push would be rejected
-    /// identically — a retry guaranteed to fail. "Pending" is therefore the
-    /// forge's own record of a commit not yet offered, taken here whether the
-    /// push succeeds or fails. A local-versus-tracking-ref comparison cannot
-    /// stand in for it: the two differ on the fresh path and on the
-    /// losing-retry path alike, so it answers the same thing in both states.
+    /// The git half of [`Forge::open_or_update_pull_request`]: push a pending commit, return an
+    /// already-open request without writing, or push a refresh commit for stranded content.
     ///
     /// # Errors
     ///
-    /// Returns whatever the push classifier names — [`ForgeError::PushRefused`],
-    /// [`ForgeError::WriteCapabilityUnavailable`], [`ForgeError::StaleLease`],
-    /// [`ForgeError::NonFastForward`] or [`ForgeError::GitPushFailed`] — and
-    /// [`ForgeError::MergeRequestUnconfirmed`] when the push landed but no merge
-    /// request appeared within [`super::git_workspace::CONFIRMATION_SCHEDULE`].
+    /// Returns the push classifier's error, or [`ForgeError::MergeRequestUnconfirmed`] when the push
+    /// landed but no merge request appeared.
     async fn publish_over_git(
         &self,
         index: &RepoCoordinate,
@@ -968,21 +620,17 @@ impl GitLabForge {
         title: &str,
         body: &str,
     ) -> Result<PullRequest, ForgeError> {
+        // Taken on every attempt: a losing retry skips `commit_files` and lands here, and re-pushing the
+        // rejected commit fails identically.
         let pending = std::mem::take(&mut self.git_run.lock().await.pending);
         if matches!(pending, PendingCommit::None)
             && let Some(existing) = self.find_open_pull_request(index, head, branch).await?
         {
-            // Path 2, and the earliest possible return: no preflight is demanded
-            // of a run that writes nothing, so an unchanged announce still
-            // succeeds on a project whose push capability is off.
+            // Before the preflight and before any `git`: an unchanged announce must succeed with push capability off.
             return Ok(existing);
         }
 
-        // Past here a push will be attempted, so the preflight runs **before any
-        // git process starts** — C-029's readable-`false` and allowlist-miss
-        // refusals are "before any push", and a clone plus a refresh commit made
-        // first would be work thrown away on a run that was always going to be
-        // refused.
+        // Preflight before any `git` process: its refusals promise "before any push".
         let preflight = self.push_preflight(index).await?;
 
         let repository = index.full_path();
@@ -990,17 +638,14 @@ impl GitLabForge {
         let lease = match pending {
             PendingCommit::Ready { lease } => lease,
             PendingCommit::None => {
-                // Before the refresh, not after: this arm is also where a losing
-                // retry lands, and its clone's view of the branch predates the
-                // writer that won.
+                // Fetch first: a losing retry lands here with a view older than the winning writer. The refresh
+                // commit exists because a server processes push options only for a push that moves a ref.
                 half.workspace.fetch(base, branch).await?;
                 half.workspace.refresh_commit(branch, title).await?;
                 None
             }
         };
-        // Recorded **before** the push, not after: the push returns its refusal
-        // through `?`, so a flag set afterwards would stay false on exactly the
-        // path — a rejection — that C-043's re-fetch exists for.
+        // Before the push: a refusal returns through `?`, and the post-rejection re-fetch keys on this flag.
         self.git_run.lock().await.push_attempted = true;
         half.workspace
             .push(
@@ -1016,62 +661,26 @@ impl GitLabForge {
             )
             .await?;
 
-        // Whether the request is new is decided by what the clone found, not by
-        // a second REST read: the branch existing when the clone was taken is
-        // exactly the state in which a request could already have been open.
+        // From the clone's view: after the push, a REST read finds the request the push just opened.
         let updated = half.branch_head.is_some();
-        // The probe returns `find_open_pull_request`'s future directly rather
-        // than wrapping it in `async || { … .await }`. An async block borrows
-        // from the closure's own environment, which makes the `AsyncFn` bound
-        // higher-ranked over the call lifetime, and the compiler cannot then
-        // prove the future `Send` for *every* lifetime — which `async_trait`'s
-        // boxed `Send` future demands, reported as "`Send` is not general
-        // enough" on this whole method. `async_trait` already boxes the
-        // method's future as `Send`, so handing it back untouched keeps the
-        // return type concrete.
         let mut confirmed = confirm_merge_request(|| self.find_open_pull_request(index, head, branch)).await?;
         confirmed.updated = updated;
         Ok(confirmed)
     }
 
-    /// The capability rows, assembled — see [`Forge::ensure_push_access`], whose
-    /// documented contract this is. Split from it only so the recording the
-    /// trait method performs has one exit rather than four.
+    /// The capability rows behind [`Forge::ensure_push_access`], split out so its recording has one exit.
     async fn push_access_checks(&self, repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
-        // `permissions` is only present on an authenticated read, and a project
-        // the credential cannot see answers 404 rather than 403 — both mean the
-        // same thing to the caller, so both land on the same error.
         let project = self.project(repo).await?;
-        // Except under a CI job token, which cannot call this endpoint at all:
-        // the Projects API is not on GitLab's [job-token endpoint list] and
-        // answers 404, indistinguishable here from a project that is not there
-        // ([#429]). Refusing on it exits 80 before the push, on a run whose push
-        // GitLab would have accepted.
-        //
-        // Nor would the answer be about the right credential: the level read
-        // here belongs to the API half, while the identity that pushes is the
-        // push half, and the split-pair posture makes those genuinely different
-        // tokens. So the row is `unknown`, the push decides, and `git_stderr.rs`
-        // promotes a real refusal on exactly that status.
-        //
-        // **Only under the git transport**, because that is the whole premise:
-        // the deferred verdict is rendered by a push, and an `api` run performs
-        // none. `api_is_job_token` alone does not imply one — `ForgeCredentials`
-        // (`credentials.rs`) sets it by value-equality against `CI_JOB_TOKEN`,
-        // with no transport in sight, so an operator exporting
-        // `OCX_ANNOUNCE_TOKEN=$CI_JOB_TOKEN` reaches it under `--transport api`.
-        // There the tolerance would suppress the exit-80 refusal this preflight
-        // exists for and let the run die later on a bare 404 from `commit_files`,
-        // which matches no arm in `error.rs` and exits 1.
-        //
-        // [job-token endpoint list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
-        // [#429]: https://github.com/ocx-sh/ocx/issues/429
+        // Only under `git`: `api_is_job_token` can hold under `--transport api`, where tolerating the 404
+        // turns exit 80 into a bare exit 1 from `commit_files`.
         let unreadable_under_job_token =
             project.is_none() && self.credentials.api_is_job_token() && self.transport == WriteTransport::Git;
         let access = project.as_ref().map_or(0, project_access_level);
+        // A job token gets 404 from the Projects API; refusing on it would exit 80 before a push GitLab accepts.
         if access < ACCESS_LEVEL_DEVELOPER && !unreadable_under_job_token {
             return Err(ForgeError::PushAccessDenied { repo: repo.full_path() });
         }
+        // Record each row once: `record` replaces, so a second call walks its status back.
         let mut checks = PushAccess::skipped_all();
         if let Some(git) = self.git.as_ref() {
             checks.record(
@@ -1081,6 +690,7 @@ impl GitLabForge {
             );
         }
         if unreadable_under_job_token {
+            // `Unknown`: the level read belongs to the API token, the push token may differ, and the push decides.
             checks.record(
                 CapabilityName::PushAccess,
                 CheckStatus::Unknown,
@@ -1093,14 +703,13 @@ impl GitLabForge {
                 Some(format!("access level {access}")),
             );
         }
+        // Rows left `Skipped` read as "does not apply", not "could not be read".
         if !self.job_token_push_applies() {
             return Ok(checks);
         }
 
-        // `Value::as_bool` is what keeps the three outcomes three: absent, null
-        // and wrong-typed all collapse onto `None`, and only a genuine `false`
-        // refuses. A typed `#[serde(default)] bool` here would turn all three
-        // into `false` and refuse every pre-18.4 instance before it pushed.
+        // `Value::as_bool`, not a defaulted `bool`: absent or null must stay unknown, or every pre-18.4
+        // instance is refused.
         match project
             .as_ref()
             .and_then(|body| body.get(JOB_TOKEN_PUSH_FIELD))
@@ -1124,14 +733,8 @@ impl GitLabForge {
             ),
         }
 
-        // No publishing project means there is nothing to look up, but the
-        // question still applies — so `unknown`, not `skipped`, and never a
-        // refusal: a runner that scrubs the variable must still be able to push.
-        // The residual is stated rather than hidden: the credential ladder turns
-        // an illegal `CI_PROJECT_PATH` into an absence, so a hostile value
-        // suppresses this check. Accepted, because what it suppresses is a
-        // safety gate rather than a security one, and refusing a whole run over
-        // a variable ocx never asked for is the worse failure.
+        // Unknown, never a refusal: a runner that scrubs `CI_PROJECT_PATH` must still push (a safety gate,
+        // not a security one: a hostile value can suppress it).
         let Some(publishing) = self.credentials.publishing_project() else {
             checks.record(
                 CapabilityName::JobTokenAllowlist,
@@ -1140,10 +743,7 @@ impl GitLabForge {
             );
             return Ok(checks);
         };
-        // Publishing from the index project itself needs no allowlist entry, so
-        // the row does not apply and no request is spent. Case-insensitive
-        // because `CI_PROJECT_PATH` is operator-typed and a case mismatch would
-        // buy both a spurious request and a spurious refusal.
+        // The index project needs no allowlist entry; case-insensitive because `CI_PROJECT_PATH` is operator-typed.
         if publishing.eq_ignore_ascii_case(&repo.full_path()) {
             return Ok(checks);
         }
@@ -1160,10 +760,6 @@ impl GitLabForge {
                 return Err(ForgeError::WriteCapabilityUnavailable {
                     capability: CapabilityName::JobTokenAllowlist,
                     repo: repo.full_path(),
-                    // Both places, because GitLab admits from both and the group
-                    // entry is the one an organisation with many publishers
-                    // actually wants (#430). Naming only the project list sent
-                    // operators to duplicate a group policy one row at a time.
                     remedy: format!(
                         "add {publishing}, or one of its groups, to Settings → CI/CD → Job token permissions on {}",
                         repo.full_path()
@@ -1174,13 +770,8 @@ impl GitLabForge {
         Ok(checks)
     }
 
-    /// One attempt at the single-request atomic commit.
-    ///
-    /// The per-path existence read at the base decides all three actions, not
-    /// just `create` versus `update`: a [`FileChange::Delete`] naming a path the
-    /// base does not carry contributes **no action at all**, because GitLab
-    /// answers `delete` on an absent file with a 400 that would fail the whole
-    /// commit — and C-001 owes the caller a no-op there.
+    /// One attempt at the atomic commit; a delete of a path absent at the base sends no action, since
+    /// GitLab 400s the whole commit on it.
     async fn commit_files_once(
         &self,
         repo: &RepoCoordinate,
@@ -1196,10 +787,8 @@ impl GitLabForge {
 
         let mut actions = Vec::with_capacity(files.len());
         for (path, change) in files {
-            // Whether a path already exists decides `create` versus `update`;
-            // GitLab has no upsert, and guessing wrong fails the whole commit.
-            // The question is asked at the BASE, because that is the tree the new
-            // commit is built on.
+            // Asked at the base, the tree the commit is built on: GitLab has no upsert, and a wrong
+            // `create`/`update` fails the whole commit.
             let existing = self.file_last_commit(base_id, path, base.sha).await?;
             let mut action = match change {
                 FileChange::Put(contents) => json!({
@@ -1215,9 +804,8 @@ impl GitLabForge {
                     json!({ "file_path": path, "action": "delete" })
                 }
             };
-            // The C4 compare-and-swap. Omitting this is what turns a concurrent
-            // announce into a silent overwrite — and a `delete` races the same
-            // way a rewrite does, so it carries the same field.
+            // Per-file compare-and-swap, as safe as `RefUpdate::FastForward` only because every announce
+            // rewrites the root document; without it a concurrent announce is silently overwritten.
             if let Some((last_commit_id, _)) = existing {
                 action["last_commit_id"] = json!(last_commit_id);
             }
@@ -1229,10 +817,8 @@ impl GitLabForge {
             "commit_message": message,
             "actions": actions,
         });
-        // `start_*` names where the branch begins. It is sent when the branch does
-        // not exist yet (create it at the base) and when a spent branch is being
-        // rebuilt (`Reset`), and NOT when accumulating onto a live branch, where
-        // GitLab would refuse it as "branch already exists".
+        // `start_*` only to create or `Reset` the branch: onto a live branch GitLab refuses it as
+        // "branch already exists".
         let reset = matches!(update, RefUpdate::Reset);
         if !branch_exists || reset {
             body["start_sha"] = json!(base.sha);
@@ -1266,28 +852,10 @@ impl GitLabForge {
 
 #[async_trait::async_trait]
 impl Forge for GitLabForge {
-    /// `GET /user`, whose `bot` field carries GitLab's own assertion.
-    ///
-    /// A CI job token may not call this endpoint at all, which is
-    /// [`ForgeError::UsersApiUnavailable`] and **not** `Ok(None)`: there is no
-    /// lookup to be had, so a bare `LOGIN` can never become an id. An **empty**
-    /// credential is the same answer for the same reason, and it is reached
-    /// without spending a request: with no header the endpoint answers 401,
-    /// which the ladder below would classify as a rejected credential (exit 80)
-    /// and so contradict S-011's "`--out` with no credential proceeds
-    /// unauthenticated".
-    ///
-    /// C-009's `Ok(None)` arm is **unreachable on GitLab** and no test pins it:
-    /// there is no userless credential here — a group or project access token
-    /// has a bot user, and `/user` returns it. The arm exists for GitHub's App
-    /// installation tokens.
-    ///
-    /// This coexists with [`Self::authenticated_username`], which reads the same
-    /// endpoint for a different question: that one answers "where does this
-    /// account's fork live" and treats a missing body as a missing field, while
-    /// this one answers the governance question the owner ladder asks and has to
-    /// keep "cannot look up" distinguishable from "no such account".
+    /// `GET /user`; a job token or empty credential is [`ForgeError::UsersApiUnavailable`], never
+    /// `Ok(None)`, so a bare `LOGIN` never becomes an id.
     async fn authenticated_identity(&self) -> Result<Option<ForgeIdentity>, ForgeError> {
+        // No request: without a header the 401 reads as a rejected credential (exit 80), breaking tokenless `--out`.
         if self.credentials.api().0.is_empty() {
             return Err(ForgeError::UsersApiUnavailable);
         }
@@ -1303,24 +871,12 @@ impl Forge for GitLabForge {
     }
 
     /// `GET /users?username={login}`, `None` when no entry matches.
-    ///
-    /// The login is percent-encoded into the query — raw interpolation would let
-    /// an operator-supplied `--owner` append a parameter to an authenticated
-    /// request — and an **empty** login is answered without a request at all,
-    /// because GitLab reads an absent filter as "every user".
-    ///
-    /// The entry selected is the one whose `username` matches, never the first.
-    /// GitLab documents the filter as an exact, case-insensitive match, so more
-    /// than one entry is a server contract violation; taking `[0]` on one would
-    /// publish the wrong owner login into an index root, since C-048 keeps the
-    /// server's canonical spelling. A body that is not a list is a decode
-    /// failure rather than an absent account: `Ok(None)` there would report
-    /// "the forge does not know this login" for an instance behind a rewriting
-    /// gateway.
     async fn resolve_user(&self, login: &str) -> Result<Option<ForgeIdentity>, ForgeError> {
+        // GitLab reads an absent filter as "every user".
         if login.is_empty() {
             return Ok(None);
         }
+        // Encoded, or an operator-supplied `--owner` appends a parameter to an authenticated request.
         let url = self.url(&format!("/users?username={}", encode_segment(login)));
         let (status, body) = self.send(self.request(Method::GET, &url), &url).await?;
         if self.users_api_is_out_of_reach(status) {
@@ -1329,10 +885,12 @@ impl Forge for GitLabForge {
         if !status.is_success() {
             return Err(self.status_error(&url, status, &body));
         }
+        // A non-list body is a decode error, or a rewriting gateway reads as an unknown login.
         let entries: Vec<Value> = serde_json::from_slice(&body).map_err(|source| ForgeError::Decode {
             url: url.clone(),
             source,
         })?;
+        // The matching `username`, never `[0]`, which could publish the wrong owner into an index root.
         let Some(entry) = entries.iter().find(|entry| {
             entry
                 .get("username")
@@ -1369,11 +927,8 @@ impl Forge for GitLabForge {
     }
 
     async fn get_ref_sha(&self, repo: &RepoCoordinate, r#ref: &str) -> Result<Option<String>, ForgeError> {
-        // The trait speaks git ref paths; GitLab's branches endpoint takes a bare
-        // branch name. Both spellings are stripped: the claim orchestration is
-        // new surface, and a caller passing the full `refs/heads/x` would
-        // otherwise have it percent-encoded as one segment, 404, and read as an
-        // absent branch — which under C-051 creates a duplicate branch.
+        // A full `refs/heads/x` would encode as one segment and 404, and the claim path would create a
+        // duplicate branch.
         let branch = r#ref
             .strip_prefix("refs/heads/")
             .or_else(|| r#ref.strip_prefix("heads/"))
@@ -1381,17 +936,8 @@ impl Forge for GitLabForge {
         self.branch_sha(repo, branch).await
     }
 
-    /// The **one read that differs by transport** (C-031).
-    ///
-    /// Under `git` the answer is computed from the temporary clone rather than
-    /// from GitLab's compare endpoint (C-037): the clone already holds both
-    /// refs, so the comparison costs no request and, more to the point, the
-    /// commit that follows it is built against exactly the objects this answer
-    /// was derived from. Every other read stays REST under both transports.
-    ///
-    /// `head` names a fork, and there are none under `git` — the two fork
-    /// operations refuse there before any request — so the clone's own
-    /// remote-tracking refs are the whole comparison.
+    /// The one read that differs by transport: under `git` it comes from the clone, so the commit that
+    /// follows is built on the objects the answer came from.
     async fn compare_branch(
         &self,
         repo: &RepoCoordinate,
@@ -1405,10 +951,8 @@ impl Forge for GitLabForge {
         }
         let base_id = self.project_id(repo).await?;
         let head_id = self.project_id(head).await?;
-        // GitLab has no single "ahead/behind/diverged" verdict the way GitHub's
-        // compare does, so it is derived from the two directed comparisons. Both
-        // are needed: one alone cannot tell `Ahead` from `Diverged`, and reading
-        // a diverged branch as ahead is what re-proposes squash-merged work.
+        // Both directions: one alone cannot tell `Ahead` from `Diverged`, and a diverged branch read as
+        // ahead re-proposes squash-merged work.
         let ahead = self.ahead_count(head_id, head_branch, base_id, base).await?;
         let behind = self.ahead_count(base_id, base, head_id, head_branch).await?;
         Ok(match (ahead, behind) {
@@ -1425,21 +969,8 @@ impl Forge for GitLabForge {
         head: &RepoCoordinate,
         branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError> {
-        // A merge request is listed on its TARGET project; the source narrows it
-        // to the one opened from this head, so an unrelated fork proposing the
-        // same deterministic branch name is never adopted.
-        //
-        // Which side answers that question depends on whether there is a fork at
-        // all. Off one, `source_project_id` needs the fork's numeric id and the
-        // run is `--transport api` by construction — `--transport git` refuses
-        // `--fork` at parse time and every fork method before its first request.
-        // Onto the index itself the same question is `source == target`, which
-        // every entry answers about itself, so no numeric id is spent: resolving
-        // one costs a `GET /projects/:id`, which is not on GitLab's job-token
-        // endpoint list and answers 404 there ([#429]). The list endpoint is on
-        // that list, and takes a URL-encoded path for `:id`.
-        //
-        // [#429]: https://github.com/ocx-sh/ocx/issues/429
+        // Narrowed to this head, so a fork with the same branch name is never adopted. Onto the index
+        // itself by path, never numeric id: `GET /projects/:id` 404s for a job token.
         let same_project = head.full_path() == index.full_path();
         let source_filter = if same_project {
             String::new()
@@ -1449,11 +980,6 @@ impl Forge for GitLabForge {
         let url = self.project_url(
             index,
             &format!(
-                // `per_page`, because dropping `source_project_id` turned a query
-                // that matched at most one entry by construction into a list: an
-                // index with more open requests onto this branch than GitLab's
-                // default page of 20 would miss the existing one and open a
-                // duplicate.
                 "/merge_requests?state=opened&per_page={MERGE_REQUEST_PER_PAGE}&source_branch={}{source_filter}",
                 encode_segment(branch)
             ),
@@ -1473,21 +999,14 @@ impl Forge for GitLabForge {
         merge_request_from_body(&url, existing, true).map(Some)
     }
 
-    /// Whether merge request `number` (an `iid`, project-local to `index`)
-    /// merges cleanly.
-    ///
-    /// GitLab computes mergeability asynchronously, so the single-request GET
-    /// can legitimately answer "still checking"; that is
-    /// [`Mergeability::Unknown`], never a guess, and never a poll.
+    /// Whether merge request `number` (a project-local `iid`) merges cleanly; GitLab's "still
+    /// checking" is [`Mergeability::Unknown`], never polled.
     ///
     /// # Errors
     ///
-    /// Returns a [`ForgeError`] on transport failure, a project that is not
-    /// visible to the credential, or a non-success status other than 404.
+    /// Returns a [`ForgeError`] on transport failure or a non-success status other than 404.
     async fn pull_request_mergeability(&self, index: &RepoCoordinate, number: u64) -> Result<Mergeability, ForgeError> {
-        // By encoded path, for the reason `find_open_pull_request` states: the
-        // single-merge-request endpoint is job-token-readable, the numeric id it
-        // used to be addressed by is not.
+        // By encoded path: only that form is job-token-readable.
         let url = self.project_url(index, &format!("/merge_requests/{number}"));
         let Some(body) = self.get_json_optional(&url).await? else {
             return Ok(Mergeability::Unknown);
@@ -1495,13 +1014,8 @@ impl Forge for GitLabForge {
         Ok(mergeability_from_merge_request(&body))
     }
 
-    /// Refused outright under the git transport, **before any request**.
-    ///
-    /// The credential that transport exists for cannot reach the fork API at
-    /// all, and the refusal is placed above the upstream project-id read for a
-    /// reason the variant alone does not show: spending that request first makes
-    /// the run fail with a *different* error — a status, or an unavailable users
-    /// API — on a project the git credential cannot see.
+    /// Refused under `git` before any request: reading the upstream id first would fail with a
+    /// different error on a project the git credential cannot see.
     async fn find_fork(
         &self,
         upstream: &RepoCoordinate,
@@ -1517,8 +1031,7 @@ impl Forge for GitLabForge {
         let Some(project) = self.project(fork).await? else {
             return Ok(None);
         };
-        // A same-named stranger project is "no fork here", not a hard error: the
-        // create path is what refuses it (X5).
+        // A same-named stranger is "no fork here"; the create path refuses it.
         let Ok(identity) = verify_gitlab_fork(&project, upstream_id) else {
             return Ok(None);
         };
@@ -1526,9 +1039,7 @@ impl Forge for GitLabForge {
         Ok(Some(identity))
     }
 
-    /// Refused outright under the git transport, **before any request** — see
-    /// [`Self::find_fork`]. The operation literal differs from that one's so a
-    /// reader of the message can tell which call refused.
+    /// Refused under `git` before any request, like [`Self::find_fork`].
     async fn ensure_fork(
         &self,
         upstream: &RepoCoordinate,
@@ -1544,9 +1055,7 @@ impl Forge for GitLabForge {
             Some(owner) => owner.to_string(),
             None => self.authenticated_username().await?,
         };
-        // A namespace cannot fork a project it already owns; GitLab answers that
-        // POST with a 409 whose reuse path would then hunt for a fork-of-itself
-        // that cannot exist, spending the whole enumeration budget to fail.
+        // A self-fork 409s, and the reuse path would spend its whole budget hunting a fork of itself.
         if expected_namespace.eq_ignore_ascii_case(&upstream.namespace) {
             return Err(ForgeError::SelfForkRefused {
                 upstream: upstream.to_string(),
@@ -1566,9 +1075,6 @@ impl Forge for GitLabForge {
             let value = Self::parse_json(&url, &response)?;
             verify_gitlab_fork(&value, upstream_id)?
         } else if status == StatusCode::CONFLICT {
-            // The fork already exists somewhere the conventional path did not
-            // predict — renamed, or created concurrently. Enumerate rather than
-            // guess (the donor's basename guess fails exactly here).
             self.find_owned_fork(upstream_id, &expected_namespace)
                 .await?
                 .ok_or_else(|| self.status_error(&url, status, &response))?
@@ -1576,11 +1082,8 @@ impl Forge for GitLabForge {
             return Err(self.status_error(&url, status, &response));
         };
         verify_fork_namespace(&identity, &expected_namespace)?;
-        // Every GitLab project document carries `id`, so an absent one means the
-        // response was not the document it claimed to be. Skipping the readiness
-        // wait on that basis would be a green that never ran: the announce would
-        // commit into a fork whose import may still be in flight, and the
-        // failure would surface later as an unexplained 404.
+        // Never skip the readiness wait on a missing `id`: a commit into a still-importing fork surfaces
+        // as an unexplained 404.
         let id = identity.id.ok_or_else(|| ForgeError::MissingField {
             url: url.clone(),
             field: "id".to_string(),
@@ -1589,14 +1092,7 @@ impl Forge for GitLabForge {
         Ok(identity)
     }
 
-    /// Nothing to do on GitLab, under either transport.
-    ///
-    /// The GitHub client syncs a fork so that a base commit read from the
-    /// upstream is reachable when the commit is written to the fork. GitLab's
-    /// commits API takes `start_project`, so the base is named explicitly and
-    /// reachability is the server's problem — there is no stale-fork hazard to
-    /// pre-empt, and syncing the fork's default branch would only rewrite history
-    /// the announce never reads.
+    /// A no-op: the commit names its `start_project`, so the base is reachable without syncing.
     async fn sync_fork(&self, fork: &RepoCoordinate, branch: &str) {
         tracing::debug!(
             fork = %fork.full_path(),
@@ -1605,53 +1101,22 @@ impl Forge for GitLabForge {
         );
     }
 
-    /// The whole capability array, from one project read plus at most one
-    /// allowlist walk — so the array has exactly one assembler and the request
-    /// count it implies is the request count that happened.
-    ///
-    /// **Three outcomes, not two.** A job-token setting that reads `true`
-    /// passes; one that reads `false` refuses the run at 86 *before any push*,
-    /// naming the setting an administrator changes; one that cannot be read at
-    /// all records `unknown` and the run proceeds. Only the third reaches the
-    /// push-stderr classifier, which is why that classifier's promotion covers
-    /// the `unknown` case alone.
-    ///
-    /// **Both job-token rows are conditional** on
-    /// [`Self::job_token_push_applies`]. C-029 states the refusal
-    /// unconditionally, and unconditional it would exit 86 on every ordinary
-    /// `--transport api` announce against a project whose job-token push setting
-    /// is off — a setting that governs nothing an API commit does. Where the
-    /// rows do not apply they stay `Skipped`, which the push classifier reads as
-    /// "this row does not apply" rather than "this could not be read".
-    ///
-    /// Each row is recorded **once**: `record` replaces rather than upgrades, so
-    /// a second call for one name walks its status back and drops its detail.
-    ///
-    /// A note so nobody "fixes" it: on the two refusing paths the `PushAccess`
-    /// is dropped, so the report's capability array never carries the refusal —
-    /// the whole diagnosis lives in the error message. That is forced by the
-    /// `Result` signature and by C-012's "there is no `Failed`"; inventing a
-    /// `Failed` status to make the row visible is the wrong repair.
+    /// The whole capability array: a `false` job-token setting or an allowlist miss refuses at 86 before
+    /// any push, an unreadable one records `unknown` and proceeds.
     async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
+        // No `Failed` status exists: a refusal is the error, never a row in the returned array.
         let checks = self.push_access_checks(repo).await?;
-        // Kept, not merely returned. The push happens inside
-        // `open_or_update_pull_request`, where the caller's copy is out of
-        // reach, and C-044's promotion to exit 86 is driven by this array's
-        // `job-token-push` row rather than by the refusal phrase (DX-35).
+        // Kept for the push inside `open_or_update_pull_request`, whose exit-86 promotion reads this array.
         if self.transport == WriteTransport::Git {
             self.git_run.lock().await.preflight = Some(checks.clone());
         }
         Ok(checks)
     }
 
-    /// One atomic multi-file commit under `api`; a local commit chain in the
-    /// temporary clone under `git`, which writes **nothing** to the network.
+    /// One atomic commit under `api`; a local commit in the clone under `git`, which writes nothing.
     ///
-    /// The retry ladder below is the REST arm's alone: it replays a throttled or
-    /// faulted HTTP request, and under `git` there is no request to replay. A
-    /// `git` commit that loses its local compare-and-swap surfaces as
-    /// [`ForgeError::NonFastForward`] immediately, which is what the caller's
-    /// own single retry is written against.
+    /// Only REST requests are replayed; a lost `git` compare-and-swap is
+    /// [`ForgeError::NonFastForward`] at once, for the caller's own retry.
     async fn commit_files(
         &self,
         repo: &RepoCoordinate,
@@ -1663,34 +1128,17 @@ impl Forge for GitLabForge {
     ) -> Result<String, ForgeError> {
         if self.transport == WriteTransport::Git {
             let half = self.git_half(repo, base.branch, branch).await?;
-            // C-043: a rebuild that follows a rejected push is re-parented on the
-            // head that WON, so the workspace is refreshed against the observed
-            // remote tip first. Without this the clone still holds the pre-race
-            // `o/<branch>`, `commit-tree` reproduces the same parent, and the
-            // second push is refused identically — a retry guaranteed to fail.
-            //
-            // The **one** workspace is refreshed; a retry never opens a second
-            // clone (DX-25/DX-50). C-040's lease is deliberately not refreshed
-            // with it: `--force-with-lease` naming a sha re-read after the race
-            // is a plain force wearing a lease's name, and losing the lease is
-            // the protection working.
-            //
-            // Both refspecs, always — a rejection proves the branch exists now,
-            // whatever the branch-existence read reported before the first
-            // attempt (C-036's conditional second refspec is the *opening*
-            // fetch's alone). An accumulating retry bases on the branch itself,
-            // so the two names coincide and the refspec is simply named twice;
-            // git accepts that and updates the tracking ref once.
+            // After a rejected push, re-fetch so the rebuild parents on the winning head, or the push is
+            // refused identically.
             if self.git_run.lock().await.push_attempted {
+                // Both refspecs: a rejection proves the branch exists, whatever the opening read saw.
                 half.workspace.fetch(base.branch, branch).await?;
             }
             let committed = half
                 .workspace
                 .commit_files(branch, base, message, files, update)
                 .await?;
-            // C-040: a lease only for the rebuild, and only ever the head the
-            // clone was taken at. `Reset` with no prior branch is a create,
-            // which has nothing to lease against.
+            // Lease only a rebuild, on the head read at open time: a sha re-read after the race is a plain force.
             let lease = matches!(update, RefUpdate::Reset)
                 .then(|| half.branch_head.clone())
                 .flatten();
@@ -1710,14 +1158,7 @@ impl Forge for GitLabForge {
         outcome
     }
 
-    /// One `POST /merge_requests` under `api`; the push and its confirmation
-    /// under `git`.
-    ///
-    /// The two transports differ in *where the write happens*, not in what the
-    /// caller sees: under `git` this is the only method that touches the
-    /// network, because [`Forge::commit_files`] built its commit locally. See
-    /// [`Self::publish_over_git`] for the three paths that arm takes, including
-    /// the one that writes nothing at all.
+    /// One `POST /merge_requests` under `api`; under `git`, [`Self::publish_over_git`].
     async fn open_or_update_pull_request(
         &self,
         index: &RepoCoordinate,
@@ -1732,9 +1173,7 @@ impl Forge for GitLabForge {
         }
         let index_id = self.project_id(index).await?;
         let head_id = self.project_id(head).await?;
-        // A cross-project merge request is created on the SOURCE project and
-        // names its target by id — the mirror image of GitHub, where it is
-        // created on the target and names its source as `owner:branch`.
+        // Created on the SOURCE project, naming its target by id (the reverse of GitHub).
         let url = self.project_id_url(head_id, "/merge_requests");
         let mut request = json!({
             "source_branch": branch,
@@ -1752,10 +1191,8 @@ impl Forge for GitLabForge {
             let value = Self::parse_json(&url, &response)?;
             return merge_request_from_body(&url, &value, false);
         }
-        // GitLab answers "an open merge request already exists for this source
-        // branch" with 409, and 400 when the branch has nothing to propose. Only
-        // the former may fall through to reuse; treating the latter as reuse
-        // would report a missing merge request instead of the real reason.
+        // 409 or an "already exists" body means reuse; any other failure (400 for nothing to propose) is
+        // reported, not masked as a missing request.
         if status != StatusCode::CONFLICT && !merge_request_already_exists(&response) {
             return Err(self.status_error(&url, status, &response));
         }
@@ -1768,30 +1205,17 @@ impl Forge for GitLabForge {
     }
 }
 
-/// The temporary clone and the one fact derived from it that outlives the
-/// fetch.
+/// The temporary clone and the branch head it was taken at.
 struct GitHalf {
-    /// The clone, and the guard that removes it.
     workspace: GitWorkspace,
-    /// The branch head the clone was taken at, `None` when the branch did not
-    /// exist.
-    ///
-    /// Two consumers, and neither could re-derive it safely. C-040's lease must
-    /// name the sha the run *read*, not one re-read at push time. And whether a
-    /// merge request is opened or updated is decided by whether the branch was
-    /// already there, which stops being observable the moment the push lands.
+    /// `None` when the branch did not exist; the lease and the opened-vs-updated verdict must not
+    /// re-read it after the push.
     branch_head: Option<String>,
-    /// What the clone was opened for, so a later caller's disagreement is
-    /// answered rather than discarded. See [`GitLabForge::git_half`].
     opened_for: OpenedFor,
 }
 
-/// The `(repository, base, branch)` the one clone was taken for.
-///
-/// The repository is the `namespace/project` path rather than the coordinate,
-/// because that is what identifies the remote the clone was taken from — a
-/// coordinate carries a `host` that is `None` for the index's own instance, so
-/// comparing coordinates would call two spellings of one repository different.
+/// The `(repository, base, branch)` the clone was taken for; the repository is a path, since
+/// comparing coordinates calls two spellings (`host: None` or set) different.
 #[derive(Debug)]
 struct OpenedFor {
     repo: String,
@@ -1799,42 +1223,23 @@ struct OpenedFor {
     branch: String,
 }
 
-/// What a later caller must do before it can use the one clone.
-///
-/// A separate decision from the act, because the act needs a real clone and a
-/// real remote while the decision needs neither — and the decision is the part
-/// that was wrong. Keeping it pure is what lets all three outcomes be asserted
-/// without a forge that serves git over HTTP.
+/// What a later caller must do before using the one clone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reuse {
-    /// The clone already holds what this caller asked for.
     Ready,
-    /// A ref this caller names was never fetched into the clone.
     Fetch,
-    /// A different repository, which one clone cannot serve.
     Refuse,
 }
 
 impl OpenedFor {
-    /// Whether the clone opened for this tuple can serve `(repo, base, branch)`.
-    ///
-    /// The repository is checked first and answers [`Reuse::Refuse`], because it
-    /// is the one disagreement no fetch can repair: the clone's remote, the
-    /// `http.<prefix>.extraHeader` scope the credential was placed under, and
-    /// every object it holds belong to the first repository. Fetching a second
-    /// repository's refs into it would carry that credential to a repository the
-    /// operator never named.
-    ///
-    /// A base or a branch that differs is [`Reuse::Fetch`] and nothing more — the
-    /// ref simply is not in the clone yet, and `rev-parse --verify --quiet`
-    /// reports an unfetched ref as *absent*, which is indistinguishable from a
-    /// branch that does not exist. That is the silent failure: `commit_files`
-    /// would then parent its commit on the caller's base rather than on the
-    /// branch head, and drop every tag the branch already carried.
     fn reuse_for(&self, repo: &str, base: &str, branch: &str) -> Reuse {
+        // Refused, not fetched: the clone's credential scope belongs to the first repository, and fetching
+        // another would carry the credential there.
         if self.repo != repo {
             return Reuse::Refuse;
         }
+        // Fetch: an unfetched ref reads as absent, and `commit_files` would parent on the base and drop
+        // the branch's tags.
         if self.base != base || self.branch != branch {
             return Reuse::Fetch;
         }
@@ -1842,99 +1247,57 @@ impl OpenedFor {
     }
 }
 
-/// Whether the git half holds a commit the server has not been offered.
-///
-/// Not derivable from the clone. `refs/heads/<branch>` differs from the
-/// freshly-fetched `o/<branch>` both on the ordinary path — where the difference
-/// *is* the commit to push — and after a rejected push, where it is a commit the
-/// server has already refused; a comparison between the two therefore answers
-/// the same thing in both states. This records which one happened.
+/// Whether the git half holds a commit the server has not been offered; the clone's refs cannot
+/// tell, since they differ after a rejection too.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum PendingCommit {
-    /// Either nothing has been committed this run, or what was committed has
-    /// already been offered to the server and rejected.
+    /// Nothing committed, or already offered and rejected.
     #[default]
     None,
-    /// [`Forge::commit_files`] built a commit that has not been pushed yet.
     Ready {
-        /// C-040's `--force-with-lease` value — `Some` only for a
-        /// [`RefUpdate::Reset`] rebuild of an existing branch.
+        /// `Some` only for a [`RefUpdate::Reset`] rebuild of an existing branch.
         lease: Option<String>,
     },
 }
 
-/// What one run's git half carries between trait calls.
-///
-/// The transport is invisible to the caller by design, so neither of these can
-/// travel as a parameter: `announce` and `claim` speak one operation set and
-/// must not learn which transport is under it.
+/// State the git half carries between trait calls; parameters would expose the transport.
 #[derive(Default)]
 struct GitRun {
-    /// The preflight [`Forge::ensure_push_access`] performed, threaded to the
-    /// push so C-044's promotion to exit 86 stays reachable (DX-35).
+    /// Threaded to the push so its promotion to exit 86 stays reachable.
     preflight: Option<PushAccess>,
-    /// Set by [`Forge::commit_files`], taken by
-    /// [`Forge::open_or_update_pull_request`] on **every** push attempt,
-    /// successful or not.
+    /// Set by [`Forge::commit_files`], taken on every push attempt, successful or not.
     pending: PendingCommit,
-    /// Whether this run has already offered a push to the server.
-    ///
-    /// C-043's re-fetch discriminator. A rebuild that follows a rejection has
-    /// to be parented on the head that won, and the workspace's view of the
-    /// remote is the one the losing attempt was taken at — so the retry must
-    /// refresh it. "A push happened" is the only honest signal: the caller's
-    /// retry is transport-blind by design and cannot say so, and the clone
-    /// cannot tell a first commit from a re-commit, since `refs/heads/<branch>`
-    /// differs from `o/<branch>` in both states.
+    /// Whether a push was offered: a rebuild after a rejection must re-fetch, and the clone cannot tell
+    /// a first commit from a re-commit.
     push_attempted: bool,
 }
 
-/// What the index project's job-token allowlists said about the publishing
-/// project.
-///
-/// Three answers because two would collapse the one distinction that matters:
-/// an allowlist that genuinely does not carry the publishing project refuses the
-/// run, while an allowlist nobody could read must not.
+/// What the job-token allowlists said: `Absent` refuses the run, `Unreadable` must not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AllowlistAnswer {
-    /// The publishing project is admitted, by name or by one of its groups.
     Admits,
     /// Both lists were read and neither admits it.
     Absent,
-    /// The named list could not be read, or came back in a shape this client
-    /// does not understand. It carries the endpoint so the recorded `detail`
-    /// names the list that went unreadable rather than always the first one.
+    /// A list unread or unrecognised, named so `detail` points at the right one.
     Unreadable(&'static str),
 }
 
-/// What one allowlist entry says about the publishing project.
-///
-/// Three answers, because "no" and "I cannot read this entry" drive opposite
-/// verdicts: a list of misses is a refusal at 86, while a list this client
-/// cannot read is `unknown` and pushes anyway.
+/// One allowlist entry's verdict; a list with no recognised entry is unknown, never a refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryVerdict {
-    /// The entry carries no name this client understands.
     Unrecognised,
-    /// The entry was read and names something else.
     Miss,
-    /// The entry admits the publishing project.
     Admits,
 }
 
 impl EntryVerdict {
-    /// The verdict a readable entry earned.
     fn from_match(admits: bool) -> Self {
         if admits { Self::Admits } else { Self::Miss }
     }
 }
 
-/// Whether one entry of the **projects** allowlist admits `publishing`.
-///
-/// Matched on `path_with_namespace` because that is the only identity ocx holds
-/// — `CI_PROJECT_PATH`, never a numeric id — and case-insensitively because the
-/// variable is operator-typed. `None` is an entry with no path at all, which the
-/// walk reads as a shape it does not understand.
+/// Matched on `path_with_namespace`, the only identity `CI_PROJECT_PATH` gives, case-insensitively
+/// because the variable is operator-typed.
 fn project_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
     let Some(path) = entry.get("path_with_namespace").and_then(Value::as_str) else {
         return EntryVerdict::Unrecognised;
@@ -1942,12 +1305,7 @@ fn project_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
     EntryVerdict::from_match(path.eq_ignore_ascii_case(publishing))
 }
 
-/// Whether one entry of the **groups** allowlist admits `publishing`.
-///
-/// A groups entry carries `id`, `web_url` and `name` and nothing else — no
-/// `full_path`, no `path` — so the group's path comes out of the URL. `None` is
-/// an entry whose URL is not a group URL, which the walk reads as a shape it does
-/// not understand rather than as a miss.
+/// A groups entry carries only `id`, `web_url` and `name`, so the group path comes from the URL.
 fn group_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
     let group = entry
         .get("web_url")
@@ -1959,61 +1317,28 @@ fn group_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
     EntryVerdict::from_match(group_contains(&group, publishing))
 }
 
-/// The group's full path, taken out of the `web_url` GitLab renders for it.
+/// The group's full path, from its `web_url`.
 ///
-/// Split out of the parsed **path**, never the raw string: a URL carrying a
-/// query or a fragment would otherwise fold it into the path
-/// (`…/groups/acme/packages?x=1` -> `acme/packages?x=1`), which `group_contains`
-/// reads as a named non-admitting entry — a false refusal at 86, the exact
-/// failure [#430] exists to remove.
-///
-/// ponytail: the segment after the first `/groups/`, which is how every GitLab
-/// group URL is shaped and costs no request. Deliberately **not** derived by
-/// stripping this client's own API base: a reverse-proxied instance whose web
-/// host differs from its API host would stop matching, and it would do so
-/// silently. Ceiling: a GitLab installed at a relative root that itself ends in
-/// `/groups`. The upgrade path is `GET /groups/:id`, whose body does carry
-/// `full_path`, at one request per entry.
-///
-/// [#430]: https://github.com/ocx-sh/ocx/issues/430
+/// ponytail: the segment after the first `/groups/`, not a strip of the API base, which a reverse
+/// proxy with a different web host breaks. Ceiling: an instance rooted under a path ending in
+/// `/groups`; upgrade to `GET /groups/:id` (`full_path`), one request per entry.
 fn group_path_from_web_url(web_url: &str) -> Option<String> {
+    // The parsed path, never the raw string: a query would fold in and read as a miss, a false refusal at 86.
     let url = Url::parse(web_url).ok()?;
     let (_, path) = url.path().split_once(GROUP_URL_MARKER)?;
     let path = path.trim_end_matches('/');
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// Whether `publishing` lies under `group`, at any depth.
-///
-/// A path-**component** prefix, never a string prefix: `acme/packages` admits
-/// `acme/packages/widget` and `acme/packages/tools/widget`, and must not admit
-/// `acme/packages-legacy/widget`. Getting that wrong over-admits — ocx would
-/// report the capability `passed` for a project GitLab's own scope check
-/// refuses, and the push would then fail naming something else.
-///
-/// Case-insensitive for the same reason the project match is: `CI_PROJECT_PATH`
-/// is operator-typed. Equality of the two paths is not a case: a project path is
-/// never a group path, and the caller has already returned when the publishing
-/// project *is* the index project.
-///
-/// The separator check runs first and proves `group.len()` is a char boundary,
-/// so the slice below cannot panic.
+/// Whether `publishing` lies under `group` at any depth, case-insensitively.
 fn group_contains(group: &str, publishing: &str) -> bool {
+    // A path-component prefix: `acme/packages` must not admit `acme/packages-legacy/widget`, a
+    // `passed` GitLab refuses. The separator check runs first, or the slice can panic off a char boundary.
     publishing.as_bytes().get(group.len()) == Some(&b'/') && publishing[..group.len()].eq_ignore_ascii_case(group)
 }
 
-/// The credential's access level on a project, as the **higher** of its project
-/// and group grants.
-///
-/// Both are independently nullable on the real API, and a group-level member —
-/// a common GitLab shape — carries the level in `group_access` with
-/// `project_access: null`. `permissions` itself is absent on an unauthenticated
-/// read, which is zero rather than an error: the caller's refusal is a verdict,
-/// not an unreadable capability, and reading a level ocx cannot see as "may
-/// push" is the one direction that writes without permission.
-///
-/// A level that is not a JSON integer is unreadable, and unreadable is zero for
-/// the same reason. A parse fallback would be the accident here.
+/// The higher of the project and group access levels (either may be null); anything unreadable
+/// is 0, never "may push".
 fn project_access_level(body: &Value) -> u64 {
     let Some(permissions) = body.get("permissions") else {
         return 0;
@@ -2029,44 +1354,18 @@ fn project_access_level(body: &Value) -> u64 {
         .max(level("group_access").unwrap_or(0))
 }
 
-/// Whether `value` is a full git object name — 40 lowercase-or-uppercase hex
-/// digits for SHA-1, 64 for SHA-256.
-///
-/// A shape check on **forge-controlled input at a trust boundary**, not a
-/// tidiness rule. The value it gates travels from a JSON response into
-/// `git read-tree <parent>` as a bare positional and into a
-/// `--force-with-lease=<branch>:<sha>`; a value beginning with `-` would be read
-/// by git as an option, and `--upload-pack=<path>` is an option that names a
-/// program to run. Measured against git 2.54.0: without the separator,
-/// `git read-tree --upload-pack=/bin/false` is parsed as an option (exit 129,
-/// "unknown option"), not as a bad revision.
-///
-/// The argv builder now also emits `--end-of-options` before every positional,
-/// which stops the same value being read as a flag. Both ship: this one refuses
-/// the value where it enters, so nothing downstream has to be trusted to place a
-/// separator correctly, and the separator covers every positional rather than
-/// the one field a reviewer thought of.
-///
-/// Deliberately full-length only. GitLab's Branches API returns the whole object
-/// name in `commit.id` and the abbreviation separately in `short_id`, so
-/// accepting a prefix would widen the guard for a value this client never
-/// receives — and an abbreviated name is ambiguous by construction. Both hash
-/// lengths are admitted because a SHA-256 repository is a supported forge state,
-/// even though a SHA-256 index cannot be fetched into this transport's SHA-1
-/// workspace (it fails loudly one step later, at the fetch).
+/// Whether `value` is a full git object name (40 or 64 hex digits).
+// Forge-controlled input bound for `git read-tree` and `--force-with-lease`: a leading `-` would
+// parse as an option (`--upload-pack` runs a program).
 fn is_object_name(value: &str) -> bool {
+    // Full length only: an abbreviated name is ambiguous, and the Branches API returns the full `commit.id`.
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Build a [`ForgeIdentity`] out of a `/user` document or a `/users` entry.
+/// Build a [`ForgeIdentity`] from a `/user` document or a `/users` entry.
 ///
-/// `bot` defaults to `false` when absent, because GitLab's regular-user list
-/// representation may simply not carry it on an older self-managed instance —
-/// erroring there would refuse an ordinary account. `username` and `id` are the
-/// opposite: a synthesised `0` id would be written into a published index root
-/// as the owner's forge identity, and a governance field that indexbot's
-/// auto-merge matches on is the worst possible place for a placeholder. A
-/// string-shaped `id` is refused rather than parsed for the same reason.
+/// `bot` defaults to `false` (older instances omit it); a missing or non-integer `id` is an error,
+/// since a placeholder id would be published as the owner's forge identity.
 fn identity_from_body(url: &str, value: &Value) -> Result<ForgeIdentity, ForgeError> {
     let missing = |field: &str| ForgeError::MissingField {
         url: url.to_string(),
@@ -2085,22 +1384,14 @@ fn identity_from_body(url: &str, value: &Value) -> Result<ForgeIdentity, ForgeEr
     })
 }
 
-/// The REST base URL for a GitLab host — always `/api/v4` on the instance.
-///
-/// Always https: the credential rides these requests as a header, and a
-/// plaintext scheme would put it on the wire.
+/// Always https: the credential rides as a header, and plaintext would put it on the wire.
 fn api_base_url(host: Option<&str>) -> String {
     format!("https://{}/api/v4", host.unwrap_or(DEFAULT_HOST))
 }
 
-/// Whether a failed commit means the base moved under it.
-///
-/// GitLab reports a stale `last_commit_id` as a 400 whose body names the
-/// condition, and a lost branch-create race as a 400 saying the branch already
-/// exists. Both are the C4 compare-and-swap firing, and both are answered by the
-/// caller re-reading the winning head and regenerating — never by a blind replay
-/// of the same commit, which would either fail identically or, with `force`,
-/// discard the concurrent announce.
+/// Whether a failed commit means the base moved (a stale `last_commit_id` or a lost branch-create
+/// race); the caller re-reads and regenerates, since a blind replay fails again or, with `force`,
+/// discards the concurrent announce.
 fn is_stale_base(status: StatusCode, body: &[u8]) -> bool {
     if status != StatusCode::BAD_REQUEST {
         return false;
@@ -2112,17 +1403,12 @@ fn is_stale_base(status: StatusCode, body: &[u8]) -> bool {
         || body.contains("invalid reference name")
 }
 
-/// Whether a failed merge-request create means one is already open.
 fn merge_request_already_exists(body: &[u8]) -> bool {
     String::from_utf8_lossy(body).to_lowercase().contains("already exists")
 }
 
-/// Whether a failed commit is worth replaying.
-///
-/// A 429 or a 5xx is throttling or a server-side fault; the commit is atomic and
-/// content is addressed by path, so a repeat is safe. A 400 is never replayed:
-/// GitLab spends it on genuine validation failure as well as on the stale-base
-/// case, which is classified before this is reached.
+/// A 429 or 5xx, safe to replay since the commit is atomic; never a 400, which GitLab also spends
+/// on genuine validation failures.
 fn is_retryable(error: &ForgeError) -> bool {
     matches!(
         error,
@@ -2131,25 +1417,16 @@ fn is_retryable(error: &ForgeError) -> bool {
     )
 }
 
-/// Whether a merge request was opened from the project it targets.
-///
-/// The id-free spelling of `source_project_id=<this project>`: every entry
-/// carries both ids, so the comparison needs no numeric id of ocx's own. A body
-/// missing either field is **not** a match — announce then proposes its own
-/// request rather than adopting one whose provenance it could not read, which is
-/// the safe direction: the push updates a branch it already owns.
+/// Whether a merge request targets its own source project; a missing id is no match, so announce
+/// proposes its own request rather than adopt one of unread provenance.
 fn opened_onto_its_own_project(request: &Value) -> bool {
     let source = request.get("source_project_id").and_then(Value::as_u64);
     let target = request.get("target_project_id").and_then(Value::as_u64);
     matches!((source, target), (Some(source), Some(target)) if source == target)
 }
 
-/// Build a [`PullRequest`] from a merge-request response body.
-///
-/// `iid`, not `id`: the `iid` is the per-project number a human sees in the UI
-/// and in `!123` references, while `id` is a global database key that means
-/// nothing to a reader. Reporting the wrong one sends people to an unrelated
-/// merge request.
+/// Build a [`PullRequest`] from a merge-request body, numbered by `iid` (the `!123` a human sees),
+/// never the global `id`.
 fn merge_request_from_body(url: &str, value: &Value, updated: bool) -> Result<PullRequest, ForgeError> {
     let number = value
         .get("iid")
@@ -2173,31 +1450,18 @@ fn merge_request_from_body(url: &str, value: &Value, updated: bool) -> Result<Pu
     })
 }
 
-/// A merge-request body's merge status as a [`Mergeability`].
-///
-/// Two fields answer overlapping questions, and only their intersection is
-/// trustworthy. `has_conflicts` is the direct one and decides first;
-/// `detailed_merge_status` also spells a conflict, and is read as a fallback so
-/// a response that carries only one of the pair still lands on the same
-/// verdict.
-///
-/// `broken_status` — GitLab's "can not merge the source into the target
-/// branch, potential conflict" — is a conflict for this detector's purpose: the
-/// contract is that an unchanged run never reports success over a request that
-/// cannot merge, and a benign `Unknown` here would do exactly that. The
-/// no-verdict states are only the two *in-progress* values. Every
-/// other value — a failed pipeline, a missing approval, a draft — is a reason
-/// the request cannot merge *right now*, which is not the
-/// base-moved-under-the-branch conflict this detector exists to catch, so it
-/// reads as mergeable rather than raising an error the caller cannot act on. An
-/// absent field is the older API shape and carries no conflict either.
+/// A merge-request body's merge status: `has_conflicts` decides first, `detailed_merge_status` is
+/// the fallback.
 fn mergeability_from_merge_request(value: &Value) -> Mergeability {
     if value.get("has_conflicts").and_then(Value::as_bool) == Some(true) {
         return Mergeability::Conflicting;
     }
     match value.get("detailed_merge_status").and_then(Value::as_str) {
+        // `broken_status` is a conflict: an unchanged run must never report success over an unmergeable request.
         Some("conflict" | "broken_status") => Mergeability::Conflicting,
         Some("checking" | "unchecked") => Mergeability::Unknown,
+        // Any other value (failed pipeline, missing approval, draft) is not the conflict this detects, so
+        // it reads as mergeable.
         _ => Mergeability::Mergeable,
     }
 }

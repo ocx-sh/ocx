@@ -2,29 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! `ocx [--global] patch` — patch overlay management commands.
-//!
-//! Sub-commands:
-//! - **freeze**: write a `patches.snapshot.json` to pin companion digests for
-//!   reproducible builds.
-//! - **sync**: refresh patch descriptors and companions from the registry for
-//!   installed packages.
-//! - **publish**: push a patch descriptor to the patch registry (maintainer).
-//! - **test**: dry-run compose a descriptor onto a base without publishing
-//!   (maintainer).
-//! - **why**: trace which companion, matched by which descriptor rule,
-//!   contributes each env var to a base.
-//!
-//! # Design
-//!
-//! The freeze and sync commands are toolchain-tier: they operate on an
-//! `ocx.toml` / `ocx.lock` project (or `$OCX_HOME` under `--global`). The
-//! snapshot file is written as a sibling of `ocx.lock`. The publish and test
-//! commands are maintainer commands operating against the configured `[patches]`
-//! registry tier.
-//!
-//! Each sub-command lives in its own leaf module (`patch_freeze`, `patch_sync`,
-//! `patch_publish`, `patch_test`, `patch_why`); this module is the dispatcher
-//! only.
 
 use std::process::ExitCode;
 
@@ -72,16 +49,14 @@ pub enum PatchGroup {
     Publish(super::patch_publish::PatchPublishArgs),
 
     /// Compose a patch descriptor onto a base locally, without publishing.
-    ///
-    /// Reads a descriptor JSON file and composes its matched companions onto the
-    /// given base identifier in a scratch store, then either runs a test script,
-    /// runs a trailing command in the composed environment, or prints the
-    /// composed environment. Lets a maintainer verify a descriptor before
-    /// publishing it.
-    ///
-    /// Required companion packages must be resolvable (installed locally or
-    /// pulled from the registry); an unresolvable required companion fails the
-    /// command.
+    #[command(long_about = "\
+        Compose a patch descriptor onto a base locally, without publishing.\n\n\
+        Reads a descriptor JSON file and composes its matched companions onto the given base \
+        identifier in a scratch store, then either runs a test script, runs a trailing command in \
+        the composed environment, or prints the composed environment. Lets a maintainer verify a \
+        descriptor before publishing it.\n\n\
+        Required companion packages must be resolvable (installed locally or pulled from the \
+        registry); an unresolvable required companion fails the command.")]
     Test(super::patch_test::PatchTestArgs),
 
     /// Show which companion contributes each patched env var to a base, and

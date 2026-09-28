@@ -3,11 +3,6 @@
 
 //! `ocx patch why <base>` — trace which companion contributes each patched
 //! env var to a base, and by which descriptor rule.
-//!
-//! An OCI-tier diagnostic: it resolves the base identifier directly (no
-//! `ocx.toml` in scope) and reports the same companion overlay
-//! `resolve_env_with_patch_boundary` would apply to it, one row per
-//! contributed env var.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -31,12 +26,6 @@ pub struct PatchWhyArgs {
 
 impl PatchWhyArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // ── Step 1: Resolve the base identifier and find-or-install it. ──
-        //
-        // OCI-tier diagnostic: no project is in scope, so the resolution uses
-        // `EnvScope::package_tier()` — it shows what the configured
-        // `[patches]` tier overlays for the base, not a project opt-out
-        // decision (there is no project to opt out from).
         let base_id = self.base.with_domain(context.default_registry())?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         let manager = context.manager();
@@ -46,22 +35,12 @@ impl PatchWhyArgs {
             .await?;
         let info: Vec<Arc<InstallInfo>> = info.into_iter().map(|found| Arc::new(found.info)).collect();
 
-        // ── Step 2: Reuse the existing provenance resolution — no new
-        // resolution path. ──
-        //
-        // Composed for the SAME platform the base was resolved for: a companion
-        // that ships no host leaf must still be traced when `-p` names its
-        // platform.
+        // The base's `platform`, not the host, or a companion with no host leaf goes untraced under `-p`.
         let (entries, patch_start, provenance) = manager
             .resolve_env_with_patch_boundary(&info, false, EnvScope::package_tier(), &platform)
             .await?;
 
-        // ── Step 3: Zip the overlay slice with its aligned provenance. ──
-        //
-        // Empty when no `[patches]` tier is configured (provenance is empty by
-        // construction — see `resolve_env_with_patch_boundary`) or no
-        // companion contributes a var to this base. Both cases collapse to
-        // the same "no patches apply" report; this is not an error.
+        // `provenance` aligns with `entries[patch_start..]`; an empty overlay means no patches apply, not an error.
         let why_entries: Vec<api::data::patch_why::PatchWhyEntry> = entries[patch_start..]
             .iter()
             .zip(provenance.iter())
@@ -74,8 +53,6 @@ impl PatchWhyArgs {
             })
             .collect();
 
-        // ── Step 4: Report. Format is a context-level concern (root
-        // `--format`); this command does not override it. ──
         context.api().report(&api::data::patch_why::PatchWhyReport::new(
             base_id.to_string(),
             why_entries,

@@ -1,39 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Trust-root resolution ladder shared by `ocx package verify` (flag-driven)
-//! and the policy-gated auto-verify hook (env-driven).
-//!
-//! Both paths must apply the identical offline gate — a policy-covered package
-//! must never be verified against material that cannot check the Rekor SET
-//! offline, and must never silently skip verification. Keeping the ladder in
-//! one place makes that gate a single source of truth. The CLI command layers
-//! flag-vs-env override resolution and per-identifier error tagging on top.
-//!
-//! Precedence, cheapest-to-override first:
-//!
-//! 1. `--sigstore-trusted-root` flag,
-//! 2. `OCX_SIGSTORE_TRUSTED_ROOT`,
-//! 3. `[trust.sigstore] trusted_root` / `trusted_root_json` from `config.toml`,
-//! 4. `$OCX_HOME/sigstore/trusted-root.json` (convention path, no config),
-//! 5. the fresh trust-root cache for this Rekor instance,
-//! 6. the public-good root fetched over TUF.
-//!
-//! Rungs 1 and 2 arrive already collapsed into one path (the CLI passes
-//! `flag.or(env)`; auto-verify passes the env value). Offline additionally
-//! requires the resolved material to carry a pinned Rekor key, and never
-//! reaches the TUF fetch.
-//!
-//! Rungs 1–3 name material the operator asked for, so a missing or unreadable
-//! file is an error. Rung 4 is a convention: absent means "not configured this
-//! way" and falls through, while an unreadable *present* file still fails.
-//!
-//! Every read here is bounded ([`MAX_TRUSTED_ROOT_BYTES`]) and refuses a
-//! non-regular file, and every one of those failures exits 74 `io_error` —
-//! `TrustRootLoadReason::TrustRootUnreadable`, matching what
-//! `--key file:<missing>` has always answered. 78 `config_error` is left to the
-//! rungs that read no operator-named file: the TUF fetch and the assembled
-//! root.
+//! Trust-root resolution ladder shared by `ocx package verify` and the auto-verify hook, so both apply one offline
+//! gate.
 
 use std::path::{Path, PathBuf};
 
@@ -45,31 +14,18 @@ use ocx_trust::SigstoreTrust;
 use ocx_util::fs::BoundedReadError;
 
 /// The largest a trusted-root JSON document may be.
-///
-/// Named here rather than inferred from the caller: the public-good
-/// `trusted_root.json` is roughly 20 KiB and a self-hosted one a few, so one
-/// mebibyte is ~50x every honest document while still refusing the
-/// `/dev/zero`-shaped read the cap exists for. It is deliberately the same
-/// ceiling `MAX_SIGSTORE_RESPONSE_BYTES` puts on the *same document* arriving
-/// over the network, so the transport an operator chose does not change how
-/// large a trust root may be.
+// Keep equal to `MAX_SIGSTORE_RESPONSE_BYTES`, so the same document's size limit never depends on its transport.
 pub const MAX_TRUSTED_ROOT_BYTES: u64 = 1024 * 1024;
 
-/// Resolve the trust root from the supplied overrides, then the configured
-/// `[trust.sigstore]` material, the `$OCX_HOME` convention path, the trust-root
-/// cache, and finally the embedded root — enforcing the offline
-/// pinned-Rekor-key gate on every rung.
+/// Resolve the trust root, first rung wins: `explicit_override` (flag-or-env), `[trust.sigstore]`,
+/// `home_trusted_root`, the fresh cache under `rekor_cache_key`, then the public-good root over TUF.
 ///
-/// `explicit_override` is the already-resolved flag-or-env path (rungs 1–2).
-/// `sigstore` is the merged `[trust.sigstore]` table, `home_trusted_root` the
-/// `$OCX_HOME/sigstore/trusted-root.json` convention path. `state` owns the
-/// trust-root cache layout; `rekor_cache_key` keys it by Rekor authority.
+/// Offline, every rung must yield a pinned Rekor key and TUF is never reached.
 ///
 /// # Errors
-/// Returns the [`VerifyErrorKind`] describing the failure (an unreadable
-/// operator-named file, a `trusted_root` / `trusted_root_json` ambiguity, JSON
-/// parse failure, offline-with-no-pinned-key, or a failed TUF fetch). Callers
-/// tag it with the target identifier.
+///
+/// An unreadable operator-named file (exit 74), a `trusted_root` / `trusted_root_json` ambiguity,
+/// a JSON parse failure, offline without a pinned key, or a failed TUF fetch.
 pub async fn resolve_trust_root(
     explicit_override: Option<&Path>,
     sigstore: Option<&SigstoreTrust>,
@@ -78,17 +34,13 @@ pub async fn resolve_trust_root(
     rekor_cache_key: &str,
     offline: bool,
 ) -> Result<TrustRoot, VerifyErrorKind> {
-    // 74 `io_error`, not 78 `config_error`: every door this closure serves is a
-    // path the operator typed, and `--key file:<missing>` has always answered 74
-    // for the identical shape. `AssetReadFailed` stays behind for the two sites
-    // that read no operator-named file at all.
+    // Exit 74, not 78: every read here is an operator-typed path, matching `--key file:<missing>`.
     let read_err = |error: BoundedReadError| {
         VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable {
             source: Box::new(error),
         })
     };
 
-    // 1+2. `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT`, already collapsed.
     if let Some(path) = explicit_override {
         let json_path = trusted_root_json_path(path).await;
         let bytes = read_trusted_root(&json_path).await.map_err(read_err)?;
@@ -96,9 +48,6 @@ pub async fn resolve_trust_root(
         return enforce_offline_rekor_key(root, offline);
     }
 
-    // 3. `[trust.sigstore]` from the operator `config.toml` tiers. The two
-    //    spellings are checked for ambiguity before either is read, so a
-    //    misconfigured file fails the same way whichever one would have won.
     if let Some(sigstore) = sigstore {
         if sigstore.trusted_root.is_some() && sigstore.trusted_root_json.is_some() {
             return Err(VerifyErrorKind::TrustRootLoad(
@@ -117,37 +66,23 @@ pub async fn resolve_trust_root(
         }
     }
 
-    // 4. `$OCX_HOME/sigstore/trusted-root.json` — the drop-a-file convention.
-    //    Absent falls through to the cache; present-but-unreadable does not,
-    //    or a permission problem would masquerade as "not configured".
     if let Some(path) = home_trusted_root {
         match read_trusted_root(path).await {
             Ok(bytes) => {
                 let root = TrustRoot::load_trusted_root_json(&bytes)?;
                 return enforce_offline_rekor_key(root, offline);
             }
-            // Absence, and only absence, falls through. `TooLarge` and
-            // `NotRegularFile` refuse a file that IS there: routing either into
-            // this arm would let a present-but-unusable trust root silently
-            // downgrade to the cache and then to TUF — the same masquerade a
-            // permission error would be, arriving through a newer door. A
-            // wildcard arm here is what `BoundedReadError`'s own doc comment
-            // warns against.
+            // Only `NotFound` falls through; any other error here silently downgrades a present trust root to
+            // cache/TUF.
             Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(read_err(error)),
         }
     }
 
-    // 5. Fresh trust-root cache for this Rekor instance (Fulcio + Rekor key).
-    //    A normal cache entry always carries a Rekor key, but route it through
-    //    the same offline gate so a hand-edited keyless entry still yields the
-    //    actionable error rather than a deeper Rekor failure.
     if let Ok(Some(cached)) = TrustRootCache::from_cache(rekor_cache_key, state).await {
         return enforce_offline_rekor_key(cached.into_trust_root(), offline);
     }
 
-    // 6. Nothing cached or supplied. Offline cannot fall back to the online
-    //    TUF fetch — fail with the remedy.
     if offline {
         return Err(VerifyErrorKind::TrustRootLoad(
             TrustRootLoadReason::OfflineTrustMaterialUnavailable,
@@ -156,9 +91,7 @@ pub async fn resolve_trust_root(
     TrustRoot::load_embedded(&state.tuf_cache_dir()).await
 }
 
-/// Offline verify needs a pinned Rekor key (the SET cannot be checked without
-/// one and there is no network to fetch it). A trust root that lacks one is an
-/// actionable error offline; online it is fine (the key is fetched, then cached).
+/// Refuse, offline only, a trust root without a pinned Rekor key: nothing else can check the SET.
 fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot, VerifyErrorKind> {
     if offline && root.rekor_public_key_pem().is_none() {
         return Err(VerifyErrorKind::TrustRootLoad(
@@ -168,23 +101,12 @@ fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot
     Ok(root)
 }
 
-/// Read a trusted-root document, bounded at [`MAX_TRUSTED_ROOT_BYTES`] and
-/// refusing anything that is not a regular file.
-///
-/// A thin wrapper over [`ocx_util::fs::read_bounded_async`] — same
-/// spawn-to-the-pool, same `JoinError`-to-`BoundedReadError::Io` mapping, so a
-/// panicking pool task can never be mistaken for an absent file by rung 4's
-/// fall-through. Named for this call site rather than inlined at each of the
-/// three callers below.
+/// Read a trusted-root document, bounded at [`MAX_TRUSTED_ROOT_BYTES`], refusing a non-regular file.
 async fn read_trusted_root(path: &Path) -> Result<Vec<u8>, BoundedReadError> {
     ocx_util::fs::read_bounded_async(path, MAX_TRUSTED_ROOT_BYTES).await
 }
 
-/// Resolve a trusted-root override to the JSON file itself: the path as given
-/// when it names a file, or `<dir>/trusted_root.json` when it names a directory.
-///
-/// Uses async `tokio::fs::metadata` — the sync `Path::is_dir` would block the
-/// runtime worker on every trusted-root resolution.
+/// The path as given when it names a file, or `<dir>/trusted_root.json` when it names a directory.
 async fn trusted_root_json_path(path: &Path) -> PathBuf {
     let is_dir = tokio::fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false);
     if is_dir {

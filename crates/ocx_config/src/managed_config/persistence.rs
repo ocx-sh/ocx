@@ -1,34 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Network fetch + pure persistence primitives for the managed-config
-//! package (managed-config v2 — config-as-package).
+//! Fetch ([`fetch_managed_config`]) and persistence ([`persist_managed_config`]) of the
+//! managed-config package.
 //!
-//! | Function | Concerns | Testable |
-//! |---|---|---|
-//! | [`fetch_managed_config`] | Network: auth, OCI fetch, package-shape validation, capped layer pull | `StubTransport` unit tests |
-//! | [`persist_managed_config`] | Pure: TOML parse + `[managed]` strip, atomic snapshot write | Unit-testable with synthetic text |
-//!
-//! ## Wire shape (v2)
-//!
-//! The managed config is an **ordinary ocx package** (published by
-//! `ocx config push`): an image index whose `any/any` entry points at an
-//! image manifest with a tar+gzip layer containing `config.toml`. A flat
-//! image manifest (no index) is also accepted. The **top-level digest** (the
-//! index digest, or the flat manifest's digest) is the tier's drift identity
-//! — the same value [`probe_managed_config_digest`] returns.
-//!
-//! ## Size caps (CWE-400)
-//!
-//! Three independent 64 KiB ceilings: the layer's declared size, the streamed
-//! blob bytes ([`ocx_oci::client::Client::fetch_layer_blob_capped`]), and
-//! the decompressed tar stream (`take(cap + 1)`).
-//!
-//! `fetch_managed_config` runs on a client whose `MirrorMap` derives from the
-//! **local-only** mirror view (ADR "Mirror posture" — the managed payload is
-//! excluded from its own fetch route, so it can never redirect or hijack its
-//! own refresh). Callers (setup phase 1.5, `ocx config update`, the background
-//! tick) are responsible for building that client.
+//! Three independent 64 KiB caps (CWE-400): the declared layer size, the streamed blob bytes, the
+//! decompressed tar stream.
 
 use crate::managed::ManagedConfigSnapshot;
 use crate::managed_config::ManagedConfigPaths;
@@ -40,25 +17,18 @@ use ocx_oci::{Digest, OciIdentifier};
 /// Result of a successful [`fetch_managed_config`] before persistence.
 #[derive(Debug)]
 pub struct FetchedManagedConfig {
-    /// The top-level manifest digest (image-index digest, or the flat image
-    /// manifest's digest) — the tier's drift identity.
+    /// The top-level manifest digest, the tier's drift identity.
     pub manifest_digest: Digest,
-    /// The extracted `config.toml` text (digest-verified, size-capped, not
-    /// yet TOML-validated — that happens in [`persist_managed_config`]).
+    /// The `config.toml` text, digest-verified and size-capped but not yet TOML-validated.
     pub config_text: String,
 }
 
 // ── Fetch errors ──────────────────────────────────────────────────────────────
 
 /// Errors raised while fetching the managed-config package from the registry.
-///
-/// Every shape variant means the package at the source is not a consumable
-/// managed-config package (→ `DataError` 65); [`Self::FetchFailed`] preserves
-/// the network/auth cause and delegates classification to it.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedConfigFetchError {
-    /// A network error from the OCI client, preserving the full
-    /// [`ocx_oci::client::error::ClientError`] source chain.
+    /// A network or auth error from the OCI client.
     #[error("failed to fetch managed config from registry")]
     FetchFailed {
         /// The underlying OCI client error.
@@ -74,9 +44,7 @@ pub enum ManagedConfigFetchError {
         detail: String,
     },
 
-    /// The image index has no platform-agnostic `any/any` entry — the package
-    /// was pushed for concrete platforms only and cannot serve as a managed
-    /// config (publish with the default `--platform any/any`).
+    /// The image index has no `any/any` entry (publish with the default `--platform any/any`).
     #[error("managed config package has no any/any platform entry")]
     NoAnyPlatformEntry,
 
@@ -127,8 +95,7 @@ pub enum ManagedConfigFetchError {
 
 // ── Persist errors ────────────────────────────────────────────────────────────
 
-/// Errors raised while persisting a fetched managed-config payload to the
-/// two-file snapshot (metadata `snapshot.json` + payload `config.toml`).
+/// Errors raised while persisting a fetched managed-config payload.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedConfigPersistError {
     /// The payload text is not valid TOML.
@@ -147,19 +114,14 @@ pub enum ManagedConfigPersistError {
         source: std::io::Error,
     },
 
-    /// The payload's `extra_ca_certs_pem` is one THIS host's TLS verifier
-    /// cannot load (C-004, run at adoption with the managed tier as origin).
-    /// `ocx config push` proves the bundle on the publisher's platform only —
-    /// a root CryptoAPI accepts and webpki refuses would otherwise be
-    /// persisted here and refuse `Context::try_init` on every command of
-    /// this host, `ocx config update` included, until the snapshot was
-    /// deleted by hand. Refused before the write, so the previous snapshot
-    /// stays in force. Classifies as the inner verdict does (78: the
-    /// payload's own text is what is wrong).
+    /// The payload's `extra_ca_certs_pem` does not load on this host; refused before the write, so
+    /// the previous snapshot stays in force.
+    ///
+    /// `ocx config push` proves it on the publisher's platform only; persisted, it would fail
+    /// `Context::try_init` on every command here, `ocx config update` included.
     #[error("managed config payload carries an extra CA bundle this host cannot load; the previous snapshot is kept")]
     ExtraCaCertsInvalid {
-        /// What the certificate parser or the platform verifier rejected —
-        /// names the block, never the bytes (D-11).
+        /// What the parser or verifier rejected, naming the block, never the bytes.
         #[source]
         source: crate::tls::TlsError,
     },
@@ -177,21 +139,16 @@ pub enum ManagedConfigUpdateError {
     /// The persist step failed.
     #[error("failed to persist managed config")]
     Persist(#[from] ManagedConfigPersistError),
-    /// The resolved source has no manifest in the registry — the ref is
-    /// genuinely absent, not a network or auth fault (`fetch_managed_config`
-    /// returns `Ok(None)` for this case). Surfaced as a first-class error so
-    /// `ocx config update` exits nonzero instead of a false
-    /// `ManagedConfigUpdateResult::NotConfigured` success, and so `ocx self
-    /// setup --managed-config` never falls through to its "always resolved"
+    /// The resolved source has no manifest in the registry.
+    ///
+    /// An error, not a `NotConfigured` success, or `ocx self setup --managed-config` reaches its
     /// `unreachable!()` arm.
     #[error("managed config source '{effective_source}' not found in registry")]
     SourceNotFound {
         /// The resolved source that produced no manifest.
         effective_source: ocx_oci::OciIdentifier,
     },
-    /// A `tag@digest` version pin was specified but the tag resolved to a
-    /// different digest (fail-closed immutability assertion — mirrors `ocx
-    /// self setup`'s `PinDigestMismatch`). Nothing was persisted.
+    /// A `tag@digest` pin's tag resolved to a different digest; nothing was persisted.
     #[error("managed config pin digest mismatch: expected '{expected}' but the tag resolved to '{fetched}'")]
     PinDigestMismatch {
         /// The digest pinned in the VERSION argument.
@@ -203,25 +160,11 @@ pub enum ManagedConfigUpdateError {
 
 // ── Network primitive ─────────────────────────────────────────────────────────
 
-/// Fetches the managed-config package for `identifier` from the OCI registry
-/// and extracts its `config.toml` payload.
+/// Fetches the managed-config package for `identifier` and extracts its `config.toml`;
+/// `Ok(None)` when the reference does not exist.
 ///
-/// `client` MUST be built from the **local-only** mirror view (ADR "Mirror
-/// posture") — the managed payload's own `[mirrors]`/`[managed]` content must
-/// never influence the route used to fetch it (no-cycle, no self-brick).
-///
-/// Flow (see the module doc for the wire shape):
-///
-/// 1. fetch the top-level manifest; its digest is the drift identity,
-/// 2. image index → select the `any/any` entry and fetch its image manifest
-///    (a flat image manifest is accepted directly),
-/// 3. select the tar+gzip layer, enforce the declared-size cap, stream the
-///    blob with a byte cap, re-verify its digest,
-/// 4. decompress (capped) and scan the tar for `config.toml` — extra archive
-///    entries are ignored.
-///
-/// Returns `Ok(None)` when the reference does not exist (ref genuinely
-/// absent); returns `Err` on any network/auth/shape failure.
+/// `client` must be built from the local-only mirror view, or a payload could redirect or brick
+/// its own refresh.
 ///
 /// # Errors
 ///
@@ -240,8 +183,6 @@ pub async fn fetch_managed_config(
         return Ok(None);
     };
 
-    // Resolve the image manifest carrying the layer: index → any/any entry;
-    // flat image manifest accepted as-is (single-platform push fallback).
     let image_manifest = match top_manifest {
         ocx_oci::Manifest::Image(image) => image,
         ocx_oci::Manifest::ImageIndex(index) => {
@@ -249,8 +190,7 @@ pub async fn fetch_managed_config(
                 .manifests
                 .iter()
                 .find(|entry| match &entry.platform {
-                    // No platform on an index entry = platform-agnostic
-                    // (matches `Index::fetch_candidates`' convention).
+                    // No platform = platform-agnostic, as in `Index::fetch_candidates`.
                     None => true,
                     Some(platform) => ocx_oci::Platform::try_from(platform.clone()).is_ok_and(|p| p.is_any()),
                 })
@@ -304,8 +244,7 @@ pub async fn fetch_managed_config(
         .await
         .map_err(|source| ManagedConfigFetchError::FetchFailed { source })?;
 
-    // Digest re-verify before touching the bytes (BlobStore's "verified
-    // digest == sha256(bytes)" contract, moved into the fetch leg in v2).
+    // Re-verify the digest before touching the bytes.
     let computed = ocx_oci::Algorithm::Sha256.hash(&layer_bytes);
     if computed != layer_digest {
         return Err(ManagedConfigFetchError::LayerDigestMismatch {
@@ -314,7 +253,7 @@ pub async fn fetch_managed_config(
         });
     }
 
-    // Cap 3: decompressed stream + tar scan (pure, unit-tested).
+    // Cap 3: decompressed stream + tar scan.
     let config_text = extract_config_toml(&layer_bytes, maximum)?;
 
     Ok(Some(FetchedManagedConfig {
@@ -323,29 +262,16 @@ pub async fn fetch_managed_config(
     }))
 }
 
-/// Scans a gzip'd tar archive for the `config.toml` entry and returns its
-/// text. Pure function over the compressed bytes.
-///
-/// The decompressed stream is capped at `maximum + 1` bytes (gzip-bomb guard)
-/// — an archive whose scan would decompress more than `maximum` bytes before
-/// `config.toml` is found fails with [`ManagedConfigFetchError::ConfigEntryTooLarge`].
-/// Extra entries besides `config.toml` are ignored.
-// ponytail: tar+gzip only — the one shape `ocx config push` produces. Other
-// compressions (xz/zst) would need archive-backend dispatch; add if a real
-// operator payload ever needs them.
+/// Scans a gzip'd tar archive for its `config.toml` entry, under a decompression cap.
+// ponytail: tar+gzip only, the one shape `ocx config push` produces; add archive-backend dispatch
+// if a real operator payload ever needs xz/zst.
 fn extract_config_toml(compressed: &[u8], maximum: u64) -> Result<String, ManagedConfigFetchError> {
     use std::io::Read as _;
 
     let invalid = |detail: String| ManagedConfigFetchError::InvalidArchive { detail };
 
     let decoder = flate2::read::GzDecoder::new(compressed);
-    // Budget = content ceiling + one 512-byte tar header block (+1 sentinel).
-    // Without the header allowance a config of exactly `maximum` content bytes —
-    // admitted by publish-side validation and by the entry-size gate below —
-    // truncates: the header eats 512 of the budget and tar reports the premature
-    // EOF as a clean Ok(0). Still a decompression-bomb backstop (ceiling is
-    // `maximum` + one block, not unbounded); the entry-size gate rejects any
-    // entry larger than `maximum` before its content is read.
+    // Plus one tar header block, or a config of exactly `maximum` bytes truncates as a clean EOF.
     const TAR_HEADER_BLOCK: u64 = 512;
     let capped = decoder.take(maximum.saturating_add(TAR_HEADER_BLOCK).saturating_add(1));
     let mut archive = tar::Archive::new(capped);
@@ -357,9 +283,6 @@ fn extract_config_toml(compressed: &[u8], maximum: u64) -> Result<String, Manage
         let mut entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                // A read failure mid-scan is either a corrupt archive or the
-                // decompression cap tripping — the cap is the security-relevant
-                // reading, so report it when the stream was plausibly truncated.
                 return Err(invalid(format!("tar entry unreadable: {e}")));
             }
         };
@@ -375,8 +298,7 @@ fn extract_config_toml(compressed: &[u8], maximum: u64) -> Result<String, Manage
         }
         let mut text = String::new();
         entry.read_to_string(&mut text).map_err(|e| match e.kind() {
-            // The capped reader ran dry mid-entry → the archive tried to
-            // decompress past the ceiling.
+            // The capped reader ran dry mid-entry: the archive decompressed past the ceiling.
             std::io::ErrorKind::UnexpectedEof => ManagedConfigFetchError::ConfigEntryTooLarge { maximum },
             _ => invalid(format!("config.toml entry unreadable: {e}")),
         })?;
@@ -385,18 +307,8 @@ fn extract_config_toml(compressed: &[u8], maximum: u64) -> Result<String, Manage
     Err(ManagedConfigFetchError::MissingConfigToml)
 }
 
-/// Probes only the managed-config package's current top-level manifest digest
-/// for `identifier`, WITHOUT downloading any manifest body or layer.
-///
-/// Wraps `ocx_oci::client::Client`'s manifest-digest probe (transport
-/// HEAD) and re-maps its error onto [`ManagedConfigFetchError`]. The digest
-/// returned is the same value [`fetch_managed_config`] carries in
-/// [`FetchedManagedConfig::manifest_digest`], so it compares directly against
-/// a persisted [`ManagedConfigSnapshot::digest`].
-///
-/// Returns `Ok(None)` when the reference does not exist. Used by the
-/// digest-only refresh paths (`notify`/`manual` background tick and
-/// `ocx config update --check`) so drift detection never pulls content.
+/// Probes only the top-level manifest digest, comparable against a persisted
+/// [`ManagedConfigSnapshot::digest`]; `Ok(None)` when the reference does not exist.
 ///
 /// # Errors
 ///
@@ -413,21 +325,8 @@ pub async fn probe_managed_config_digest(
 
 // ── Pure persistence primitive ────────────────────────────────────────────────
 
-/// Parses the fetched payload as TOML, proves its `extra_ca_certs_pem` (if
-/// any) loads on this host ([`ManagedConfigPersistError::ExtraCaCertsInvalid`]
-/// otherwise — nothing written), strips any `[managed]` section (WARN if
-/// present — ADR Decision I, a remote payload can never redirect the tier that
-/// fetched it), and writes the resulting [`ManagedConfigSnapshot`] as two
-/// sibling files under
-/// [`ManagedConfigPaths::dir`](crate::managed_config::ManagedConfigPaths::dir):
-/// the readable `config.toml` payload and the `snapshot.json` metadata (each via
-/// its own atomic temp+rename).
-///
-/// `source` is the effective managed-config source; its canonical `Display`
-/// form is carried into [`ManagedConfigSnapshot::source`] (identity gate) and
-/// its tag into [`ManagedConfigSnapshot::tag`] (snapshot v2 bookkeeping).
-/// Digest verification happens in [`fetch_managed_config`] — by the time a
-/// [`FetchedManagedConfig`] exists, its text is digest-verified.
+/// Parses the payload, proves its `extra_ca_certs_pem` loads on this host, strips any `[managed]`
+/// section (a payload never redirects the tier that fetched it), and writes the snapshot.
 ///
 /// # Errors
 ///
@@ -439,17 +338,10 @@ pub async fn persist_managed_config(
 ) -> Result<ManagedConfigSnapshot, ManagedConfigPersistError> {
     let text = fetched.config_text;
 
-    // Validate the payload matches the Config schema; the strip below operates
-    // on the raw TOML text so the persisted string never carries a literal
-    // `[managed]` section (ADR Decision I — the loader's own strip is a second,
-    // redundant line of defense against a snapshot.json written by another
-    // path).
     let parsed: crate::Config =
         toml::from_str(&text).map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
 
-    // The consumer's own verdict on the bundle, before it can become the
-    // snapshot every later `try_init` fails closed on. `parse_pem` is
-    // blocking (its probe build loads the platform trust store, DX-11).
+    // Before the write, or every later `try_init` fails closed on this snapshot.
     if let Some(pem) = parsed.extra_ca_certs_pem.clone() {
         tokio::task::spawn_blocking(move || {
             crate::tls::parse_pem(
@@ -494,17 +386,8 @@ pub async fn persist_managed_config(
     Ok(snapshot)
 }
 
-/// Writes `snapshot` as two sibling files under
-/// [`ManagedConfigPaths::dir`](crate::managed_config::ManagedConfigPaths::dir):
-/// the raw `config.toml` payload and the `snapshot.json` metadata, each via its
-/// own atomic temp+rename.
-///
-/// Write order is payload-first, metadata-last. `snapshot.json` is the commit
-/// marker: by the time a reader observes it, the `config.toml` written before
-/// it is already in place, so the reader never sees metadata pointing at a
-/// missing payload. A crash between the two writes leaves the metadata absent —
-/// the whole snapshot then reads as absent (benign-state rule; the next drift
-/// sync re-persists it).
+/// Writes the payload `config.toml` first, then `snapshot.json` as the commit marker, or a
+/// reader could see metadata whose payload is not yet in place.
 async fn write_snapshot_atomic(paths: &ManagedConfigPaths, snapshot: &ManagedConfigSnapshot) -> std::io::Result<()> {
     let dir = paths.dir();
     let snapshot_path = paths.snapshot_file();
@@ -515,11 +398,8 @@ async fn write_snapshot_atomic(paths: &ManagedConfigPaths, snapshot: &ManagedCon
 
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
-        // ponytail: two atomic renames, not one — each file is torn-write-safe
-        // on its own, but the cross-file pairing is not itself atomic, so racing
-        // writers can leave metadata from one and payload from another. Both are
-        // complete, valid files and drift-sync self-heals on the next tick;
-        // tighten to a temp-dir swap only if a real pairing hazard shows up.
+        // ponytail: two atomic renames, so racing writers can pair one's metadata with another's
+        // payload; drift-sync self-heals it, tighten to a temp-dir swap if that ever bites.
         ocx_util::fs::write_bytes_atomic(&payload_path, &payload)?;
         ocx_util::fs::write_bytes_atomic(&snapshot_path, &metadata)?;
         Ok(())
@@ -528,21 +408,13 @@ async fn write_snapshot_atomic(paths: &ManagedConfigPaths, snapshot: &ManagedCon
     .map_err(|join_error| std::io::Error::other(join_error.to_string()))?
 }
 
-/// Reads and parses the two-file snapshot from the tier's well-known paths,
-/// treating any I/O or parse failure as absent (benign-state rule — a missing
-/// or corrupt snapshot is never a hard error at read time).
+/// Reads the two-file snapshot; any I/O or parse failure reads as absent.
 pub async fn read_managed_config_snapshot(paths: &ManagedConfigPaths) -> Option<ManagedConfigSnapshot> {
     read_managed_config_snapshot_at(&paths.snapshot_file()).await
 }
 
-/// Path-based variant of [`read_managed_config_snapshot`], for callers (the
-/// config loader) that hold only the snapshot path.
-///
-/// `path` is the metadata `snapshot.json`; the payload is loaded from the
-/// sibling `config.toml` derived by
-/// [`ManagedConfigPaths::toml_beside_snapshot`](crate::managed_config::ManagedConfigPaths::toml_beside_snapshot).
-/// A missing or unreadable payload sibling makes the whole snapshot read as
-/// absent — the reader never yields a snapshot with an empty `config`.
+/// [`read_managed_config_snapshot`] from the `snapshot.json` path; a missing payload sibling
+/// reads as absent, never as an empty `config`.
 pub async fn read_managed_config_snapshot_at(path: &std::path::Path) -> Option<ManagedConfigSnapshot> {
     let metadata_bytes = tokio::fs::read(path).await.ok()?;
     let mut snapshot: ManagedConfigSnapshot = serde_json::from_slice(&metadata_bytes).ok()?;

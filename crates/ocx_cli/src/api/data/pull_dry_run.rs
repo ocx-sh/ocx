@@ -28,18 +28,13 @@ impl fmt::Display for PullStatus {
     }
 }
 
+// `package` stays typed: JSON keeps the full pin while the plain table shortens it.
 /// A single dry-run preview row.
 ///
-/// `package` is held typed rather than pre-formatted so plain and JSON can
-/// render it differently: `PinnedPackageRef`'s `Serialize` is its `Display`,
-/// so JSON keeps the pinned `…@sha256:<64hex>` form, while the plain table
-/// drops the digest.
-///
-/// `path` is `Some` for cached entries (the package root directory,
-/// parent of `content/` and `entrypoints/`) and `None` for `WouldFetch`
-/// rows where nothing has been materialised yet. Mirrors the contract
-/// documented on [`crate::api::data::paths::PathEntry`]: consumers
-/// traverse into `<path>/content/` for installed files or
+/// `package` is the pinned `…@sha256:<64hex>` identifier. `path` is the
+/// package root directory (parent of `content/` and `entrypoints/`) for
+/// `cached` rows, and `null` for `would-fetch` rows where nothing has been
+/// materialised yet; traverse into `<path>/content/` for installed files or
 /// `<path>/entrypoints/` for generated launchers.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DryRunEntry {
@@ -54,15 +49,7 @@ impl DryRunEntry {
     }
 }
 
-/// Preview of what `ocx pull` would do without writing to the store.
-///
-/// Plain format: two-column table (Package | Status), the package pinned to a
-/// 12-hex short digest. `path` has no column: it is populated only for `cached`
-/// rows and is a dash for exactly the `would-fetch` rows this command exists to
-/// surface.
-///
-/// JSON format: array of `{ package, status, path }` objects, preserving
-/// lock-file order.
+/// Preview of what `ocx pull` would do without writing to the store, in lock-file order.
 pub struct PullDryRun {
     pub entries: Vec<DryRunEntry>,
 }
@@ -83,11 +70,7 @@ impl Printable for PullDryRun {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
-            // A locked leaf carries no tag (`LockedTool::repository` is bare
-            // registry/repo coordinates), so dropping the digest outright would
-            // leave the row with no version at all. Shorten it instead: 12 hex
-            // still discriminates two leaves of the same repo, at a quarter the
-            // width. JSON keeps the full pin.
+            // Shortened, not dropped: a locked leaf has no tag, so the digest is its only version.
             rows[0].push(format!(
                 "{}@{}",
                 entry.package.without_digest(),
@@ -102,8 +85,7 @@ impl Printable for PullDryRun {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. `entries` is written as a bare array.
+// Transparent `Serialize`: the schema is the bare entry array.
 impl schemars::JsonSchema for PullDryRun {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "PullDryRun".into()

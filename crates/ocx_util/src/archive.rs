@@ -20,18 +20,13 @@ pub struct Archive {
     inner: Box<dyn backend::Backend>,
 }
 
-/// Returns `true` if the path has a `.zip` extension.
 fn is_zip(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
 }
 
-/// Multiplier applied to a compressed archive's byte size to bound its
-/// decompressed output (CWE-400). Matches the registry pull path's policy in
-/// `oci::client`: 100x covers realistic compression ratios for tool binaries
-/// with headroom.
+/// Decompression-bomb cap multiplier (CWE-400), matching the registry pull path's policy.
 const EXTRACTION_CAP_MULTIPLIER: u64 = 100;
-/// Floor for the decompression cap, so a tiny compressed input still permits a
-/// reasonable extraction. Matches the registry pull path's 256 MiB floor.
+/// Decompression cap floor, matching the registry pull path's.
 const EXTRACTION_CAP_MINIMUM: u64 = 256 << 20;
 
 /// Number of entries between periodic debug log messages during archiving.
@@ -44,8 +39,7 @@ fn extraction_cap(compressed_size: u64) -> u64 {
         .max(EXTRACTION_CAP_MINIMUM)
 }
 
-/// Strips setuid/setgid/sticky (`0o7000`) and group/other write (`0o022`) from a
-/// directory this extractor created. No-op off Unix, where there is no such mode.
+/// Strips setuid/setgid/sticky and group/other write from a directory this extractor created.
 #[cfg(unix)]
 fn cap_directory_mode(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -53,18 +47,9 @@ fn cap_directory_mode(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & !(0o7000 | 0o022)))
 }
 
-/// Creates `dir` and every missing ancestor, then caps the mode of each
-/// component strictly below `root` (see [`cap_directory_mode`]).
+/// Creates `dir` and missing ancestors, capping the mode of each component strictly below `root`.
 ///
-/// `create_dir_all` opens implicit parent directories with `0o777 & ~umask`, and
-/// zip directory entries the same way — never chmodded afterwards. Under a
-/// permissive umask (`000`/`002`, routine in containers and CI) an archive of
-/// `a/b/file` would otherwise leave `a` and `b` group/other-writable, retaining
-/// exactly the bits the entry-driven `0o022` cap promises to strip (Codex
-/// Finding 4). `root` is the extraction root — a scratch/layer dir owned by the
-/// caller — so it is left untouched; every component below it was created by this
-/// extraction. The mode cap is idempotent, so re-capping a component an earlier
-/// entry already created is harmless.
+/// `create_dir_all` leaves implicit parents at `0o777 & ~umask`, group/other-writable under a permissive umask.
 #[cfg_attr(not(unix), allow(unused_variables))] // the cap loop below is unix-only
 fn create_dir_all_capped(root: &Path, dir: &Path) -> std::result::Result<(), Error> {
     std::fs::create_dir_all(dir).map_err(|e| Error::Io {
@@ -86,33 +71,15 @@ fn create_dir_all_capped(root: &Path, dir: &Path) -> std::result::Result<(), Err
     Ok(())
 }
 
-/// Sweeps every link under `root` once the entry loop has finished and refuses
-/// the extraction if any resolves outside `root` *as the finished tree stands*.
+/// Refuses the extraction if any link under the root resolves outside it after the entry loop.
 ///
-/// The per-entry predicate judges each link against the disk as it is when the
-/// entry arrives, so it cannot see a hop a LATER entry plants: `e1 -> a/..` with
-/// `a` still absent folds to the root and is accepted, then `a -> .` lands and
-/// `e1` physically resolves to `root/..`. Nothing is written through it — the
-/// ancestor guard refuses that — but the tree now carries an escaping link, and
-/// the layer routes have no re-pack to catch it.
-///
-/// This is a *physical* post-condition, not a second run of the entry-time
-/// predicate: an existing link is judged by where it actually lands, so a
-/// Windows junction — which the extractor necessarily creates with an absolute
-/// substitute name — is judged by its resolution rather than refused for being
-/// spelled absolutely. A link that resolves nowhere (dangling) can be walked by
-/// nothing and is left alone.
-///
-/// A refused link is removed before the error is returned, and the sweep
-/// repeats until the tree holds none: a per-entry refusal leaves a partial tree
-/// the caller discards, but an escaping symlink is not a partial file — it is
-/// the published artifact itself, and it must not survive in the scratch root
-/// for anything that walks it later. The first refusal is the one reported.
+/// The per-entry check misses a hop a later entry plants (`e1 -> a/..`, then `a -> .`).
+/// Judged physically: a junction's absolute spelling is not refused, a dangling link is left alone.
+/// Escaping links are removed until none remain, since the tree is the published artifact.
 pub(super) fn sweep_symlinks(canonical_root: &Path) -> std::result::Result<(), Error> {
     let mut first: Option<Error> = None;
     while let Some((link, target)) = first_escaping_link(canonical_root, canonical_root)? {
-        // `symlink::remove` knows how to take a junction down; `remove_file`
-        // does not.
+        // `symlink::remove`, since `remove_file` cannot take a junction down.
         crate::fs::symlink::remove(&link).map_err(|e| Error::Io {
             path: link.clone(),
             source: std::io::Error::other(e),
@@ -122,9 +89,9 @@ pub(super) fn sweep_symlinks(canonical_root: &Path) -> std::result::Result<(), E
     first.map_or(Ok(()), Err)
 }
 
-/// Depth-first, returns the first link under `dir` that physically resolves
-/// outside `canonical_root`, as `(link, target as written)`. Recurses into real
-/// directories only — a link to a directory is judged, never entered.
+/// Depth-first, the first link under `dir` resolving outside `canonical_root`, as `(link, target as written)`.
+///
+/// A link to a directory is judged, never entered.
 fn first_escaping_link(
     canonical_root: &Path,
     dir: &Path,
@@ -153,11 +120,7 @@ fn first_escaping_link(
 }
 
 impl Archive {
-    /// Creates a new archive at the given path.
-    /// Any existing file at the path will be overwritten.
-    /// If the path has a known extension, the corresponding format and compression will be used.
-    /// Otherwise, a plain tar archive will be created.
-    /// If you want to enforce compression, use `create_with_compression` instead.
+    /// Creates an archive at `output`, overwriting it; format and compression follow the extension, else plain tar.
     pub async fn create(output: impl AsRef<Path>) -> Result<Self> {
         let output = output.as_ref();
         if is_zip(output) {
@@ -183,9 +146,7 @@ impl Archive {
         }
     }
 
-    /// Creates a new archive at the given path with the given compression options.
-    /// For zip archives, the compression level from options is used; the algorithm field is ignored.
-    /// For tar archives, the algorithm is inferred from the file extension if not specified.
+    /// Creates an archive with `options`; zip uses only the level, tar infers a missing algorithm from the extension.
     pub async fn create_with_compression(
         output: impl AsRef<Path>,
         options: compression::CompressionOptions,
@@ -214,17 +175,12 @@ impl Archive {
         })
     }
 
-    /// Extracts the given archive to the given output path.
-    /// If the archive has a known extension, the corresponding format and compression will be used.
-    /// Otherwise, a plain tar archive will be assumed.
+    /// Extracts `archive` into `output`, inferring format and compression.
     pub async fn extract(archive: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<()> {
         Self::extract_with_options(archive, output, None).await
     }
 
-    /// Extracts the given archive to the given output path with the given options.
-    /// If the algorithm is not specified, it is inferred from the file extension,
-    /// then from the file's magic number; neither matching means a plain tar.
-    /// Zip archives are detected by extension; compression options are only used for tar archives.
+    /// Extracts with `options`; a missing algorithm comes from the extension, then the magic number, else plain tar.
     pub async fn extract_with_options(
         archive: impl AsRef<Path>,
         output: impl AsRef<Path>,
@@ -234,11 +190,7 @@ impl Archive {
         let archive = archive.as_ref().to_path_buf();
         let output = output.as_ref().to_path_buf();
 
-        // Decompression-bomb cap (CWE-400): a file-path extraction (`ocx package
-        // create --extract`, or a locally materialized blob) carries no
-        // registry-declared size, so derive the ceiling from the compressed
-        // input. The registry pull path caps its decompressor directly
-        // (`oci::client`); this is the equivalent guard for the file-path callers.
+        // No registry-declared size here, so the decompression-bomb cap derives from the compressed input.
         let compressed_size = tokio::fs::metadata(&archive)
             .await
             .map(|metadata| metadata.len())
@@ -256,9 +208,7 @@ impl Archive {
             .map_err(error::Error::internal)?;
         }
 
-        // Extension first, then content: a compressed tarball whose name does
-        // not say so used to reach the tar parser raw and fail on a garbage
-        // checksum (ocx-sh/ocx#283) instead of being decoded.
+        // Content fallback: an unlabelled compressed tarball would reach the tar parser raw (ocx-sh/ocx#283).
         let algorithm = match options
             .algorithm
             .or_else(|| compression::CompressionAlgorithm::from_file(&archive))
@@ -278,10 +228,7 @@ impl Archive {
 
         tokio::task::spawn_blocking(move || {
             use std::io::Read as _;
-            // take(cap + 1): a well-formed archive stops before the probe byte; a
-            // stream that yields cap + 1 decompressed bytes drives `limit()` to 0,
-            // which is the bomb signal — reported ahead of any truncation error
-            // the capped read would otherwise surface (mirrors `oci::client`).
+            // `limit() == 0` after `take(cap + 1)` is the bomb signal, reported ahead of the truncation error it causes.
             let capped = reader.take(decompressed_cap.saturating_add(1));
             let (result, capped) = tar::extract_returning_reader(capped, &output, options.strip_components);
             if capped.limit() == 0 {
@@ -318,28 +265,9 @@ impl Archive {
     }
 }
 
-/// Extracts a tar archive from a sync reader to `output`, returning the reader
-/// after extraction.
+/// Extracts a tar from a sync reader into `output`, returning the reader (partially consumed on error).
 ///
-/// This is the streaming-pipeline entry point for `oci::client::Client::pull_layer`:
-/// the tar extractor is driven from inside a `spawn_blocking` closure that holds the
-/// `tokio_util::io::SyncIoBridge` over the async decompressor. The function applies
-/// the same path-safety rules (escape check, strip_components) as
-/// [`Archive::extract_with_options`].
-///
-/// Returning the reader allows the caller to recover state accumulated during the
-/// read (e.g. a digest computed by a hashing wrapper). On error the reader may be
-/// partially consumed.
-///
-/// # Why a separate function
-///
-/// [`Archive::extract_with_options`] accepts a file path and opens its own
-/// `spawn_blocking` internally, which cannot be nested inside the caller's
-/// `spawn_blocking`. This function accepts an already-open sync reader so the caller
-/// manages the blocking boundary.
-// `pub` rather than `pub(crate)`: its one consumer, `ocx_oci`'s layer-pull
-// pipeline, is another crate now. The one visibility widening this extraction
-// needs.
+/// The caller owns the `spawn_blocking` boundary, which [`Archive::extract_with_options`] cannot nest in.
 pub fn extract_tar_from_reader<R: std::io::Read>(reader: R, output: &Path, strip_components: usize) -> (Result<()>, R) {
     tar::extract_returning_reader(reader, output, strip_components)
 }

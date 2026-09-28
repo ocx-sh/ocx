@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The cosign *simplesigning* claim — the payload a `sha256-<hex>.sig`
-//! sidecar layer carries and a sidecar signature is taken over.
-//!
-//! This is a wire format, not a convenience struct. Everything here is shaped
-//! by bytes cosign 3.1.1 actually pushed, captured in
-//! `test/tests/fixtures/golden/simplesigning_*`.
+//! The cosign *simplesigning* claim — the payload a `sha256-<hex>.sig` sidecar layer carries,
+//! shaped by cosign 3.1.1's bytes in `test/tests/fixtures/golden/simplesigning_*`.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,31 +11,20 @@ pub const SIMPLESIGNING_CLAIM_TYPE: &str = "cosign container image signature";
 
 /// The cosign simplesigning claim — the bytes a `.sig` sidecar signs.
 ///
-/// **Field order is the wire order** and must not be reordered: `serde_json`
-/// emits struct fields in declaration order, and this file relies on that
-/// deliberately, because the golden fixtures are what cosign actually pushed
-/// and their SHA-256 *is* the layer's registry address.
-///
-/// **Trust boundary.** Verification checks the signature over the **raw layer
-/// bytes** as served. Never re-serialize a parsed claim to reconstruct the
-/// signed payload — a round trip is not guaranteed byte-identical, and a
-/// reconstruction that differs is a silent verification bypass.
+/// Field order is wire order: the SHA-256 of cosign's bytes is the layer's registry address.
+/// Verify over the raw layer bytes; a re-serialized parsed claim is a silent verification bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimpleSigningClaim {
     /// The part of the claim a verifier is required to understand.
     pub critical: Critical,
-    /// Free-form publisher annotations. Emitted as an explicit `null` when
-    /// absent — **never omitted**; cosign writes the key unconditionally, and
-    /// dropping it changes the layer digest.
+    /// Free-form publisher annotations; emitted as `null`, never omitted, or the layer digest changes.
     pub optional: Option<serde_json::Value>,
 }
 
 /// The `critical` object. Field order is wire order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Critical {
-    /// What was signed, by name.
     pub identity: Identity,
-    /// What was signed, by digest.
     pub image: Image,
     /// Always [`SIMPLESIGNING_CLAIM_TYPE`] on anything OCX writes.
     #[serde(rename = "type")]
@@ -57,13 +42,11 @@ pub struct Identity {
 /// The signed object's manifest digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
-    /// The subject manifest digest, in `sha256:<hex>` spelling.
     #[serde(rename = "docker-manifest-digest")]
     pub docker_manifest_digest: String,
 }
 
 impl SimpleSigningClaim {
-    /// Build the claim for `docker_reference` over `subject`.
     pub fn new(docker_reference: impl Into<String>, subject: &ocx_oci::Digest) -> Self {
         Self {
             critical: Critical {
@@ -82,9 +65,8 @@ impl SimpleSigningClaim {
     /// The exact bytes to sign: compact JSON, no trailing newline.
     ///
     /// # Errors
-    /// Propagates a [`serde_json`] failure. Unreachable for a claim built by
-    /// [`SimpleSigningClaim::new`]; reachable only if `optional` was set to a
-    /// value that cannot serialize.
+    ///
+    /// A [`serde_json`] failure, reachable only through an unserializable `optional`.
     pub fn to_signing_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }

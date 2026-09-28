@@ -22,28 +22,22 @@ pub struct PackageCreate {
     #[clap(short, long)]
     identifier: Option<options::Identifier>,
     /// Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content)
-    ///
-    /// Required whenever `--metadata` is given: it declares the platform the
-    /// packaged content runs on, which cannot be read off the machine doing
-    /// the build. Dependencies carrying no digest are resolved against the
-    /// selected index to a platform manifest digest for this platform, and
-    /// the content tree is scanned under this platform's executable
-    /// convention. Resolution honors `--remote`, `--offline`, and `--frozen`.
-    ///
-    /// The value is written to a build receipt beside the bundle, which `ocx
-    /// package push` and `ocx package test` fall back to when they are given
-    /// no `--platform` of their own. Passing `--platform` to either of those
-    /// simply wins; the receipt is not consulted for it.
-    ///
-    /// Also used to infer the output filename.
-    ///
-    /// With `--metadata`, a Linux target or `any` also has its declared
-    /// `os.features` checked against what the packaged binaries actually
-    /// need: a binary linked against a libc this value does not require is
-    /// refused (exit 65), because an undeclared libc claims the package runs
-    /// on hosts that cannot execute it. `any` requires no libc at all, so
-    /// under it every dynamically linked binary is refused. Static binaries
-    /// need no declaration.
+    #[arg(long_help = "\
+        Platform of the package content (e.g. `linux/amd64`, or `any` for platform-agnostic content)\n\n\
+        Required whenever `--metadata` is given: it declares the platform the packaged content runs \
+        on, which cannot be read off the machine doing the build. Dependencies carrying no digest \
+        are resolved against the selected index to a platform manifest digest for this platform, \
+        and the content tree is scanned under this platform's executable convention. Resolution \
+        honors `--remote`, `--offline`, and `--frozen`.\n\n\
+        The value is written to a build receipt beside the bundle, which `ocx package push` and \
+        `ocx package test` fall back to when they are given no `--platform` of their own. Passing \
+        `--platform` to either of those simply wins; the receipt is not consulted for it.\n\n\
+        Also used to infer the output filename.\n\n\
+        With `--metadata`, a Linux target or `any` also has its declared `os.features` checked \
+        against what the packaged binaries actually need: a binary linked against a libc this value \
+        does not require is refused (exit 65), because an undeclared libc claims the package runs \
+        on hosts that cannot execute it. `any` requires no libc at all, so under it every \
+        dynamically linked binary is refused. Static binaries need no declaration.")]
     #[clap(short, long)]
     platform: Option<ocx_oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
@@ -73,33 +67,30 @@ pub struct PackageCreate {
     #[clap(flatten)]
     bin_scan: options::BinScan,
     /// Skip the libc check on the packaged binaries
-    ///
-    /// An escape hatch, not a convenience: a false refusal from the check
-    /// would otherwise block every `ocx package create` for a Linux target
-    /// with no way through. Skipping it leaves the declared `os.features`
-    /// unverified, so a binary needing a libc the platform does not require
-    /// can be published and will then resolve on hosts that cannot execute
-    /// it; a warning naming the platform is printed wherever the check would
-    /// have run, which is `--metadata` with a Linux target or `--platform
-    /// any`. Anywhere else the check inspects nothing, so the flag
-    /// suppresses nothing and says nothing. Nothing else changes - the same
-    /// metadata and the same layers are written either way. See
-    /// https://ocx.sh/docs/reference/command-line#package-create-libc-check
-    /// for what the check does.
+    #[arg(long_help = "\
+        Skip the libc check on the packaged binaries\n\n\
+        An escape hatch, not a convenience: a false refusal from the check would otherwise block \
+        every `ocx package create` for a Linux target with no way through. Skipping it leaves the \
+        declared `os.features` unverified, so a binary needing a libc the platform does not require \
+        can be published and will then resolve on hosts that cannot execute it; a warning naming \
+        the platform is printed wherever the check would have run, which is `--metadata` with a \
+        Linux target or `--platform any`. Anywhere else the check inspects nothing, so the flag \
+        suppresses nothing and says nothing. Nothing else changes - the same metadata and the same \
+        layers are written either way. See \
+        https://ocx.sh/docs/reference/command-line#package-create-libc-check for what the check \
+        does.")]
     #[clap(long)]
     no_libc_lint: bool,
     /// Treat PATH as an archive and bundle what it extracts to
-    ///
-    /// The format is taken from the file name - tar, tar with gzip, xz, zstd
-    /// or bzip2 compression, or zip. The archive is unpacked into a temporary
-    /// directory that is removed when the command exits, and that tree, not
-    /// the archive file, is what everything else sees: the metadata sidecar,
-    /// the binaries scan, the libc check and the bundle all behave exactly as
-    /// they do for a directory input.
-    ///
-    /// Without this flag an archive is bundled as the single file it is.
-    /// Implied by `--strip-components`. An archive that extracts to nothing
-    /// is refused (exit 65).
+    #[arg(long_help = "\
+        Treat PATH as an archive and bundle what it extracts to\n\n\
+        The format is taken from the file name - tar, tar with gzip, xz, zstd or bzip2 compression, \
+        or zip. The archive is unpacked into a temporary directory that is removed when the command \
+        exits, and that tree, not the archive file, is what everything else sees: the metadata \
+        sidecar, the binaries scan, the libc check and the bundle all behave exactly as they do for \
+        a directory input.\n\n\
+        Without this flag an archive is bundled as the single file it is. Implied by \
+        `--strip-components`. An archive that extracts to nothing is refused (exit 65).")]
     #[clap(long)]
     extract: bool,
     /// Drop the leading N path components of every extracted entry
@@ -131,11 +122,7 @@ impl PackageCreate {
             None => self.infer_filename(identifier.as_ref()).into(),
         };
 
-        // Typed like every other `--output` touch in this command. The bare
-        // `?` here was the one the class sweep missed: an `--output` whose
-        // parent is a regular file answers ENOTDIR, and an untyped `io::Error`
-        // has no rung in the downcast ladder, so an operator's bad path exited
-        // 1 `internal` before `create_dir_all` below ever typed anything.
+        // Typed as `FileError`: an untyped `io::Error` (ENOTDIR on a bad `--output` parent) classifies as exit 1.
         let exists = tokio::fs::try_exists(&output)
             .await
             .map_err(|error| ocx_util::error::FileError::new(&output, error))?;
@@ -146,20 +133,9 @@ impl PackageCreate {
             );
         }
 
-        // Under `--extract`/`--strip-components` the content tree is what the
-        // archive unpacks to, not the argument itself. The `TempDir` is bound
-        // for the rest of `execute` — dropping it deletes the tree, and every
-        // consumer below reads `content_root`, so there is one place where the
-        // archive and directory forms diverge. D9: the scratch tree lives under
-        // `$OCX_HOME/temp/create/`, beside the digest-keyed `TempStore`, not in
-        // the system temp dir — one owned, GC-visible root for OCX scratch.
+        // `content_root` points into the extracted `TempDir`; dropping it early deletes that tree.
         let create_root = context.file_structure().temp.root().join("create");
-        // Hold the scratch lock (`temp/create.lock`) for the rest of `execute` so
-        // a concurrent `ocx clean` treats `temp/create` as busy — its stale scan
-        // acquires this sibling lock, which fails while it is held — rather than
-        // sweeping it as an orphan while the extracted tree beneath it is still
-        // being read. `_create_lock` is held for its `Drop`; only the extract
-        // path writes scratch, so the directory-input path takes no lock.
+        // Held (named, not `_`) to the end of `execute`, or `clean` sweeps `temp/create` mid-read.
         let (extracted, _create_lock) = if self.extract || self.strip_components.is_some() {
             let lock = ocx_util::fs::LockedFile::open_exclusive(ocx_store::file_structure::TempStore::lock_path_for(
                 &create_root,
@@ -171,62 +147,17 @@ impl PackageCreate {
         };
         let content_root = extracted.as_ref().map_or(self.path.as_path(), tempfile::TempDir::path);
 
-        // Resolve + validate the sidecar BEFORE writing the output bundle:
-        // dependency resolution can fail (network / policy / missing tag /
-        // empty platform intersection), and a failure must leave no orphan
-        // bundle on disk (Codex #3). Only after the metadata is fully validated
-        // do we build the archive and, last, write the resolved sidecar.
+        // Resolve and validate before writing anything, so a failure leaves no orphan bundle.
         let resolved_metadata = match self.metadata.as_deref().zip(declared_platform) {
             Some((metadata_source, platform)) => {
                 let metadata = AuthoringMetadata::read_json(metadata_source).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context, &platform).await?;
                 let metadata = self.resolve_binaries(content_root, metadata, &platform).await?;
-                // Project to the published form and run the publish-time
-                // env/entrypoint checks over it. This projection is what gets
-                // written beside the bundle: push and test read the compiled
-                // wire shape, never the authoring input.
-                //
-                // `validate_for_publish`, not `ValidMetadata::try_from`: the
-                // token checks live only in the publish gate now (D14), and a
-                // publisher is present here to be told about a typo. Downgrading
-                // this line to the structural check would let an unrecognised
-                // token reach a registry with no error anywhere.
-                //
-                // Ahead of the libc lint, because the lint resolves its scan
-                // scope out of the same `PATH` value: an unrecognised token
-                // there is not a directory it can name, so it lands on
-                // `unresolvable` and the publisher is told the scope could not
-                // be resolved rather than which token was misspelled. Both
-                // refuse the same publish; only one of them says what is wrong.
+                // Not `ValidMetadata::try_from`: only the publish gate rejects unknown tokens.
                 let valid = ocx_package::metadata::validate_for_publish(metadata.to_published()?)?;
-                // Check what the packaged binaries actually demand of a host
-                // against what `--platform` claims they demand. Runs after
-                // the binaries scan (both read the same content tree) and,
-                // like every other step in this arm, before the archive is
-                // written — a refused artifact leaves no bundle on disk.
-                //
-                // Not gated on `--bin-scan`: that flag governs the `binaries`
-                // metadata claim, while this governs the `os.features` claim.
-                // A publisher passing `--no-bin-scan` is declining to have
-                // their binary list filled in, not declining to have a false
-                // libc claim caught.
-                //
-                // `--no-libc-lint` skips the whole call, refusals and
-                // scan-scope failures alike. A partial bypass would leave a
-                // bug in the un-bypassed half still able to block publishing,
-                // which is the availability failure the flag exists to
-                // prevent. Everything below still runs, so the flag suppresses
-                // one check and nothing else.
+                // Before the archive write, so a refusal leaves no bundle; `--no-bin-scan` does not skip it.
                 if self.no_libc_lint {
-                    // Gated on the lint's own scope predicate, not on the flag
-                    // alone: `check_declared_libc` returns `Ok(())` for a
-                    // target whose libc OCX does not model, so on `darwin/*`
-                    // or `windows/*` the two runs are behaviourally identical
-                    // and a warning would name a verification that was never
-                    // going to happen. In the per-platform matrix a shared
-                    // create step carries this flag on every leg, and a
-                    // warning that fires where nothing was suppressed dilutes
-                    // exactly the loudness the escape hatch depends on.
+                    // Warn only where the lint would have run; elsewhere it names a no-op.
                     if ocx_package::libc_lint::checks_declared_libc(&platform) {
                         context.ui().warn(format!(
                             "--no-libc-lint: skipped the libc check, so the os.features declared by \
@@ -267,24 +198,15 @@ impl PackageCreate {
         );
 
         if let Some(metadata) = resolved_metadata {
-            // Always rewrite the sidecar canonically (never a byte copy): the
-            // file next to the bundle is the compiled, pin-resolved published
-            // form.
+            // Written from the resolved form (pins resolved, binaries filled), never a byte copy of `--metadata`.
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
             ocx_package::metadata::Metadata::from(metadata)
                 .write_json(&metadata_target)
                 .await?;
         }
 
-        // The receipt records what this invocation was told, so push and test
-        // do not have to be told it again — with or without `--metadata`.
-        // Written last: the bundle and its sidecar are the artifacts, the
-        // receipt only describes how they were asked for. Nothing declared
-        // means nothing to record, so no file — and any receipt an earlier
-        // build left at this path is removed rather than kept, because it
-        // describes a build that no longer exists here and would silently
-        // supply push with an identifier and platform this invocation never
-        // named. A removal that fails is fatal for the same reason.
+        // With nothing to record, a stale receipt is removed (failure fatal), or push silently
+        // inherits an identifier and platform this invocation never named.
         let receipt_target = crate::conventions::infer_receipt_file(&output)?;
         match crate::build_receipt::BuildReceipt::new(self.platform.clone(), identifier) {
             Some(receipt) => receipt.write_json(&receipt_target).await?,
@@ -298,18 +220,10 @@ impl PackageCreate {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Unpacks `--extract`'s archive into a temporary directory and hands the
-    /// directory back, so the caller decides how long the tree lives.
-    ///
-    /// An extraction that leaves the directory empty is refused rather than
-    /// bundled: the usual cause is a `--strip-components` deeper than the
-    /// archive, and the alternative is publishing a package that installs no
-    /// files. The directory answers that question directly - no entry count is
-    /// threaded out of the extractor for it.
+    /// Unpacks the `--extract` archive into a `TempDir` the caller owns; an empty result is
+    /// refused (exit 65) rather than published as a package that installs nothing.
     async fn extract_archive(&self, create_root: &std::path::Path) -> anyhow::Result<tempfile::TempDir> {
-        // H8: --extract/--strip-components treat PATH as an archive. A directory
-        // has no archive format to unpack; refuse it by name (exit 64) rather
-        // than letting the extractor fail deep with "Is a directory".
+        // Refused up front (exit 64), or the extractor fails deep with "Is a directory".
         let is_dir = tokio::fs::metadata(&self.path)
             .await
             .map(|metadata| metadata.is_dir())
@@ -321,8 +235,7 @@ impl PackageCreate {
             ))
             .into());
         }
-        // Map an unrecognised suffix to UnsupportedFormat (exit 65) up front,
-        // rather than attempting a plain-tar read that fails deep in the extractor.
+        // Checked up front, or an unknown suffix falls through to a plain-tar read that fails deep.
         if !archive_format_recognized(&self.path) {
             return Err(archive::Error::UnsupportedFormat(self.path.display().to_string()).into());
         }
@@ -360,14 +273,8 @@ impl PackageCreate {
         Ok(target)
     }
 
-    /// The empty-extraction refusal (exit 65).
-    ///
-    /// W2: this is a CLI policy — an archive that unpacks to nothing must not
-    /// become an empty package — so it lives here rather than in `archive::Error`,
-    /// whose other extract caller (local blob materialization) extracts with
-    /// strip 0, where an empty layer is legitimate. W10: the `--strip-components`
-    /// clause is emitted only when the operator passed a non-zero strip, so the
-    /// message never invents a `--strip-components 0` the operator never typed.
+    /// The empty-extraction refusal (exit 65); kept out of `archive::Error`, since an empty
+    /// layer is legitimate when blob materialization extracts.
     fn empty_extraction_error(&self, strip_components: usize) -> anyhow::Error {
         let message = if strip_components == 0 {
             format!("archive '{}' extracted no entries", self.path.display())
@@ -380,11 +287,7 @@ impl PackageCreate {
         crate::app::CommandError::new(message, ocx_exit::ExitCode::DataError).into()
     }
 
-    /// Rejects an explicit `--bin-scan` given without `--metadata` (`-m`):
-    /// the flag has nothing to verify, and silently no-op'ing would defeat
-    /// its purpose as an explicit verification switch. `--no-bin-scan`
-    /// without `--metadata` stays a harmless no-op — there is nothing to
-    /// disable.
+    /// Refuses `--bin-scan` without `--metadata` (exit 64): there is nothing to verify.
     fn validate_bin_scan(&self) -> anyhow::Result<()> {
         if self.bin_scan.mode() == options::BinScanMode::Verify && self.metadata.is_none() {
             return Err(crate::error::UsageError::new(
@@ -395,19 +298,9 @@ impl PackageCreate {
         Ok(())
     }
 
-    /// The platform `--metadata` is compiled for: dependency pins resolve
-    /// against it and the binaries scan applies its executable convention.
-    /// `None` when no sidecar was supplied — `--platform` then only shapes the
-    /// inferred output filename and the build receipt (which records the flag
-    /// itself, sidecar or not).
+    /// The platform `--metadata` is compiled for, or `None` without a sidecar.
     ///
-    /// There is no default. The host platform describes what the build
-    /// machine *supplies*; the recorded platform describes what the packaged
-    /// artifact *demands* — a static musl binary cross-built on a glibc host
-    /// demands neither the host's libc nor its architecture. Guessing one
-    /// from the other corrupts every downstream consumer of the recorded
-    /// value, so an absent `--platform` is a usage error rather than a
-    /// silent host default.
+    /// Never defaults to the host: the build machine's platform is not what the artifact demands.
     fn declared_platform(&self) -> anyhow::Result<Option<ocx_oci::Platform>> {
         match (&self.metadata, &self.platform) {
             (None, _) => Ok(None),
@@ -420,9 +313,6 @@ impl PackageCreate {
         }
     }
 
-    /// Resolve unpinned dependencies against the selected index for
-    /// `platform`. Already-pinned dependencies pass through untouched (no
-    /// network).
     async fn resolve_dependency_pins(
         &self,
         metadata: AuthoringMetadata,
@@ -433,9 +323,8 @@ impl PackageCreate {
         Ok(ocx_package::dependency_pinning::pin_dependencies(metadata, context.default_index(), platform).await?)
     }
 
-    /// Runs the create-time interface-binaries scan/fill/verify step
-    /// against `content_root`'s content tree, per `self.bin_scan`'s resolved
-    /// mode (`adr_declared_binaries_metadata.md` §2 / §2.1 ordering block).
+    /// Fills or verifies the `binaries` claim from `content_root` per `--bin-scan`
+    /// (`adr_declared_binaries_metadata.md` §2 / §2.1 ordering block).
     async fn resolve_binaries(
         &self,
         content_root: &std::path::Path,
@@ -450,7 +339,6 @@ impl PackageCreate {
         Ok(ocx_package::bin_scan::resolve_binaries(content_root, metadata, platform, mode).await?)
     }
 
-    /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
     fn infer_filename(&self, identifier: Option<&ocx_oci::PackageRef>) -> String {
         let mut name = match identifier {
             Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
@@ -462,14 +350,8 @@ impl PackageCreate {
         format!("{}.tar.xz", name)
     }
 
-    /// The bundle-name stem derived from the input path when no identifier is
-    /// given.
-    ///
-    /// W11: under `--extract` the input is an archive, so strip the whole
-    /// recognized suffix as a unit (`hello-1.2.3.tar.gz` → `hello-1.2.3`).
-    /// `file_prefix` stops at the first dot (`hello-1`), which is wrong for a
-    /// versioned archive name. Without `--extract` the input is bundled as a
-    /// single file, and the historical `file_prefix` stem is unchanged.
+    /// Bundle-name stem from the input path; under `--extract` the whole archive suffix goes,
+    /// since `file_prefix` would cut `hello-1.2.3.tar.gz` to `hello-1`.
     fn inferred_stem(&self) -> String {
         if (self.extract || self.strip_components.is_some())
             && let Some(name) = self.path.file_name().and_then(|name| name.to_str())
@@ -484,9 +366,7 @@ impl PackageCreate {
     }
 }
 
-/// Whether `path`'s suffix names an archive format `--extract` can unpack: zip,
-/// plain tar, or tar with a supported compression. `compression`'s `from_file`
-/// is the single source of truth for the compressed suffixes.
+/// Whether `--extract` can unpack `path`; compressed suffixes come from `CompressionAlgorithm::from_file` alone.
 fn archive_format_recognized(path: &std::path::Path) -> bool {
     if compression::CompressionAlgorithm::from_file(path).is_some() {
         return true;
@@ -500,13 +380,10 @@ fn archive_format_recognized(path: &std::path::Path) -> bool {
     )
 }
 
-/// Strips a recognized archive suffix as a unit, so `hello-1.2.3.tar.gz` yields
-/// `hello-1.2.3`. Longest compound suffixes are tried first, case-insensitively.
+/// Strips a recognized archive suffix as a unit, longest first, case-insensitively.
 ///
-/// Every tar spelling [`archive_format_recognized`] accepts must appear here, or
-/// the inferred bundle name keeps the input's own archive suffix (W11) —
-/// `hello-1.2.3.tbz2` would bundle as `hello-1.2.3.tbz2.tar.xz`. The two lists
-/// are held in step by `tar_archive_suffixes_are_recognized_and_stripped`.
+/// Must list every tar spelling [`archive_format_recognized`] accepts, or `hello-1.2.3.tbz2` bundles as
+/// `hello-1.2.3.tbz2.tar.xz`; held by `tar_archive_suffixes_are_recognized_and_stripped`.
 fn strip_archive_suffix(name: &str) -> &str {
     const SUFFIXES: &[&str] = &[
         ".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2", ".tgz", ".tzst", ".tbz2", ".tbz", ".tar", ".zip",

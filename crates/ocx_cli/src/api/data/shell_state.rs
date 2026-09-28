@@ -1,46 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The `ocx shell state` report (C-050).
+//! The `ocx shell state` report, which must never be eval-able in any arm, coloured or not.
 //!
-//! **Hard contract — the output is human-readable and must never be
-//! eval-able.** `ocx self activate` and `--reconcile` emit shell source whose
-//! entire purpose is to be `eval`'d; this command emits diagnostics whose
-//! entire purpose is to be read. A surface where the two are confusable is one
-//! copy-paste away from executing a diagnostic dump in a live shell. So: **no
-//! line** of output is valid `export` / `set` / `$env.` syntax in **any** of
-//! the ten arms, and a test asserts the two commands' outputs are never
-//! interchangeable, for **every** enumerated inertness reason.
-//!
-//! # How the never-eval-able property is made structural, not incidental
-//!
-//! Two rules, both checkable by reading [`ShellStateReport::lines`]:
-//!
-//! 1. **Every line begins with a label from a fixed vocabulary this module
-//!    owns** — a heading in the first column, or an indented label, or an
-//!    indented `- ` list marker. No caller-, carrier- or filesystem-supplied
-//!    byte is ever the first token of a line, so no line can *start* an
-//!    assignment.
-//! 2. **Every interpolated dynamic string passes through [`quoted`]**, which is
-//!    `{:?}` — Rust's own escaping. That is the "quoted for a human, never for
-//!    a shell" rule S-022 states, and it is what stops a ledger value carrying
-//!    a literal LF from splitting itself into a second, unlabelled line. The
-//!    carrier is untrusted input (C-007) and a forged one may hold any bytes at
-//!    all in a key, a value, a `dir` or a source name.
-//!
-//! Rule 1 alone would be defeated by rule 2's hazard and vice versa; together
-//! they leave no way for output to become shell source. The test derives the
-//! forbidden prefixes from the shipped [`Shell`](ocx_shell::shell::Shell)
-//! emitters rather than hard-coding them, so a new arm or a changed emitter
-//! cannot silently widen what counts as "not shell source".
-//!
-//! **Colour does not exempt either rule.** A theme puts its own SGR introducer
-//! in front of a heading, so the first byte of a *rendered* line is an escape
-//! in every arm — and a `starts_with("export ")` over those bytes would answer
-//! about the escape rather than about the text, passing unconditionally. The
-//! assertions strip ANSI first, and pair that with a parity check
-//! (stripped-coloured equals uncoloured) so the stripping cannot hide a
-//! divergence of its own.
+//! Every line starts with a label this module owns, or a carrier byte could start an
+//! assignment; every dynamic string goes through `quoted`, or a literal LF splits a new line.
 
 use std::path::{Path, PathBuf};
 
@@ -53,29 +17,9 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// Render an untrusted string **quoted for a human, never for a shell**
-/// (S-022) — and only when it needs quoting.
-///
-/// `{:?}` escapes the two bytes that would otherwise break the report's
-/// one-fact-per-line shape — LF and CR — along with `"` and `\`, and wraps the
-/// result in quotes so the exact bytes are visible. It is deliberately *not* a
-/// shell escaper: the point is that the result cannot be pasted into a shell
-/// and mean anything.
-///
-/// Applied **unconditionally** it also quoted every ordinary path, which is
-/// most of what this report prints, and a page of `"…"` reads as a serialized
-/// document rather than a report. So a value that `{:?}` would emit unchanged
-/// is emitted unchanged, and the quotes become a signal: this value carries
-/// something a reader should look at twice.
-///
-/// The predicate is a **subset** of what the fallback leaves alone, which is
-/// why it cannot let anything through that the unconditional form would have
-/// escaped: `escape_debug` renders exactly one character for a character it
-/// does not escape, so requiring that is requiring `{:?}` to be a no-op. It
-/// covers the control range, the C1 introducers and the Unicode bidi controls
-/// (CWE-150) without naming any of them. Whitespace is excluded separately —
-/// `{:?}` passes a space through, but an unquoted value with spaces in it is
-/// unreadable on a line whose fields are space-separated.
+/// Quote an untrusted string with `{:?}` for a human, never a shell; a value it would leave unchanged stays bare.
+// The predicate must stay a subset of what `escape_debug` leaves alone, or a
+// control, C1 or bidi byte (CWE-150) reaches the terminal unescaped.
 fn quoted(text: &str) -> String {
     if !text.is_empty()
         && text
@@ -87,26 +31,16 @@ fn quoted(text: &str) -> String {
     format!("{text:?}")
 }
 
-/// [`quoted`] over a path, which reaches us from the carrier, the environment
-/// or the filesystem and is therefore subject to the same rule.
 fn quoted_path(path: &Path) -> String {
     quoted(&path.display().to_string())
 }
 
-/// [`human_bytes`] over the report's `u64` sizes.
-///
-/// A size past `i64::MAX` cannot come off a real file; `human_bytes` renders a
-/// negative as `unknown`, which is the honest answer for one that did.
+/// [`human_bytes`] over a `u64`; a size past `i64::MAX` renders as `unknown`.
 fn human_size(bytes: u64) -> String {
     human_bytes(i64::try_from(bytes).unwrap_or(-1))
 }
 
-/// A watch member's mtime, as an age **and** the instant it stands for.
-///
-/// Both, because this line is asked both questions: *is this file newer than
-/// the freshness stamp* (the age) and *which exact second does the fingerprint
-/// fold* (the instant, A-14). The bare epoch integer answered neither without
-/// arithmetic. A value that will not convert falls back to it.
+/// A watch member's mtime as an age and the instant it stands for, or the raw epoch when it will not convert.
 fn modified_description(mtime: u64) -> String {
     let converted = i64::try_from(mtime)
         .ok()
@@ -117,13 +51,7 @@ fn modified_description(mtime: u64) -> String {
     format!("{}, {}", human_time(at), human_instant(at))
 }
 
-/// The consent stamp's recorded instant, as an age **and** the instant itself.
-///
-/// The stamp is a file on disk, so its string is untrusted — and parsing it is
-/// a stronger answer to that than quoting it was: a value re-rendered from a
-/// `DateTime` cannot carry a control sequence at all, whatever the file held.
-/// Only an unparseable value reaches [`quoted`], which is where S-022 still
-/// does the work.
+/// The consent stamp's recorded instant as an age and the instant; an unparseable (untrusted) value is [`quoted`].
 fn written_description(written: &str) -> String {
     let Ok(at) = chrono::DateTime::parse_from_rfc3339(written) else {
         return quoted(written);
@@ -132,12 +60,10 @@ fn written_description(written: &str) -> String {
     format!("{}, {}", human_time(at), human_instant(at))
 }
 
-/// One member of the fingerprint watch set (C-019, A-13), as it stands on disk
-/// right now.
+/// One member of the fingerprint watch set, as it stands on disk right now.
 ///
-/// Absent members are recorded too: a tier file that did not exist becoming
-/// present is exactly the change the watch set must notice, which is why the
-/// loader records candidates rather than survivors (A-13).
+/// Absent members are recorded too.
+// Keep absent members: a tier file appearing is exactly the change the watch set must notice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct WatchMember {
     /// The watched path.
@@ -153,100 +79,85 @@ pub struct WatchMember {
 
 /// Whether the project scope still holds the prior for one constant it owns.
 ///
-/// The priors are the one datum nothing can reconstruct (C-050), and the thing
-/// C-012's `unset __OCX_ENV_STATE` repair gesture destroys — which is why this
-/// is reported per constant rather than as a single yes/no.
+/// Nothing can reconstruct a prior, and the `unset __OCX_ENV_STATE` repair
+/// gesture destroys them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PriorStatus {
     /// The constant's env key, as the carrier records it.
     pub key: String,
-    /// Whether a [`Prior`] is still recorded for it.
+    /// Whether a prior is still recorded for it.
     pub intact: bool,
 }
 
-/// The per-prompt hook's enablement, read from C-038's ladder rather than
-/// re-derived.
+/// The per-prompt hook's enablement, as its ladder resolved it.
 ///
-/// `ocx shell state` declares no `--hook` / `--no-hook` pair of its own, so
-/// rungs 1 and 2 are unreachable from here by construction and the answer comes
-/// from rung 3 (`OCX_NO_HOOK`), rung 4 (`[shell] hook`) or rung 5 (auto).
+/// The answer comes from rung 3 (`OCX_NO_HOOK`), rung 4 (`[shell] hook`) or
+/// rung 5 (auto): `ocx shell state` takes no `--hook` / `--no-hook` flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct HookStatus {
     /// The deciding rung, rendered the way a user spells it.
     pub rung: String,
-    /// The config tier that set it, when rung 4 decided (A-32 — the tier that
-    /// **actually** decided, never a hard-coded "managed").
+    /// The config tier that **actually** set it, when rung 4 decided.
     pub tier: Option<String>,
     /// The resolved answer, or `None` on rung 5: "auto" is decided shell-side
     /// by the shim's interactivity probe, which a diagnostic cannot observe.
     pub enabled: Option<bool>,
 }
 
-/// A reason row that is not a member of [`Reason`] because it does not make the
-/// shell inert on its own — it explains an answer the user would otherwise get
+/// A reason row that is not an inertness reason, because it does not make the
+/// shell inert on its own: it explains an answer the user would otherwise get
 /// wrong.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "note")]
 pub enum Note {
-    /// A-12 — the CWD walk skipped a symlinked `ocx.toml` candidate and
-    /// promoted an ancestor. The loader's `log::warn!` never reaches the prompt
-    /// (the hook discards the binary's stderr unconditionally, A-21), so this
-    /// row is the user's only path to that answer.
+    /// The CWD walk skipped a symlinked `ocx.toml` candidate and promoted an
+    /// ancestor.
     SymlinkedCandidateSkipped {
         /// The symlinked candidate that was skipped.
         candidate: PathBuf,
         /// The ancestor project activated in its place.
         ancestor: PathBuf,
     },
-    /// A-26 — active via a `paths` grant, which is unconditional: source-set
-    /// drift is **not** tracked for path grants, because nothing on the
-    /// activation path writes a stamp to drift against.
+    /// Active via a `paths` grant, which is unconditional: source-set drift is
+    /// **not** tracked for path grants.
     ActiveViaPathsGrant {
         /// The granting entry.
         entry: PathBuf,
     },
-    /// QUAL-3 — a project file was reachable but could not be resolved (an
-    /// unparseable `ocx.toml`, a canonicalization failure). Without this row
-    /// the report says *"no project reachable from this directory"*, which is
-    /// false for a user standing in a project whose config is broken — and this
-    /// is the command whose product is the explanation.
+    /// A project file was reachable but could not be resolved (an unparseable
+    /// `ocx.toml`, a canonicalization failure).
     ProjectUnresolved {
         /// The resolution failure, rendered for a human.
         detail: String,
     },
-    /// A-28 — a `paths` entry that would grant `canonical` if the compare
-    /// folded ASCII case, exact or subtree entry alike. Entries are compared
-    /// as literal bytes ([`ocx_config::shell::consent_path_matches`]), so this is
-    /// `Inert`; the row exists to pay off the support cost of that decision.
+    /// A `paths` entry that would grant `canonical` if the compare folded ASCII case.
+    ///
+    /// Exact or subtree entry alike. Entries are compared as literal bytes, so
+    /// the project stays inert.
+    // Pairs with the literal-bytes compare in `consent_path_matches`.
     PathsNearMiss {
         /// The entry that nearly matched.
         entry: PathBuf,
         /// The canonical project directory it was compared against.
         canonical: PathBuf,
     },
-    /// A `[shell.consent] paths` entry that can never match any project by
-    /// construction — [`ocx_config::shell::consent_entry_defect`]'s classification of
-    /// the entry's own bytes, independent of which project is in view.
-    /// `namespaces`' sibling grant refuses a pattern this broken at parse
-    /// time (A-27); a `paths` entry is an ordinary path and parses
-    /// regardless of whether it can ever grant, so without this row it sits
-    /// in the config forever, granting nothing and saying nothing.
+    /// A `[shell.consent] paths` entry that can never match any project by construction.
+    ///
+    /// Classified from the entry's own bytes, independent of which project is in
+    /// view.
+    // Classified by `consent_entry_defect`; unlike a `namespaces` pattern, a broken `paths` entry still parses.
     PathsDefect {
         /// The malformed entry.
         entry: PathBuf,
-        /// [`ocx_config::shell::EntryDefect`]'s own rendering of what is wrong with it.
+        /// What is wrong with the entry, rendered for a human.
         defect: String,
     },
-    /// The `ocx.toml` that answers for the reported scope exists but will not
-    /// parse, so its `activate` / `pinned` are absent and the ladder answered
-    /// from `OCX_TOOLCHAIN_*` and then the floors.
+    /// The `ocx.toml` that answers for the reported scope exists but will not parse.
     ///
-    /// The per-prompt path is deliberately lenient over these bytes — a
-    /// malformed `$OCX_HOME/ocx.toml` must not break every prompt on the
-    /// machine — and the hook discards the binary's stderr unconditionally
-    /// (A-21). Without this row a typo'd `activate = "nnone"` therefore fails
-    /// **open**, to `env`, the most-composing mode, and nothing anywhere tells
-    /// the user their restriction was ignored.
+    /// Its `activate` / `pinned` are then absent and the ladder answered from
+    /// `OCX_TOOLCHAIN_*` and then the floors, so a typo'd `activate = "nnone"`
+    /// fails **open**, to `env`, the most-composing mode.
+    // The only report of this: the per-prompt path tolerates the bad file and the hook discards stderr.
     ToolchainManifestUnparsed {
         /// The `ocx.toml` that would not parse — `$OCX_HOME/ocx.toml` for the
         /// global tier, the project's own otherwise.
@@ -256,210 +167,141 @@ pub enum Note {
     },
 }
 
-/// How much of the report the human rendering carries.
-///
-/// A tier of the **plain** rendering only: the structured report serializes
-/// the whole [`ShellStateReport`] either way, so nothing a human flag hides is
-/// hidden from `--format json`.
+/// How much of the report the plain rendering carries; `--format json` always gets all of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
-    /// The answer, and nothing else: where OCX is, which project is in effect,
-    /// whether the integration is active, and — when it is not — the
-    /// enumerated reason and the fix.
+    /// Home, project, verdict and, when inert, the reason and its fix.
     Answer,
-    /// The answer, plus the evidence behind it: the decoded ledger with its
-    /// carrier accounting, the fingerprint watch set, the project's state key
-    /// and stamp, and the hook ladder.
+    /// The answer plus its evidence: ledger, watch set, state key and stamp, hook ladder.
     Diagnostics,
 }
 
-/// What `ocx shell state` reports — all derived, none of it mutating.
+/// What `ocx shell state` reports: all derived, none of it mutating.
 ///
-/// Read-only, absolutely: it never writes a stamp, never repairs a ledger,
-/// never emits a plan (A-29 names it a non-member of the stamp-writer
-/// allowlist — a stamp written from here would consent to the very project it
-/// is diagnosing). Repair is the `unset __OCX_ENV_STATE` gesture or a new
-/// shell (C-012); this command is how a user checks the gesture worked.
+/// Read-only: it never writes a stamp, repairs a ledger or emits a plan.
+/// Repair is `unset __OCX_ENV_STATE` or a new shell.
+// Never a stamp writer: a stamp written here would consent to the project it diagnoses.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ShellStateReport {
-    /// `$OCX_HOME`, and whether it exists. A missing home is an ordinary state
-    /// on a fresh install and exits 0; only a home that cannot be *read* is the
-    /// single 74 path (C-051).
+    /// `$OCX_HOME`.
+    ///
+    /// A missing home is an ordinary state on a fresh install and exits 0; only
+    /// a home that cannot be *read* exits 74.
     pub ocx_home: PathBuf,
     /// Whether `$OCX_HOME` exists on disk.
     pub ocx_home_present: bool,
 
-    /// Whether `ocx self setup` has ever wired this machine's shell — probed
-    /// as [`ocx_setup::shims::WITNESS_SHIM`] under [`Self::ocx_home`].
+    /// Whether `ocx self setup` has ever wired this machine's shell.
     ///
-    /// C-050 reason 6's first-prompt half tells the user "the next prompt
-    /// applies it". That is true only once the rc/profile fence exists to
-    /// source the shim, and on a bare-binary install neither does. Without
-    /// this field the report answers the command's single most likely first
-    /// use — *"I installed ocx, why isn't it working"* — with a fix that can
-    /// never come true, so the renderer branches on it rather than promising
-    /// convergence that nothing will perform.
-    ///
-    /// Deliberately **not** a [`Reason`] arm: "setup has not run" is not a
-    /// consent state, and `consent::Reason` enumerates consent states.
+    /// Probed as the witness shim under `ocx_home`.
+    // "The next prompt applies it" holds only once the rc/profile fence sources the shim; a bare binary has neither.
+    // Not a `Reason` arm: "setup has not run" is not a consent state.
     pub shell_integration_installed: bool,
 
-    /// The **resolved toolchain home** — a machine-readable contract field
-    /// (C-056, S-004).
+    /// The **resolved toolchain home**, a machine-readable contract field.
     ///
-    /// The supported way for an IDE, a devcontainer feature or a CI step to
-    /// discover where a project's tree lives when `config.toml` relocates it
-    /// with `toolchain_dir`; without it the only route is re-deriving a 16-hex
-    /// project key from a path the discoverer would also have to canonicalize
-    /// the same way ocx does.
-    ///
+    /// The supported way for an IDE, a devcontainer feature or a CI step to find
+    /// a project's tree when `config.toml` relocates it with `toolchain_dir`:
     /// `<project>/.ocx/toolchain` or `<toolchain_dir>/<project-key>/toolchain`
     /// for the project in effect, and `$OCX_HOME/toolchain` when no project
-    /// resolves — the tier that is always in effect, so the field never has to
-    /// say "none".
-    ///
-    /// **Always present, never `null`** (RUL-51): a `toolchain_dir` that fails
-    /// C-017–C-019 is refused at *config load*, so every command — this one
-    /// included — has already exited 78 before the report is built, and
-    /// `ToolchainRoot::resolve` performs no filesystem write and accepts a root
-    /// that does not exist yet (RUL-5). Once the configuration parses, the home
-    /// is always spellable, whether or not it has ever been rendered.
+    /// resolves. **Always present, never `null`**: an invalid `toolchain_dir`
+    /// fails config load with exit 78 instead.
+    // Non-optional because once the configuration parses the home is always spellable, rendered or not.
     pub toolchain_home: PathBuf,
 
-    /// The **PATH-facing trampoline directory** for the same tier — the
-    /// directory a consumer outside ocx puts on `PATH` (G-1, S-004).
+    /// The **PATH-facing trampoline directory** for the same tier, which a consumer outside ocx puts on `PATH`.
     ///
-    /// [`toolchain_home`](Self::toolchain_home) answers *where the tree is*;
-    /// this answers *what to export*, and the two are not one join apart.
-    /// Every published recipe used to build the second from the first with
-    /// `.toolchain_home + "/bin"`, which the tree layout falsified — and
-    /// falsified silently, because a `jq` concatenation exits 0 whatever it
-    /// produces and the failure surfaces steps later in someone else's
-    /// automation with no ocx process in the trace.
-    ///
-    /// Publishing the resolved value is the only fix that survives the next
-    /// layout change: a documented `<toolchain_home>/active/bin` would leak a
-    /// tree-internal name into every consumer's YAML and re-create the identical
-    /// defect the day that name moves.
-    ///
-    /// **Always present whenever [`toolchain_home`](Self::toolchain_home) is**,
-    /// which is always (RUL-51), so no consumer has to branch. It names a
-    /// directory that need not exist yet: nothing here renders, and a home that
-    /// has never been pulled reports the path it *would* hold — the same
-    /// promise `toolchain_home` already makes.
+    /// `toolchain_home` answers *where the tree is*; this answers *what to
+    /// export*, and the two are not one join apart, so never build this from
+    /// `toolchain_home`. Always present. It
+    /// names a directory that need not exist yet: a home that has never been
+    /// pulled reports the path it *would* hold.
     pub toolchain_bin: PathBuf,
 
-    /// The **effective** `activate` mode, past the whole ladder — the flag tier
-    /// (absent here), then `ocx.toml`, then `OCX_TOOLCHAIN_ACTIVATE`, then the
-    /// floor (C-005, C-056).
+    /// The **effective** `activate` mode, past the whole ladder.
     ///
-    /// The resolved answer, never a tier: reporting `ocx.toml`'s raw value would
-    /// answer a different question from the one a user asking "why is my shell
-    /// not doing anything" is asking.
+    /// The flag tier (absent here), then `ocx.toml`, then
+    /// `OCX_TOOLCHAIN_ACTIVATE`, then the floor. The resolved answer, never a tier.
     pub activate: ocx_project::activate::ActivateMode,
 
-    /// The **effective** `pinned` value, resolved through the same ladder
-    /// (C-056, C-066).
+    /// The **effective** `pinned` value, resolved through the same ladder.
     ///
     /// `true` means a composing emitter yields digest paths and consults no
     /// `links/<group>/<entry>` link; `false` means it follows the rendered links, so
     /// an `ocx update` takes effect with no re-render.
     pub pinned: bool,
 
-    /// Why the project's `ocx.lock` refuses composition, when it does — the
-    /// `Display` of [`ocx_project::LockCurrency`], rendered as text the
-    /// same way [`Note::ProjectUnresolved`] carries its detail.
+    /// Why the project's `ocx.lock` refuses composition, when it does, as text.
     ///
-    /// Consent can say *activate* over a lock that composition then refuses: a
-    /// `paths` grant holds without a readable lock at all, and a stale one
-    /// still parses. Every prompt then exits 65 with a stderr the hook
-    /// discards (A-21), so the scope never reaches the ledger and the report
-    /// answered `active: not yet` — "the next prompt applies it" — forever.
-    /// Nothing else in the report could tell that state from a genuine first
-    /// prompt.
-    ///
-    /// Deliberately **not** a [`Reason`] arm: the consent predicate did not
-    /// refuse, so this is not one of its eight enumerated answers.
+    /// Set when consent activates over a lock composition refuses, such as a
+    /// `paths` grant over an unreadable or stale lock. Every prompt then exits 65
+    /// and the scope never reaches the ledger.
+    // The only field telling this state apart from a genuine first prompt.
+    // `LockCurrency`'s `Display`; not a `Reason` arm, since the consent predicate did not refuse.
     pub lock_refusal: Option<String>,
 
     /// Whether the `__OCX_ENV_STATE` carrier is set at all.
     ///
-    /// This is what separates the two halves of C-050 reason 6: an absent
+    /// This is what separates two inert states: an absent
     /// carrier is the first prompt of a shell (nothing applied, nothing to
     /// repair); a carrier that is present and undecodable is a corrupt one (a
     /// scope was applied and its record is gone).
     pub carrier_present: bool,
 
-    /// The carrier's encoded length in bytes, against [`MAX_CARRIER_BYTES`].
+    /// The carrier's encoded length in bytes, measured against the carrier cap.
     pub carrier_bytes: usize,
 
-    /// The decoded ledger, **rendered as fields, never as base64** — envelope
-    /// tag, schema `v`, and the payload. `None` when the carrier is absent or
-    /// [`Ledger::decode`] refused it (C-003, C-006).
+    /// The decoded ledger, **rendered as fields, never as base64**.
     ///
-    /// Carries what is applied per scope (`global` and `project` separately),
-    /// whether `priors` are intact for each constant the project scope owns —
-    /// the one datum nothing can reconstruct — and, through `over_cap`, the
-    /// abandoned-scope marker (A-01: read from the marker, never inferred from
-    /// an absent carrier).
+    /// Envelope tag, schema `v`, and the payload; `None` when the carrier is
+    /// absent or fails to decode. Carries what is applied per scope (`global` and
+    /// `project` separately), whether `priors` are intact for each constant the
+    /// project scope owns (the one datum nothing can reconstruct) and, through
+    /// `over_cap`, the abandoned-scope marker.
     pub ledger: Option<Ledger>,
 
-    /// Whether the ledger's recorded `fp` still matches the watch set as it
-    /// stands on disk right now (C-019). `None` when there is no recorded
-    /// fingerprint to compare against, **and** when no fold is available to
-    /// compare with: the fingerprint is the reconciler's
-    /// ([`ocx_shell::shell::reconcile::fingerprint`], which folds the raw
-    /// `OCX_CONSENT_*` values, the recorded config-tier paths and the project's
-    /// consent stamp — A-13), and a second fold defined here would produce a
-    /// different string and report every fresh shell as stale.
+    /// Whether the ledger's recorded `fp` still matches the watch set on disk now.
+    ///
+    /// `None` when there is no recorded fingerprint to compare against, **and**
+    /// when no fold is available to compare with.
+    // Compared with the reconciler's own `reconcile::fingerprint`; a second fold here reports every fresh shell stale.
     pub fingerprint_current: Option<bool>,
 
-    /// The watch set, with each member's presence, size and mtime (C-050).
+    /// The watch set, with each member's presence, size and mtime.
     pub watch_set: Vec<WatchMember>,
 
-    /// The project the CWD walk resolved, canonicalized (A-30), and its
-    /// 16-hex state key.
+    /// The project the CWD walk resolved, canonicalized.
     pub project_dir: Option<PathBuf>,
-    /// `ReferenceManager::name_for_path` of [`Self::project_dir`].
+    /// The 16-hex state key of `project_dir`.
+    // `ReferenceManager::name_for_path` of `project_dir`.
     pub project_key: Option<String>,
-    /// Whether a usable consent stamp exists for that key (A-25: an unusable
-    /// stamp is an absent stamp).
+    /// Whether a usable consent stamp exists for that key; an unusable stamp
+    /// counts as absent.
     pub project_stamped: bool,
 
     /// **Which clause activated this project**, or `None` when it is inert.
     ///
-    /// The consent stamp is an independent grant kind that outranks the
-    /// `[shell.consent]` table a user reads, and until this field existed the
-    /// report could not tell the two apart: a project stamped by a past
-    /// `ocx add` looked exactly like one the config granted, so the config and
-    /// the behaviour disagreed with nothing to say so. Naming the granting
-    /// clause is the whole fix — a user who sees `stamp` where they expected
-    /// `paths` now knows which one to revoke.
-    ///
-    /// Serialized as the [`Grant`] discriminant: `"stamp"`, `"namespace"` or
-    /// `"path"`.
+    /// `"stamp"`, `"namespace"` or `"path"`. A consent stamp outranks the
+    /// `[shell.consent]` table.
     pub grant: Option<Grant>,
 
     /// When the consent stamp was written (RFC 3339, UTC), when there is one.
     ///
-    /// The stamp's own recorded instant, not a `stat` — a stamp replaced in
-    /// place would otherwise report the moment of the replacement. `None`
-    /// whenever [`Self::project_stamped`] is `false`; the two come from one
-    /// read, so they cannot disagree.
+    /// The stamp's own recorded instant, not its file time. `None` whenever
+    /// `project_stamped` is `false`.
+    // Taken from the same read as `project_stamped`, or the two can disagree.
     pub stamp_written_at: Option<String>,
 
     /// Prior intactness for each constant the ledger's project scope owns.
     pub priors: Vec<PriorStatus>,
 
-    /// The hook's enablement and the rung that decided it (C-038).
+    /// The hook's enablement and the rung that decided it.
     pub hook: HookStatus,
 
-    /// Every coexisting tool observed live in this shell (C-049).
+    /// Every coexisting tool observed live in this shell.
     ///
-    /// A-37 — the two sentinels fire independently, so this is a list and the
-    /// renderer prints **one line per observed tool**. [`Reason::YieldedTo`]
-    /// carries a single [`Observation`], which is why the enumerated reason
-    /// names the first and this field carries all of them.
+    /// One entry per observed tool; the `yielded_to` inert reason names only the
+    /// first.
     pub yielded_to: Vec<Observation>,
 
     /// Why the shell is not active, when it is not — **the command's reason to
@@ -467,16 +309,12 @@ pub struct ShellStateReport {
     pub inert_reason: Option<Reason>,
 
     /// Reason rows that explain an answer without being an inertness verdict of
-    /// their own (A-12, A-26, A-28).
+    /// their own.
     pub notes: Vec<Note>,
 }
 
 impl ShellStateReport {
     /// Prior intactness for each constant the ledger's project scope owns.
-    ///
-    /// A constant with no recorded prior cannot be reverted: C-006 forbids
-    /// guess-unsetting one, and "restore the recorded prior" has no operand
-    /// without it.
     #[must_use]
     pub fn priors_for(ledger: Option<&Ledger>) -> Vec<PriorStatus> {
         let Some(project) = ledger.and_then(|ledger| ledger.scopes.project.as_ref()) else {
@@ -493,19 +331,8 @@ impl ShellStateReport {
             .collect()
     }
 
-    /// The report as the lines [`Printable::print_plain`] prints, at `detail`.
-    ///
-    /// Separated from the printing so the never-eval-able assertions can run
-    /// over the exact bytes a user sees without capturing stdout — and so they
-    /// can run over the **coloured** bytes too, which is where a label's own
-    /// escape sequence would otherwise sit in front of a line's real first
-    /// token and make the assertion answer about the escape instead.
-    ///
-    /// The answer leads at both tiers: where OCX is, which project is in
-    /// effect, whether the integration is active, and — when it is not — the
-    /// enumerated reason and the fix. [`Detail::Diagnostics`] appends the
-    /// evidence behind that answer; nothing is dropped from the structured
-    /// report at either tier.
+    /// The lines [`Printable::print_plain`] prints at `detail`, kept apart from printing so
+    /// the never-eval-able test checks the exact bytes a user sees, coloured included.
     #[must_use]
     pub fn lines(&self, theme: &Theme, detail: Detail) -> Vec<String> {
         let mut out = Vec::new();
@@ -517,20 +344,13 @@ impl ShellStateReport {
             self.fingerprint_lines(theme, &mut out);
             self.hook_lines(theme, &mut out);
         }
-        // Each diagnostics section closes with its own blank separator, so the
-        // last one would otherwise leave the report ending on an empty line.
         while out.last().is_some_and(String::is_empty) {
             out.pop();
         }
         out
     }
 
-    /// Where OCX lives and which project is in effect — the two facts every
-    /// other line is relative to.
-    ///
-    /// The state key and the stamp's presence are diagnostics: a lookup index
-    /// and a file that exists or does not, neither of which is the answer to
-    /// *"is it working"*. They join the block under [`Detail::Diagnostics`].
+    /// Where OCX lives and which project is in effect.
     fn summary_lines(&self, theme: &Theme, detail: Detail, out: &mut Vec<String>) {
         let home = if self.ocx_home_present {
             quoted_path(&self.ocx_home)
@@ -557,22 +377,12 @@ impl ShellStateReport {
             )),
         }
 
-        // C-056 — the resolved home and the two **effective** settings, at both
-        // detail tiers. A user who has to pass `--verbose` to learn where their
-        // toolchain lives has been told the answer is a diagnostic; and the
-        // relocated case (`toolchain_dir`) is precisely the one where nothing
-        // else in this report names the directory.
-        //
-        // `quoted_path`, like every other path here: a `toolchain_dir` is a
-        // user-supplied path and on POSIX may carry a newline (CWE-117).
+        // Ungated: under `toolchain_dir` relocation nothing else names this directory.
         out.push(format!(
             "{} {}",
             theme.label("toolchain:"),
             quoted_path(&self.toolchain_home)
         ));
-        // G-1 — the same answer the JSON field carries, for the reader who is
-        // about to export it by hand. A user given only the home derives the
-        // rest, and the derivation is what broke.
         out.push(theme.field("  ", "bin", quoted_path(&self.toolchain_bin)));
         out.push(theme.field("  ", "activate", self.activate.to_string()));
         out.push(theme.field("  ", "pinned", if self.pinned { "yes" } else { "no" }));
@@ -585,10 +395,6 @@ impl ShellStateReport {
         out.push(theme.label("ledger:"));
         out.push(theme.field("  ", "carrier", quoted(CARRIER_KEY)));
         out.push(theme.field("  ", "present", if self.carrier_present { "yes" } else { "no" }));
-        // A-38 — the cap bounds ocx's own contribution only; the combined
-        // argv+envp size is an OS boundary ocx does not account for. That
-        // distinction is documentation, and it lives on the docs page rather
-        // than in a parenthesis on a status line.
         out.push(theme.field(
             "  ",
             "bytes",
@@ -739,11 +545,7 @@ impl ShellStateReport {
         out.push(String::new());
     }
 
-    /// Whether a consented project scope is still waiting to be applied.
-    ///
-    /// True only on a ledger that **decoded**: an absent or corrupt carrier is
-    /// [`Reason::LedgerUnreadable`]'s business, and a scope named in `over_cap`
-    /// is [`Reason::LedgerOverCap`]'s.
+    /// Whether a consented project scope awaits its first apply; false on an undecoded or over-cap ledger.
     fn project_scope_pending(&self) -> bool {
         let Some(ledger) = self.ledger.as_ref() else {
             return false;
@@ -751,46 +553,27 @@ impl ShellStateReport {
         self.project_dir.is_some() && ledger.scopes.project.is_none() && !ledger.over_cap.contains(&ScopeId::Project)
     }
 
-    /// Whether a reachable project file could not be resolved.
-    ///
-    /// QUAL-3 — an unresolvable `ocx.toml` composes nothing, so the shell is
-    /// not active, but no [`Reason`] says so: the consent predicate never ran,
-    /// because there was no project to run it over. Without this the report
-    /// prints `active: yes` over a broken project file — the one answer a
-    /// command whose entire product is the explanation must never give.
+    /// Whether a reachable project file could not be resolved; no [`Reason`] covers
+    /// that, so without this the report prints `active: yes` over a broken `ocx.toml`.
     fn project_unresolved(&self) -> bool {
         self.notes
             .iter()
             .any(|note| matches!(note, Note::ProjectUnresolved { .. }))
     }
 
-    /// The verdict, the enumerated inertness reason behind it, its fix, and the
-    /// notes that explain an answer without being a verdict.
+    /// The verdict, its reason and fix, and the notes.
     fn activation_lines(&self, theme: &Theme, out: &mut Vec<String>) {
         match self.inert_reason.as_ref() {
             Some(reason) => {
                 out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
                 self.reason_lines(theme, reason, out);
             }
-            // No enumerated reason, and none is owed: the project tier never
-            // resolved, so nothing composed. The note below carries the detail
-            // and the fix; this line only has to stop saying `yes`.
+            // The note below carries detail and fix; this arm only stops the verdict saying `yes`.
             None if self.project_unresolved() => {
                 out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
             }
-            // C-059 — `activate = none` contributes nothing: no composed
-            // environment, no directory on PATH, on this prompt and every one
-            // after it. Every other signal in this report reads exactly like a
-            // healthy `env` project, because the project scope *is* recorded
-            // (empty) on the first prompt after consent, so
-            // `project_scope_pending` is false and the arm below would answer
-            // `yes` with nothing behind it. The resolved mode is the only thing
-            // that separates the two states, and this is the command whose
-            // whole product is the explanation.
-            //
-            // Ordered after the enumerated reasons on purpose: consent refusing
-            // is the more specific answer, and a project that never got past
-            // the predicate never reached its own `activate` key.
+            // Only the resolved mode tells `activate = none` from a healthy env project.
+            // After the reason arm: a consent-refused project never reaches its own activate key.
             None if self.project_dir.is_some() && self.activate == ActivateMode::None => {
                 out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
                 out.push(format!("{} {}", theme.alert("reason:"), "activate = none"));
@@ -801,17 +584,8 @@ impl ShellStateReport {
                     "set `activate` to `env` or `bin` in this project's ocx.toml",
                 );
             }
-            // A project resolved, consent did not refuse, and the ledger
-            // decoded but holds no project-scope record: the scope simply has
-            // not been applied in this shell yet. Saying `yes` here would be as
-            // untrue as calling a decoded carrier "unset" — and C-050 reason 6
-            // enumerates exactly two carrier situations, so this third state
-            // gets its own sentence rather than borrowing one of theirs.
             None if self.project_scope_pending() => match self.lock_refusal.as_deref() {
-                // Consent said activate and composition refuses anyway, so the
-                // scope will never reach the ledger: "not yet" is a promise
-                // about a prompt that has already failed silently on every
-                // one before this.
+                // Composition refuses, so the scope never reaches the ledger and "not yet" would never come true.
                 Some(refusal) => {
                     out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
                     out.push(format!("{} {refusal}", theme.alert("reason:")));
@@ -830,12 +604,7 @@ impl ShellStateReport {
             },
             None => out.push(format!("{} {}", theme.label("active:"), theme.ok("yes"))),
         }
-        // The provenance of the grant, at both detail tiers: it is the answer,
-        // not the evidence behind it. `None` here is the inert case, where the
-        // reason arms above already said why nothing granted.
         if let Some(grant) = self.grant {
-            // Themed like `fix:` — its structural peer, a labelled line under
-            // the verdict rather than one of the uncoloured evidence rows.
             out.push(format!(
                 "  {} {}",
                 theme.label("granted by:"),
@@ -885,13 +654,7 @@ impl ShellStateReport {
                         theme.label("note:")
                     ));
                     out.push(theme.field("  ", "entry", quoted_path(entry)));
-                    // No separate `fix:` line: unlike a `Reason` refusal, this
-                    // note is not gated to an inert project (a defective entry
-                    // is a config bug whether or not something else granted),
-                    // and `every_inert_arm_names_a_fix_and_no_other_arm_does`
-                    // holds `fix:` to exactly the arms that block activation.
-                    // `EntryDefect::Display` already states the actionable
-                    // rewrite, so the guidance is not lost.
+                    // No `fix:` line: every_inert_arm_names_a_fix_and_no_other_arm_does reserves it for blocking arms.
                     out.push(theme.field("  ", "problem", defect));
                 }
                 Note::ToolchainManifestUnparsed { manifest, detail } => {
@@ -900,15 +663,9 @@ impl ShellStateReport {
                         theme.label("note:")
                     ));
                     out.push(theme.field("  ", "manifest", quoted_path(manifest)));
-                    // The loader's message embeds the offending path: untrusted
-                    // bytes, and therefore quoted, like `ProjectUnresolved`.
+                    // The loader's message embeds the path: untrusted, so quoted.
                     out.push(theme.field("  ", "detail", quoted(detail)));
-                    // No `fix:` line: this note is not gated to an inert
-                    // project — a broken manifest is a config bug whether or
-                    // not the shell activated — and
-                    // `every_inert_arm_names_a_fix_and_no_other_arm_does` holds
-                    // `fix:` to exactly the arms that block activation. The
-                    // line below still says what to do.
+                    // No `fix:` line: every_inert_arm_names_a_fix_and_no_other_arm_does reserves it for blocking arms.
                     out.push(
                         "  repair the manifest - until it parses, activate and pinned fall to their floors".to_owned(),
                     );
@@ -918,9 +675,6 @@ impl ShellStateReport {
     }
 
     /// The consent stamp's presence and, when present, the instant it records.
-    ///
-    /// One sentence for both, because "present" without a date is the state
-    /// that made the stamp feel like it appeared from nowhere.
     fn stamp_description(&self) -> String {
         match (self.project_stamped, self.stamp_written_at.as_deref()) {
             (true, Some(written)) => format!("present (written {})", written_description(written)),
@@ -929,8 +683,7 @@ impl ShellStateReport {
         }
     }
 
-    /// The granting clause, spelled the way the user would go looking for it —
-    /// a command for the stamp, a config key for the other two.
+    /// The granting clause as the user would look for it: a command for the stamp, a config key otherwise.
     fn grant_description(&self, grant: Grant) -> String {
         match grant {
             Grant::Stamp => format!(
@@ -942,8 +695,7 @@ impl ShellStateReport {
         }
     }
 
-    /// One arm per enumerated reason (C-050), each naming its own evidence and
-    /// closing with the one line that says what to do about it.
+    /// One arm per enumerated reason: its evidence, then its `fix:` line.
     fn reason_lines(&self, theme: &Theme, reason: &Reason, out: &mut Vec<String>) {
         let headline = |out: &mut Vec<String>, text: &str| out.push(format!("{} {text}", theme.alert("reason:")));
         match reason {
@@ -997,9 +749,6 @@ impl ShellStateReport {
                     claimed_sources.iter().map(String::as_str),
                 );
                 match verified_sources {
-                    // A `Some` that disagrees is the security-relevant half: a
-                    // locked digest in the store came from a repository outside
-                    // the granted namespace, and the lock renamed it.
                     Some(verified) => push_list(theme, out, "verified sources", verified.iter().map(String::as_str)),
                     None => out.push(theme.field("  ", "verified sources", "none recorded for this lock")),
                 }
@@ -1022,9 +771,7 @@ impl ShellStateReport {
             }
             Reason::YieldedTo(first) => {
                 headline(out, "yielded to another live per-prompt hook");
-                // A-37 — both sentinels fire independently, so this is one line
-                // per observed tool, never an `elif` chain that suppresses the
-                // second. `Reason::YieldedTo` carries only the first.
+                // One line per observed tool: the sentinels fire independently and `YieldedTo` carries only the first.
                 let observed = if self.yielded_to.is_empty() {
                     std::slice::from_ref(first)
                 } else {
@@ -1064,10 +811,7 @@ impl ShellStateReport {
                         out.push("  the carrier is unset: this is the first prompt, not a fault".to_owned());
                         push_fix(theme, out, "none needed - the next prompt applies it");
                     } else {
-                        // Same evidence, opposite remedy: an unset carrier in a
-                        // shell that was never wired is not a first prompt on
-                        // the way to converging, it is a shell where no prompt
-                        // will ever apply anything.
+                        // Same unset carrier, but in a never-wired shell no prompt will ever apply anything.
                         headline(out, "the shell integration has never been installed here");
                         out.push(format!(
                             "  no {} under {}: `ocx self setup` has not run",
@@ -1095,8 +839,7 @@ impl ShellStateReport {
     }
 }
 
-/// One ledger entry per line, under the fixed `- ` list marker so no carrier
-/// byte is ever the first token of a line.
+/// One ledger entry per line, behind the fixed `- ` marker so no carrier byte starts a line.
 fn push_entries(theme: &Theme, out: &mut Vec<String>, applied: &[LedgerEntry]) {
     for entry in applied {
         let separator = entry.separator.as_deref().map_or_else(String::new, |sep| {
@@ -1123,12 +866,7 @@ fn push_list(theme: &Theme, out: &mut Vec<String>, label: &str, items: impl Into
     }
 }
 
-/// The one line that says what to do about the reason above it.
-///
-/// Every arm has one, including the two whose remedy is *none* — a shell that
-/// converges by itself is an answer, and leaving it unsaid reads as an
-/// omission. The label is styled so a reader scanning for what to type finds
-/// it without reading the evidence.
+/// The `fix:` line closing a reason; arms whose remedy is none still say so.
 fn push_fix(theme: &Theme, out: &mut Vec<String>, fix: &str) {
     out.push(format!("{} {fix}", theme.label("fix:")));
 }
@@ -1148,9 +886,7 @@ fn tool_name(tool: Tool) -> &'static str {
 }
 
 impl Printable for ShellStateReport {
-    /// The answer: where OCX is, which project is in effect, whether the
-    /// integration is active, and — when it is not — the enumerated reason and
-    /// the fix. Never eval-able (C-050), coloured or not.
+    /// The answer only ([`Detail::Answer`]).
     fn print_plain(&self, data: &DataInterface) {
         for line in self.lines(&data.theme(), Detail::Answer) {
             println!("{line}");
@@ -1158,16 +894,9 @@ impl Printable for ShellStateReport {
     }
 }
 
-/// [`ShellStateReport`] rendered with the diagnostics behind the answer —
-/// `ocx shell state --verbose`.
+/// [`ShellStateReport`] with its diagnostics (`ocx shell state --verbose`).
 ///
-/// Plain format: the same leading answer, then the decoded ledger, the
-/// fingerprint watch set and the hook ladder.
-///
-/// JSON format: delegates to the inner [`ShellStateReport`] — **identical wire
-/// shape whether verbose or not**, the same contract `VerboseVersionData`
-/// keeps. `--verbose` is a human flag; a `--format json` consumer never sees
-/// less for its absence.
+/// Serializes as the inner report: `--verbose` changes the plain rendering, never the JSON.
 pub struct VerboseShellState(pub ShellStateReport);
 
 impl Printable for VerboseShellState {
@@ -1184,8 +913,7 @@ impl Serialize for VerboseShellState {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. Verbosity changes the plain rendering only.
+// Must match the transparent `Serialize` above: the published schema is the inner report's.
 impl schemars::JsonSchema for VerboseShellState {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "VerboseShellState".into()

@@ -3,26 +3,12 @@
 
 //! Device + inode directory-identity check.
 //!
-//! Answers "do these two paths denote the *same directory*?" using filesystem
-//! identity (`dev`/`ino` on Unix; canonicalized-handle equivalence on Windows),
-//! **not** canonical-path byte equality.
-//!
-//! Byte equality of `canonicalize` output is unsound on case-insensitive /
-//! normalizing filesystems (macOS APFS default, Windows — both first-class
-//! platforms per `product-context.md`): `tokio::fs::canonicalize` does not
-//! case-fold, so two byte-different paths can denote the same directory.
-//! `ProjectRegistry::register`'s no-self-link invariant (ADR
-//! `adr_project_gc_symlink_ledger.md` §"No self-link invariant", review
-//! correction ARCH-1b — silent-data-loss class) requires true identity, hence
-//! this helper.
+//! Identity, not canonical-path equality: `canonicalize` does not case-fold, and a missed match
+//! breaks `ProjectRegistry::register`'s no-self-link invariant (`adr_project_gc_symlink_ledger.md` § No self-link invariant).
 
 use std::path::Path;
 
-/// Windows file-identity triple: volume serial number + 64-bit file index.
-///
-/// `BY_HANDLE_FILE_INFORMATION` splits the file index into two 32-bit
-/// halves; collapsing them into a single `u64` keeps the equality check
-/// readable.
+/// Windows file identity: volume serial number + 64-bit file index.
 #[cfg(windows)]
 #[derive(PartialEq, Eq)]
 struct FileId {
@@ -37,7 +23,7 @@ fn file_id(path: &Path) -> std::io::Result<FileId> {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
 
-    // `FILE_FLAG_BACKUP_SEMANTICS` (0x02000000) — see module doc above.
+    // Opens a directory handle; adding `FILE_FLAG_OPEN_REPARSE_POINT` would stop a junction resolving to its target.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
     let file = std::fs::OpenOptions::new()
@@ -46,9 +32,7 @@ fn file_id(path: &Path) -> std::io::Result<FileId> {
         .open(path)?;
 
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: `file` owns a valid open handle for the duration of this
-    // call (closed on drop after we return). `&mut info` is a valid
-    // writable pointer to a properly aligned `BY_HANDLE_FILE_INFORMATION`.
+    // SAFETY: `file` holds a valid handle across the call and `info` is a valid, aligned out-pointer.
     let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
     if ok == 0 {
         return Err(std::io::Error::last_os_error());
@@ -60,17 +44,11 @@ fn file_id(path: &Path) -> std::io::Result<FileId> {
     })
 }
 
-/// Returns `true` when `a` and `b` denote the same directory by filesystem
-/// identity (Unix `dev`+`ino`; Windows canonicalized-handle equivalence).
-///
-/// Both paths must exist and be directories. A non-existent path or an I/O
-/// failure resolving identity surfaces as `Err`; callers decide whether that
-/// is fatal (the registry treats it as "not the same dir, proceed").
+/// Returns `true` when `a` and `b` denote the same directory by filesystem identity.
 ///
 /// # Errors
 ///
-/// Returns the underlying [`std::io::Error`] when either path cannot be
-/// stat'd / opened to determine its filesystem identity.
+/// When either path cannot be stat'd or opened, including when it does not exist.
 pub fn same_dir(a: &Path, b: &Path) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
@@ -82,28 +60,13 @@ pub fn same_dir(a: &Path, b: &Path) -> std::io::Result<bool> {
     }
     #[cfg(windows)]
     {
-        // The Windows inode equivalent is the (volume serial number, file
-        // index) pair from `BY_HANDLE_FILE_INFORMATION`. We open each path
-        // and pull that pair via `GetFileInformationByHandle` — the stable
-        // counterpart to the nightly `MetadataExt::{volume_serial_number,
-        // file_index}` accessors (rust-lang/rust#63010, gated behind the
-        // `windows_by_handle` feature).
-        //
-        // `FILE_FLAG_BACKUP_SEMANTICS` is required to open a *directory*
-        // handle on Windows. Opening with default flags (i.e. via
-        // `File::open`) fails on directories. We deliberately *do not* set
-        // `FILE_FLAG_OPEN_REPARSE_POINT`: a directory junction or symlink
-        // must resolve to its target so identity matches the Unix
-        // `dev`/`ino` semantics above.
         let ia = file_id(a)?;
         let ib = file_id(b)?;
         Ok(ia == ib)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        // No filesystem-identity API on this platform; fall back to
-        // canonical-path equality. Documented weaker guarantee — OCX's
-        // first-class platforms are all unix or windows.
+        // No identity API here; canonical-path equality is the weaker fallback.
         Ok(std::fs::canonicalize(a)? == std::fs::canonicalize(b)?)
     }
 }

@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Certificate identity + issuer matching against a resolved trust-policy set.
+//! Certificate identity + issuer matching against an ANY-of set of [`CompiledPolicy`] constraints.
 //!
-//! Extracts the leaf certificate's SubjectAltName and the Fulcio OIDC-issuer
-//! OID extension (`1.3.6.1.4.1.57264.1.8`, issuer v2), then checks them against an ANY-of
-//! set of [`CompiledPolicy`] constraints. The identity constraint is exact
-//! (byte-equal) or an anchored full-match regex ([`ocx_trust::IdentityRule`]);
-//! the issuer constraint is always exact.
+//! The identity matches per [`ocx_trust::IdentityRule`]; the issuer always matches exactly.
 
 use x509_cert::Certificate;
 use x509_cert::der::{Decode, oid::ObjectIdentifier};
@@ -17,15 +13,9 @@ use x509_cert::ext::pkix::name::GeneralName;
 use super::error::VerifyErrorKind;
 use ocx_trust::PolicyBackend;
 
-/// Fulcio OIDC-issuer extension OID (`1.3.6.1.4.1.57264.1.8`, "Issuer (V2)").
-///
-/// Deliberately **not** `.1.1`: that is the deprecated v1 issuer claim, whose
-/// value Fulcio writes as a *bare* UTF-8 byte string with no DER header, so
-/// parsing it as a DER `UTF8String` always fails and the issuer silently reads
-/// as absent. Verified against a live Fulcio v1.8.8: `.1.1` is 19 raw bytes,
-/// `.1.8` is the same URL behind a `0c 13` DER header.
+/// Fulcio OIDC-issuer extension OID, "Issuer (V2)".
+// Not v1's `.1.1`: Fulcio writes that one without a DER header, so the issuer would silently read as absent.
 const FULCIO_ISSUER_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.8");
-/// SubjectAltName extension OID (`2.5.29.17`).
 const SUBJECT_ALT_NAME_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
 
 /// Parse a DER leaf certificate, mapping failures to `CertChainInvalid`.
@@ -33,10 +23,7 @@ pub(crate) fn parse_certificate(cert_der: &[u8]) -> Result<Certificate, VerifyEr
     Certificate::from_der(cert_der).map_err(|_| VerifyErrorKind::CertChainInvalid)
 }
 
-/// Extract the certificate's signing identity from its SubjectAltName.
-///
-/// Returns the first RFC822 (email) or URI general name — the two forms Fulcio
-/// issues for human and workload identities. `None` when no SAN is present.
+/// The first RFC822 (email) or URI SubjectAltName, the two forms Fulcio issues; `None` without one.
 pub(crate) fn subject_identity(cert: &Certificate) -> Option<String> {
     let extensions = cert.tbs_certificate.extensions.as_deref()?;
     let ext = extensions.iter().find(|e| e.extn_id == SUBJECT_ALT_NAME_OID)?;
@@ -48,36 +35,24 @@ pub(crate) fn subject_identity(cert: &Certificate) -> Option<String> {
     })
 }
 
-/// Extract the OIDC issuer URL from the Fulcio issuer OID extension.
-///
-/// The extension value is a DER `UTF8String` carrying the issuer URL. `None`
-/// when the extension is absent or malformed.
+/// The OIDC issuer URL from the Fulcio issuer extension; `None` when absent or malformed.
 pub(crate) fn oidc_issuer(cert: &Certificate) -> Option<String> {
     let extensions = cert.tbs_certificate.extensions.as_deref()?;
     let ext = extensions.iter().find(|e| e.extn_id == FULCIO_ISSUER_OID)?;
     let raw = ext.extn_value.as_bytes();
-    // Fulcio encodes the v2 issuer extension as a DER UTF8String. The v1 OID
-    // (`.1.1`) carries the same URL *unwrapped* and would not parse here.
     x509_cert::der::asn1::Utf8StringRef::from_der(raw)
         .ok()
         .map(|s| s.as_str().to_owned())
 }
 
-/// Verify a leaf certificate against an ANY-of set of compiled trust policies:
-/// the certificate passes if its SAN + OIDC issuer satisfy *any one* policy
-/// (supporting key/workflow rotation, where old and new identities coexist).
+/// Every policy in the ANY-of set whose identity and issuer the leaf certificate satisfies.
 ///
-/// On failure the returned kind preserves the single-policy (flag-mode)
-/// behaviour: if some policy's identity matched but its issuer did not, the
-/// failing part is the issuer → [`VerifyErrorKind::IssuerMismatch`]; otherwise
-/// no identity matched → [`VerifyErrorKind::IdentityMismatch`]. A certificate
-/// with no usable SAN or issuer fails closed.
+/// Returns the matched subset, not a boolean, because the `builder` pin is ORed across it.
 ///
-/// Returns **every** satisfied policy rather than only whether one was: the
-/// `builder` pin is ANDed within a policy and ORed across the set (#103), so
-/// deciding it needs the matched subset. An equal-scope policy carrying no pin
-/// weakens the set, which is exactly what `system_locked` exists to contain and
-/// what a boolean would hide.
+/// # Errors
+///
+/// [`VerifyErrorKind::IssuerMismatch`] when an identity matched under the wrong issuer, otherwise
+/// [`VerifyErrorKind::IdentityMismatch`]; a certificate with no usable SAN or issuer fails closed.
 pub fn matching_policies<'a>(
     cert_der: &[u8],
     policies: &'a [ocx_trust::CompiledPolicy],
@@ -89,15 +64,7 @@ pub fn matching_policies<'a>(
     let mut matched = Vec::new();
     let mut any_identity_matched = false;
     for policy in policies {
-        // A policy's `backends` are an ANY-of set, so one satisfied keyless
-        // signer admits the policy. A `Key` backend contributes nothing here and
-        // must not: this function matches a Fulcio certificate, and a key
-        // signature carries none — so a policy whose signers are all
-        // `kind = "key"` never matches a keyless artifact, which is spec D5's
-        // rule falling out of the type rather than being restated.
-        //
-        // Exhaustive on purpose: a third `PolicyBackend` variant has to break
-        // this match rather than silently fall through as "not a keyless match".
+        // Exhaustive, no `_`: a third `PolicyBackend` variant must break the build, not skip as "not keyless".
         let mut policy_matched = false;
         for backend in &policy.backends {
             let keyless = match backend {
@@ -122,56 +89,16 @@ pub fn matching_policies<'a>(
     Ok(matched)
 }
 
-/// Verify a signature against an ANY-of set of compiled trust policies,
-/// returning every policy whose pinned public key produced it.
+/// Every policy in the ANY-of set whose pinned public key produced `signature`; the key-mode twin of
+/// [`matching_policies`].
 ///
-/// The key-mode twin of [`matching_policies`], and a separate function rather
-/// than a branch inside it on purpose: that one is handed a certificate, this
-/// one a message and a signature, and one function taking both would have to
-/// accept a call shape in which half its arguments mean nothing.
-///
-/// `message` is the bytes the signature covers, and never the base64 text of
-/// them. Which bytes those are is the caller's wire shape, not a constant: the
-/// DSSE Pre-Authentication Encoding ([`crate::attest::dsse::pae`]) on the
-/// bundle path, and the raw simplesigning payload exactly as the registry
-/// served it on the sidecar path — cosign signs those bytes directly, with no
-/// PAE wrapper around them.
-///
-/// # Which refusal, and why it is not the identity one
-///
-/// A signature no policy key verifies is either "signed by a key nobody here
-/// trusts" or "trusted key, tampered signature". A verifier holding only public
-/// keys cannot distinguish them — both are `verify_signature` returning an error
-/// for every key it has. Both therefore land on
-/// [`VerifyErrorKind::SignatureInvalid`] (exit 65), whose rendering ("signature
-/// verification failed") is the one sentence true of both readings: at least one
-/// trusted key was tried and none accepted these bytes.
-///
-/// [`VerifyErrorKind::IdentityMismatch`] (exit 77) was the older answer and was
-/// wrong twice over. It renders as "certificate identity mismatch" on a path
-/// that carries no certificate and reads no identity, so it names material that
-/// does not exist; and it hides a bad signature from every caller scripting 65
-/// as "this artifact did not verify", handing them a permissions code they
-/// cannot act on.
-///
-/// # The one case that IS about identity
-///
-/// A policy set carrying no [`PolicyBackend::Key`] at all — every signer is
-/// `kind = "keyless"` — never even reaches `verify_signature`. Nothing was
-/// measured about the signature there, so reporting it invalid would assert a
-/// corruption never observed; the refusal is
-/// [`VerifyErrorKind::IdentityMismatch`], which is the honest verdict: this
-/// artifact is key-signed and nobody here trusts a key. That is spec D5's
-/// direction for a certificate ([`matching_policies`]) mirrored, and it is
-/// decided on the policy set rather than on the verification outcome so the two
-/// answers cannot blur into one.
+/// `message` is the signed bytes, never their base64 text: the DSSE PAE ([`crate::attest::dsse::pae`]) on the
+/// bundle path, the raw simplesigning payload as served on the sidecar path.
 ///
 /// # Errors
 ///
-/// [`VerifyErrorKind::SignatureInvalid`] when at least one policy key was tried
-/// and none verified the signature; [`VerifyErrorKind::IdentityMismatch`] when
-/// the policy set names no key at all. Never any other kind: there is no
-/// material here that could be malformed in a way worth a distinct code.
+/// [`VerifyErrorKind::SignatureInvalid`] when a policy key was tried and none verified;
+/// [`VerifyErrorKind::IdentityMismatch`] when the policy set names no key.
 pub(crate) fn matching_key_policies<'a>(
     message: &[u8],
     signature: &[u8],
@@ -180,9 +107,7 @@ pub(crate) fn matching_key_policies<'a>(
     let mut matched = Vec::new();
     let mut any_key_tried = false;
     for policy in policies {
-        // Exhaustive for the same reason the sibling function's match is: a
-        // third `PolicyBackend` variant must break this match rather than
-        // silently fall through as "not a key match".
+        // Exhaustive, no `_`: a third `PolicyBackend` variant must break the build, not skip as "not a key".
         let mut policy_matched = false;
         for backend in &policy.backends {
             let key = match backend {
@@ -200,8 +125,11 @@ pub(crate) fn matching_key_policies<'a>(
     }
     if matched.is_empty() {
         return Err(if any_key_tried {
+            // Untrusted key and tampered signature are indistinguishable here; both stay exit 65, which scripts rely
+            // on.
             VerifyErrorKind::SignatureInvalid
         } else {
+            // No key was tried, so claiming an invalid signature would assert corruption nobody observed.
             VerifyErrorKind::IdentityMismatch
         });
     }

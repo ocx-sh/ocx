@@ -3,35 +3,8 @@
 
 //! Record filename templates.
 //!
-//! The default grammar — `<utc-basic-ms>-<pid>-<8 hex random>.json` — is part of
-//! the contract: it sorts lexicographically into chronological order, names the
-//! owning process, and breaks same-pid-same-millisecond ties across hosts and
-//! containers.
-//!
-//! The placeholder set is **closed**, and an unknown placeholder is a
-//! configuration error rather than a silent literal. The failure mode of a
-//! silently unexpanded `{jobid}` is a directory of identically named files,
-//! discovered during an audit.
-//!
-//! The selection rule is that a placeholder must be **cheap to make safe as a
-//! filename**. Three of the four are OCX-generated and safe by construction;
-//! `{host}` is read from the environment, where a UTS hostname is bytes to the
-//! kernel and may legitimately contain `/`, so its expansion is slugified here
-//! (everything outside `[A-Za-z0-9._-]` becomes `_`, and a name that reduces to
-//! `.` or `..` is dropped). A `{command}` placeholder was considered and
-//! rejected on the same rule: sanitizing user-controlled argv for path
-//! separators, spaces, unicode and length is real surface for cosmetic value,
-//! when the command is already in the record and one `jq` away.
-//!
-//! The sanitizer covers the expanded values; the literal text around them is
-//! checked by [`NameTemplate::parse`], which refuses a separator while the
-//! operator is still looking at their config. [`super::sink`] is the backstop
-//! behind both, refusing to publish under any rendered name that is not a single
-//! plain filename — so nothing can place a record outside the operator's sink.
-//!
-//! These are substitutions only, never behaviour. A profile-runtime style
-//! specifier that carries semantics (merge pools, continuous sync) would be a
-//! contract worth regretting.
+//! The placeholder set is closed: a silently unexpanded `{jobid}` would give every record the same name
+//! (`adr_exec_resolution_record.md` § "Rationale from code: launch").
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -42,38 +15,16 @@ use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use super::error::RecordsError;
 use ocx_util::prelude::StringExt;
 
-/// The default template when `[records] name` is unset.
+/// The default template when `[records] name` is unset; its shape is contract (chronological sort, owning pid).
 pub const DEFAULT_TEMPLATE: &str = "{time}-{pid}-{rand}.json";
 
-/// `{time}`'s expansion: ISO 8601 basic, UTC, millisecond — `20260726T140311482Z`.
-///
-/// Basic rather than extended form because the result is a filename on every
-/// supported platform, and it still sorts lexicographically into chronological
-/// order.
+/// `{time}`'s expansion, e.g. `20260726T140311482Z`: basic form, so it is a valid filename everywhere.
 const TIME_FORMAT: &str = "%Y%m%dT%H%M%S%3fZ";
 
-/// The placeholders `{rand}` expands to, and the retry component the sink
-/// appends when a template carries none.
+/// Eight lowercase hex characters: the `{rand}` expansion and the sink's collision-retry suffix.
 ///
-/// Eight lowercase hex characters, drawn from the operating system's CSPRNG
-/// (`getrandom`/`arc4random`, reached through `rand_core`'s `OsRng` — the same
-/// source the signing path already draws its ephemeral keys from). Two
-/// properties, and the second is why the source is the OS rather than
-/// `RandomState`:
-///
-/// - **Distinct across processes and containers.** Two containers that are both
-///   PID 1 in the same millisecond on a shared mount draw different values, so
-///   the default template stays unique where its timestamp and pid do not.
-/// - **Unpredictable to a local co-tenant.** A shared sink is writable by
-///   principals other than the recording user, and a name sequence that could be
-///   predicted could be pre-created — burning every publish attempt and, under
-///   `required = true`, stopping the job. `RandomState` is SipHash-1-3 over
-///   empty input with a thread-local key that merely increments, and its own
-///   documentation disclaims cryptographic strength.
-///
-/// Falls back to the hasher if the OS entropy source is unavailable. A filename
-/// is not a security token, and an environmental detail must never fail an
-/// invocation — the collision-breaking property survives the fallback.
+/// From the OS CSPRNG, or another principal can pre-create a shared sink's predictable names and stop a
+/// `required = true` job; the hasher fallback exists because an unavailable OS source must not fail a launch.
 pub fn random_component() -> String {
     let mut bytes = [0u8; 4];
     if OsRng.try_fill_bytes(&mut bytes).is_err() {
@@ -86,53 +37,33 @@ pub fn random_component() -> String {
 /// A validated record filename template.
 #[derive(Debug, Clone)]
 pub struct NameTemplate {
-    /// The template text, validated at construction.
     template: String,
 }
 
-/// The per-invocation values a template expands against.
-///
-/// Drawn from the record itself so the filename and the payload can never
-/// disagree about when the record was written or which process ran the tool.
+/// The per-invocation values a template expands against, drawn from the record so name and payload agree.
 #[derive(Debug, Clone)]
 pub struct NameContext {
-    /// Expands `{time}` as `20260726T140311482Z` — ISO 8601 basic, UTC,
-    /// millisecond.
+    /// Expands `{time}`.
     pub recorded_at: DateTime<Utc>,
 
-    /// Expands `{pid}` — the process that runs the tool, matching the record's
-    /// own `process.pid` on both platforms.
+    /// Expands `{pid}`: the process that runs the tool, matching the record's `process.pid`.
     pub pid: u32,
 
-    /// Expands `{host}`. `None` when the hostname could not be determined, in
-    /// which case `{host}` expands to the empty string: an environmental detail
-    /// must never fail an invocation, and the template's other components carry
-    /// the uniqueness.
+    /// Expands `{host}`; `None` (hostname undeterminable) expands to the empty string.
     pub host: Option<String>,
 }
 
 impl NameTemplate {
     /// Validate a template.
     ///
-    /// Validation happens at resolve time, not at write time, so a bad template
-    /// surfaces as a configuration error while the operator is still looking at
-    /// their config rather than as a surprise filename much later.
-    ///
     /// # Errors
     ///
-    /// - [`RecordsError::NameNotAFilename`] — the literal text carries a path
-    ///   separator, or the whole template is `.` or `..`.
-    /// - [`RecordsError::TemplateUnknownPlaceholder`] — a placeholder outside
-    ///   the closed set `{time}`, `{pid}`, `{rand}`, `{host}`.
-    /// - [`RecordsError::TemplateNotUnique`] — the template contains none of
-    ///   `{time}`, `{pid}` or `{rand}`, so every record in the sink resolves to
-    ///   one name.
+    /// - [`RecordsError::NameNotAFilename`] — a path separator, or the template is `.` or `..`.
+    /// - [`RecordsError::TemplateUnknownPlaceholder`] — a placeholder outside `{time}`, `{pid}`, `{rand}`, `{host}`,
+    ///   or an unterminated `{`.
+    /// - [`RecordsError::TemplateNotUnique`] — none of `{time}`, `{pid}` or `{rand}`.
     pub fn parse(template: &str) -> Result<Self, RecordsError> {
-        // Checked here and not left to the write-time backstop: a separator in
-        // the literal text parses clean and then fails on every publish, which
-        // under the default warn posture is one warning per invocation and zero
-        // records forever — the silent outcome resolve-time validation exists to
-        // prevent.
+        // Not left to the write-time check, or under `warn` every publish fails and no record is ever written.
         if template.contains('/') || template.contains('\\') || matches!(template, "." | "..") {
             return Err(RecordsError::NameNotAFilename {
                 name: template.to_string(),
@@ -143,9 +74,6 @@ impl NameTemplate {
         let mut varies = false;
         while let Some(open) = rest.find('{') {
             rest = &rest[open + 1..];
-            // An unterminated `{` is the same class of typo as an unknown name,
-            // and keeping it as a literal brace would produce exactly the
-            // constant filename the uniqueness rule exists to prevent.
             let Some(close) = rest.find('}') else {
                 return Err(RecordsError::TemplateUnknownPlaceholder {
                     placeholder: rest.to_string(),
@@ -154,8 +82,7 @@ impl NameTemplate {
             let (placeholder, remainder) = rest.split_at(close);
             match placeholder {
                 "time" | "pid" | "rand" => varies = true,
-                // `{host}` is constant for every record on a host, so it is a
-                // valid placeholder that contributes nothing to uniqueness.
+                // Constant per host, so no contribution to uniqueness.
                 "host" => {}
                 _ => {
                     return Err(RecordsError::TemplateUnknownPlaceholder {
@@ -178,31 +105,22 @@ impl NameTemplate {
         &self.template
     }
 
-    /// Whether the template expands `{rand}`.
-    ///
-    /// A publish collision retries under a fresh random component; when the
-    /// template has none, the retry appends one rather than re-rendering an
-    /// identical name and spinning forever.
+    /// Whether the template expands `{rand}`; without it a collision retry must append one, or it re-renders forever.
     pub fn has_random(&self) -> bool {
         self.template.contains("{rand}")
     }
 
-    /// Render a filename, drawing a fresh random component each call.
-    ///
-    /// Called again on a publish collision, so every call must draw anew.
+    /// Render a filename, drawing a fresh random component each call, which the collision retry relies on.
     pub fn render(&self, context: &NameContext) -> String {
         let mut rendered = self
             .template
             .replace("{time}", &context.recorded_at.format(TIME_FORMAT).to_string())
             .replace("{pid}", &context.pid.to_string());
-        // One draw per occurrence, so a template asking for more entropy gets
-        // it. The loop terminates because a drawn component is hex only.
+        // Terminates because a drawn component is hex only.
         while rendered.contains("{rand}") {
             rendered = rendered.replacen("{rand}", &random_component(), 1);
         }
-        // `{host}` expands last: it is the one value ocx does not generate, so
-        // substituting it first would let a pathological hostname introduce a
-        // placeholder that the earlier passes then expanded.
+        // Last, or a hostname could inject a placeholder that an earlier pass expands.
         rendered.replace(
             "{host}",
             &context.host.as_deref().map(sanitize_host).unwrap_or_default(),
@@ -211,12 +129,7 @@ impl NameTemplate {
 }
 
 impl Default for NameTemplate {
-    /// [`DEFAULT_TEMPLATE`], without going through [`NameTemplate::parse`].
-    ///
-    /// A policy with no sink renders no filename, so it must not be able to fail
-    /// on a template it will never use — and the shipped default's validity is a
-    /// property of this crate, guarded by a test, not something to re-derive at
-    /// runtime and hand a caller a `Result` for.
+    /// [`DEFAULT_TEMPLATE`] unparsed: a policy with no sink must not fail on a name it never renders.
     fn default() -> Self {
         Self {
             template: DEFAULT_TEMPLATE.to_string(),
@@ -224,21 +137,9 @@ impl Default for NameTemplate {
     }
 }
 
-/// The filename-safe form of a hostname.
+/// The filename-safe form of a hostname: outside `[A-Za-z0-9._-]` becomes `_`, dots-only becomes empty.
 ///
-/// The kernel imposes no charset on a UTS hostname, and this value is joined
-/// into a path component: a `/` would send every record to a directory that does
-/// not exist (ENOENT on every attempt, exit 74 for the whole host under a
-/// `required` policy), and a `..` would relocate the audit trail out of the sink
-/// the operator designated. Both are the ADR's own example template
-/// `{time}-{host}-{pid}.json` on an unusual host, so this is a sanitizer rather
-/// than a rejection: a launch must not fail over an environmental detail.
-///
-/// Everything outside `[A-Za-z0-9._-]` becomes `_` — the project's relaxed slug,
-/// as used for every other filesystem-facing name. A hostname that reduces to
-/// dots only is dropped to the empty string, which is what an undeterminable
-/// hostname already expands to; the template's other placeholders carry the
-/// uniqueness either way.
+/// Sanitized, not rejected, since a launch must not fail over it; a raw `/` or `..` would misplace every record.
 fn sanitize_host(host: &str) -> String {
     let slug = host.to_relaxed_slug();
     if slug.chars().all(|c| c == '.') {

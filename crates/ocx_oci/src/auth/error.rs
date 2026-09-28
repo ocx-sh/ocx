@@ -33,17 +33,7 @@ pub enum AuthError {
     LoginRejected { registry: String },
     /// The login-time probe never completed, so the credential was never judged.
     ///
-    /// Split from [`Self::LoginRejected`] because a TLS handshake against a
-    /// plain-HTTP registry, a DNS failure and a genuine 401 demand three
-    /// different actions. Reporting all three as "rejected credentials" at
-    /// exit 80 routes a CI script into the refresh-credentials branch, whose
-    /// retry then fails identically forever — and tells a human to rotate a
-    /// secret that never left the machine.
-    ///
-    /// The exit code is delegated to the wrapped
-    /// [`ClientError`](crate::client::error::ClientError), so the probe
-    /// classifies the same way the rest of the binary classifies the same wire
-    /// failure.
+    /// Kept apart from [`Self::LoginRejected`], or a TLS/DNS failure sends CI into a credential-refresh retry loop.
     #[error("could not verify credentials against registry '{registry}'")]
     ProbeFailed {
         registry: String,
@@ -54,7 +44,7 @@ pub enum AuthError {
 
 // ─────────────────────────── tests ───────────────────────────
 //
-// One test per row in the Error Taxonomy table of `plan_ocx_login.md`. Pins
+// One test per `AuthError` variant. Pins
 // the AuthError → ExitCode classification contract for downstream consumers
 // (CI scripts case on numeric values, see `quality-rust-exit_codes.md`).
 #[cfg(test)]

@@ -2,23 +2,11 @@
 // Copyright 2026 The OCX Authors
 
 //! Coarse error categories for the structured JSON error envelope.
-//!
-//! The serialized snake_case form of [`ErrorCategory`] is the envelope's
-//! `error.kind` value — a frozen wire contract consumers pattern-match on
-//! (ADR §C-S1-1).
-//!
-//! The type lives beside [`ExitCode`] rather than in the CLI crate for one
-//! reason: `#[non_exhaustive]` binds only *downstream* crates, so an in-crate
-//! match over [`ExitCode`] can be exhaustive with no wildcard. That makes the
-//! compiler, rather than a hand-maintained table, the thing that forces every
-//! exit code to be classified.
 
 use crate::exit_code::ExitCode;
 use serde::Serialize;
 
-/// Frozen error-category set (ADR C-S1-1). Matches `error.kind` values listed
-/// in the ADR's `error_kind` inventory — the serialized lowercase form is
-/// the stable contract consumers pattern-match on.
+/// Frozen `error.kind` vocabulary: the snake_case serialization is a wire contract consumers match on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
@@ -39,21 +27,9 @@ pub enum ErrorCategory {
 }
 
 impl ErrorCategory {
-    /// Total function mapping every [`ExitCode`] to an [`ErrorCategory`].
-    ///
-    /// The match is **exhaustive with no wildcard**. [`ExitCode`] is
-    /// `#[non_exhaustive]`, but that binds downstream crates only, so here —
-    /// in the crate that defines it — a new variant is a compile error until
-    /// it is classified. That is the whole guard: the former cross-crate form
-    /// needed a `_ => Internal` arm, under which a new exit code compiled
-    /// clean, passed clippy, and silently serialized as `internal`.
-    ///
-    /// Success codes (`Success = 0`, `Failure = 1`) are nonsensical for an error
-    /// envelope and map to [`Self::Internal`] as a fail-safe: emitting an error
-    /// envelope on exit-code 0 would itself be a bug, and an envelope with
-    /// `kind=internal` is a readable trap. `PolicyBlocked` maps to
-    /// `PermissionDenied` — it is a deliberate policy rejection, not a network fault.
+    /// Maps every [`ExitCode`] to its category; `Success` and `Failure` map to [`Self::Internal`].
     pub fn from_exit_code(code: ExitCode) -> Self {
+        // No wildcard arm: a `_ => Internal` lets a new exit code compile and serialize as `internal`.
         match code {
             ExitCode::Success | ExitCode::Failure => Self::Internal,
             ExitCode::UsageError => Self::UsageError,
@@ -66,16 +42,9 @@ impl ErrorCategory {
             ExitCode::NotFound => Self::NotFound,
             ExitCode::AuthError => Self::AuthError,
             ExitCode::PolicyBlocked => Self::PermissionDenied,
-            // Same genus as `PolicyBlocked`: a deliberate refusal to act (the
-            // managed RC block carries user edits and `--force` was absent), not
-            // a malformed config. `ConfigError` would erase that distinction,
-            // which exit 82 exists to draw.
             ExitCode::DirtyRcBlock => Self::PermissionDenied,
             ExitCode::TransparencyLogUnavailable => Self::TransparencyLogUnavailable,
             ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
-            // Its own category rather than a fold into `UsageError`: same genus
-            // as 84 (`ReferrersUnsupported`) -- a capability is absent, and the
-            // invocation that named it was well-formed.
             ExitCode::UnsupportedKeyBackend => Self::UnsupportedKeyBackend,
             ExitCode::ForgeCapabilityUnavailable => Self::ForgeCapabilityUnavailable,
         }

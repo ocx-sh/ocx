@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Create-time interface-binaries auto-scan — the `ocx package create`
-//! compile step that fills or verifies the `binaries` claim (WP1: `metadata::
-//! {Binaries, BinaryName}`) against the on-disk content tree.
-//!
-//! Sibling of [`super::dependency_pinning`] — the other "compile step" module
-//! `ocx package create` runs before archiving. See
-//! `adr_declared_binaries_metadata.md` §2.
+//! Create-time interface-binaries auto-scan: the `ocx package create` compile
+//! step that fills or verifies the `binaries` claim against the content tree.
+//! See `adr_declared_binaries_metadata.md` § 2.
 
 use crate::error::Error as PackageError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,36 +17,16 @@ use ocx_oci::{OperatingSystem, Platform};
 use ocx_util::fs::path::join_under_root;
 use ocx_util::fs::{DirWalker, WalkDecision};
 
-/// Windows extension allowlist the scan strips before validating a filename
-/// stem as a [`BinaryName`].
-///
-/// Deliberately the same set as `env.rs::resolve_command_windows`'s PATHEXT
-/// *fallback*, frozen as a source constant — never read from `%PATHEXT%`.
-/// See `adr_declared_binaries_metadata.md` §2 step 3.
+/// Windows extension allowlist the scan strips from a filename stem; frozen, never
+/// read from `%PATHEXT%`, or a scan's result depends on the build host.
 pub const BIN_SCAN_WINDOWS_EXTENSIONS: [&str; 4] = [".exe", ".com", ".bat", ".cmd"];
 
-/// Scans `content_root` for interface-surface executables declared reachable
-/// via `metadata`'s install-path-rooted, interface-visible `Path` env vars, for
-/// `platform`'s executable-file convention (Unix exec-bit vs. Windows extension
-/// allowlist).
-///
-/// "Install-path-rooted" is
-/// [`crate::metadata::template::classify_install_path_rooted_dir`]'s
-/// judgement, so `${self.installPath}/bin` is the same scan target as
-/// `${installPath}/bin` (D4) — the two are one referent, not two spellings a
-/// scan may treat differently.
-///
-/// Returns the plain union of discovered names — **not** yet a validated
-/// [`crate::metadata::Binaries`] collection; case-fold-collision
-/// validation happens once, at the call site that turns a scan or an
-/// authored list into the typed collection (`adr_declared_binaries_metadata.md`
-/// §2 step 4, §5 Decision B).
+/// Scans `content_root` for executables under `platform`'s convention in the
+/// directories `metadata`'s install-path-rooted, interface-visible `Path` vars name.
 ///
 /// # Errors
 ///
-/// Propagates directory-walk I/O failures via [`PackageError::File`]. A missing or
-/// non-directory scan target contributes zero candidates rather than
-/// erroring (§2 step 3, "Existence probed before walk").
+/// Directory-walk I/O failures; a missing scan target contributes nothing.
 pub async fn scan_interface_binaries(
     content_root: &Path,
     metadata: &AuthoringMetadata,
@@ -63,22 +39,13 @@ pub async fn scan_interface_binaries(
         .collect())
 }
 
-/// One naming candidate discovered while scanning a target directory: its
-/// on-disk path (diagnostic context) and whether it satisfies `platform`'s
-/// executable-file convention. A non-executable regular file with a
-/// grammar-valid name is still recorded — [`scan_interface_binaries`]
-/// filters to executable candidates only, but [`verify_declared_binaries`]
-/// needs the non-executable ones too, to distinguish "declared name present
-/// but not executable" from "declared name simply absent from disk" (ADR §2
-/// mode table, Verify row).
+/// A scanned name; non-executable ones are kept so verify can tell "not
+/// executable" from "absent".
 struct Candidate {
     path: PathBuf,
     executable: bool,
 }
 
-/// Shared candidate collection behind [`scan_interface_binaries`] and
-/// [`verify_declared_binaries`] — one walk of the content tree, one name ->
-/// candidate map, two different projections of it.
 async fn collect_candidates(
     content_root: &Path,
     metadata: &AuthoringMetadata,
@@ -86,8 +53,6 @@ async fn collect_candidates(
 ) -> Result<BTreeMap<BinaryName, Candidate>, PackageError> {
     let AuthoringMetadata::Bundle(bundle) = metadata;
     let strip = usize::from(bundle.strip_components.unwrap_or(0));
-    // Hoisted out of the per-var loop below: the wildcard top-level dirs
-    // depend only on `content_root`/`strip`, not on the var being scanned.
     let wildcard_dirs = wildcard_target_dirs(content_root, strip).await?;
 
     let mut candidates: BTreeMap<BinaryName, Candidate> = BTreeMap::new();
@@ -111,12 +76,8 @@ async fn collect_candidates(
     Ok(candidates)
 }
 
-/// Resolves the `strip`-many wildcard top-level directories `${installPath}`
-/// maps onto at extraction time — every directory `strip` levels below
-/// `content_root` (see `adr_declared_binaries_metadata.md` §2 step 2). Each
-/// returned directory is already confirmed to exist: [`DirWalker`] only
-/// discovers real directories via `readdir`, so a missing wildcard level
-/// yields an empty list rather than an error.
+/// Every existing directory `strip` levels below `content_root`, the ones
+/// `${installPath}` maps onto after extraction.
 pub async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> Result<Vec<PathBuf>, PackageError> {
     let classify = move |dir: &Path, depth: usize| -> WalkDecision<PathBuf> {
         if depth < strip {
@@ -132,29 +93,14 @@ pub async fn wildcard_target_dirs(content_root: &Path, strip: usize) -> Result<V
         .map_err(Into::into)
 }
 
-/// Every regular file directly under `dir`, each paired with its
-/// symlink-followed metadata — the one directory walk behind both create-time
-/// content-tree scans.
+/// Every regular file directly under `dir`, with its symlink-followed metadata.
 ///
-/// **Yields candidates, applies no filter.** The two callers want different
-/// subsets of the same files and each states its own predicate at the call
-/// site: this scan keeps what `platform`'s executable convention claims (see
-/// [`claim_name`]), while [`super::libc_lint`] keeps every file, because a
-/// bundled `.so` or a name [`BinaryName`] rejects still has a dynamic loader
-/// that matters. Pushing either filter in here would silently narrow the
-/// other.
-///
-/// Not recursive — a `PATH` directory never contributes its subdirectories.
+/// Applies no filter: [`super::libc_lint`] needs every file, so a filter here narrows it.
 ///
 /// # Errors
 ///
-/// A *missing* or non-directory `dir` yields zero files, not an error (ADR §2
-/// step 3, "existence probed before walk"), and a dangling symlink is skipped
-/// the same way. Any other I/O failure (permission denied, `ELOOP`, transient)
-/// propagates: a scan that cannot read its target must never silently bake
-/// `binaries: []` into the sidecar, pass `--bin-scan` Verify green without
-/// reading the content tree, or report a file's libc requirement as absent
-/// because it could not be read.
+/// Any I/O failure but a missing `dir` or a dangling symlink, which yield nothing;
+/// swallowing one would bake `binaries: []` or pass Verify unread.
 pub async fn scan_directory_files(dir: &Path) -> Result<Vec<(PathBuf, std::fs::Metadata)>, PackageError> {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
@@ -175,11 +121,6 @@ pub async fn scan_directory_files(dir: &Path) -> Result<Vec<(PathBuf, std::fs::M
         .map_err(|e| super::error::file_error(dir, e))?
     {
         let path = entry.path();
-        // `tokio::fs::metadata` follows symlinks; a dangling symlink yields
-        // `NotFound` here and is silently excluded, not a hard failure (ADR
-        // §2 step 3). Any other metadata failure (e.g. permission denied)
-        // propagates instead — same fail-closed rationale as the `read_dir`
-        // above.
         let file_metadata = match tokio::fs::metadata(&path).await {
             Ok(file_metadata) => file_metadata,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -193,12 +134,8 @@ pub async fn scan_directory_files(dir: &Path) -> Result<Vec<(PathBuf, std::fs::M
     Ok(files)
 }
 
-/// Records a candidate for each file under `dir` whose name `platform`'s
-/// executable convention claims and whose stem is a grammar-valid
-/// [`BinaryName`], merging into `candidates`.
-///
-/// The walk itself is [`scan_directory_files`]; this is the binaries-claim
-/// filter over it.
+/// Merges into `candidates` each file under `dir` that `platform`'s convention
+/// claims and whose stem is a valid [`BinaryName`].
 async fn collect_directory_candidates(
     dir: &Path,
     platform: &Platform,
@@ -222,22 +159,10 @@ async fn collect_directory_candidates(
     Ok(())
 }
 
-/// Claims `file_name` under `platform`'s executable-file convention: nothing
-/// at all for a wasm target, Windows extension allowlist for a Windows
-/// target, Unix exec-bit for everything else (including `any` — no native OS
-/// convention exists for it, so it falls back to the exec-bit check per the
-/// ADR edge case table).
-/// Returns `None` when the convention itself doesn't claim the file at all
-/// (e.g. a non-allowlisted Windows extension); the boolean tracks whether
-/// the claimed name is executable. The [`BinaryName`] grammar check is
-/// applied separately by the caller.
+/// Claims `file_name` as `(name, executable)` under `platform`'s convention:
+/// nothing for wasm, the extension allowlist for Windows, the exec-bit otherwise.
 fn claim_name(file_name: &str, metadata: &std::fs::Metadata, platform: &Platform) -> Option<(String, bool)> {
     if is_wasm_target(platform) {
-        // A wasm module is a data artifact, not a host executable: no host
-        // ever exec's it, so neither the exec bit nor a filename extension
-        // carries a claim. A package needing a named entry point declares it
-        // explicitly in metadata. An extension-based scan (`*.wasm`) is
-        // addable later without disturbing any other target's convention.
         None
     } else if is_windows_target(platform) {
         windows_claim_name(file_name).map(|stem| (stem.to_string(), true))
@@ -266,66 +191,43 @@ fn is_wasm_target(platform: &Platform) -> bool {
     )
 }
 
-/// True when the compiled host can evaluate `platform`'s executable-file
-/// convention. The Windows extension allowlist is pure string matching —
-/// host-independent. A wasm target claims nothing on any host, so its
-/// (empty) result is host-independent too: the skip is a convention, not a
-/// host limitation, and refusing on a non-Unix host would turn a
-/// deterministic empty claim into an error for no reason. The Unix exec-bit
-/// convention (every remaining platform, including `any`) needs a Unix host:
-/// there is no portable API to inspect POSIX permission bits from a non-Unix
-/// build, so [`unix_is_executable`] can only ever report "not executable"
-/// there, silently corrupting both an Auto-mode fill and a Verify-mode diff.
-/// `cfg!(unix)` folds to a compile-time constant, so this is trivially `true`
-/// on a Unix build.
+/// Whether this host can evaluate `platform`'s convention; the exec-bit one needs
+/// a Unix host, where [`unix_is_executable`] otherwise reads every file as non-executable.
 fn host_can_scan(platform: &Platform) -> bool {
     is_windows_target(platform) || is_wasm_target(platform) || cfg!(unix)
 }
 
-/// Strips the first matching allowlisted extension, claiming the bare,
-/// case-preserved stem. The match itself is ASCII case-insensitive — Windows
-/// resolves `.exe`/`.EXE`/`.Exe` identically — while [`BIN_SCAN_WINDOWS_EXTENSIONS`]
-/// stays the canonical lowercase set.
+/// Strips the first allowlisted extension, matched ASCII case-insensitively as
+/// Windows does, keeping the stem's case.
 fn windows_claim_name(file_name: &str) -> Option<&str> {
     let lower = file_name.to_ascii_lowercase();
     let ext = BIN_SCAN_WINDOWS_EXTENSIONS.iter().find(|ext| lower.ends_with(*ext))?;
     Some(&file_name[..file_name.len() - ext.len()])
 }
 
-// Deliberately duplicated by `env.rs`'s `executable_verdict` (which returns the
-// mode on failure so the resolver can name it) — sharing would invert the
-// env-on-package layering. Change the bit test here, change it there.
+// Duplicated by `ocx_config::env`'s `executable_verdict`: change the bit test in both.
 #[cfg(unix)]
 fn unix_is_executable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    // A bare exec-bit test would also claim a directory (0o755 carries `x`
-    // meaning "traversable") — the caller already filtered to `is_file()`
-    // before reaching here, so this checks the bit only.
+    // Callers filter to `is_file()` first: a directory's `x` bit means traversable.
     metadata.permissions().mode() & 0o111 != 0
 }
 
-// ponytail: the exec bit is a POSIX filesystem concept with no host API on a
-// non-Unix build — scanning for the Unix convention from a non-Unix host
-// treats every candidate as non-executable rather than erroring, consistent
-// with every other best-effort exclusion in this scan. Upgrade if
+// ponytail: no host API for the exec bit on a non-Unix build, so every
+// candidate reads as non-executable rather than erroring. Upgrade if
 // cross-host Unix-convention scanning becomes a real requirement.
 #[cfg(not(unix))]
 fn unix_is_executable(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// One-directional diff between `declared` and the executable candidates
-/// found under `content_root` — the `--bin-scan` Verify-mode check
-/// (`adr_declared_binaries_metadata.md` §2 mode table): a scanned executable
-/// absent from `declared` is [`BinScanError::UndeclaredBinary`]; a declared
-/// name present on disk but not executable is
-/// [`BinScanError::DeclaredNotExecutable`]; a declared name simply absent
-/// from disk is legal (no error).
+/// The `--bin-scan` Verify-mode check: every scanned executable must be declared;
+/// a declared name absent from disk is legal.
 ///
 /// # Errors
 ///
-/// See variant docs above, plus [`BinScanError::Scan`] for a directory-walk
-/// I/O failure.
+/// [`BinScanError::UndeclaredBinary`], [`BinScanError::DeclaredNotExecutable`], or
+/// [`BinScanError::Scan`] on a directory-walk I/O failure.
 pub async fn verify_declared_binaries(
     content_root: &Path,
     metadata: &AuthoringMetadata,
@@ -356,39 +258,24 @@ pub async fn verify_declared_binaries(
     Ok(())
 }
 
-/// Lib-local mirror of the CLI's `--bin-scan`/`--no-bin-scan` tri-state
-/// (`ocx_cli::options::BinScanMode`) — duplicated here (rather than
-/// depending on the CLI crate) so this module's create-time orchestration
-/// decision stays in `ocx_lib` per the lib-hosts-substance/CLI-thin
-/// convention. `ocx package create` maps its parsed flag state onto this
-/// type before calling [`resolve_binaries`].
+/// The `--bin-scan`/`--no-bin-scan` tri-state [`resolve_binaries`] acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanMode {
-    /// Neither flag given: scan and fill an absent `binaries` claim; pass a
-    /// declared claim through verbatim (no verification).
+    /// Neither flag: fill an absent claim, pass a declared one through.
     Auto,
-    /// `--bin-scan`: scan; verify a declared claim one-directionally against
-    /// the scan result, or fill an absent one exactly like `Auto`.
+    /// `--bin-scan`: verify a declared claim, or fill an absent one like `Auto`.
     Verify,
-    /// `--no-bin-scan`: never scan; the `binaries` field passes through
-    /// verbatim regardless of its state.
+    /// `--no-bin-scan`: never scan.
     Off,
 }
 
-/// The create-time interface-binaries orchestration: scans, fills, or
-/// verifies `metadata`'s `binaries` claim per `mode` and the authoring
-/// field's current state — the full mode table in
-/// `adr_declared_binaries_metadata.md` §2 / §2.1 ordering block.
+/// Fills or verifies `metadata`'s `binaries` claim per `mode`.
 ///
 /// # Errors
 ///
-/// [`BinScanError::UndeclaredBinary`] / [`BinScanError::DeclaredNotExecutable`]
-/// under `Verify` mode with a declared claim that disagrees with the content
-/// tree; [`BinScanError::Binary`] if a freshly scanned set fails the
-/// case-fold-collision check; [`BinScanError::Scan`] on a directory-walk I/O
-/// failure; [`BinScanError::UnsupportedHostScan`] whenever a scan is required
-/// — `Verify`, or `Auto` with no declared claim — and this host cannot
-/// evaluate `platform`'s executable-file convention.
+/// A Verify disagreement, a case-fold collision in a scanned set
+/// ([`BinScanError::Binary`]), a walk I/O failure, or
+/// [`BinScanError::UnsupportedHostScan`] when a required scan cannot run on this host.
 pub async fn resolve_binaries(
     content_root: &Path,
     metadata: AuthoringMetadata,
@@ -398,14 +285,7 @@ pub async fn resolve_binaries(
     resolve_binaries_on_host(content_root, metadata, platform, mode, host_can_scan(platform)).await
 }
 
-/// Host-injectable core of [`resolve_binaries`], taking the scan-capability
-/// verdict explicitly.
-///
-/// Same seam shape, and the same reason, as [`Platform::host_can_run_on`]:
-/// [`host_can_scan`] folds `cfg!(unix)` to a compile-time constant, so on a
-/// Unix build the "cannot scan" arms are unreachable through the public entry
-/// point and a `#[cfg(not(unix))]` test of them never compiles — a green
-/// indistinguishable from a check that never ran.
+/// [`resolve_binaries`] with the host verdict injected, so a Unix build can test the "cannot scan" arms.
 async fn resolve_binaries_on_host(
     content_root: &Path,
     metadata: AuthoringMetadata,
@@ -413,32 +293,14 @@ async fn resolve_binaries_on_host(
     mode: ScanMode,
     host_can_scan: bool,
 ) -> Result<AuthoringMetadata, BinScanError> {
-    // Decoupled from `metadata` up front so later arms are free to move
-    // `metadata` without fighting a borrow held by this match scrutinee.
     let declared = metadata.binaries().cloned();
 
-    // Every arm that actually scans (`scan_interface_binaries` /
-    // `verify_declared_binaries`) is guarded by `host_can_scan` — and the
-    // guard arm refuses, never degrades. `Off` and `Auto` with a declared
-    // field never scan by design (ADR §2 mode table) and so carry no such
-    // guard. Keeping the check inline here, rather than as a standalone
-    // up-front predicate, keeps this match the single source of truth for
-    // which combinations scan.
     match (mode, declared) {
         (ScanMode::Off, _) => Ok(metadata),
-        // Both scanning combinations fail closed on a host that cannot
-        // evaluate the target's executable convention. Verify would risk a
-        // false pass or a false diff; Auto would publish with `binaries`
-        // silently absent, which reads downstream as "this publisher never
-        // declared any" and is indistinguishable from a deliberate omission.
-        // A host that cannot check the claim must say so rather than ship an
-        // unchecked artifact quietly — `--no-bin-scan` is the deliberate way
-        // through, and the error names it.
+        // Refuse, never degrade: Auto would publish a silently absent `binaries`.
         (ScanMode::Verify, _) | (ScanMode::Auto, None) if !host_can_scan => Err(BinScanError::UnsupportedHostScan {
             platform: platform.clone(),
         }),
-        // Nothing declared: fill, regardless of Auto vs Verify — verification
-        // needs a declaration to verify against (ADR §2 Verify row).
         (_, None) => {
             let scanned = scan_interface_binaries(content_root, &metadata, platform).await?;
             let binaries = Binaries::try_from(scanned)?;
@@ -448,40 +310,26 @@ async fn resolve_binaries_on_host(
             verify_declared_binaries(content_root, &metadata, platform, &declared).await?;
             Ok(metadata)
         }
-        // Auto + a declared field: scan is NOT run at all.
         (ScanMode::Auto, Some(_)) => Ok(metadata),
     }
 }
 
-/// Errors from the `--bin-scan` (Verify mode) one-directional diff between a
-/// scanned candidate set and a declared `binaries` claim, plus the failure
-/// modes of the create-time orchestration ([`resolve_binaries`]) that wraps
-/// the scan.
+/// Errors from [`resolve_binaries`].
 #[derive(Debug, thiserror::Error)]
 pub enum BinScanError {
-    /// A name found on disk during the scan is absent from the declared
-    /// `binaries` list.
+    /// A scanned executable is absent from the declared `binaries`.
     #[error("scanned binary '{name}' at '{}' is not declared in binaries", path.display())]
     UndeclaredBinary { name: BinaryName, path: std::path::PathBuf },
-    /// A declared name is present on disk but is not executable under the
-    /// active platform's convention.
+    /// A declared name is on disk but not executable under the platform's convention.
     #[error("declared binary '{name}' at '{}' is not executable", path.display())]
     DeclaredNotExecutable { name: BinaryName, path: std::path::PathBuf },
-    /// A freshly scanned candidate set fails [`Binaries`]' case-fold-collision
-    /// validation (ADR §5 Decision B) — the same check a hand-authored
-    /// `binaries` array goes through at parse time.
+    /// A scanned set fails [`Binaries`]' case-fold-collision check.
     #[error(transparent)]
     Binary(#[from] BinaryError),
-    /// The directory-walk scan itself failed (I/O error).
+    /// The directory walk failed.
     #[error("interface-binaries scan failed")]
     Scan(#[from] PackageError),
-    /// A scan is required — `Verify`, or `Auto` with no declared claim — but
-    /// this host cannot evaluate `platform`'s executable-file convention (the
-    /// Unix exec-bit convention scanned from a non-Unix host: there is no
-    /// portable API to read POSIX permission bits off-Unix).
-    ///
-    /// The message names both ways through, because an error that states a
-    /// problem without its remedy costs the reader a documentation lookup.
+    /// A required scan cannot evaluate `platform`'s convention on this host.
     #[error("cannot scan for '{platform}' executables on this host; hand-author binaries or pass --no-bin-scan")]
     UnsupportedHostScan { platform: Platform },
 }

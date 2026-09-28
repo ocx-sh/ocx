@@ -1,65 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The two classification traits, and the one case that belongs to no library
-//! crate: `std::io::Error`, which cannot be an impl at all because the trait
-//! and the type would be foreign to each other's crate anywhere else.
+//! The two classification traits, and the `std::io::Error` case the orphan rule keeps from being an impl.
 
 use ocx_exit::ExitCode;
 
 /// Classify an error into an [`ExitCode`].
-///
-/// Each library error type gets an impl here, owning the mapping from its own
-/// variants to a process exit code. The default impl returns `None` so types
-/// that do not classify can opt out.
-///
-/// # Composition
-///
-/// A wrapper variant that holds an inner classifiable error can recursively
-/// call `inner.classify()` and either return the inner code as-is (delegate)
-/// or override it based on its own context. This keeps each impl self-
-/// contained: an `OciClientError::Registry` impl can inspect its inner cause
-/// and decide whether to surface it or translate it (e.g. timeout vs. auth).
 pub(crate) trait ClassifyExitCode {
-    /// Return an exit code for this error, or `None` to defer to the next
-    /// link in the source chain.
+    /// Return an exit code for this error, or `None` to defer to the next link in the source chain.
     fn classify(&self) -> Option<ExitCode> {
         None
     }
 }
 
-/// Infallible variant of [`ClassifyExitCode`] for leaf "kind" enums.
-///
-/// "Kind" enums (e.g. `SignErrorKind`, `VerifyErrorKind`) are pure
-/// discriminants — every variant has a well-defined exit code by construction.
-/// Using a separate trait with a non-`Option` return value forces each impl to
-/// be exhaustive: adding a new variant produces a match-exhaustiveness compile
-/// error in the impl body, keeping the exit-code contract in lockstep with the
-/// enum without a separate table that can silently drift.
-///
-/// Wrapping error types (e.g. `SignError { identifier, kind }`) still implement
-/// [`ClassifyExitCode`] and delegate to `self.kind.exit_code()` wrapped in
-/// `Some(_)`.
+/// Infallible variant of [`ClassifyExitCode`] for leaf "kind" enums; the non-`Option` return forces an exhaustive impl.
 pub(crate) trait ClassifyErrorKind {
     /// Return the exit code this kind maps to.
     fn exit_code(&self) -> ExitCode;
 
-    /// Stable snake_case discriminant for `envelope.error.detail`.
+    /// Stable snake_case discriminant for `envelope.error.detail`, frozen across releases: consumers dispatch on it.
     ///
-    /// Frozen contract C-S1-1 — values must NOT change between releases.
-    /// Consumers pattern-match on this string to dispatch programmatically
-    /// without parsing stderr. The snake_case parallel to `exit_code()`:
-    /// coarse category goes on `exit_code`, fine-grained variant name goes here.
-    ///
-    /// Implementations must be exhaustive (no wildcard `_` arm) so that adding
-    /// a new variant produces a compile error and forces an explicit mapping.
+    /// Implementations take no wildcard `_` arm, so a new variant forces an explicit mapping.
     fn kind_detail(&self) -> &'static str;
 }
 
 pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
-    // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
-    // everything else falls through to the chain walker.
+    // `std::io::Error` is foreign, so it gets no `ClassifyExitCode` impl (orphan rule).
     if let Some(io) = cause.downcast_ref::<std::io::Error>()
         && io.kind() == std::io::ErrorKind::PermissionDenied
     {

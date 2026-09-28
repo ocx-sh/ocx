@@ -2,11 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! `ocx patch sync` — refresh descriptors and companions.
-//!
-//! Re-fetches every patch descriptor for all installed packages and the global
-//! descriptor, then installs any newly-referenced companion packages. Requires
-//! network access. Also picks up patches for packages installed before patch
-//! configuration was added.
 
 use std::process::ExitCode;
 
@@ -23,27 +18,14 @@ pub struct PatchSyncArgs {
 
 impl PatchSyncArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // ── Step 1: Resolve the platform(s) to sync. ──
-        //
-        // Unlike most commands (host-only default via
-        // `conventions::platform_or_default`), an omitted `--platform` here
-        // fans out over the FULL concrete ship matrix. A synced
-        // descriptor/companion set is shareable across a team like `ocx
-        // lock`: it pins a manifest per platform a team runs, not a single
-        // host-scoped variant. This is the one sanctioned multi-platform
-        // fan-out (D4 exception, `adr_platform_model_unification.md`) — an
-        // explicit enumeration loop over concrete platforms, never a
-        // selection tier list.
         let platforms = platforms_or_concrete_matrix(self.platform.platform.clone());
 
-        // ── Step 2: Run the sync. ──
         let report = context
             .manager()
             .sync_patches(&platforms)
             .await
             .map_err(anyhow::Error::new)?;
 
-        // ── Step 3: Report. ──
         context
             .api()
             .report(&crate::api::data::patch_sync::PatchSyncReport::new(report))?;
@@ -52,16 +34,9 @@ impl PatchSyncArgs {
     }
 }
 
-/// Returns `[explicit]` when `--platform` was given; otherwise the full
-/// concrete ship-target matrix `ocx patch sync` fans out over by default.
+/// Returns `[explicit]`, else the full concrete ship matrix, not the host: a synced set is team-shared like `ocx lock`.
 ///
-/// This is the fan-out site the D4 exception in
-/// `adr_platform_model_unification.md` names: the concrete enumeration
-/// belongs to this single caller, not a general-purpose "supported set"
-/// helper. `Any` is deliberately absent from the matrix: an
-/// `any`-published companion satisfies every one of the concrete
-/// requirements below by construction (D1's `Any`-offer rule), so a trailing
-/// pseudo-`Any` requirement tier is redundant.
+/// This is the single-platform exception `adr_platform_model_unification.md` names.
 fn platforms_or_concrete_matrix(explicit: Option<ocx_oci::Platform>) -> Vec<ocx_oci::Platform> {
     match explicit {
         Some(platform) => vec![platform],
@@ -69,8 +44,7 @@ fn platforms_or_concrete_matrix(explicit: Option<ocx_oci::Platform>) -> Vec<ocx_
     }
 }
 
-/// The five concrete OS/architecture combinations OCX ships and tests, kept
-/// in sync with `product-context.md` "Platform support".
+/// The five OS/architecture pairs OCX ships; keep in sync with `product-context.md` "Platform support".
 fn concrete_ship_platforms() -> Vec<ocx_oci::Platform> {
     [
         "linux/amd64",
@@ -94,7 +68,7 @@ mod tests {
 
     /// An omitted `--platform` must expand to the full concrete ship matrix,
     /// not just the host platform — regression guard for a host-only default
-    /// that would silently miss non-host companions (C6).
+    /// that would silently miss non-host companions.
     #[test]
     fn absent_platform_covers_full_concrete_matrix() {
         let resolved = platforms_or_concrete_matrix(None);

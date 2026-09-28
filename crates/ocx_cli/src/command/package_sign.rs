@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package sign` — keyless Sigstore signing of a published package
-//! manifest via OCI Referrers.
+//! `ocx package sign` — Sigstore signing of a published package as an OCI referrer. Pipeline:
+//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 //!
-//! Publishes a Sigstore bundle v0.3 as a referrer manifest for the target,
-//! with the bundle body itself in a CAS blob. See
-//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
-//! for the full pipeline.
-//!
-//! C-S1-4 override token handling: the CLI resolves `--identity-token-file` >
-//! `--identity-token-stdin` > `OCX_IDENTITY_TOKEN` env *before* calling the
-//! sign pipeline. There is deliberately NO `--identity-token <VALUE>` flag —
-//! raw tokens on the command line would leak into shell history.
+//! No `--identity-token <VALUE>` flag: a raw token on the command line leaks into shell history.
 
 use ocx_package_manager::Error as PmError;
 use std::process::ExitCode;
@@ -50,17 +42,12 @@ pub struct PackageSign {
     )]
     platform: Option<ocx_oci::Platform>,
 
-    // C-S1-3 injection seam: these two URL overrides point sign at a private
-    // Fulcio/Rekor deployment (validated at the boundary in `execute`). Left
-    // `Option` rather than clap-defaulted so `execute` can tell "user passed
-    // the public default" from "user passed nothing" — the latter is what
-    // `[trust.sigstore]` gets to answer.
+    // Both URLs are `Option`, not clap-defaulted, or `[trust.sigstore]` can never apply.
     /// Fulcio CA endpoint (the keyless certificate issuer)
     ///
     /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
     ///
-    /// Keyless-only: an error alongside `--key`, never silently ignored. A flag
-    /// that does nothing is the failure mode this command refuses everywhere.
+    /// Keyless-only: an error alongside `--key`, never silently ignored.
     #[clap(long = "fulcio-url", value_name = "URL", conflicts_with = "key")]
     fulcio_url: Option<String>,
 
@@ -134,22 +121,17 @@ impl PackageSign {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
-        // SSRF hardening (CWE-918): validate user-supplied endpoint URLs at the
-        // boundary before they become HTTP client targets. Precedence, guard
-        // and refusal kind are the shared ladder's — see `resolve_sigstore_pair`.
+        // Also the SSRF guard (CWE-918): both endpoints are validated before any client dials them.
         let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
             &identifier,
             self.fulcio_url.as_deref(),
             self.rekor_url.as_deref(),
         )?;
-        // S1-E policy: offline sign is a deliberate rejection, NOT a passive
-        // network-access failure — the acceptance test `test_sign_offline_refused`
-        // drives this contract.
+        // Offline is a policy refusal, not a network failure (`test_sign_offline_refused`).
         package_sign_common::refuse_when_offline(&context, &identifier, SignErrorKind::OfflineSignRefused)?;
 
-        // C-S1-4 token precedence: file > stdin > env. The resolved token is
-        // held under `Zeroizing`; never log, never surface in error context.
+        // Never log the token or put it in error context.
         let override_token = package_sign_common::resolve_override_token(
             self.identity_token_file.as_deref(),
             self.identity_token_stdin,
@@ -157,28 +139,12 @@ impl PackageSign {
         )
         .await?;
 
-        // Route through the PackageManager facade: it owns the pipeline assembly
-        // (registry client, index, signer, token provider) and returns a
-        // per-package error whose kind preserves the sign exit-code taxonomy.
-        // Offline was already refused above via `OfflineSignRefused`.
-        // The reference is parsed once, here: `KeyRefError` decides between an
-        // unimplemented backend (exit 85) and a malformed reference (exit 64),
-        // and `SignErrorKind::from` is the single place that routing lives.
-        //
-        // Wrapped in `SignError` before it reaches `anyhow`, exactly as verify
-        // wraps its twin: `classify_error` downcasts the outer `SignError`, so
-        // a bare kind on the chain matches nothing and falls through to
-        // `Failure` (1) — the 85/64 rows would be unreachable, and
-        // `envelope.error.context.identifier` would be empty.
+        // Wrapped in `SignError`, or classification misses the 85/64 rows (exit 1) and the
+        // envelope loses `context.identifier`.
         let key = self
             .key
             .reference()
             .map_err(|kind| SignError::new(identifier.clone(), SignErrorKind::from(kind)))?;
-        // Keyless always uploads and `--no-rekor-upload` is an error there; key
-        // mode is off unless opted in, per-run or fleet-wide. A Fulcio
-        // certificate is valid for about ten minutes, so under keyless the
-        // Rekor timestamp is the only durable proof the signature happened
-        // while the certificate still was.
         let configured_rekor_upload = context
             .config_trust_sigstore()
             .and_then(|sigstore| sigstore.rekor_upload);
@@ -197,12 +163,8 @@ impl PackageSign {
             rekor_upload,
             format: self.signature_format.write_format(),
         };
-        // The sweep branches here, once the option set is complete, so every
-        // step above is byte-identical on both paths.
-        // `is_sweep`, not "the resolved list is non-empty": an empty
-        // `--tags-file` is still a sweep of zero tags, and falling through to
-        // the single-reference path there would sign the reference the caller
-        // named instead of the nothing the file asked for.
+        // Branches only after every check above, so a sweep skips none. `is_sweep`, not a
+        // non-empty list: an empty `--tags-file` must sign nothing, not the named reference.
         if self.tags.is_sweep() {
             let tags = self.tags.resolve().await?;
             return self.sweep(&context, &identifier, &tags, &options).await;
@@ -215,32 +177,16 @@ impl PackageSign {
             .map_err(sign_error_into_anyhow)?
             .result;
 
-        // Read before the result is consumed: a `--signature-format both` run
-        // where one leg failed still reports the leg that landed, and the exit
-        // code comes from the failure rather than from the run as a whole.
+        // A `both` run that lost one leg still reports the leg that landed, but exits with the failure.
         let failure = result.first_failure().map(package_sign_common::leg_exit_code);
         let report = package_sign_common::signature_report(&identifier, self.platform.as_ref(), result)
-            // The report is the one stdout document of a partially-failed run,
-            // so its envelope has to carry the code the process exits with. A
-            // success envelope hard-codes 0, and `error_envelope.rs` states the
-            // invariant this would otherwise break: the envelope's `exit_code`
-            // can never disagree with the process's.
+            // Or the envelope's `exit_code` disagrees with the process's (`error_envelope.rs` invariant).
             .with_exit_code(failure.unwrap_or(ocx_exit::ExitCode::Success));
         context.api().report(&report)?;
         Ok(failure.map_or(ExitCode::SUCCESS, ExitCode::from))
     }
 
-    /// Sign the index each swept tag resolves to, one row per tag — and one
-    /// signature per distinct index, so a cascade release's aliases publish one
-    /// referrer between them and a re-sweep adds one more, never one per tag.
-    ///
-    /// The loop itself is [`PackageManager::sign_tags`]; this is the reporting
-    /// half — turn each outcome into a row, collect the failures' exit codes,
-    /// and let [`package_sign_common::sweep_exit_code`] pick the one the
-    /// process returns. Nothing here can abort early: the sweep already ran to
-    /// completion, which is the contract.
-    ///
-    /// [`PackageManager::sign_tags`]: ocx_package_manager::PackageManager::sign_tags
+    /// Reports `PackageManager::sign_tags`: one row per tag, one signature per distinct index.
     async fn sweep(
         &self,
         context: &crate::app::Context,
@@ -268,10 +214,7 @@ impl PackageSign {
                 }
                 SweptOutcome::Done(report) => {
                     let result = report.result;
-                    // Read before the result is consumed, exactly as the
-                    // single-reference path does: a swept tag whose `both` run
-                    // lost one leg is a failure that still carries the leg that
-                    // landed.
+                    // A `both` run that lost one leg is a failed row still carrying the landed leg.
                     let leg = result
                         .first_failure()
                         .map(|kind| (package_sign_common::leg_exit_code(kind), kind.to_string()));
@@ -301,16 +244,8 @@ impl PackageSign {
     }
 }
 
-/// The signature report one swept tag's row carries.
-///
-/// The report's `identifier` is the tag **this** iteration signed, not the
-/// positional the sweep was launched from: a row reading `tag: "1.0.0"` beside
-/// `identifier: "repo:9.9.9"` names an artifact the run never touched.
-/// `attest`'s sweep does the same thing one file over.
-///
-/// Split out of [`PackageSign::sweep`] only so the choice is reachable by a
-/// test — the sweep itself needs a live `PackageManager`, so nothing that can
-/// run in-process could otherwise read the row back.
+/// One swept tag's signature report, named after that tag, never the positional the sweep
+/// was launched from, which names an artifact the run never touched.
 fn swept_signature_report(
     identifier: &ocx_oci::PackageRef,
     tag: &str,
@@ -319,17 +254,8 @@ fn swept_signature_report(
     package_sign_common::signature_report(&identifier.clone_with_tag(tag), None, result)
 }
 
-/// Convert a sign-path [`PackageError`] into an `anyhow::Error`, unwrapping the
-/// inner [`SignError`] so the `--format json` error envelope's
-/// `context.identifier` is populated on every pipeline-stage failure — matching
-/// the pre-check paths (offline refusal, URL validation) that already surface a
-/// bare `SignError`.
-///
-/// `ocx_lib::Error::Sign` is `#[error(transparent)]`, so its `source()` forwards
-/// straight to the inner `SignErrorKind`, skipping the `SignError` node the
-/// envelope's context walk downcasts to. The exit code, `error.kind`, and
-/// `error.detail` are unchanged — all three reach the same `SignErrorKind`
-/// whether or not the `SignError` node is preserved.
+/// Unwraps the inner [`SignError`], or the JSON envelope's `context.identifier` is empty:
+/// `Error::Sign` is `#[error(transparent)]`, so its `source()` skips that node.
 fn sign_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
         PackageErrorKind::Internal(PmError::Sign(sign_error)) => anyhow::Error::new(*sign_error),

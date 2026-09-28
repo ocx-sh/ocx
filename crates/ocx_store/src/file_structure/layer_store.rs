@@ -3,41 +3,25 @@
 
 use std::path::{Path, PathBuf};
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, which is what every one of these
-/// functions used to return one conversion later.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Represents a single content-addressed layer directory within the layer store.
-///
-/// A layer directory has a fixed layout:
-/// - `content/` -- the extracted layer files (directory tree)
-/// - `digest`   -- full digest string for recovery
+/// One layer directory: `content/` plus the `digest` file.
 pub struct LayerDir {
-    /// The root directory of this layer (parent of `content/`, `digest`).
     pub dir: PathBuf,
 }
 
 impl LayerDir {
-    /// Path to the extracted layer content directory.
     pub fn content(&self) -> PathBuf {
         self.dir.join("content")
     }
 
-    /// Path to the digest marker file.
     pub fn digest_file(&self) -> PathBuf {
         self.dir.join(super::cas_path::DIGEST_FILENAME)
     }
 }
 
-/// Manages the content-addressed layer store on the local filesystem.
+/// Extracted layers at `{root}/{registry_slug}/{cas_shard_path}/`.
 ///
-/// All layers are stored under a single `root` directory, sharded by
-/// registry and digest (via [`super::cas_path::cas_shard_path`]) to avoid
-/// filesystem limits in any single directory.
-///
-/// Layout:
 /// ```text
 /// {root}/
 ///   {registry_slug}/
@@ -57,35 +41,25 @@ impl LayerStore {
         Self { root: root.into() }
     }
 
-    /// The root directory of the layer store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Returns the layer directory path for the given registry and digest.
     pub fn path(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.root
             .join(super::slugify(registry))
             .join(super::cas_path::cas_shard_path(digest))
     }
 
-    /// Returns the `content/` path for the given registry and digest.
     pub fn content(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.path(registry, digest).join("content")
     }
 
-    /// Returns the `digest` file path for the given registry and digest.
     pub fn digest_file(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.path(registry, digest).join(super::cas_path::DIGEST_FILENAME)
     }
 
-    /// Lists all layer directories currently present in the store.
-    ///
-    /// A layer directory is identified by the presence of a `content/` child
-    /// directory. Recursion stops at that point so that layer-installed files
-    /// are never traversed.
-    ///
-    /// Returns an empty vec if the store root does not exist yet.
+    /// Lists every layer directory, never descending into `content/`; empty if the root does not exist.
     pub async fn list_all(&self) -> Result<Vec<LayerDir>> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -97,19 +71,10 @@ impl LayerStore {
     }
 }
 
-/// Registry directory + CAS shard depth (algorithm/prefix/suffix).
 const MAX_WALK_DEPTH: usize = 1 + super::cas_path::CAS_SHARD_DEPTH;
 
-/// Directory names that are part of the layer layout and must not be
-/// recursed into during the store walk.
 const LAYER_SKIP_NAMES: &[&str] = &["content"];
 
-/// Classifies a directory for the generic walker.
-///
-/// - If a `content/` subdirectory exists and the path is valid CAS →
-///   [`WalkDecision::leaf`] with a [`LayerDir`].
-/// - If `content/` exists but the path is invalid → [`WalkDecision::skip`].
-/// - Otherwise → [`WalkDecision::descend_skip`], skipping `content`.
 fn classify_layer_dir(dir: &Path, _depth: usize) -> ocx_util::fs::WalkDecision<LayerDir> {
     if dir.join("content").is_dir() {
         if super::cas_path::is_valid_cas_path(dir) {

@@ -1,17 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Operator-supplied extra CA roots (`OCX_EXTRA_CA_CERTS` / `extra_ca_certs`,
-//! ocx#448): the validated type family, the single choke point every root
-//! byte passes through, and the process-wide Sigstore set.
-//!
-//! Domain-free by construction — nothing here reads a tier, a path or the
-//! environment. The source a bundle came from, the refusal that names it and
-//! the resolution ladder over the `config.toml` tiers live in
-//! `ocx_config`'s `tls`, which wraps [`ExtraRoots::from_pem`] as `parse_pem`
-//! to attach that origin. Beside `trust`, the other trust-material ladder; the
-//! bundled Mozilla seed for hand-rolled `reqwest` builders is
-//! [`embedded_roots`].
+//! Operator-supplied extra CA roots (`OCX_EXTRA_CA_CERTS` / `extra_ca_certs`) and the process-wide Sigstore set.
 
 pub mod embedded_roots;
 
@@ -19,35 +9,24 @@ pub use embedded_roots::seed_embedded_roots;
 
 use std::sync::OnceLock;
 
-/// Ceiling on the combined size of an operator-supplied extra-CA-roots PEM
-/// bundle, from any source (environment variable, file path, or inline
-/// `config.toml` text) — D-10.
+/// Ceiling on an extra-CA-roots PEM bundle from any source.
 ///
-/// Sits under `config::loader::MAX_CONFIG_SIZE` (64 KiB) so an inline
-/// `extra_ca_certs_pem` value can never make `config.toml` itself unloadable,
-/// and under the ~32 767-character Windows environment-variable limit.
+/// Stays under the 64 KiB config ceiling, or an inline bundle makes `config.toml` itself unloadable, and under
+/// the ~32 767-character Windows environment-variable limit `OCX_EXTRA_CA_CERTS` must fit.
 pub const MAX_EXTRA_CA_CERTS_BYTES: usize = 32 * 1024;
 
-/// Additional CA root certificates, appended to the platform trust store and
-/// the bundled Mozilla set — never a replacement (D-2, "extra" in every name).
+/// Additional CA roots, appended to the platform and bundled Mozilla sets — never a replacement.
 ///
-/// The only way to build a non-empty value is [`ExtraRoots::from_pem`], the
-/// single choke point every extra-CA-roots byte must pass through before it
-/// reaches a [`reqwest::ClientBuilder`] or the registry transport's own
-/// certificate list (C-004, D-9). A default-constructed value is empty and
-/// [`ExtraRoots::seed`] is then a no-op — what every client is built with
-/// when no source is configured.
+/// Only [`ExtraRoots::from_pem`] builds a non-empty value; the default is empty and seeds nothing.
 #[derive(Clone, Default)]
 pub struct ExtraRoots {
-    /// The parsed roots, for the registry transport's own certificate list.
     der: Vec<pki_types::CertificateDer<'static>>,
-    /// The same roots as reqwest wants them, built once at parse time so
-    /// [`ExtraRoots::seed`] has nothing left to fail on.
+    /// Built at parse time so [`ExtraRoots::seed`] has nothing left to fail on.
     certificates: Vec<reqwest::Certificate>,
 }
 
 impl std::fmt::Debug for ExtraRoots {
-    /// Prints a certificate count, never the DER bytes (D-11).
+    /// Prints a certificate count, never the DER bytes.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ExtraRoots")
@@ -57,81 +36,41 @@ impl std::fmt::Debug for ExtraRoots {
 }
 
 impl PartialEq for ExtraRoots {
-    /// Two sets are equal when their DER bytes are — the reqwest copies are
-    /// derived from them.
     fn eq(&self, other: &Self) -> bool {
         self.der == other.der
     }
 }
 
-/// Why [`ExtraRoots::from_pem`] refused a bundle — the discriminant alone,
-/// with no source attached, because this tier has no vocabulary for where a
-/// bundle came from.
+/// Why [`ExtraRoots::from_pem`] refused a bundle, with no source attached.
 ///
-/// **Never reaches an operator.** It implements neither `Display` nor
-/// `std::error::Error`, so it cannot be formatted into a message, cannot be
-/// carried as a `#[source]`, and cannot enter an error chain the CLI walks —
-/// the compiler is what enforces that, not a convention. Its one consumer is
-/// `config::tls::parse_pem`, which maps each
-/// variant one-to-one onto the `TlsError` arm that renders it with the origin.
+/// No `Display` or `Error` impl, so it cannot reach an operator without the origin `ocx_config` attaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PemBundleError {
-    /// The bundle exceeds [`MAX_EXTRA_CA_CERTS_BYTES`], carrying its length.
     TooLarge {
-        /// The bundle's length in bytes.
         bytes: usize,
     },
-    /// A PEM block's tag is not `CERTIFICATE`, carrying that tag.
     NotACertificate {
-        /// The PEM block's own tag (the text between `-----BEGIN ` and `-----`).
         tag: String,
     },
-    /// The bundle held zero `CERTIFICATE` blocks.
     Empty,
-    /// A block failed to decode as X.509 (`Some(index)`, zero-based), or the
-    /// PEM decoder refused the bundle / the platform probe refused the set
-    /// (`None`).
+    /// `index` is the offending block, or `None` when the decoder or the platform probe refused the whole set.
     Malformed {
-        /// The zero-based index of the offending block, or `None` when the
-        /// failure is not attributable to one block.
         index: Option<usize>,
     },
-    /// A `-----BEGIN` line the decoder could not complete, at that block.
+    /// A `-----BEGIN` line with no end line, at block `index`.
     Truncated {
-        /// The zero-based index of the first block with no end line.
         index: usize,
     },
 }
 
 impl ExtraRoots {
-    /// The only constructor from bytes. Every extra-CA-roots byte passes here
-    /// before any [`reqwest::ClientBuilder`] or registry transport sees it
-    /// (C-004, D-9).
+    /// The only constructor from bytes; a final probe client build means no production builder fails on CA input.
     ///
-    /// Checks run in this order, each on the whole input: the byte cap, then
-    /// the `pem` decoder (leading text such as a `subject=` label and CRLF
-    /// line endings are accepted), then that every `-----BEGIN ` line became
-    /// a block (the decoder stops silently at the first one it cannot
-    /// complete, so a bundle truncated after its first certificate would
-    /// otherwise trust one root and drop the rest), then every block's tag,
-    /// then zero blocks, then each block's X.509 parse, and finally one
-    /// **probe build** of a `reqwest::Client` carrying the whole set. The
-    /// probe is the platform's own verdict (webpki / CryptoAPI /
-    /// Security.framework) on the roots as trust anchors: a set that fails it
-    /// never becomes an `ExtraRoots`, so no production builder can fail on CA
-    /// input and reach its degraded fallback arm with fewer roots than
-    /// configured (D-9).
-    ///
-    /// **Blocking.** The probe build loads the platform trust store
-    /// (`rustls-platform-verifier`, which on Linux reads the system bundle
-    /// through `rustls-native-certs`). Call from a blocking context; from
-    /// async, wrap the read and the parse together in `spawn_blocking`.
+    /// Blocking: the probe loads the platform trust store.
     ///
     /// # Errors
     ///
     /// A [`PemBundleError`] naming which rule the bundle broke.
-    /// `config::tls::parse_pem` is the door
-    /// that turns it into the operator-facing refusal.
     pub fn from_pem(pem: &[u8]) -> Result<Self, PemBundleError> {
         use x509_cert::der::Decode as _;
 
@@ -139,13 +78,8 @@ impl ExtraRoots {
             return Err(PemBundleError::TooLarge { bytes: pem.len() });
         }
         let blocks = pem::parse_many(pem).map_err(|_| PemBundleError::Malformed { index: None })?;
-        // The decoder ends iteration at the first block it cannot complete
-        // (no `-----END` line) and returns the blocks before it without an
-        // error — so a bundle cut off mid-copy is malformed at that block,
-        // never "the certificates that made it" and never absent. The needle
-        // is the decoder's own (`pem` 3.0.6 `parser.rs` matches
-        // `-----BEGIN ` with the trailing space), so a bare `-----BEGIN` in a
-        // leading comment line is neither a block nor a missing one.
+        // The decoder silently drops a block with no `-----END`, trusting fewer roots than configured.
+        // The needle keeps the decoder's trailing space, so a bare `-----BEGIN` in a comment is not a block.
         let begins = pem
             .windows(b"-----BEGIN ".len())
             .filter(|window| *window == b"-----BEGIN ")
@@ -181,10 +115,7 @@ impl ExtraRoots {
         Ok(roots)
     }
 
-    /// Chains every root onto `builder` via `tls_certs_merge` (not the
-    /// deprecated `add_root_certificate`) — additive, so it composes with
-    /// [`seed_embedded_roots`] in
-    /// either order. An empty set returns `builder` unchanged.
+    /// Chains every root onto `builder` additively, so it composes with [`seed_embedded_roots`] in either order.
     pub fn seed(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         if self.is_empty() {
             return builder;
@@ -192,9 +123,7 @@ impl ExtraRoots {
         builder.tls_certs_merge(self.certificates.iter().cloned())
     }
 
-    /// The parsed DER-encoded roots, for the registry transport's own
-    /// certificate list (`oci::native::Certificate { encoding: Der, .. }`,
-    /// C-006).
+    /// The parsed DER roots, for the registry transport's own certificate list.
     #[must_use]
     pub fn der(&self) -> &[pki_types::CertificateDer<'static>] {
         &self.der
@@ -213,31 +142,17 @@ impl ExtraRoots {
     }
 }
 
-/// Process-wide extra CA roots for the Sigstore trust-services client
-/// (`oci::endpoint::sigstore_http_client`).
+/// Process-wide extra CA roots for the Sigstore trust-services client.
 static SIGSTORE_ROOTS: OnceLock<ExtraRoots> = OnceLock::new();
 
-/// Install the process-wide extra CA roots for Sigstore calls.
+/// Install the process-wide extra CA roots for Sigstore calls; a second install is ignored.
 ///
-/// Set once, from `Context::try_init`, before any Sigstore call (C-007). A
-/// second install is a no-op — the roots validated at startup are what every
-/// later Sigstore dial uses for the process's lifetime. A read before install
-/// (e.g. unit tests calling [`sigstore_roots`] directly) sees the empty set
-/// without pinning it — a later install still takes effect.
-///
-/// A `OnceLock` pair (this + [`sigstore_roots`]) rather than a parameter is
-/// what lets `oci::endpoint::sigstore_http_client` stay a zero-argument
-/// lazy static. The upgrade path, if that ever needs to change (e.g. roots
-/// that can rotate mid-process), is threading the roots into
-/// `sigstore_http_client` directly as an explicit argument and dropping this
-/// pair — not adding a second global.
+/// Install before any Sigstore call: `sigstore_http_client` captures the roots once, on first use.
 pub fn install_sigstore_roots(roots: ExtraRoots) {
     if let Err(later) = SIGSTORE_ROOTS.set(roots)
         && SIGSTORE_ROOTS.get() != Some(&later)
     {
-        // Unreachable while one `Context` is built per process; a trace the
-        // day that stops being true, since the second set would otherwise
-        // vanish silently.
+        // Unreachable with one `Context` per process; traced so a second set does not vanish silently.
         log::debug!(
             "a second install_sigstore_roots with a different set ({} certificates) is ignored",
             later.len()
@@ -245,12 +160,7 @@ pub fn install_sigstore_roots(roots: ExtraRoots) {
     }
 }
 
-/// The installed extra CA roots, or an empty [`ExtraRoots`] if
-/// [`install_sigstore_roots`] was never called.
-///
-/// Reads `SIGSTORE_ROOTS` without `get_or_init` — initializing the
-/// [`OnceLock`] with a default would permanently pin the empty set for a
-/// caller that reads before `install_sigstore_roots` runs.
+/// The installed extra CA roots, or an empty set; never `get_or_init`, which would pin the empty set before install.
 #[must_use]
 pub fn sigstore_roots() -> &'static ExtraRoots {
     static EMPTY: ExtraRoots = ExtraRoots {

@@ -1,63 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Corporate-managed configuration tier (`[managed]`).
-//!
-//! Home for all `[managed]` settings. Structural twin of
-//! [`PatchConfig`](crate::patch::PatchConfig): the seed pointer lives in
-//! `$OCX_HOME/config.toml`, resolving to a plain `config.toml` payload published
-//! as an OCI artifact (domain layer: [`crate::managed_config`]) and merged above
-//! the user config every invocation.
-//!
-//! See `adr_managed_config_tier.md` §"Component contracts" #1 and
-//! §"Decision E — required enforcement".
+//! Corporate-managed configuration tier (`[managed]`): a seed pointer resolving to a published
+//! `config.toml` payload merged above the user config. See `adr_managed_config_tier.md`.
 
 use serde::{Deserialize, Serialize};
 
+// No `deny_unknown_fields`, for the fleet forward-compat reason stated on `crate::Config`.
 /// Configuration for the `[managed]` tier.
 ///
-/// All fields are `Option` so [`Default`] and tier merge work correctly; absent
-/// fields fall back to their defaults in [`resolve_managed_config`].
-///
-/// Like [`PatchConfig`](crate::patch::PatchConfig), unknown fields
-/// are tolerated (no `deny_unknown_fields`) — fleet forward-compat: a config
-/// written for a newer ocx (e.g. a future `[managed]` key) must not brick
-/// every older binary in the fleet that reads the same seed. The cost is that
-/// a typo'd key silently no-ops; `ocx config update --check` surfaces the
-/// tier's effective state for diagnosis.
+/// Unknown keys are tolerated, so a typo'd key silently does nothing;
+/// `ocx config update --check` surfaces the tier's effective state for diagnosis.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ManagedConfig {
     /// OCI reference for the managed-config artifact, e.g.
     /// `"internal.company.com/ocx-config:user"`.
     ///
-    /// Required at resolve time; absent → [`resolve_managed_config`] returns
-    /// `None` (no managed tier configured).
+    /// Absent → no managed tier configured.
     pub source: Option<String>,
 
     /// Fail posture when the snapshot is required but absent.
     ///
-    /// - `true` (default) — fail closed: [`ManagedConfigError::SnapshotRequired`]
-    ///   until `ocx config update` (or `self setup --managed-config`) syncs one.
+    /// - `true` (default) — fail closed: a config error (exit 78) until `ocx config update`
+    ///   (or `self setup --managed-config`) syncs one.
     /// - `false` — the tier contributes nothing until synced; a throttle-gated
-    ///   stderr hint only (benign-state rule, no per-invocation WARN).
+    ///   stderr hint only.
+    // An unsynced optional tier is a benign state: never a per-invocation WARN.
     pub required: Option<bool>,
 
-    /// Background refresh posture. Defaults to [`RefreshPolicy::Notify`].
+    /// Background refresh posture. Defaults to `notify`.
     pub refresh: Option<RefreshPolicy>,
 
     /// Background refresh throttle interval, `\d+[smhd]?` (bare = seconds).
-    /// Defaults to [`ManagedConfig::DEFAULT_INTERVAL`] (`"1d"`).
+    /// Defaults to `"1d"`.
     pub interval: Option<String>,
 
-    /// Runtime provenance marker: this tier was declared at the SYSTEM config
-    /// scope (`/etc/ocx/config.toml`) AND declared `required = true`, so it is
-    /// NON-OVERRIDABLE by any lower tier (mirrors
-    /// [`PatchConfig::system_locked`](crate::patch::PatchConfig::system_locked)).
+    /// Set by the loader on a SYSTEM-scope tier whose effective `required` is true.
     ///
-    /// Never serialized (read side) — set by the loader via
-    /// [`Self::lock_as_system`] after parsing the system-scope file. Skipped on
-    /// the write side too: the fence-write path (`ocx self setup
-    /// --managed-config`) never persists this flag back to disk.
+    /// Skipped on write too, or `ocx self setup --managed-config` persists the lock to disk.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
@@ -69,10 +49,9 @@ pub struct ManagedConfig {
 pub enum RefreshPolicy {
     /// Drift silently triggers a full fetch + persist + swap — but only via the
     /// background tick, whose activation gate is narrow: it fires only on an
-    /// interactive terminal (stderr is a TTY), outside CI, and online (see
-    /// `app::managed_config_check`). CI and other automation hosts never see
-    /// the tick run; they must refresh the snapshot with an explicit
-    /// `ocx config update`.
+    /// interactive terminal (stderr is a TTY), outside CI, and online. CI and
+    /// other automation hosts never see the tick run; they must refresh the
+    /// snapshot with an explicit `ocx config update`.
     Apply,
     /// Drift prints a stderr advisory ("run `ocx config update`"); content is
     /// never fetched by the background tick.
@@ -92,16 +71,10 @@ impl std::fmt::Display for RefreshPolicy {
     }
 }
 
-/// Fully resolved form of [`ManagedConfig`] with defaults applied and the
-/// source parsed into a canonical `ocx_oci::OciIdentifier`.
-///
-/// Produced by [`resolve_managed_config`], called at `Context::try_init`
-/// (mirrors [`resolve_patch_config`](crate::patch::resolve_patch_config)).
+/// Fully resolved [`ManagedConfig`], with defaults applied and the source parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedManagedConfig {
-    /// The managed-config artifact's registry location. A location, not a
-    /// package name: the artifact is fetched from exactly here, never routed
-    /// through an index.
+    /// The artifact's registry location, fetched from exactly here, never routed through an index.
     pub source: ocx_oci::OciIdentifier,
     /// Whether an absent/mismatched snapshot fails closed.
     pub required: bool,
@@ -109,83 +82,34 @@ pub struct ResolvedManagedConfig {
     pub refresh: RefreshPolicy,
     /// Background refresh throttle interval.
     pub interval: std::time::Duration,
-    /// Whether this tier originates at the SYSTEM scope as a non-overridable
-    /// required tier (mirrors
-    /// [`ResolvedPatchConfig::system_required`](crate::patch::ResolvedPatchConfig::system_required)).
+    /// Whether this is a non-overridable SYSTEM-scope required tier.
     pub system_required: bool,
 }
 
-/// On-disk snapshot of the managed-config tier, persisted as two sibling files
-/// under `$OCX_HOME/state/managed-config/`:
+/// On-disk snapshot of the managed-config tier: this metadata in `snapshot.json`, the payload
+/// ([`Self::config`]) in a sibling `config.toml`.
 ///
-/// - `snapshot.json` — this struct's metadata (`source`/`tag`/`digest`/
-///   `fetched_at`), written by `serde`;
-/// - `config.toml` — the raw payload bytes, held here in [`Self::config`] but
-///   `#[serde(skip)]`'d out of the JSON so the payload stays a readable,
-///   greppable file instead of an escaped string inside the metadata.
-///
-/// A config-tier data model: the loader identity-gates it against `source`
-/// before folding the `config` payload, and the `required` gate compares it
-/// here (see [`snapshot_matches_source`]). The domain layer
-/// ([`crate::managed_config`]) writes both files (payload first, metadata last)
-/// and reads them back via `persist_managed_config` /
-/// `read_managed_config_snapshot_at`, and re-exports this type for API
-/// stability.
+/// Its payload folds only after [`snapshot_matches_source`] passes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ManagedConfigSnapshot {
-    /// The managed-config source this snapshot was fetched from, in its
-    /// canonical (normalized) `Display` form — including tag/digest. The
-    /// loader compares this against the effective source before merging.
+    /// The source this snapshot was fetched from, in canonical `Display` form with tag and digest.
     pub source: String,
-    /// The tag component of the source at persist time (snapshot format v2).
-    ///
-    /// Optional for backward readability of v1 snapshots (`#[serde(default)]`
-    /// — absent = `None`, refreshed on the next drift sync; no migration).
-    /// Surfaced by `ocx config update --check` so operators can see which
-    /// floating tag the snapshot tracks.
+    /// The source's tag at persist time; absent in older snapshots until the next drift sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// The top-level manifest digest (the image-index digest for a package
-    /// pushed by `ocx config push`) of the fetched package at persist time —
-    /// the tier's drift identity.
+    /// The top-level manifest digest at persist time, the tier's drift identity.
     pub digest: ocx_oci::Digest,
     /// ISO-8601 UTC timestamp of the fetch that produced this snapshot.
     pub fetched_at: String,
-    /// The raw TOML text of the fetched `config.toml` payload, with any
-    /// `[managed]` section already stripped by `persist_managed_config`
-    /// (ADR Decision I: a remote payload can never redirect/loosen the tier
-    /// that fetched it). The loader parses this string directly and folds it
-    /// into the accumulator once the source identity check passes.
-    ///
-    /// Persisted as the readable sibling `config.toml`, NOT embedded in
-    /// `snapshot.json`: `#[serde(skip)]` keeps it out of the metadata file, and
-    /// `read_managed_config_snapshot_at` repopulates it from the sibling on load.
-    /// A missing/unreadable sibling makes the whole snapshot read as absent
-    /// (the reader never yields a snapshot with an empty `config`).
+    /// The raw payload TOML, `[managed]` already stripped; persisted as the sibling `config.toml`.
     #[serde(skip)]
     pub config: String,
 }
 
-/// Identity gate (v2) between a snapshot's provenance and an effective
-/// managed-config source.
+/// Identity gate: the snapshot names the same `registry/repository` as `source` (tags float), and
+/// a digest-pinned `source` requires the snapshot's digest to equal the pin.
 ///
-/// Two clauses, both required:
-///
-/// 1. **Repository identity** — the snapshot's source and the effective
-///    source name the same `registry/repository`
-///    ([`OciIdentifier::without_specifiers`](ocx_oci::OciIdentifier::without_specifiers)
-///    equality). Tags float: a snapshot fetched at `:user-1.4.2` still
-///    satisfies a seed tracking `:user` (version pins via `ocx config update
-///    <VERSION>` and cascade tags both move within one repository).
-/// 2. **Digest pin** — when the effective source itself carries a digest
-///    (`…@sha256:<hex>`, a digest-pinned seed), the snapshot's content digest
-///    must equal that pin (fail-closed immutability assertion).
-///
-/// A cross-repository snapshot never matches (CI cache-poison defense). A
-/// parse failure on the snapshot side is a non-match. Shared by the loader's
-/// identity gate ([`crate::loader`]), [`resolve_managed_config`]'s
-/// `required` gate, the background tick, and the CLI's gated snapshot
-/// accessor so they can never drift.
+/// A cross-repository snapshot never matches (CI cache-poison defense).
 #[must_use]
 pub fn snapshot_matches_source(snapshot: &ManagedConfigSnapshot, source: &ocx_oci::OciIdentifier) -> bool {
     ocx_oci::OciIdentifier::parse_target(&snapshot.source, ocx_oci::DEFAULT_REGISTRY).is_ok_and(|snapshot_source| {
@@ -194,13 +118,8 @@ pub fn snapshot_matches_source(snapshot: &ManagedConfigSnapshot, source: &ocx_oc
     })
 }
 
-/// Canonical [`ocx_oci::PackageRef`](ocx_oci::PackageRef) equality between two
-/// raw managed-config source strings (both parsed with the default registry; a
-/// parse failure on either side is a non-match).
-///
-/// Used by the system-lock env-override guard in [`resolve_target`]: a
-/// system-locked `[managed]` seed accepts an `OCX_MANAGED_CONFIG` override only
-/// when it canonicalizes to the same source.
+/// Canonical [`ocx_oci::PackageRef`] equality of two raw source strings; a parse failure is a
+/// non-match.
 #[must_use]
 fn sources_canonically_eq(left: &str, right: &str) -> bool {
     matches!(
@@ -212,13 +131,7 @@ fn sources_canonically_eq(left: &str, right: &str) -> bool {
     )
 }
 
-/// Error variants raised while resolving [`ManagedConfig`] or parsing its
-/// fields.
-///
-/// Every variant classifies to `ExitCode::ConfigError` (78) — a managed-config
-/// resolution failure is always a configuration problem (bad seed, bad env
-/// override, or a required snapshot that never synced), never a data or network
-/// fault in its own right.
+/// Errors raised while resolving [`ManagedConfig`] or parsing its fields.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ManagedConfigError {
@@ -250,36 +163,21 @@ pub enum ManagedConfigError {
     #[error("managed config snapshot required for source '{effective_source}' but absent; run `ocx config update`")]
     SnapshotRequired {
         /// The effective managed-config source that has no matching snapshot.
-        ///
-        /// Named `effective_source`, not `source`, so `thiserror` does not
-        /// treat this field as the variant's `#[source]` error (it is an
-        /// `ocx_oci::PackageRef`, not an error type).
         effective_source: ocx_oci::OciIdentifier,
     },
 
-    /// `required = true` and an identity-matching snapshot IS on disk, but its
-    /// payload does not parse as a [`Config`](crate::Config), so the
-    /// tier contributes nothing.
-    ///
-    /// Distinct from [`Self::SnapshotRequired`]: the fix is a re-sync or a
-    /// payload repair, not a first sync. Failing closed here is the point —
-    /// the identity gate alone would report the tier satisfied while its
-    /// settings silently never reached the merged config.
+    /// `required = true` and an identity-matching snapshot is on disk, but its payload does not
+    /// parse as a [`Config`](crate::Config), so none of its settings apply.
     #[error(
         "managed config snapshot for source '{effective_source}' is present but its payload is not a usable \
          config; re-sync with `ocx config update`"
     )]
     SnapshotUnusable {
-        /// The effective managed-config source whose snapshot payload failed
-        /// to parse. Named `effective_source` for the same reason as
-        /// [`Self::SnapshotRequired`]'s field.
+        /// The effective managed-config source whose snapshot payload failed to parse.
         effective_source: ocx_oci::OciIdentifier,
     },
 
-    /// An explicit `ocx self setup --managed-config` value was refused because
-    /// the `[managed]` tier is system-locked (declared `required` at the SYSTEM
-    /// scope): a lock only tightens, so the flag can neither clear the tier nor
-    /// redirect it. Only a value matching the locked source may proceed.
+    /// An explicit `--managed-config` value would clear or redirect a system-locked tier.
     #[error("managed config is system-locked to '{locked}'; --managed-config cannot clear or redirect it")]
     SystemLockedOverride {
         /// The locked source the explicit value must match (or be omitted).
@@ -294,31 +192,18 @@ impl ManagedConfig {
     /// Default `refresh` value.
     pub const DEFAULT_REFRESH: RefreshPolicy = RefreshPolicy::Notify;
 
-    /// Default `interval` value, applied by [`resolve_managed_config`] when
-    /// `interval` is absent.
+    /// Default `interval` value.
     pub const DEFAULT_INTERVAL: &'static str = "1d";
 
-    /// Mark this tier as system-locked — non-overridable by lower tiers — when
-    /// it is `required` (the default is `required = true`).
-    ///
-    /// Called by the config loader on the system-scope file
-    /// (`/etc/ocx/config.toml`) after parsing and before folding higher tiers
-    /// in. Mirrors
-    /// [`PatchConfig::lock_as_system`](crate::patch::PatchConfig::lock_as_system)
-    /// exactly, including the "lock on the *effective* required" security
-    /// rationale.
+    /// Mark this tier as system-locked when its effective `required` is true, for the reason on
+    /// [`PatchConfig::lock_as_system`](crate::patch::PatchConfig::lock_as_system).
     pub fn lock_as_system(&mut self) {
         if self.required.unwrap_or(Self::DEFAULT_REQUIRED) {
             self.system_locked = true;
         }
     }
 
-    /// Merge `other` into `self` field-by-field. `other`'s `Some` values
-    /// override `self`'s; `other`'s `None` values do not clobber `self`.
-    ///
-    /// A system-locked tier (`self.system_locked`) ignores ALL lower-tier
-    /// overrides, mirroring
-    /// [`PatchConfig::merge`](crate::patch::PatchConfig::merge).
+    /// Merge `other` into `self`: `other`'s `Some` values win, unless `self` is system-locked.
     pub fn merge(&mut self, other: ManagedConfig) {
         if self.system_locked {
             return;
@@ -338,32 +223,14 @@ impl ManagedConfig {
     }
 }
 
-/// Resolves the `[managed]` config into a [`ResolvedManagedConfig`], applying
-/// defaults, validating fields, and enforcing `required` against `snapshot`.
-///
-/// - `env_override` — the `OCX_MANAGED_CONFIG` value, if set; overrides
-///   `config.managed.source` for this invocation only (never written back).
-/// - `snapshot` — the local snapshot (if any) whose provenance the loader
-///   already identity-gated before folding its content into `config`. Passed
-///   here again so `required` enforcement can distinguish "absent" from
-///   "present but ref-mismatched" (both fail the same way — ADR Decision E).
-///
-/// Returns `None` when no source is configured (no managed tier active) — an
-/// **empty** source string is a hard error (same footgun as an empty
-/// `[patches].registry` / a `[mirrors."<host>"]` `registry` or `index` field).
+/// Resolves `[managed]` with defaults applied and `required` enforced against `snapshot`; `None`
+/// when no source is configured. `env_override` (`OCX_MANAGED_CONFIG`) overrides the source.
 ///
 /// # Errors
 ///
-/// - [`ManagedConfigError::EmptySource`] — `source` present but empty.
-/// - [`ManagedConfigError::InvalidSource`] — `source` is not a valid OCI
-///   identifier.
-/// - [`ManagedConfigError::InvalidInterval`] — `interval` fails
-///   [`parse_interval`].
-/// - [`ManagedConfigError::SnapshotRequired`] — `required` (effective) is
-///   `true` and no snapshot provenance matches the effective source.
-/// - [`ManagedConfigError::SnapshotUnusable`] — `required` is `true` and the
-///   matching snapshot's payload does not parse as a
-///   [`Config`](crate::Config).
+/// [`ManagedConfigError::EmptySource`], [`ManagedConfigError::InvalidSource`] or
+/// [`ManagedConfigError::InvalidInterval`] for a bad field; [`ManagedConfigError::SnapshotRequired`]
+/// or [`ManagedConfigError::SnapshotUnusable`] for a `required` tier whose snapshot is not applied.
 pub fn resolve_managed_config(
     config: &crate::Config,
     env_override: Option<&str>,
@@ -377,21 +244,14 @@ pub fn resolve_managed_config(
     Ok(Some(enforce_required_snapshot(resolved, state)?))
 }
 
-/// What the on-disk managed-config snapshot actually contributed to the merged
-/// config — the input to the `required` gate.
+/// What the on-disk snapshot actually contributed to the merged config, the input to the
+/// `required` gate.
 ///
-/// A three-state value rather than "did the identity match": identity is a
-/// *necessary* condition for the tier to take effect, never a sufficient one.
-/// A snapshot whose payload fails to parse is dropped by the loader, so gating
-/// on identity alone reported a `required` tier satisfied while none of its
-/// settings were in force — fail-open exactly where the operator asked to fail
-/// closed.
+/// Identity alone is not enough: the loader drops an unparsable payload, so gating on identity
+/// would fail open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedSnapshotState {
-    /// No snapshot on disk (absent, unreadable, or malformed metadata), or one
-    /// whose provenance names a different source. Both are "this tier has
-    /// nothing synced for it" from the gate's perspective, and both are
-    /// answered by the same `ocx config update`.
+    /// No readable snapshot, or one whose provenance names a different source.
     Unmatched,
     /// Identity matched, but the payload did not parse as a
     /// [`Config`](crate::Config) and was therefore not merged.
@@ -401,13 +261,7 @@ pub enum ManagedSnapshotState {
 }
 
 impl ManagedSnapshotState {
-    /// Classifies a snapshot against `source` by re-deriving what the loader
-    /// would do with it — identity gate, then payload parse.
-    ///
-    /// Used by [`resolve_managed_config`], whose callers hand it a snapshot
-    /// rather than a loader outcome. The loader itself reports the state it
-    /// observed directly (it has already parsed the payload) instead of
-    /// calling this.
+    /// Classifies a snapshot against `source` as the loader would: identity gate, then payload parse.
     #[must_use]
     pub fn classify(snapshot: Option<&ManagedConfigSnapshot>, source: &ocx_oci::OciIdentifier) -> Self {
         let Some(snapshot) = snapshot.filter(|snap| snapshot_matches_source(snap, source)) else {
@@ -421,20 +275,13 @@ impl ManagedSnapshotState {
     }
 }
 
-/// Applies the `required` gate to an already-resolved target: a `required`
-/// tier whose snapshot did not reach the merged config fails closed; every
-/// other combination returns the target unchanged.
-///
-/// Split out so a caller that resolved the target once (e.g. the config loader
-/// threading it into `Context::try_init`) can apply the gate without a second
-/// [`resolve_managed_target`] — the error type is owned here in `ocx_lib`,
-/// where the `#[non_exhaustive]` [`ManagedConfigError`] can be constructed.
+/// Applies the `required` gate to an already-resolved target: a `required` tier whose snapshot
+/// did not reach the merged config fails closed.
 ///
 /// # Errors
 ///
 /// When `resolved.required`: [`ManagedConfigError::SnapshotRequired`] for
-/// [`ManagedSnapshotState::Unmatched`] and
-/// [`ManagedConfigError::SnapshotUnusable`] for
+/// [`ManagedSnapshotState::Unmatched`], [`ManagedConfigError::SnapshotUnusable`] for
 /// [`ManagedSnapshotState::PayloadUnusable`].
 pub fn enforce_required_snapshot(
     resolved: ResolvedManagedConfig,
@@ -454,19 +301,12 @@ pub fn enforce_required_snapshot(
     }
 }
 
-/// Resolves the `[managed]` tier's effective target — source, `required`
-/// posture, refresh policy, interval — WITHOUT enforcing the
-/// required-snapshot gate [`resolve_managed_config`] applies.
-///
-/// Used by callers whose entire job is to satisfy or inspect that gate —
-/// `ocx config update` (the full fetch+persist path and its `--check` probe)
-/// and the background-refresh hook — none of which should fail merely because
-/// the snapshot they are about to create or refresh does not exist yet.
+/// Resolves the effective target without the required-snapshot gate, for callers that create or
+/// inspect the snapshot (`ocx config update`, the background refresh).
 ///
 /// # Errors
 ///
-/// Same as [`resolve_managed_config`], except this function never returns
-/// [`ManagedConfigError::SnapshotRequired`].
+/// As [`resolve_managed_config`], minus the two snapshot errors.
 pub fn resolve_managed_target(
     config: &crate::Config,
     env_override: Option<&str>,
@@ -474,20 +314,15 @@ pub fn resolve_managed_target(
     resolve_target(config, env_override)
 }
 
-/// Guards an explicit `ocx self setup --managed-config <value>` against the
-/// system lock (a lock only tightens — mirrors `resolve_target`'s env-override
-/// posture, but rejects instead of silently ignoring since the flag is explicit
-/// intent whose downstream clear/fetch would otherwise corrupt the locked tier).
+/// Guards an explicit `ocx self setup --managed-config <value>` against the system lock.
 ///
-/// `Ok(())` when the tier is unconfigured, unlocked, or `value` canonicalizes to
-/// the locked source. A system-locked tier refuses an empty (clear) or
-/// non-matching (redirect) `value`.
+/// Refuses where the env override is merely ignored, since the flag's downstream clear or fetch
+/// would corrupt the locked tier.
 ///
 /// # Errors
 ///
-/// - [`ManagedConfigError::SystemLockedOverride`] — locked tier, `value` empty
-///   or not the locked source.
-/// - Any error from resolving the locked seed (malformed source/interval).
+/// [`ManagedConfigError::SystemLockedOverride`] for an empty or non-matching `value` on a locked
+/// tier, or any error from resolving the locked seed.
 pub fn check_locked_managed_override(config: &crate::Config, value: &str) -> Result<(), ManagedConfigError> {
     let Some(locked) = resolve_target(config, None)? else {
         return Ok(());
@@ -509,19 +344,11 @@ fn resolve_target(
     config: &crate::Config,
     env_override: Option<&str>,
 ) -> Result<Option<ResolvedManagedConfig>, ManagedConfigError> {
-    // A bare `OCX_MANAGED_CONFIG` env override activates the tier even with no
-    // `[managed]` seed at all (the CI-ephemeral recipe) — default every other
-    // field from `ManagedConfig::default()` in that case.
+    // A bare `OCX_MANAGED_CONFIG` activates the tier even with no `[managed]` seed.
     let managed = config.managed.clone().unwrap_or_default();
 
-    // Env override wins over the seed; an empty override is treated as unset
-    // (matches the `OCX_CONFIG=""` precedent). A SYSTEM-LOCKED seed
-    // (`/etc/ocx/config.toml` `[managed] required = true`) is an exception:
-    // locks only tighten, so `OCX_MANAGED_CONFIG` can never redirect a locked
-    // tier to a different source. The override is honored only when it
-    // canonicalizes to the locked seed's own source; otherwise it is ignored
-    // and the locked seed source stands (never a silent resolve/fetch of the
-    // injected source — the trust-boundary fix for CWE-15).
+    // A system-locked seed honours only an override naming the locked source, or the env could
+    // redirect a locked tier (CWE-15).
     let overridden = env_override.filter(|value| !value.is_empty());
     let source = match overridden {
         Some(value)
@@ -568,13 +395,7 @@ fn resolve_target(
     }))
 }
 
-/// Parses an interval string of the form `\d+[smhd]?` (bare digits = seconds;
-/// `s`/`m`/`h`/`d` suffix scales the value) into a [`Duration`](std::time::Duration).
-///
-/// Used to resolve [`ManagedConfig::interval`] into
-/// [`ResolvedManagedConfig::interval`], and shared by the background-refresh
-/// throttle (mirrors the flat glob matcher precedent in `patch::matcher` —
-/// small, dependency-free, unit-tested parser rather than a crate).
+/// Parses `\d+[smhd]?` (bare digits = seconds) into a [`Duration`](std::time::Duration).
 ///
 /// # Errors
 ///

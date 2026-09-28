@@ -1,30 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Toolchain activation mode and the two environment tiers of its resolution
-//! ladders (`plan_toolchain_activation.md` C-006 / C-007).
-//!
-//! [`ActivateMode`] decides how a project's rendered toolchain reaches a
-//! shell: `env` composes the environment per prompt (today's behaviour),
-//! `bin` puts `<home>/toolchain/active/bin` on `PATH` instead, `none` does neither.
-//! [`pinned_from_env`] reads the sibling `pinned` setting, which decides
-//! whether composed paths follow the `<group>/<entry>` links or pin to
-//! digests.
-//!
-//! Both readers are the **weakest** tier of their ladder ([`crate::ladder`]),
-//! below `ocx.toml`. Neither ever overrides a project that states a value.
-//!
-//! The two floors are named here as [`ACTIVATE_FLOOR`] and [`PINNED_FLOOR`],
-//! and a later package resolving either ladder is expected to pass *those*
-//! constants to [`crate::ladder::Ladder::resolve`] rather than a re-spelled
-//! literal — a convention checked at review, not by the type.
-//!
-//! # Not `package_manager::activation`
-//!
-//! Four letters apart, unrelated subjects. This module owns the `activate`
-//! setting's vocabulary and its environment tier; `package_manager::activation`
-//! sequences the per-prompt reconciliation of a shell's environment, which is
-//! what one of this setting's three values selects.
+//! Toolchain activation mode and the environment tiers of its ladders.
 
 use std::fmt;
 use std::str::FromStr;
@@ -33,26 +10,14 @@ use serde::{Deserialize, Serialize};
 
 /// How a rendered toolchain home reaches a shell's environment.
 ///
-/// # C-006
-///
-/// Closed, internal enum — no `#[non_exhaustive]` (`arch-principles.md`
-/// "Internal enum exhaustiveness"): `ocx_lib` ships no external API, so every
-/// match over `ActivateMode` stays total across the workspace.
-///
-/// `Deserialize` rejects any wire value outside `"env"` / `"bin"` / `"none"`
-/// — the derived enum tag match is exhaustive by construction, so an unknown
-/// `ocx.toml` value surfaces as a parse error (C-012, exit 78) rather than
-/// silently defaulting.
-///
-/// Deliberately **no `Default` impl**. The floor is [`ACTIVATE_FLOOR`] and it
-/// is applied by [`crate::ladder::Ladder::resolve`]'s `floor` parameter at the
-/// one site that resolves the ladder; a `Default` here would be a second floor
-/// that no reader of the ladder can see (C-005).
+/// Wire values are `"env"`, `"bin"` and `"none"`; any other `ocx.toml` value
+/// is a parse error (exit 78), never a silent default.
+// No `Default`: `ACTIVATE_FLOOR` is the floor, and a `Default` would be a
+// second one no reader of the ladder sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ActivateMode {
-    /// Compose the toolchain environment on every prompt — the shipped
-    /// behaviour, and the ladder's floor.
+    /// Compose the toolchain environment on every prompt. The default.
     Env,
     /// Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a
     /// tool is resolved by its launcher trampoline at invocation time.
@@ -62,7 +27,6 @@ pub enum ActivateMode {
 }
 
 impl fmt::Display for ActivateMode {
-    /// Formats as the lowercase wire value (e.g. `"env"`, `"bin"`, `"none"`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Env => write!(f, "env"),
@@ -75,10 +39,7 @@ impl fmt::Display for ActivateMode {
 impl FromStr for ActivateMode {
     type Err = InvalidActivateModeError;
 
-    /// Parses from the lowercase wire value. Case-sensitive, exactly as
-    /// [`crate::lazy::LazyMode`]'s is: nothing sets `Arg::ignore_case`, so a
-    /// flag or an `ocx.toml` value spelled `Bin` is rejected rather than
-    /// folded. [`ActivateMode::from_env`] is the only reader that folds case.
+    /// Parses the lowercase wire value case-sensitively; only `from_env` folds case.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "env" => Ok(Self::Env),
@@ -90,25 +51,10 @@ impl FromStr for ActivateMode {
 }
 
 impl ActivateMode {
-    /// Reads the [`ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE`] tier of the
-    /// `activate` ladder (C-006).
-    ///
-    /// The shipped [`crate::lazy::LazyMode::from_env`] idiom, verbatim:
-    ///
-    /// - Read through [`ocx_util::env::var`], never `std::env::var` — that
-    ///   function carries the `#[cfg(test)]` override seam, and reading the
-    ///   process environment directly would make every unit test of this
-    ///   ladder order-dependent inside nextest's shared process.
-    /// - An **empty** value returns `None` before parsing and without a
-    ///   warning: `OCX_TOOLCHAIN_ACTIVATE=` is "unset", not "invalid".
-    /// - An unrecognised value **warns and returns `None`**, exit 0. `None`
-    ///   means *this tier is absent*, so the ladder continues to the next tier
-    ///   — it never short-circuits to the floor.
-    /// - Whitespace is **not** trimmed, because the shipped reader does not
-    ///   trim: ` bin` is an unrecognised value and says so.
-    ///
-    /// Case is folded with [`str::to_ascii_lowercase`]. See
-    /// [`pinned_from_env`] for why the sibling reader folds differently.
+    /// Reads the `OCX_TOOLCHAIN_ACTIVATE` tier: empty is unset, an unrecognised
+    /// value warns and counts as absent, whitespace is not trimmed.
+    /// Through `ocx_util::env::var`, never `std::env::var`, or the unit tests
+    /// lose the override seam and race in nextest's shared process.
     pub fn from_env() -> Option<Self> {
         let key = ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE;
         let value = ocx_util::env::var(key)?;
@@ -125,31 +71,11 @@ impl ActivateMode {
     }
 }
 
-/// The floor of the `activate` ladder (C-007): compose the environment per
-/// prompt, today's behaviour.
-///
-/// Named so the floor of this setting is written once. `ActivateMode` has no
-/// `Default` on purpose (C-005), so without this constant the floor would be
-/// whatever each caller happens to spell.
-///
-/// Passing it is a **convention** — [`crate::ladder::Ladder`] takes the floor as
-/// a plain parameter and accepts any value, deliberately — and the convention
-/// has one enforcement point per setting: the **shared resolver**.
-/// `activate_mode` owns this floor;
-/// `pinned_for_project` owns [`PINNED_FLOOR`]. Every
-/// other site calls one of those, so a re-spelled floor is a *new* `Ladder`
-/// construction and shows up as one — see
-/// `the_ladder_is_constructed_only_inside_the_two_shared_resolvers`, which
-/// asserts it rather than asking a reader to.
+/// The floor of the `activate` ladder; callers pass it, never a re-spelled literal.
 pub const ACTIVATE_FLOOR: ActivateMode = ActivateMode::Env;
 
-/// The floor of the `pinned` ladder (C-007): follow the rendered
-/// `<group>/<entry>` links rather than pinning composed paths to digest roots.
-///
-/// Named for the reason [`ACTIVATE_FLOOR`] is, and the reason
-/// [`pinned_from_env`] yields `Option<bool>` rather than `bool`: "unset" and
-/// "explicitly false" must stay distinguishable all the way down the ladder,
-/// and only this value is allowed to answer for a tier that never spoke.
+/// The floor of the `pinned` ladder: follow the rendered `<group>/<entry>`
+/// links rather than pinning composed paths to digest roots.
 pub const PINNED_FLOOR: bool = false;
 
 /// Invalid [`ActivateMode`] wire value, returned by [`FromStr::from_str`].
@@ -173,31 +99,9 @@ impl clap_builder::ValueEnum for ActivateMode {
     }
 }
 
-/// Reads the [`ocx_config::env::keys::OCX_TOOLCHAIN_PINNED`] tier of the `pinned`
-/// ladder (C-007).
-///
-/// Same contract as [`ActivateMode::from_env`]: read through
-/// [`ocx_util::env::var`], empty is absent, an unparseable value warns and
-/// returns `None` so the ladder continues to the next tier.
-///
-/// Parsing goes through the shipped [`ocx_util::boolean_string::BooleanString`],
-/// which already defines ocx's boolean vocabulary (`1|y|yes|on|true` /
-/// `0|n|no|off|false`) — inventing a second one here would mean two spellings
-/// of "truthy" in one product.
-///
-/// **Not [`ocx_util::env::flag`]**, which collapses absent and false into one
-/// `bool`. A ladder tier needs `Option<bool>`: "unset" must fall through to
-/// the floor, while an explicit `OCX_TOOLCHAIN_PINNED=false` must *win* over
-/// the floor when no more specific tier speaks. `flag` cannot express that
-/// difference.
-///
-/// # A deliberate, unobservable folding difference
-///
-/// `BooleanString` folds with full Unicode [`str::to_lowercase`];
-/// [`ActivateMode::from_env`] folds with ASCII-only
-/// [`str::to_ascii_lowercase`]. Both vocabularies are pure ASCII, so no input
-/// can distinguish the two — recorded here only so that nobody "fixes" one of
-/// them into agreement with the other and calls it a bug fix.
+/// Reads the `OCX_TOOLCHAIN_PINNED` tier with `ActivateMode::from_env`'s contract.
+/// `Option<bool>`, not `ocx_util::env::flag`, which collapses unset and false:
+/// only the floor may answer for an unset tier.
 pub fn pinned_from_env() -> Option<bool> {
     let key = ocx_config::env::keys::OCX_TOOLCHAIN_PINNED;
     let value = ocx_util::env::var(key)?;

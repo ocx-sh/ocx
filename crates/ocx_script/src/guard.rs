@@ -3,22 +3,8 @@
 
 //! Path sandbox for script-supplied paths.
 //!
-//! Two layers, both required:
-//!
-//! 1. LEXICAL — [`ocx_util::fs::path::lexical_normalize`] +
-//!    [`ocx_util::fs::path::escapes_root`]. Absolute input is rejected
-//!    before normalization; the result is joined onto the chosen root and
-//!    re-checked. This alone does NOT defeat symlink or TOCTOU escapes.
-//! 2. SYMLINK + TOCTOU (Codex C1) — after the lexical check, EVERY
-//!    path-consuming host fn (read-side `read_file`/`exists` included, plus
-//!    `write_file`/`mkdir` and `ocx.run(cwd=…)`) re-validates symlink
-//!    containment via the EXISTING `ocx_util::fs::symlink::validate_target` /
-//!    `ocx_util::fs::path::validate_symlinks_in_dir` utilities (no
-//!    hand-rolled symlink walk) and, where feasible, re-checks containment
-//!    post-canonicalize immediately before the syscall to shrink the TOCTOU
-//!    window. The residual check-to-open window cannot be fully eliminated
-//!    against an adversarial in-sandbox process that spawns binaries — a
-//!    documented best-effort bound flagged for `/security-auditor`.
+//! The lexical resolvers alone do not stop symlink escapes: every path-consuming host fn, reads and
+//! `ocx.run(cwd=…)` included, must also call [`verify_symlink_containment`].
 
 use std::path::{Component, Path, PathBuf};
 
@@ -27,7 +13,7 @@ use ocx_util::fs::path::{escapes_root, lexical_normalize};
 /// Reason a path was rejected by the sandbox guard.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum GuardError {
-    /// path escaped the sandbox lexically (`..`, absolute, or outside root)
+    /// path escaped the sandbox lexically
     #[error("path escapes the sandbox: {0}")]
     LexicalEscape(String),
     /// path resolved through a symlink that leaves the sandbox
@@ -35,18 +21,11 @@ pub(super) enum GuardError {
     SymlinkEscape(String),
 }
 
-/// Resolves a script-supplied path, anchoring it on the scratch root.
-///
-/// This is the WRITE/`cwd` side: the result is always inside the read-write
-/// scratch root. (Read-side fallback to the bundle content is `resolve_read`.)
-/// Applies the lexical layer only; the caller must additionally apply the
-/// symlink re-check (Codex C1) before opening/spawning. Returns the resolved
-/// absolute path on success.
+/// Resolves a script-supplied write or `cwd` path inside the scratch root, lexically only.
 pub(super) fn resolve_scratch(user_path: &str, scratch_root: &Path) -> Result<PathBuf, GuardError> {
     let raw = Path::new(user_path);
 
-    // Reject absolute input (incl. Windows prefixes like `C:\`) before any
-    // normalization — an absolute path can never be sandbox-relative.
+    // Absolute input, `C:\` prefixes included, would replace the scratch root on `join`.
     if raw.is_absolute()
         || raw
             .components()
@@ -55,22 +34,15 @@ pub(super) fn resolve_scratch(user_path: &str, scratch_root: &Path) -> Result<Pa
         return Err(GuardError::LexicalEscape(user_path.to_string()));
     }
 
-    // Lexical layer: a `..` that escapes the logical root is rejected. The
-    // shared helper treats `\` as a separator on every platform so test
-    // scripts stay portable.
     if escapes_root(raw) {
         return Err(GuardError::LexicalEscape(user_path.to_string()));
     }
     let normalized = lexical_normalize(raw);
 
-    // The scratch root is the read-write sandbox. Bundle-content reads are
-    // handled separately by `resolve_read` (which probes the content root as
-    // an explicit fallback base); this fn always anchors on scratch so a write
-    // can never land in the read-only package tree.
+    // Always scratch, or a write lands in the read-only package tree.
     let resolved = scratch_root.join(&normalized);
 
-    // Defence in depth: re-check the joined path cannot escape the scratch
-    // root (guards against any normalization edge the lexical pass missed).
+    // Defence in depth against a normalization edge the lexical pass missed.
     if let Ok(rel) = resolved.strip_prefix(scratch_root)
         && escapes_root(rel)
     {
@@ -82,43 +54,25 @@ pub(super) fn resolve_scratch(user_path: &str, scratch_root: &Path) -> Result<Pa
     Ok(resolved)
 }
 
-/// Resolves a read-side path, allowing the bundle's content root as a fallback base.
-///
-/// `read_file` / `exists` accept `{scratch (rw), content (ro)}`. This anchors
-/// the lexically-validated relative path on the scratch root first; if it does
-/// not exist there it retries against the read-only content root. Both
-/// candidates are inside their respective roots (the lexical layer already
-/// rejected `..`/absolute escapes).
-///
-/// `content_root` is the bundle's own file tree (`<package_root>/content`), NOT
-/// the package store directory: a script asks for `bin/javac`, the layout of the
-/// store around it is not part of the script contract.
+/// Resolves a read-side path on scratch first, then on the read-only bundle content root.
 pub(super) fn resolve_read(user_path: &str, scratch_root: &Path, content_root: &Path) -> Result<PathBuf, GuardError> {
     let scratch_candidate = resolve_scratch(user_path, scratch_root)?;
     if scratch_candidate.exists() {
         return Ok(scratch_candidate);
     }
+    // Only after `resolve_scratch`, or a `../` path reads outside the bundle; the symlink re-check skips `..`.
     let normalized = lexical_normalize(Path::new(user_path));
     let content_candidate = content_root.join(&normalized);
     if content_candidate.exists() {
         return Ok(content_candidate);
     }
-    // Neither exists yet — default to the scratch candidate (the host fn maps
-    // a missing file to its own error / `false`).
     Ok(scratch_candidate)
 }
 
-/// Codex C1 symlink + best-effort TOCTOU re-check.
+/// Checks that no symlink component of `resolved` leaves `root`.
 ///
-/// After the lexical [`resolve_scratch`] / [`resolve_read`], every path-consuming host fn
-/// re-validates that no symlink component leaves `root`. Reuses the existing
-/// [`ocx_util::fs::symlink`] validators (no hand-rolled symlink walk). The residual
-/// check-to-open window against an adversarial in-sandbox process cannot be
-/// fully eliminated — documented best-effort bound (flagged for
-/// `/security-auditor`).
+/// Best effort: a check-to-open race by an adversarial in-sandbox process remains.
 pub(super) fn verify_symlink_containment(root: &Path, resolved: &Path) -> Result<(), GuardError> {
-    // Walk each existing ancestor component; if it is a symlink, validate its
-    // target stays within `root` via the existing single-component validator.
     let mut current = root.to_path_buf();
     let Ok(rel) = resolved.strip_prefix(root) else {
         return Err(GuardError::SymlinkEscape(resolved.display().to_string()));
@@ -129,24 +83,10 @@ pub(super) fn verify_symlink_containment(root: &Path, resolved: &Path) -> Result
         };
         current.push(name);
         if std::fs::symlink_metadata(&current).is_err() {
-            // Does not exist yet (e.g. a not-yet-written file) — nothing to
-            // traverse; later components cannot exist either.
-            //
-            // LOAD-BEARING: this break stops the walk at the first absent
-            // component, so `validate_target` below is only ever called on a
-            // `current` whose parent exists on disk. That is exactly the
-            // precondition under which `validate_target` resolves the true
-            // physical parent depth (it canonicalizes the longest existing
-            // prefix). Deleting this break would feed it a `current` past a
-            // non-existent component, collapsing it back to a lexical
-            // component count — the very budget miscount the chain-planting
-            // escape exploited. Keep it.
+            // Stop here, or `validate_target` miscounts the parent depth lexically and a planted chain escapes.
             break;
         }
-        // Junction-aware: `Metadata::file_type().is_symlink()` misses Windows
-        // NTFS junctions, so a junction-based escape would bypass the
-        // containment re-check. `ocx_util::fs::symlink::is_link` reports junctions on
-        // Windows and is identical to `is_symlink()` on Unix.
+        // `is_link`, not `is_symlink()`, or a Windows NTFS junction escapes the check.
         if ocx_util::fs::symlink::is_link(&current) {
             let target =
                 std::fs::read_link(&current).map_err(|_| GuardError::SymlinkEscape(current.display().to_string()))?;
@@ -154,8 +94,7 @@ pub(super) fn verify_symlink_containment(root: &Path, resolved: &Path) -> Result
                 .map_err(|_| GuardError::SymlinkEscape(current.display().to_string()))?;
         }
     }
-    // If the resolved path itself is a directory subtree, sweep it too
-    // (post-canonicalize defence for `cwd`/`mkdir`).
+    // A directory target (`cwd`, `mkdir`) is swept whole.
     if resolved.is_dir() && ocx_util::fs::path::validate_symlinks_in_dir(root, resolved).is_err() {
         return Err(GuardError::SymlinkEscape(resolved.display().to_string()));
     }

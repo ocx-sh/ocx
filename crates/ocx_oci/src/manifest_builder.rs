@@ -2,20 +2,10 @@
 // Copyright 2026 The OCX Authors
 
 //! Pure assembly of OCI image manifests.
-//!
-//! The builder is intentionally decoupled from any OCX domain type — callers
-//! supply the artifact-type and config-blob media types directly. This keeps
-//! the module reusable across the package push path, the description push
-//! path, and the local-test path without any of them sharing knowledge of
-//! one another's payload shapes.
 
 use super::client::error::ClientError;
 
 /// Fluent assembler for [`crate::ImageManifest`]. No I/O, no network.
-///
-/// Consuming-builder shape: each setter takes `self` and returns `Self` so
-/// callers can chain. Required pieces (config) are checked at [`build`]
-/// time; missing config is rejected as [`ClientError::InvalidManifest`].
 ///
 /// # Example
 ///
@@ -26,8 +16,6 @@ use super::client::error::ClientError;
 ///     .layers(layer_descriptors)
 ///     .build()?;
 /// ```
-///
-/// [`build`]: ManifestBuilder::build
 #[derive(Default)]
 pub struct ManifestBuilder {
     artifact_type: Option<String>,
@@ -46,7 +34,6 @@ impl ManifestBuilder {
         Self::default()
     }
 
-    /// Set the manifest's `artifactType`.
     pub fn artifact_type(mut self, t: impl Into<String>) -> Self {
         self.artifact_type = Some(t.into());
         self
@@ -70,7 +57,6 @@ impl ManifestBuilder {
         Ok(self)
     }
 
-    /// Use raw bytes as the config blob.
     pub fn config_bytes(mut self, media_type: impl Into<String>, bytes: Vec<u8>) -> Self {
         self.config = Some(ManifestConfigBlob {
             media_type: media_type.into(),
@@ -79,26 +65,22 @@ impl ManifestBuilder {
         self
     }
 
-    /// Append one layer descriptor.
     pub fn layer(mut self, descriptor: crate::Descriptor) -> Self {
         self.layers.push(descriptor);
         self
     }
 
-    /// Append several layer descriptors. Order is preserved.
     pub fn layers(mut self, descriptors: impl IntoIterator<Item = crate::Descriptor>) -> Self {
         self.layers.extend(descriptors);
         self
     }
 
-    /// Set manifest-level annotations.
     pub fn annotations(mut self, annotations: std::collections::BTreeMap<String, String>) -> Self {
         self.annotations = Some(annotations);
         self
     }
 
-    /// Assemble the [`ManifestArtifacts`]. Validates layer sizes (negative
-    /// sizes are rejected) and serializes the manifest into canonical JSON.
+    /// Assemble the [`ManifestArtifacts`].
     ///
     /// # Errors
     ///
@@ -157,11 +139,7 @@ impl ManifestBuilder {
     }
 }
 
-/// Built artifact returned by [`ManifestBuilder::build`].
-///
-/// Carries the assembled manifest, its canonical bytes + digest, and the
-/// config blob with its digest. All fields owned; consume with field access
-/// or convert into the bare manifest via `.into()`.
+/// The manifest [`ManifestBuilder::build`] assembled, with its bytes, config blob and both digests.
 pub struct ManifestArtifacts {
     pub manifest: crate::ImageManifest,
     pub manifest_bytes: Vec<u8>,

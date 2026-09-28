@@ -45,9 +45,6 @@ pub struct PackageCopy {
     #[clap(long = "cascade", short = 'c')]
     cascade: bool,
 
-    // No doc comment on either flattened field: clap renders the *flattened
-    // struct's* own field docs, so anything written here reaches nobody and the
-    // struct's text reaches the user (`quality-cli-help.md`, render source).
     #[clap(flatten)]
     keep_tag: options::KeepTag,
 
@@ -83,9 +80,7 @@ impl PackageCopy {
         let source = self.source.with_domain(context.default_registry())?;
         let target = self.resolve_target(&source, context.default_registry())?;
 
-        // Everything below this line is argument-shaped and decided before a
-        // single request goes out — an invocation that cannot succeed must not
-        // first authenticate against a production registry.
+        // Decided before any request, or an invocation that cannot succeed first authenticates against the target.
         if source.digest().is_some() && source.tag().is_none() {
             if self.platform.len() != 1 {
                 return Err(UsageError::new(format!(
@@ -107,29 +102,16 @@ impl PackageCopy {
         }
 
         let annotations: BTreeMap<String, String> = self.annotation.iter().cloned().collect();
+        // No pre-emptive `ensure_auth` on the target, or it is contacted before `Publisher::copy` raises
+        // its exit-64 source-form refusals.
         let publisher = Publisher::new(context.remote_client()?.clone());
-        // No pre-emptive `ensure_auth` on the target. The source-form refusals
-        // that exit 64 are raised inside `Publisher::copy`, by
-        // `resolve_source_leaves`, which runs before the first target contact —
-        // so authenticating here made "the target registry is provably never
-        // contacted" false for exactly the invocations the ADR promises it for.
-        // Nothing is lost: every write authenticates itself first, at
-        // `oci/copy.rs` (`copy_blob`, and the leaf manifest PUT) and in
-        // `merge_platform_into_index`, so a bad target credential still fails
-        // before a single byte is transferred.
 
-        // Layers spool here on their way through, and the description artifact
-        // downloads here too. Under the OCX home rather than `$TMPDIR`, because
-        // a memory-backed `$TMPDIR` turns the spool's byte cap into a bound on
-        // how much RAM one promotion eats — the cap bounds the file, not the
-        // medium. Created once; `copy_leaf` makes its own subdirectory per leaf.
+        // Under the OCX home, not `$TMPDIR`: a memory-backed `$TMPDIR` turns the spool's byte cap into a RAM bound.
         let scratch_root = context.file_structure().temp.root().to_path_buf();
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .map_err(|e| ocx_util::error::FileError::new(&scratch_root, e))?;
 
-        // Says what this run will do, not what a copy does: `--dry-run -l info`
-        // asserting "copying" is a log line the run then contradicts.
         if self.dry_run {
             log::info!("planning a copy of {source} to {target}");
         } else {
@@ -152,12 +134,8 @@ impl PackageCopy {
             )
             .await?;
 
-        // The description is repository-level and independent of the version, so
-        // it is copied after the package landed and never instead of it. The
-        // outcome is a reported field rather than a stderr warning: `--format
-        // json` is how a CI job learns whether the catalog page travelled, and
-        // a dry run that silently dropped the flag printed a plan missing the
-        // one thing the flag asked for.
+        // Copied after the package lands, never instead of it; reported as a field, not a stderr
+        // warning, since `--format json` is how CI learns whether the description travelled.
         let description = if !self.description {
             None
         } else if self.dry_run {
@@ -177,32 +155,17 @@ impl PackageCopy {
         };
 
         let report = CopyReport::from_outcome(outcome, description);
-        // The receipt goes to stderr, leaving stdout to the per-platform rows —
-        // the single-table rule, and the Channel Rules' "receipts are
-        // diagnostics" (`subsystem-cli-api.md`).
         context.ui().status(report.action(), report.summary());
         context.api().report(&report)?;
-        // Reported first, then failed. A sidecar tag the target already holds
-        // under a different manifest is refused rather than overwritten — a
-        // `.sig` accumulates signatures as layers within itself, so a verbatim
-        // PUT would destroy every one the target has and the source does not.
-        // The leaf and the other sidecars landed, so this is a data fault in
-        // what the *target* holds, not a failed promotion: 65, the code
-        // registry-supplied state this build declines already carries. Exiting
-        // before the report would swallow the tag names, which are the only
-        // part of this an operator can act on.
+        // Sidecar conflicts exit 65 only after the report, or the conflicting tag names are lost.
         Ok(match report.sidecar_conflicts.is_empty() {
             true => ExitCode::SUCCESS,
             false => ExitCode::from(ocx_exit::ExitCode::DataError),
         })
     }
 
-    /// Resolves where the copy lands.
-    ///
-    /// `--to` rewrites the host and keeps everything else, which is the
-    /// promotion shape; `--identifier` states the whole reference. Neither means
-    /// the source repository at the default registry, which is only useful when
-    /// the source named a different one.
+    /// Where the copy lands: `--identifier` as given, else the source repository and tag at `--to`
+    /// or the default registry.
     fn resolve_target(
         &self,
         source: &ocx_oci::PackageRef,

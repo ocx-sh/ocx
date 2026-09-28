@@ -1,27 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! direnv / mise coexistence: does another per-prompt hook already own this
-//! directory's environment?
+//! direnv / mise coexistence: is another per-prompt hook managing this directory's env?
 //!
-//! Detection half of WP-4 (C-049, A-37). WP-11 owns the behavioural half:
-//! narrow `desired` to the global scope, revert the project scope, and print
-//! one info line per observed tool.
-//!
-//! **The yield signal is the other tool's live session state, never a file on
-//! disk** (C-020, C-049) — an `.envrc`, a `mise.toml` or a `.tool-versions`
-//! checked into a repo where the tool is not installed, not hooked, or not
-//! active in *this* shell must not suppress ocx activation: a config file is
-//! evidence of someone else's workflow, not of a live hook that will set the
-//! env at this prompt. Yielding on file presence would leave the project
-//! silently managed by nobody.
+//! Yield only on the other tool's live session state, never on an `.envrc` or `mise.toml` on disk,
+//! or a repo whose tool is not hooked is managed by nobody.
 
 use std::path::Path;
 
 use serde::Serialize;
 
-// Third-party sentinel names. Not `ocx_config::env::keys` — those are ocx's own
-// vars; these belong to direnv and mise and are never written by ocx.
 const DIRENV_DIR: &str = "DIRENV_DIR";
 const MISE_SHELL: &str = "MISE_SHELL";
 const MISE_ORIG_PATH: &str = "__MISE_ORIG_PATH";
@@ -40,9 +28,8 @@ pub enum Tool {
 
 /// One live-session observation: which tool, and the signal that proved it.
 ///
-/// `signal` is what `ocx shell state` renders, because a user staring at an
-/// `.envrc` will guess the wrong cause (C-050 reason 4) — it names the variable
-/// observed and, for direnv, the directory it named.
+/// `signal` is what `ocx shell state` renders: it names the variable observed and,
+/// for direnv, the directory it named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Observation {
     /// The tool observed live in this shell.
@@ -51,42 +38,18 @@ pub struct Observation {
     pub signal: String,
 }
 
-/// The typed yield verdict (C-049).
-///
-/// An empty `observed` means no yield: reconcile normally. A non-empty one
-/// means apply the **global** scope only, revert any project scope already
-/// applied, and print **one info line per observed tool**.
+/// The yield verdict: non-empty `observed` means apply the global scope only and revert the project scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Yield {
-    /// Every tool observed live, in detection order.
     pub observed: Vec<Observation>,
 }
 
-/// Detect which coexisting tools are live for `project_dir` (C-049).
-///
-/// A-37 — the two checks are **independent `if`s, never an `elif` chain**: ocx
-/// yields on a matching `DIRENV_DIR` **or** on `MISE_SHELL` /
-/// `__MISE_ORIG_PATH`, regardless of the other's state. With both sentinels set
-/// and matching, both observations appear. Red state: an `elif` between the two
-/// checks silently suppresses the second tool's line.
-///
-/// `project_dir` is the canonical directory the CWD walk resolved — direnv's
-/// arm compares against it, mise's arm does not use it.
+/// Detect which coexisting tools are live for the canonical `project_dir`.
 pub fn detect(project_dir: &Path) -> Yield {
     let mut observed = Vec::new();
 
-    // direnv arm. C-020: this reads one env var and compares strings — no
-    // stat, no shelling out to `direnv status`. A DIRENV_DIR naming some
-    // other (e.g. ancestor) directory is direnv managing a different
-    // project, not this one (S-020) — left unobserved, not partially matched.
-    //
-    // direnv exports the value as `-` followed by the absolute directory — the
-    // dash is direnv's own marker, not part of the path (`DIRENV_DIR=-/home/u/p`,
-    // verified against direnv 2.35.0). Comparing the raw value matches nothing a
-    // real direnv ever sets, so the prefix is stripped before the compare and the
-    // raw spelling is kept for `signal`, which is what the user sees in their own
-    // environment.
     if let Some(raw) = ocx_util::env::var(DIRENV_DIR)
+        // direnv prefixes the directory with `-`; strip it to compare, or no real direnv ever matches.
         && Path::new(raw.strip_prefix('-').unwrap_or(raw.as_str())) == project_dir
     {
         observed.push(Observation {
@@ -95,10 +58,8 @@ pub fn detect(project_dir: &Path) -> Yield {
         });
     }
 
-    // mise arm — deliberately a separate `if`, not `else if`/`elif` off the
-    // direnv arm above (A-37: independent, both fire when both are live).
-    // MISE_SHELL is mise's primary per-session sentinel; __MISE_ORIG_PATH
-    // covers a shell where only the PATH-restore half of the hook ran.
+    // A separate `if`, not `else if`, or the mise line vanishes when direnv is also live.
+    // `__MISE_ORIG_PATH` covers a shell where only the PATH-restore half of mise's hook ran.
     if let Some(value) = ocx_util::env::var(MISE_SHELL) {
         observed.push(Observation {
             tool: Tool::Mise,

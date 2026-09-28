@@ -1,34 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! JUnit XML sidecar for `ocx package test --script … --junit PATH`.
+//! JUnit XML sidecar for `ocx package test --script … --junit PATH`; the exit code stays the primary signal.
 //!
-//! This lives in `ocx_cli`, not `ocx_lib`, on purpose: homing the writer here
-//! keeps the `quick-junit` dependency off `ocx_lib`, the crate slated to
-//! split. The destination is a CI persistence channel with a provider-defined
-//! wire format (GitLab `artifacts:reports:junit`, the GitHub test-reporter
-//! actions), not a `DataInterface` table or JSON document. The v1 JSON
-//! envelope on stdout is unaffected — this file is written *in addition to*
-//! it, and the exit code stays the primary signal.
-//!
-//! **One invocation writes one file, truncated.** `ocx package test` runs one
-//! identifier, on one platform, with one script, so the report holds exactly
-//! one `<testcase>`. Two matrix jobs writing one path is a concurrent-write
-//! problem ocx does not try to solve — each job writes its own file and a CI
-//! reporter globs them afterwards, so ocx never reads an existing file.
-//!
-//! The element names are chosen so a reporter globbing per-platform artifacts
-//! groups them cleanly: the suite name is identical across platforms and the
-//! case name is the platform, giving one suite with one case per platform —
-//! the shape the GitHub test-reporter actions expect from downloaded
-//! artifacts.
-//!
-//! Serialization goes through `quick-junit` (the cargo-nextest crate). Script
-//! stdout is arbitrary bytes, so a correct writer needs attribute escaping
-//! *and* removal of the characters XML 1.0 forbids outright (`\x00`–`\x08`,
-//! `\x0b`, `\x0c`, `\x0e`–`\x1f`) — escaping alone does not give the second,
-//! and `quality-core.md` puts a hand-rolled wire-format serializer at Block
-//! tier. `quick_junit::XmlString` owns both (it also strips ANSI escapes).
+//! One invocation writes one truncated file with one `<testcase>`, never reading an existing one,
+//! so matrix jobs each write their own for a reporter to glob. `quick_junit::XmlString` also strips
+//! XML 1.0's forbidden characters from script stdout, which escaping alone misses.
 
 use std::path::Path;
 use std::time::Duration;
@@ -38,35 +15,27 @@ use quick_junit::{NonSuccessKind, Report, TestCase, TestCaseStatus, TestSuite};
 
 use crate::api::data::script_run::{ScriptRunReport, ScriptStatus};
 
-/// Appended to a capture that hit the 10 MiB cap, so whoever reads the merge
-/// request sees that the output stops early rather than that the tool went
-/// quiet.
+/// Appended to a capture that hit the 10 MiB cap, so a reader sees the output stop early.
 const TRUNCATION_MARKER: &str = "\n[output truncated by ocx]";
 
 /// Where the report goes and what identifies the run inside it.
 pub struct Target<'a> {
-    /// Destination path, exactly as `--junit` gave it. Parent directories are
-    /// created; an existing file is truncated.
+    /// Destination, exactly as `--junit` gave it.
     pub path: &'a Path,
-    /// The resolved package identifier — the suite name and the `classname`.
+    /// The suite name and the `classname`.
     pub identifier: &'a str,
-    /// The tested platform — the `<testcase name=>`, so a per-platform glob
-    /// merges into one suite with one case per platform.
+    /// The `<testcase name=>`, so a per-platform glob merges into one suite.
     pub platform: &'a str,
 }
 
 /// Renders the run as a JUnit report.
-///
-/// Pure: every decision the format makes is testable without touching disk.
 pub fn build(target: &Target<'_>, report: &ScriptRunReport) -> Report {
     let time = Duration::from_millis(report.run.as_ref().map_or(0, |run| run.duration_ms));
 
     let mut case = TestCase::new(target.platform, case_status(report));
     case.set_classname(target.identifier).set_time(time);
 
-    // GitLab uses `file` to link a failed test to its source; without it a
-    // testcase degrades to a bare name. `<stdin>` is deliberately omitted — it
-    // names nothing a reporter can open.
+    // GitLab links a failure to its source via `file`; `<stdin>` names nothing a reporter can open.
     if let Some(location) = report.assertion.as_ref().and_then(|a| a.location.as_ref())
         && location.file != "<stdin>"
     {
@@ -88,18 +57,11 @@ pub fn build(target: &Target<'_>, report: &ScriptRunReport) -> Report {
     report
 }
 
-/// Writes the report to `target.path`, creating parent directories.
-///
-/// Truncates: a second run over the same path replaces the file rather than
-/// appending or merging. Follows the `--save-readme` convention
-/// (`create_dir_all` then write), so `--junit build/junit/linux-amd64.xml`
-/// needs no `mkdir` step in a pipeline.
+/// Writes the report to `target.path`, creating parent directories and truncating an existing file.
 ///
 /// # Errors
 ///
-/// Returns an error when the directory cannot be created or the file cannot be
-/// written — a pipeline that asked for a report and silently got none is worse
-/// than a loud failure.
+/// When the directory cannot be created or the file cannot be written.
 pub async fn write(target: &Target<'_>, report: &ScriptRunReport) -> anyhow::Result<()> {
     let xml = build(target, report)
         .to_string()
@@ -117,11 +79,7 @@ pub async fn write(target: &Target<'_>, report: &ScriptRunReport) -> anyhow::Res
         .with_context(|| format!("failed to write the JUnit report to {}", target.path.display()))
 }
 
-/// Maps the run status onto the JUnit outcome.
-///
-/// `Failed` is a test verdict → `<failure>`. Everything else (an unusable
-/// script, a sandbox I/O fault, a timeout) says the test never delivered a
-/// verdict at all → `<error>`.
+/// `Failed` is a test verdict (`<failure>`); any other non-pass never delivered one (`<error>`).
 fn case_status(report: &ScriptRunReport) -> TestCaseStatus {
     let status_token = status_token(report.status);
     if matches!(report.status, ScriptStatus::Passed) {
@@ -137,19 +95,14 @@ fn case_status(report: &ScriptRunReport) -> TestCaseStatus {
 
     let mut status = TestCaseStatus::non_success(kind);
     status
-        // Attribute: one line, so a merge-request annotation reads as a
-        // sentence. The body carries the full multi-line diagnostic.
         .set_message(first_line(detail))
         .set_type(assertion.map_or(status_token, |a| a.kind.as_str()))
-        // The body is the diagnostic alone: the captured stdout/stderr already
-        // live in `<system-out>`/`<system-err>`, so appending them here again
-        // would duplicate a capture that can reach the 10 MiB cap.
+        // Diagnostic alone: the captures already sit in `<system-out>`/`<system-err>`, up to 10 MiB each.
         .set_description(detail);
     status
 }
 
-/// Stable snake_case token for a status, mirroring the JSON envelope's
-/// `status` field so both surfaces name an outcome the same way.
+/// Mirrors the JSON envelope's `status` field, so both surfaces name an outcome the same way.
 fn status_token(status: ScriptStatus) -> &'static str {
     match status {
         ScriptStatus::Passed => "passed",

@@ -1,36 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Resolved context for a single direct dependency, available during env
-//! interpolation.
-//!
-//! Lives in its own module so the env-resolution surface is one concept per
-//! file: the resolver computes; the dep context describes the inputs.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::install_info::InstallInfo;
 
 /// Resolved context for a single direct dependency, available during env interpolation.
-///
-/// Keyed by `dep.name()` (the explicit name or repository basename). Two
-/// variants encode the available data so consumers can never silently fan out
-/// from a fake install record:
-///
-/// - [`DependencyContext::Full`] — backs the runtime path. Carries the real
-///   `Arc<InstallInfo>`, so future template fields
-///   (`${deps.NAME.version}`, `${deps.NAME.digest}`) can read metadata
-///   without an extra lookup.
-/// - [`DependencyContext::PathOnly`] — backs the publish-time validator and
-///   the env-only runtime callers (the two-env composer) where no full
-///   `InstallInfo` is loaded. Only `installPath` is resolvable;
-///   metadata-dependent fields return `None`.
 #[derive(Debug, Clone)]
 pub enum DependencyContext {
-    /// Full install record — every field on [`InstallInfo`] is available.
     Full(Arc<InstallInfo>),
-    /// Identifier and resolved content path only — no metadata, no resolved deps.
+    /// Identifier and content path only, for callers without an [`InstallInfo`].
     PathOnly {
         id: ocx_oci::PinnedPackageRef,
         path: PathBuf,
@@ -38,25 +18,14 @@ pub enum DependencyContext {
 }
 
 impl DependencyContext {
-    /// Constructs a `DependencyContext` wrapping real install info.
     pub fn full(install_info: Arc<InstallInfo>) -> Self {
         Self::Full(install_info)
     }
 
-    /// Constructs a context from an identifier and a content path only.
-    ///
-    /// Used by call sites that have no full `InstallInfo` available —
-    /// `validate_entrypoints` (publish-time sentinels) and the two-env
-    /// composer (runtime, where only `${...installPath}` resolution is
-    /// required). Metadata-dependent template fields are
-    /// unresolvable on this variant and return `None`.
     pub fn path_only(id: ocx_oci::PinnedPackageRef, path: PathBuf) -> Self {
         Self::PathOnly { id, path }
     }
 
-    /// Returns the underlying `Arc<InstallInfo>` when the variant carries one.
-    ///
-    /// Returns `None` for [`DependencyContext::PathOnly`] — there is no install record.
     pub fn install_info(&self) -> Option<&Arc<InstallInfo>> {
         match self {
             Self::Full(info) => Some(info),
@@ -64,7 +33,7 @@ impl DependencyContext {
         }
     }
 
-    /// Returns the absolute content path for this dependency (`packages/.../content/`).
+    /// The dependency's absolute content path.
     pub fn install_path(&self) -> PathBuf {
         match self {
             Self::Full(info) => info.dir().content(),
@@ -72,7 +41,6 @@ impl DependencyContext {
         }
     }
 
-    /// Returns the full pinned OCI identifier for this dependency.
     pub fn identifier(&self) -> &ocx_oci::PinnedPackageRef {
         match self {
             Self::Full(info) => info.identifier(),

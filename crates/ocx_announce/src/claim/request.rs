@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Public request/outcome vocabulary for the claim orchestration (C-046), and
-//! the fixed pull/merge-request template built over it (C-067).
+//! Request/outcome vocabulary for the claim orchestration, and the fixed pull/merge-request template.
 //!
-//! [`OwnerIdentitySource`] and [`ClaimStatus`] are **JSON-report wire
-//! vocabularies**: their `Display` spellings are rendered into a parsed report
-//! and are one-way once shipped, so both carry an `ALL` array paired against a
-//! spelling-and-arity guard, the shape `CapabilityName` established in
-//! `forge/api.rs`. Neither carries `#[non_exhaustive]` — they are internal
-//! non-error enums, per `arch-principles.md` § Internal enum exhaustiveness and
-//! C-070.
+//! The `Display` spellings of [`OwnerIdentitySource`] and [`ClaimStatus`] are shipped JSON-report
+//! values; renaming one breaks every report consumer.
 
 use std::path::PathBuf;
 
@@ -20,23 +14,15 @@ use crate::forge::{ForkIdentity, PullRequest, PushAccess, RepoCoordinate};
 /// Where the claim writes its rendered root.
 #[derive(Debug, Clone)]
 pub enum ClaimTarget {
-    /// Write the root under this directory — no forge mutation. The forge is
-    /// still **read**, for the C-050 refusal and for owner resolution.
+    /// Write the root under this directory with no forge mutation; the forge is still read.
     Out(PathBuf),
     /// Open (or update) a pull request from a fork of the index repository.
     Fork(RepoCoordinate),
-    /// Commit the claim branch onto the index repository itself and open the
-    /// pull request from it — no fork anywhere.
+    /// Commit the claim branch onto the index repository itself and open the pull request from it.
     Direct,
 }
 
-/// Whether the claim moved the **claim branch** (C-046).
-///
-/// Deliberately the same two words announce uses, over a different subject: a
-/// committed root would already have exited 65 (C-050), so claim compares
-/// against the open claim branch rather than against the committed root. The
-/// consequence a builder copying announce gets wrong is that a `--out` run is
-/// **always** [`Self::Updated`].
+/// Whether the claim moved the claim branch; a `--out` run is always [`Self::Updated`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimStatus {
     /// The claim branch already carries a byte-identical root.
@@ -51,7 +37,6 @@ impl ClaimStatus {
 }
 
 impl std::fmt::Display for ClaimStatus {
-    /// `unchanged` / `updated`.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Unchanged => "unchanged",
@@ -60,16 +45,14 @@ impl std::fmt::Display for ClaimStatus {
     }
 }
 
-/// Which rule produced the owner list (C-046, C-048).
+/// Which rule produced the owner list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerIdentitySource {
     /// Every pair came from the forge's users API or the token identity.
     Resolved,
-    /// At least one `LOGIN:ID` was taken on the operator's word because the
-    /// users API was unreachable.
+    /// At least one `LOGIN:ID` was taken on the operator's word because the users API was unreachable.
     Asserted,
-    /// The list came from `GITLAB_USER_*` / `GITHUB_ACTOR*` with no server
-    /// confirmation.
+    /// The list came from `GITLAB_USER_*` / `GITHUB_ACTOR*` with no server confirmation.
     CiEnvironment,
 }
 
@@ -79,7 +62,6 @@ impl OwnerIdentitySource {
 }
 
 impl std::fmt::Display for OwnerIdentitySource {
-    /// `resolved` / `asserted` / `ci-environment` — note the **hyphen**.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Resolved => "resolved",
@@ -98,13 +80,10 @@ pub enum OwnerSpec {
     Resolved { login: String, id: u64 },
 }
 
-/// The `upstream` object a third-party package carries (C-047).
+/// The `upstream` object a third-party package carries.
 ///
-/// `repository_url` and `disclaimer` are **omitted, never `null`**, when their
-/// flags were not given: the live root schema sets `additionalProperties: false`
-/// and takes no placeholder null. C-047 states the omission rule for the outer
-/// object only, so the natural symmetric implementation — `Option` fields
-/// serialized as `null` — ships a root the schema refuses.
+/// `repository_url` and `disclaimer` are omitted when absent, never `null`: the root schema
+/// refuses a `null` there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
     /// `--upstream-org`. Always present when the object is.
@@ -115,37 +94,11 @@ pub struct Upstream {
     pub disclaimer: Option<String>,
 }
 
-/// Whether a value may be written into [`Upstream::repository_url`].
+/// Whether a value may be written into [`Upstream::repository_url`], which a catalog renders as an `href`.
 ///
-/// A real parse, not a prefix test, because the value reaches a **committed**
-/// index root verbatim (`build_root`) and a catalog renders it
-/// as an `href`. Two properties have to hold at once:
-///
-/// - **`http` or `https` scheme** (DX-64). `javascript:` or `data:` would become
-///   a live link in a downstream site that no ocx-side control covers.
-/// - **No userinfo.** GitLab hands every job a `CI_REPOSITORY_URL` shaped
-///   `https://gitlab-ci-token:<CI_JOB_TOKEN>@host/group/project.git`, so a
-///   pipeline forwarding the variable it already has would publish its own job
-///   token into a public governance artifact (CWE-522). Both halves are checked
-///   — `https://user@host/p` carries no password and is still refused, because
-///   a login is not a repository URL either.
-///
-/// `url::Url` rather than a hand-rolled authority split: the parser already
-/// folds the scheme's case and decides where the authority ends, and this repo
-/// owns no URL grammar (`quality-core.md` § Don't Own Non-Domain Code). It also
-/// refuses the empty-authority form `https://` and every base-relative one
-/// (`example.com/x`, `//example.com/x`) for free.
-///
-/// One measured difference from the prefix test this replaced: `https:///acme/x`
-/// is **accepted**. WHATWG's special-authority-ignore-slashes state folds the
-/// extra slash away, so the parser reads it as host `acme`, path `/x` — an
-/// ordinary single-label https URL, carrying no scheme abuse and no userinfo.
-/// Refusing it would be a guess about typos, not a publication rule.
-///
-/// A predicate rather than a `Result`: the flag name belongs to the CLI that
-/// owns the flag, and the refusal deliberately carries **no** detail — echoing
-/// the rejected value back is how the job token would reach the CI log the
-/// refusal was meant to keep it out of (CWE-532).
+/// Only `http`/`https`, or a `javascript:`/`data:` value becomes a live link downstream.
+/// No userinfo: GitLab's `CI_REPOSITORY_URL` embeds the job token, which forwarding would publish.
+/// A bare `bool`, because echoing a refused value would print that token in the CI log.
 #[must_use]
 pub fn upstream_repository_url_is_publishable(value: &str) -> bool {
     let Ok(url) = url::Url::parse(value) else {
@@ -157,14 +110,11 @@ pub fn upstream_repository_url_is_publishable(value: &str) -> bool {
 /// One package claim.
 #[derive(Debug, Clone)]
 pub struct ClaimRequest {
-    /// The logical `<namespace>/<package>` identifier, already carrying its
-    /// resolved registry domain — the `OCX_DEFAULT_REGISTRY` resolution lives at
-    /// the CLI boundary, so claim renders the identifier it is handed.
+    /// The logical `<namespace>/<package>` identifier, its registry already resolved by the caller.
     pub package: ocx_oci::PackageRef,
     /// `--repository`, the `oci://host/path` physical pointer, unparsed.
     pub repository: String,
-    /// `--owner`, in the order given. Empty means "not given" — the ladder then
-    /// consults the CI environment and the token identity.
+    /// `--owner`, in the order given; empty means the ladder consults the CI environment and token.
     pub owners: Vec<OwnerSpec>,
     /// The `upstream` object, when `--upstream-org` was given.
     pub upstream: Option<Upstream>,
@@ -172,15 +122,11 @@ pub struct ClaimRequest {
     pub target: ClaimTarget,
     /// The index repository coordinate (default `ocx-sh/index`).
     pub index_repo: RepoCoordinate,
-    /// `[registries."<ns>"].trusted_hosts` for the package's **logical**
-    /// registry — the sole SSRF escape hatch (design register X2), and the same
-    /// value `AnnounceRequest` carries for the same reason: claim observes the
-    /// `__ocx.desc` artifact at the physical repository, which is operator-typed
-    /// here and root-supplied on a re-claim.
+    /// `[registries."<ns>"].trusted_hosts` for the package's logical registry: the sole SSRF escape
+    /// hatch for dialing the physical repository.
     pub trusted_hosts: Vec<String>,
-    /// The plain-HTTP allowance the client is built with, so the pre-flight
-    /// decides the dial **scheme** — and hence which proxy variable applies
-    /// (ocx#407) — from what the client will actually dial.
+    /// The plain-HTTP allowance the client is built with; the pre-flight picks the dial scheme, and so
+    /// the proxy variable, from it.
     pub insecure_hosts: Vec<String>,
 }
 
@@ -195,33 +141,13 @@ pub struct ClaimOutcome {
     pub status: ClaimStatus,
     /// The resolved list written into the root — never a bare login.
     pub owners: Vec<ResolvedOwner>,
-    /// Which rule produced [`Self::owners`]. Rendered **once** per run and read
-    /// from here by both the request body and the report, so the three surfaces
-    /// cannot disagree.
+    /// Which rule produced [`Self::owners`]; the request body and the report both read this one value.
     pub owner_identity_source: OwnerIdentitySource,
-    /// The identity that authored the request, when known: the token identity,
-    /// else the CI-environment identity. `None` when neither is available — a
-    /// bare job token with no CI user variables, **reachable only with an
-    /// explicit `--owner`**, since the same state yields no detected owner
-    /// either.
-    ///
-    /// Distinct from [`Self::owners`] by construction: authorship is the
-    /// credential's, ownership is the explicit list, and the two never
-    /// substitute. Resolved in
-    /// [`claim::owners`](super::owners) beside the owner ladder — see
-    /// [`OwnerResolution::author`](super::owners::OwnerResolution::author).
+    /// The token identity, else the CI-environment identity; `None` when neither is available.
+    /// Authorship never substitutes for ownership, nor the reverse.
     pub author: Option<ResolvedOwner>,
-    /// Which rung produced [`Self::author`] — the sibling of
-    /// [`Self::owner_identity_source`], over the authoring identity rather than
-    /// the owner list, and the answer to the question the login alone cannot
-    /// settle: `resolved` means the forge's own assertion about the credential,
-    /// `ci-environment` an ordinary `GITLAB_USER_*` / `GITHUB_ACTOR*` read an
-    /// earlier pipeline step can set to anything. Without the word, a consumer
-    /// cannot tell an attested author from an asserted one, and the two look
-    /// identical in [`Self::author`].
-    ///
-    /// `None` exactly when [`Self::author`] is. `asserted` is unreachable: no
-    /// operator word is ever taken for the author.
+    /// Which rung produced [`Self::author`]: `resolved` is forge-attested, `ci-environment` is
+    /// settable by any earlier pipeline step. `None` exactly when [`Self::author`] is; never `asserted`.
     pub author_identity_source: Option<OwnerIdentitySource>,
     /// The claim branch, so a script need not re-derive the naming convention.
     pub branch: String,
@@ -231,31 +157,20 @@ pub struct ClaimOutcome {
     pub fork: Option<ForkIdentity>,
     /// Relative paths written under the `--out` directory; empty otherwise.
     pub written_paths: Vec<String>,
-    /// The preflight rows, held as a [`PushAccess`] rather than a bare vector so
-    /// an empty `checks` is unrepresentable (C-069).
+    /// The preflight rows.
     pub push_access: PushAccess,
 }
 
-/// The pull/merge-request title (C-067).
-///
-/// A fixed template over the logical name and nothing else.
+/// The pull/merge-request title: a fixed template over the logical name and nothing else.
 #[must_use]
 pub fn request_title(name: &str) -> String {
     format!("claim: {name}")
 }
 
-/// The pull/merge-request body (C-067).
+/// The pull/merge-request body.
 ///
-/// A fixed template over **structured values only**: the logical name, the
-/// physical repository, the branch, every resolved `login:id` pair, and the
-/// [`OwnerIdentitySource`] word. No operator free text is interpolated — the
-/// `--upstream-*` values reach the root file alone, where the serializer escapes
-/// them — and owners render as bare `login:id`, **never `@login`**, so a claim
-/// fires no mentions in a repository humans review.
-///
-/// `source` is passed in rather than re-derived so the word in the body and the
-/// word on [`ClaimOutcome::owner_identity_source`] are one rendering of one
-/// value.
+/// A fixed template over structured values only, so no operator free text reaches a body a human
+/// merges.
 #[must_use]
 pub fn request_body(
     name: &str,
@@ -264,11 +179,7 @@ pub fn request_body(
     owners: &[ResolvedOwner],
     source: OwnerIdentitySource,
 ) -> String {
-    // Every interpolated value is structured: `name` and `repository` come from
-    // the identifier grammar, `branch` from `claim_branch`, each pair from a
-    // charset-guarded login plus a numeric id, and `source` from an enum. The
-    // pairs are bare `login:id` — an `@` here would fire a mention in a
-    // repository humans review.
+    // Bare `login:id`, never `@login`, or the claim fires a mention in a repository humans review.
     let pairs = owners
         .iter()
         .map(|owner| format!("{}:{}", owner.login, owner.id))

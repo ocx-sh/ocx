@@ -2,13 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 /// Whether to materialize resolved packages into the object store.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--pull` / `--no-pull` flags. The two use POSIX last-wins semantics
-/// (`overrides_with`) — combining the flags is not an error (git
-/// `--[no-]verify` idiom). The default differs per command (eager for
-/// `add`/`lock`/`update`, lazy for `env`), so resolve with
-/// [`Pull::enabled`], passing the command's default.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Pull {
     /// Materialize resolved packages into the object store, installing
@@ -24,9 +17,7 @@ pub struct Pull {
 }
 
 impl Pull {
-    /// Resolve whether materialization is enabled. `default` is the
-    /// command's behavior when neither flag is given; an explicit
-    /// (last-wins) flag overrides it.
+    /// Whether materialization is enabled; `default` is the command's behavior when neither flag is given.
     pub fn enabled(&self, default: bool) -> bool {
         if self.pull {
             true

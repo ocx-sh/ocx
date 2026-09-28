@@ -12,21 +12,18 @@ use crate::error::Error as PackageError;
 type Result<T> = std::result::Result<T, PackageError>;
 use ocx_oci::{media_type::MEDIA_TYPE_PNG, media_type::MEDIA_TYPE_SVG};
 
-/// Repository-level description containing a README, optional logo,
-/// and manifest-level annotations (title, summary, keywords, etc.).
+/// Repository-level description: README, optional logo and manifest annotations.
 pub struct Description {
     pub readme: String,
     pub logo: Option<Logo>,
     pub annotations: BTreeMap<String, String>,
 }
 
-/// A logo image with its raw bytes and media type.
 pub struct Logo {
     pub data: Vec<u8>,
     pub media_type: &'static str,
 }
 
-/// Returns the media type for a logo file based on its extension.
 fn logo_media_type(path: &Path) -> Result<&'static str> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("png") => Ok(MEDIA_TYPE_PNG),
@@ -42,18 +39,12 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// Reads a logo file and verifies its bytes are the format its extension claims.
 ///
-/// The verification exists because an unchecked `--logo` silently overwrites a
-/// published logo with whatever is on disk — a Git LFS pointer left by a checkout
-/// without `lfs: true`, an empty file, an HTML error page — and the catalog then
-/// renders nothing. Failing here turns that into a loud publish failure.
-///
 /// # Errors
 ///
-/// - [`Error::UnsupportedLogoFormat`](super::error::Error::UnsupportedLogoFormat)
-///   when the extension is neither `png` nor `svg`.
-/// - An I/O error carrying the path when the file cannot be read.
-/// - [`Error::InvalidLogoContent`](super::error::Error::InvalidLogoContent) when the
-///   bytes are not the claimed format.
+/// [`UnsupportedLogoFormat`](super::error::Error::UnsupportedLogoFormat) for an
+/// extension other than `png`/`svg`, an I/O error, or
+/// [`InvalidLogoContent`](super::error::Error::InvalidLogoContent) when the bytes
+/// are not the claimed format.
 pub fn load_logo(path: &Path) -> Result<Logo> {
     let media_type = logo_media_type(path)?;
     let data = std::fs::read(path).map_err(|e| super::error::file_error(path, e))?;
@@ -61,13 +52,8 @@ pub fn load_logo(path: &Path) -> Result<Logo> {
     Ok(Logo { data, media_type })
 }
 
-/// Verifies logo bytes against the media type its extension claimed.
-///
-/// PNG is an exact signature check. SVG is UTF-8 text carrying an `<svg` element —
-/// a presence check, not a parse: it rejects every non-SVG payload seen in practice
-/// (LFS pointers, empty files, HTML, binaries) without owning an XML parser. A text
-/// file that merely mentions `<svg` passes; the fix for that is a real XML parse,
-/// which no failure so far justifies.
+/// Verifies logo bytes against the media type its extension claimed; SVG is a
+/// `<svg` presence check, not a parse.
 fn verify_logo_bytes(path: &Path, media_type: &'static str, data: &[u8]) -> Result<()> {
     let is_png = media_type == MEDIA_TYPE_PNG;
     let valid = if is_png {
@@ -92,8 +78,7 @@ pub struct Frontmatter {
     pub keywords: Option<Keywords>,
 }
 
-/// Keywords can be specified as a comma-separated string or a YAML list.
-/// Both forms normalize to a comma-separated string.
+/// Keywords from a comma-separated string or a YAML list, normalized to the former.
 #[derive(Debug, Clone)]
 pub struct Keywords(pub String);
 
@@ -122,14 +107,12 @@ pub struct ParsedReadme {
     pub body: String,
 }
 
-/// Parse YAML frontmatter from a README string.
+/// Splits a README into YAML frontmatter and body.
 ///
-/// Frontmatter must start at line 1 with `---` and end with a matching `---` fence.
-/// If parsing fails, a warning is logged and the full content is returned as the body.
+/// Without a well-formed frontmatter block the whole input is the body.
 pub fn parse_readme(raw: &str) -> ParsedReadme {
     let fence = "---";
 
-    // Must start with `---` followed by a newline.
     let after_open = if let Some(rest) = raw.strip_prefix("---\r\n") {
         rest
     } else if let Some(rest) = raw.strip_prefix("---\n") {
@@ -141,13 +124,11 @@ pub fn parse_readme(raw: &str) -> ParsedReadme {
         };
     };
 
-    // Find the closing fence.
     let close_pos = after_open
         .find("\n---\n")
         .map(|p| (p, p + "\n---\n".len()))
         .or_else(|| after_open.find("\n---\r\n").map(|p| (p, p + "\n---\r\n".len())))
         .or_else(|| {
-            // Closing fence at end of file with no trailing newline.
             if after_open.ends_with("\n---") {
                 let p = after_open.len() - fence.len();
                 Some((p, after_open.len()))
@@ -157,7 +138,6 @@ pub fn parse_readme(raw: &str) -> ParsedReadme {
         });
 
     let Some((yaml_end, body_start)) = close_pos else {
-        // No closing fence — treat as no frontmatter.
         return ParsedReadme {
             frontmatter: Frontmatter::default(),
             body: raw.to_string(),

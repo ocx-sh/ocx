@@ -16,31 +16,12 @@ use super::transport::{MountOutcome, OciTransport, ProgressFn, Result};
 use crate::auth;
 use crate::transport_policy;
 
-/// Real OCI transport that delegates to the `oci_client` crate.
-///
-/// Handles authentication internally via [`auth::Auth`] so that callers
-/// (and the [`OciTransport`] trait surface) don't need to carry auth state.
-///
-/// # Auth patterns
-///
-/// The underlying `oci_client::Client` uses two styles of authentication:
-///
-/// - **Explicit**: Some methods (`list_tags`, `catalog`, `fetch_manifest_digest`,
-///   `pull_manifest_raw`) require an `&Auth` parameter — we pass credentials
-///   via [`auth_for`](Self::auth_for).
-/// - **Internal**: Other methods (`pull_blob`, `push_blob`, `push_manifest_raw`)
-///   manage auth internally via cached tokens. No explicit credentials are needed.
-///
-/// The [`authenticate`](Self::authenticate) method pre-populates the token
-/// cache with a Push scope, used before `push_manifest` where the registry
-/// may require explicit push authorization upfront.
+/// Real OCI transport over the `oci_client` fork, resolving auth itself via [`auth::Auth`].
 #[derive(Clone)]
 pub(super) struct NativeTransport {
     client: crate::native::Client,
     auth: auth::Auth,
-    /// Wait before the first push restart. [`PUSH_RETRY_INITIAL_BACKOFF`]
-    /// everywhere but the wire tests, which shrink it so proving the restart
-    /// costs milliseconds instead of the shipped seconds.
+    /// Wait before the first push restart; only the wire tests shrink it.
     push_retry_backoff: std::time::Duration,
 }
 
@@ -53,23 +34,16 @@ impl NativeTransport {
         }
     }
 
-    /// Shrinks the restart backoff for a test that counts *requests*, not
-    /// seconds.
+    /// Shrinks the restart backoff for a test that counts requests, not seconds.
     ///
-    /// The shipped 1 s + 2 s ladder is a thundering-herd control, and no
-    /// assertion in `push_wire_tests` reads the wait — they read how many
-    /// sessions were opened and which error came back. Waiting it out in real
-    /// time buys nothing and costs 3 s of every run.
-    /// `the_shipped_push_retry_backoff_is_one_second` is what stops this seam
-    /// from silently becoming the production value.
+    /// `the_shipped_push_retry_backoff_is_one_second` keeps this seam from becoming the production value.
     #[cfg(test)]
     pub(super) fn with_push_retry_backoff(mut self, backoff: std::time::Duration) -> Self {
         self.push_retry_backoff = backoff;
         self
     }
 
-    /// The restart backoff this transport will actually use — the seam
-    /// `the_shipped_push_retry_backoff_is_one_second` reads to pin the default.
+    /// The restart backoff this transport will use.
     #[cfg(test)]
     pub(super) fn push_retry_backoff(&self) -> std::time::Duration {
         self.push_retry_backoff
@@ -91,62 +65,8 @@ impl NativeTransport {
 
 /// Classifies any failed registry operation onto the [`ClientError`] taxonomy.
 ///
-/// Three buckets, and the split that matters is the last two:
-/// [`ClientError::RegistryTransient`] (exit 75) promises the same command may
-/// succeed if it is run again, [`ClientError::Registry`] (exit 69) promises it
-/// will not, and [`ClientError::Authentication`] (exit 80) says the credentials
-/// are the problem. A connect that never completed and a request that timed out
-/// belong in the first: nothing about the request was ever answered, least of
-/// all the credentials. One connect failure is carved out of that: a connect
-/// that died on the verifier refusing the registry's certificate. The registry
-/// did answer -- with a certificate -- and the verdict on it does not change
-/// from one dial to the next, so it is 69, the code the index client gives the
-/// same handshake -- not 75, which tells `push_blob` to restart the upload
-/// twice and a CI wrapper to run the command again.
-///
-/// # Two shapes carry the same status code
-///
-/// A 429 or a 403 reaches this function as *either* an enveloped
-/// `RegistryError` or a bare `ServerError`, depending on which fork code path
-/// produced it. `validate_registry_response` parses the OCI error envelope out
-/// of any 4xx body, but the push path's `extract_location_header` turns every
-/// non-`202` answer into a `ServerError` without ever looking at the body — so
-/// a 401 rejecting a chunk `PATCH` arrives as `ServerError { code: 401 }`.
-/// Both shapes must be classified or half the wire surface falls to the
-/// catch-all.
-///
-/// # Why auth is checked before rate limiting on an envelope
-///
-/// An envelope may carry several codes. Auth wins because the costs are
-/// asymmetric under retry: retrying a denial spends the budget and can trip an
-/// account lockout, while reading a rate limit as an auth failure only misnames
-/// a wait the caller was going to take anyway.
-///
-/// # Why only 429 / 502 / 503 / 504 are transient
-///
-/// The set is deliberately issue-scoped, not "every 5xx". A 500 is a server
-/// bug — a rerun hits the same bug, so it stays 69. A 408 is rare from a
-/// registry, and the case it would cover is already transient by another
-/// route: reqwest surfaces a client-side timeout as `RequestError`, matched
-/// above.
-///
-/// # Why two wire failures leave the registry buckets entirely
-///
-/// A content-type refusal and a digest verification failure both say the same
-/// thing: the bytes that arrived are not the bytes that were asked for. Exit 65
-/// says exactly that, and says a rerun cannot fix it. Exit 69 says the opposite
-/// -- it invites a retry wrapper to fetch the same wrong bytes again, and it
-/// reports a mis-routed mirror as an unavailable registry.
-///
-/// # Why there is no `_` arm
-///
-/// The fork's `OciDistributionError` is not `#[non_exhaustive]` and is
-/// path-vendored, so ocx controls the version. A catch-all here would ship
-/// every future guard the fork grows silently mis-classified -- which is
-/// exactly how `CrossHostRefused` and `InsecureAuthRealm` first landed on
-/// "registry unreachable, retry with backoff". An exhaustive match turns that
-/// into a compile error at the next submodule bump, which is the only
-/// compile-time guarantee available.
+/// [`ClientError::RegistryTransient`] (75) promises a rerun may succeed, [`ClientError::Registry`] (69) that it
+/// will not, [`ClientError::Authentication`] (80) blames the credentials.
 pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
     use oci_client::errors::DigestError as WireDigestError;
     use oci_client::errors::OciDistributionError::{
@@ -160,10 +80,8 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
     };
     use oci_client::errors::OciErrorCode;
     match &e {
-        // Before the connect arm, which it would otherwise match: a refused
-        // certificate is a connect failure to reqwest, and a terminal one
-        // here -- carrying the remedy (extra CA roots), which the verdict
-        // alone never names.
+        // Before the connect arm, which would otherwise match: a refused certificate is terminal, and carries the
+        // extra-CA-roots remedy.
         RequestError(request) if transport_policy::is_tls_certificate_refusal(request) => {
             let url = request.url().cloned();
             ClientError::Registry(Box::new(transport_policy::UntrustedCertificateHint::for_url(
@@ -171,53 +89,28 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
                 e,
             )))
         }
-        // A connect that never completed against an `https://` URL is the shape
-        // a plain-HTTP registry produces, and the scheme is itself the proof
-        // that the host is NOT in the plain-HTTP allowance -- a host that were
-        // would have been contacted over `http`. So the remediation can be
-        // named without knowing the allowance set here. It stays TempFail: a
-        // refused connection and a DNS failure are the common causes and both
-        // are retryable, and mis-labelling those as terminal would also stop
-        // `push_blob`'s transient-only retry.
+        // Stays transient, or `push_blob`'s retry stops on common refused-connection/DNS causes; an `https` connect
+        // proves the host is not plain-HTTP-allowed, so the hint names it unchecked.
         RequestError(request) if request.is_connect() => match https_allowance_name(request.url()) {
             Some(host) => ClientError::RegistryTransient(Box::new(PlainHttpAllowanceHint { host, source: e })),
             None => ClientError::RegistryTransient(Box::new(e)),
         },
         RequestError(request) if request.is_timeout() => ClientError::RegistryTransient(Box::new(e)),
-        // The two typed guards -- the only two shapes that name a destination and
-        // refuse it. See `ClientError::UnsafeDestination` for why 65.
         CrossHostRefused { .. } | InsecureAuthRealm { .. } => ClientError::UnsafeDestination(Box::new(e)),
-        // The fork's redirect policy ending a chain with `attempt.error(..)`:
-        // either an `https` -> `http` hop, or the hop count exceeding
-        // `MAX_REDIRECTS`. A closure inside reqwest, so a reqwest error rather
-        // than a typed variant.
-        //
-        // The limit branch reaches here only because it errors rather than
-        // stopping: `attempt.stop()` hands the 3xx back as an `Ok` response,
-        // which `error_for_status_ref` reads as success -- a blob behind an
-        // over-long chain then answered "exists" to a HEAD and its layer was
-        // never uploaded.
+        // Redirect-policy refusals (https -> http, hop limit) must arrive as errors: `attempt.stop()` returns the 3xx
+        // as `Ok`, reporting an unwritten layer as uploaded.
         RequestError(request) if request.is_redirect() => ClientError::UnfollowedRedirect(Box::new(e)),
         AuthenticationFailure(_) | UnauthorizedError { .. } => ClientError::Authentication(Box::new(e)),
         ServerError { code: 401 | 403, .. } => ClientError::Authentication(Box::new(e)),
-        // A 3xx that reached ocx as a *status* is a redirect no client acted on,
-        // from either of two paths:
-        //
-        // - the upload path, which issues its registry-supplied session URLs on a
-        //   `Policy::none()` client precisely so a mid-session handoff surfaces
-        //   instead of replaying the blob body to a foreign host (CWE-918);
-        // - a redirect `tower-http` could not follow at all -- a missing or
-        //   unparseable `Location`, or a body it cannot clone -- which it hands
-        //   back as the 3xx itself on ANY client, whatever the policy.
-        //
-        // The two are indistinguishable here: both arrive as `ServerError`, and
-        // the second is a malformed answer, not a refusal. Both are terminal --
-        // a rerun walks the same chain to the same answer.
+        // A 3xx no client acted on (a declined mid-upload handoff, an unfollowable redirect); a rerun walks
+        // the same chain.
         ServerError { code: 301..=308, .. } => ClientError::UnfollowedRedirect(Box::new(e)),
+        // Only these four: a 500 repeats on rerun, and a 408 is caught by `is_timeout` above.
         ServerError {
             code: 429 | 502 | 503 | 504,
             ..
         } => ClientError::RegistryTransient(Box::new(e)),
+        // On an envelope, auth wins over rate-limit: retrying a denial risks an account lockout.
         RegistryError { envelope, .. } => {
             let has = |wanted: OciErrorCode| envelope.errors.iter().any(|err| err.code == wanted);
             if has(OciErrorCode::Unauthorized) || has(OciErrorCode::Denied) {
@@ -228,20 +121,14 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
                 ClientError::Registry(Box::new(e))
             }
         }
-        // A manifest request answered with HTML is a mis-delivered response, not
-        // an unavailable registry: 65 says the bytes were wrong, 69 would tell a
-        // retry wrapper the registry might answer differently next time.
+        // Wrong bytes (65), not an unavailable registry: 69 would invite a retry wrapper.
         UnexpectedContentType { .. } => ClientError::NotAManifest(Box::new(e)),
-        // The wire proved the bytes are not what the digest claimed. Same 65,
-        // same reason. Only this one `DigestError` variant moves: the others
-        // (an unusable algorithm, a malformed header) are the registry giving a
-        // bad answer rather than serving corrupted content, so they stay 69.
+        // Only this `DigestError` moves to 65; the others are a bad answer, not corrupted content, and stay 69.
         DigestError(WireDigestError::VerificationError { expected, actual }) => ClientError::DigestMismatch {
             expected: expected.clone(),
             actual: actual.clone(),
         },
-        // Everything the registry answered that ocx cannot use, enumerated so
-        // the next fork variant is a compile error rather than a silent 69.
+        // No `_` arm, so a new fork variant is a compile error rather than a silently mis-classified 69.
         ConfigConversionError(_)
         | DigestError(_)
         | GenericError(_)
@@ -270,48 +157,22 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
     }
 }
 
-/// The `[registries."<name>"]` key that would have licensed plain HTTP for the
-/// host this failed request was addressed to, when the request used `https`.
+/// The `[registries."<name>"]` key that would have licensed plain HTTP for this `https` URL's host.
 ///
-/// `None` for any other scheme or a URL with no host: the hint is only correct
-/// when TLS is what was attempted.
-///
-/// # One case where the hint under-quotes
-///
-/// This is the only one of the four plain-HTTP messages that DERIVES the name
-/// instead of quoting the configured string, and the two sides normalise
-/// differently. The `url` crate drops a scheme-default port at parse time, so
-/// `https://mirror.corp:443/` yields `mirror.corp` -- but `config::mirror`'s
-/// `parse_url` keeps the authority verbatim, and `resolve_registry()` passes it
-/// through unchanged, so a name configured as `mirror.corp:443` is what the gate
-/// actually compares. For that one redundant spelling the hint names a key that
-/// would grant nothing. `registry_error` holds only the post-parse `Url` and
-/// cannot recover the configured form, so this is stated rather than fixed.
-///
-/// Twin on the other side of the submodule boundary: the fork's `url_authority`
-/// derives the same `host[:port]` and decides whether a plaintext realm is
-/// ADMITTED, where this one tells the operator what to write to admit one. A
-/// crate boundary rules out sharing the function, so a change to either wants a
-/// look at the other.
+/// Misses a host configured with its default port (`mirror.corp:443`); the fork's `url_authority` derives the
+/// same `host[:port]`, so change both together.
 fn https_allowance_name(url: Option<&reqwest::Url>) -> Option<String> {
     let url = url.filter(|url| url.scheme() == "https")?;
     let host = url.host_str()?;
     Some(match url.port() {
-        // `Url::port` is `None` on the scheme's default port, which is exactly
-        // when the allowance is written as the bare host.
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
     })
 }
 
-/// Carries the plain-HTTP remediation on a failed HTTPS connect.
+/// Carries the plain-HTTP remediation on a failed HTTPS connect, whose rustls message names neither remedy.
 ///
-/// A registry that speaks plain HTTP answers a TLS `ClientHello` with an HTTP
-/// response, which rustls reports as "received corrupt message of type
-/// InvalidContentType" -- legible only to someone who has met it before, and
-/// naming neither of the two ways to allow plaintext. Wrapping rather than
-/// adding a `ClientError` variant keeps the transient bucket, and with it
-/// `push_blob`'s retry and `via_mirror`'s annotation, exactly as they were.
+/// A wrapper, not a `ClientError` variant, so the failure stays transient and keeps `push_blob`'s retry.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "could not connect to '{host}' over https; if it serves plain HTTP, set insecure = true \
@@ -323,9 +184,7 @@ struct PlainHttpAllowanceHint {
     source: oci_client::errors::OciDistributionError,
 }
 
-/// Maps OCI distribution errors to [`ClientError::ManifestNotFound`] when the
-/// registry indicates the manifest does not exist (404 / MANIFEST_UNKNOWN),
-/// and defers to [`registry_error`] for everything else.
+/// Maps a 404 / `MANIFEST_UNKNOWN` to [`ClientError::ManifestNotFound`], else defers to [`registry_error`].
 fn manifest_not_found_or_registry_error(
     e: oci_client::errors::OciDistributionError,
     image: &crate::native::Reference,
@@ -349,14 +208,9 @@ fn manifest_not_found_or_registry_error(
     }
 }
 
-/// Maps OCI distribution errors to [`ClientError::RepositoryNotFound`] when the
-/// registry indicates the repository does not exist (404 / NAME_UNKNOWN),
-/// and defers to [`registry_error`] for everything else.
+/// Maps a 404 / `NAME_UNKNOWN` to [`ClientError::RepositoryNotFound`], else defers to [`registry_error`].
 ///
-/// Used by `list_tags` so callers can distinguish an authoritative
-/// "repository absent" (legitimately empty, e.g. before the first publish)
-/// from a transient failure — treating the two alike is the fail-open
-/// hazard behind issue #157.
+/// Kept apart, or an absent repository and a transient failure read alike and callers fail open.
 fn repository_not_found_or_registry_error(
     e: oci_client::errors::OciDistributionError,
     image: &crate::native::Reference,
@@ -378,13 +232,9 @@ fn repository_not_found_or_registry_error(
     }
 }
 
-/// Maps OCI distribution errors to [`ClientError::ReferrersUnsupported`] when
-/// the registry returns HTTP 404 for `/v2/<name>/referrers/<digest>`, and
-/// falls back to [`ClientError::Registry`] for everything else.
+/// Maps a referrers-endpoint 404 to [`ClientError::ReferrersUnsupported`], else [`ClientError::Registry`].
 ///
-/// A 404 here means the endpoint itself is absent (registry lacks the OCI
-/// 1.1 Referrers API) — distinct from a 200 with an empty `manifests` array,
-/// which means the subject exists but has zero known referrers.
+/// A 404 means no Referrers API; a subject with no referrers is a 200 with an empty list.
 fn referrers_unsupported_or_registry_error(
     e: oci_client::errors::OciDistributionError,
     image: &crate::native::Reference,
@@ -411,12 +261,9 @@ fn referrers_unsupported_or_registry_error(
     }
 }
 
-/// Filters referrer entries by `artifact_type` (when provided) and converts
-/// the survivors to [`crate::Descriptor`].
+/// Filters referrer entries by `artifact_type` and converts them to [`crate::Descriptor`].
 ///
-/// The OCI spec permits a server to ignore the `artifactType` query filter
-/// (or apply it without setting the advisory `OCI-Filters-Applied` header),
-/// so this client-side pass is the only filtering callers can rely on.
+/// The only filtering callers can rely on: a server may ignore the query filter.
 fn filter_and_convert_referrers(
     entries: Vec<oci_client::manifest::ImageIndexEntry>,
     artifact_type: Option<&str>,
@@ -432,11 +279,7 @@ fn filter_and_convert_referrers(
             digest: entry.digest,
             size: entry.size,
             urls: None,
-            // Preserve the referrer's artifactType. The Referrers-API index
-            // carries it per descriptor; discarding it here blinds every
-            // consumer's client-side artifactType check (the verify pipeline
-            // re-filters to Sigstore bundles), which would drop server-matched
-            // referrers as if none existed.
+            // Kept, or every consumer's client-side artifactType re-filter drops server-matched referrers.
             artifact_type: entry.artifact_type,
             annotations: entry.annotations,
         })
@@ -543,16 +386,8 @@ impl OciTransport for NativeTransport {
             .pull_blob(image, digest_str.as_str(), &mut file)
             .await
             .map_err(registry_error)?;
-        // Explicitly flush + close the write handle before returning.
-        //
-        // On Windows, `tokio::fs::File` drop is asynchronous — the underlying
-        // OS handle is closed on a background threadpool thread, not during
-        // the drop call itself. If the caller immediately reopens the same
-        // path (a subsequent reopen for read right after this
-        // returns), the still-open write handle can cause ERROR_LOCK_VIOLATION
-        // (os error 33). POSIX advisory locks are optional so Linux tolerates
-        // the overlap silently. `shutdown()` drives the tokio file through its
-        // internal sync + close path synchronously before we return.
+        // Closed explicitly: Windows closes a dropped handle asynchronously, so an immediate reopen hits
+        // ERROR_LOCK_VIOLATION.
         file.shutdown().await.map_err(|e| io_error(path, e))?;
         Ok(())
     }
@@ -575,19 +410,13 @@ impl OciTransport for NativeTransport {
         let digest_str = digest.to_string();
         log::debug!("Streaming blob {} for image {}", digest_str, image);
 
-        // Call the fork's public `pull_blob_stream`, which wraps the response
-        // in a `VerifyingStream` that verifies the digest at stream end.
-        // Digest mismatch surfaces as `io::Error::other(DigestError::VerificationError)`
-        // at the point where the stream yields `None`.
+        // The fork's `VerifyingStream` surfaces a digest mismatch as an `io::Error` when the stream ends.
         let sized_stream = self
             .client
             .pull_blob_stream(image, digest_str.as_str())
             .await
             .map_err(registry_error)?;
 
-        // Adapt `SizedStream` (a `BoxStream<Result<Bytes, io::Error>>`) to
-        // `AsyncRead` using `tokio_util::io::StreamReader`. The map_err is a
-        // no-op here (both sides are `io::Error`) but makes the type explicit.
         let stream_reader = tokio_util::io::StreamReader::new(sized_stream.stream);
 
         Ok(Box::new(stream_reader))
@@ -663,13 +492,7 @@ impl OciTransport for NativeTransport {
             source_repository,
             image
         );
-        // A 202 mount-miss is spec-legal (registry declined and opened a regular
-        // upload session instead) — that session is deliberately abandoned here;
-        // `push_multi_layer_manifest`'s existing fallback re-uploads through the
-        // normal `push_blob` path. A genuine transport error is likewise mapped
-        // to `UploadRequired` rather than propagated: mounting is purely an
-        // upload-avoidance optimization, so declining is never itself fatal —
-        // what the caller's fallback then finds is the caller's business.
+        // A 202 mount-miss or a transport error both mean `UploadRequired`: mounting is only an optimization.
         match self.client.mount_blob(image, &source, digest_str.as_str()).await {
             Ok(oci_client::client::BlobMountResponse::Mounted) => Ok(MountOutcome::Mounted),
             Ok(oci_client::client::BlobMountResponse::UploadSessionOpened(_)) => Ok(MountOutcome::UploadRequired),
@@ -693,9 +516,7 @@ impl OciTransport for NativeTransport {
         manifest_bytes: &[u8],
         media_type: &str,
     ) -> Result<crate::Descriptor> {
-        // The manifest JSON already carries the `subject` field (built by the
-        // caller) — pushing it is a plain manifest PUT addressed by the
-        // manifest's OWN digest (referrer manifests are not tagged).
+        // Referrer manifests are untagged: a plain PUT addressed by the manifest's own digest.
         let expected_size = i64::try_from(manifest_bytes.len()).map_err(|_| {
             ClientError::InvalidManifest(format!(
                 "referrer manifest size {} exceeds i64::MAX",
@@ -705,20 +526,12 @@ impl OciTransport for NativeTransport {
         let expected_digest = crate::Algorithm::Sha256.hash(manifest_bytes).to_string();
         let target = image.clone_with_digest(expected_digest.clone());
 
-        // The push is digest-addressed (`PUT /v2/<repo>/manifests/<expected_digest>`)
-        // over the exact bytes we hashed, so a spec-compliant registry stores the
-        // manifest at precisely `expected_digest` or rejects the request. The
-        // transport's `push_manifest_raw` returns the pullable manifest URL (the
-        // `Location` header), NOT a bare digest, so it cannot be compared to a
-        // digest — integrity is already guaranteed by the content-addressed PUT.
+        // Content-addressed PUT of the exact bytes hashed: the registry stores them at `expected_digest` or refuses.
         self.push_manifest_raw(&target, manifest_bytes.to_vec(), media_type)
             .await?;
 
-        // `artifactType` and the annotations are read back out of the bytes just
-        // pushed rather than left `None`. They are what the referrers fallback
-        // index has to carry (`append_referrer_fallback_index`, OCI tag-schema
-        // write step 5), and a descriptor without them is the exact defect
-        // sigstore/cosign#4641 reports in cosign's own fallback write.
+        // Read back from the bytes, or the fallback index loses the facets tag-schema step 5 requires
+        // (sigstore/cosign#4641).
         let (artifact_type, annotations) = super::transport::referrer_descriptor_facets(manifest_bytes);
 
         Ok(crate::Descriptor {
@@ -738,15 +551,8 @@ impl OciTransport for NativeTransport {
         artifact_type: Option<&str>,
     ) -> Result<Vec<crate::Descriptor>> {
         let target = image.clone_with_digest(subject_digest.to_string());
-        // Native-only referrers lookup: a 404 on `/v2/<name>/referrers/<digest>`
-        // is a *capability verdict* — `ReferrersUnsupported` — and not the
-        // read-side answer. Readers go through `list_referrers_with_fallback`,
-        // which reads that verdict as "try the OCI referrers tag schema" and
-        // reports an empty listing as "no signatures found"; only callers that
-        // want the verdict itself — `ReferrersApiCapability::probe`, the sign
-        // path — let it reach exit 84. Surfacing the 404 instead of swallowing
-        // it into an empty list here is what keeps those two readings apart.
-        // See `pull_referrers_native`.
+        // A 404 is a capability verdict (`ReferrersUnsupported`), never an empty listing: the fallback path and
+        // exit 84 both depend on telling the two apart.
         match self
             .client
             .pull_referrers_native(&target, artifact_type)
@@ -765,24 +571,10 @@ impl OciTransport for NativeTransport {
     }
 }
 
-/// Checks whether a borrowed `io::Error` carries a fork `DigestError::VerificationError`
-/// and, if so, returns the corresponding `ClientError::DigestMismatch`.
+/// The `ClientError::DigestMismatch` a fork `DigestError::VerificationError` inside `error` stands for.
 ///
-/// This is the shared detection core. Both the owned-error path
-/// ([`map_fork_io_error_to_client_error`]) and the chain-walk path in
-/// `pull_layer` use this function to avoid duplicating the downcast logic.
-///
-/// Returns `None` if the error is not a typed fork digest error; the caller
-/// maps `None` to `Io`. **No string-fallback** — any `io::Error` whose inner
-/// source is not a typed `DigestError::VerificationError` maps to `Io`, not
-/// `DigestMismatch`. A string-fallback would be CWE-20 (spoofable: any
-/// io::Error whose message happens to contain "digest" could produce a spurious
-/// `DigestMismatch{expected: ""}` that would be logged and reported to users
-/// as a security event when none occurred).
+/// Typed downcast only, never a message match: matching "digest" in text would spoof a security event (CWE-20).
 pub(super) fn check_fork_io_error(error: &std::io::Error) -> Option<ClientError> {
-    // The fork produces io::Error::other(DigestError::VerificationError { expected, actual }).
-    // We detect this by downcasting the inner error stored in the io::Error.
-    // `io::Error::get_ref()` returns `Option<&(dyn Error + Send + Sync + 'static)>`.
     if let Some(inner) = error.get_ref()
         && let Some(oci_client::errors::DigestError::VerificationError { expected, actual }) =
             inner.downcast_ref::<oci_client::errors::DigestError>()
@@ -795,27 +587,16 @@ pub(super) fn check_fork_io_error(error: &std::io::Error) -> Option<ClientError>
     None
 }
 
-/// Maps an `io::Error` that originates from the fork's `VerifyingStream`
-/// (which surfaces digest mismatch as `io::Error { kind: Other, source: DigestError }`)
-/// to the typed [`ClientError::DigestMismatch`].
+/// Maps an `io::Error` from the fork's `VerifyingStream` (digest mismatch as
+/// `io::Error { kind: Other, source: DigestError }`) to the typed
+/// [`ClientError::DigestMismatch`]; any other `io::Error` maps to
+/// `Err(ClientError::Io { path: PathBuf::new(), source: error })` with no
+/// path context.
 ///
-/// Any other `io::Error` is mapped to `Err(ClientError::Io)` with no path context
-/// (the caller adds path context when needed). A non-digest io::Error results in
-/// `Err(ClientError::Io { path: PathBuf::new(), source: error })`.
-///
-/// # Design
-///
-/// The fork's `VerifyingStream` (in `external/rust-oci-client/src/blob.rs`) wraps
-/// the response stream and, at stream end, compares the accumulated digest against
-/// the expected one. On mismatch it yields:
-///   `io::Error::new(io::ErrorKind::Other, DigestError::VerificationError { ... })`
-///
-/// OCX must convert this to `ClientError::DigestMismatch` (not `ClientError::Io`) so
-/// the error taxonomy holds regardless of whether the fork's verifier or
-/// OCX's `HashingAsyncReader` fires first. See spec §D2 "two verifiers, one typed error".
-///
-/// Used only in unit tests that validate the mapping contract. Production code uses
-/// [`check_fork_io_error`] (the borrowed-ref extraction core) directly.
+/// Holds the error taxonomy regardless of whether the fork's
+/// `VerifyingStream` or OCX's `HashingAsyncReader` fires first. Used only in
+/// unit tests validating the mapping contract — production code uses
+/// [`check_fork_io_error`] directly.
 #[cfg(test)]
 pub(super) fn map_fork_io_error_to_client_error(error: std::io::Error) -> super::transport::Result<()> {
     if let Some(client_err) = check_fork_io_error(&error) {
@@ -827,71 +608,37 @@ pub(super) fn map_fork_io_error_to_client_error(error: std::io::Error) -> super:
     })
 }
 
-/// Whole-blob push restarts allowed after a transient registry fault — three
-/// total attempts.
+/// Whole-blob push restarts allowed after a transient registry fault —
+/// three total attempts.
 ///
 /// Each *request* is bounded by
 /// [`REGISTRY_READ_TIMEOUT`](super::builder::REGISTRY_READ_TIMEOUT) (120 s),
-/// not each attempt: a restart re-uploads the whole blob, so an attempt is as
-/// many bounded requests as the blob has chunks. The worst case before a push
-/// finally gives up is therefore three attempts, each of which may re-upload
-/// the whole blob and then stall for the full 120 s read deadline, plus the
-/// 1 s + 2 s backoff. That is the ceiling being bought; anything larger stops
-/// looking like resilience and starts looking like a hang.
+/// not each attempt: a restart re-uploads the whole blob, so an attempt is
+/// as many bounded requests as the blob has chunks. Worst case is three
+/// attempts, each stalling the full 120 s deadline plus 1 s + 2 s backoff —
+/// larger stops looking like resilience and starts looking like a hang.
 const PUSH_RETRY_ATTEMPTS: u8 = 2;
 
-/// Wait before the first restart, doubled per attempt (the house pattern from
-/// `project::resolve::retry_fetch`).
+/// Wait before the first restart, doubled per attempt (the house pattern
+/// from `project::resolve::retry_fetch`). No jitter: two retries across at
+/// most four concurrent layers is not a thundering herd.
 ///
-/// No jitter: two retries across at most four concurrent layers is not a
-/// thundering herd, and the spread jitter buys would be invisible against the
-/// per-request timeout.
-///
-/// The default [`NativeTransport::new`] installs into `push_retry_backoff`,
-/// which is the value every production transport carries; the wire tests are
-/// the only thing that ever overrides it, and
-/// `the_shipped_push_retry_backoff_is_one_second` pins this number against
-/// their override leaking back into the default.
+/// [`NativeTransport::new`] installs this into `push_retry_backoff` for
+/// every production transport; only the wire tests override it, and
+/// `the_shipped_push_retry_backoff_is_one_second` pins the number against
+/// that override leaking back into the default.
 const PUSH_RETRY_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl NativeTransport {
-    /// Checks blob existence, then uploads the blob via a streamed chunked push
-    /// with fluent progress.
+    /// Checks blob existence, then uploads via a streamed chunked push with
+    /// progress, restarting on a transient registry fault and falling back
+    /// to a buffered push on a `SpecViolationError`. Wraps the blob in a
+    /// [`ProgressReader`]-backed stream (see [`progress_body_stream`]) so
+    /// progress advances per [`UPLOAD_FRAME_SIZE`] frame as the wire pulls it.
     ///
-    /// Wraps the in-RAM blob in a [`ProgressReader`]-backed byte stream (see
-    /// [`progress_body_stream`]) and hands it to the fork's `push_blob_stream` with
-    /// the total size. The fork streams each `push_chunk_size`-bounded PATCH body
-    /// directly from that stream, pulling it only as the socket accepts more, so
-    /// progress advances per [`UPLOAD_FRAME_SIZE`] frame as it is pulled for the
-    /// wire (not in `push_chunk_size` upload-session steps) while each request body
-    /// stays bounded for proxies/registries that cap single-request body size. On
-    /// `SpecViolationError` it falls back to the fork's buffered `push_blob` (its
-    /// own chunked-then-monolithic retry, no progress) — but only for a blob that
-    /// still fits in one request. That fallback ends in a single `PUT` carrying the
-    /// whole blob, so above [`MAX_UPLOAD_REQUEST_BYTES`] it is rejected by the very
-    /// cap the chunking exists to respect: falling back there would trade a
-    /// diagnosable spec violation for the `416` this chunking was written to avoid.
-    /// Above the cap the violation is propagated instead.
-    ///
-    /// # Restart on a transient fault
-    ///
-    /// A [`ClientError::RegistryTransient`] mid-upload restarts the whole blob,
-    /// up to [`PUSH_RETRY_ATTEMPTS`] times. Each attempt begins with a fresh
-    /// `POST`, which abandons whatever the failed session stored — a registry
-    /// discards an unreferenced upload session, so the restart needs no range
-    /// reconciliation to be safe. Progress rewinds with it, harmlessly: the bar
-    /// is driven by absolute `set_position`, so a restart moves it backwards
-    /// rather than double-counting.
-    ///
-    /// A `SpecViolationError` is *not* transient and keeps its existing
-    /// behaviour exactly — one monolithic fallback, itself never retried. The
-    /// registry disagreed with the client about what it stored; sending the
-    /// same bytes again does not resolve a disagreement.
-    ///
-    /// Deliberately skipped: re-checking `blob_exists` between attempts. It
-    /// would only pay off in the narrow case where the committing `PUT`
-    /// succeeded server-side and the response timed out. Add it when a log
-    /// shows that happening.
+    /// Deliberately skipped: re-checking `blob_exists` between attempts — it
+    /// only pays off when a committing `PUT` succeeded server-side and the
+    /// response timed out.
     // ponytail: whole-blob restart. Per-chunk retry needs a fork change
     // (buffer the chunk into Bytes for a replayable body) — do it when a
     // re-sent layer measurably costs more than the fork PR.
@@ -926,7 +673,7 @@ impl NativeTransport {
         // Checked, not `as`: a narrowing cast would hand the fork a short length
         // on a 32-bit target, its `while remaining > 0` loop would upload a
         // prefix, and the failure would surface as a rejected committing PUT
-        // rather than as the size problem it is (PKG-03).
+        // rather than as the size problem it is.
         let total_len = usize::try_from(total).map_err(|_| ClientError::LayerSizeExceeded {
             // A file length never exceeds i64::MAX, so both saturations are
             // unreachable; they exist so the error stays total.
@@ -949,6 +696,11 @@ impl NativeTransport {
                     on_progress(total);
                     return Ok(url);
                 }
+                // Falls back to a buffered, one-request push only below MAX_UPLOAD_REQUEST_BYTES:
+                // above it, that single PUT would itself be rejected by the same per-request cap,
+                // trading a diagnosable spec violation for the 416 this chunking exists to avoid
+                // -- so it propagates unchanged. Not transient: the fallback runs once, never
+                // retried -- resending cannot resolve a disagreement about what was stored.
                 Err(error @ oci_client::errors::OciDistributionError::SpecViolationError(_)) => {
                     log::warn!("Registry spec violation during streamed chunked push: {}", error);
                     if total > MAX_UPLOAD_REQUEST_BYTES as u64 {
@@ -970,6 +722,11 @@ impl NativeTransport {
                         .await
                         .map_err(registry_error);
                 }
+                // A transient fault restarts the whole blob: each attempt
+                // opens a fresh POST, which a registry discards if
+                // unreferenced, so no range reconciliation is needed.
+                // Progress rewinds harmlessly since it's driven by absolute
+                // `set_position`, never double-counted.
                 Err(e) => {
                     let mapped = registry_error(e);
                     if !matches!(mapped, ClientError::RegistryTransient(_)) || attempt >= PUSH_RETRY_ATTEMPTS {

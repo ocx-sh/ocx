@@ -4,7 +4,7 @@
 //! `ocx patch test` — compose a local (unpublished) patch descriptor onto a base.
 //!
 //! This module implements the lib half of Phase 6A's maintainer `ocx patch test`
-//! command (`adr_infrastructure_patches.md`, milestone #111, issue #117). The CLI
+//! command (`adr_infrastructure_patches.md`). The CLI
 //! verb (`crates/ocx_cli/src/command/patch.rs::run_patch_test`) provisions a
 //! scratch [`ocx_store::file_structure::FileStructure`] (a tempdir, like
 //! `package_test.rs`) and then calls [`PackageManager::seed_and_compose_patch_test`]

@@ -4,10 +4,6 @@
 use ocx_package_manager::record::RecordsOptions;
 
 /// Where to write the execution record for this invocation.
-///
-/// Flatten into a launching command with `#[clap(flatten)]`. Resolve through
-/// [`Records::options`] — never read the raw fields at a call site, so the
-/// config / environment / flag fold stays the single precedence rule.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Records {
     /// Directory to write this invocation's execution record into.
@@ -34,10 +30,7 @@ pub struct Records {
 
 impl Records {
     /// This tier's contribution to the records fold.
-    ///
-    /// `required` is absent by construction: the fail posture is settable from a
-    /// config file only, so that a mistyped `--records-dir` warns rather than
-    /// killing a build nobody set a policy for.
+    // `required: None` keeps the fail posture config-only, so a mistyped `--records-dir` warns instead of failing.
     pub fn options(&self) -> RecordsOptions {
         RecordsOptions {
             dir: self.dir.clone(),

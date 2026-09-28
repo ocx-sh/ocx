@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the signing and verification error family — the `ocx_sign` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_sign` error family.
 
 use ocx_exit::ExitCode;
 
@@ -18,14 +17,7 @@ use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
 impl ClassifyExitCode for VerifyError {
     fn classify(&self) -> Option<ExitCode> {
         match &self.kind {
-            // `Internal` means "no verify-side code fits this", not "the code is
-            // 1". Answering `Some(Failure)` here would short-circuit the chain
-            // walker at the outermost wrapper and discard a cause that already
-            // classifies itself -- a registry 401/503/5xx reached through
-            // `map_client_error` exits 80/75/69 only because this defers. A cause
-            // nothing in the ladder recognizes still lands on `Failure` via
-            // `classify_error`'s own fall-through, so the catch-all keeps its
-            // catch-all exit code without asserting it.
+            // `None`, not `Some(Failure)`, or a wrapped registry 401/503 exits 1 instead of 80/75/69.
             VerifyErrorKind::Internal(_) => None,
             kind => Some(kind.exit_code()),
         }
@@ -35,9 +27,6 @@ impl ClassifyExitCode for VerifyError {
 impl ClassifyErrorKind for VerifyErrorKind {
     fn exit_code(&self) -> ExitCode {
         match self {
-            // AttestationNotFound joins the family for the same reason
-            // NoSignaturesFound is here: the scan completed and found nothing
-            // to check, which is an absence, not a verification failure.
             Self::NoSignaturesFound
             | Self::NoUsableBundle
             | Self::TargetNotFound { .. }
@@ -50,19 +39,10 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::SignatureInvalid
             | Self::SubjectDigestMismatch
             | Self::BundleParseFailed
-            // RekorSetInvalid and TransparencyBodyMismatch are data integrity
-            // failures (tampered/spliced bundle), not service-unavailability
-            // signals. Exit 65 so retry logic does not fire.
             | Self::RekorSetInvalid
             | Self::TransparencyBodyMismatch
             | Self::RekorInclusionProofAbsent
-            // CandidateLimitExhausted is a fail-closed "could not examine all
-            // candidates" outcome, not "unsigned" (79) — keep it in the
-            // verification-failed bucket.
             | Self::CandidateLimitExhausted { .. }
-            // Every attestation shape, binding and bound failure is 65: the
-            // bytes arrived and did not hold up. A retry re-fetches the same
-            // bytes, so none of these is transient.
             | Self::PredicateTypeMismatch { .. }
             | Self::StatementSubjectMismatch { .. }
             | Self::StatementSubjectAbsent
@@ -83,46 +63,22 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::AttestationBudgetExhausted { .. } => ExitCode::DataError,
             Self::RekorSetAbsentTsaPresent | Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
             Self::UnsupportedKeyBackend(_) => ExitCode::UnsupportedKeyBackend,
-            // Before the flatten below: the same refusal through a second door.
-            Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => {
-                ExitCode::UnsupportedKeyBackend
-            }
-            // The second door again, one class over. A path key reference
-            // that cannot be read is a filesystem failure on a path the operator
-            // typed, and the `--key` sign door has always answered 74 `io_error`
-            // for it (`KeyBackendError::Io`). The flatten below answered 78
-            // `config_error` for the identical invocation — a category error:
-            // the "scope" its message names is the literal string `--key`, and
-            // no config file is involved at all.
+            // The carve-outs down to `TrustRootUnreadable` must precede the flatten below, or they exit 78.
+            Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => ExitCode::UnsupportedKeyBackend,
             Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyUnreadable { .. })
             | Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyMalformed {
                 fault: ocx_trust::KeyFault::Path,
                 ..
             }) => ExitCode::IoError,
-            // A regular file that read fine and holds something that is not a
-            // key: the bytes are the problem, which is the 65 `ocx package sign`
-            // answers for the same file. An inline `key_pem` falls through to
-            // 78 below — there the config text itself is what is wrong.
             Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyMalformed {
                 fault: ocx_trust::KeyFault::FileBytes,
                 ..
             }) => ExitCode::DataError,
-            // The same carve-out as `KeyUnreadable` above, one flag family
-            // over: a trust-root path the operator typed that cannot be read is
-            // a filesystem failure, and `--key file:<missing>` already answers
-            // 74 for it. The `TrustRootLoad(_)` arm below would otherwise call
-            // an operator's typo a configuration error, naming a scope that is
-            // a flag rather than any config file.
             Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. }) => ExitCode::IoError,
             Self::TrustRootUnavailable
             | Self::TrustRootLoad(_)
             | Self::TrustPolicyInvalid(_)
             | Self::ForbiddenRegistryTarget { .. } => ExitCode::ConfigError,
-            // The rejection verdict was decided in `oci/endpoint.rs`
-            // (`UrlRejection` carries an exit code set by its
-            // `From<SsrfError>` impl): 69 for an endpoint that does not
-            // resolve, else the documented 64. Delegate rather than
-            // flattening every rejection to one code.
             Self::InvalidEndpointUrl { reason, .. } => reason.exit_code(),
             Self::NoIdentityProvided | Self::KeyReferenceInvalid(_) => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
@@ -130,8 +86,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
     }
 
     fn kind_detail(&self) -> &'static str {
-        // Frozen contract C-S1-1: snake_case parallel of the variant name.
-        // Exhaustive match — no wildcard, so adding a variant forces a new arm.
+        // Frozen: scripts dispatch on these slugs, so a rename is a breaking change.
         match self {
             Self::NoSignaturesFound => "no_signatures_found",
             Self::TargetNotFound { .. } => "target_not_found",
@@ -196,12 +151,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
 impl ClassifyExitCode for SignError {
     fn classify(&self) -> Option<ExitCode> {
         match &self.kind {
-            // See the verify-side twin: `Internal` means "no sign-side code fits
-            // this", so it defers to the chain walker instead of flattening a
-            // cause that classifies itself. A registry 401/503/5xx reached
-            // through `map_client_error` exits 80/75/69 only because of this
-            // arm; an unrecognized cause still lands on `Failure` via
-            // `classify_error`'s fall-through.
+            // `None`, not `Some(Failure)`, or a wrapped registry 401/503 exits 1 instead of 80/75/69.
             SignErrorKind::Internal(_) => None,
             kind => Some(kind.exit_code()),
         }
@@ -223,26 +173,16 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
             Self::TargetNotFound { .. } | Self::TargetNotAnIndex { .. } => ExitCode::NotFound,
             Self::UnsupportedKeyBackend(_) => ExitCode::UnsupportedKeyBackend,
-            // The backend's own class, not a flattened one: a KMS signs over
-            // the network, so "unreachable" (retry) and "wrong key" (fix the
-            // config) are different operator actions.
             Self::KeyBackend(error) => match error {
                 ocx_sign::sign::key_backend::KeyBackendError::Unavailable { .. } => ExitCode::TempFail,
                 ocx_sign::sign::key_backend::KeyBackendError::Io(_) => ExitCode::IoError,
                 ocx_sign::sign::key_backend::KeyBackendError::MalformedKey { .. } => ExitCode::DataError,
                 ocx_sign::sign::key_backend::KeyBackendError::Unsupported { .. } => ExitCode::UnsupportedKeyBackend,
             },
-            // OfflineAttestRefused shares 77 with OfflineSignRefused by
-            // design: one policy, two verbs.
             Self::OidcPreCheckFailed { .. }
             | Self::OfflineSignRefused
             | Self::OfflineAttestRefused
             | Self::IdentityTokenFilePermissive { .. } => ExitCode::PermissionDenied,
-            // The rejection verdict was decided in `oci/endpoint.rs`
-            // (`UrlRejection` carries an exit code set by its
-            // `From<SsrfError>` impl): 69 for an endpoint that does not
-            // resolve, else the documented 64. Delegate rather than
-            // flattening every rejection to one code.
             Self::InvalidEndpointUrl { reason, .. } => reason.exit_code(),
             Self::ProvenanceVersionUnsupported { .. }
             | Self::UnsignedTypeUnsupported { .. }
@@ -254,8 +194,7 @@ impl ClassifyErrorKind for SignErrorKind {
     }
 
     fn kind_detail(&self) -> &'static str {
-        // Frozen contract C-S1-1: snake_case parallel of the variant name.
-        // Exhaustive match — no wildcard, so adding a variant forces a new arm.
+        // Frozen: scripts dispatch on these slugs, so a rename is a breaking change.
         match self {
             Self::FulcioBadRequest => "fulcio_bad_request",
             Self::OidcTokenRejected => "oidc_token_rejected",

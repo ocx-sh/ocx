@@ -13,9 +13,6 @@ use super::{Client, MirrorMap};
 use crate::{Algorithm, RegistryOperation};
 
 /// Test data backing a [`StubTransport`].
-///
-/// Fields are public so they can be accessed through the lock guards
-/// returned by [`StubTransportData::read`] and [`StubTransportData::write`].
 #[derive(Default)]
 pub struct StubTransportInner {
     /// Pages of tags returned by successive `list_tags` calls (consumed FIFO).
@@ -24,83 +21,38 @@ pub struct StubTransportInner {
     pub repositories: Vec<Vec<String>>,
     /// Image string → (raw manifest bytes, digest string).
     pub manifests: HashMap<String, (Vec<u8>, String)>,
-    /// Image string → artificial latency before `pull_manifest_raw` answers.
-    ///
-    /// Exists so a concurrent fetch loop's completion order can be made to
-    /// differ from its submission order. Without it an in-memory stub answers
-    /// every request in submission order, and an ordering assertion passes just
-    /// as happily against an unordered implementation — proving nothing.
+    /// Image string → artificial latency before `pull_manifest_raw` answers, so completion order can differ
+    /// from submission order.
     pub manifest_delays: HashMap<String, std::time::Duration>,
-    /// Digest string → blob bytes (written to file by `pull_blob_to_file`).
-    ///
-    /// Content only: which *repository* holds a blob is a separate question,
-    /// answered by [`blob_locations`](Self::blob_locations).
+    /// Digest string → blob bytes; which repository holds one is [`blob_locations`](Self::blob_locations).
     pub blobs: HashMap<String, Vec<u8>>,
-    /// `"<registry>/<repository>"` → the digests it holds, for `head_blob`.
+    /// `"<registry>/<repository>"` → the digests it holds, for `head_blob`; `None` answers from `blobs` alone.
     ///
-    /// `None` — the default — makes `head_blob` answer from `blobs` alone: one
-    /// global store, which is right for every test with a single registry in
-    /// play. `Some` scopes presence per repository, which a registry-to-registry
-    /// copy needs, because there the whole question is whether the *target*
-    /// already has a blob the *source* obviously does. `Option` rather than an
-    /// empty map so "not configured" and "configured, holds nothing" stay
-    /// distinguishable — an empty map would make a copy test that forgot to set
-    /// it up pass for the wrong reason.
+    /// An `Option`, not an empty map, or a copy test that forgot to seed it passes for the wrong reason.
     pub blob_locations: Option<HashMap<String, std::collections::BTreeSet<String>>>,
 
-    /// Digest string → read-boundary plan for `pull_blob_streaming`.
-    ///
-    /// When a plan exists for a digest, the stub yields exactly those chunks in
-    /// order, one per read, instead of the whole blob. Exists so a test can put
-    /// a layer's codec trailer in a chunk the tar extractor never demands —
-    /// the shape a real network produces by chance, and the one that decides
-    /// whether the compressed-side digest covers the whole blob or a prefix.
+    /// Digest string → chunks `pull_blob_streaming` yields one per read, instead of the whole blob.
     pub blob_stream_chunks: HashMap<String, Vec<Vec<u8>>>,
-    /// Artificial latency before `list_tags` / `fetch_manifest_digest` answer.
+    /// Artificial latency before `list_tags` / `fetch_manifest_digest` answer, so concurrent reads overlap.
     ///
-    /// The tag-read sibling of [`manifest_delays`](Self::manifest_delays), and
-    /// there for the same reason: an in-memory stub answers instantly, so a
-    /// caller that read-checks a cache, misses and fetches can complete before
-    /// the next one starts. A "these N concurrent reads made one request"
-    /// assertion then passes just as happily against no coalescing at all.
-    /// Under `tokio::time::pause()` the clock only advances once every task is
-    /// parked, so the delay releases exactly when all N callers have arrived.
+    /// Under `tokio::time::pause()` it releases only once every caller has parked.
     pub tag_read_delay: Option<std::time::Duration>,
     /// Digest returned by `fetch_manifest_digest`.
     pub digest: Option<String>,
     /// Successive results for push operations (consumed FIFO).
     pub push_results: Vec<Result<String>>,
-    /// Successive results for `list_tags` calls (consumed FIFO); an empty queue
-    /// falls through to [`tags`](Self::tags).
-    ///
-    /// `tags` alone can only express a *successful* listing, so without this a
-    /// test cannot tell "the target repository does not exist" from "the target
-    /// publishes nothing" — which is exactly the distinction the cascade
-    /// prelude turns on.
+    /// Successive `list_tags` results (consumed FIFO); an empty queue falls through to [`tags`](Self::tags).
     pub list_tags_results: Vec<Result<Vec<String>>>,
     /// Log of method calls for assertions.
     pub calls: Vec<String>,
     /// Log of `ensure_auth` calls: `(registry, operation)`.
     pub auth_calls: Vec<(String, RegistryOperation)>,
-    /// The first transport method the client invoked — `ensure_auth` included.
+    /// The first transport method invoked, `ensure_auth` included.
     ///
-    /// [`calls`](Self::calls) and [`auth_calls`](Self::auth_calls) are separate
-    /// logs, so neither can witness their relative ORDER: "the first entry of
-    /// `auth_calls` is `Push`" stays true when the handshake happens *after* the
-    /// first blob upload, which is precisely the anonymous-request bug an
-    /// authenticates-first guard exists to catch. This field is what tells those
-    /// two worlds apart, and an ordering assertion that does not read it is
-    /// asserting nothing.
+    /// An authenticates-first assertion must read this: `calls` and `auth_calls` cannot witness their relative order.
     pub first_call: Option<String>,
-    /// Log of manifest/blob reads: `(method, registry, repository)` of the
-    /// reference the transport was actually handed.
-    ///
-    /// [`calls`](Self::calls) records method names only, so it cannot witness
-    /// *where* a read went — which is the entire question for a mirror-addressed
-    /// or index-routed read. Populated by `pull_manifest_raw`, `pull_blob`,
-    /// `pull_blob_to_file` and `pull_blob_streaming`; a test needing another
-    /// method's target adds the `record_target` call there rather than
-    /// asserting on an absent row.
+    /// `(method, registry, repository)` each manifest/blob read was handed, from the `pull_*` methods that
+    /// call `record_target`.
     pub read_targets: Vec<(&'static str, String, String)>,
     /// When true, `push_manifest_raw` stores pushed data back into `manifests`
     /// so subsequent reads see the updated content.
@@ -108,70 +60,39 @@ pub struct StubTransportInner {
     /// When set, `pull_manifest_raw` returns a `Registry` error with this
     /// message for any image not in `manifests` (instead of `ManifestNotFound`).
     pub pull_manifest_error_override: Option<String>,
-    /// Image string → registry error message for that one image's manifest
-    /// fetch, whether or not a manifest is seeded for it.
-    ///
-    /// Exists because `pull_manifest_error_override` above only fires for
-    /// images that are ABSENT, so it cannot express the failure that matters
-    /// most here: a healthy, published version whose fetch fails transiently
-    /// mid-run. That is the shape a cascade swallows, and reproducing it needs
-    /// the error to win over a seeded manifest.
+    /// Image string → registry error for that image's manifest fetch, winning over a seeded manifest.
     pub manifest_errors: HashMap<String, String>,
-    /// When set, `ensure_auth` returns `ClientError::Authentication` with this
-    /// message instead of succeeding. Drives a genuine authentication-failure
-    /// path through any transport method that calls `ensure_auth` first (e.g.
-    /// `Client::pull_manifest`) — distinct from `pull_manifest_error_override`,
-    /// which simulates a generic (non-auth) registry error.
+    /// When set, `ensure_auth` fails with `ClientError::Authentication` carrying this message.
     pub ensure_auth_error_override: Option<String>,
     /// Successive results for `mount_blob` calls (consumed FIFO); an empty
     /// queue falls through to the trait's default `Ok(UploadRequired)`.
     pub mount_results: Vec<Result<MountOutcome>>,
     /// Log of `mount_blob` calls: `(target_repository, source_repository, digest)`.
     pub mount_calls: Vec<(String, String, String)>,
-    /// `"<repository>@<subject digest>"` → referrer descriptors for that subject.
-    ///
-    /// Seeded directly to stand in for a source registry's referrers index;
-    /// grown by `push_referrer_manifest` when `capture_pushes` is set, which is
-    /// what lets a test push a referrer and then list it back.
+    /// `"<repository>@<subject digest>"` → referrer descriptors; grown by `push_referrer_manifest` under
+    /// `capture_pushes`.
     pub referrers: HashMap<String, Vec<crate::Descriptor>>,
-    /// When true, both referrer methods fail with
-    /// [`ClientError::ReferrersUnsupported`] — a registry with no OCI 1.1
-    /// Referrers API. Distinct from an empty `referrers` map, which is a
-    /// supporting registry answering "no referrers"; conflating the two is the
-    /// bug the hard error exists to prevent.
+    /// When true, both referrer methods fail with [`ClientError::ReferrersUnsupported`], unlike an empty
+    /// `referrers` map.
     pub referrers_unsupported: bool,
-    /// Monotonic count of successful captured manifest PUTs to a *tag*
-    /// reference. `manifests` is keyed on the reference, so a second write of
-    /// the same tag is idempotent and invisible — this counts every write, the
-    /// only way a test can witness a tag re-tagged twice (e.g. a
-    /// default-variant self-alias re-writing a track the cascade already wrote).
+    /// Count of captured manifest PUTs to a tag; `manifests` cannot show a tag written twice.
     pub tag_manifest_writes: usize,
-    /// Monotonic count of successful captured manifest PUTs to a *digest*
-    /// reference — a leaf-manifest upload. Same idempotence blind spot in
-    /// `manifests`, so a "one upload, many tags" claim needs this to be real.
+    /// Count of captured manifest PUTs to a digest (leaf uploads).
     pub digest_manifest_writes: usize,
 }
 
-/// Keys [`StubTransportInner::blob_locations`].
-///
-/// Registry *and* repository: a promotion routinely copies `team/demo` on one
-/// host to `team/demo` on another, so a repository-only key would report the
-/// target as already holding every blob the source holds.
+/// Keys [`StubTransportInner::blob_locations`] by registry and repository, or a cross-host copy of `team/demo` sees
+/// the target holding every source blob.
 pub fn blob_location_key(image: &crate::native::Reference) -> String {
     format!("{}/{}", image.resolve_registry(), image.repository())
 }
 
-/// Keys [`StubTransportInner::referrers`]. Repository-scoped, because a
-/// referrer belongs to a subject in a repository — not to whatever tag the
-/// caller's reference happened to carry.
+/// Keys [`StubTransportInner::referrers`] by repository and subject, never by the caller's tag.
 pub fn referrers_key(image: &crate::native::Reference, subject_digest: &crate::Digest) -> String {
     format!("{}@{}", image.repository(), subject_digest)
 }
 
-/// Shared data handle for [`StubTransport`].
-///
-/// Wraps `Arc<RwLock<...>>` internally so test code never needs to deal
-/// with locking boilerplate. Clones are cheap (Arc clone).
+/// Shared, cheaply cloned data handle for [`StubTransport`].
 ///
 /// ```ignore
 /// let data = StubTransportData::new();
@@ -208,20 +129,11 @@ impl StubTransportData {
 }
 
 /// A [`Client`] speaking to `data`, with no mirror configured.
-///
-/// The constructor a test outside `crate::oci` needs: `Client::with_transport`
-/// is `pub(crate)`, but the assembly — which transport, which mirror map — is
-/// this module's subject, not every caller's.
 pub fn stub_client(data: &StubTransportData) -> Client {
     Client::with_transport(Box::new(StubTransport::new(data.clone())))
 }
 
-/// [`stub_client`] with `upstream` mirrored to `mirror_host` under `prefix`.
-///
-/// `Client::mirrors` is `pub(crate)` on purpose — a caller outside the
-/// OCI tree must not be able to redirect a read — so a test of a read's
-/// *addressing* that lives outside it has to be handed a mirrored client rather
-/// than build one.
+/// [`stub_client`] with `upstream` mirrored to `mirror_host` under `prefix`, for callers outside the crate.
 pub fn mirrored_stub_client(data: &StubTransportData, upstream: &str, mirror_host: &str, prefix: &str) -> Client {
     let mut client = stub_client(data);
     client.mirrors = MirrorMap::new([(
@@ -235,11 +147,7 @@ pub fn mirrored_stub_client(data: &StubTransportData, upstream: &str, mirror_hos
     client
 }
 
-/// A configurable, cloneable test double for [`OciTransport`].
-///
-/// All mutable state lives in a shared [`StubTransportData`] (behind
-/// `Arc<RwLock<...>>`), so clones — including via [`OciTransport::box_clone`] —
-/// share the same backing data.
+/// A configurable test double for [`OciTransport`]; clones share one [`StubTransportData`].
 #[derive(Clone)]
 pub struct StubTransport {
     data: StubTransportData,
@@ -258,8 +166,7 @@ impl StubTransport {
         inner.calls.push(call.to_string());
     }
 
-    /// Record which host and repository `method` was handed, for
-    /// [`StubTransportInner::read_targets`].
+    /// Record which host and repository `method` was handed.
     fn record_target(&self, method: &'static str, image: &crate::native::Reference) {
         self.data.write().read_targets.push((
             method,
@@ -304,7 +211,7 @@ impl OciTransport for StubTransport {
         _last: Option<String>,
     ) -> Result<Vec<String>> {
         self.record("list_tags");
-        // Bind the delay out first: the read guard must not span the await.
+        // Bound first: the read guard must not span the await.
         let delay = self.data.read().tag_read_delay;
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -343,14 +250,10 @@ impl OciTransport for StubTransport {
         }
         let key = image.to_string();
         let inner = self.data.read();
-        // A per-image error wins over every other answer, including a seeded
-        // manifest: it stands in for a registry that is failing this one read.
         if let Some(message) = inner.manifest_errors.get(&key) {
             return Err(ClientError::Registry(message.clone().into()));
         }
-        // Explicit `digest` override wins; otherwise mirror a real registry's
-        // HEAD semantics: the digest of the manifest stored at the reference,
-        // or 404 (`ManifestNotFound`) when nothing is stored there.
+        // An explicit `digest` override wins; otherwise a real registry's HEAD answer.
         if let Some(digest) = inner.digest.clone() {
             return Ok(digest);
         }
@@ -369,8 +272,7 @@ impl OciTransport for StubTransport {
         self.record("pull_manifest_raw");
         self.record_target("pull_manifest_raw", image);
         let key = image.to_string();
-        // Read the delay and release the lock before awaiting — the guard is not
-        // held across the sleep, and concurrent callers must not serialise here.
+        // Lock released before the sleep, or concurrent callers serialise here.
         let delay = self.data.read().manifest_delays.get(&key).copied();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -399,8 +301,6 @@ impl OciTransport for StubTransport {
         };
         match (present, inner.blobs.get(&digest_key)) {
             (true, Some(blob)) => Ok(blob.len() as u64),
-            // Listed as present but with no seeded content: still a HEAD hit, and
-            // the size is all a caller gets from it.
             (true, None) => Ok(0),
             (false, _) => Err(ClientError::blob_not_found(image, digest)),
         }
@@ -449,9 +349,7 @@ impl OciTransport for StubTransport {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob_streaming:{digest_key}"));
         self.record_target("pull_blob_streaming", image);
-        // Overriding the trait default (temp file round-trip) is what makes read
-        // boundaries controllable. Without a plan the whole blob is one chunk,
-        // which is what the default delivers on its first fill anyway.
+        // Overridden (not the temp-file default) so read boundaries are controllable.
         let chunks = {
             let inner = self.data.read();
             inner
@@ -460,8 +358,7 @@ impl OciTransport for StubTransport {
                 .cloned()
                 .unwrap_or_else(|| vec![inner.blobs.get(&digest_key).cloned().unwrap_or_default()])
         };
-        // `StreamReader` hands out at most one stream item per `poll_read`, so
-        // each planned chunk is exactly one read at the pipeline's bottom.
+        // `StreamReader` yields one item per `poll_read`, so each chunk is exactly one read.
         let stream = futures::stream::iter(
             chunks
                 .into_iter()
@@ -483,10 +380,7 @@ impl OciTransport for StubTransport {
     ) -> Result<String> {
         self.record("push_manifest_raw");
         let digest = Algorithm::Sha256.hash(&data).to_string();
-        // Consult the queued outcome before recording: a manifest push that
-        // fails did not land, and storing it first made a failed push
-        // indistinguishable from a successful one in `manifests` — which is
-        // what stopped a test modelling a failed index merge.
+        // Outcome before recording, or a failed push lands in `manifests` like a successful one.
         let outcome = {
             let mut inner = self.data.write();
             if inner.push_results.is_empty() {
@@ -516,11 +410,8 @@ impl OciTransport for StubTransport {
         on_progress: super::transport::ProgressFn,
     ) -> Result<String> {
         self.record(&format!("push_blob:{}", digest));
-        // Simulate progress: report full size in one shot.
         on_progress(data.len() as u64);
-        // A pushed blob is present in the target repository afterwards, so a
-        // second copy of the same content HEADs it and skips the upload. Without
-        // this an idempotency test could never observe the skip.
+        // Recorded as present, or an idempotency test never observes the skipped re-upload.
         {
             let mut inner = self.data.write();
             let digest_key = digest.to_string();
@@ -535,9 +426,7 @@ impl OciTransport for StubTransport {
         self.next_push_result()
     }
 
-    /// Buffers, because a stub's blobs are already in memory. Stated here
-    /// rather than inherited: the trait has no default, so a real transport
-    /// cannot reach this shape by forgetting to write one.
+    /// Buffers, since a stub's blobs are already in memory.
     async fn push_blob_from_path(
         &self,
         image: &crate::native::Reference,
@@ -602,10 +491,7 @@ impl OciTransport for StubTransport {
             digest: digest.clone(),
             size,
             urls: None,
-            // A real registry copies `artifactType` out of the manifest into the
-            // referrers-index descriptor, and that is the field `list_referrers`
-            // filters on — so a stub that left it `None` would make every
-            // filtered listing come back empty and read as "nothing to copy".
+            // Lifted like a real registry does, or every filtered `list_referrers` comes back empty.
             artifact_type: referrer_artifact_type(manifest_bytes),
             annotations: None,
         };
@@ -658,9 +544,7 @@ impl OciTransport for StubTransport {
     }
 }
 
-/// Reads the `artifactType` a referrer manifest declares, mirroring what a
-/// registry lifts into its referrers index. Falls back to `None` for bytes that
-/// are not a JSON object carrying the field.
+/// The `artifactType` a referrer manifest declares, or `None` for bytes not carrying it.
 fn referrer_artifact_type(manifest_bytes: &[u8]) -> Option<String> {
     serde_json::from_slice::<serde_json::Value>(manifest_bytes)
         .ok()?

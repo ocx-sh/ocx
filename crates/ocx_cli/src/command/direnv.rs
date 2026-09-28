@@ -29,7 +29,6 @@ impl Direnv {
         match &self.command {
             Some(DirenvCommand::Init(init)) => init.execute(context).await,
             Some(DirenvCommand::Export(export)) => export.execute(context).await,
-            // Bare `ocx direnv` defaults to the setup action.
             None => super::direnv_init::DirenvInit::default().execute(context).await,
         }
     }

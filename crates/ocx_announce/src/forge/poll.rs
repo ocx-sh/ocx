@@ -2,14 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Bounded fork-readiness backoff schedule.
-//!
-//! Ported from grimoire `src/catalog/forge.rs` (`PollBounds` / `next_interval`
-//! / `poll_until_ready`, same owner), transport-adjusted to REST-only and
-//! owned by OCX (design register S5). GitHub provisions a fork's git objects
-//! asynchronously — a fork's metadata reads ready before its first write can —
-//! so readiness runs to a wall-clock deadline on exponential backoff, each
-//! request bounded by a short timeout so one black-holed attempt cannot consume
-//! the whole deadline (design register X5).
 
 use std::time::Duration;
 
@@ -22,9 +14,7 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(300);
 /// Per-request timeout so one hung request cannot eat the deadline.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Timing bounds for the bounded exponential-backoff readiness poll. A
-/// dedicated struct so a test can assert the schedule (and drive the loop on a
-/// short deadline) without real wall-clock waits.
+/// Timing bounds for the bounded exponential-backoff readiness poll.
 #[derive(Debug, Clone, Copy)]
 pub struct PollSchedule {
     /// The first sleep interval.
@@ -48,17 +38,12 @@ impl Default for PollSchedule {
     }
 }
 
-/// The next backoff interval: double the current, capped at `max`.
 fn next_interval(current: Duration, max: Duration) -> Duration {
     current.saturating_mul(2).min(max)
 }
 
-/// The exact sleep delays a bounded readiness poll uses, in order.
-///
-/// Doubles from `initial_interval`, capped at `max_interval`, with the final
-/// delay clamped so cumulative wall time reaches — and never exceeds — the
-/// `deadline`. Deterministic and clock-free: the readiness loop drives off this
-/// list, and tests assert the schedule without sleeping.
+/// The exact sleep delays a bounded readiness poll uses, in order; their sum
+/// reaches, and never exceeds, the `deadline`.
 #[must_use]
 pub fn backoff_delays(schedule: &PollSchedule) -> Vec<Duration> {
     let mut delays = Vec::new();

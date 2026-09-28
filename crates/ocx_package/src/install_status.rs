@@ -7,10 +7,9 @@ use ocx_util::fs::LockedJsonFile;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct InstallStatus {
-    /// The timestamp of the installation attempt.
     pub timestamp: chrono::DateTime<chrono::Utc>,
 
-    /// Defaults to false, and should be set to true by the installer when the installation is complete and successful.
+    /// Set only once the installation completed successfully.
     pub ok: bool,
 }
 
@@ -33,23 +32,11 @@ impl InstallStatus {
     }
 }
 
-/// Probes whether `status_path` records a successful install
-/// (`status.ok == true`).
+/// Whether `status_path` records a successful install; an absent, unparseable
+/// or unlockable file yields `false`.
 ///
-/// Coordinates with concurrent writers via a shared advisory lock acquired
-/// through [`LockedJsonFile`]. The status file IS the lock target — no
-/// sidecar. Three outcomes collapse to `false`:
-///
-/// - File absent (no install attempt yet) → `false`.
-/// - File exists but unparseable (kill-9 mid-write left partial JSON) →
-///   `false`; the inline [`LockedJsonFile::read`] kill-9-recovery contract
-///   surfaces a `warn` log.
-/// - Lock acquisition failed (e.g. permission denied) → `false` + debug log.
-///
-/// Returns `true` only when the file exists, parses, and `status.ok` is set.
-/// A concurrent writer holding the exclusive lock will block the shared
-/// acquisition until its `replace_bytes` write completes, so a partial-write
-/// window cannot escape this probe.
+/// Reads under a shared lock on the status file itself, so a writer's partial
+/// write is never observed.
 pub async fn check_install_status(status_path: impl AsRef<std::path::Path>) -> bool {
     let status_path = status_path.as_ref();
     let mut locked = match LockedJsonFile::<InstallStatus>::open_shared(status_path).await {

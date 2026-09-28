@@ -16,34 +16,13 @@ use ocx_package::metadata::env::apply::reconcile_list_separators;
 
 /// Prints stateless shell export statements for the project toolchain.
 ///
-/// Reads the nearest project `ocx.toml` (project tier only — no home-tier
-/// fallback in this phase), loads the matching `ocx.lock`, looks up each
-/// selected package in the local object store, and prints bash export
-/// lines for the resolved environment. The command is stateless, which is
-/// what makes it usable from `direnv`'s `.envrc` via
-/// `eval "$(ocx direnv export)"`.
-///
-/// `ocx direnv init` writes an `.envrc` that calls this command with no
-/// arguments, which selects the default group. Edit that line to widen the
-/// scope or add an override — `eval "$(ocx direnv export -g ci --env
-/// FORCE_COLOR=1)"` — and direnv picks it up on the next reload.
-///
-/// Output is always bash. `direnv` evaluates `.envrc` files in a bash
-/// sub-shell regardless of the user's interactive shell; translation to
-/// the interactive shell happens later, inside direnv, via `direnv export
-/// <shell>`. Programs invoked via `eval` from `.envrc` therefore must emit
-/// bash. There is no `--shell` flag on this command for the same reason.
-///
-/// By default a package missing from the object store is materialised before
-/// exporting: a package already present resolves locally with no network (its
-/// lock-pinned digest is content-addressed — nothing to look up), so only a
-/// genuine miss falls through to the registry. Pass `--no-pull` to keep the
-/// command strictly offline — missing packages then produce a one-line stderr
-/// note and are skipped. Either way a stale lock produces a stderr warning but
-/// the stale digests are still used, a missing package never fails the prompt,
-/// and when no project `ocx.toml` is found the command exits 0 with no output.
-/// The pull fallback is also skipped whenever no registry is reachable
-/// (`--offline` / no configured remote), so an offline shell never blocks.
+/// Reads the nearest project `ocx.toml` (no home-tier fallback) and its
+/// `ocx.lock`, and prints bash export lines for the selected packages, for
+/// `eval "$(ocx direnv export)"` in an `.envrc` (`ocx direnv init` writes one
+/// selecting the default group). A missing package is pulled unless
+/// `--no-pull` or no reachable registry keeps the command offline, else noted
+/// on stderr and skipped. A stale lock warns and is still used, a missing
+/// package never fails the prompt, and no project `ocx.toml` exits 0 silently.
 #[derive(Parser)]
 pub struct DirenvExport {
     #[clap(flatten)]
@@ -59,49 +38,34 @@ pub struct DirenvExport {
     ///
     /// `always` exports a package as a generated shim: its declared names reach
     /// `PATH` immediately and its content downloads the first time one of them
-    /// runs. Without this, a project declaring `lazy-mode = "always"` would get
-    /// shims under `ocx env` and eager content under direnv: one project with
-    /// two environments depending on which door you came through.
-    ///
-    /// A package whose metadata is not already local is noted on stderr and
-    /// omitted, exactly as a not-materialised package is. This command never fails
-    /// a prompt.
+    /// runs. A package whose metadata is not already local is noted on stderr
+    /// and omitted, exactly as a not-materialised package is; this command never
+    /// fails a prompt.
+    // Without it, `lazy-mode = "always"` composes shims under `ocx env` but eager content under direnv.
     #[clap(flatten)]
     lazy_mode: options::LazyMode,
 }
 
 impl DirenvExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Always bash: direnv evaluates `.envrc` in bash and translates to the interactive shell itself.
         let shell = shell::Shell::Bash;
 
-        // Parse-level validation first, before any filesystem work. Both are
-        // usage errors (exit 64) — the one place this command is allowed to
-        // fail loudly, because a malformed argument in `.envrc` is a typo the
-        // user must see, not a transient toolchain state to warn past.
+        // Argv faults fail loudly (64) before any filesystem work: an `.envrc` typo must be seen.
         crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
 
-        // Project tier ONLY in Phase 7 — Phase 9 will add home-tier
-        // fallback. The OCX_NO_PROJECT=1 kill switch is honored by
-        // `load_project_state` via `ProjectConfig::resolve`.
         let cwd = ocx_util::env::current_dir()?;
-        // A relative `:path` value anchors here, to the directory ocx runs in
-        // — which under direnv is the directory holding `.envrc`. Resolved to
-        // an absolute value before the entry exists, so the emitted export
-        // line is stable regardless of where direnv later replays it.
+        // Relative `:path` values anchor here (the `.envrc` directory) and resolve absolute, so the
+        // export is stable wherever direnv replays it.
         let env_overrides = self.env.entries(&cwd)?;
         let project = match load_project_state(&cwd, context.project_path()).await? {
             Ok(state) => state,
             Err(MissingState::NoProject) => {
-                // No `ocx.toml` in scope → emit nothing, exit 0. Matches
-                // direnv's expectation: a directory without project config
-                // simply does not contribute to the shell environment.
+                // No `ocx.toml` in scope contributes nothing.
                 return Ok(ExitCode::SUCCESS);
             }
             Err(MissingState::LockMissing { lock_path }) => {
-                // Missing lock is NOT an error here (unlike `ocx exec` /
-                // `ocx pull`). The shell-hook fires on every prompt;
-                // failing on a missing lock would render the user's
-                // terminal unusable when they freshly clone a project.
+                // Not an error: this runs every prompt, and failing would break a fresh clone's terminal.
                 eprintln!(
                     "# ocx: ocx.lock not found at {}; run `ocx lock` to fetch",
                     lock_path.display()
@@ -110,18 +74,12 @@ impl DirenvExport {
             }
         };
 
-        // Stale-lock policy diverges from `ocx exec` (which exits 65) —
-        // shell-hook warns but continues using the stale digests so the
-        // interactive shell stays usable until the user re-locks.
+        // Warn and use the stale digests, unlike `ocx exec`'s 65, so the shell stays usable until a re-lock.
         if project.stale {
             eprintln!("# ocx: ocx.lock is stale (ocx.toml changed since last `ocx lock`); using stale digests");
         }
 
-        // Group selection is validated against the loaded config, so a `-g`
-        // naming a group that no longer exists fails loudly (exit 64) rather
-        // than silently exporting nothing. That is an argv typo in a
-        // hand-edited `.envrc`, not a transient toolchain state — the
-        // never-fail-the-prompt contract covers the latter, not the former.
+        // An unknown `-g` is an `.envrc` typo and fails (64) rather than silently exporting nothing.
         crate::app::project_context::ensure_groups_known(self.groups.names(), &project.config)?;
         let mut expanded = expand_all_keyword(self.groups.names(), &project.config);
         if expanded.is_empty() {
@@ -130,11 +88,8 @@ impl DirenvExport {
 
         let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
 
-        // One request per in-scope lock tool, each carrying the `lazy-mode` its
-        // ladder resolved to — the same ladder `ocx env` and `ocx exec` apply, so
-        // a project cannot compose two different environments depending on
-        // which door it came through. A tool that ships no leaf for this host is
-        // dropped here with a note: `direnv export` never fails a prompt.
+        // Each tool's `lazy-mode` comes from the same ladder `ocx env`/`ocx exec` apply; a tool with no
+        // host leaf is dropped with a note.
         let mut names: Vec<String> = Vec::new();
         let mut requests: Vec<ComposeRequest> = Vec::new();
         for tool in project.lock.tools.iter().filter(|tool| expanded.contains(&tool.group)) {
@@ -152,28 +107,17 @@ impl DirenvExport {
             requests.push(ComposeRequest { identifier, mode });
         }
 
-        // Probe first through an offline `PackageManager` clone: any incidental
-        // index lookup (V1 legacy locks walk the cached index->manifest chain;
-        // V2 locks read the pinned leaf directly) stays local, so a present tool
-        // resolves with no registry contact and a not-materialised one is
-        // omitted rather than fetched.
+        // Probe offline first, so a present tool resolves with no registry contact and a missing one is
+        // omitted, not fetched.
         let offline = context.manager().offline_view(context.local_index().clone());
         let mut composed = offline
             .compose_roots(&requests, &platform, Materialization::LocalOnly, context.concurrency())
             .await?;
 
-        // Default: materialise anything the probe omitted, then re-probe so the
-        // freshly-pulled tools join the export. `--no-pull` opts out and the
-        // command stays strictly offline. The pull is also skipped when no
-        // registry is reachable (`--offline` / no remote) so an offline shell
-        // never blocks. Best-effort throughout: a per-prompt hook must never
-        // fail on a transient registry error, so a failed pull leaves the tools
-        // omitted and warned about rather than breaking the prompt.
+        // Pull what the probe omitted, unless `--no-pull` or no reachable registry; a failed pull only
+        // leaves those tools omitted.
         if self.pull.enabled(true) && !composed.omitted.is_empty() && !context.manager().is_offline() {
-            // Only what the probe omitted. Handing the retry the whole set
-            // would re-run `prepare_lazy` for every tool that already composed
-            // — a second closure walk each, on a partially-warm store, because
-            // one unrelated eager tool was missing.
+            // Only the omitted: retrying the whole set re-walks every tool that already composed.
             let missing: Vec<ocx_oci::PackageRef> = composed
                 .omitted
                 .iter()
@@ -190,10 +134,7 @@ impl DirenvExport {
                 .await
             {
                 Ok(installed) => {
-                    // `roots` carries one entry per surviving request, in
-                    // request order, with no slot for an omission — so the two
-                    // sets are re-interleaved by replaying `requests` rather
-                    // than by index arithmetic over either vector alone.
+                    // `roots` has no slot for an omission, so re-interleave by replaying `requests`, not by index.
                     let mut probed = std::mem::take(&mut composed.roots).into_iter();
                     let mut pulled = installed.roots.into_iter();
                     composed.roots = requests
@@ -225,15 +166,11 @@ impl DirenvExport {
             eprintln!("# ocx: {advisory}");
         }
 
-        // Stages 4-6, same assembly as `ocx exec` and `ocx env`: the project's
-        // `[env]`, each selected group's `[env]` in `-g` order, then `--env`.
+        // As in `ocx exec`/`ocx env`: project `[env]`, each group's `[env]` in `-g` order, then `--env`.
         let mut project_env = ocx_project::project_env_entries(&project.config, &project.config_path, &expanded);
         project_env.extend(env_overrides);
-        // C-065/C-070, same derivation as `ocx env` and `ocx exec`: this is a
-        // composing emitter, so it heals the groups it is about to emit before
-        // emitting any link path. No `--pinned` flag on this command (C-055
-        // gives it to `env` and `exec` only), so the CLI tier is `None` and
-        // `ocx.toml` / `OCX_TOOLCHAIN_PINNED` decide.
+        // Heals the groups before any link path is emitted. No `--pinned` flag here, so `ocx.toml` /
+        // `OCX_TOOLCHAIN_PINNED` decide.
         let toolchain = crate::app::project_context::toolchain_links(
             &context,
             &project.config_path,
@@ -252,17 +189,10 @@ impl DirenvExport {
             .resolve_env_with_patch_boundary(&composed.roots, false, scope, &platform)
             .await?;
 
-        // W-11: settle each `list` entry's separator before emitting — a
-        // package's explicit separator must be the one every `None`-separator
-        // contributor (project `[env]`, `--env`) inherits, not the fold's bare
-        // default. No forwarded copy exists here (this command never spawns a
-        // re-entrant launcher), so a single-vector pass is enough.
+        // A package's explicit separator must be what `None`-separator contributors (`[env]`, `--env`)
+        // inherit, not the fold's default; nothing is forwarded, so one pass suffices.
         reconcile_list_separators(entries.iter_mut())?;
 
-        // Delegate to the shared emit helper (C5 / conventions.rs).
-        // `Shell::Bash` is fixed: direnv always evaluates `.envrc` in a bash
-        // sub-shell regardless of the user's interactive shell.  There is no
-        // `--shell` flag on `direnv export` for this reason.
         emit_lines(shell, &entries);
 
         Ok(ExitCode::SUCCESS)

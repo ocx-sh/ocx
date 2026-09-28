@@ -117,72 +117,16 @@ impl Shell {
         }
     }
 
-    /// Emit a **self-contained, idempotent, move-to-front** shell statement that
-    /// prepends `value` to the path-style variable named `key`.
+    /// Emit a **self-contained, idempotent, move-to-front** statement prepending `value` to the
+    /// path-style variable `key`; it needs no ocx process, guard variable or helper to be re-sourced.
     ///
-    /// Re-sourcing the emitted statement never duplicates `value`; re-adding a
-    /// value already present removes the stale occurrence and moves it to the
-    /// front ("last activation wins" for lookup). The statement depends on no
-    /// ocx process, no ocx-set guard variable, and no helper function — so it
-    /// keeps working when captured into a profile
-    /// (`ocx package env cmake --shell bash >> ~/.bashrc`) and re-sourced with
-    /// ocx absent. This is the contract that unblocks the per-prompt shell hook.
-    ///
-    /// Each native shell (bash/zsh, fish, PowerShell, elvish, nushell) does the
-    /// dedup with zero subprocesses; the strict-POSIX family (ash/ksh/dash) uses
-    /// a single `awk`. A throwaway `__ocx_p` variable carries the value through
-    /// one escape context and is `unset` within the same statement, so the
-    /// value's match position references the quoted variable rather than a
-    /// re-interpolated literal — closing the glob / second-escape gap. The
-    /// shells whose `__ocx_p` is matched byte-for-byte against an existing PATH
-    /// segment use a **single-quoted literal** (bash/zsh/POSIX via `'\''`,
-    /// elvish/PowerShell via `''`) so `$`, backtick, `\`, `!`, and glob chars
-    /// stay exact; fish and nushell keep their double-quoted escaper (that
-    /// form round-trips those bytes). `batch` is idempotent too:
-    /// cmd's `%VAR:search=%` substring deletion gives move-to-front without the
-    /// `FOR /F` + delayed-expansion `!`-corruption that made dedup look infeasible.
-    ///
-    /// **Precondition:** `value` is a single directory with no embedded
-    /// `PATH_SEPARATOR` (the env resolver yields one resolved `bin/` dir per
-    /// entry). The split-based emitters (POSIX `awk`, fish, PowerShell, elvish,
-    /// nushell) treat a separator inside `value` as a segment boundary and would
-    /// not recognise it for dedup — the same precondition as
-    /// [`utility::path::move_to_front`](ocx_util::path::move_to_front).
-    ///
-    /// **The emitted result equals
-    /// [`move_to_front`](ocx_util::path::move_to_front) byte for byte, in
-    /// every arm** — the parity the reconciler needs, because it applies in
-    /// process on one prompt and through this emit on another in the same
-    /// session, and a divergence would surface as PATH order flapping between
-    /// prompts. That includes dropping ambient empty segments, and comparing a
-    /// PATH element segment-exact after stripping one surrounding pair of `"`,
-    /// ordinally on Unix and case-insensitively on Windows.
-    ///
-    /// **One known divergence, reachable only through the ambient value.** On
-    /// Windows a *quoted* ambient segment whose interior holds an empty field —
-    /// `"C:\a;;b"` — survives
-    /// [`move_to_front`](ocx_util::path::move_to_front) whole, because
-    /// `std::env::split_paths` unquotes it into a single non-empty segment that
-    /// the re-join then re-quotes; every arm here splits on the raw separator
-    /// with no quote awareness, so it reads that interior field as an ambient
-    /// empty segment and drops it, re-joining as `"C:\a;b"`. The precondition
-    /// above forbids that shape in `value`, so the prepended value is never
-    /// affected — only a segment the variable already carried.
-    ///
-    /// An **empty `value` is a no-op**, emitted as a shell comment. Prepending
-    /// it would put an empty segment at the front of the variable, which POSIX
-    /// resolves as the current working directory — a privilege-escalation
-    /// primitive, and a divergence from
-    /// [`move_to_front`](ocx_util::path::move_to_front), which refuses to
-    /// prepend an empty value.
-    ///
-    /// Returns `None` when `key` is not a valid POSIX environment-variable
-    /// name (`[A-Za-z_][A-Za-z0-9_]*`), **or** for [`Shell::Batch`] when the
-    /// value contains `%`, LF or CR (see [`Self::export_constant`] for why cmd
-    /// cannot express those). Caller decides how to surface that — invalid keys
-    /// are produced exclusively by malformed package metadata and never by the
-    /// OCX code base itself, so propagating `None` is the path-of-least-impact
-    /// safety guard.
+    /// **The result equals [`move_to_front`](ocx_util::path::move_to_front) byte for byte in every
+    /// arm**: the reconciler applies in process on one prompt and through this emit on another, and a
+    /// divergence shows as PATH order flapping. **Precondition:** `value` is one directory with no
+    /// embedded `PATH_SEPARATOR`; the split-based arms would read it as two segments and never dedup it.
+    /// An **empty `value` is a no-op** (a shell comment): prepending it puts an empty segment first,
+    /// which POSIX resolves as the current directory. Returns `None` for an invalid POSIX env-var name,
+    /// or for [`Shell::Batch`] when `value` is one `cmd.exe` cannot carry (`batch_cannot_express`).
     pub fn export_path(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
         if !ocx_util::env::is_valid_env_key(key) {
@@ -195,225 +139,130 @@ impl Shell {
         if self == Self::Batch && batch_cannot_express(raw) {
             return None;
         }
+        // Known divergence from `move_to_front`, reachable only through the ambient value: on Windows
+        // a *quoted* ambient segment with an empty interior field (`"C:\a;;b"`) survives it whole
+        // (`split_paths` unquotes it into one segment), but every arm here splits on the raw separator
+        // with no quote awareness, drops the interior field and re-joins `"C:\a;b"`. The precondition
+        // keeps this away from `value` itself.
         let separator = ocx_util::env::PATH_SEPARATOR;
+        // A throwaway `__ocx_p` carries the value through one escape context and is unset in the same
+        // statement, so the match references the quoted variable, not a re-interpolated literal,
+        // closing the glob / second-escape gap.
         Some(match self {
-            // bash / zsh — pure-builtin colon-sentinel removal, zero subprocess.
-            // The value is a single-quoted literal so `$`, backtick, `\`, `!`,
-            // and glob chars stay byte-exact (a double-quoted `\!` would not
-            // match a real `!`-bearing segment). Quoting `"$__ocx_p"` inside
-            // `${var//pat/repl}` forces a *literal* match (no glob). The `while`
-            // loops the replacement to a fixed point so even pre-existing
-            // *adjacent* duplicates collapse (one non-overlapping `${//}` pass
-            // leaves one). A second fixpoint loop collapses `::` to `:`: the
-            // other six arms and `move_to_front` all drop ambient empty
-            // segments, and under a per-prompt reconciler a surviving empty
-            // segment would be re-asserted on every recompose. zsh keeps its
-            // `path` array tied to `PATH` on every assignment, so the scalar
-            // form updates both. `${KEY-}` is `set -u`-safe.
+            // bash / zsh: pure-builtin colon-sentinel removal, zero subprocess. Quoting `"$__ocx_p"`
+            // inside `${var//pat/repl}` forces a *literal* match (no glob), and the `while` loops the
+            // replacement to a fixed point so pre-existing *adjacent* duplicates collapse. A second
+            // fixpoint loop collapses `::` to `:`: the other six arms and `move_to_front` drop ambient
+            // empty segments, and a surviving one would be re-asserted on every recompose.
             Self::Bash | Self::Zsh => {
+                // `$`, backtick, `\`, `!` and glob chars stay literal because the operand is single-quoted;
+                // a double-quoted spelling would turn `!` into `\!`, which never matches a plain `!`.
+                // Assigning scalar `PATH` also updates zsh's tied `path` array; `${KEY-}` is `set -u`-safe.
                 let value = escape::posix_single_quoted(raw);
                 format!(
                     "__ocx_p='{value}'; {key}=\":${{{key}-}}:\"; while [ \"${key}\" != \"${{{key}//:\"$__ocx_p\":/:}}\" ]; do {key}=\"${{{key}//:\"$__ocx_p\":/:}}\"; done; while [ \"${key}\" != \"${{{key}//::/:}}\" ]; do {key}=\"${{{key}//::/:}}\"; done; {key}=\"${{{key}#:}}\"; {key}=\"${{{key}%:}}\"; export {key}=\"$__ocx_p${{{key}:+:${{{key}}}}}\"; unset __ocx_p"
                 )
             }
-            // strict POSIX (ash / ksh / dash) — one `awk`, literal key name (no
-            // non-POSIX `${!var}` indirection). The value is a single-quoted
-            // literal (byte-exact: `!`, `\`, `$` all literal) and is read by awk
-            // through `ENVIRON["__ocx_p"]` (an exported shell var) rather than
-            // `-v d=...`, because `awk -v` decodes backslash escapes in its
-            // value — `-v d=/a\b` would set `d` to `/a<BS>b` and fail to match a
-            // real `/a\b` segment. `ENVIRON` carries the bytes verbatim, `RS=":"`
-            // is the POSIX path separator, and the compare is exact string
-            // equality, so no glob/pattern escaping is needed. (`awk` collapses
-            // adjacent duplicates in one pass, so no fixpoint loop is needed.)
+            // strict POSIX (ash / ksh / dash): one `awk`, literal key name (no non-POSIX `${!var}`
+            // indirection). The value reaches awk through `ENVIRON["__ocx_p"]`, not `-v d=...`: `awk -v`
+            // decodes backslash escapes, so `-v d=/a\b` would set `d` to `/a<BS>b` and miss a real
+            // `/a\b` segment. `ENVIRON` carries the bytes verbatim, so no glob/pattern escaping is
+            // needed; awk collapses adjacent duplicates in one pass.
             Self::Ash | Self::Ksh | Self::Dash => {
                 let value = escape::posix_single_quoted(raw);
                 format!(
                     "__ocx_p='{value}'; export __ocx_p; export {key}=\"$__ocx_p$(printf %s \"${{{key}-}}\" | awk 'BEGIN{{ORS=\"\";RS=\":\";d=ENVIRON[\"__ocx_p\"]}} $0!=d && $0!=\"\"{{printf \":%s\",$0}}')\"; unset __ocx_p"
                 )
             }
-            // fish — rebuild the list keeping the new value first and dropping any
-            // exact-string duplicate. `test "$e" != "$p"` is exact (no glob), so
-            // bracket/glob paths are safe. `test -n` drops ambient empty elements,
-            // which is the same normalisation `move_to_front` performs and the
-            // other arms already did — measured, fish was the last arm where an
-            // ambient `/a::/b` survived as `/a::/b` while every other
-            // implementation returned `/a:/b`. The `fish_add_path` builtin is
-            // deliberately avoided: it skips non-existent dirs and mangles
-            // bracket paths.
-            //
-            // **`--path` on BOTH sides, and it is the whole correctness of this
-            // arm for any key other than `PATH`.** fish colon-splits on import and
-            // colon-joins on export only for a *path variable*: `PATH`, `CDPATH`,
-            // `MANPATH` and names ending in `PATH`. For `PERL5LIB`, `RUBYLIB`,
-            // `XDG_DATA_DIRS`, `GEM_HOME`, `TERMINFO_DIRS` the ambient arrives as
-            // ONE element holding the whole `/x:/y` string — measured — so
-            // iterating `$KEY` directly never matched the operand and the
-            // write-back produced a two-element list fish exports **space**-joined,
-            // corrupting the variable rather than mis-ordering it. `set --path`
-            // makes the list-ness explicit instead of inherited: it splits the
-            // seed on `:` whatever the key is called, and the `--path` write-back
-            // marks the exported variable so it re-joins on `:`. On `PATH` itself
-            // both are no-ops (it already carries the flag), so one form serves
-            // every key.
+            // fish: rebuild the list keeping the new value first and dropping any exact-string duplicate.
+            // `test "$e" != "$p"` is exact (no glob), so bracket paths are safe, and `test -n` drops
+            // ambient empty elements as `move_to_front` does. Not `fish_add_path`: it skips
+            // non-existent dirs and mangles bracket paths.
             Self::Fish => {
                 let value = escape::fish_double_quoted(raw);
+                // `--path` on BOTH sides is the whole correctness of this arm for any key but `PATH`: fish
+                // splits/joins on `:` only for path variables (`PATH`, `CDPATH`, `MANPATH`, names ending in
+                // `PATH`). For `PERL5LIB`, `XDG_DATA_DIRS` and the like the ambient is ONE element, so
+                // iterating `$KEY` never matched and the write-back produced a two-element list fish
+                // exports **space**-joined, corrupting the variable.
                 format!(
                     "set --path __ocx_l ${key}; set __ocx_p \"{value}\"; set __ocx_r; for __ocx_e in $__ocx_l; test \"$__ocx_e\" != \"$__ocx_p\"; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path {key} $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l"
                 )
             }
-            // PowerShell — split on the OS path separator, drop empties + the
-            // value, prepend. The value is a single-quoted literal (`''` escapes
-            // an embedded quote) so no `$`/backtick interpolation can fire.
-            // `[IO.Path]::PathSeparator` is `;` on Windows, `:` elsewhere.
-            // The comparison is `[String]::Equals` with an explicit
-            // `StringComparison`, never `-ne`: PowerShell's comparison
-            // operators are case-INsensitive by default, so on Linux — where
-            // `/opt/Bin` and `/opt/bin` are different directories — `-ne`
-            // silently deletes a foreign entry. `[String]::Equals(a, b, cmp)`
-            // is available on .NET Framework too, so Windows PowerShell 5.1
-            // parses this. Each segment is compared after stripping one
-            // surrounding pair of `"` (Windows quotes PATH segments containing
-            // spaces, and `std::env::split_paths` unquotes on the in-process
-            // side) — the *comparison* is normalised, the surviving segment is
-            // kept byte-exact.
-            //
-            // E3 — **the operand carries the identical normalisation**, and the
-            // comparison is symmetric because of it. Normalising one side only
-            // meant this arm never recognised the quoted value it had itself
-            // written a prompt earlier, re-prepending one copy per prompt
-            // without bound. `$__ocx_p` itself stays raw, so the prepend is
-            // still byte-exact and still equals what `move_to_front` writes;
-            // only the equality test sees the stripped form, on both sides.
+            // PowerShell: split on the OS path separator, drop empties + the value, prepend; the value is
+            // a single-quoted literal (`''` escapes a quote) so no `$`/backtick fires. The compare is
+            // `[String]::Equals` with an explicit `StringComparison`, never `-ne`: PowerShell operators
+            // are case-INsensitive, so on Linux `-ne` would delete a foreign `/opt/Bin` when asked for
+            // `/opt/bin`. The three-argument form also parses on Windows PowerShell 5.1.
             Self::PowerShell => {
                 let value = escape::single_quoted_doubled(raw);
+                // Each segment is compared after stripping one surrounding `"` pair (Windows quotes PATH
+                // segments with spaces; `split_paths` unquotes in process), and the operand gets the
+                // identical normalisation: normalising one side only never recognised the quoted value
+                // it wrote a prompt earlier and re-prepended one copy per prompt. `$__ocx_p` stays raw, so
+                // the prepend is byte-exact; only the equality test sees the stripped form.
                 let comparison = path_element_comparison();
                 let normalisation = path_segment_normalisation();
                 format!(
                     "$__ocx_p='{value}'; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(@($__ocx_p)+($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), ($__ocx_p{normalisation}), [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
                 )
             }
-            // elvish — split the env string, filter empties + the value, prepend,
-            // re-join. The value is a single-quoted raw string (`'` doubled):
-            // elvish double-quoted strings reject `\$` / `` \` `` as *invalid
-            // escape sequences* (a parse error), so a `$`/backtick-bearing path
-            // must use the raw form. `not-eq` is exact (no glob). Works for any
-            // key and is empty-safe (the `$paths` list view is `$nil` when
-            // `PATH` is empty). `use str` is idempotent across repeated emits.
-            // Requires elvish with the `str:` module (0.16+).
+            // elvish: split the env string, filter empties + the value, prepend, re-join. The value is
+            // a single-quoted raw string (`'` doubled) because double-quoted strings reject `\$` /
+            // `` \` `` as invalid escape sequences (a parse error). `not-eq` is exact (no glob); the
+            // arm is empty-safe (`$paths` is `$nil` when `PATH` is empty), `use str` is idempotent
+            // across emits and needs elvish 0.16+.
             Self::Elvish => {
                 let value = escape::single_quoted_doubled(raw);
                 format!(
                     "use str; set E:{key} = (str:join \"{separator}\" ['{value}' (str:split \"{separator}\" $E:{key} | each {{|p| if (and (not-eq $p '{value}') (not-eq $p \"\")) {{ put $p }} }})])"
                 )
             }
-            // nushell — normalise to a list (`$env.PATH` is auto-listified since
-            // 0.101, other path vars stay strings), drop the value, prepend, then
-            // **join back to a string**. The `$env.KEY? | default ""` guard treats
-            // an unset variable as empty (parity with the POSIX `${KEY-}`); the
-            // `describe` guard then tolerates both string and list inputs. Plain
-            // (non-interpolating) double-quoted literals, so `$`/`(` cannot fire.
-            //
-            // The trailing `str join` is not cosmetic. `$env.PATH` has a built-in
-            // `ENV_CONVERSIONS` entry and re-joins on export; a path-style
-            // variable that has none — `PERL5LIB`, `XDG_DATA_DIRS`, `GEM_HOME` —
-            // does not, and nushell refuses to hand a non-string env value to an
-            // external command, so storing the list silently dropped the variable
-            // for every child process. One joined string serves every key, agrees
-            // with the shipped `env.nu` applier (which stores `$env.PATH` as a
-            // string too) and with the in-process `Env`, whose values are
-            // `OsString`.
+            // nushell: normalise to a list (`$env.PATH` is auto-listified since 0.101, other path vars
+            // stay strings), drop the value, prepend, then **join back to a string**. `$env.KEY? |
+            // default ""` treats an unset variable as empty (parity with POSIX `${KEY-}`) and the
+            // `describe` guard tolerates string and list inputs. Plain double-quoted literals, so
+            // `$`/`(` cannot fire.
             Self::Nushell => {
                 let value = escape::nushell_plain_string(raw);
+                // The trailing `str join` is not cosmetic: a path-style variable with no `ENV_CONVERSIONS`
+                // entry (`PERL5LIB`, `XDG_DATA_DIRS`, `GEM_HOME`) is not re-joined on export, and nushell
+                // refuses to hand a non-string env value to an external command, so storing the list
+                // silently dropped the variable for every child. One joined string agrees with the
+                // shipped `env.nu` applier and the in-process `Env` (`OsString` values).
                 format!(
                     "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | prepend \"{value}\" | str join (char esep))"
                 )
             }
-            // batch (cmd.exe) — idempotent move-to-front in a SINGLE statement.
-            // cmd has no list primitive, but `%VAR:search=%` deletes every literal
-            // occurrence of `search` using *normal* (non-delayed) expansion, so a
-            // `!`-bearing segment stays intact (the `FOR /F` + delayed-expansion form
-            // would corrupt it). One statement is essential: this line is consumed
-            // both via `call file.bat` AND via `FOR /F ... DO @%i` (how `ocx --global
-            // env` is applied), and a FOR/F eval does not re-expand `%KEY%` between
-            // statements — a multi-statement form would read a stale value. So delete
-            // every existing `value<sep>` occurrence and prepend `value<sep>` once, in
-            // place. Re-running is stable: the front occurrence is deleted and
-            // re-prepended (the work the removed OCX_ACTIVATED guard used to do).
-            // Match is case-insensitive — Windows PATH semantics, and the correct
-            // answer here because Batch exists only on Windows. Caveats, both
-            // benign and matching the prior prepend-only behaviour: an entry that was
-            // the unanchored *last* segment is not relocated (a one-time non-dedup,
-            // never unbounded growth), and an empty `%KEY%` yields a trailing
-            // separator (an empty PATH segment cmd ignores).
-            //
-            // **Delayed-expansion-off precondition** (a named ceiling, not a bug):
-            // the emit is correct only under cmd's default. Under `cmd /v:on`, or
-            // after `setlocal EnableDelayedExpansion` in the consuming `.bat`, a
-            // `!`-bearing value is consumed as a variable reference and the segment
-            // is truncated. Nothing in ocx controls the consuming script's
-            // `setlocal`, and no spelling is correct under both states.
+            // batch (cmd.exe): `%VAR:search=%` deletes every literal `search` under *normal* expansion, so
+            // a `!`-bearing segment stays intact (the `FOR /F` + delayed-expansion form would corrupt
+            // it). The match is case-insensitive: Windows PATH semantics, and right because Batch
+            // exists only on Windows.
             Self::Batch => {
+                // Correct only with delayed expansion OFF (cmd's default): under `cmd /v:on` or `setlocal
+                // EnableDelayedExpansion` a `!`-bearing value is read as a variable reference and the
+                // segment is truncated. ocx controls neither, and no spelling is correct under both.
                 let value = escape::batch_set_value(raw);
+                // One statement is essential: the line is consumed via `call file.bat` AND via `FOR /F ... DO
+                // @%i` (how `ocx --global env` is applied), and FOR/F does not re-expand `%KEY%` between
+                // statements, so a multi-statement form would read a stale value. Deleting every
+                // `value<sep>` and prepending it once is stable on re-run; an unanchored *last* segment is
+                // not relocated (a one-time non-dedup, never unbounded growth).
                 format!("SET \"{key}={value}{separator}%{key}:{value}{separator}=%\"")
             }
         })
     }
 
-    /// Emit a **self-contained, idempotent, unique-append** shell statement that
-    /// appends `value` to the `separator`-joined list variable named `key`.
+    /// Emit a **self-contained, idempotent, unique-append** statement appending `value` to the
+    /// `separator`-joined list variable `key`, computing the same function as
+    /// [`append_unique`](ocx_util::list::append_unique) so an exported line and the in-process child env
+    /// (`ocx exec`) agree byte for byte.
     ///
-    /// The fold is pinned by `adr_env_modifier_types.md` D1 and computes the
-    /// same function as [`utility::list::append_unique`](ocx_util::list::append_unique),
-    /// so an exported shell line and the in-process child env (`ocx exec`) agree
-    /// byte for byte:
-    ///
-    /// > wrap the ambient value in the separator; replace **every**
-    /// > `sep + value + sep` with `sep`, to a fixpoint; strip the wrapper;
-    /// > append `sep + value` (bare `value` when nothing survived).
-    ///
-    /// Every arm runs the same four steps: seed the working string with
-    /// `sep + ambient + sep`, or with a **bare `sep` when the ambient is
-    /// empty** — that branch is what keeps an empty ambient from yielding a
-    /// leading separator, and it makes a single *leading*-separator strip
-    /// equivalent to the primitive's strip-both-ends; replace to a fixpoint;
-    /// strip the one leading separator; concatenate `value`. The fixpoint loop
-    /// is what makes the removal total: a single replace pass leaves the second
-    /// of two *adjacent* duplicates behind, because the first match consumed
-    /// the separator they share.
-    ///
-    /// **The separator is untrusted text**, exactly like the value: both are
-    /// authored in package metadata and both go through the same per-shell
-    /// escaper. Matching is **case-sensitive in every shell** — list elements
-    /// are opaque option strings, where `-DFOO=1` and `-Dfoo=1` are different
-    /// options, so the case-insensitive default of PowerShell's `-replace`/`-eq`
-    /// would delete the wrong element. The PowerShell arm therefore calls the
-    /// ordinal .NET `String.Contains`/`String.Replace` rather than any
-    /// PowerShell operator, which also removes the need to regex-escape either
-    /// operand.
-    ///
-    /// **`cmd.exe` (`Shell::Batch`) returns `None`** — it cannot express this
-    /// fold. Its only string-replacement primitive, `%VAR:search=replace%`, is
-    /// case-**insensitive** with no case-sensitive form (measured: `%V:,abc,=,%`
-    /// deletes `,ABC,`), so it silently removes a differently-cased element;
-    /// its case-sensitive primitives (`IF` comparison, `%VAR:~n,m%`) cannot
-    /// locate a substring at an unknown position. An append that skips the
-    /// removal instead grows without bound when two entries share a key, and a
-    /// tail-anchored `IF` guard grows the same way as soon as a second entry is
-    /// interleaved. Emitting nothing beats emitting a statement that deletes
-    /// the wrong option or grows on every re-source.
-    ///
-    /// An empty `value` is a no-op (the primitive's rule), emitted as a shell
-    /// comment: folding with an empty value would make the search pattern
-    /// `sep + sep` and collapse the ambient's own adjacent separators.
-    ///
-    /// **Precondition:** `separator` is non-empty and `value` neither starts nor
-    /// ends with it — the same precondition
-    /// [`append_unique`](ocx_util::list::append_unique) documents, enforced
-    /// at every parse boundary and again after template resolution.
-    ///
-    /// Returns `None` when `key` is not a valid POSIX environment-variable name
-    /// (see [`Self::export_path`]) or when the shell cannot express the fold.
+    /// **Matching is case-sensitive in every shell** and the separator is untrusted text, escaped like the
+    /// value: list elements are opaque options (`-DFOO=1` and `-Dfoo=1` differ). **`Shell::Batch` returns
+    /// `None`**: `%VAR:search=replace%` is case-insensitive, so it would delete a differently-cased element.
+    /// An empty `value` is a no-op comment. **Precondition:** `separator` is non-empty and `value` neither
+    /// starts nor ends with it. Returns `None` for an invalid key.
     pub fn export_list(
         self,
         key: impl AsRef<str>,
@@ -426,23 +275,22 @@ impl Shell {
         }
         let raw = value.as_ref();
         let raw_separator = separator.as_ref();
+        // An empty value would make the search pattern `sep + sep` and collapse the ambient's own
+        // adjacent separators.
         if raw.is_empty() {
             return Some(self.comment(format!("ocx: {key} list entry is empty, nothing to append")));
         }
+        // Every arm runs the same four steps: seed the working string with `sep + ambient + sep`
+        // (a bare `sep` when the ambient is empty, so an empty ambient never yields a leading
+        // separator and one leading-separator strip suffices), replace to a fixpoint, strip the
+        // leading separator, concatenate `value`. A single replace pass leaves the second of two
+        // *adjacent* duplicates behind, because the first match consumed the separator they share.
         match self {
-            // POSIX family (bash/zsh + strict ash/ksh/dash) — one arm, pure
-            // builtins, no subprocess. `${l%%"$p"*}` is the prefix before the
-            // FIRST occurrence of `$__ocx_p` and `${l#*"$p"}` the part after it,
-            // so the loop body replaces that occurrence with the separator; the
-            // same `%%` expansion doubles as the loop guard, since it returns
-            // `$__ocx_l` unchanged exactly when the pattern does not occur (the
-            // idiom bash's `export_path` uses with `${//}`). Every interpolated
-            // pattern is a *quoted* expansion, which POSIX makes literal — so a
-            // separator containing `*`, `?` or `[` matches itself instead of
-            // globbing. Value and separator ride single-quoted literals, keeping
-            // `$`, backtick, `\` and `!` byte-exact (the double-quoted form's
-            // `\!` would not match a real `!`). `${KEY:+…}` supplies the
-            // empty-ambient branch inline and is `set -u`-safe.
+            // POSIX family (bash/zsh + strict ash/ksh/dash): pure builtins, no subprocess. The loop replaces
+            // the FIRST occurrence (`${l%%"$p"*}` before it, `${l#*"$p"}` after it) with the separator,
+            // and the same `%%` expansion is the loop guard. Patterns are *quoted* expansions (literal,
+            // so `*`, `?`, `[` match themselves) and operands ride single-quoted literals (`$`,
+            // backtick, `\`, `!` byte-exact); `${KEY:+…}` is the `set -u`-safe empty-ambient branch.
             Self::Bash | Self::Zsh | Self::Ash | Self::Ksh | Self::Dash => {
                 let value = escape::posix_single_quoted(raw);
                 let separator = escape::posix_single_quoted(raw_separator);
@@ -450,14 +298,11 @@ impl Shell {
                     "__ocx_v='{value}'; __ocx_s='{separator}'; __ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; __ocx_l=\"${{{key}:+$__ocx_s${{{key}}}}}$__ocx_s\"; while [ \"$__ocx_l\" != \"${{__ocx_l%%\"$__ocx_p\"*}}\" ]; do __ocx_l=\"${{__ocx_l%%\"$__ocx_p\"*}}$__ocx_s${{__ocx_l#*\"$__ocx_p\"}}\"; done; export {key}=\"${{__ocx_l#\"$__ocx_s\"}}$__ocx_v\"; unset __ocx_v __ocx_s __ocx_p __ocx_l"
                 ))
             }
-            // fish — `string replace` without `-r` is a literal, case-sensitive
-            // replace; `--all` covers one pass and the `$__ocx_n`/`$__ocx_l`
-            // compare drives it to the fixpoint. The final unflagged
-            // `string replace` removes the FIRST occurrence, which is the
-            // leading separator by construction. The variable is written as one
-            // plain string (`set -gx`, not a fish list) so the shell fold and
-            // the in-process fold produce identical bytes — a list-typed
-            // variable is a string in every other shell too.
+            // fish: `string replace` without `-r` is literal and case-sensitive; `--all` covers one pass
+            // and the `$__ocx_n`/`$__ocx_l` compare drives it to the fixpoint. The final unflagged
+            // replace removes the FIRST occurrence, the leading separator by construction. The variable
+            // is written as one plain string (`set -gx`, not a fish list) so the shell fold and the
+            // in-process fold produce identical bytes.
             Self::Fish => {
                 let value = escape::fish_double_quoted(raw);
                 let separator = escape::fish_double_quoted(raw_separator);
@@ -470,12 +315,9 @@ impl Shell {
                     "set __ocx_v \"{value}\"; set __ocx_s \"{separator}\"; set __ocx_p \"$__ocx_s$__ocx_v$__ocx_s\"; set __ocx_l \"$__ocx_s\"; if test -n \"${key}\"; set __ocx_l \"$__ocx_s${key}$__ocx_s\"; end; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); while test \"$__ocx_n\" != \"$__ocx_l\"; set __ocx_l \"$__ocx_n\"; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); end; set __ocx_l (string replace -- \"$__ocx_s\" \"\" \"$__ocx_l\" | string collect); set -gx {key} \"$__ocx_l$__ocx_v\"; set -e __ocx_v __ocx_s __ocx_p __ocx_l __ocx_n"
                 ))
             }
-            // PowerShell — ordinal (case-sensitive) .NET string methods, so no
-            // `-creplace` and no `[regex]::Escape` of either operand. The value
-            // and separator are single-quoted literals (`''` escapes a quote),
-            // which no `$`/backtick interpolation can reach. `.Substring` needs
-            // no bounds guard: the working string always starts with the
-            // separator.
+            // PowerShell: ordinal (case-sensitive) .NET string methods, so no `-creplace` and no
+            // `[regex]::Escape`; value and separator are single-quoted literals (`''` escapes a quote).
+            // `.Substring` needs no bounds guard: the working string always starts with the separator.
             Self::PowerShell => {
                 let value = escape::single_quoted_doubled(raw);
                 let separator = escape::single_quoted_doubled(raw_separator);
@@ -483,12 +325,10 @@ impl Shell {
                     "$__ocx_v='{value}'; $__ocx_s='{separator}'; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length)+$__ocx_v; Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
                 ))
             }
-            // elvish — `str:replace` mirrors Go's `strings.Replace`: literal,
-            // case-sensitive, all occurrences by default, and `&max=1` for the
-            // leading-separator strip. Single-quoted raw strings (`'` doubled)
-            // carry both operands, because elvish rejects `\$` / `` \` `` inside
-            // double quotes as invalid escape sequences. `has-env` guards the
-            // ambient read so an unset key cannot raise.
+            // elvish: `str:replace` mirrors Go's `strings.Replace` (literal, case-sensitive, all
+            // occurrences; `&max=1` for the leading-separator strip). Operands are single-quoted raw
+            // strings (`'` doubled) because elvish rejects `\$` / `` \` `` inside double quotes as
+            // invalid escapes. `has-env` keeps an unset key from raising.
             Self::Elvish => {
                 let value = escape::single_quoted_doubled(raw);
                 let separator = escape::single_quoted_doubled(raw_separator);
@@ -496,13 +336,11 @@ impl Shell {
                     "use str; var __ocx_l = '{separator}'; if (and (has-env {key}) (not-eq $E:{key} '')) {{ set __ocx_l = '{separator}'$E:{key}'{separator}' }}; while (str:contains $__ocx_l '{separator}{value}{separator}') {{ set __ocx_l = (str:replace '{separator}{value}{separator}' '{separator}' $__ocx_l) }}; set E:{key} = (str:replace &max=1 '{separator}' '' $__ocx_l)'{value}'"
                 ))
             }
-            // nushell — `str replace` without `--regex` is literal and
-            // case-sensitive; `--all` per pass, the `while` drives the fixpoint,
-            // and the unflagged form strips the leading separator (first
-            // occurrence). The variable is written as one string, not a nushell
-            // list, so the two folds agree byte for byte. Plain (non-interpolating)
-            // double-quoted literals — `$` and `(` cannot fire, so
-            // `escape::nushell_plain_string` neutralizes only `\` and `"`.
+            // nushell: `str replace` without `--regex` is literal and case-sensitive; `--all` per pass,
+            // the `while` drives the fixpoint, the unflagged form strips the leading separator. The
+            // variable is written as one string, not a nushell list, so the two folds agree byte for
+            // byte. Plain double-quoted literals (`$`, `(` cannot fire), so `escape::nushell_plain_string`
+            // neutralizes only `\` and `"`.
             Self::Nushell => {
                 let value = escape::nushell_plain_string(raw);
                 let separator = escape::nushell_plain_string(raw_separator);
@@ -510,66 +348,22 @@ impl Shell {
                     "mut __ocx_l = (if ($env.{key}? | default \"\") == \"\" {{ \"{separator}\" }} else {{ \"{separator}\" + ($env.{key}? | default \"\") + \"{separator}\" }}); while ($__ocx_l | str contains \"{separator}{value}{separator}\") {{ $__ocx_l = ($__ocx_l | str replace --all \"{separator}{value}{separator}\" \"{separator}\") }}; $env.{key} = (($__ocx_l | str replace \"{separator}\" \"\") + \"{value}\")"
                 ))
             }
-            // batch (cmd.exe) — no emit; see the doc comment for the measured
-            // case-insensitivity of `%VAR:search=replace%` and why every
-            // single-statement alternative either deletes the wrong element or
-            // grows on re-source.
+            // batch (cmd.exe): no emit. `%VAR:search=replace%` is case-insensitive, and every
+            // single-statement alternative either deletes the wrong element or grows on re-source.
             Self::Batch => None,
         }
     }
 
-    /// Emit a shell statement that removes one whole contribution from `key`.
+    /// Emit a statement removing one whole contribution from `key`, the inverse of
+    /// [`export_list`](Self::export_list): **flank-delimited removal of one whole contribution, never a
+    /// segment op**. Delete-if-found and commutative with foreign edits, so a revert is safe.
     ///
-    /// The inverse of [`export_list`](Self::export_list) and of
-    /// [`append_unique`](ocx_util::list::append_unique): **flank-delimited
-    /// removal of one whole contribution, never a segment op** — a contribution
-    /// that itself carries the separator is still removed as one span.
-    /// Delete-if-found — absence is not an error, and removal commutes with
-    /// foreign prepends and appends, which is what makes the reconciler's
-    /// revert safe against every other tool that edited the variable since.
-    ///
-    /// `separator: None` means the platform PATH separator **and selects
-    /// path-kind semantics**; `Some(effective)` selects list-kind. The
-    /// parameter is **mandatory to the contract**: without it every
-    /// non-default-separator list var is permanently unrevertible — `CFLAGS` as
-    /// `{ type = "list", separator = " " }` applies through `export_list`
-    /// (which does take a separator) and would then remove nothing, or split on
-    /// the wrong byte and corrupt the value. A list-kind revert always passes
-    /// `Some(effective_separator)`; `None` is path-kind only. Per-entry
-    /// separators are settled upstream by
-    /// [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators) —
-    /// this primitive never guesses one.
-    ///
-    /// The two kinds differ in exactly two ways, each inherited from the
-    /// applier being reverted:
-    ///
-    /// | | path-kind (`None`) | list-kind (`Some`) |
-    /// |---|---|---|
-    /// | ambient empty segments | collapsed, as [`export_path`](Self::export_path) and [`move_to_front`](ocx_util::path::move_to_front) do | preserved verbatim |
-    /// | comparison | segment-exact after stripping one surrounding pair of `"`, ordinal on Unix and `OrdinalIgnoreCase` on Windows | byte-exact, case-sensitive on every platform |
-    ///
-    /// Case-sensitivity is not a free choice on either side: PATH is
-    /// case-insensitive on Windows, while list elements are opaque option
-    /// strings where `-DFOO=1` and `-Dfoo=1` are different options. The
-    /// **emitted key is never re-cased.**
-    ///
-    /// An empty `value` is a no-op, emitted as a shell comment: the flank
-    /// pattern would degrade to `sep + sep` and delete the ambient's own
-    /// separators.
-    ///
-    /// Returns `None` for an invalid env key (delegating to
-    /// [`ocx_util::env::is_valid_env_key`], same as `export_path`) **or** for
-    /// [`Shell::Batch`]. Batch is not "cannot express it" — `export_path` does
-    /// delete an element there via `%VAR:search=%`. The reason is that
-    /// `cmd.exe`'s only substring-replace primitive is case-insensitive with no
-    /// case-sensitive form, and list elements need case-sensitive matching.
-    /// Batch also hosts no prompt hook, so nothing consumes it.
-    ///
-    /// **Escaping is per arm**, never one shared escaper. Routing every arm
-    /// through the fish/nushell double-quote escaper would ship a shell
-    /// injection: that escaper deliberately leaves `'` untouched, so an element
-    /// like `/tmp/a';id;'b` — reachable from a project `[env]` value — would
-    /// execute at every prompt.
+    /// `separator: None` means the platform PATH separator **and selects path-kind semantics**;
+    /// `Some(effective)` selects list-kind and is **mandatory**: without it a non-default-separator list
+    /// (`CFLAGS` with `" "`) is unrevertible or corrupted. Path-kind collapses ambient empty segments and
+    /// compares segment-exact after one `"` pair is stripped (ordinal on Unix, `OrdinalIgnoreCase` on
+    /// Windows); list-kind preserves them and compares byte-exact. The key is never re-cased; an empty
+    /// `value` is a no-op comment. Returns `None` for an invalid key or [`Shell::Batch`].
     pub fn remove_list_element(
         self,
         key: impl AsRef<str>,
@@ -592,19 +386,15 @@ impl Shell {
             return Some(self.comment(format!("ocx: {key} removal value is empty, nothing to remove")));
         }
         let raw_separator = separator.unwrap_or(ocx_util::env::PATH_SEPARATOR);
+        // Escaping is per arm, never one shared escaper: the fish/nushell double-quote escaper leaves
+        // `'` untouched, so an element like `/tmp/a';id;'b` from a project `[env]` value would run at
+        // every prompt if it reached a single-quoted arm.
         Some(match self {
-            // POSIX family (bash/zsh + strict ash/ksh/dash) — one arm, pure
-            // builtins, no subprocess and, unlike `export_path`, no `awk`: the
-            // `${l%%"$p"*}` / `${l#*"$p"}` idiom `export_list` already proves
-            // across all five shells expresses the whole fold, so the value
-            // never has to survive `awk -v`'s backslash decoding. Every
-            // interpolated pattern is a *quoted* expansion, which POSIX makes
-            // literal — a separator or element containing `*`, `?` or `[`
-            // matches itself instead of globbing, which is also what closes
-            // zsh's glob over-match. Value and separator ride single-quoted
-            // literals, keeping `$`, backtick, `\` and `!` byte-exact.
-            // `${KEY:+…}` supplies the empty-ambient branch inline and is
-            // `set -u`-safe.
+            // POSIX family (bash/zsh + strict ash/ksh/dash): pure builtins and, unlike `export_path`, no
+            // `awk`, so the value never has to survive `awk -v`'s backslash decoding. Patterns are
+            // *quoted* expansions, literal under POSIX: a separator or element with `*`, `?` or `[` matches
+            // itself, which also closes zsh's glob over-match. Operands ride single-quoted literals (`$`,
+            // backtick, `\`, `!` byte-exact); `${KEY:+…}` is the `set -u`-safe empty-ambient branch.
             Self::Bash | Self::Zsh | Self::Ash | Self::Ksh | Self::Dash => {
                 let value = escape::posix_single_quoted(raw);
                 let separator = escape::posix_single_quoted(raw_separator);
@@ -623,52 +413,36 @@ impl Shell {
                     fold = fold("$__ocx_p")
                 )
             }
-            // fish, path-kind — `$PATH` is a genuine fish *list*, so the string
-            // fold the list-kind arm below uses would first space-join it. This
-            // is `export_path`'s own loop minus the prepend, `--path` included:
-            // `test "$e" != "$p"` is an exact compare (no glob), empty elements
-            // are dropped, which is what `utility::path::remove_segment` does in
-            // process, and `set --path` gives a key fish would not otherwise
-            // treat as a colon list (`PERL5LIB`, `XDG_DATA_DIRS`, …) the same
-            // splitting on the way in and joining on the way out that `PATH` gets
-            // for free. Without it this arm removed **nothing** whenever the
-            // ambient arrived as a string — a new shell, or a `cd` into the
-            // project — so the ledger could never take the element back out.
+            // fish, path-kind: `$PATH` is a genuine fish *list*, so the list-kind string fold would first
+            // space-join it. This is `export_path`'s loop minus the prepend, `--path` included: an exact
+            // compare (no glob), empty elements dropped as `remove_segment` does in process, and `set
+            // --path` gives a key like `PERL5LIB` the colon splitting `PATH` gets for free. Without it
+            // this arm removed **nothing** for a string ambient, so the ledger could never take the element out.
             Self::Fish if path_kind => {
                 let value = escape::fish_double_quoted(raw);
                 format!(
                     "set --path __ocx_l ${key}; set __ocx_p \"{value}\"; set __ocx_r; for __ocx_e in $__ocx_l; test \"$__ocx_e\" != \"$__ocx_p\"; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path {key} $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l"
                 )
             }
-            // fish, list-kind — `string replace` without `-r` is a literal,
-            // case-sensitive replace; `--all` covers one pass and the
-            // `$__ocx_n`/`$__ocx_l` compare drives it to the fixpoint. No
-            // index-based `set -e VAR[N]`: that is the field workaround for
-            // fish's missing remove primitive and it shifts every later index,
-            // so removing more than one element needs a highest-index-first
-            // ordering the caller cannot see. The string fold has no index at
-            // all. `string sub` peels the two wrapper separators off in one
-            // step — it stays in range when everything collapsed and the whole
-            // working string *is* the wrapper. `| string collect` on every
-            // substitution: fish splits command-substitution output on newlines
-            // into a list, so a newline-bearing ambient or value would silently
-            // come back space-joined.
+            // fish, list-kind: `string replace` without `-r` is literal and case-sensitive; `--all` covers
+            // one pass and the `$__ocx_n`/`$__ocx_l` compare drives it to the fixpoint. No index-based
+            // `set -e VAR[N]`: it shifts every later index, so removing several elements needs a
+            // highest-index-first order the caller cannot see. `string sub` peels both wrapper
+            // separators in one step and stays in range when everything collapsed.
             Self::Fish => {
                 let value = escape::fish_double_quoted(raw);
                 let separator = escape::fish_double_quoted(raw_separator);
+                // `| string collect` on every substitution: fish splits command-substitution output on
+                // newlines into a list, so a newline-bearing ambient or value would come back space-joined.
                 format!(
                     "set __ocx_v \"{value}\"; set __ocx_s \"{separator}\"; set __ocx_p \"$__ocx_s$__ocx_v$__ocx_s\"; set __ocx_l \"$__ocx_s\"; if test -n \"${key}\"; set __ocx_l \"$__ocx_s${key}$__ocx_s\"; end; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); while test \"$__ocx_n\" != \"$__ocx_l\"; set __ocx_l \"$__ocx_n\"; set __ocx_n (string replace --all -- \"$__ocx_p\" \"$__ocx_s\" \"$__ocx_l\" | string collect); end; set -gx {key} (string sub --start (math (string length -- \"$__ocx_s\") + 1) --end (math 0 - (string length -- \"$__ocx_s\")) -- \"$__ocx_l\" | string collect); set -e __ocx_v __ocx_s __ocx_p __ocx_l __ocx_n"
                 )
             }
-            // PowerShell, path-kind — the `export_path` pipeline minus the
-            // prepend, so the applier and the remover share one comparison:
-            // `[String]::Equals` with an explicit `StringComparison` (never the
-            // case-insensitive `-ne`/`-notlike`), segment-exact so removing
-            // `C:\WINDOWS` cannot take `C:\WINDOWS\system32` with it, and one
-            // surrounding pair of `"` stripped per segment before comparing.
-            // `$env:PATH` and `$env:Path` are the same variable on Windows and
-            // different ones elsewhere, so the authored key spelling is emitted
-            // verbatim.
+            // PowerShell, path-kind: `export_path`'s pipeline minus the prepend, so applier and remover
+            // share one comparison: `[String]::Equals` with an explicit `StringComparison` (never the
+            // case-insensitive `-ne`), segment-exact so removing `C:\WINDOWS` cannot take
+            // `C:\WINDOWS\system32`, one surrounding `"` pair stripped per segment. `$env:PATH` and
+            // `$env:Path` are one variable on Windows and two elsewhere, so the authored key is emitted verbatim.
             Self::PowerShell if path_kind => {
                 let value = escape::single_quoted_doubled(raw);
                 let comparison = path_element_comparison();
@@ -677,13 +451,10 @@ impl Shell {
                     "$__ocx_p='{value}'; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), $__ocx_p, [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
                 )
             }
-            // PowerShell, list-kind — ordinal (case-sensitive) .NET string
-            // methods, so no `-creplace` and no `[regex]::Escape` of either
-            // operand. Value and separator are single-quoted literals, which no
-            // `$`/backtick interpolation can reach. `.Substring` needs no
-            // bounds guard beyond the `Max`: the working string always starts
-            // with the separator, and `Max` covers the case where everything
-            // between the wrappers collapsed.
+            // PowerShell, list-kind: ordinal (case-sensitive) .NET string methods, so no `-creplace` and
+            // no `[regex]::Escape`; operands are single-quoted literals. `.Substring` needs no bounds guard
+            // beyond the `Max`: the working string always starts with the separator, and `Max` covers
+            // everything between the wrappers having collapsed.
             Self::PowerShell => {
                 let value = escape::single_quoted_doubled(raw);
                 let separator = escape::single_quoted_doubled(raw_separator);
@@ -691,13 +462,11 @@ impl Shell {
                     "$__ocx_v='{value}'; $__ocx_s='{separator}'; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length,[Math]::Max(0,$__ocx_l.Length-2*$__ocx_s.Length)); Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
                 )
             }
-            // elvish — `str:replace` mirrors Go's `strings.Replace`: literal,
-            // case-sensitive, all occurrences by default. Single-quoted raw
-            // strings (`'` doubled) carry both operands, because elvish rejects
-            // `\$` / `` \` `` inside double quotes as invalid escape sequences.
-            // `has-env` guards the ambient read so an unset key cannot raise.
-            // `str:trim-prefix`/`str:trim-suffix` peel exactly one wrapper each
-            // and are no-ops when there is nothing left to peel.
+            // elvish: `str:replace` mirrors Go's `strings.Replace` (literal, case-sensitive, all
+            // occurrences). Operands are single-quoted raw strings (`'` doubled) because elvish rejects
+            // `\$` / `` \` `` inside double quotes as invalid escapes. `has-env` keeps an unset key from
+            // raising; `str:trim-prefix`/`str:trim-suffix` peel exactly one wrapper each and are no-ops
+            // when nothing is left.
             Self::Elvish => {
                 let value = escape::single_quoted_doubled(raw);
                 let separator = escape::single_quoted_doubled(raw_separator);
@@ -712,27 +481,21 @@ impl Shell {
                     "use str; var __ocx_l = '{separator}'; if (and (has-env {key}) (not-eq $E:{key} '')) {{ set __ocx_l = '{separator}'$E:{key}'{separator}' }}; while (str:contains $__ocx_l '{separator}{value}{separator}') {{ set __ocx_l = (str:replace '{separator}{value}{separator}' '{separator}' $__ocx_l) }}; {collapse}set E:{key} = (str:trim-suffix (str:trim-prefix $__ocx_l '{separator}') '{separator}')"
                 )
             }
-            // nushell, path-kind — `$env.PATH` is auto-listified since 0.101
-            // while other path vars stay strings, so this is `export_path`'s own
-            // `describe` guard, filter and closing `str join` minus the prepend.
-            // Filtering the list keeps the two in step; the string fold below
-            // would have to join it first. The join back is what keeps a
-            // conversion-less key (`PERL5LIB`, `XDG_DATA_DIRS`) reaching a child
-            // process at all — see `export_path`'s nushell arm.
+            // nushell, path-kind: `export_path`'s `describe` guard, filter and closing `str join` minus the
+            // prepend (`$env.PATH` is auto-listified since 0.101, other path vars stay strings). Filtering
+            // the list keeps the two in step; the string fold would have to join it first. The join back
+            // is what lets a conversion-less key (`PERL5LIB`, `XDG_DATA_DIRS`) reach a child process at all.
             Self::Nushell if path_kind => {
                 let value = escape::nushell_plain_string(raw);
                 format!(
                     "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | str join (char esep))"
                 )
             }
-            // nushell, list-kind — `str replace` without `--regex` is literal
-            // and case-sensitive; `--all` per pass, the `while` drives the
-            // fixpoint. The wrappers come off by splitting on the separator and
-            // dropping the leading and trailing empty field, which is exact for
-            // a multi-character separator and stays correct when nothing
-            // survived (the split then yields exactly the two empties). Plain
-            // (non-interpolating) double-quoted literals, so `$` and `(` cannot
-            // fire.
+            // nushell, list-kind: `str replace` without `--regex` is literal and case-sensitive; `--all`
+            // per pass, the `while` drives the fixpoint. The wrappers come off by splitting on the
+            // separator and dropping the leading and trailing empty field: exact for a multi-character
+            // separator, and correct when nothing survived (exactly two empties). Plain double-quoted
+            // literals, so `$` and `(` cannot fire.
             Self::Nushell => {
                 let value = escape::nushell_plain_string(raw);
                 let separator = escape::nushell_plain_string(raw_separator);
@@ -740,29 +503,22 @@ impl Shell {
                     "mut __ocx_l = (if ($env.{key}? | default \"\") == \"\" {{ \"{separator}\" }} else {{ \"{separator}\" + ($env.{key}? | default \"\") + \"{separator}\" }}); while ($__ocx_l | str contains \"{separator}{value}{separator}\") {{ $__ocx_l = ($__ocx_l | str replace --all \"{separator}{value}{separator}\" \"{separator}\") }}; $env.{key} = ($__ocx_l | split row \"{separator}\" | skip 1 | drop 1 | str join \"{separator}\")"
                 )
             }
-            // batch (cmd.exe) — refused above; see the doc comment.
+            // batch (cmd.exe): refused above; its only substring-replace is case-insensitive, and Batch
+            // hosts no prompt hook.
             Self::Batch => return None,
         })
     }
 
-    /// Emit a shell line that sets `key=value` (replacing any prior value).
+    /// Emit a shell line that sets `key=value`, replacing any prior value.
     ///
     /// The emitted value is **byte-identical to what
-    /// [`apply_entries`](ocx_package::metadata::env::apply::EnvEntriesExt::apply_entries)
-    /// sets in process**, which is what
-    /// makes the reconciler's `C == L.applied` exit guard decidable: its two
-    /// operands are exactly this emit and that in-process write.
+    /// [`apply_entries`](ocx_package::metadata::env::apply::EnvEntriesExt::apply_entries) sets in
+    /// process**, which is what makes the reconciler's `C == L.applied` exit guard decidable: its
+    /// operands are this emit and that in-process write. Every arm therefore uses **its own** escaper
+    /// and quoting context, the same one [`Self::export_path`] uses: single-quoted for POSIX, PowerShell
+    /// and elvish (no interpolation, history expansion or globbing), double-quoted for fish and nushell.
     ///
-    /// Every arm therefore uses **its own** escaper and quoting context — the
-    /// same one [`Self::export_path`] uses. The POSIX family, PowerShell and
-    /// elvish all ride a **single-quoted** literal, where no interpolation,
-    /// history expansion or globbing exists and the value survives byte-exact;
-    /// fish and nushell keep their double-quoted form, which round-trips the
-    /// same bytes.
-    ///
-    /// Returns `None` when `key` is not a valid POSIX environment-variable
-    /// name (see [`Self::export_path`] for the rationale), **or** for
-    /// [`Shell::Batch`] when the value contains `%`, LF or CR.
+    /// Returns `None` for an invalid key, or for [`Shell::Batch`] when `value` contains `%`, `"`, LF or CR.
     pub fn export_constant(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
         if !ocx_util::env::is_valid_env_key(key) {
@@ -773,12 +529,10 @@ impl Shell {
             return None;
         }
         Some(match self {
-            // Single-quoted POSIX literal. The double-quoted form used to turn
-            // `!` into `\!` for history-expansion safety, which is a byte
-            // corruption rather than a hardening: `\!` is *literal* inside
-            // double quotes in every measured shell, so the variable ended up
-            // holding `a\!b` where the in-process write holds `a!b`. Inside
-            // `'...'` no expansion — history included — can fire at all.
+            // Single-quoted POSIX literal. The double-quoted form turned `!` into `\!` for
+            // history-expansion safety, a byte corruption: `\!` is *literal* inside double quotes in
+            // every measured shell, so the variable held `a\!b` where the in-process write holds
+            // `a!b`. Inside `'...'` no expansion, history included, can fire.
             Self::Ash | Self::Ksh | Self::Dash | Self::Bash | Self::Zsh => {
                 format!("export {key}='{}'", escape::posix_single_quoted(raw))
             }
@@ -818,17 +572,12 @@ impl Shell {
 
     /// Emit a shell statement that prints `text` on **stderr** when evaluated.
     ///
-    /// The reconciler's diagnostics travel as shell code on stdout, not on the
-    /// binary's stderr: the shim that invokes the reconcile call discards its
-    /// stderr unconditionally, so a message written there is lost. Returns
-    /// `None` for [`Shell::Batch`], which hosts no prompt hook and therefore
-    /// has nothing to say.
+    /// The reconciler's diagnostics travel as shell code on stdout because the shim that invokes the
+    /// reconcile call discards its stderr. Returns `None` for [`Shell::Batch`], which hosts no prompt hook.
     ///
-    /// `text` rides as a **format argument, never as the format string** — a
-    /// `%` in a project path would otherwise be consumed as a conversion
-    /// specifier — and passes that arm's own value escaper, so a project path
-    /// such as `/home/u/it's work` cannot close the literal and have its
-    /// remainder parsed as shell source.
+    /// `text` rides as a **format argument, never as the format string** (a `%` in a project path would
+    /// be consumed as a conversion specifier) and passes that arm's own value escaper, so a project path
+    /// such as `/home/u/it's work` cannot close the literal and have its remainder parsed as shell source.
     pub fn emit_message(self, text: impl AsRef<str>) -> Option<String> {
         let text = text.as_ref();
         Some(match self {
@@ -850,56 +599,27 @@ impl Shell {
     }
 }
 
-/// `true` when a value cannot be carried through a `cmd.exe` `SET "KEY=…"`
-/// statement.
+/// `true` when a value cannot be carried through a `cmd.exe` `SET "KEY=…"` statement.
 ///
-/// A `"` closes the statement's own quote, after which cmd parses the rest of
-/// the value as command syntax — `x" & <cmd> & "` runs `<cmd>`. That is command
-/// execution from package metadata, so the quote is refused rather than escaped:
-/// cmd has no in-quote escape for it, and the caret escapes `escape::batch_set_value`
-/// used to carry never covered it either (they were over-escaping — `^ & < > |`
-/// are literal inside the quotes — and only corrupted the value).
-/// `%VAR:search=%` has no escape for a literal `%` in `search`, so a
-/// `%`-bearing value's delete half never matches and every apply prepends
-/// another copy — unbounded growth under a per-prompt reconciler. An LF or CR
-/// splits one `SET` into two commands in the `FOR /F … DO @%i` channel that
-/// `ocx --global env` is applied through. Emitting nothing beats emitting a
-/// statement that executes, grows or splits.
+/// A `"` closes the statement's own quote and cmd then parses the rest as command syntax (`x" & <cmd>
+/// & "` runs `<cmd>`), so it is refused, not escaped: cmd has no in-quote escape for it. `%VAR:search=%`
+/// has no escape for a literal `%` in `search`, so a `%`-bearing value's delete half never matches
+/// and every apply prepends another copy, unbounded under a per-prompt reconciler. An LF or CR splits
+/// one `SET` into two commands in the `FOR /F … DO @%i` channel `ocx --global env` is applied through.
+/// Emitting nothing beats emitting a statement that executes, grows or splits.
 fn batch_cannot_express(value: &str) -> bool {
     value.contains(['%', '"', '\n', '\r'])
 }
 
 /// Refuse an [`Entry`] no shell arm can emit **and** later revert.
 ///
-/// One admission rule for both emit sites: the reconciler's planner
-/// ([`reconcile`]) calls it to keep `L ⊆ emittable(D)` an invariant, and
-/// `conventions::emit_lines` calls it so `ocx env --shell`,
-/// `ocx package env --shell` and `ocx direnv export` refuse the same set. Two
-/// copies of an admission rule drift, and the export path had none at all.
-///
-/// The four refusals, each because the *revert* is impossible rather than
-/// because the apply is:
-///
-/// 1. **An invalid environment-variable name.** Every emitter already returns
-///    `None` for one, so the apply is silently empty while a ledger entry would
-///    name a key no arm can ever remove.
-/// 2. **A path-kind value embedding [`ocx_util::env::PATH_SEPARATOR`].** The split-based
-///    arms (POSIX `awk`, fish, PowerShell, elvish, nushell) read it as two
-///    segments and match neither against the whole operand, so every re-source
-///    prepends another copy — measured growing without bound on ksh, dash and
-///    pwsh. It also violates [`Self::export_path`]'s stated precondition and
-///    [`move_to_front`](ocx_util::path::move_to_front)'s.
-/// 3. **An empty path or list element.** Prepending one puts an empty segment at
-///    the front of `PATH`, which POSIX resolves as the current working
-///    directory.
-/// 4. **A path or list element containing LF or CR.** The removal fold cannot
-///    address a span that the ambient may have re-wrapped, and Batch's `SET`
-///    channel splits on it outright.
-///
-/// The error is a fixed reason string, suitable for a warn line or a `# ocx:`
-/// note. `Ok(())` means every arm that supports the entry's kind can express it;
-/// a per-shell refusal (a `list` under `cmd.exe`) is still the emitter's own
-/// answer and is not decided here.
+/// One admission rule for both emit sites: the reconciler's planner ([`reconcile`]) keeps
+/// `L ⊆ emittable(D)` with it, and `conventions::emit_lines` refuses the same set for the export commands.
+/// Each refusal is because the *revert* is impossible, not the apply: an invalid env-var name (a ledger
+/// entry would name a key no arm can remove); a path-kind value embedding [`ocx_util::env::PATH_SEPARATOR`]
+/// (split-based arms read two segments, so every re-source prepends another copy); an empty element (an
+/// empty `PATH` segment is the current directory); an element with LF or CR (the removal fold cannot
+/// address a re-wrapped span, and Batch's `SET` splits on it). A per-shell refusal stays the emitter's own.
 ///
 /// # Errors
 ///
@@ -923,28 +643,22 @@ pub fn is_emittable(entry: &ocx_package::metadata::env::entry::Entry) -> Result<
     Ok(())
 }
 
-/// The `StringComparison` a PATH element is compared under, chosen at emit
-/// time: the emitter and the shell it emits for run on the same host, so
-/// `cfg!(windows)` is the platform test — the same rule
-/// [`ocx_util::env::PATH_SEPARATOR`] already follows.
+/// The `StringComparison` a PATH element is compared under, chosen at emit time: the emitter
+/// and the shell it emits for run on the same host, so `cfg!(windows)` is the platform test, the
+/// same rule [`ocx_util::env::PATH_SEPARATOR`] follows.
 fn path_element_comparison() -> &'static str {
     if cfg!(windows) { "OrdinalIgnoreCase" } else { "Ordinal" }
 }
 
-/// The per-segment normalisation a PowerShell PATH element is compared through,
-/// chosen at emit time by the same `cfg!(windows)` rule as
-/// [`path_element_comparison`].
+/// The per-segment normalisation a PowerShell PATH element is compared through, chosen at emit
+/// time by the same `cfg!(windows)` rule as [`path_element_comparison`].
 ///
 /// **Empty off Windows, and that is the contract, not a shortcut.**
-/// [`move_to_front`](ocx_util::path::move_to_front) splits with
-/// `std::env::split_paths`, which strips one surrounding pair of `"` from a
-/// segment **only on Windows** — so on Unix a segment beginning with `\"` is a
-/// directory whose name begins with `\"`. An unconditional strip made the pwsh
-/// arm disagree with `move_to_front` and with its five sibling arms two ways at
-/// once: it deleted a quoted foreign segment they all keep, and — because the
-/// operand is never stripped — it never recognised the quoted value it had
-/// itself written a prompt earlier, re-prepending one copy per prompt. Both were
-/// measured on pwsh 7 / Linux.
+/// [`move_to_front`](ocx_util::path::move_to_front) splits with `std::env::split_paths`, which
+/// strips one surrounding `"` pair **only on Windows**; on Unix a segment beginning with `\"` is a
+/// directory whose name begins with `\"`. An unconditional strip made the pwsh arm disagree with
+/// `move_to_front` and its five sibling arms: it deleted a quoted foreign segment they all keep,
+/// and (the operand never being stripped) re-prepended one copy per prompt.
 fn path_segment_normalisation() -> &'static str {
     if cfg!(windows) {
         " -replace '(?s)^\"(.*)\"$','$1'"
@@ -993,29 +707,22 @@ impl clap_builder::ValueEnum for Shell {
         Some(match self {
             Self::Ash => PossibleValue::new("ash"),
             Self::Ksh => PossibleValue::new("ksh"),
-            // `sh` is a POSIX alias for `Dash` — the canonical strict-POSIX
-            // shell (Debian `/bin/sh`).  C5 contract: zero new enum variants,
-            // zero new match arms.  `--shell=sh` emits byte-identical output
-            // to `--shell=dash` through the existing Dash code path.
+            // `sh` is a POSIX alias for `Dash`, the canonical strict-POSIX shell (Debian `/bin/sh`):
+            // `--shell=sh` emits byte-identical output to `--shell=dash` through the same code path.
             Self::Dash => PossibleValue::new("dash").alias("sh"),
             Self::Bash => PossibleValue::new("bash"),
             Self::Elvish => PossibleValue::new("elvish"),
             Self::Fish => PossibleValue::new("fish"),
-            // `cmd` is the canonical shell name on Windows (the interpreter is
-            // `cmd.exe`).  Without this alias `--shell=cmd` would fail clap
-            // parsing (exit 64), which is surprising for Windows users.
+            // `cmd` is the canonical shell name on Windows (the interpreter is `cmd.exe`); without
+            // this alias `--shell=cmd` would fail clap parsing (exit 64).
             Self::Batch => PossibleValue::new("batch").alias("cmd"),
-            // `pwsh` is an alias for `powershell` — same C5 zero-new-variant
-            // contract as the `sh`→Dash alias above.  The installer-generated
-            // `env.ps1`/`env.sh` emit `--shell=pwsh`; without the alias that
-            // would fail clap parsing (exit 64) and silently no-op global
-            // toolchain activation on Windows.
+            // `pwsh` aliases `powershell`. The installer-generated `env.ps1`/`env.sh` emit
+            // `--shell=pwsh`; without the alias clap parsing would fail (exit 64) and silently no-op
+            // global toolchain activation on Windows.
             Self::PowerShell => PossibleValue::new("powershell").alias("pwsh"),
             Self::Zsh => PossibleValue::new("zsh"),
-            // `nu` is the canonical short name used in most Nushell installations
-            // (e.g. `which nu`, PATH entry `nu`, shebang `#!/usr/bin/env nu`).
-            // Without this alias `--shell=nu` would fail clap parsing (exit 64),
-            // which is surprising for the majority of Nushell users.
+            // `nu` is the canonical short name in most Nushell installations (`which nu`, shebang
+            // `#!/usr/bin/env nu`); without this alias `--shell=nu` would fail clap parsing (exit 64).
             Self::Nushell => PossibleValue::new("nushell").alias("nu"),
         })
     }

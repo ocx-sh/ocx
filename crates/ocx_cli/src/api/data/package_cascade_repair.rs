@@ -16,11 +16,11 @@ use crate::api::Printable;
 /// One package's repair run: what was wrong, what the run planned, and what
 /// the registry accepted.
 ///
-/// `planned` and `outcomes` are separate because a preview has the first and
-/// not the second, and a real run's outcomes can disagree with its plan (an
-/// alias refused at preflight, a write the registry rejected). Collapsing them
-/// into one list would make a refusal indistinguishable from a plan that never
-/// covered the alias.
+/// `planned` and `outcomes` are separate: a preview has the first and not the
+/// second, and a real run's outcomes can disagree with its plan (an alias
+/// refused at preflight, a write the registry rejected).
+// Never collapse the two lists: a refusal would become indistinguishable from a plan that
+// never covered the alias.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RepairEntry {
     pub report: CascadeReport,
@@ -35,39 +35,25 @@ pub struct RepairEntry {
 
 /// What `cascade repair` did, one entry per package in input order.
 ///
-/// Plain format: one row per attempted alias write (or, for a preview, per
-/// planned write), plus the follow-up announce command when this run moved
-/// tags or index staleness remains.
-///
-/// JSON format: `{ "entries": [...], "dry_run", "tags_file" }` — one
-/// per-package entry carrying the finding report, the planned writes, their
-/// outcomes and the `tags` this run left present, alongside the run-wide
-/// preview flag and the `--tags-file` destination (`null` when the flag was
-/// not passed).
+/// Each of `entries` carries the finding report, the planned writes, their
+/// outcomes and the `tags` this run left present; `dry_run` and `tags_file`
+/// (`null` when `--tags-file` was not passed) are run-wide.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeRepair {
     pub entries: Vec<RepairEntry>,
     /// True when nothing was written because the run was a preview.
     pub dry_run: bool,
-    /// Where `--tags-file` was written, when the flag was passed. The
-    /// follow-up hint can only name the file the user actually asked for.
+    /// Where `--tags-file` was written, when the flag was passed.
+    // The follow-up hint can only name the file the user actually asked for.
     pub tags_file: Option<PathBuf>,
-    /// Packages a configured index source claims but has no root document for
-    /// yet - never announced, so the staleness layer had nothing to compare
-    /// against and produced no findings. Plain-mode only: an empty
-    /// `index_findings` means "agrees" for every other package, and a reader
-    /// deserves to be told which of the two silences this is.
-    ///
-    /// Not serialized. The JSON key set is what a `--format json` consumer
-    /// parses and stays pinned; this is a note, not a finding.
+    /// Packages an index source claims but has no root for yet, so the index layer compared nothing;
+    /// plain only, to tell that silence from "agrees". Not serialized: the JSON key set is pinned.
     #[serde(skip)]
     pub index_layer_skipped: Vec<ocx_oci::PackageRef>,
 }
 
 impl PackageCascadeRepair {
-    /// A run in which no package needed a write: every report carries its
-    /// findings (possibly none) and empty write lists. The shape of both a
-    /// clean run and a preview with nothing to repair.
+    /// A run in which no package needed a write: a clean run, or a preview with nothing to repair.
     pub fn from_reports(reports: Vec<CascadeReport>, dry_run: bool) -> Self {
         let entries = reports
             .into_iter()
@@ -86,11 +72,8 @@ impl PackageCascadeRepair {
         }
     }
 
-    /// The plain table's cells, row-major, before styling.
-    ///
-    /// A run that attempted writes reports its outcomes; a preview has none, so
-    /// it reports the plan instead. The two never mix for one package - that is
-    /// what keeps "refused" distinguishable from "never planned".
+    /// The plain table's cells, row-major: outcomes, or the plan for a preview, never mixed for one
+    /// package, or "refused" reads like "never planned".
     fn table_rows(&self) -> Vec<[String; 4]> {
         let mut rows = Vec::new();
         for entry in &self.entries {
@@ -112,9 +95,7 @@ impl PackageCascadeRepair {
             }
             for outcome in &entry.outcomes {
                 let (status, detail) = match &outcome.outcome {
-                    // An unverified write still landed - the read-back
-                    // disagreeing means a concurrent publisher, not a failure,
-                    // so it stays a written row with the caveat in view.
+                    // Still landed: a disagreeing read-back means a concurrent publisher, not a failure.
                     WriteOutcome::Written {
                         digest,
                         verified,
@@ -124,9 +105,6 @@ impl PackageCascadeRepair {
                         written_detail(digest, dropped),
                     ),
                     WriteOutcome::Refused(reason) => ("refused", refusal_detail(reason)),
-                    // Nothing was written and nothing is broken: a publisher
-                    // moved the tag between the gather and the write, so the
-                    // plan describes a graph that no longer exists.
                     WriteOutcome::Raced { expected, live } => ("raced", raced_detail(expected.as_ref(), live.as_ref())),
                     WriteOutcome::Failed { message } => ("failed", message.clone()),
                 };
@@ -147,13 +125,8 @@ impl PackageCascadeRepair {
             })
     }
 
-    /// The hops left after this run, in the order they must be taken.
-    ///
-    /// Which publish hint applies is decided by whether this run wrote: a run
-    /// that moved aliases has a tag list to hand `announce`, while a run that
-    /// only *found* index staleness has none, so `announce` has to re-observe
-    /// the committed tags itself. A preview gets neither - it moved nothing,
-    /// so there is nothing yet to publish.
+    /// The hops left after this run, in order: a run that wrote hands `announce` a tag list, one that
+    /// only found staleness does not, and a preview gets neither.
     fn print_follow_up_hints(&self, data: &ocx_console::DataInterface) {
         let wrote = self.wrote_anything();
         for entry in &self.entries {
@@ -172,8 +145,7 @@ impl PackageCascadeRepair {
                 (true, None) => data.print_hint(&publish_moved_tags_without_file_hint(&package)),
                 (false, _) => data.print_hint(&stale_index_hint(&package)),
             }
-            // Announcing publishes the index; the local copy only learns of it
-            // on the next sync, so a stale index is a two-hop follow-up.
+            // Announcing publishes the index; the local copy needs a sync after it.
             if stale_index {
                 data.print_hint(&format!(
                     "then refresh the local copy - run: ocx index update {package}"
@@ -200,9 +172,7 @@ impl Printable for PackageCascadeRepair {
             columns[2].push(Cell::from(status));
             columns[3].push(Cell::from(detail));
         }
-        // The Package column repeats one constant for the ordinary
-        // single-package run, and a column whose every value is the same
-        // string is noise the plain table pays width for.
+        // The Package column is dropped for a single-package run, where it would repeat one value.
         let headers: [ocx_console::Column; 4] = ["Package".into(), "Tag".into(), "Status".into(), "Detail".into()];
         let first = usize::from(self.entries.len() < 2);
         data.print_table(&headers[first..], &columns[first..]);
@@ -215,16 +185,8 @@ impl Printable for PackageCascadeRepair {
     }
 }
 
-/// The remediation line a run that moved tags prints, naming the file
-/// `--tags-file` wrote.
-///
-/// One of the three pure hint builders DX-70 extracts. They exist for
-/// testability rather than reuse: [`ocx_console::DataInterface::print_hint`]
-/// writes the real stdout, so these strings were covered by no assertion at all
-/// and migrating them to the positional `ocx package announce` grammar would
-/// have reded nothing. The `stale_index_hint` third one is
-/// [`super::package_cascade_check::stale_index_hint`], shared rather than
-/// duplicated, so `check` and `repair` cannot migrate apart.
+/// The remediation line a run that moved tags prints, naming the file `--tags-file` wrote; a pure
+/// builder so tests can assert it, since `print_hint` writes real stdout.
 #[must_use]
 fn publish_moved_tags_hint(package: &str, tags_path: &std::path::Path) -> String {
     format!(
@@ -233,8 +195,7 @@ fn publish_moved_tags_hint(package: &str, tags_path: &std::path::Path) -> String
     )
 }
 
-/// The remediation line a run that moved tags prints when it was given no
-/// `--tags-file` destination, so the follow-up needs two commands.
+/// The remediation line for moved tags without a `--tags-file`, so the follow-up needs two commands.
 #[must_use]
 fn publish_moved_tags_without_file_hint(package: &str) -> String {
     format!(
@@ -243,11 +204,7 @@ fn publish_moved_tags_without_file_hint(package: &str) -> String {
     )
 }
 
-/// A landed write's detail cell.
-///
-/// A write that dropped dead orphan entries did not put the planned bytes on
-/// the wire, so it must not read like a clean one. The count is what the cell
-/// carries - the digests themselves are unbounded and already in the JSON.
+/// A landed write's detail cell; a write that dropped orphan entries says so, with a count.
 fn written_detail(digest: &ocx_oci::Digest, dropped: &[String]) -> String {
     let landed = digest.to_short_string();
     if dropped.is_empty() {
@@ -260,8 +217,7 @@ fn written_detail(digest: &ocx_oci::Digest, dropped: &[String]) -> String {
     )
 }
 
-/// A raced alias's detail cell: what the plan expected the tag to hold against
-/// what it holds now. `-` for a side the tag did not exist on.
+/// A raced alias's detail cell: expected against live, `-` for a side where the tag did not exist.
 fn raced_detail(expected: Option<&ocx_oci::Digest>, live: Option<&ocx_oci::Digest>) -> String {
     let render =
         |digest: Option<&ocx_oci::Digest>| digest.map_or_else(|| "-".to_string(), ocx_oci::Digest::to_short_string);
@@ -272,9 +228,7 @@ fn raced_detail(expected: Option<&ocx_oci::Digest>, live: Option<&ocx_oci::Diges
 fn refusal_detail(reason: &Unrepairable) -> String {
     match reason {
         Unrepairable::ChildManifestMissing { digest, .. } => format!("child manifest gone: {digest}"),
-        // Not "gone" - nothing was observed to be missing. The algorithm is
-        // one this build cannot address, so whether the child is still there
-        // could not be checked at all.
+        // Not "gone": this build cannot address the algorithm, so presence was never checked.
         Unrepairable::ChildDigestUnaddressable { digest, .. } => {
             format!("unaddressable digest algorithm: {digest}")
         }

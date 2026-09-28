@@ -7,25 +7,14 @@ use clap::Parser;
 
 use crate::api;
 
-/// A per-repository tag-fetch outcome, tagged with its input index so failures
-/// can be surfaced in input order.
+/// A per-repository tag-fetch outcome, keyed by input index so failures surface in input order.
 type IndexedTagResult = (usize, anyhow::Result<(String, Vec<String>)>);
 
 /// How many per-repository tag listings `--tags` keeps in flight.
 ///
-/// Its own permit class, deliberately never `index_common`'s
-/// `INDEX_REFRESH_CONCURRENCY`: #316 and #167 both record that an inner
-/// fan-out reusing the *same* class deadlocks, because an ancestor holds a
-/// permit while waiting on children that cannot acquire one. This loop is
-/// top-level today and has no such ancestor, so sharing would be safe *here* —
-/// a separate constant makes the rule hold by construction instead of by an
-/// argument about the current call graph, which a later refactor can falsify.
-///
-/// Unlike the refresh fan-out this number is the in-flight request count
-/// outright: one tag listing is a single latency-bound round trip with no
-/// nested fan-out beneath it, so nothing multiplies it. 16 clears a
-/// several-hundred-repository catalog in a handful of rounds while staying far
-/// below the `index` verb family's stated 512-request ceiling.
+/// Its own permit class, never `INDEX_REFRESH_CONCURRENCY`: one class shared across an inner fan-out
+/// deadlocks when an ancestor holds a permit its children wait for (ocx-sh/ocx#316, ocx-sh/ocx#167).
+/// 16 keeps a several-hundred-repository catalog within the `index` family's 512-request ceiling.
 const CATALOG_TAG_CONCURRENCY: usize = 16;
 
 #[derive(Parser)]
@@ -61,33 +50,21 @@ impl IndexCatalog {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // Index-tagged so a per-repository failure can be surfaced in input
-        // order, matching `index update`'s fail-fast aggregation below.
-        //
-        // A `JoinSet` gated on a permit rather than `index_common`'s
-        // `buffer_unordered`: the join below reads `JoinError::is_panic()` to
-        // abort the rest and re-raise. A stream has no task boundary, so a
-        // panic would unwind the caller directly, and "a task panic still
-        // aborts the rest and propagates" (`adr_index_sync_performance.md`
-        // S-008) would have to be restated to describe that instead.
+        // A permit-gated `JoinSet`, not `buffer_unordered`: the join needs `JoinError::is_panic()` to
+        // abort and re-raise, which a stream cannot give it.
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(CATALOG_TAG_CONCURRENCY));
         let mut join_set: tokio::task::JoinSet<IndexedTagResult> = tokio::task::JoinSet::new();
         for (index, repo) in repositories.iter().enumerate() {
             let identifier = ocx_oci::PackageRef::new_registry(repo.repository(), repo.registry());
             let display_name = repo.to_string();
             let context = context.clone();
-            // Acquired before the spawn, so a registry listing thousands of
-            // repositories holds that many permits' worth of work rather than
-            // that many live tasks. Nothing closes `permits` — it is owned by
-            // this frame and outlives the loop.
+            // Acquired before the spawn, or thousands of repositories become thousands of live tasks.
             let permit = std::sync::Arc::clone(&permits)
                 .acquire_owned()
                 .await
                 .expect("the semaphore is owned by this frame and is never closed");
             join_set.spawn(async move {
-                // Released when the task ends, however it ends: a panic unwinds
-                // through it and `abort_all` drops it, so neither can strand a
-                // permit and wedge the loop.
+                // Dropped however the task ends (panic or `abort_all`), so no permit is stranded.
                 let _permit = permit;
                 let result = context
                     .default_index()
@@ -96,9 +73,7 @@ impl IndexCatalog {
                     .map_err(anyhow::Error::from)
                     .map(|tags| {
                         let tags = tags.unwrap_or_else(|| {
-                            // Same `repositories` vector as the `error!` below, so
-                            // the same neutralization. `warn!` reaches stderr under
-                            // the default INFO console filter.
+                            // Foreign-authored, so sanitized like the `error!` below.
                             log::warn!(
                                 "No tags found for repository '{}'.",
                                 api::data::sanitize_for_terminal(&identifier.to_string())
@@ -119,13 +94,8 @@ impl IndexCatalog {
                     tags.insert(repository, repository_tags);
                 }
                 Ok((index, Err(e))) => {
-                    // Both halves are foreign-authored and neither reaches
-                    // `main.rs`'s boundary intact: `repositories` comes from
-                    // `list_repositories`' response, and the aggregation below
-                    // returns the lowest-index failure alone, so every other
-                    // chain is printed here and nowhere else. Without this the
-                    // command neutralized the same repository name on stdout
-                    // (`api::data::catalog`) while emitting it raw on stderr.
+                    // Every chain but the one returned prints only here; foreign-authored, so sanitize both,
+                    // or stderr carries raw what stdout neutralizes.
                     log::error!(
                         "fetching tags for repository '{}' failed: {}",
                         api::data::sanitize_for_terminal(&repositories[index].to_string()),
@@ -134,20 +104,14 @@ impl IndexCatalog {
                     failures.push((index, e));
                 }
                 Err(join_err) => {
-                    // A tag-fetch task panicked — abort the rest and propagate,
-                    // matching the `index update` JoinSet panic precedent.
                     join_set.abort_all();
                     std::panic::resume_unwind(join_err.into_panic());
                 }
             }
         }
 
-        // A per-repository tag fetch that errors (e.g. `--remote` against an
-        // unreachable source) must surface as a nonzero exit rather than a
-        // SUCCESS report with a partial or empty catalog — a script consuming
-        // JSON output otherwise cannot tell "no tags" (`None`, handled above)
-        // from "fetch failed". Matches `index update`'s fail-fast aggregation:
-        // the input-order-first failure, deterministic across repeated runs.
+        // A failed fetch must exit nonzero, or a script cannot tell "no tags" from a failure; the
+        // lowest-index failure keeps the exit deterministic.
         if !failures.is_empty() {
             failures.sort_by_key(|(index, _)| *index);
             let (_, error) = failures.into_iter().next().expect("failures is non-empty");
@@ -194,7 +158,7 @@ mod tests {
         window
     }
 
-    /// C-022's bound is a Rust-side contract, not only an acceptance one.
+    /// This module's permit-class bound is a Rust-side contract, not only an acceptance one.
     ///
     /// This module is one of the two **exemptions** in
     /// `index_common.rs::no_index_module_outside_this_one_grows_a_refresh_fan_out`,
@@ -276,7 +240,7 @@ mod tests {
             body.matches("log::error!").count(),
             // `(&` was an artefact of the old argument type: the failures were
             // `ocx_lib::Error`, so the call read `(&e)`. They are `anyhow::Error`
-            // since WP-37 and the call is `(e.as_ref())` — keeping the `&`
+            // now and the call is `(e.as_ref())` — keeping the `&`
             // would be a needle that reds on a correct call. The property is
             // unchanged: one sanitized chain per error log.
             body.matches("sanitize_error_chain(").count(),

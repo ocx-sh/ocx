@@ -3,20 +3,9 @@
 
 //! CPU architecture component of an OCI platform specification.
 //!
-//! This enum is a closed subset of the architectures defined by the
-//! [OCI Image Index specification](https://github.com/opencontainers/image-spec/blob/main/image-index.md),
-//! which in turn mirrors the values from Go's `GOARCH`.
-//!
-//! The full list of valid values is maintained upstream in the `oci-spec` crate
-//! (`oci_spec::image::Arch`). OCX intentionally restricts this to the
-//! architectures we actively support and test. Unsupported values are rejected
-//! at parse time rather than silently accepted via an `Other(String)` fallback.
-//!
-//! To add a new architecture: add a variant here, update [`std::fmt::Display`],
-//! [`std::str::FromStr`], [`VARIANTS`](Architecture::VARIANTS), and both `From`/`TryFrom`
-//! impls for `native::Arch`. Append the variant **last** — [`Ord`] derives
-//! from declaration order and `variants_is_sorted` pins it. The `(os, arch)`
-//! pairings it is legal in belong in [`SUPPORTED_PAIRS`](super::SUPPORTED_PAIRS).
+//! A new variant also needs `FromStr`, [`VARIANTS`](Architecture::VARIANTS) and
+//! [`SUPPORTED_PAIRS`](super::SUPPORTED_PAIRS) entries (no match forces them), and
+//! goes last because [`Ord`] follows declaration order (`variants_is_sorted`).
 
 use serde::{Deserialize, Serialize};
 
@@ -24,52 +13,21 @@ use super::error::PlatformErrorKind;
 use crate::native;
 
 /// Supported CPU architectures for OCX packages.
-///
-/// Translates bidirectionally to [`native::Arch`] (`oci_spec::image::Arch`) at
-/// the OCI transport boundary. Only the subset that OCX supports is
-/// represented; unsupported values from the OCI spec are listed as
-/// commented-out variants for reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Architecture {
-    // --- Supported ---
     Amd64,
     Arm64,
-    /// 32 bit WebAssembly. Paired only with a `wasip*` operating system: a
-    /// wasm module is a distribution target OCX never executes natively, so
-    /// there is no host that reports `Wasm` from [`current`](Self::current).
+    /// 32-bit WebAssembly: paired only with a `wasip*` OS, never reported by [`current`](Self::current).
     Wasm,
-    // --- Unsupported (upstream oci_spec::image::Arch values from Go GOARCH) ---
-    // i386,          // 32 bit x86, little-endian
-    // Amd64p32,      // 64 bit x86 with 32 bit pointers, little-endian
-    // ARM,           // 32 bit ARM, little-endian
-    // ARMbe,         // 32 bit ARM, big-endian
-    // ARM64be,       // 64 bit ARM, big-endian
-    // LoongArch64,   // 64 bit Loongson RISC CPU, little-endian
-    // Mips,          // 32 bit Mips, big-endian
-    // Mipsle,        // 32 bit Mips, little-endian
-    // Mips64,        // 64 bit Mips, big-endian
-    // Mips64le,      // 64 bit Mips, little-endian
-    // Mips64p32,     // 64 bit Mips with 32 bit pointers, big-endian
-    // Mips64p32le,   // 64 bit Mips with 32 bit pointers, little-endian
-    // PowerPC,       // 32 bit PowerPC, big endian
-    // PowerPC64,     // 64 bit PowerPC, big-endian
-    // PowerPC64le,   // 64 bit PowerPC, little-endian
-    // RISCV,         // 32 bit RISC-V, little-endian
-    // RISCV64,       // 64 bit RISC-V, little-endian
-    // s390,          // 32 bit IBM System/390, big-endian
-    // s390x,         // 64 bit IBM System/390, big-endian
-    // SPARC,         // 32 bit SPARC, big-endian
-    // SPARC64,       // 64 bit SPARC, bi-endian
+    // Unsupported upstream oci_spec::image::Arch values (Go GOARCH), listed at
+    // adr_platform_model_unification.md § Rationale from code: ocx_oci
 }
 
 impl Architecture {
-    /// All supported variants, in the order used for error messages.
+    /// All supported variants, in error-message order.
     pub const VARIANTS: &[Self] = &[Self::Amd64, Self::Arm64, Self::Wasm];
 
-    /// Detects the CPU architecture of the current host.
-    ///
-    /// Maps Rust's [`std::env::consts::ARCH`] to the corresponding OCI value.
-    /// Returns `None` if the host architecture is not in [`VARIANTS`](Self::VARIANTS).
+    /// The host's CPU architecture, or `None` when it is not supported.
     pub fn current() -> Option<Self> {
         match std::env::consts::ARCH {
             "x86_64" => Some(Self::Amd64),
@@ -80,7 +38,6 @@ impl Architecture {
 }
 
 impl std::fmt::Display for Architecture {
-    /// Formats as the lowercase OCI string value (e.g. `"amd64"`, `"arm64"`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Amd64 => write!(f, "amd64"),
@@ -93,7 +50,6 @@ impl std::fmt::Display for Architecture {
 impl std::str::FromStr for Architecture {
     type Err = PlatformErrorKind;
 
-    /// Parses from the lowercase OCI string value. Case-sensitive.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "amd64" => Ok(Self::Amd64),
@@ -118,7 +74,6 @@ impl<'de> Deserialize<'de> for Architecture {
     }
 }
 
-/// Converts to the upstream `native::Arch` for OCI transport operations.
 impl From<Architecture> for native::Arch {
     fn from(arch: Architecture) -> Self {
         match arch {
@@ -129,7 +84,6 @@ impl From<Architecture> for native::Arch {
     }
 }
 
-/// Converts from the upstream `native::Arch`, rejecting unsupported values.
 impl TryFrom<native::Arch> for Architecture {
     type Error = PlatformErrorKind;
 

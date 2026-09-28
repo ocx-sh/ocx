@@ -1,48 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The watch-set fingerprint ([ocx-sh/ocx#345](https://github.com/ocx-sh/ocx/issues/345)):
-//! [`watch_paths`] names the member files a per-prompt reconcile must notice,
-//! and [`fingerprint`]/[`current_fingerprint`] fold them into the value
-//! compared against [`super::Ledger::fp`] to decide whether the environment
-//! is stale (C-019, C-044).
+//! The watch-set fingerprint compared against [`super::Ledger::fp`] to decide whether the environment is stale.
 
 use std::path::{Path, PathBuf};
 
-/// Fold the watch set into the ledger's `fp` (C-019, A-13, A-14).
+/// Fold the watch set into the ledger's `fp`, the **only** definition of what makes an environment stale.
 ///
-/// The **only** definition of what makes an environment stale. `fp` is compared
-/// against [`Ledger::fp`]; equal means nothing in the watch set moved, and —
-/// together with a cached [`Verdict::Inert`] — that is what makes the per-prompt
-/// path stat-only (C-042).
-///
-/// `watch_paths` is the recorded member list, in order, exactly as the emitted
-/// hook body carries it (C-044): the project file the loader resolved and the
-/// `ocx.lock` beside it, the global tier's pair, the managed-config snapshot,
-/// the config-tier paths the last `ConfigLoader` pass discovered, and the
-/// project's consent stamp. Each is folded with its **presence**, its size and
-/// its mtime, so a tier file that did not exist becomes a change the moment it
-/// is created. `project_dir` is member 7 — which project the CWD walk resolved
-/// — folded as identity, so moving between two projects is a change even when
-/// no watched file was touched. The binary version is folded from
-/// `CARGO_PKG_VERSION`, so `self update` moves it.
-///
-/// A-13 — `consent_paths` and `consent_namespaces` are the **raw**
-/// `OCX_CONSENT_PATHS` / `OCX_CONSENT_NAMESPACES` values, passed in rather than
-/// read here so the fold stays pure and unit-testable without a process-wide env
-/// lock. Without them a grant exported from another terminal would never expire
-/// the cached `inert` verdict until the shell restarted. Set-but-empty is a
-/// distinct state from unset, on the same set-ness rule [`Prior`] follows.
-///
-/// A-14 — the mtime is the **full** `SystemTime`, never a seconds-truncated
-/// value, so the named ceiling ("an unchanged `(mtime, size)` pair is
-/// invisible") is the filesystem's own granularity and nothing coarser.
-///
-/// Blocking: one `stat` per member. Call it from a blocking context — the whole
-/// point of C-044 is that this is cheaper than the exec that reaches it.
+/// Blocking: one `stat` per member.
 pub fn fingerprint(
     watch_paths: &[PathBuf],
     project_dir: Option<&Path>,
+    // Raw `OCX_CONSENT_*` values, or a grant exported in another terminal never expires the cached `inert` verdict.
     consent_paths: Option<&str>,
     consent_namespaces: Option<&str>,
 ) -> String {
@@ -58,16 +27,14 @@ pub fn fingerprint(
 
     for path in watch_paths {
         fold(&mut hasher, "path", path.as_os_str().as_encoded_bytes());
-        // `metadata`, not `symlink_metadata`: the shell-side newer-than test
-        // this fold has to agree with follows symlinks too (C-044).
+        // `metadata`, not `symlink_metadata`, to agree with the shell-side newer-than test.
         match std::fs::metadata(path) {
             Ok(meta) => {
                 fold(&mut hasher, "present", &[1]);
                 fold(&mut hasher, "size", &meta.len().to_le_bytes());
                 fold(&mut hasher, "mtime", &mtime_bytes(&meta));
             }
-            // Presence is a member in its own right — an absent tier file that
-            // appears must read as a change, not as "nothing to compare".
+            // Folded, not skipped, so a tier file that appears reads as a change.
             Err(_) => fold(&mut hasher, "present", &[0]),
         }
     }
@@ -78,29 +45,9 @@ pub fn fingerprint(
     hex::encode(hasher.finalize())
 }
 
-/// [`fingerprint`] over this process's own `OCX_CONSENT_*` environment.
+/// [`fingerprint`] (blocking) over this process's [`GRANT_SIGNALS`](ocx_config::shell::GRANT_SIGNALS) environment.
 ///
-/// The two env reads happen **here**, at the one seam every consumer shares —
-/// `ocx self activate --reconcile`, which folds the fingerprint it records, and
-/// `ocx shell state`, which folds the one it reports — so the fold itself stays
-/// pure and unit-testable without a process-wide env lock (A-13). Forgetting one
-/// would silently make the cached `inert` verdict unexpirable, and a second copy
-/// of this wrapper would let exactly that happen in one consumer and not the
-/// other: the reporter would then print a fingerprint the reconciler never
-/// computes.
-///
-/// The names are read **through [`GRANT_SIGNALS`]**, never spelled here: the
-/// per-prompt guard in `shell::hook` records and compares the same list, and a
-/// variable folded here that the guard cannot see is a grant that never reaches
-/// this fold at all — the shell never invokes the binary
-/// ([ocx-sh/ocx#442](https://github.com/ocx-sh/ocx/issues/442)). The array
-/// destructure is the tie: a third name added to the list fails to compile
-/// until this fold learns to carry it.
-///
-/// Blocking: [`fingerprint`]'s one `stat` per member. Call it from a blocking
-/// context.
-///
-/// [`GRANT_SIGNALS`]: ocx_config::shell::GRANT_SIGNALS
+/// The one reader for `ocx self activate --reconcile` and `ocx shell state`, so both compute the same value.
 #[must_use]
 pub fn current_fingerprint(watch_paths: &[PathBuf], project_dir: Option<&Path>) -> String {
     let [consent_paths, consent_namespaces] = ocx_config::shell::GRANT_SIGNALS.map(ocx_util::env::var);
@@ -112,28 +59,9 @@ pub fn current_fingerprint(watch_paths: &[PathBuf], project_dir: Option<&Path>) 
     )
 }
 
-/// The **membership** digest of the watch set — the ordered path list, and
-/// nothing about the files themselves.
+/// The **membership** digest of the ordered watch-path list, recorded in [`Ledger::ws`](super::Ledger::ws).
 ///
-/// Deliberately not [`fingerprint`]. That fold answers *"did anything move?"*
-/// and mixes in every member's presence, size and mtime, so it changes on every
-/// edit; this one answers *"is the shell watching the right files?"* and changes
-/// only when the list itself does. The gate baked into the emitted hook body
-/// carries the **list**, so the list is what has to be compared against it.
-///
-/// Recorded in [`Ledger::ws`] as the membership the shell's gate currently
-/// holds, which is why the emission that redefines that gate and the write of
-/// this value are one step in the caller.
-///
-/// Truncated to 16 hex characters, on [`Ledger::messages_fp`]'s reasoning: the
-/// carrier has a 16 KiB ceiling (C-004) and the only question asked of this
-/// value is equality against the previous one.
-///
-/// Pure — no `stat`, so unlike [`fingerprint`] it costs nothing to call on the
-/// hot path.
-///
-/// [`Ledger::ws`]: super::Ledger::ws
-/// [`Ledger::messages_fp`]: super::Ledger::messages_fp
+/// It moves only when the list does, which is when the gate baked into the hook body is out of date.
 #[must_use]
 pub fn watch_set_fingerprint(watch_paths: &[PathBuf]) -> String {
     use sha2::Digest as _;
@@ -145,18 +73,9 @@ pub fn watch_set_fingerprint(watch_paths: &[PathBuf]) -> String {
     hex::encode(hasher.finalize())[..16].to_owned()
 }
 
-/// The watch set's member paths, in the order [`fingerprint`] folds them and
-/// the emitted hook body carries them (C-019, C-044, A-13).
+/// The watch set's member paths, in the order [`fingerprint`] folds them and the hook body carries them.
 ///
-/// **Candidates, not survivors**: a path that does not exist is a member too,
-/// because one becoming present is exactly the change the watch set must
-/// notice. Discovery happens here — during the shell-start `ConfigLoader` pass
-/// and again only when a recomposition is already due — so the per-prompt path
-/// stats this recorded list and parses nothing (C-042).
-///
-/// One definition, deliberately: the emitted hook body, the fingerprint fold and
-/// `ocx shell state`'s evidence table all read this list, and two definitions of
-/// *"what makes the environment stale"* drift.
+/// **Candidates, not survivors**: an absent path is a member, since one appearing is the change to notice.
 pub fn watch_paths(
     file_structure: &ocx_store::file_structure::FileStructure,
     project_config: Option<&Path>,
@@ -165,22 +84,7 @@ pub fn watch_paths(
 ) -> Vec<PathBuf> {
     let mut paths = Vec::with_capacity(9);
 
-    // Members 1-2 — the project tier. `[env]` applies on its own authority
-    // independently of the lock, so watching locks alone would miss an
-    // `[env]`-only edit.
-    //
-    // The **resolved** file, never `<dir>/ocx.toml`: `--project` and
-    // `OCX_PROJECT` name the project file outright, and `OCX_PROJECT` is the
-    // only one of the two that reaches a per-prompt process (it is spawned with
-    // no argv of its own). A hardcoded `ocx.toml` there watches a path the
-    // project does not have and never the file that decides, so an `[env]` edit
-    // is invisible at every prompt.
-    //
-    // The lock is `config.parent()` and not the project's canonical directory,
-    // because that is the spelling `lock_path_for` uses —
-    // the file the loader actually reads. `shell/` may not import
-    // `ocx_project` (A-45, now a Cargo error), so the two derivations are held together by
-    // `package_manager::activation::identity_tests::the_watch_set_lock_member_is_the_lock_the_loader_reads`.
+    // The resolved config, never `<dir>/ocx.toml`: `OCX_PROJECT` may name another file, and `[env]` edits go unseen.
     if let Some(config) = project_config {
         paths.push(config.to_path_buf());
         if let Some(dir) = config.parent() {
@@ -188,43 +92,19 @@ pub fn watch_paths(
         }
     }
 
-    // Members 3-5 — the global tier and the managed-config snapshot.
     let home = file_structure.root();
     paths.push(home.join("ocx.toml"));
     paths.push(home.join("ocx.lock"));
     paths.push(file_structure.state.managed_config().snapshot_file());
 
-    // Member 6's *observable* half. `CARGO_PKG_VERSION` alone does not move on
-    // this project's floating `<version>-dev` channel — `self update` swaps
-    // `current` to a different binary carrying the same version string — so the
-    // binary the `current` symlink resolves to is watched directly. Its mtime
-    // and size move whenever the symlink is repointed.
-    //
-    // One spelling of that directory, workspace-wide (RUL-63, RUL-90, R-W29).
-    // It is also the directory the desired set contributes under C-059, and
-    // `repair_owned_segments` owns every segment under `$OCX_HOME`: a second
-    // derivation that drifted from `setup`'s would make the watch set and the
-    // desired set name two different paths, so the prompt would delete one and
-    // add the other for the shell's whole life.
+    // `CARGO_PKG_VERSION` stays put when `self update` swaps a `-dev` binary, so watch the binary itself.
     paths.push(file_structure.ocx_install_bin_path());
 
-    // Member 8 — the config tiers (A-13, A-33).
-    //
-    // The **recorded** list wins whenever there is one: it came from
-    // `LoadedConfig::config_tier_paths`, which honours `OCX_NO_CONFIG` and
-    // includes the `--config` overlay that a per-prompt process cannot see for
-    // itself. Re-deriving is the fallback for the one run that has no record
-    // yet, and it is deliberately the *same* arithmetic the loader uses.
+    // The recorded tiers win: they include the `--config` overlay a per-prompt process cannot see.
     match recorded_tiers {
         Some(recorded) => paths.extend(recorded.iter().cloned()),
         None => {
-            // The system tier is unconditional, matching what the loader
-            // actually reads: `OCX_NO_CONFIG` prunes ambient configuration, not
-            // operator policy, so `/etc/ocx/config.toml` still loads for its
-            // system-locked sections and still seeds `config_tier_paths`. An
-            // operator adding a lock there changes the resolved config, and a
-            // cached `inert` verdict that does not watch the file cannot expire
-            // on it.
+            // Unconditional, as in the loader: `OCX_NO_CONFIG` does not prune the system tier's locked sections.
             paths.push(ocx_config::loader::ConfigLoader::system_path());
             if !ocx_util::env::flag("OCX_NO_CONFIG", false) {
                 paths.extend(ocx_config::loader::ConfigLoader::user_path());
@@ -238,8 +118,7 @@ pub fn watch_paths(
         }
     }
 
-    // Member 9 — the project's consent stamp. Without it a grant written from
-    // another terminal never expires the cached `inert` verdict.
+    // Without the consent stamp, a grant written in another terminal never expires the cached `inert` verdict.
     if let Some(key) = project_key {
         paths.push(file_structure.state.consent_stamp_file(key));
     }
@@ -247,8 +126,7 @@ pub fn watch_paths(
     paths
 }
 
-/// Absorb one named member, length-prefixed so two different member lists can
-/// never collide by concatenating to the same byte stream.
+/// Absorb one named member, length-prefixed so two member lists never concatenate to the same bytes.
 fn fold(hasher: &mut sha2::Sha256, tag: &str, bytes: &[u8]) {
     use sha2::Digest as _;
     hasher.update(tag.as_bytes());
@@ -268,11 +146,8 @@ fn fold_optional(hasher: &mut sha2::Sha256, tag: &str, bytes: Option<&[u8]>) {
     }
 }
 
-/// The full modification time, sign byte first so a pre-epoch mtime folds
-/// distinctly from its post-epoch mirror (A-14 — never seconds-truncated).
+/// The full mtime, never seconds-truncated, or a same-second, same-size edit is invisible.
 fn mtime_bytes(meta: &std::fs::Metadata) -> Vec<u8> {
-    // A filesystem with no modification time contributes the empty member
-    // rather than a fabricated one; presence and size still fold above.
     let Ok(modified) = meta.modified() else {
         return Vec::new();
     };

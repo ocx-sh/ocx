@@ -3,43 +3,11 @@
 
 //! Move-to-back deduplication for separator-joined option-list values.
 
-/// Unique append for a separator-joined list value: drops every existing
-/// occurrence of `value` and re-appends it at the back.
+/// Unique append for a separator-joined list value: moves `value` to the back.
 ///
-/// The algorithm is pinned by `adr_env_modifier_types.md` D1 and is
-/// implemented identically in every emitted shell snippet, so the in-process
-/// child env (`ocx exec` / `ocx package exec`) and the exported shell text agree
-/// byte for byte:
+/// Must match the emitted shell snippets (`adr_env_modifier_types.md § Decision`), or the in-process env and the shell env diverge.
 ///
-/// > Wrap `existing` in the separator; replace **every** occurrence of
-/// > `sep + value + sep` with `sep`, repeating to a fixpoint; strip the
-/// > wrapper; append `sep + value` (bare `value` when nothing survived).
-///
-/// Removing *every* occurrence — not the first — is what keeps `f∘f = f` when
-/// the ambient value already carried duplicates, the same property
-/// [`move_to_front`](super::path::move_to_front) guards for `PATH`. The
-/// fixpoint loop covers *adjacent* duplicates, whose second copy shares the
-/// separator the first match consumed.
-///
-/// An empty `value` is a no-op, deliberately unlike
-/// `Env::add_path`'s empty-insert asymmetry.
-/// Elements are opaque: nothing is tokenized, trimmed or emptied out, because
-/// list element grammar belongs to the consuming tool, never to ocx.
-///
-/// UTF-8 `&str` rather than [`OsStr`](std::ffi::OsStr): a list separator is
-/// authored text, and the sibling `PATH` primitive's `OsStr` form comes from
-/// `std::env::split_paths`, which hardcodes the platform path separator and is
-/// therefore not reusable here.
-///
-/// **Precondition:** `value` neither starts nor ends with `separator` — such a
-/// value makes the flank match ambiguous and is refused at every parse boundary
-/// and again after template resolution. `separator` is non-empty; an empty one
-/// would degrade the match to a bare substring scan.
-///
-/// **Known boundary (accepted, ADR D1):** a contribution equal to the
-/// concatenation of two adjacent prior contributions matches the flank rule and
-/// is removed as one span, then re-appended as one element. Deterministic and
-/// idempotent; fixing it would mean tokenizing elements.
+/// **Precondition:** `value` is not flanked by `separator` and `separator` is non-empty, or `value` is cut out of other elements.
 ///
 /// # Examples
 ///
@@ -63,13 +31,12 @@ pub fn append_unique(existing: &str, value: &str, separator: &str) -> String {
     wrapped.push_str(separator);
 
     let occurrence = format!("{separator}{value}{separator}");
+    // Loop to a fixpoint: one `replace` pass misses adjacent duplicates, which breaks idempotence.
     while wrapped.contains(&occurrence) {
         wrapped = wrapped.replace(&occurrence, separator);
     }
 
-    // Each replacement puts a separator where a separator-flanked match stood,
-    // so the wrapper survives — except when everything between collapsed and
-    // the two ends fused into the single separator that is then left.
+    // A fully collapsed list leaves one bare separator, which fails the strip and means empty.
     let survivors = wrapped
         .strip_prefix(separator)
         .and_then(|inner| inner.strip_suffix(separator))

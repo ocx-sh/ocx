@@ -52,9 +52,7 @@ impl ConfigPushArgs {
         )
         .await?;
 
-        // The reported digest doubles as the operator's TOFU signal: it is
-        // the value a digest-pinned seed or `ocx config update --check`
-        // compares against.
+        // The reported digest is the operator's TOFU signal for a digest-pinned seed.
         context.api().report(&crate::api::data::push::PushReport::from_outcome(
             identifier.to_string(),
             outcome,

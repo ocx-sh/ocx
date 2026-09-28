@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! [`Signer`] trait — the cryptographic half of keyless signing.
-//!
-//! A signer turns an in-toto Statement + an acquired OIDC token into a
-//! Sigstore bundle v0.3. The registry push is a separate concern owned by
-//! [`pipeline::SignPipeline`](super::pipeline). This split (Architect F2) lets
-//! v2 add HSM/KMS signers without touching the push state machine, and lets
-//! tests inject a fake signer.
+//! [`Signer`] trait — the cryptographic half of signing; the registry push is `SignPipeline`'s.
 
 use async_trait::async_trait;
 use p256::ecdsa::SigningKey;
@@ -24,32 +18,19 @@ use super::rekor::RekorClient;
 use crate::attest::dsse::{DsseEnvelope, DsseSignature, pae};
 use crate::attest::{DSSE_PAYLOAD_TYPE, MAX_STATEMENT_PAYLOAD_BYTES};
 
-/// A signature over opaque bytes, plus the verification material a cosign
-/// simplesigning sidecar puts in layer annotations.
-///
-/// Every field but `signature` is optional because their absence is a **legal
-/// shape**, not malformed output (spec D5): under a key there is no certificate
-/// and no chain, and with no transparency-log upload there is no offline Rekor
-/// bundle. A reader must not treat any of them as required.
+/// A signature over opaque bytes, plus the verification material a cosign simplesigning
+/// sidecar puts in layer annotations; every optional field may legally be absent.
 #[derive(Debug, Clone)]
 pub struct SignedBlob {
     /// DER-encoded ECDSA signature over `sha256(payload)`.
     pub signature: Vec<u8>,
     /// PEM leaf certificate. Keyless only.
     pub certificate_pem: Option<String>,
-    /// PEM intermediate chain.
-    ///
-    /// Always `None` today, and deliberately: bundle v0.3 replaced the chain
-    /// field with a single leaf, Fulcio's intermediates come from the trust
-    /// root, and cosign v3.1.1's own `.sig` manifests carry no `/chain`
-    /// annotation either (`test/tests/fixtures/golden/simplesigning_keyless_manifest.json`).
-    /// Modelled rather than dropped so a private-CA signer with real
-    /// intermediates has somewhere to put them.
+    /// PEM intermediate chain; always `None` today, as bundle v0.3 and cosign carry no chain.
+    /// Kept for a private-CA signer with real intermediates.
     pub chain_pem: Option<String>,
-    /// The offline Rekor bundle for the `dev.sigstore.cosign/bundle`
-    /// annotation, when an entry was created.
+    /// The offline Rekor bundle for the `dev.sigstore.cosign/bundle` annotation.
     pub rekor_bundle: Option<String>,
-    /// The Rekor log index, when a transparency record was created.
     pub transparency_log_index: Option<u64>,
     /// Which key model produced the signature.
     pub key_backend: ocx_trust::key_ref::KeyBackendKind,
@@ -58,28 +39,11 @@ pub struct SignedBlob {
 }
 
 /// Produces a Sigstore bundle over an in-toto Statement.
-///
-/// The keyless v1 implementation is [`KeylessSigner`]; the trait exists so v2
-/// signers (KMS, private CA) reuse the same push pipeline.
 #[async_trait]
 pub trait Signer: Send + Sync {
-    /// Sign an in-toto Statement as a DSSE envelope, returning a bundle.
+    /// Sign an in-toto Statement as a DSSE envelope over `sha256(PAE(type, statement_bytes))`.
     ///
-    /// The payload type is fixed (`DSSE_PAYLOAD_TYPE`): v1 writes exactly one,
-    /// so it is a constant rather than a stringly-typed parameter (ARCH-05).
-    /// What is signed is `sha256(PAE(payload_type, statement_bytes))` — never
-    /// the statement bytes alone and never the base64 text — the Rekor entry is
-    /// `dsse:0.0.1`, and the returned bundle's content oneof is `dsseEnvelope`.
-    ///
-    /// **Preconditions.** `statement_bytes` is bounded here, against
-    /// `MAX_STATEMENT_PAYLOAD_BYTES` — the same ceiling the read side applies
-    /// in [`DsseEnvelope::parse`](crate::attest::dsse::DsseEnvelope::parse)
-    /// — and the refusal comes *before* any network contact. A Rekor entry is
-    /// permanent, so an over-cap statement that reached the log would be
-    /// published forever and then refused by this tool's own verifier.
-    ///
-    /// A signer that only wants message signatures still supplies this; that
-    /// cost was taken deliberately over generalizing [`Self::sign`].
+    /// Must refuse over `MAX_STATEMENT_PAYLOAD_BYTES` before any network: a Rekor entry is permanent.
     async fn sign_dsse(
         &self,
         statement_bytes: &[u8],
@@ -88,17 +52,9 @@ pub trait Signer: Send + Sync {
         rekor_url: &Url,
     ) -> Result<SignedBundle, SignErrorKind>;
 
-    /// Sign `payload` verbatim, returning the signature and the verification
-    /// material a cosign simplesigning sidecar carries in annotations.
+    /// Sign `sha256(payload)` verbatim, not the PAE, returning the material a simplesigning sidecar carries.
     ///
-    /// **The bytes are the message.** Unlike [`Self::sign_dsse`], which signs
-    /// `sha256(PAE(type, payload))`, this signs `sha256(payload)` — cosign's
-    /// simplesigning claim is signed as an opaque blob and its Rekor entry is a
-    /// `hashedrekord` over the same digest. A signature produced by one rule
-    /// does not verify under the other, which is why this is a separate method
-    /// rather than a flag on `sign_dsse`.
-    ///
-    /// The caller owns the payload's meaning; this signer only signs it.
+    /// Matches cosign's `hashedrekord` rule, so a signature from one rule never verifies under the other.
     async fn sign_blob(
         &self,
         payload: &[u8],
@@ -107,32 +63,16 @@ pub trait Signer: Send + Sync {
         rekor_url: &Url,
     ) -> Result<SignedBlob, SignErrorKind>;
 
-    /// Whether this signer needs an OIDC identity token.
+    /// Whether this signer needs an OIDC identity token; also gates the Fulcio SSRF pre-flight.
     ///
-    /// `true` for keyless, `false` under a key pair. The pipeline reads it to
-    /// decide whether to acquire a token at all — a key-mode run in an
-    /// air-gapped org has no issuer to ask, and spending an ambient token there
-    /// would fail a signature that needs no identity. The same answer gates the
-    /// Fulcio SSRF pre-flight: a URL that is never dialled must not have to
-    /// resolve.
-    ///
-    /// **Contract:** `sign_dsse` receives `Some` exactly when this is `true`. A
-    /// signer that answers `true` and is handed `None` must fail rather than
-    /// sign, which is what keeps the pair honest.
+    /// `sign_dsse` receives `Some` exactly when this is `true`; given `None` it must fail, never sign.
     fn requires_identity_token(&self) -> bool {
         true
     }
 
-    /// Whether this signer will upload a transparency-log entry.
+    /// Whether this signer will upload a transparency-log entry; gates the Rekor SSRF pre-flight.
     ///
-    /// Keyless always does — the Rekor timestamp is the only durable proof the
-    /// signature happened inside its ten-minute certificate window — so the
-    /// default is `true`. Key mode answers whether `--rekor-upload` (or
-    /// `[trust.sigstore] rekor_upload`) opted in.
-    ///
-    /// The pipeline reads it to decide whether the Rekor SSRF pre-flight runs:
-    /// an endpoint that is never dialled must not have to resolve, or an
-    /// air-gapped key-mode sign fails on DNS for a host it never contacts.
+    /// Keyless must: the Rekor timestamp is the only proof it signed within the certificate window.
     fn uploads_to_transparency_log(&self) -> bool {
         true
     }
@@ -169,8 +109,6 @@ impl Signer for KeylessSigner {
         let token = token.ok_or(SignErrorKind::OidcTokenRejected)?;
         let identity = issue_ephemeral_certificate(token, fulcio_url).await?;
 
-        // `sha256(payload)`, not the PAE: cosign signs a simplesigning claim as
-        // an opaque blob and logs a `hashedrekord` over the same digest.
         let payload_digest = sha256(payload);
         let signature: p256::ecdsa::Signature = identity
             .signing_key
@@ -204,16 +142,9 @@ impl Signer for KeylessSigner {
         fulcio_url: &Url,
         rekor_url: &Url,
     ) -> Result<SignedBundle, SignErrorKind> {
-        // The trait's contract says `Some` whenever `requires_identity_token`
-        // is true, and this signer never answers false. A `None` here is a
-        // pipeline bug, and a keyless signature without an identity is exactly
-        // what must not be produced — so it refuses rather than improvising.
+        // A keyless signature without an identity must never be produced.
         let token = token.ok_or(SignErrorKind::OidcTokenRejected)?;
-        // First, before the Fulcio round trip and long before the irreversible
-        // Rekor write: a statement over the verifier's ceiling would be signed,
-        // published to a permanent log, and then refused by this tool's own
-        // verify path. Cheapest possible refusal, at the only point it is
-        // still free.
+        // Before Fulcio and the irreversible Rekor write, or an over-cap statement is logged forever.
         if statement_bytes.len() > MAX_STATEMENT_PAYLOAD_BYTES {
             return Err(SignErrorKind::PredicateTooLarge {
                 limit: MAX_STATEMENT_PAYLOAD_BYTES as u64,
@@ -221,8 +152,6 @@ impl Signer for KeylessSigner {
             });
         }
 
-        // Same first step as `sign`; the two then diverge exactly where the
-        // protocols do — what is signed, what is logged, what the bundle holds.
         let identity = issue_ephemeral_certificate(token, fulcio_url).await?;
         let signed = SignedEnvelope::new(sign_envelope(&identity.signing_key, statement_bytes)?)?;
 
@@ -248,16 +177,9 @@ struct EphemeralIdentity {
     certificate: FulcioCertificate,
 }
 
-/// Mint an ephemeral P-256 keypair and exchange `token` for a Fulcio
-/// certificate over it.
+/// Mint an ephemeral P-256 keypair and exchange `token` for a Fulcio certificate over it.
 ///
-/// The half [`Signer::sign`] and [`Signer::sign_dsse`] share. Which bytes get
-/// signed afterwards is the only thing that differs between them, so keeping
-/// this in one place is what stops the two paths drifting into obtaining
-/// certificates differently.
-///
-/// A free function rather than a method: `KeylessSigner` is a unit struct and
-/// there is no receiver state to reach.
+/// Shared by both sign paths so they cannot drift into obtaining certificates differently.
 async fn issue_ephemeral_certificate(token: &OidcToken, fulcio_url: &Url) -> Result<EphemeralIdentity, SignErrorKind> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -268,12 +190,7 @@ async fn issue_ephemeral_certificate(token: &OidcToken, fulcio_url: &Url) -> Res
         .to_public_key_pem(LineEnding::LF)
         .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
 
-    // Proof of possession over the identity Fulcio will put in the SAN.
-    //
-    // Not `unwrap_or_default()`: an empty subject produces a signature Fulcio
-    // cannot verify, and it answered 400 with a message this side discarded. A
-    // token carrying no usable identity claim is a rejected token, and saying
-    // so costs one round trip less to diagnose.
+    // Refuse an empty subject: Fulcio rejects its proof of possession with a discarded 400.
     let subject = jwt_subject(token.as_str()).ok_or(SignErrorKind::OidcTokenRejected)?;
     let pop_sig: p256::ecdsa::Signature = signing_key
         .sign_prehash(&sha256(subject.as_bytes()))
@@ -292,13 +209,7 @@ async fn issue_ephemeral_certificate(token: &OidcToken, fulcio_url: &Url) -> Res
 
 /// Build the DSSE envelope for `statement_bytes`, signed with `signing_key`.
 ///
-/// **What gets signed is `sha256(PAE(payload_type, statement_bytes))`.** Not the
-/// statement bytes, not their digest, and not the base64 text of either — the
-/// PAE is what binds the payload to its declared type, and dropping it makes a
-/// signature over a CycloneDX SBOM equally valid over the same bytes claimed as
-/// SLSA provenance.
-///
-/// Pure: no network, no clock. The Fulcio and Rekor halves are the caller's.
+/// Sign the PAE, never the bare bytes, or one signature holds for the same bytes under another payload type.
 fn sign_envelope(signing_key: &SigningKey, statement_bytes: &[u8]) -> Result<DsseEnvelope, SignErrorKind> {
     let signature: p256::ecdsa::Signature = signing_key
         .sign_prehash(&sha256(&pae(DSSE_PAYLOAD_TYPE, statement_bytes)))
@@ -309,14 +220,12 @@ fn sign_envelope(signing_key: &SigningKey, statement_bytes: &[u8]) -> Result<Dss
         payload_type: DSSE_PAYLOAD_TYPE.to_string(),
         signatures: vec![DsseSignature {
             sig: signature.to_der().as_bytes().to_vec(),
-            // Empty by design: cosign omits it on a keyless signature, and it
-            // is a lookup hint that verification never reads.
+            // Empty: cosign omits it on a keyless signature, and verification never reads it.
             keyid: String::new(),
         }],
     })
 }
 
-/// SHA-256 of `bytes` as a 32-byte array.
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     use sha2::Digest as _;
     sha2::Sha256::digest(bytes).to_vec()
@@ -324,15 +233,7 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
 
 /// Extract the identity claim a Fulcio proof-of-possession must be signed over.
 ///
-/// **`email` first, `sub` second, and the order is the contract.** Fulcio signs
-/// over its *principal name*, which for an email-type issuer is the `email`
-/// claim, not `sub` — dex's `sub` is an opaque base64 blob, and signing it
-/// yields "The signature supplied in the request could not be verified". `sub`
-/// remains the fallback for issuers with no email: a GitHub Actions token's
-/// principal name genuinely is its `sub` (`repo:owner/name:ref`).
-///
-/// Returns `None` on any structural failure; the caller treats that as a
-/// rejected token rather than signing an empty string.
+/// `email` before `sub`: Fulcio signs over the principal name, and an email issuer's `sub` fails verification.
 fn jwt_subject(jwt: &str) -> Option<String> {
     use base64::Engine as _;
     let payload_b64 = jwt.split('.').nth(1)?;
@@ -340,12 +241,7 @@ fn jwt_subject(jwt: &str) -> Option<String> {
         .decode(payload_b64)
         .ok()?;
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    // Emptiness is tested per claim, before the fallback, not once after it.
-    // A trailing `.filter(non-empty)` let a present-but-empty `email` win the
-    // `or_else` and then be discarded, so a token carrying `"email": ""`
-    // alongside a perfectly signable `sub` came back rejected — exit 80 with
-    // "refresh the token", for a token that needed nothing. "Issuers with no
-    // email" is what the paragraph above promises, and an empty claim is one.
+    // Empty per claim, before the fallback, or `"email": ""` shadows a signable `sub`.
     let claim = |name: &str| claims.get(name).and_then(|v| v.as_str()).filter(|s| !s.is_empty());
     claim("email").or_else(|| claim("sub")).map(str::to_owned)
 }

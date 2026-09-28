@@ -5,19 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
+// The serde and clap slugs must match by hand; `signature_format_slugs_are_frozen` checks it.
 /// Which cosign wire shape a signature is written in, and which shape a verify
 /// pins.
 ///
 /// Format and key model are **orthogonal**: either format can be produced
-/// keyless or with a key pair, so this enum never says anything about how the
+/// keyless or with a key pair, so this value never says anything about how the
 /// signing material was obtained.
-///
-/// One vocabulary, two channels — serde for config and JSON, `ValueEnum` for
-/// the command line. The two spellings are identical by contract, and
-/// `signature_format_slugs_are_frozen` asserts that rather than assuming it:
-/// the enum is hand-written on the clap side (this crate carries
-/// `clap_builder`, not the `clap` derive), so nothing makes the two agree
-/// automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignatureFormat {
@@ -31,18 +25,14 @@ pub enum SignatureFormat {
     Simplesigning,
     /// Write both shapes.
     ///
-    /// **Write-side only.** A verify pins exactly one shape, because "either
-    /// of two signatures satisfied me" is not a statement a verification
-    /// result can carry; the read-side resolver refuses this value.
+    /// **Write-side only**: a verify pins exactly one shape, and the read-side
+    /// resolver refuses this value.
+    // "Either of two signatures satisfied me" is not a statement a verification result can carry.
     Both,
 }
 
 impl SignatureFormat {
     /// Whether this selection writes the OCI 1.1 + Sigstore-bundle shape.
-    ///
-    /// Added by loop C: the write path branches on the selection twice, and two
-    /// `matches!` arms spelled at the call sites is how `Both` gets forgotten in
-    /// one of them.
     #[must_use]
     pub const fn writes_bundle(self) -> bool {
         matches!(self, Self::Bundle | Self::Both)
@@ -54,8 +44,7 @@ impl SignatureFormat {
         matches!(self, Self::Simplesigning | Self::Both)
     }
 
-    /// Every variant, in declaration order — the order clap renders in help
-    /// and the order the frozen-slug test walks.
+    /// Every variant, in declaration order (the order clap renders).
     pub const ALL: &'static [Self] = &[Self::Bundle, Self::Simplesigning, Self::Both];
 
     /// The frozen wire slug, identical on the serde and clap channels.

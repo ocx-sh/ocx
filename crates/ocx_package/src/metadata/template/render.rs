@@ -1,64 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Render modifiers for resolved interpolation tokens.
+//! The `:native` / `:posix` render modifiers for resolved interpolation tokens.
 //!
-//! A recognised `${…}` token (`scanner.rs`) may carry an optional render
-//! modifier — `:native` or `:posix` — that governs how its *already-resolved*
-//! value is rendered before landing in the output string. [`render`] is the
-//! pure transform: no I/O, no `cfg!` read inside the body, `host` is always
-//! the caller's explicit parameter. That is what makes both `:posix` legs
-//! testable on any CI host (`adr_interpolation_token_grammar.md` D5, C-014,
-//! C-015).
-//!
-//! Rendering composes **after** `dunce::simplified`, never instead of it —
-//! stripping a Windows `\\?\` verbatim prefix stays `TemplateResolver`'s job
-//! in the parent module. UNC paths and verbatim prefixes are explicit
-//! non-goals: OCX's input space is paths it generated itself
-//! (`$OCX_HOME`-rooted, digest-sharded, ASCII-slugified), never an arbitrary
-//! user-typed filesystem path.
+//! Rendering composes after `dunce::simplified`, never instead of it; UNC and verbatim
+//! prefixes are non-goals, since OCX only renders paths it generated.
 
 use std::borrow::Cow;
 
-/// The closed set of token render modifiers.
-///
-/// Distinct from a variable's wire *type* (`env::modifier::Modifier` —
-/// `path`/`constant`/`list`, a **combination** axis: how a declared value
-/// combines with an existing one). `RenderModifier` answers a **rendering**
-/// axis instead — how an already-resolved value is rendered — and is never
-/// serialized. The modifier never carries free text: a future modifier that
-/// takes an argument needs a new ADR, not a new arm.
+/// The closed set of token render modifiers; never serialized, and distinct from a var's
+/// wire `type` (`env::modifier::Modifier`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderModifier {
-    /// The resolved value in the host's native form. Identical to omitting
-    /// the modifier — the identity function on every host, for every input.
+    /// The host-native form; identical to omitting the modifier.
     Native,
-    /// On [`Host::Windows`]: [`RenderModifier::Native`], then every `\`
-    /// replaced by `/`, drive letter preserved (`C:\Users\x` →
-    /// `C:/Users/x`). On [`Host::Unix`]: the identity function, so a POSIX
-    /// filename that happens to contain a backslash is not corrupted.
+    /// On Windows every `\` becomes `/` (`C:\Users\x` → `C:/Users/x`); the identity on Unix,
+    /// where a filename may contain a backslash.
     Posix,
 }
 
-/// The host [`render`] renders for, passed explicitly rather than read from
-/// `cfg!` inside the transform.
-///
-/// [`Host::current`] is the real host and carries no `cfg`-gated seam of its
-/// own — `render` requires it to stay pure (D5), so no `__OCX_*` env read
-/// belongs here. `TemplateResolver` (the parent module) is where C-013/C-017
-/// need the override: it will carry a `Host` field defaulting to
-/// [`Host::current`], overridable through a
-/// `#[cfg(any(test, feature = "__testing"))]` constructor on
-/// `TemplateResolver` itself, so its unit tests construct a resolver
-/// pinned to either host with no runtime env read.
-///
-/// Deliberately not `ocx_oci::platform::OperatingSystem` (`operating_system.rs`):
-/// that type is a serialized OCI wire value with an `Option`-shaped read from
-/// `std::env::consts::OS` (three arms plus "unknown"), while `Host::current`
-/// must key on exactly the predicate `dunce::simplified` uses — `cfg(windows)`
-/// — because `render` is required to compose after it (D5). Reusing
-/// `OperatingSystem` would import a `None` case this module has no business
-/// deciding and split that one predicate across two types.
+/// The host [`render`] renders for, passed in so `render` stays pure and testable.
+// Not `OperatingSystem`: this must key on `cfg(windows)`, the predicate `dunce::simplified` uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
     Windows,
@@ -73,22 +35,11 @@ impl Host {
     }
 }
 
-/// Renders an already-resolved token value for `modifier` on `host`.
-///
-/// Pure: no I/O, no `cfg!` read in the body — `host` is the only source of
-/// platform behavior. [`RenderModifier::Native`] is the identity function for
-/// every host and every input. [`RenderModifier::Posix`] is host-conditional,
-/// not an unconditional slash flip: a POSIX filename may legitimately
-/// contain a backslash, so an unconditional flip would corrupt it
-/// (`adr_interpolation_token_grammar.md` D5).
-///
-/// Composes **after** `dunce::simplified` — never emits and never strips a
-/// `\\?\` verbatim prefix. UNC paths and verbatim prefixes are explicit
-/// non-goals.
+/// Renders an already-resolved token value for `modifier` on `host`
+/// (`adr_interpolation_token_grammar.md`).
 #[must_use]
 pub fn render(value: &str, modifier: RenderModifier, host: Host) -> Cow<'_, str> {
-    // Matched on both axes rather than with a `_` catch-all: a future arm on
-    // either enum must then be a compile error here, not a silent identity.
+    // No `_` arm, so a new variant on either enum is a compile error, not a silent identity.
     match modifier {
         RenderModifier::Native => Cow::Borrowed(value),
         RenderModifier::Posix => match host {

@@ -7,24 +7,19 @@ use std::path::PathBuf;
 
 use crate::forge::{ForkIdentity, PullRequest, PushAccess, RepoCoordinate};
 
-/// How the caller curated the tag set (design register C3/C5).
+/// How the caller curated the tag set.
 #[derive(Debug, Clone)]
 pub enum TagSelection {
-    /// `--tags`: the given list **is** the universe. A committed tag absent from
-    /// the list is dropped (reference-impl replace semantics).
+    /// `--tags`: the list is the universe; a committed tag absent from it is dropped.
     Replace(Vec<String>),
-    /// `--tags-file`: additive union of the file's tags with the committed root
-    /// — deletion only ever happens via [`Replace`](TagSelection::Replace).
+    /// `--tags-file`: union with the committed root; only
+    /// [`Replace`](TagSelection::Replace) deletes.
     UnionFile(Vec<String>),
-    /// `--refresh`: re-observe every tag already in the committed root (catches
-    /// moved digests such as `latest`/cascades) without scanning the registry or
-    /// touching yank markers.
+    /// `--refresh`: re-observe every committed tag (catching moved digests)
+    /// without scanning the registry or touching yank markers.
     Refresh,
-    /// `--tags-from-registry`: additive union of every tag the physical
-    /// repository currently holds with the committed root. The registry supplies
-    /// the candidates instead of the caller; the merge is
-    /// [`UnionFile`](TagSelection::UnionFile)'s, so nothing committed is ever
-    /// dropped and yank markers survive.
+    /// `--tags-from-registry`: union of every tag the physical repository holds
+    /// with the committed root; nothing committed is dropped and yank markers survive.
     FromRegistry,
 }
 
@@ -34,29 +29,19 @@ pub enum AnnounceTarget {
     /// Write the root and new CAS files locally under this directory — no forge
     /// mutation.
     Out(PathBuf),
-    /// Open (or update) a fork pull request against the index repository. The
-    /// coordinate's `owner` threads into the fork-create target (design register
-    /// S12 shared `ocx-contrib/index` fork path).
+    /// Open (or update) a pull request from a fork; a missing fork is created
+    /// under the coordinate's namespace.
     Fork(RepoCoordinate),
-    /// Commit the announce branch onto the index repository **itself** and open
-    /// the pull request from it — no fork anywhere.
+    /// Commit onto the index repository itself and open the pull request from
+    /// it, for a credential that can push there (GitHub refuses to fork a
+    /// repository into the organization that owns it).
     ///
-    /// For a publisher whose credential can already push to
-    /// [`AnnounceRequest::index_repo`]: OCX's own packages are published from
-    /// repositories in the organization that owns the index, and GitHub refuses
-    /// to fork a repository into the organization that already owns it, so the
-    /// fork path is not merely redundant for them — it cannot run at all.
-    ///
-    /// Still a **pull request**, never a push to the index's default branch: the
-    /// index's governance gate and its `refresh`/`new-package` labelling run on
-    /// pull requests, so bypassing them would be strictly worse than forking.
-    /// Narrows design register S3 ("always fork") to "always a reviewed pull
-    /// request".
+    /// Still a pull request, never a default-branch push, which would bypass the
+    /// governance gate and the `refresh`/`new-package` labelling.
     Direct,
 }
 
-/// One package's announce request (design register C11/C12 — one package per
-/// call; the caller loops for multi-root).
+/// One package's announce request; the caller loops for multi-root.
 #[derive(Debug, Clone)]
 pub struct AnnounceRequest {
     /// The logical `<namespace>/<package>` identifier.
@@ -65,40 +50,30 @@ pub struct AnnounceRequest {
     pub curated: TagSelection,
     /// The write target.
     pub target: AnnounceTarget,
-    /// The index repository coordinate (default `ocx-sh/index`, design register
-    /// C11).
+    /// The index repository coordinate (default `ocx-sh/index`).
     pub index_repo: RepoCoordinate,
-    /// Tags to mark yanked (design register C7).
+    /// Tags to mark yanked.
     pub yank: Vec<String>,
-    /// Tags to clear the yank marker from (design register C7).
+    /// Tags to clear the yank marker from.
     pub unyank: Vec<String>,
-    /// The reason recorded for every `--yank` in this run (design register C7).
+    /// The reason recorded for every `--yank` in this run.
     pub yank_reason: String,
-    /// SSRF escape-hatch hosts/CIDRs for the physical registry (design register
-    /// X2 — sourced only from the selected `[registries."<ns>"]` entry).
+    /// SSRF escape-hatch hosts/CIDRs for the physical registry, sourced only from
+    /// the selected `[registries."<ns>"]` entry.
     pub trusted_hosts: Vec<String>,
-    /// Registry authorities (`host[:port]`) allowed to be dialed over plain
-    /// HTTP, exactly as `OCX_INSECURE_REGISTRIES` and `[registries."<ns>"]
-    /// insecure` spell them.
-    ///
-    /// The announce pre-flight needs them because the dial **scheme** decides
-    /// which proxy variable applies (`HTTP_PROXY` vs `HTTPS_PROXY`), and
-    /// therefore whether the physical registry is reached through a proxy at
-    /// all — see
-    /// [`DialScheme::for_registry`](ocx_oci::ssrf::DialScheme::for_registry).
+    /// Registry authorities (`host[:port]`) allowed over plain HTTP; the dial
+    /// scheme decides which proxy variable applies
+    /// ([`DialScheme::for_registry`](ocx_oci::ssrf::DialScheme::for_registry)).
     pub insecure_hosts: Vec<String>,
 }
 
-/// Whether the announce changed the committed root (cross-track contract #4).
+/// Whether the announce changed the committed root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnounceStatus {
-    /// The rebuilt root was byte-identical to the committed root and no new CAS
-    /// object was produced — no commit, no pull request (design register C6).
-    /// `--out` still writes its files: C6 governs forge mutation, not the local
-    /// write.
+    /// Byte-identical root and no new CAS object: no commit, no pull request.
+    /// `--out` still writes its files.
     Unchanged,
-    /// The rebuilt root differed — a fork pull request was opened/updated
-    /// (`--fork`), or the locally written files (`--out`) carry a change.
+    /// The rebuilt root differed.
     Updated,
 }
 
@@ -114,49 +89,25 @@ impl AnnounceStatus {
 pub struct AnnounceOutcome {
     /// The logical `<namespace>/<package>` identifier announced.
     pub package: String,
-    /// Whether the root changed (design register C6).
+    /// Whether the root changed.
     pub status: AnnounceStatus,
-    /// The opened/updated pull request — `None` for `--out` and for an unchanged
-    /// run.
+    /// The opened or updated pull request, if any.
     pub pull_request: Option<PullRequest>,
-    /// The verified fork identity — `None` for `--out`, for an unchanged run,
-    /// and for [`AnnounceTarget::Direct`], which has no fork by construction.
+    /// The verified fork identity, when the run used a fork.
     pub fork: Option<ForkIdentity>,
-    /// The relative paths written under the `--out` directory (sorted) — always
-    /// the whole entry, unchanged runs included; empty in fork mode.
+    /// The paths written under `--out` (sorted, the whole entry even when
+    /// unchanged); empty otherwise.
     pub written_paths: Vec<String>,
-    /// Whether the `__ocx.desc` observation moved this run (D6).
-    /// [`AnnounceStatus::Updated`] means the root's `desc` object was rebuilt
-    /// and its readme (and logo) blobs written as new CAS objects;
-    /// [`AnnounceStatus::Unchanged`] means the description tag sits where the
-    /// committed root already recorded it, or the package publishes none.
+    /// Whether the `__ocx.desc` observation moved the root's `desc` object.
     pub desc_status: AnnounceStatus,
-    /// Reserved tags dropped from the curated set (D7) — the OCX-internal
-    /// `__ocx` namespace (which carries the keep tag) and the frozen legacy
-    /// `<algorithm>.<hex>` keep tags. Dropping them
-    /// is not a failure, so they are reported here rather than refused; empty
-    /// when the selection carried none.
+    /// Reserved tags (the `__ocx` namespace and legacy `<algorithm>.<hex>` keep
+    /// tags) dropped from the curated set — reported, not refused.
     pub reserved_tags_dropped: Vec<String>,
-    /// The announce branch the run wrote to — `indexbot-announce-<ns>-<pkg>`.
-    ///
-    /// **Empty under [`AnnounceTarget::Out`]**, which reads no branch and pushes
-    /// nothing. The name is derived from the package alone and is therefore
-    /// available on every run, so reporting it there would tell a consumer a
-    /// branch was written when none was; the field says what this run did, not
-    /// what a different run would be called.
+    /// The announce branch written; empty under [`AnnounceTarget::Out`], which
+    /// pushes nothing.
     pub branch: String,
-    /// What the write preflight checked, and how each check came out.
-    ///
-    /// Held as the [`PushAccess`] itself rather than as a copied-out
-    /// `Vec<CapabilityCheck>`: that vector is private to the module declaring it
-    /// and [`PushAccess::skipped_all`] is its only constructor, so "the
-    /// capability array is non-empty on every run" stays a property the compiler
-    /// holds. Copying the rows out here would make `Vec::new()` spellable at
-    /// every construction site and re-open exactly that hole. Render through
+    /// What the write preflight checked; a run that never probed carries every
+    /// row as [`Skipped`](crate::forge::CheckStatus::Skipped). Render through
     /// [`PushAccess::checks`].
-    ///
-    /// A run that never probes — `--out`, either unchanged arm, and the whole
-    /// fork path — carries the seeded rows, every one
-    /// [`Skipped`](crate::forge::CheckStatus::Skipped), rather than nothing.
     pub capability_checks: PushAccess,
 }

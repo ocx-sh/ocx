@@ -46,12 +46,7 @@ impl RemovedEntry {
     }
 }
 
-/// Results of an uninstall or deselect operation.
-///
-/// Plain format: two-column table (Package | Status). `path` has no column:
-/// every value it holds is the path of something that no longer exists.
-///
-/// JSON format: array of `{ package, status, path }` objects.
+/// Results of an uninstall or deselect; `path` gets no plain column since it names something now gone.
 pub struct Removed {
     pub entries: Vec<RemovedEntry>,
 }
@@ -82,8 +77,7 @@ impl Printable for Removed {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. `entries` is written as a bare array.
+// Transparent `Serialize`: the schema is the bare entry array.
 impl schemars::JsonSchema for Removed {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Removed".into()

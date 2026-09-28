@@ -14,29 +14,17 @@ use ocx_package::metadata::env::modifier::ModifierKind;
 
 use super::{error, flavor::Flavor};
 
-/// GitHub Actions CI flavor.
+/// GitHub Actions: `PATH` entries to `$GITHUB_PATH`, everything else to `$GITHUB_ENV`.
 ///
-/// Writes environment variable exports to the runtime files specified by
-/// `$GITHUB_PATH` (for `PATH` entries) and `$GITHUB_ENV` (for everything else).
-///
-/// All entries are buffered in memory and written on [`flush`](Flavor::flush),
-/// producing exactly one line per key in each output file. This avoids
-/// last-writer-wins issues when multiple packages contribute to the same var.
+/// Buffered until [`flush`](Flavor::flush) so each key gets one line, or several contributors last-writer-win.
 pub(super) struct GitHubFlavor {
     path_file: PathBuf,
     env_file: PathBuf,
-    /// Buffered PATH entries for `$GITHUB_PATH` (one per line, in order).
     path_entries: Vec<String>,
-    /// Buffered non-PATH path entries: key → [values in prepend order].
     buffered_paths: IndexMap<String, Vec<String>>,
-    /// Buffered list entries: key → (separator, [values in append order]).
-    /// The separator is captured from the first entry buffered for a key;
-    /// every later entry for the same key already carries the same one,
-    /// settled upstream by `reconcile_list_separators`.
+    /// Separator taken from the first entry; `reconcile_list_separators` already made all entries agree.
     buffered_lists: IndexMap<String, (String, Vec<String>)>,
-    /// Buffered constant entries: key → value (last-writer-wins).
     buffered_constants: IndexMap<String, String>,
-    /// Tracks constant-type assignments to warn on conflicts.
     constants: ConstantTracker,
 }
 
@@ -56,7 +44,6 @@ impl GitHubFlavor {
         })
     }
 
-    /// Returns `true` if there are any buffered entries to flush.
     fn has_buffered(&self) -> bool {
         !self.path_entries.is_empty()
             || !self.buffered_paths.is_empty()
@@ -64,14 +51,8 @@ impl GitHubFlavor {
             || !self.buffered_constants.is_empty()
     }
 
-    /// Flushes all buffered entries to their respective files.
     fn flush_inner(&mut self) -> Result<(), crate::ci::error::Error> {
-        // Dedup `$GITHUB_PATH` lines keeping the LAST occurrence, preserving
-        // order. The runner prepends each line to `PATH` as it reads the file,
-        // so the last line written wins precedence (LIFO); keeping the last
-        // occurrence matches the in-process move-to-front semantics and avoids
-        // emitting duplicate directory lines on re-export. See
-        // <https://docs.github.com/actions/reference/workflow-commands-for-github-actions#adding-a-system-path>.
+        // Keep the LAST duplicate: the runner prepends each line, so the last one wins, as move-to-front does.
         use ocx_util::vec_ext::VecExt;
         self.path_entries.unique_last();
         for entry in self.path_entries.drain(..) {
@@ -100,19 +81,14 @@ impl Flavor for GitHubFlavor {
         kind: &ModifierKind,
         separator: Option<&str>,
     ) -> Result<(), crate::ci::error::Error> {
-        // Gate the key slot before any branch buffers it: a key bearing a
-        // newline would inject a second `KEY=value` line into `$GITHUB_ENV`
-        // (CWE-77), and a non-identifier charset corrupts the var name.
+        // A key with a newline injects a second `KEY=value` line into `$GITHUB_ENV` (CWE-77).
         if !ocx_util::env::is_valid_env_key(key) {
             warn!("skipping invalid env-var key {key:?} for CI export");
             return Ok(());
         }
         match kind {
             ModifierKind::Path if key == "PATH" => {
-                // `$GITHUB_PATH` entries are written one raw value per line,
-                // unquoted. A value containing `\n`/`\r` would inject extra
-                // PATH directories (CWE-426/77); a real PATH dir never has a
-                // newline, so reject it.
+                // `$GITHUB_PATH` is one raw value per line, so a newline injects extra PATH dirs (CWE-426/77).
                 if value.contains('\n') || value.contains('\r') {
                     warn!("skipping PATH value with embedded newline for CI export: {value:?}");
                     return Ok(());
@@ -158,17 +134,15 @@ impl Drop for GitHubFlavor {
     }
 }
 
-/// Detects whether we're running inside GitHub Actions.
+/// Whether this process runs inside GitHub Actions.
 pub(super) fn detect() -> bool {
     ocx_util::env::var("GITHUB_ACTIONS").as_deref() == Some("true")
 }
 
-/// Appends a `KEY=value` entry to a GitHub Actions environment file,
-/// using heredoc delimiters for values containing line breaks or double quotes.
+/// Appends `KEY=value`, heredoc-delimited when the value holds a line break or `"`.
 ///
-/// A lone `\r` counts as a line break here for the same reason the
-/// `$GITHUB_PATH` guard treats it as one: the runner's parser ends a record on
-/// it, so a `KEY=a\rINJECTED=1` line writes two variables (CWE-93).
+/// A lone `\r` must count as a line break: the runner ends a record on it, so `KEY=a\rINJECTED=1`
+/// sets two variables (CWE-93).
 fn append_env_var(file: &Path, key: &str, value: &str) -> Result<(), error::Error> {
     let needs_delimiter = value.contains(['\n', '\r', '"']);
     if needs_delimiter {
@@ -180,12 +154,10 @@ fn append_env_var(file: &Path, key: &str, value: &str) -> Result<(), error::Erro
     }
 }
 
-/// Appends a single line (with trailing newline) to a file.
 fn append_line(file: &Path, line: &str) -> Result<(), error::Error> {
     append_line_raw(file, &format!("{line}\n"))
 }
 
-/// Appends raw content to a file.
 fn append_line_raw(file: &Path, content: &str) -> Result<(), error::Error> {
     let mut f = OpenOptions::new()
         .create(true)
@@ -201,14 +173,12 @@ fn append_line_raw(file: &Path, content: &str) -> Result<(), error::Error> {
     })
 }
 
-/// Reads a required environment variable that should contain a file path.
 fn required_env_path(name: &str) -> Result<PathBuf, error::Error> {
     ocx_util::env::var(name)
         .map(PathBuf::from)
         .ok_or_else(|| error::Error::MissingEnv(name.to_string()))
 }
 
-/// Generates a delimiter that does not appear in the value.
 fn unique_delimiter(value: &str) -> String {
     let base = "EOF";
     if !value.contains(base) {

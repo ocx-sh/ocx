@@ -2,11 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Report type for `ocx package attest` output.
-//!
-//! Sibling of [`SignatureReport`](super::signature::SignatureReport), never a
-//! mutation of it: attest and sign publish different referrer bodies and echo
-//! different fields, so one shared type would have to make half of them
-//! optional.
 
 use ocx_console::Cell;
 use serde::Serialize;
@@ -14,27 +9,15 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
 
+// `bundle_digest`/`referrer_digest` keep their shipped names, so a run without `--signature-format` sees the same keys.
 /// Summary of a successful keyless attestation.
 ///
-/// Plain format: a single "Field | Value" table. `subject_digest` is the answer
-/// (what was attested) and renders full; `bundle_digest` and `referrer_digest`
-/// shorten to 12 hex, so one 71-column `sha256:<64hex>` earns its row per view
-/// (subsystem-cli-api.md "Plain-Mode Column Budget"). Both stay full in JSON.
-///
-/// JSON format: `{ identifier, platform, subject_digest, predicate_type,
-/// bundle_digest, referrer_digest, sidecar_digest, certificate_identity,
-/// certificate_oidc_issuer }`.
-///
-/// `bundle_digest` and `referrer_digest` describe the OCI 1.1 referrer and are
-/// absent under `--signature-format simplesigning`, which publishes only the
-/// `sha256-<hex>.att` sidecar `sidecar_digest` names. Their shipped spelling is
-/// kept: an invocation that does not pass `--signature-format` sees exactly the
-/// keys it always did.
-///
-/// `predicate_type` is the **resolved** URI, not the `--type` spelling the
-/// caller passed: alias resolution decides what is published, annotated and
-/// hashed, so echoing it is what keeps the resolution visible rather than
-/// surprising (ADR D-c).
+/// Digests are always full in JSON. `bundle_digest` and `referrer_digest`
+/// describe the OCI 1.1 referrer and are absent under `--signature-format
+/// simplesigning`, which publishes only the `sha256-<hex>.att` sidecar that
+/// `sidecar_digest` names. `predicate_type` is the **resolved** URI, not the
+/// `--type` spelling passed: alias resolution decides what is published,
+/// annotated and hashed, and echoing it keeps that resolution visible.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AttestationReport {
     /// User-facing identifier that was attested (echoes the CLI arg).
@@ -75,10 +58,8 @@ pub struct AttestationReport {
     pub certificate_oidc_issuer: Option<String>,
     /// Which key model produced this attestation (`keyless`, `file`, and —
     /// once they exist — `aws_kms` and friends). Absent on an unsigned attach,
-    /// where no key model was involved at all.
-    ///
-    /// Spelled as [`SignatureReport`](super::signature::SignatureReport)
-    /// spells it, so one vocabulary describes both commands.
+    /// where no key model was involved at all. Same vocabulary as the
+    /// `ocx package sign` report.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub key_backend: Option<ocx_trust::key_ref::KeyBackendKind>,
@@ -95,25 +76,14 @@ pub struct AttestationReport {
     pub transparency_log_index: Option<u64>,
 }
 
-/// How the `--platform` request reads in a report when none was made.
-///
-/// The flag is a narrowing modifier, not a selector, so its absence is a legal
-/// outcome the report has to name. `any` is what the absence means — the run
-/// put no platform constraint on what it acted on — and it is the same spelling
-/// the sign/attest/verify error messages use for the same absence, so a reader
-/// meets one word for one state. Keeping the field a plain string is
-/// deliberate: it is a shipped JSON contract (C-S1-1), and turning it null
-/// would break every consumer reading it unconditionally.
+/// The `--platform` request as reported, `any` when none was made; never null, since consumers
+/// read the field unconditionally.
 fn platform_label(platform: Option<&ocx_oci::Platform>) -> String {
     platform.map_or_else(|| "any".to_string(), ocx_oci::Platform::to_string)
 }
 
 impl AttestationReport {
-    /// Build a report from the pipeline result and the invocation's own inputs.
-    ///
-    /// Takes the whole [`AttestResult`](ocx_sign::attest::pipeline::AttestResult)
-    /// rather than its fields: three of them are `Digest` and two are `String`,
-    /// so as adjacent positionals a swapped pair would type-check silently.
+    /// Builds a report from the whole pipeline result, since same-typed positionals would swap silently.
     pub fn new(
         identifier: String,
         platform: Option<&ocx_oci::Platform>,
@@ -136,19 +106,8 @@ impl AttestationReport {
         }
     }
 
-    /// The (label, value) pairs `print_plain` renders, in display order.
-    ///
-    /// Extracted so the digest-shortening contract can be pinned by a unit
-    /// test: `Printer` writes to the real process stdout with no injectable
-    /// writer, so `print_plain`'s bytes cannot be captured in-process.
-    ///
-    /// Every value is neutralized for the terminal (CWE-150), not only the
-    /// obviously foreign ones — the same position `signature.rs` takes.
-    /// `predicate_type` is the sharpest of these: it is attacker-controlled
-    /// inside a signed payload, so being authentic says nothing about being
-    /// printable. The digests and the platform are typed values that cannot
-    /// carry a control character and are routed anyway, because a filter
-    /// applied per field has to be re-argued for every field added later.
+    /// The (label, value) pairs `print_plain` renders, every value neutralized (CWE-150): a signed
+    /// `predicate_type` is still attacker-controlled, and a field added later is covered.
     fn plain_fields(&self) -> Vec<(&'static str, String)> {
         let mut fields = vec![
             ("Identifier", sanitize_for_terminal(&self.identifier)),
@@ -158,10 +117,7 @@ impl AttestationReport {
                 sanitize_for_terminal(&self.subject_digest.to_string()),
             ),
             ("Predicate type", sanitize_for_terminal(&self.predicate_type)),
-            // Stated outright rather than left to be inferred from the absence
-            // of the two certificate rows below: an operator scanning a table
-            // notices a row that says "unsigned", and does not notice two rows
-            // that are not there.
+            // Stated outright: an operator notices a row saying "unsigned", not two missing rows.
             (
                 "Signature",
                 match self.signed {
@@ -188,9 +144,7 @@ impl AttestationReport {
         if let Some(backend) = &self.key_backend {
             fields.push(("Key backend", sanitize_for_terminal(&backend.to_string())));
         }
-        // Stated, never omitted, for the reason `signature.rs` states at its
-        // twin: under a key `--rekor-upload` is opt-in, so "no record" has to
-        // be readable off the result instead of inferred from an absent row.
+        // Stated, never omitted: under a key `--rekor-upload` is opt-in, so "no record" must be readable.
         fields.push((
             "Transparency log",
             match self.transparency_log_index {
@@ -212,8 +166,7 @@ impl Printable for AttestationReport {
         data.print_table(&["Field".into(), "Value".into()], &rows);
     }
 
-    /// Emit a C-S1-1 success envelope:
-    /// `{"schema_version":1,"command":"package attest","exit_code":0,"data":{...}}`.
+    /// Emits the success envelope `{"schema_version":1,"command":"package attest","exit_code":0,"data":{...}}`.
     fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,

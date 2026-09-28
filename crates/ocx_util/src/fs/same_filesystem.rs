@@ -2,14 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Detect whether two paths reside on the same filesystem.
-//!
-//! On Unix this compares `stat.dev` device numbers. On Windows it compares
-//! the volume mount-point string returned by `GetVolumePathNameW`. On other
-//! platforms the check returns `Ok(true)` (assume same fs).
-//!
-//! Either input path may be absent: the helper walks up to the first
-//! existing ancestor, so callers can probe a destination before it is
-//! created.
 
 use std::path::{Path, PathBuf};
 
@@ -36,12 +28,7 @@ impl std::error::Error for SameFilesystemError {
     }
 }
 
-/// Returns `Ok(true)` when `a` and `b` reside on the same filesystem,
-/// `Ok(false)` when they differ, and `Err` on I/O failure.
-///
-/// Each path is resolved to its nearest existing ancestor — a destination
-/// path that does not exist yet is keyed off its parent (or `.` when the
-/// parent is empty, e.g. a bare relative name like `build`).
+/// Whether `a` and `b` share a filesystem; a path that does not exist yet is keyed off its nearest existing ancestor.
 pub async fn same_filesystem(a: &Path, b: &Path) -> Result<bool, SameFilesystemError> {
     let a_anchor = anchor(a).await?;
     let b_anchor = anchor(b).await?;
@@ -96,9 +83,7 @@ async fn compare_anchors(a: &Path, b: &Path) -> Result<bool, SameFilesystemError
     Ok(av.eq_ignore_ascii_case(&bv))
 }
 
-/// Returns the volume mount-point string for `path` (e.g. `C:\`). Uses
-/// `GetVolumePathNameW`, which resolves symlinks/junctions to the underlying
-/// volume root.
+/// The volume mount point for `path` (e.g. `C:\`), with symlinks and junctions resolved.
 #[cfg(windows)]
 fn volume_mount_point(path: &Path) -> Result<String, SameFilesystemError> {
     use std::ffi::OsString;
@@ -106,12 +91,8 @@ fn volume_mount_point(path: &Path) -> Result<String, SameFilesystemError> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // MAX_PATH (260) + null is conservative; long-path-aware callers may pass
-    // `\\?\…` paths but we keep the buffer modest.
     let mut buf = vec![0u16; 261];
-    // SAFETY: `wide` is a null-terminated UTF-16 string and `buf` is a writable
-    // buffer of length `buf.len()`; both arguments live for the duration of the
-    // call. `GetVolumePathNameW` writes at most `buf.len()` u16s.
+    // SAFETY: `wide` is NUL-terminated and `buf` is writable for `buf.len()` u16s; both outlive the call.
     let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
     if ok == 0 {
         return Err(SameFilesystemError::Io {

@@ -25,7 +25,6 @@ pub struct PatchFreezeReport {
 }
 
 impl PatchFreezeReport {
-    /// Build a freeze report.
     pub fn new(companions: usize, descriptors: usize, path: PathBuf) -> Self {
         Self {
             companions,
@@ -45,7 +44,7 @@ impl Printable for PatchFreezeReport {
             &["Kind".into(), "Count".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
-        // Print the snapshot path as a hint so the user knows where to point OCX_PATCH_SNAPSHOT.
+        // Tells the user where to point `OCX_PATCH_SNAPSHOT`.
         printer.print_hint(&format!("snapshot: {}", self.path.display()));
     }
 }

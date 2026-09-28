@@ -1,18 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-// C4 (plan_toolchain_cli.md Phase 1): the `global: bool` field, the
-// `if self.global { return self.execute_global(context).await; }` dispatch
-// branch, and the entire `execute_global` method are deleted.
-//
-// `ocx install --global <pkg>` no longer exists (handshake §7 — this was the
-// ONE `--global` site from a4211591 that does NOT survive).  The toolchain-tier
-// equivalent is `ocx --global add <pkg>` (which auto-initialises the global
-// file, re-locks, installs, and selects).
-//
-// `install` itself is moved from root `Command` to `Package::Install` (C1).
-// `ocx package install --global` → clap unknown-flag error (exit 64) because
-// `--global` is not declared on this struct; ocx maps clap usage errors → EX_USAGE 64.
+// No `--global`: `ocx package install --global` is a deliberate usage error (64); the toolchain-tier
+// form is `ocx --global add` (`handshake_toolchain_cli.md`).
 
 use std::process::ExitCode;
 
@@ -48,8 +38,6 @@ impl Install {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        // Auto-verify is attached on the shared manager (Context::try_init);
-        // refine its opt-out from this command's --verify/--no-verify flag.
         let manager = crate::conventions::manager_with_verify_flag(&context, &self.verify);
         let install_infos = manager
             .install_all(
@@ -69,12 +57,8 @@ impl Install {
             .zip(oci_packages.iter())
             .zip(install_infos.iter())
             .map(|((raw, oci_pkg), info)| {
-                // Report the symlink actually written. A foreign-platform install
-                // writes neither host pointer (issue #179), so surface no path;
-                // otherwise `--select` moves the `current` pointer while a plain
-                // install writes the tag-pinned candidate. The host-runnable check
-                // is the same gate `wire_selection` applied, so the report never
-                // claims a path that was suppressed.
+                // The symlink actually written: none for a foreign-platform install (the
+                // `wire_selection` gate), `current` under `--select`, else the candidate.
                 let path = if !info.is_host_runnable() {
                     None
                 } else if self.select {

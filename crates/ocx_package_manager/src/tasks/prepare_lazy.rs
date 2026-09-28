@@ -1,40 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shim-directory generation — the producer half of lazy package loading
-//! (plan contracts C-008 / C-009 / C-022,
-//! [#302](https://github.com/ocx-sh/ocx/issues/302)).
+//! Shim-directory generation, the producer half of lazy package loading.
 //!
-//! A *deferred* tool is one composed onto `PATH` without its content being
-//! materialized. [`PackageManager::prepare_lazy`] is what puts it on disk: it
-//! resolves the pinned digest, walks the metadata-only dependency closure,
-//! derives the interface-surface name set, writes one generated launcher per
-//! name, and publishes the whole tree into
-//! [`ShimStore`](ocx_store::file_structure::ShimStore) by a single atomic rename.
-//!
-//! Three properties this module exists to hold:
-//!
-//! - **It is a sibling task, never a cut in `pull.rs`** (ADR D-a). Nothing here
-//!   touches `setup_owned_impl`, so a tool that later materializes is
-//!   byte-identical to one that was never deferred.
-//! - **Publication is all-or-nothing and lock-free** (C-022). The staged tree
-//!   lands by `rename`; a losing racer discards its own copy and converges on
-//!   the winner's, because two calls for the same *pinned* identifier see the
-//!   same digest, the same closure and therefore byte-identical shim bodies.
-//!   Correctness rests on content identity, not mutual exclusion.
-//! - **`bin/` is the completeness marker** (C-022, 2026-08-10). Not `digest` —
-//!   that file is written before the launchers are, so keying the race
-//!   pre-check on it would report a half-built tree as complete the moment
-//!   publishing stops being one atomic rename. The GC walker classifies on
-//!   `bin/` too (`file_structure/shim_store.rs`), deliberately: producer and
-//!   consumer key on one fact.
-//!
-//! Refusals live in [`PackageErrorKind`] and are shared with the consuming half
-//! (`ocx launcher shim`, WP-7): a closure whose names are not enumerable. A
-//! claimed name equal to ocx's own is **not** a refusal (plan contract C-024,
-//! [`toolchain_names`](super::toolchain_names) D-4) — it renders like any
-//! other name, and the self-resolution hazard that once justified refusing it
-//! is closed on the trampoline's own re-entry path instead (WP-6).
+//! Never touches `pull.rs`'s `setup_owned_impl`, or a materialized tool stops being byte-identical to an eager one.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -48,73 +17,24 @@ use super::common::ClosureNode;
 use super::lazy_advisory::{LazyAdvisory, classify_lazy_advisories};
 use super::toolchain_names::{NotEnumerablePolicy, exposed_names};
 
-/// Everything one [`PackageManager::prepare_lazy`] call produced (plan
-/// contract C-008, F-5).
-///
-/// A named struct rather than a third tuple element: the closure is a
-/// `Vec<ClosureNode>` and a positional triple at the call site reads as
-/// nothing. It is handed back rather than discarded because the composer needs
-/// exactly the closure this call already walked — otherwise `ocx env` over a
-/// ten-tool lazy toolchain walks twenty closures per invocation, network-bound
-/// on a cold store.
+/// Everything one [`PackageManager::prepare_lazy`] call produced.
 #[derive(Debug)]
 pub struct PreparedLazy {
-    /// The published shim directory. Its existence means completeness (C-020).
     pub shim: ShimDir,
-    /// The metadata-only dependency closure the shim tree was generated from,
-    /// deps before dependents, root last — the composer's carrier source for a
-    /// deferred tool (C-020).
+    /// The whole closure, sealed and private edges included, or the composer's conflict gate sees a truncated one.
     pub closure: Vec<ClosureNode>,
-    /// Advisories the deferred tool's declared metadata raised (C-015 (d)).
     pub advisories: Vec<LazyAdvisory>,
 }
 
 impl PackageManager {
-    /// Prepares the shim directory for a deferred tool, returning it, the
-    /// closure it was generated from, and the advisories its declared metadata
-    /// raised.
-    ///
-    /// Resolves `package` to a pinned digest (honouring the ambient index
-    /// chain, so `--frozen` materializes by digest with no tag resolve and
-    /// `--offline` refuses), walks the metadata-only dependency closure via
-    /// [`common::walk_closure_nodes`](super::common::walk_closure_nodes) —
-    /// the same walk `ocx package inspect --deps` uses, never a second one —
-    /// computes the interface-surface name set, stages one generated launcher
-    /// per name plus the closure's config-blob forward-refs, and publishes the
-    /// tree into [`ShimStore::path`](ocx_store::file_structure::ShimStore::path)
-    /// (C-008).
-    ///
-    /// The returned [`PreparedLazy::advisories`] list is this site's half of
-    /// C-015 (d):
-    /// advisories are classified here, for a **deferred** tool only, and are
-    /// returned rather than logged so the composing caller can serialize them
-    /// under `--format json`. An eagerly-materialized tool never reaches this
-    /// method, which is what makes the "deferred only" clause testable.
-    ///
-    /// Idempotent and safe under concurrent callers: an already-published tree
-    /// is returned as-is and a losing racer converges on the winner's
-    /// (C-022). The returned directory is **complete** — every consumer
-    /// (composer, GC) may treat its existence as the only completeness probe
-    /// it needs (C-020).
-    ///
-    /// No content is downloaded and no package directory is created; the tool
-    /// materializes on the first invocation of one of the generated names.
+    /// Publishes a deferred tool's shim directory without downloading content; idempotent under concurrency.
     ///
     /// # Errors
     ///
-    /// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a closure node claims
-    ///   neither `binaries` nor entry points, so there is no name set to
-    ///   generate from (C-022, [`NotEnumerablePolicy::Refuse`]).
-    /// - [`PackageErrorKind::ShimNameInvalid`] — a declared entry point name is
-    ///   a valid `EntrypointName` but not a valid [`BinaryName`] (every
-    ///   Windows-reserved device name is one: `nul`, `con`, `com1`…), so no
-    ///   launcher can be written for it. Refusing beats skipping: a quietly
-    ///   incomplete shim set is the failure C-009 exists to prevent.
-    /// - [`PackageErrorKind::NotFound`] — the tag or digest is unknown, or the
-    ///   closure's metadata is not available locally and no source may be
-    ///   consulted (the caller warns and omits the tool — S-009, WP-8).
-    /// - [`PackageErrorKind::Internal`] — offline policy block, staging or
-    ///   publication I/O failure.
+    /// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a closure node claims neither `binaries` nor entry points.
+    /// - [`PackageErrorKind::ShimNameInvalid`] — an entry point name is not a valid [`BinaryName`] (e.g. `nul`).
+    /// - [`PackageErrorKind::NotFound`] — unknown tag or digest, or closure metadata unavailable.
+    /// - [`PackageErrorKind::Internal`] — offline policy block, staging or publication I/O failure.
     pub async fn prepare_lazy(
         &self,
         package: &ocx_oci::PackageRef,
@@ -122,17 +42,13 @@ impl PackageManager {
     ) -> Result<PreparedLazy, PackageErrorKind> {
         let (fs, index) = (self.file_structure(), self.index());
         let resolved = self.resolve(package, platform.clone()).await?;
-        // The shim tree's `refs/blobs/` is the only thing that keeps the
-        // closure's config blobs off GC's unreachable set (C-014) and the only
-        // place a consumer can read a deferred tool's env carriers from
-        // (C-020), so every blob those links name must be in the blob store
-        // first. Same warm-the-whole-chain step `inspect --deps` runs, for the
-        // same reason — the walk stages each dep, never its own root.
+        // Every blob `refs/blobs/` names must already be staged; the walk stages each dep, never the root.
         super::common::stage_chain_blobs(fs, index, &resolved).await?;
         super::common::stage_leaf_manifest(fs, index, &resolved.pinned).await?;
 
         let metadata = super::common::load_config_metadata(index, &resolved.pinned, &resolved.final_manifest).await?;
         let config_digest = super::common::config_blob_digest(&resolved.final_manifest)?;
+        // The walk `inspect --deps` runs, never a second one, or the two can disagree on a closure.
         let nodes = super::common::walk_closure_nodes(
             fs,
             index,
@@ -146,13 +62,7 @@ impl PackageManager {
 
         let destination = fs.shims.shim_dir(&resolved.pinned);
 
-        // Already published — nothing below would change a byte of it, so the
-        // whole stage-and-discard is skipped. `bin/` is the completeness marker
-        // (C-022), the same fact `publish_shim_dir` step (1) converges on and
-        // the GC walker classifies on; probing it *here* rather than there is
-        // what keeps a warm `ocx env` from staging and `remove_dir_all`ing a
-        // full tree per deferred tool on every direnv reload. The closure walk
-        // above stays: the composer consumes it.
+        // Probed here, or every warm `ocx env` stages and discards a full tree.
         if ocx_util::fs::path_exists_lossy(&destination.bin()).await {
             log::debug!("Reusing published shim dir {}", destination.root().display());
             return Ok(PreparedLazy {
@@ -162,10 +72,7 @@ impl PackageManager {
             });
         }
 
-        // Staged, then published by one rename — the tree is whole before it is
-        // named (C-022). Order inside the temp is load-bearing: `bin/` is the
-        // completeness marker, so it is written last and a refusal below leaves
-        // nothing that could read as complete.
+        // `bin/` is the completeness marker, so it is written last or a refusal leaves a tree that reads complete.
         let staged = stage_shim_dir(fs).await?;
         let staged_dir = ShimDir {
             dir: staged.path().to_path_buf(),
@@ -175,22 +82,14 @@ impl PackageManager {
             .map_err(|error| PackageErrorKind::Internal(error.into()))?;
         link_closure_config_blobs(fs, &staged_dir, &nodes).await?;
 
-        // C-021 / C-023: `exposed_names` does its own admission filtering (a
-        // sealed or private dependency's `binaries` claim gets no launcher,
-        // exactly as under eager composition), so `nodes` is handed over
-        // whole. A deferred tool has no fallback if a node in its closure
-        // turns out unenumerable — `Refuse` (C-022) — and only the keys go on;
-        // ownership/shadow tracking is for `ocx inspect`, not this call site.
+        // `Refuse`: a deferred tool has no fallback for an unenumerable node.
         let names = exposed_names(&nodes, NotEnumerablePolicy::Refuse)?;
+        // A claimed `ocx` is admitted; `activation.rs`'s `is_ocx_trampoline` closes the self-resolution hazard.
         let names: BTreeSet<BinaryName> = names.into_keys().collect();
         write_shim_launchers(&staged_dir.bin(), &resolved.pinned, &names, &fs.shim_bin).await?;
 
         publish_shim_dir(&staged_dir, &destination).await?;
 
-        // The whole closure, not the interface-admitted subset: the composer
-        // synthesizes the deferred root's transitive closure from it and must
-        // see the sealed and private edges too, or the version-conflict gate
-        // and the surface algebra both answer against a truncated TC (F-12).
         Ok(PreparedLazy {
             shim: destination,
             closure: nodes,
@@ -199,16 +98,9 @@ impl PackageManager {
     }
 }
 
-/// Creates an empty staging directory for one shim tree under `temp/`.
+/// Creates a fresh, unique staging directory under `temp/`, discarded on drop.
 ///
-/// A fresh unique directory per call rather than
-/// [`TempStore::path`](ocx_store::file_structure::TempStore::path)'s
-/// identifier-keyed one: that path is shared by every caller for the same
-/// identifier and comes with a sibling lock file, and publication here is
-/// deliberately lock-free (C-022). The [`tempfile::TempDir`] guard also
-/// discards the tree on every error path below, so a refused package leaves no
-/// half-built litter; after a successful publish its path is already gone and
-/// the drop is a no-op.
+/// Not `TempStore::path`'s identifier-keyed one: that is shared and locked, and publication here is lock-free.
 ///
 /// # Errors
 ///
@@ -218,8 +110,6 @@ async fn stage_shim_dir(file_structure: &FileStructure) -> Result<tempfile::Temp
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&root, e)))?;
-    // `TempDir::new_in` is synchronous, so it runs on a blocking thread — the
-    // same treatment `ShimBinStore::ensure` gives its `NamedTempFile` staging.
     tokio::task::spawn_blocking({
         let root = root.clone();
         move || tempfile::TempDir::new_in(&root)
@@ -231,21 +121,9 @@ async fn stage_shim_dir(file_structure: &FileStructure) -> Result<tempfile::Temp
     .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&root, e)))
 }
 
-/// Writes one generated launcher per name into `bin_dir`, each dispatching to
-/// `ocx launcher shim '<package>' -- "$(basename "$0")" "$@"` (C-008, C-010).
+/// Writes one `ocx launcher shim` launcher per name into the staged tree's `bin_dir`.
 ///
-/// `bin_dir` is the staged tree's `bin/`, never the published one — the tree is
-/// complete before it is named (C-022).
-///
-/// `launcher::generate` is deliberately not reused: its signature takes an
-/// `&Entrypoints` and the union set here carries [`BinaryName`]s that are not
-/// valid entry point names (`c++`, `python3.13`, `MSBuild`), which is the whole
-/// point of the looser grammar (C-008 (b), ADR D8).
-///
-/// On Windows this also writes each name's `.exe`/`.shimref` pair (C-026): the
-/// extensionless body above is a shell script, and a directory of those on a
-/// Windows `PATH` is a directory of non-executables. See
-/// [`write_windows_shim_slot`].
+/// Not `launcher::generate`: it takes `&Entrypoints`, and names like `c++` are not valid entry point names.
 ///
 /// # Errors
 ///
@@ -263,15 +141,12 @@ async fn write_shim_launchers(
     names: &BTreeSet<BinaryName>,
     shim_bin: &ocx_store::file_structure::ShimBinStore,
 ) -> Result<(), PackageErrorKind> {
-    // Created even for an empty name set: `bin/` is the completeness marker,
-    // and a package claiming zero executables still has a complete tree.
+    // Even for no names: `bin/` is the completeness marker.
     tokio::fs::create_dir_all(bin_dir)
         .await
         .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(bin_dir, e)))?;
 
-    // One rendering for every name — the body carries no name, `$(basename
-    // "$0")` does. Produced by `launcher::shim_body`, the sanctioned producer
-    // of the `launcher shim` wire token (C-018); nothing here spells a body.
+    // One body for every name; `launcher::shim_body` is the sole producer of the wire token.
     let body = crate::launcher::shim_body(package).map_err(PackageErrorKind::Internal)?;
 
     for name in names {
@@ -292,57 +167,13 @@ async fn write_shim_launchers(
     Ok(())
 }
 
-/// Windows producer for a single name's shim slot (C-026): hardlinks
-/// `<name>.exe` from `shim_bin` (the same committed blob
-/// [`crate::launcher::generate`] hardlinks for an installed
-/// package's `entrypoints/`) and writes its `<name>.shimref` sidecar — one
-/// line, the pinned identifier, newline-terminated (RUL-35) — so
-/// `ocx launcher shim`'s Windows dispatch (`materialize_lazy`'s
-/// `GENERATED_SIBLING_EXTENSIONS`) can find it. `.shimref`, never `.shim`:
-/// `.shim` names an installed package's sidecar under `entrypoints/`, and a
-/// shim tree's `bin/` is a different grammar (`materialize_lazy.rs`).
+/// Hardlinks `<name>.exe` from `shim_bin` and writes its `<name>.shimref` sidecar (`adr_windows_exe_shim.md`).
 ///
-/// The `.exe` is linked before the `.shimref` is written, mirroring the
-/// sibling `.shim` producer's write-ordering postcondition (ADR Contract 2):
-/// the only recoverable partial state on a mid-write fault is
-/// exe-present/sidecar-absent, never a `.shimref` whose `.exe` is missing.
-///
-/// `hardlink::create`, never `hardlink::update` (RUL-33): the tree is staged
-/// fresh into a `TempDir` and published by one atomic rename (C-022), so a
-/// slot can never land on an occupied path — an occupied slot is a bug in the
-/// caller, and this surfaces it as `EEXIST` rather than converging on it.
-///
-/// Not exercised by this workspace's `cargo check` gate: `#[cfg(windows)]`
-/// code compiles only when cross-compiling for a Windows target, which this
-/// repository's toolchain cannot do without an MSVC host (tracked separately,
-/// R-W9). The Implement stage's merge gate (RUL-36) type-checks this arm by
-/// hand via a local flip, applied to **every** `cfg` in this file, not only
-/// the `#[cfg(windows)]` attributes: `cfg(windows)` → `cfg(unix)` **and**
-/// `not(windows)` → `not(unix)`. The second rewrite is load-bearing, not
-/// cosmetic — `write_shim_launchers` carries a sibling
-/// `#[cfg_attr(not(windows), expect(unused_variables, …))]` on its `shim_bin`
-/// parameter, and `not(windows)` does not contain the substring `cfg(windows)`,
-/// so a flip that only rewrites the latter leaves that attribute evaluating
-/// true on Linux. Once the flip makes this arm's call site live, `shim_bin` is
-/// used, the `expect`'s lint no longer fires, and an unfulfilled `#[expect]`
-/// is itself a hard error under `-D warnings`
-/// (`unfulfilled_lint_expectations`) — so the doc names both halves because
-/// running only the first produces a clippy failure, not a clean type-check.
-/// The flip proves the arm compiles under the same borrow/type rules the
-/// Windows target would apply, and nothing more: `ocx_store::hardlink::create` is
-/// a plain `std::fs::hard_link` on the flipped host's real filesystem and
-/// `ocx_store::shim::SHIM_BYTES` is `&[]` off Windows, so the flip *does* write a
-/// real (zero-byte-sourced) `.shimref` to that filesystem — it cannot observe
-/// Windows-only failure modes (`ERROR_*` codes, NTFS/ReFS/FAT/network-share
-/// path length limits, file locking). Actual Windows behaviour is unverified
-/// until this arm runs on a real Windows host or CI runner.
+/// Compiled only for Windows, so a host `cargo check` never type-checks it.
 ///
 /// # Errors
 ///
-/// Returns an error if publishing the shared shim blob, hardlinking it, or
-/// writing the `.shimref` sidecar fails — including an occupied `.exe` slot
-/// (`EEXIST`) and a cross-device `shim_bin` store (`CrossesDevices`, no copy
-/// fallback, matching [`ocx_store::hardlink::create`]'s own contract).
+/// Returns an error if publishing, hardlinking (incl. `EEXIST`, cross-device) or writing the sidecar fails.
 #[cfg(windows)]
 async fn write_windows_shim_slot(
     bin_dir: &Path,
@@ -351,17 +182,17 @@ async fn write_windows_shim_slot(
     shim_bin: &ocx_store::file_structure::ShimBinStore,
 ) -> Result<(), PackageErrorKind> {
     let exe_path = bin_dir.join(format!("{}.exe", name.as_str()));
+    // `.shimref`, never `.shim`, which names an installed package's sidecar in another grammar.
     let shimref_path = bin_dir.join(format!("{}.shimref", name.as_str()));
 
     let shim_bin_path = shim_bin
         .ensure()
         .await
         .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    // `create`, never `update`: an occupied slot in a fresh tree is a bug to surface, not converge on.
     ocx_store::hardlink::create(&shim_bin_path, &exe_path).map_err(|error| PackageErrorKind::Internal(error.into()))?;
 
-    // Exactly `<pinned identifier>\n` — the whole grammar RUL-35's golden
-    // literal pins, and the exact shape `ocx_shim::core::parse_shimref_sidecar`
-    // reads back (see `assert_shimref_grammar` and the byte-exact test below).
+    // Exactly `<pinned identifier>\n`, the shape `ocx_shim::core::parse_shimref_sidecar` reads back.
     let body = format!("{package}\n");
     tokio::fs::write(&shimref_path, body.as_bytes())
         .await
@@ -370,20 +201,9 @@ async fn write_windows_shim_slot(
     Ok(())
 }
 
-/// Links the closure's config blobs into the staged tree's `refs/blobs/`
-/// (C-008).
+/// Links the closure's config blobs into the staged tree's `refs/blobs/`, their only GC root.
 ///
-/// These forward-refs are what keeps the blobs off GC's unreachable set
-/// (C-014) — and they are the only place a consumer can read a deferred tool's
-/// env carriers from, since no package directory exists for it (C-020).
-///
-/// Each blob is addressed by pairing a node's own registry with its
-/// [`ClosureNode::config_digest`] — the field the walker carries for exactly
-/// this consumer, so no node is re-fetched to recover it.
-///
-/// `ReferenceManager::link_blobs` is not reusable here: it derives its target
-/// directory through `PackageStore::refs_blobs_dir_for_content`, and a shim
-/// tree is neither in `packages/` nor has a `content/`.
+/// Not `ReferenceManager::link_blobs`: a shim tree is neither in `packages/` nor has a `content/`.
 ///
 /// # Errors
 ///
@@ -403,68 +223,44 @@ async fn link_closure_config_blobs(
             .blobs
             .data(node.identifier.registry(), &node.config_digest);
         let link = refs_blobs.join(ocx_store::file_structure::cas_ref_name(&node.config_digest));
-        // `update`, not `create`: two nodes may share one config blob, and the
-        // ref name is derived from the digest alone, so the second write must
-        // be a no-op rather than an `EEXIST`.
+        // `update`, not `create`: two nodes may share one config blob, or the second write fails `EEXIST`.
         ocx_util::fs::symlink::update(&target, &link).map_err(|error| PackageErrorKind::Internal(error.into()))?;
     }
     Ok(())
 }
 
-/// Publishes the fully staged tree at `staged` to `destination` by atomic
-/// rename, converging rather than failing when a concurrent call won the race
-/// (C-022).
-///
-/// The dance, which takes no lock: pre-check `destination.bin()` — present ⇒
-/// discard the staged tree and return `Ok`; otherwise create the parent and
-/// `rename_with_windows_retry` onto an absent destination; on rename failure
-/// re-check `destination.bin()` — present ⇒ the race was lost and the winner's
-/// tree is byte-identical, absent ⇒ propagate.
-///
-/// **`utility::fs::move_dir` is forbidden here.** It `remove_dir_all`s its
-/// destination, so a loser would delete a live shim tree out from under a
-/// concurrent exec, which then hits `ENOENT` on a `PATH` entry that existed a
-/// moment earlier.
+/// Publishes `staged` to `destination` by atomic rename, lock-free, converging when a concurrent call won.
 ///
 /// # Errors
 ///
-/// Returns an error if creating the destination's parent fails, or if the
-/// rename fails with the destination still absent.
+/// Returns an error if creating the parent fails, or the rename fails with the destination still absent.
 async fn publish_shim_dir(staged: &ShimDir, destination: &ShimDir) -> Result<(), PackageErrorKind> {
     let marker = destination.bin();
 
-    // Step (1). Also the fast path for a lost race on Windows, where a rename
-    // onto an existing directory reports the same `ERROR_ACCESS_DENIED` the
-    // transient retry targets — without this probe a loser would burn the
-    // whole backoff schedule before the post-rename re-check catches it.
+    // Without this probe a lost race burns the Windows rename retry's whole backoff (same ERROR_ACCESS_DENIED).
     if ocx_util::fs::path_exists_lossy(&marker).await {
         discard_staged_tree(staged, "already published").await;
         return Ok(());
     }
 
-    // Step (2).
     if let Some(parent) = destination.root().parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(parent, e)))?;
     }
 
-    // Step (3) — a bare rename onto an absent destination, never
-    // `utility::fs::move_dir`, which `remove_dir_all`s its destination and
-    // would delete a live shim tree out from under a concurrent exec.
+    // Never `move_dir`: it `remove_dir_all`s the destination, deleting a live tree under a concurrent exec.
     match ocx_util::fs::rename_with_windows_retry(staged.root(), destination.root()).await {
         Ok(()) => {
             log::debug!("Published shim dir {}", destination.root().display());
             Ok(())
         }
-        // Step (4), present half: the winner's tree is byte-identical to this
-        // one — same pinned digest, same closure, same bodies — so converge.
+        // The winner's tree is byte-identical (same digest, closure and bodies), so converge.
         Err(_) if ocx_util::fs::path_exists_lossy(&marker).await => {
             discard_staged_tree(staged, "lost the publish race").await;
             Ok(())
         }
-        // Step (4), absent half: whatever blocked the rename is not a
-        // published shim tree, and it is not this call's to remove.
+        // Whatever blocked the rename is not a published tree, and not this call's to remove.
         Err(e) => Err(PackageErrorKind::Internal(crate::Error::InternalFile(
             staged.root().to_path_buf(),
             e,
@@ -472,9 +268,7 @@ async fn publish_shim_dir(staged: &ShimDir, destination: &ShimDir) -> Result<(),
     }
 }
 
-/// Removes a staged tree whose contents another call already published,
-/// tolerating failure — a surviving temp is reclaimed by the next
-/// `TempStore` sweep, and reporting it would fail a call that succeeded.
+/// Removes an already-published staged tree; a failure is only logged, or it fails a call that succeeded.
 async fn discard_staged_tree(staged: &ShimDir, reason: &str) {
     log::debug!("Discarding staged shim tree ({reason}): {}", staged.root().display());
     if let Err(e) = tokio::fs::remove_dir_all(staged.root()).await {
@@ -503,7 +297,7 @@ mod tests {
         .expect("digest-bearing identifier is pinned")
     }
 
-    /// The exact pinned identifier WP-6's `ocx_shim::core` test module names
+    /// The exact pinned identifier `ocx_shim::core`'s test module names
     /// `PINNED_IDENTIFIER` — `ocx.sh/tool/cmake:3.28@sha256:0000…0001`. A
     /// dedicated fixture rather than a call through [`pinned`]/[`digest_from`]:
     /// those two build a `ns/<repo>@example.com` identifier with no tag and a
@@ -588,9 +382,9 @@ mod tests {
         found
     }
 
-    // ── C-008 / C-003: the generated launchers ──────────────────────────────
+    // ── the generated launchers ──────────────────────────────
 
-    /// C-008: one artifact per name, written into `bin/` — and C-003: never at
+    /// One artifact per name, written into `bin/` — and never at
     /// the shim dir's root, where `digest` and `refs` live.
     #[tokio::test]
     async fn write_shim_launchers_writes_one_launcher_per_name_under_bin() {
@@ -619,8 +413,8 @@ mod tests {
         }
     }
 
-    /// C-010: the body dispatches through `ocx launcher shim '<pinned-id>'`.
-    /// WP-7 owns the byte-exact template; what this pins is WP-6's half — that
+    /// The body dispatches through `ocx launcher shim '<pinned-id>'`.
+    /// The byte-exact template is pinned elsewhere; what this pins is that
     /// the *pinned identifier it was handed* is the one baked in.
     #[cfg(unix)]
     #[tokio::test]
@@ -646,7 +440,7 @@ mod tests {
         );
     }
 
-    /// C-008: a shim artifact that is not executable is not on `PATH` in any
+    /// A shim artifact that is not executable is not on `PATH` in any
     /// useful sense. Same obligation the entry-point generator already carries
     /// (`launcher::generate` writes mode 0755).
     #[cfg(unix)]
@@ -671,16 +465,16 @@ mod tests {
         assert_eq!(mode & 0o111, 0o111, "a generated launcher must be executable");
     }
 
-    // ── C-026: the Windows shim slot ────────────────────────────────────────
+    // ── the Windows shim slot ────────────────────────────────────────
     //
     // EVERY test in this section is `#[cfg(windows)]`, because
     // `write_windows_shim_slot` is. **No gate in this repository compiles
     // them** (R-W9): `task rust:check:windows-cfg` is scoped to `ocx_shim`,
     // and `cargo check -p ocx_lib --target x86_64-pc-windows-msvc` dies in
-    // `aws-lc-sys` on a non-MSVC host. They are written from C-026 and the
-    // `.shimref` grammar `ocx_shim::core::parse_shimref_sidecar` already
-    // enforces, and the Implement stage must type-check the arm by hand
-    // before merging (see the Specify report's R-W9 procedure).
+    // `aws-lc-sys` on a non-MSVC host. They are written from the contract
+    // above and the `.shimref` grammar `ocx_shim::core::parse_shimref_sidecar`
+    // already enforces, and the Implement stage must type-check the arm by
+    // hand before merging (see the Specify report's R-W9 procedure).
 
     /// The five read-side rules `ocx_shim::core::parse_one_line` applies to a
     /// `.shimref`, plus its pinned-identifier clause, asserted against the
@@ -689,8 +483,8 @@ mod tests {
     /// Restated here rather than imported: `ocx_lib` cannot depend on
     /// `ocx_shim` (the shim is a standalone binary crate with no library
     /// surface `ocx_lib` may link), so producer and reader are bound by a
-    /// paired golden, exactly as C-034 prescribes for the `launcher shim`
-    /// wire token. See the report's E-36 gap.
+    /// paired golden for the `launcher shim`
+    /// wire token, the same treatment applied elsewhere in this file.
     #[cfg(windows)]
     fn assert_shimref_grammar(raw: &[u8], expected: &ocx_oci::PinnedPackageRef) {
         assert!(raw.len() <= 32 * 1024, "a .shimref must fit the reader's 32 KiB cap");
@@ -727,7 +521,7 @@ mod tests {
         );
     }
 
-    /// C-026 (E-35, E-37): the slot is `<name>.exe` — a hardlink of the
+    /// The slot is `<name>.exe` — a hardlink of the
     /// published shim blob — plus `<name>.shimref` holding one line, the
     /// pinned identifier. And **no `<name>.shim`**: `SIDECAR_PROBE_ORDER`
     /// probes `shim` before `shimref`, so one stray `.shim` in a shim tree's
@@ -757,14 +551,14 @@ mod tests {
         );
     }
 
-    /// RUL-35 (C-034's paired-golden treatment, WP-5's half): the produced
+    /// The paired-golden treatment applied to the produced
     /// `.shimref` bytes against a literal, not merely against `expected`'s own
     /// `to_string()` (as `assert_shimref_grammar` does above) — a producer
     /// that quietly changed the wire shape while staying consistent with
     /// itself would still pass that check. The literal is [`golden_pinned`]'s
-    /// own value, converged onto WP-6's `ocx_shim::core::tests::PINNED_IDENTIFIER`
-    /// so the two halves of the paired golden assert the same bytes; WP-6
-    /// restates it independently on the reader side
+    /// own value, converged onto `ocx_shim::core::tests::PINNED_IDENTIFIER`
+    /// so the two halves of the paired golden assert the same bytes; the
+    /// reader side restates it independently
     /// (`ocx_shim::core::parse_shimref_sidecar`), byte-for-byte.
     #[cfg(windows)]
     #[tokio::test]
@@ -786,7 +580,7 @@ mod tests {
         );
     }
 
-    /// C-026 (E-35, inode clause): `<name>.exe` is a **hardlink** of the
+    /// `<name>.exe` is a **hardlink** of the
     /// store's published blob, not a copy — one inode per store, which is the
     /// property #301 exists for and what keeps an `ocx` upgrade or a re-sign
     /// reaching every generated `.exe`.
@@ -822,11 +616,11 @@ mod tests {
         );
     }
 
-    /// C-026 (E-40): the extensionless body stays, on Windows too. It is not
+    /// The extensionless body stays, on Windows too. It is not
     /// redundant — `materialize_lazy::is_generated_sibling` *requires* the
     /// extensionless file to be present before `.exe`/`.shimref` read as
     /// siblings, so dropping it would break the claim-set reader. Assert the
-    /// whole trio, and (E-42) that an interior dot does not turn a claimed
+    /// whole trio, and that an interior dot does not turn a claimed
     /// name into a sibling of something else.
     #[cfg(windows)]
     #[tokio::test]
@@ -854,7 +648,7 @@ mod tests {
         }
     }
 
-    /// C-026 (E-41): a publisher may claim `mytool.exe` outright — `BinaryName`
+    /// A publisher may claim `mytool.exe` outright — `BinaryName`
     /// imposes no suffix rule and `materialize_lazy.rs` records the defect that
     /// assuming otherwise once caused. The slot is therefore `mytool.exe.exe`
     /// and `mytool.exe.shimref`, and the extensionless `mytool.exe` stays the
@@ -880,7 +674,7 @@ mod tests {
         }
     }
 
-    /// C-022 / C-026 (E-38): the slot is staged into a fresh `TempDir` and
+    /// The slot is staged into a fresh `TempDir` and
     /// published by one rename, so it can **never** land on an occupied path.
     /// An occupied slot is therefore a bug, and the writer must surface it
     /// rather than paper over it — `hardlink::create` (`EEXIST`), no overwrite
@@ -925,7 +719,7 @@ mod tests {
         }
     }
 
-    /// C-022 / C-026 (E-39): the shim blob cannot be published — here because
+    /// The shim blob cannot be published — here because
     /// the store root is occupied by a file, so `ShimBinStore::ensure`'s
     /// `create_dir_all` fails. The refusal is `PackageErrorKind::Internal` and,
     /// crucially, **no sidecar is left behind**: `.shimref` without its `.exe`
@@ -957,9 +751,9 @@ mod tests {
         );
     }
 
-    // ── C-008 / C-014 / C-020: the config-blob forward-refs ─────────────────
+    // ── the config-blob forward-refs ─────────────────
 
-    /// C-008 ref-linking clause, and the guard `ClosureNode::config_digest`
+    /// The ref-linking clause, and the guard `ClosureNode::config_digest`
     /// has been missing since the walker gained the field: every node's config
     /// blob — the root's included — is linked into the staged tree's
     /// `refs/blobs/`, and each link resolves to *that digest's* blob data.
@@ -998,9 +792,9 @@ mod tests {
         }
     }
 
-    // ── C-022: lock-free, all-or-nothing publication ────────────────────────
+    // ── lock-free, all-or-nothing publication ────────────────────────
 
-    /// C-022 steps (2) and (3): create the destination's parent, then rename
+    /// Steps (2) and (3): create the destination's parent, then rename
     /// onto an absent destination. And the lock-free clause: nothing resembling
     /// a lock file is left behind — `publish_shim_dir` has no locks root to
     /// write one into, so any lock it took would be a sidecar.
@@ -1034,7 +828,7 @@ mod tests {
         assert!(litter.is_empty(), "publication takes no lock, found: {litter:?}");
     }
 
-    /// C-022 step (1): a destination whose completeness marker is already
+    /// Step (1): a destination whose completeness marker is already
     /// present means a concurrent call won. Converge — return `Ok`, discard the
     /// temp, and leave the winner's tree **byte-for-byte as it was**. The last
     /// assertion is the one that would have caught `move_dir`, which
@@ -1060,7 +854,7 @@ mod tests {
         assert!(!staged.root().exists(), "the losing temp tree must be discarded");
     }
 
-    /// C-022 step (4), the absent half: the marker is still absent after a
+    /// Step (4), the absent half: the marker is still absent after a
     /// failed rename, so the error propagates — and the destination that
     /// blocked the rename is left alone. `move_dir` would instead
     /// `remove_dir_all` it and report success, deleting data this call never
@@ -1091,11 +885,11 @@ mod tests {
         );
     }
 
-    // ── C-008 (F-6): advisories have a return channel ───────────────────────
+    // ── advisories have a return channel ───────────────────────
 
-    /// C-008 (F-6): advisories are **returned**, never only logged — otherwise
-    /// `--format json` (C-015) has nothing to serialize. C-008 (F-5) adds the
-    /// walked closure to the same channel, so the composer does not walk it a
+    /// Advisories are **returned**, never only logged — otherwise
+    /// `--format json` has nothing to serialize. The walked closure is added to
+    /// the same channel, so the composer does not walk it a
     /// second time. The channel is the return type, so this is where it is
     /// pinned; dropping either field stops this compiling.
     #[test]

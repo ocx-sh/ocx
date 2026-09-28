@@ -1,119 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Classifying what a rejected `git push` said into a named [`super::ForgeError`].
-//!
-//! Pure — no I/O, no clock, no environment — but **not a function of the text
-//! alone**: four of the five outcomes carry data stderr does not hold (the
-//! branch, the repository, the capability, the remedy), so the preflight and
-//! both names are parameters. Worth reading alone because it decides a published
-//! exit code.
-//!
-//! The one rule a later reader most needs: an HTTP 403 or a `remote:` line
-//! containing "not allowed to push" is promoted to a capability refusal **only
-//! when the write preflight reported `job-token-push` as
-//! [`super::CheckStatus::Unknown`], and on no other status**. The promotion is
-//! driven by what was checked, never by the phrase — the same text with the
-//! preflight reporting `passed` is an ordinary permission refusal, and
-//! conflating the two would report "your instance is too old" at an operator
-//! whose instance is fine. [`super::CheckStatus::Skipped`] lands on 77 with
-//! `passed`: it says the row does not apply to this run — the push credential is
-//! not a job token — which is a *stronger* statement than `unknown`, and it is
-//! also what [`super::PushAccess::status`] returns for an absent row, so the
-//! exact `== Unknown` predicate makes that fallback safe by construction and no
-//! defensive arm is written for it.
-//!
-//! Three further facts the table encodes, each of which a reader of the contract
-//! prose alone would get wrong:
-//!
-//! * **Precedence is mandatory, not defensive.** A job-token refusal carries
-//!   *both* the promotable line and `(pre-receive hook declined)` in one body —
-//!   the fixture records that pair — so a declaration-order table that put the
-//!   generic hook decline first would make the promotion unreachable in
-//!   production. The order is `(stale info)`, `(fetch first)`, the promotable
-//!   set, the generic hook decline, then the fallback.
-//! * **An HTTP 403 is two texts**, not one. The `info/refs` arm and the
-//!   receive-pack arm print different client-side strings sharing no substring
-//!   beyond `403`; both are needles, both resolve alike, and neither is ever
-//!   shortened to the bare number, which appears in ordinary object counts.
-//! * **The `remote: ` prefix anchors one needle only.** `send-pack` adds it to
-//!   every hook-written line, so it is the whole narrowing against a phrase
-//!   echoed from a branch name or a server banner — but git's own three phrases
-//!   and both 403 texts never carry it, so requiring it everywhere would break
-//!   four of six.
-//!
-//! Two ordering facts that live outside this file but decide whether it works:
-//!
-//! * The classifier runs on the **uncapped** redacted text. A cap applied before
-//!   the match silently destroys the table's inputs — the in-tree precedent is a
-//!   300-character *head* cap while these phrases sit at the tail, behind the
-//!   server's `remote:` banner — and turns every recognised refusal into exit 1.
-//!   Any cap belongs on the payload placed in [`super::ForgeError::GitPushFailed`].
-//! * `LC_ALL=C` protects **three** of the six phrases, not all six.
-//!   `(fetch first)`, `(stale info)` and `(pre-receive hook declined)` are git's
-//!   own and are gettext-translated; the `info/refs` 403 is libcurl's and the
-//!   receive-pack 403 is remote-curl's, neither translated, and the
-//!   not-allowed line is written by the server and never touched by the client's
-//!   locale. The promotable arm is therefore locale-independent on both its 403
-//!   legs.
+//! Classifying what a rejected `git push` said into a named [`super::ForgeError`], which
+//! decides a published exit code.
 
 use super::{CapabilityName, CheckStatus, ForgeError, PushAccess, Redacted};
 
 /// What a recognised phrase resolves to *before* the preflight is consulted.
-///
-/// Separated from [`ForgeError`] because three of the four outcomes need a
-/// branch, a repository or a remedy the table does not hold, and because one of
-/// them — [`Self::PermissionOrCapability`] — is not an outcome at all until the
-/// preflight has been read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
     /// The branch moved; the caller re-fetches and retries (exit 75).
     NonFastForward,
-    /// A leased force-push lost its lease (exit 75). Listed *before*
-    /// [`Self::NonFastForward`] because it is reachable only under
-    /// `--force-with-lease` and is therefore strictly the more specific signal,
-    /// and because the two share an exit code and can only be told apart by the
-    /// variant.
+    /// A leased force-push lost its lease (exit 75).
     StaleLease,
-    /// The server refused a write the credential may not make. **Promotable**:
+    /// The server refused a write the credential may not make:
     /// [`ForgeError::WriteCapabilityUnavailable`] (86) under an `unknown`
     /// `job-token-push` preflight, [`ForgeError::PushRefused`] (77) otherwise.
     PermissionOrCapability,
-    /// A hook said no for a reason that is not a capability gate — a protected
-    /// branch, or any other `pre-receive` refusal. Always
-    /// [`ForgeError::PushRefused`] (77); there is no "protected-branch phrase"
-    /// to look for, because GitLab's protected-branch line *contains* "not
-    /// allowed to push" and is therefore a member of the promotable set rather
-    /// than a discriminator against it.
+    /// Any other `pre-receive` refusal: always [`ForgeError::PushRefused`] (77).
     HookDeclined,
 }
 
-/// Where in the stderr a needle has to appear for the row to match.
+/// Where a needle has to appear for the row to match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatchScope {
-    /// Anywhere in the body, as a case-sensitive substring.
+    /// Anywhere in stdout or stderr, as a case-sensitive substring.
     Body,
-    /// On a line that, once trimmed, begins `remote: ` — the prefix `send-pack`
-    /// adds to every line a server-side hook wrote.
+    /// On a trimmed stderr line beginning `remote: `, so a phrase echoed by a branch name or
+    /// banner does not match; git's own phrases and the 403 texts never carry that prefix.
     RemoteLine,
 }
 
-/// Every recorded refusal shape, **in precedence order**, with the scope its
-/// needle is matched under.
+/// Every recorded refusal shape, **in precedence order**, with the scope its needle is
+/// matched under.
 ///
-/// The six rows mirror `RefusalShape` / `OBSERVED_REFUSAL_STDERR` in
-/// `test/tests/git_http_fixture.py`, whose own test drives all six against a
-/// real `git` and asserts each published phrase appears verbatim in the stderr
-/// that shape produced. That is the producer; this is the consumer, and the
-/// arity is asserted on both sides so a seventh recorded shape cannot land
-/// silently on the fallback.
-///
-/// Five needles are the recorded phrase verbatim. The sixth is the case-
-/// sensitive substring `not allowed to push` of
-/// `You are not allowed to push code to this project.`, deliberately shorter
-/// than the recording: GitLab's protected-branch wording is
-/// `You are not allowed to push code to protected branches on this project.`,
-/// and the substring is what covers both without a second row.
+/// Mirrors `OBSERVED_REFUSAL_STDERR` in `test/tests/git_http_fixture.py`; both sides assert
+/// the arity, so a new row needs a fixture shape too.
+// A job-token refusal also carries `(pre-receive hook declined)`, so moving that row up makes
+// the 86 promotion unreachable.
+// `not allowed to push` stays a substring so it also matches GitLab's protected-branch wording.
 const REFUSAL_NEEDLES: [(&str, MatchScope, Refusal); 6] = [
     ("(stale info)", MatchScope::Body, Refusal::StaleLease),
     ("(fetch first)", MatchScope::Body, Refusal::NonFastForward),
@@ -136,43 +61,23 @@ const REFUSAL_NEEDLES: [(&str, MatchScope, Refusal); 6] = [
 ];
 
 /// The `reason` [`ForgeError::PushRefused`] carries for a generic hook decline.
-///
-/// A classifier-owned constant, never a slice of the body:
-/// [`ForgeError::PushRefused`] takes a bare `String`, so the guarantee
-/// [`Redacted`] buys does not extend to it, and the only safe closure is one
-/// this file writes. Same discipline [`super::CapabilityCheck`]'s `detail`
-/// states for itself.
+// A fixed string, never a body slice: `PushRefused` takes a bare `String`, so a slice would
+// escape `Redacted` and could leak a secret.
 const HOOK_DECLINED_REASON: &str = "pre-receive hook declined";
 
-/// The `reason` [`ForgeError::PushRefused`] carries when a promotable phrase was
-/// seen but the preflight had already read the capability — the credential is
-/// simply not allowed to write here.
+/// The `reason` [`ForgeError::PushRefused`] carries for a promotable phrase the preflight
+/// had already read as a plain permission refusal.
 const PERMISSION_REASON: &str = "the credential may not push to this project";
 
 /// The `remedy` the promoted [`ForgeError::WriteCapabilityUnavailable`] carries.
-///
-/// **S-017's two-signal wording, and deliberately not C-029's.** There are two
-/// different 86s: the preflight raises one when the job-token field reads
-/// `false`, and its remedy names Settings → CI/CD → Job token permissions,
-/// because ocx read the setting and knows which one to change. This one fires
-/// when the field could not be read *and* the push was then refused — two
-/// signals, neither conclusive alone — so the remedy has to say what was
-/// observed rather than name a setting that may not exist on that instance.
+// States what was observed, not a setting to change: the field was unreadable, so the
+// setting may not exist on that instance.
 const CAPABILITY_REMEDY: &str = "field unreadable (GitLab < 18.4 or hidden); push refused";
 
 /// Name the [`ForgeError`] a rejected `git push` deserves.
 ///
-/// `stderr` is taken **by value** and moved into
-/// [`ForgeError::GitPushFailed`] on the fallback path: [`Redacted`] is not
-/// `Clone` by design, and this file may not construct one — `redact` lives in
-/// `git_command` and carries a `dead_code` expectation that a second production
-/// caller would turn into a build error. The input arrives already redacted, so
-/// there is nothing here to redact.
-///
-/// `preflight` is read for exactly one row, `job-token-push`, and only to decide
-/// the promotion. `branch` and `repo` are the names the outcome variants carry;
-/// neither is ever parsed out of the text. `remote` names the URL a rejected
-/// credential is reported against.
+/// `stderr` must be **uncapped**: the phrases sit at its tail, so a capped text turns every
+/// recognised refusal into exit 1.
 #[must_use]
 pub fn classify_push_failure(
     status: String,
@@ -183,34 +88,17 @@ pub fn classify_push_failure(
     repo: &str,
     remote: &str,
 ) -> ForgeError {
-    // **Authentication first, and it has to be first.** Every row below asks why
-    // the server refused a write, which presumes the credential was let in at
-    // all. A push the forge rejects at `git-receive-pack` never authenticated, so
-    // it matches none of them and used to fall through to `GitPushFailed` —
-    // unclassified, exit 1, against a claim table promising 80. The two sets are
-    // disjoint in practice (a run that could not read a username reached no hook,
-    // so no hook wrote a decline), which is why the order is safe as well as
-    // necessary.
+    // Credential rejection first: a push refused at `git-receive-pack` matches no row below
+    // and would exit 1 instead of 80.
     if let Some(rejected) = classify_remote_failure(&stderr, remote, GitInvocation::Push) {
         return rejected;
     }
 
-    // Declaration order IS precedence, and the scan runs on the whole text: a
-    // job-token refusal carries a promotable line and `(pre-receive hook
-    // declined)` in one body, so first-match-wins over this order is the only
-    // thing that keeps the 86 arm reachable at all.
     let refusal = REFUSAL_NEEDLES
         .iter()
         .find(|&&(needle, scope, _)| match scope {
-            // **Both channels, because `--porcelain` moves the ref-status line
-            // onto stdout.** The reject reason (`(fetch first)`, `(stale info)`)
-            // is written per-ref, and with `--porcelain` git writes that table
-            // to stdout in a tab-separated form it documents for scripts, while
-            // the prose `error:`/`hint:` frame stays on stderr. Reading only
-            // stderr made the verdict depend on git's *prose*, which CI was
-            // observed to emit as nothing at all — an empty body matches no
-            // needle, so a plain non-fast-forward reached the operator as an
-            // unclassified exit 1.
+            // Both streams: `--porcelain` writes `(fetch first)` and `(stale info)` to stdout,
+            // so reading stderr alone exits a non-fast-forward as 1.
             MatchScope::Body => stdout.as_str().contains(needle) || stderr.as_str().contains(needle),
             MatchScope::RemoteLine => stderr
                 .as_str()
@@ -231,10 +119,8 @@ pub fn classify_push_failure(
             branch,
             reason: HOOK_DECLINED_REASON.to_string(),
         },
-        // Exactly `== Unknown`, never `!= Passed`: `Skipped` says the push
-        // credential is not a job token — a stronger statement than `unknown` —
-        // and it is also what `PushAccess::status` returns for an absent row, so
-        // the strict comparison is what makes that fallback safe.
+        // Promote only on `== Unknown`, or a plain permission refusal blames a healthy instance.
+        // Never `!= Passed`: `Skipped`, also returned for an absent row, means no job token.
         Refusal::PermissionOrCapability => {
             if preflight.status(CapabilityName::JobTokenPush) == CheckStatus::Unknown {
                 ForgeError::WriteCapabilityUnavailable {
@@ -253,25 +139,6 @@ pub fn classify_push_failure(
 }
 
 /// Which invocations a recorded rejection is decisive for.
-///
-/// The axis exists because **a 401 and a 403 do not mean the same thing on the
-/// two paths**, and collapsing them was the defect. A 401 is authentication
-/// refused outright — the credential never got in — which is exit 80 wherever it
-/// happens. A 403 is *taken as* authenticated-and-then-forbidden, and on a push
-/// that is the permission-or-capability verdict [`REFUSAL_NEEDLES`] already
-/// resolves to 77 or 86 against the write preflight. On a fetch there is no
-/// preflight and no capability alternative, so a 403 there is read as the
-/// credential being refused.
-///
-/// **That reading is an assumption, not a proof.** git's stderr carries no
-/// provenance for the status, so a 403 raised *before* the forge ever saw the
-/// credential — by a WAF, a reverse proxy, or a repository policy — is
-/// indistinguishable here from one raised after authentication succeeded. The
-/// consequence is a wrong *reason*, never a wrong success: such a fetch reports
-/// the credential refused (80) and such a push reports permission or capability
-/// (77/86), when the true cause was an intermediary. Establishing the difference
-/// needs positive evidence that the credential was accepted, which the git
-/// subprocess boundary does not expose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RejectionScope {
     /// Decisive on any invocation: authentication itself was refused.
@@ -281,16 +148,11 @@ enum RejectionScope {
 }
 
 /// Which git invocation's stderr is being read.
-///
-/// A caller-supplied fact rather than something inferred from the text: the same
-/// bytes mean different things depending on which command produced them, and the
-/// text cannot say which command that was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitInvocation {
     /// `git push`.
     Push,
-    /// Every other invocation the workspace runs — in practice the `fetch`, the
-    /// only other one that reaches the network.
+    /// Every other invocation; in practice the `fetch`.
     Fetch,
 }
 
@@ -301,57 +163,10 @@ impl RejectionScope {
     }
 }
 
-/// Every recorded shape of a **credential** refusal, paired with the HTTP status
-/// the forge actually answered with and the invocations that status is decisive
-/// for.
+/// Every recorded shape of a **credential** refusal: needle, HTTP status, decisive scope.
 ///
-/// **One table, both paths.** The fetch and the push were classified separately
-/// at first, and that shipped the defect this scope column removes: the
-/// production index project is *public*, so GitLab serves its `upload-pack` to
-/// anyone, and a run whose credential the forge rejects fetches successfully,
-/// builds its commit, and is refused at `git-receive-pack`. Classifying the
-/// fetch alone therefore fixed the rarer shape and left the common one exiting
-/// 1 — the sibling-caller failure a per-path table invites by construction.
-///
-/// Kept distinct from [`REFUSAL_NEEDLES`] all the same, because the two answer
-/// different questions: that table asks "why did the server refuse this write",
-/// this one asks "was the credential let in at all". A push consults this one
-/// first, and only reaches the refusal table when the answer is yes.
-///
-/// **Measured against git 2.54.0** under this transport's own child environment
-/// (`LC_ALL=C`, `GIT_TERMINAL_PROMPT=0`), driving a loopback server that answers
-/// `GET /info/refs` with each status:
-///
-/// | Answer | What git printed |
-/// |---|---|
-/// | 401, nothing to offer | `fatal: could not read Username for '<url>': terminal prompts disabled` |
-/// | 401, a credential offered and rejected | `remote: HTTP Basic: Access denied` then `fatal: Authentication failed for '<url>'` |
-/// | 403 | `fatal: unable to access '<url>': The requested URL returned error: 403` |
-///
-/// The push prints the **same** first line — confirmed end to end against the
-/// acceptance fixture's authorization gate, which refuses `git-receive-pack`
-/// while serving `git-upload-pack`: `git push failed: fatal: could not read
-/// Username for '<url>': terminal prompts disabled`. That is why no new needle
-/// was needed to fix the push path, only a scope on the rows that already
-/// existed.
-///
-/// The bare number `401` appears in none of them, which is why the first two
-/// rows are phrases rather than the code: a table written by symmetry with the
-/// 403 row would match nothing, and every rejected credential would keep exiting
-/// with the generic status.
-///
-/// The recorded residual runs the other way — libcurl's
-/// `The requested URL returned error: 401` was **not** reproducible on the smart
-/// HTTP path (git converts a 401 into a credential request before curl's message
-/// escapes, on every `WWW-Authenticate` scheme tried and with a helper that
-/// returns nothing), so no row is written for it: an unfalsifiable row reads as
-/// coverage while providing none.
-///
-/// Two rows are git's own gettext-translated strings, protected by the `LC_ALL=C`
-/// this transport sets on every child; the third is libcurl's and is not
-/// translated. The `403` needle is deliberately the same literal
-/// [`REFUSAL_NEEDLES`] carries, not a shortened one — the bare number appears in
-/// ordinary object counts.
+/// Measured on git 2.54.0 under `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0`, identical on push.
+// Needles are phrases git prints, never a bare status number: git's output never carries `401`.
 const CREDENTIAL_REJECTIONS: [(&str, u16, RejectionScope); 3] = [
     ("could not read Username for ", 401, RejectionScope::EveryInvocation),
     ("Authentication failed for ", 401, RejectionScope::EveryInvocation),
@@ -360,34 +175,14 @@ const CREDENTIAL_REJECTIONS: [(&str, u16, RejectionScope); 3] = [
 
 /// The fixed `detail` a git-side credential rejection carries into
 /// [`ForgeError::Status`].
-///
-/// Classifier-owned, never a slice of the body, and it opens with `": "` because
-/// the variant's format string appends it straight onto the URL — the same
-/// convention `error.rs`'s `status_detail` builds. `git`'s stderr is the one
-/// channel where a secret arrives *inside* forge-controlled bytes, so the detail
-/// that reaches an operator is a sentence this file writes rather than one a
-/// server chose.
+// Opens with `": "` because the variant's format string appends it straight onto the URL.
+// A fixed sentence, never a body slice: git's stderr can carry a secret inside forge bytes.
 const CREDENTIAL_REJECTED_DETAIL: &str = ": the git remote rejected the credential";
 
-/// The HTTP status a rejected credential earned on `invocation`, or `None` when
-/// the text says something else.
+/// The HTTP status a rejected credential earned on `invocation`, or `None`.
 ///
-/// Declaration order is precedence, as in [`classify_push_failure`], though the
-/// three recorded shapes are disjoint in practice: a 401 that reached the
-/// credential prompt cannot also carry curl's 403 line.
-///
-/// A local plumbing step cannot produce any of these phrases — `read-tree`,
-/// `write-tree`, `commit-tree`, `hash-object`, `update-index`, `update-ref`,
-/// `rev-parse` and `rev-list` speak to no server — so a caller reading a
-/// non-push invocation's stderr does not have to know which of them touched the
-/// network to use this safely.
-///
-/// **True once `git_command`'s `GIT_NO_LAZY_FETCH` refusal is in effect, and
-/// best-effort below the git version that honours it** (see that constant's
-/// doc for the floor). Below it, `write-tree` can still resolve a missing
-/// promisor blob by fetching it — the one member of this list that reaches the
-/// network anyway — and the fetch is credential-less, so it fails as a rejected
-/// credential rather than as a network error.
+/// Safe on any invocation's stderr, since local plumbing cannot print these phrases; below
+/// the git that honours `GIT_NO_LAZY_FETCH`, a `write-tree` lazy fetch can still match.
 #[must_use]
 pub fn credential_rejection_status(stderr: &Redacted, invocation: GitInvocation) -> Option<u16> {
     CREDENTIAL_REJECTIONS
@@ -396,24 +191,9 @@ pub fn credential_rejection_status(stderr: &Redacted, invocation: GitInvocation)
         .map(|&(_, status, _)| status)
 }
 
-/// Name a rejected credential as the forge status it really was.
+/// Name a rejected credential as the [`ForgeError::Status`] 401 or 403 it was, so it exits 80.
 ///
-/// [`ForgeError::Status`] rather than a variant of this transport's own, because
-/// what happened *is* a 401 or a 403 the forge answered with — `git` is simply
-/// the HTTP client that read it. Reusing the variant makes exit 80 fall out of
-/// the classification table that already maps 401/403 to
-/// [`ocx_exit::ExitCode::AuthError`], with no new arm to keep in step with the
-/// published claim table.
-///
-/// `remote` is the URL the workspace was opened for. It never carries the
-/// credential: C-034 injects the pair as an `http.<prefix>.extraHeader` in the
-/// child environment, never as userinfo, which is what makes it safe to name in
-/// an error at all.
-///
-/// **Both git paths call this**, which is the point: the fetch's failure handler
-/// and the push classifier ask the same question of the same table, so a
-/// credential the forge rejects earns exit 80 whichever invocation met the
-/// refusal — the claim table's promise does not qualify itself by git subcommand.
+/// `remote` is named in the error, so it must not carry userinfo.
 #[must_use]
 pub fn classify_remote_failure(stderr: &Redacted, remote: &str, invocation: GitInvocation) -> Option<ForgeError> {
     credential_rejection_status(stderr, invocation).map(|status| ForgeError::Status {

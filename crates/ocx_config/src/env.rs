@@ -6,467 +6,134 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::records::RecordsOptions;
-// The accessor moved to `ocx_util::env` (the future `ocx_util::env`); this
-// module reads the environment through it like every other consumer.
 use ocx_util::env::{flag, string, var};
 
 /// Canonical names for `OCX_*` environment variables read or written by ocx.
-///
-/// Single source of truth so spawn helpers, config loaders, docs, and tests
-/// reference the same string in one place.
 pub mod keys {
-    /// Absolute path to the running `ocx` executable. Set on every subprocess
-    /// spawn so child ocx invocations (e.g. via generated entrypoint launchers)
-    /// pin to the same binary instead of whatever `$PATH` happens to resolve.
-    /// Named `_PIN` to make the pin semantics explicit — the value is
-    /// the specific binary that was running when the package was installed.
+    /// Absolute path to the running `ocx`, set on every spawn so a child ocx runs the
+    /// same binary, not whatever `$PATH` resolves.
     pub const OCX_BINARY_PIN: &str = "OCX_BINARY_PIN";
-    /// The OCX data root every store is rooted at — `$OCX_HOME`, else
-    /// `~/.ocx`. Resolved through [`crate::home::default_ocx_root`], the one
-    /// definition of that fallback.
+    /// The OCX data root — `$OCX_HOME`, else `~/.ocx` ([`crate::home::default_ocx_root`]).
     ///
-    /// Forwarded by [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) **set-always**,
-    /// never removed — the second key here with that shape, beside
-    /// [`OCX_BINARY_PIN`]. Unlike [`OCX_CONFIG`] and its siblings there is no
-    /// "parent resolved none" state a stale inherited value could beat: a
-    /// resolvable root *is* what the parent resolved, so the value written
-    /// here is the home the parent's own stores used, and an ambient
-    /// `OCX_HOME=""` is corrected to the absolute fallback rather than
-    /// travelling onward as the empty string.
-    ///
-    /// Without that forwarding `ocx exec --clean` sent a child into a
-    /// *different* home: `--clean` strips `HOME` too, so a generated
-    /// entrypoint launcher's `ocx launcher exec` re-entry resolved `~/.ocx`
-    /// from the passwd database, read another config chain and looked for the
-    /// package the parent had just materialized in a store that did not have
-    /// it (ocx-sh/ocx#488).
+    /// Forwarded set-always as the resolved root, or an `ocx exec --clean` child (no `HOME`)
+    /// resolves another root and misses the package the parent just materialized.
     pub const OCX_HOME: &str = "OCX_HOME";
     /// Boolean — disables network access when truthy. Mirrors `--offline`.
     pub const OCX_OFFLINE: &str = "OCX_OFFLINE";
-    /// Boolean — freezes tag resolution to the local index when truthy:
-    /// an unpinned (tag-only) reference missing from the local index errors
-    /// instead of being fetched and committed. Digest-pinned content still
-    /// fetches over the network. Mirrors `--frozen`.
+    /// Boolean — a tag-only reference missing from the local index errors instead of
+    /// being fetched; digest-pinned content still fetches. Mirrors `--frozen`.
     pub const OCX_FROZEN: &str = "OCX_FROZEN";
     /// Boolean — uses the remote index by default when truthy. Mirrors `--remote`.
     pub const OCX_REMOTE: &str = "OCX_REMOTE";
     /// Path to an explicit configuration file. Mirrors `--config`.
     pub const OCX_CONFIG: &str = "OCX_CONFIG";
-    /// Boolean — when truthy, skip the discovered config-tier chain
-    /// (system / user / `$OCX_HOME`). Explicit `--config` / [`OCX_CONFIG`]
-    /// paths still load; a SYSTEM-scope lock survives regardless.
-    /// Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), so a launcher re-entry stays as hermetic as
-    /// the frame that spawned it instead of re-reading the whole chain.
+    /// Boolean — skip the discovered config-tier chain; explicit `--config` / [`OCX_CONFIG`]
+    /// paths still load and a system-scope lock survives. Forwarded to child ocx.
     pub const OCX_NO_CONFIG: &str = "OCX_NO_CONFIG";
-    /// Path to an explicit project `ocx.toml` (project-tier toolchain config).
-    /// Mirrors `--project`.
+    /// Path to an explicit project `ocx.toml`. Mirrors `--project`.
     pub const OCX_PROJECT: &str = "OCX_PROJECT";
-    /// Boolean — when truthy, skip the CWD walk and the [`OCX_PROJECT`]
-    /// env var. Explicit `--project` paths still load.
-    ///
-    /// Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), so a
-    /// launcher re-entry or a nested `ocx exec` keeps the prune instead of
-    /// walking up from its own working directory and adopting a project the
-    /// frame that spawned it deliberately had none of.
-    ///
-    /// **Forwarded only when this invocation resolved no project.** The two
-    /// keys collide in the child: `ConfigLoader::explicit_project` reads the
-    /// prune *before* [`OCX_PROJECT`], so forwarding both would make the child
-    /// discard the very path being forwarded beside it. An explicit
-    /// `--project` outranks the prune here, and has to outrank it there too.
+    /// Boolean — skip the CWD walk and [`OCX_PROJECT`]; explicit `--project` paths still load.
+    /// Forwarded only when this invocation resolved no project.
     pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
-    /// Boolean — when truthy, the seven project-scoped commands that stamp
-    /// shell-activation consent as a side effect (`add`, `remove`, `lock`,
-    /// `update`, `pull`, `exec`, `init`) run without writing one.
+    /// Boolean — commands that stamp shell-activation consent as a side effect write none;
+    /// `--consent` / `--no-consent` outrank it and `ocx shell allow` ignores it.
     ///
-    /// For a caller that is not a consenting human: build tooling drives
-    /// `ocx --project <abs> pull` against a checkout it did not choose, and a
-    /// stamp there grants `Grant::Stamp`, which authorizes the project's own
-    /// `[env]` table on every later `cd` (ocx-sh/ocx#400).
-    ///
-    /// **Outranked by the flag.** `--consent` / `--no-consent` on the commands
-    /// that carry the pair decides first; this speaks only where neither was
-    /// given. Read at exactly one site,
-    /// `app::project_context::record_activation_consent_over` — the point every
-    /// automatic writer routes through.
-    ///
-    /// **`ocx shell allow` ignores it.** That command is the explicit gesture
-    /// this variable exists to distinguish machine invocation *from*, and it
-    /// calls `project::consent::record` directly, past the seam.
-    ///
-    /// Forwarded to child ocx processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), from
-    /// either the ambient value or an `ocx exec --no-consent` on the frame that
-    /// spawns them. `ocx exec` composes its child from `shell::reconcile::inherited_env` by
-    /// default and from [`Env::clean`](crate::env::Env::clean) under `--clean`, so the ambient half
-    /// earns its keep on that second arm; the flag half has no other channel at
-    /// all, because argv does not cross a spawn. Without both, a script `ocx
-    /// exec` runs that itself calls `ocx pull` would stamp after all.
+    /// Forwarded, else a script run by `ocx exec` that calls `ocx pull` stamps after all.
     pub const OCX_NO_CONSENT: &str = "OCX_NO_CONSENT";
-    /// Boolean — when truthy, select the global toolchain
-    /// (`$OCX_HOME/ocx.toml`) as the in-effect project file instead of
-    /// discovering one via the CWD walk. Mirrors `--global`.
+    /// Boolean — select the global toolchain (`$OCX_HOME/ocx.toml`). Mirrors `--global`.
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
-    /// The registry a bare identifier resolves under — `cmake:3.28` becomes
-    /// `<value>/cmake:3.28`. Outranks `[registry] default`; absent from both,
-    /// the built-in `ocx.sh` applies.
-    ///
-    /// A pure env opt-in with no `OcxConfigView` field and no CLI flag: its
-    /// authoritative value *is* the ambient environment, read at
-    /// `Context::try_init`. Resolution-affecting → forwarded to child ocx
-    /// processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config),
-    /// so a bare identifier means the same repository in every frame of one
-    /// launch chain. Empty is treated as unset, matching the read side's
-    /// [`ocx_util::env::string`] default.
+    /// The registry a bare identifier resolves under; outranks `[registry] default`, else
+    /// `ocx.sh`. Empty is unset. Forwarded so every frame of a launch chain agrees.
     pub const OCX_DEFAULT_REGISTRY: &str = "OCX_DEFAULT_REGISTRY";
-    /// Comma-separated `host[:port]` authorities that may be dialled over
-    /// plain HTTP — the env tier of `[registries."<name>"] insecure`, unioned
-    /// with it and then narrowed by anything the system scope locked shut.
+    /// Comma-separated `host[:port]` authorities that may be dialled over plain HTTP.
     ///
-    /// Same shape as [`OCX_DEFAULT_REGISTRY`]: ambient-only, no view field, no
-    /// flag. Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), because a
-    /// child that resolved a narrower set fails to reach a registry the parent
-    /// just pulled from. Parsed back by [`crate::env::insecure_registries`].
+    /// Forwarded, or a child with a narrower set cannot reach a registry the parent just pulled from.
     pub const OCX_INSECURE_REGISTRIES: &str = "OCX_INSECURE_REGISTRIES";
-    /// Boolean — when truthy, a tag resolving to a yanked entry on a static-file
-    /// index (`index.ocx.sh`) is allowed instead of refused. A yank is a
-    /// publisher signal, not a delete, so the override is explicit and opt-in.
-    /// Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config).
+    /// Boolean — allow a tag resolving to a yanked index entry. Forwarded to child ocx.
     pub const OCX_ALLOW_YANKED: &str = "OCX_ALLOW_YANKED";
-    /// Path to the active patch snapshot file (`patches.snapshot.json`).
-    ///
-    /// When set, the compose overlay prefers the snapshot's pinned digests
-    /// over live tag lookups for companions — enabling reproducible builds
-    /// without a network round-trip.  Written by `ocx patch freeze`.
-    /// Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) so launchers apply the same frozen tier.
+    /// Path to the active patch snapshot file, whose pinned digests win over live tag lookups.
+    /// Forwarded to child ocx.
     pub const OCX_PATCH_SNAPSHOT: &str = "OCX_PATCH_SNAPSHOT";
-    /// JSON object mapping an upstream traffic host to its mirror value —
-    /// either a bare string (both traffic roles) or a `{"registry"?, "index"?}`
-    /// object (per-role split), the same F5b union `[mirrors."<host>"]`
-    /// accepts in TOML (e.g. `{"ghcr.io":"https://artifactory.example.com/ghcr-remote",
-    /// "index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}`).
-    /// Resolution-affecting → forwarded to child ocx processes. A single JSON
-    /// object is used (not a comma/`=` list) because mirror values are
-    /// structured URLs with no delimiter-safe separator.
+    /// JSON object mapping an upstream host to a mirror string or `{"registry"?, "index"?}`,
+    /// the same union `[mirrors."<host>"]` accepts. Forwarded to child ocx.
     pub const OCX_MIRRORS: &str = "OCX_MIRRORS";
-    /// JSON object encoding the resolved `[patches]` config
-    /// (`ResolvedPatchConfig`). Resolution-affecting → forwarded to child ocx
-    /// processes so launchers re-apply the same patch tier (C5 across process
-    /// boundaries). Forwarded only when `[patches]` is configured; absent
-    /// otherwise. Mirrors `OCX_MIRRORS` in forwarding semantics.
+    /// JSON object encoding the resolved `[patches]` config; forwarded only when configured.
     pub const OCX_PATCHES: &str = "OCX_PATCHES";
-    /// JSON envelope carrying the resolved project/group `[env]` entries plus
-    /// any `ocx exec --env` overrides, forwarded so a generated entrypoint
-    /// launcher's re-entry (`ocx launcher exec`) applies the same project env
-    /// the parent composed.
+    /// JSON envelope of the resolved project `[env]` entries plus `ocx exec --env` overrides,
+    /// or a launcher re-entry silently reverts them.
     ///
-    /// Without it the launcher silently loses those entries: it builds a fresh
-    /// `Env` from the inherited environment, then re-applies the package's own
-    /// entries on top — reverting exactly the overrides the project declared,
-    /// with no signal to the user. A package that declares entrypoints
-    /// resolves *through* the launcher on the ordinary `ocx exec` path, so this
-    /// is the primary path, not a corner case.
-    ///
-    /// **Decode is untrusted input and fails closed on the whole payload.** An
-    /// entry whose key is reserved (`OCX_*` / `__OCX_*`) or whose modifier
-    /// `kind` is unrecognized rejects the entire envelope rather than being
-    /// skipped: a misread `kind` would apply a value with the wrong
-    /// combination semantics and silently produce a wrong environment. This is
-    /// where [`OCX_PATCHES`]' leniency must NOT be copied — a forged
-    /// `no_patches` can only suppress an overlay, whereas a forged entry here
-    /// can set a value.
-    ///
-    /// Carries no version discriminator, matching [`OCX_PATCHES`]: the
-    /// envelope is not where this can break across versions — an unknown
-    /// modifier `kind` is, and rejecting that directly is strictly better than
-    /// a version field an older binary could not act on anyway.
+    /// Decode fails closed on the whole envelope (reserved key, unknown `kind`): a forged entry
+    /// can set a value, so [`OCX_PATCHES`]'s leniency must not be copied.
     pub const OCX_ENV: &str = "OCX_ENV";
-    /// Boolean — when truthy, `ocx self setup` writes the env shims but does
-    /// NOT modify any shell profile. Mirrors `--no-modify-path`. Not a
-    /// resolution-affecting flag (not forwarded to child ocx); the opt-out is
-    /// not remembered between runs.
+    /// Boolean — `ocx self setup` modifies no shell profile. Mirrors `--no-modify-path`.
     pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
-    /// OCI reference for the managed-config artifact (plain string, like
-    /// [`OCX_CONFIG`]). Overrides `[managed].source` for this invocation only
-    /// — never written back to disk; `ocx self setup --managed-config` is the
-    /// only writer of the seed. Resolution-affecting → forwarded to child ocx
-    /// processes via [`crate::env::Env::apply_ocx_config`]. Runtime
-    /// `OCX_MANAGED_CONFIG=""` is treated as unset (matches [`OCX_CONFIG`]).
-    /// Suppressed (read side) by [`OCX_NO_CONFIG`] — hermetic means hermetic.
+    /// OCI reference overriding `[managed].source` for this invocation only; empty is unset,
+    /// [`OCX_NO_CONFIG`] suppresses it. Forwarded to child ocx.
     pub const OCX_MANAGED_CONFIG: &str = "OCX_MANAGED_CONFIG";
-    /// Boolean — kill switch for the managed-config background refresh tick
-    /// (both `notify` and `apply` postures). Distinct from
-    /// `OCX_NO_UPDATE_CHECK` — an independently silenceable concern. Explicit
-    /// `ocx config update` still works when this is set.
+    /// Boolean — kill switch for the managed-config background refresh; `ocx config update` still works.
     ///
-    /// Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config). The
-    /// refresh can *replace* the managed tier mid-chain, so a child that
-    /// re-enabled it would resolve against configuration the parent never saw
-    /// — and a `--clean` child re-enables it by starting from an empty map.
+    /// Forwarded, or a child's refresh replaces the managed tier with config the parent never saw.
     pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
-    /// Directory execution records are written to — the env tier of `[records]
-    /// dir` / `--records-dir`. Absent ⇒ recording is off.
-    /// Resolution-affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), so every frame of one launch chain (an
-    /// `ocx exec` and the `ocx launcher exec` it spawns) records into the sink
-    /// the outermost invocation resolved. Read back by
-    /// `crate::record::RecordsOptions::from_env`;
-    /// `OCX_RECORDS_DIR=""` is treated as unset (matches [`OCX_CONFIG`]).
+    /// Directory execution records are written to; absent or empty turns recording off.
+    /// Forwarded so every frame of a launch chain records into the outermost sink.
     pub const OCX_RECORDS_DIR: &str = "OCX_RECORDS_DIR";
-    /// Filename template for each execution record — the env tier of
-    /// `[records] name` / `--records-name`. Forwarded alongside
-    /// [`OCX_RECORDS_DIR`], because a collector that globs or parses filenames
-    /// depends on the pattern exactly as much as on the directory.
+    /// Filename template for each execution record; forwarded alongside [`OCX_RECORDS_DIR`].
     ///
-    /// There is deliberately no `OCX_RECORDS_REQUIRED`. The fail-closed posture
-    /// is an operator decision read from the config file at every tier, never
-    /// from the environment or a flag.
+    /// No `OCX_RECORDS_REQUIRED` exists: fail-closed recording is config-file-only operator policy.
     pub const OCX_RECORDS_NAME: &str = "OCX_RECORDS_NAME";
-    /// `crate::lazy::LazyMode` wire value (`never` /
-    /// `always`) — the least specific tier of the `lazy-mode` resolution
-    /// ladder (`plan_lazy_package_loading.md` C-006), below `ocx.toml`'s
-    /// toolchain/group/package tiers and the `--lazy-mode` CLI flag.
+    /// `LazyMode` wire value (`never` / `always`), the weakest tier of the `lazy-mode` ladder.
     ///
-    /// **Not** resolution-affecting in the [`OcxConfigView`](crate::env::OcxConfigView) sense: it
-    /// changes *when* a tool's content materializes, never *which* digest
-    /// resolves, so it is deliberately absent from [`OcxConfigView`](crate::env::OcxConfigView) and
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) never forwards it to a child ocx process.
+    /// Not forwarded: it changes when content materializes, never which digest resolves.
     pub const OCX_LAZY_MODE: &str = "OCX_LAZY_MODE";
-    /// `crate::lazy::LazyReport` wire value (`silent` /
-    /// `progress`) — whether a shim's first-invocation materialization
-    /// renders progress.
-    ///
-    /// **Not** resolution-affecting and **not** forwarded, same rationale as
-    /// [`OCX_LAZY_MODE`].
+    /// `LazyReport` wire value (`silent` / `progress`); not forwarded, like [`OCX_LAZY_MODE`].
     pub const OCX_LAZY_REPORT: &str = "OCX_LAZY_REPORT";
-    /// `crate::activate::ActivateMode` wire value (`env` / `bin` / `none`) —
-    /// how a rendered toolchain home reaches a shell
-    /// (`plan_toolchain_activation.md` C-006).
-    ///
-    /// **The weakest tier of the `activate` ladder, not an override.** It sits
-    /// *below* `ocx.toml`'s `activate` key, so a project that states a value
-    /// wins over an exported value here; this variable only decides the outcome
-    /// for a project that states none. Read through
-    /// `crate::activate::ActivateMode::from_env`, which folds ASCII case and
-    /// warns-and-falls-through on an unrecognised value rather than erroring.
-    ///
-    /// **Not** resolution-affecting in the [`OcxConfigView`](crate::env::OcxConfigView) sense: it changes
-    /// how the toolchain reaches `PATH`, never *which* digest resolves, so it
-    /// is deliberately absent from [`OcxConfigView`](crate::env::OcxConfigView) and
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) never forwards it — same rationale as
-    /// [`OCX_LAZY_MODE`].
+    /// `ActivateMode` wire value (`env` / `bin` / `none`), the weakest tier of the `activate`
+    /// ladder (`adr_toolchain_activation.md`). Not forwarded, like [`OCX_LAZY_MODE`].
     pub const OCX_TOOLCHAIN_ACTIVATE: &str = "OCX_TOOLCHAIN_ACTIVATE";
-    /// Boolean — whether composed paths pin to digest roots instead of
-    /// following the rendered `<group>/<entry>` links
-    /// (`plan_toolchain_activation.md` C-007).
+    /// Boolean — composed paths pin to digest roots; the weakest tier of the `pinned` ladder.
     ///
-    /// **The weakest tier of the `pinned` ladder, not an override.** Below
-    /// both `--pinned` and `ocx.toml`'s `pinned` key, so it decides only for an
-    /// invocation where neither speaks. Read through
-    /// `crate::activate::pinned_from_env`, which yields `Option<bool>` —
-    /// **not** through [`ocx_util::env::flag`], which collapses "unset" and "false" and would
-    /// make an explicit `OCX_TOOLCHAIN_PINNED=false` indistinguishable from
-    /// absence.
+    /// Never read via [`ocx_util::env::flag`], which collapses unset and `false` and hides an explicit `false`.
     pub const OCX_TOOLCHAIN_PINNED: &str = "OCX_TOOLCHAIN_PINNED";
-    /// Path to the root under which project toolchain homes are rendered —
-    /// the environment tier of `config.toml`'s `toolchain_dir`
-    /// (`plan_toolchain_activation.md` C-008 / C-016).
+    /// Root under which project toolchain homes render — the env tier of `toolchain_dir`.
     ///
-    /// **Resolution-affecting**: it moves where the `links/<group>/<entry>`
-    /// links and the `shells/default/bin` trampolines live, so every composed
-    /// path a child ocx emits changes with it. Carried on [`OcxConfigView`](crate::env::OcxConfigView) and
-    /// forwarded by [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), which **removes** any inherited value when
-    /// the parent resolved none — otherwise a stale parent-shell export beats
-    /// the outer ocx's parsed state in every child.
-    ///
-    /// The containment refusals (C-017 root must be under `$HOME` /
-    /// `$OCX_HOME`, C-018 never a system prefix, C-019 owner-owned and not
-    /// group- or world-writable) apply to the **resolved** root whatever tier
-    /// produced it — this variable included. A value refused when written in
-    /// `config.toml` is refused identically when exported here (finding R-W2;
-    /// WP-4 owns the refusals themselves).
+    /// Forwarded set-or-remove; the containment refusals apply to it like to every tier.
     pub const OCX_TOOLCHAIN_DIR: &str = "OCX_TOOLCHAIN_DIR";
-    /// Boolean — when truthy, skip the policy-gated auto-verify on
-    /// `ocx package install` / `ocx package pull`. Env mirror of the
-    /// per-command `--no-verify` flag (the flag wins). Forwarded to child ocx
-    /// processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) so a CI-wide opt-out reaches a
-    /// launcher-spawned child install.
+    /// Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child ocx.
     pub const OCX_NO_VERIFY: &str = "OCX_NO_VERIFY";
 
-    /// Operator-supplied extra CA root material — a path, or inline PEM text
-    /// (a value containing `-----BEGIN`), for the registry, index, forge and
-    /// Sigstore TLS clients (ocx#448). `OCX_EXTRA_CA_CERTS=""` is treated as
-    /// unset, matching [`OCX_CONFIG`].
+    /// Extra CA roots — a path or inline PEM (contains `-----BEGIN`); empty is unset.
     ///
-    /// **Not** forwarded to child processes — deliberately absent from
-    /// [`OcxConfigView`](crate::env::OcxConfigView) and [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config): an env-only CA does not
-    /// survive `ocx exec --clean` or reach the launcher it spawns, though the
-    /// `config.toml` form of the same setting does, because the child re-reads
-    /// disk for itself. Forwarding an inline PEM would also exceed Windows'
-    /// 32,767-character per-variable limit and land in every launched tool's
-    /// environment; a CA is public material, so scrubbing it like a credential
-    /// would be the wrong posture too. See `ocx_util::tls::ExtraRoots`
-    /// for the validated value this resolves to.
+    /// Not forwarded: an inline PEM can exceed Windows' 32,767-character per-variable limit.
     pub const OCX_EXTRA_CA_CERTS: &str = "OCX_EXTRA_CA_CERTS";
 
-    /// Short-lived OIDC bearer token for keyless Sigstore signing, read once by
-    /// `ocx package sign` (lowest precedence, after `--identity-token-file` /
-    /// `--identity-token-stdin`). A bearer credential: read directly via
-    /// `std::env::var` and never forwarded to child processes — see
-    /// [`CREDENTIAL_KEYS`] and the credential exemption table in `subsystem-cli.md`.
+    /// OIDC bearer token for keyless signing, below `--identity-token-file`/`-stdin`. In [`CREDENTIAL_KEYS`].
     pub const OCX_IDENTITY_TOKEN: &str = "OCX_IDENTITY_TOKEN";
 
-    /// Password for an encrypted signing key, read once by the file key backend
-    /// (`oci::sign::key_backend::key_password`). Never a flag — a password in
-    /// `argv` is visible to every process on the host.
-    ///
-    /// A bearer credential in exactly the sense [`OCX_IDENTITY_TOKEN`] is: only
-    /// the signing path needs it, so it is read directly via `std::env::var` and
-    /// never forwarded to child processes — see [`CREDENTIAL_KEYS`] and the
-    /// credential exemption table in `subsystem-cli.md`.
+    /// Password for an encrypted signing key; never a flag, since `argv` is visible host-wide.
+    /// In [`CREDENTIAL_KEYS`].
     pub const OCX_KEY_PASSWORD: &str = "OCX_KEY_PASSWORD";
 
-    /// The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`, read once
-    /// by `oci::sign::key_backend::PemKeyBackend::open_env` (and on the verify
-    /// side by `ocx_trust::compile_key_reference`).
-    ///
-    /// The **value is the key**, not a path to one — the spelling for a runner
-    /// with no writable disk, where writing the key out in order to sign with
-    /// it is the thing being avoided. [`OCX_KEY_PASSWORD`] is unrelated and the
-    /// two coexist: one names the envelope, the other opens it.
-    ///
-    /// The most sensitive member of [`CREDENTIAL_KEYS`] — a raw private key
-    /// rather than a short-lived token. `env://` accepts **any** variable name,
-    /// and a name ocx does not know cannot be scrubbed; this is the
-    /// conventional one, so the documented case is covered. Choosing another
-    /// name still works and is still inherited by plugins — the operator's
-    /// knowing call, made once, not a silent default.
+    /// The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`. In [`CREDENTIAL_KEYS`];
+    /// any other `env://` name works but is not scrubbed from plugins.
     pub const OCX_SIGNING_KEY: &str = "OCX_SIGNING_KEY";
 
-    /// The API half of the forge credential pair — a forge personal, project or
-    /// group access token — read by the forge credential ladder
-    /// (`forge::credentials::ForgeCredentials::resolve`).
+    /// The API half of the forge credential pair (a forge access token).
     ///
-    /// **A documented non-member of [`CREDENTIAL_KEYS`]**, and the only
-    /// constant here that is one: see `# Known non-members` below for why it
-    /// stays out while its push-half sibling [`OCX_ANNOUNCE_GIT_TOKEN`] is in.
-    /// It lives here regardless because three sites need the *name* — the
-    /// ladder that reads it, the CLI refusal that tells an operator which
-    /// variable to set, and this module's own prose — and a name spelled three
-    /// times is a name that drifts.
-    ///
-    /// **One private copy survives**, and it is recorded rather than assumed
-    /// away: `ocx_cli::command::package_announce` still declares its own
-    /// `const OCX_ANNOUNCE_TOKEN` and reads the variable directly, so a rename
-    /// here compiles clean and leaves announce reading the old name. WP-15
-    /// deletes that copy when it moves announce onto the ladder. Not a scrub
-    /// gap — this variable is a documented non-member of [`CREDENTIAL_KEYS`],
-    /// so no `env_remove` loop depends on the spelling.
+    /// Not in [`CREDENTIAL_KEYS`], so a plugin-dispatched `ocx-mirror` inherits it to announce.
+    /// `ocx_cli::command::package_announce` declares a private copy, so a rename here leaves it reading the old name.
     pub const OCX_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
 
-    /// The push-only forge credential, read by the git write transport's
-    /// credential ladder (`forge::credentials::ForgeCredentials::resolve`).
-    ///
-    /// A bearer credential in the plain sense: it is presented as the secret
-    /// half of an HTTP Basic pair to a `git push`, so holding the string is
-    /// enough to write to the index repository. Its user half,
-    /// `OCX_ANNOUNCE_GIT_USERNAME`, is **not** a credential and is deliberately
-    /// absent from [`CREDENTIAL_KEYS`].
-    ///
-    /// **Asymmetric against its own sibling**, and the asymmetry is deliberate:
-    /// this variable is scrubbed from plugin child environments while
-    /// [`OCX_ANNOUNCE_TOKEN`] is not (see `# Known non-members`), so a
-    /// plugin-dispatched `ocx-mirror` inherits the API half and not the push
-    /// half. Benign today because that plugin drives no git transport; any
-    /// transport wiring there must pass the push credential explicitly rather
-    /// than relying on inheritance.
+    /// The push-only forge credential (the secret half of `git push`'s Basic pair). In [`CREDENTIAL_KEYS`].
     pub const OCX_ANNOUNCE_GIT_TOKEN: &str = "OCX_ANNOUNCE_GIT_TOKEN";
 
-    /// Every env var that carries a **bearer credential** — the single source
-    /// of truth for that property, and the set `apply_ocx_config` scrubs from
-    /// any child env.
+    /// Every env var carrying a bearer credential, stripped from child envs by
+    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config).
     ///
-    /// # Membership rule
-    ///
-    /// A variable belongs here when possessing its value is enough to act as
-    /// the operator: a token, a passphrase, a private key. Not "sensitive" in
-    /// the vague sense — a registry hostname is configuration, and
-    /// `OCX_CONSENT_PATHS` is policy. If holding the string authenticates you,
-    /// it is a credential.
-    ///
-    /// # Adding one
-    ///
-    /// Four edits, in the same change, or the set is a lie somewhere:
-    ///
-    /// 1. Add the constant here and list it below.
-    /// 2. If the new member has a sibling that stays **out**, update
-    ///    `# Known non-members` so it explains the asymmetry rather than a
-    ///    rationale the new member violates.
-    /// 3. Add its row to the credential exemption table in
-    ///    `.claude/rules/subsystem-cli.md` (the reviewer-facing list).
-    /// 4. Document it in `website/src/docs/reference/environment.md`, stating
-    ///    that it is never forwarded to child processes (the user-facing list).
-    ///
-    /// # Members
-    ///
-    /// | Variable | Carries | Read at |
-    /// |---|---|---|
-    /// | [`OCX_IDENTITY_TOKEN`] | Short-lived OIDC bearer token | the shared sign/attest token resolver |
-    /// | [`OCX_KEY_PASSWORD`] | Passphrase for an encrypted signing key | `oci::sign::key_backend::key_password` |
-    /// | [`OCX_SIGNING_KEY`] | The signing key PEM itself | `oci::sign::key_backend::PemKeyBackend::open_env` |
-    /// | [`OCX_ANNOUNCE_GIT_TOKEN`] | The push half of the forge credential pair | `forge::credentials::ForgeCredentials::resolve` |
-    ///
-    /// # Known non-members
-    ///
-    /// Two variables satisfy the membership rule above and are **deliberately
-    /// not** in the set; a third is listed because its name makes it look as
-    /// though it should be. Recorded here so the next contributor does not
-    /// re-derive the analysis, or add one without seeing what it costs.
-    ///
-    /// - [`OCX_ANNOUNCE_TOKEN`] (read by the forge credential ladder) — a forge
-    ///   personal access token, so holding it authenticates you. **Open: a
-    ///   cross-repo decision, not an oversight.** `ocx-mirror` announces from a
-    ///   plugin process, and a plugin inherits the ambient environment, so
-    ///   adding this entry would stop that working. The owner's call.
-    ///
-    ///   **This is now an asymmetry inside one family, not a blanket
-    ///   exclusion.** Its push-half sibling [`OCX_ANNOUNCE_GIT_TOKEN`] **is** a
-    ///   member and **is** scrubbed, so a plugin-dispatched `ocx-mirror`
-    ///   inherits the API half and not the push half. Benign only because that
-    ///   plugin drives no git write transport today; wiring one there means
-    ///   passing the push credential explicitly rather than relying on
-    ///   inheritance.
-    /// - `OCX_ANNOUNCE_GIT_USERNAME` (read by the same ladder) — the **user**
-    ///   half of the HTTP Basic pair, defaulting to `gitlab-ci-token`. It does
-    ///   **not** satisfy the membership rule: holding it authenticates nobody,
-    ///   and listing it would say that it did. Not open, and not a gap — a
-    ///   decided no, recorded only because it sits one underscore away from a
-    ///   member.
-    /// - `OCX_AUTH_<slug>_TOKEN` (read by `ocx_oci::auth::get_env_auth`) — a name
-    ///   *pattern*, not a name, so a `&[&str]` structurally cannot hold it. **Open: a gap
-    ///   in the mechanism, not a missing row.** The repo already solves this
-    ///   shape once — `script::ocx_module::is_reserved_env_key` masks the whole
-    ///   `OCX_AUTH_` family from Starlark by prefix — so there are two
-    ///   credential masks and only one of them handles patterns. Closing it
-    ///   means teaching this one prefixes too. Same shape as `env://` under an
-    ///   operator-chosen name: what ocx cannot name, it cannot scrub.
-    ///
-    /// # Why a set at all
-    ///
-    /// Forwarding a credential to every subprocess broadens the attack surface
-    /// for no gain: the one command that needs it reads it directly. But *not
-    /// forwarding* is not *not leaking* — `Command::envs` only adds and
-    /// overrides, so a spawn site that inherits the ambient environment passes
-    /// an inherited credential straight through. Every such site must
-    /// `env_clear()` or `env_remove` each entry here; `app/plugin_dispatch.rs`
-    /// is the one that inherits deliberately and therefore removes explicitly.
+    /// `Command::envs` only adds, so any other spawn site inheriting the ambient env must remove
+    /// each entry itself, or the credential leaks to the child.
+    /// The `OCX_AUTH_<slug>_TOKEN` pattern cannot be listed here and is never scrubbed.
     pub const CREDENTIAL_KEYS: &[&str] = &[
         OCX_IDENTITY_TOKEN,
         OCX_KEY_PASSWORD,
@@ -475,130 +142,49 @@ pub mod keys {
     ];
 }
 
-/// Resolution-affecting policy snapshot, taken from the running ocx's parsed
-/// `ContextOptions`. `Env::apply_ocx_config` writes this onto a child env so a
-/// spawned ocx subprocess sees the same policy the parent saw, even when the
-/// child env was built via [`Env::clean`](crate::env::Env::clean).
+/// Resolution-affecting policy snapshot that `Env::apply_ocx_config` writes onto a child env.
 ///
-/// Only carries flags that change *what* a child ocx resolves. Presentation
-/// flags (`--log-level`, `--format`, `--color`) are intentionally absent —
-/// generated launchers must remain opaque to the surrounding tool, so outer
-/// presentation choices never propagate via env. See
-/// `website/src/docs/reference/env-composition.md` for the full forwarding
-/// rule.
+/// Presentation flags (`--log-level`, `--format`, `--color`) stay out, or a generated launcher
+/// stops being opaque to the surrounding tool.
 #[derive(Debug, Clone)]
 pub struct OcxConfigView {
     /// Absolute path to the running ocx executable.
     pub self_exe: PathBuf,
     pub offline: bool,
     pub remote: bool,
-    /// When true, tag→digest resolution may only consult the local index; an
-    /// unpinned (tag-only) miss errors instead of walking the source chain.
-    /// Digest-pinned content still fetches. Resolution-affecting → forwarded
-    /// as [`keys::OCX_FROZEN`] so a child ocx applies the same freeze.
+    /// Tag resolution may only consult the local index. Forwarded as [`keys::OCX_FROZEN`].
     pub frozen: bool,
     pub config: Option<PathBuf>,
     pub project: Option<PathBuf>,
-    /// When true, the global toolchain (`$OCX_HOME/ocx.toml`) is the
-    /// in-effect project file. Resolution-affecting → forwarded as
-    /// [`keys::OCX_GLOBAL`] so a child ocx selects the same tier.
-    ///
-    /// **Forwarding-coverage rationale (W2-P3, F6).** `OCX_GLOBAL` is
-    /// forwarded by [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) like every other
-    /// resolution-affecting flag, and that contract is pinned by the unit
-    /// test `apply_ocx_config_sets_ocx_global_when_set` (the sole
-    /// `OCX_*`-landing path). No *acceptance-level* end-to-end
-    /// "child ocx inherits `OCX_GLOBAL`" test is exercised on purpose: under
-    /// strict isolation (adr_global_toolchain_tier.md §Decision 4) the only
-    /// path that re-enters `ocx` from a `run`/`exec` spawn is a generated
-    /// entrypoint launcher (`ocx launcher exec`), an OCI-tier primitive that
-    /// reads `metadata.json` and never consults `ocx.toml`/global project
-    /// resolution. There is therefore no observable child-side resolution
-    /// difference to assert; fabricating a recursive `ocx --global run`
-    /// child to create one would test a contrived path strict isolation
-    /// forbids by design. The block-tier "resolution flag forwarded"
-    /// contract is fully pinned at the unit layer.
+    /// The global toolchain is the in-effect project file. Forwarded as [`keys::OCX_GLOBAL`];
+    /// only `apply_ocx_config_sets_ocx_global_when_set` observes it, no acceptance test can.
     pub global: bool,
-    /// When true, the invocation's own `--no-consent` said this command must
-    /// not stamp. Forwarded as [`keys::OCX_NO_CONSENT`] so a nested ocx a
-    /// child process launches inherits the refusal.
+    /// This invocation's `--no-consent`, forwarded as [`keys::OCX_NO_CONSENT`].
     ///
-    /// **Suppression-only, deliberately asymmetric.** A `--consent` leaves
-    /// this `false` and therefore never *clears* an ambient
-    /// `OCX_NO_CONSENT` from the child env: `--consent` is a statement about
-    /// the one project this invocation targets, not a grant covering
-    /// everything the child goes on to touch. Refusal inherits downward;
-    /// permission does not (ocx-sh/ocx#400).
+    /// Suppression-only: `--consent` never clears an ambient `OCX_NO_CONSENT`, since it covers
+    /// only this invocation's project, not everything the child touches.
     pub no_consent: bool,
     pub index: Option<PathBuf>,
-    /// Root under which project toolchain homes are rendered — the resolved
-    /// `toolchain_dir` (C-008). `None` when no tier set one, which is the
-    /// in-project `<project>/.ocx/toolchain` default.
+    /// The resolved `toolchain_dir`; `None` is the in-project default.
     ///
-    /// Resolution-affecting, and that is the whole reason it travels: it moves
-    /// `<home>/toolchain/links/<group>/<entry>`, so a child ocx that resolved a
-    /// different root would emit composed paths pointing at another tree.
-    /// Forwarded as [`keys::OCX_TOOLCHAIN_DIR`], set-or-**remove** like
-    /// [`keys::OCX_CONFIG`] and [`keys::OCX_INDEX`].
-    ///
-    /// Every producer in the tree writes `None` until WP-4 resolves
-    /// `toolchain_dir` (plan finding R-W7) — which is the shape D-V10 invoked
-    /// *Unchecked Green* to reject for C-002, and is justified differently
-    /// here: the field is compile-forced (a struct literal cannot omit it),
-    /// and its `None` arm in [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) does real work today by
-    /// stripping a stale inherited export. Only the `Some` arm waits.
+    /// Every producer writes `None` today, but its remove arm strips a stale inherited export,
+    /// so the field is not dead.
     pub toolchain_dir: Option<PathBuf>,
-    /// Per-traffic-host mirrors, as `(host, MirrorConfig)` pairs — the
-    /// merged-but-not-yet-role-parsed union entries from
-    /// [`crate::mirror::ResolvedMirrors::merged`]. Resolution-
-    /// affecting → forwarded to child ocx processes via
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) as the single JSON object [`keys::OCX_MIRRORS`].
-    /// The resolved map merges `[mirrors]` config with the inherited
-    /// `OCX_MIRRORS` env, env winning per-host key.
+    /// Per-host mirrors from [`crate::mirror::ResolvedMirrors::merged`], forwarded as [`keys::OCX_MIRRORS`].
     pub mirrors: Vec<(String, crate::mirror::MirrorConfig)>,
-    /// Resolved `[patches]` site-tier config. Resolution-affecting → forwarded
-    /// to child ocx processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) as a JSON object
-    /// in [`keys::OCX_PATCHES`] so launchers apply the same patch tier (C5).
-    /// `None` when no `[patches]` registry is configured.
+    /// Resolved `[patches]` config, forwarded as [`keys::OCX_PATCHES`].
     pub patches: Option<crate::patch::ResolvedPatchConfig>,
-    /// Path to the active patch snapshot file. Resolution-affecting →
-    /// forwarded to child ocx processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) as
-    /// [`keys::OCX_PATCH_SNAPSHOT`] so launchers resolve the same frozen
-    /// companion digests. `None` when no snapshot is active.
+    /// Active patch snapshot file, forwarded as [`keys::OCX_PATCH_SNAPSHOT`].
     pub patch_snapshot: Option<PathBuf>,
-    /// The effective managed-config source (flag > env > seed), forwarded to
-    /// child ocx processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) as
-    /// [`keys::OCX_MANAGED_CONFIG`] so a launcher re-entry resolves the same
-    /// managed tier. `None` when no managed-config source is in effect.
+    /// The effective managed-config source (flag > env > seed), forwarded as [`keys::OCX_MANAGED_CONFIG`].
     pub managed_config_source: Option<String>,
-    /// When true, the policy-gated auto-verify on install/pull is opted out
-    /// (`OCX_NO_VERIFY` truthy in the parent env). Forwarded as
-    /// [`keys::OCX_NO_VERIFY`] so a child ocx install inherits the same
-    /// CI-wide opt-out. The per-command `--no-verify` flag is a one-shot user
-    /// choice and is NOT forwarded.
+    /// Ambient `OCX_NO_VERIFY`, forwarded as [`keys::OCX_NO_VERIFY`]; the `--no-verify` flag is not.
     pub no_verify: bool,
-    /// When true, the discovered config-tier chain (system / user /
-    /// `$OCX_HOME`) is skipped for this invocation (`OCX_NO_CONFIG` truthy in
-    /// the parent env). Forwarded as [`keys::OCX_NO_CONFIG`] so a launcher
-    /// re-entry stays as hermetic as the frame that spawned it instead of
-    /// re-reading the whole chain.
+    /// The discovered config chain was skipped, forwarded as [`keys::OCX_NO_CONFIG`].
     ///
-    /// A field rather than an ambient read inside
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config): every other resolution-affecting value the
-    /// child inherits is resolved once at `Context::try_init` and travels on
-    /// this view, and a value read at the forwarding site instead is a second
-    /// source of truth that can disagree with the one the loader actually
-    /// used.
+    /// A field, not an ambient read at the forwarding site, which could disagree with what the loader used.
     pub no_config: bool,
-    /// The resolved `[records]` sink and filename template, forwarded to child
-    /// ocx processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) as
-    /// [`keys::OCX_RECORDS_DIR`] / [`keys::OCX_RECORDS_NAME`].
-    ///
-    /// Only `dir` and `name` travel: they are the two fields with an
-    /// environment peer. `required` is config-file-only at every tier and
-    /// `system_locked` is loader-set provenance, so setting either here
-    /// forwards nothing — a child re-reads both from the config chain it
-    /// resolves for itself.
+    /// The resolved `[records]` sink; only `dir` and `name` are forwarded, the rest a child re-reads.
     pub records: RecordsOptions,
 }
 
@@ -626,18 +212,8 @@ impl OcxConfigView {
     }
 }
 
-/// Case-normalizing wrapper for environment variable keys.
-///
-/// On Windows, environment variable names are case-insensitive, so we
-/// normalize to uppercase using the native wide-char representation.
-/// On other platforms, keys are left as-is.
-///
-/// Keys are stored as `OsString` to preserve non-UTF-8 environment
-/// variable names (possible on Unix).
-///
-/// Crate-visible because `package::metadata::env::apply` groups list entries by
-/// the same normalized key this env stores them under — one normalization rule,
-/// not two that can drift.
+/// Environment variable key, uppercased on Windows (case-insensitive there); an `OsString`
+/// so a non-UTF-8 Unix name survives.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EnvKey(OsString);
 
@@ -655,11 +231,7 @@ impl EnvKey {
     }
 }
 
-/// Uppercase a single UTF-16 code unit in the ASCII range.
-///
-/// Full Unicode case-folding is not needed — Windows environment variable
-/// names are conventionally ASCII. This matches the kernel behavior for
-/// env var lookups (case-insensitive in the ASCII range).
+/// Uppercase a single UTF-16 code unit in the ASCII range, as the kernel folds env names.
 #[cfg(windows)]
 fn wide_to_upper(c: u16) -> u16 {
     if (b'a' as u16..=b'z' as u16).contains(&c) {
@@ -672,16 +244,9 @@ fn wide_to_upper(c: u16) -> u16 {
 #[derive(Clone)]
 pub struct Env {
     vars: HashMap<EnvKey, OsString>,
-    /// The `PATH` directories contributed by composed package entries, in the
-    /// same order they occupy in `PATH` — never the ambient inherited ones.
+    /// The `PATH` directories composed packages contributed, in `PATH` order, never ambient ones.
     ///
-    /// This is what makes [`Env::resolve_test_command`] able to answer "does
-    /// the package under test ship this name?" separately from "is this name
-    /// on PATH at all". Populated only through [`Env::note_package_path`],
-    /// which the entry fold calls for every composed `PATH` entry, and
-    /// deliberately never emitted by [`Env::iter`] / `IntoIterator`: it is
-    /// resolution bookkeeping, not an environment variable, and must not reach
-    /// a child process.
+    /// Never emitted by [`Env::iter`] / `IntoIterator`: it is bookkeeping and must not reach a child.
     package_path: OsString,
 }
 
@@ -714,11 +279,7 @@ impl Env {
         self.vars.insert(EnvKey::new(key), value.into());
     }
 
-    /// Prepends `value` to the path-style variable `key` with **move-to-front**
-    /// semantics: any existing occurrence of `value` is removed and `value` is
-    /// placed at the front, so re-applying the same value never duplicates an
-    /// entry. Empty segments are dropped. See
-    /// `ocx_util::path::move_to_front`.
+    /// Prepends `value` to the path-style variable `key`, moving an existing occurrence to the front.
     pub fn add_path(&mut self, key: impl Into<OsString>, value: impl Into<OsString>) {
         let key = EnvKey::new(key);
         let value = value.into();
@@ -729,21 +290,9 @@ impl Env {
         self.vars.insert(key, new_value);
     }
 
-    /// Appends `value` to the list-style variable `key` with **move-to-back**
-    /// semantics: any existing occurrence of `value` is removed and `value` is
-    /// placed at the back, joined by `separator`, so re-applying the same
-    /// contribution never duplicates it. See
-    /// `ocx_util::list::append_unique`
-    /// for the pinned algorithm.
+    /// Appends `value` to the list-style variable `key`, moving an existing occurrence to the back.
     ///
-    /// An empty `value` is a no-op — on an absent key too, which is where this
-    /// deliberately differs from [`Self::add_path`]: appending nothing must not
-    /// bring a variable into existence.
-    ///
-    /// The ambient value is read through `to_string_lossy`. Option-list
-    /// variables carry authored text, and the fold is defined on UTF-8; a
-    /// non-UTF-8 ambient value would not survive the append with its bytes
-    /// intact either way.
+    /// An empty `value` is a no-op even on an absent key; the ambient value is read lossily.
     pub fn add_list(&mut self, key: impl Into<OsString>, value: &str, separator: &str) {
         if value.is_empty() {
             return;
@@ -754,102 +303,36 @@ impl Env {
         self.vars.insert(key, OsString::from(folded));
     }
 
-    /// Borrowing iterator over `(key, value)` pairs.
-    ///
-    /// Lets a caller feed this env to `Command::envs` without consuming or
-    /// cloning the whole map (`IntoIterator` is by-value). Order is
-    /// unspecified (backed by a `HashMap`).
+    /// Borrowing iterator over `(key, value)` pairs, in unspecified order.
     pub fn iter(&self) -> impl Iterator<Item = (&OsStr, &OsStr)> {
         self.vars.iter().map(|(k, v)| (k.0.as_os_str(), v.as_os_str()))
     }
 
-    /// Removes the named key from this environment. No-op if absent.
+    /// Removes the named key; no-op if absent.
     pub fn remove(&mut self, key: &str) {
         self.vars.remove(&EnvKey::new(key));
     }
 
     /// Records `dir` as a `PATH` directory a composed package contributed.
     ///
-    /// The write the private `package_path` field exists for, and the only way
-    /// to make it from outside this module. `EnvEntriesExt::apply_entries` is
-    /// the sole caller: it owns the decision of *which* entries count (a `path`
-    /// entry on the `PATH` key, never `LD_LIBRARY_PATH` and its siblings), and
-    /// this owns the fold — the same
-    /// [`move_to_front`](ocx_util::path::move_to_front) the real `PATH`
-    /// gets, so [`Self::resolve_test_command`] searches the two in one order.
-    ///
-    /// Setting a value on `PATH` is **not** implied. This is bookkeeping about
-    /// an environment the caller has already written; calling it alone records
-    /// a directory the child process cannot see.
+    /// Does not set `PATH`: called alone it records a directory the child cannot see.
     pub fn note_package_path(&mut self, dir: &OsStr) {
         self.package_path = ocx_util::path::move_to_front(&self.package_path, dir);
     }
 
-    /// Materializes resolution-affecting OCX configuration onto this env so a
-    /// child ocx process sees the same policy the parent saw.
+    /// Writes resolution-affecting OCX configuration onto this env so a child ocx sees the
+    /// parent's policy, and strips [`keys::CREDENTIAL_KEYS`]. Idempotent.
     ///
-    /// [`keys::OCX_NO_CONSENT`] is the one member that is **not**
-    /// resolution-affecting: it changes nothing a child resolves, only whether
-    /// a child writes a consent stamp. It rides here because this is the one
-    /// channel that survives a deliberately emptied child env
-    /// ([`Env::clean`](crate::env::Env::clean)) — the reason at its own block below.
-    ///
-    /// Always sets [`keys::OCX_BINARY_PIN`] and — when a root resolves —
-    /// [`keys::OCX_HOME`], so a child lands in the same store the parent did
-    /// even on the `--clean` arm, which strips `HOME` along with everything
-    /// else. Sets [`keys::OCX_OFFLINE`] /
-    /// [`keys::OCX_REMOTE`] / [`keys::OCX_FROZEN`] / [`keys::OCX_GLOBAL`] /
-    /// [`keys::OCX_NO_VERIFY`] / [`keys::OCX_NO_CONFIG`] only
-    /// when the corresponding flag is true so the child env stays minimal. Sets
-    /// [`keys::OCX_CONFIG`] /
-    /// [`keys::OCX_INDEX`] / [`keys::OCX_TOOLCHAIN_DIR`] /
-    /// [`keys::OCX_RECORDS_DIR`] /
-    /// [`keys::OCX_RECORDS_NAME`] only when the parent had an explicit value;
-    /// otherwise removes any inherited setting so a stale parent-shell export
-    /// cannot beat the outer ocx's parsed state.
-    ///
-    /// Five keys have no [`OcxConfigView`] field and no CLI flag at all, so
-    /// their authoritative value is the ambient environment and they are read
-    /// here rather than carried: [`keys::OCX_ALLOW_YANKED`],
-    /// [`keys::OCX_NO_PROJECT`], [`keys::OCX_NO_CONFIG_REFRESH`],
-    /// [`keys::OCX_DEFAULT_REGISTRY`] and [`keys::OCX_INSECURE_REGISTRIES`].
-    /// Each is set-or-remove on the same terms as the parsed keys above; the
-    /// prune is additionally suppressed whenever this invocation carries an
-    /// explicit project, since the child resolves the two against each other.
-    ///
-    /// Does **not** propagate presentation flags (`--log-level`, `--format`,
-    /// `--color`) — those are user-facing surface and must not leak into a
-    /// launcher's child stream. Idempotent.
+    /// Every key but the binary pin and `OCX_HOME` is set-or-remove, so a stale parent-shell
+    /// export cannot beat the parsed state.
     pub fn apply_ocx_config(&mut self, cfg: &OcxConfigView) {
-        // Bearer credentials are intentionally NOT forwarded — strip any
-        // inherited value before writing the resolution-affecting keys.
         for credential in keys::CREDENTIAL_KEYS {
             self.remove(credential);
         }
         self.set(keys::OCX_BINARY_PIN, cfg.self_exe.as_os_str());
-        // Set-always, never removed, and the one value here that is *resolved*
-        // rather than parsed from the view: `default_ocx_root()` is the single
-        // definition of the root this process' own stores were opened at, so
-        // reading it here is the same source the parent used, not a second one
-        // (the shape `OCX_ALLOW_YANKED` established below). `None` means
-        // neither `$OCX_HOME` nor a home directory resolved — the state that
-        // produced it, and one no inherited value could improve on — so that
-        // arm writes nothing and clears nothing.
-        //
-        // Absolutized against *this* process' working directory, which is the
-        // only frame where a relative ambient `OCX_HOME` still means what its
-        // author meant: a child is free to run somewhere else —
-        // `package test --script` spawns from the scratch tree — and a
-        // relative value travelling verbatim would name a different directory
-        // there, silently. `std::path::absolute` is lexical (no filesystem
-        // access, no symlink resolution), so an absolute value is returned
-        // unchanged and nothing is canonicalized behind the operator's back.
         if let Some(root) = crate::home::default_ocx_root() {
+            // Absolutized here: a child may run from another CWD and read another directory.
             let absolute = std::path::absolute(&root).unwrap_or_else(|error| {
-                // The documented failure is an empty path or a CWD this
-                // process cannot read; the raw value is still better than no
-                // value, and the child re-resolves it the same way this
-                // process just did.
                 log::debug!("could not absolutize OCX_HOME '{}': {error}", root.display());
                 root.clone()
             });
@@ -887,11 +370,7 @@ impl Env {
             Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
             None => self.remove(keys::OCX_INDEX),
         }
-        // C-008. The `None` arm is load-bearing, not symmetry for its own sake:
-        // without the remove, a stale `OCX_TOOLCHAIN_DIR` exported into the
-        // parent shell survives into every child and beats the outer ocx's
-        // parsed state, so the two frames of one launch render and read two
-        // different toolchain trees.
+        // Without the remove, a stale exported `OCX_TOOLCHAIN_DIR` makes two frames of one launch use two trees.
         match &cfg.toolchain_dir {
             Some(path) => self.set(keys::OCX_TOOLCHAIN_DIR, path.as_os_str()),
             None => self.remove(keys::OCX_TOOLCHAIN_DIR),
@@ -917,10 +396,7 @@ impl Env {
         } else {
             self.remove(keys::OCX_NO_VERIFY);
         }
-        // Sink and template forward independently, each set-or-remove: a
-        // resolved sink with a defaulted template must not pick the parent
-        // shell's pattern back up, or a collector's glob matches files the
-        // operator never described.
+        // Each set-or-remove, or a defaulted template picks up the parent shell's pattern.
         match &cfg.records.dir {
             Some(path) => self.set(keys::OCX_RECORDS_DIR, path.as_os_str()),
             None => self.remove(keys::OCX_RECORDS_DIR),
@@ -929,59 +405,22 @@ impl Env {
             Some(template) => self.set(keys::OCX_RECORDS_NAME, template.as_str()),
             None => self.remove(keys::OCX_RECORDS_NAME),
         }
-        // Unconditional clear, never a set: the forwarded project env is NOT a
-        // resolution-affecting config field and deliberately does not live on
-        // `OcxConfigView`. This half of the contract guarantees a stale
-        // `OCX_ENV` — exported by a shell, or inherited from an unrelated
-        // parent `ocx exec` — can never reach a child. The invocation that
-        // genuinely has a payload writes it afterwards, through
-        // `EnvEntriesExt::apply_child_env`.
+        // Always cleared, or a stale shell value reaches the child; `apply_child_env` writes the real one after.
         self.remove(keys::OCX_ENV);
-        // Hermetic must stay hermetic across the hop. Without this the parent
-        // prunes the discovered config chain and the child — a fresh process —
-        // re-reads it in full, so the two frames of one launch resolve against
-        // different configuration. The already-forwarded `OCX_RECORDS_*` do not
-        // cover it: `required` has no environment peer at all, so an unlocked
-        // `[records]` posture the parent never saw would still reach the child.
-        // Taken from the view rather than read ambiently here: the loader seam
-        // is where the value is authoritative, `Context::try_init` captures it
-        // there once, and a second read at this site could disagree with the
-        // chain this process actually loaded.
+        // Without this a hermetic parent's child re-reads the full config chain and resolves differently.
         if cfg.no_config {
             self.set(keys::OCX_NO_CONFIG, "1");
         } else {
             self.remove(keys::OCX_NO_CONFIG);
         }
-        // Resolution-affecting, but a pure env opt-in with no `ContextOptions`
-        // / CLI counterpart (unlike the flags above): its authoritative value
-        // IS the ambient env, which the outer ocx read the same way at the
-        // index-client seam. Forward the parsed bool so a child ocx resolving
-        // an index-sourced yanked tag honours the identical override.
+        // Ambient-only keys: without them a `--clean` child resolves against defaults the parent overrode.
         if flag(keys::OCX_ALLOW_YANKED, false) {
             self.set(keys::OCX_ALLOW_YANKED, "1");
         } else {
             self.remove(keys::OCX_ALLOW_YANKED);
         }
-        // Four more of the same shape as `OCX_ALLOW_YANKED` above: pure env
-        // opt-ins with no `OcxConfigView` field and no CLI flag, so the
-        // ambient value IS what the outer ocx resolved from, and the ambient
-        // read here is the same read the outer ocx already made. Without them
-        // a `--clean` child — a generated entrypoint launcher's
-        // `ocx launcher exec` re-entry, or a nested `ocx exec` — starts from
-        // an empty map and resolves against the *defaults* of four settings
-        // the parent had overridden.
-        //
-        // The `else { remove }` arm does real work on the inherit path too:
-        // it is what stops a stale parent-shell export from beating the
-        // state this process actually resolved with, the same reason
-        // `OCX_TOOLCHAIN_DIR` clears above.
-        //
-        // Gated on the view, unlike its three neighbours: forwarding a prune
-        // and an explicit project together hands the child two answers, and
-        // `ConfigLoader::explicit_project` reads the prune first — so the
-        // child would discard the `OCX_PROJECT` written a few lines above.
-        // The flag outranks the prune here (Amendment G3) and must outrank it
-        // there.
+        // Gated on the view: `explicit_project` reads the prune before `OCX_PROJECT`, so forwarding
+        // both makes the child discard the project.
         if cfg.project.is_none() && flag(keys::OCX_NO_PROJECT, false) {
             self.set(keys::OCX_NO_PROJECT, "1");
         } else {
@@ -992,9 +431,7 @@ impl Env {
         } else {
             self.remove(keys::OCX_NO_CONFIG_REFRESH);
         }
-        // Empty is unset on the read side (`ocx_util::env::string` falls back
-        // to its default for it), so an empty ambient value must not travel as
-        // a value the child would then honour as "no default registry at all".
+        // An empty value must not travel, or the child reads it as "no default registry at all".
         match var(keys::OCX_DEFAULT_REGISTRY).filter(|value| !value.is_empty()) {
             Some(registry) => self.set(keys::OCX_DEFAULT_REGISTRY, registry),
             None => self.remove(keys::OCX_DEFAULT_REGISTRY),
@@ -1003,29 +440,7 @@ impl Env {
             Some(authorities) => self.set(keys::OCX_INSECURE_REGISTRIES, authorities),
             None => self.remove(keys::OCX_INSECURE_REGISTRIES),
         }
-        // Two independent refusals, one key: `cfg.no_consent` is what this
-        // invocation's own `--no-consent` said, the ambient read is what the
-        // environment said, and either one suppresses. Not a second spelling of
-        // the flag > env > stamp ladder — that still resolves at exactly one
-        // site, `project_context::record_activation_consent_over`; this only
-        // ORs two refusals that have already been decided.
-        //
-        // The halves cover different hops. `ocx exec` builds its child from
-        // `Env::inherited` by default, so the ambient half already survives
-        // that hop untouched and earns its keep on the `--clean` arm
-        // (`toolchain_exec.rs` takes `Env::clean` there), where the child map
-        // starts empty. The flag half has no other channel at all: a
-        // `--no-consent` lives in argv, which no child process ever sees, so
-        // without it the explicit gesture would propagate less far than the
-        // ambient one — failing OPEN on a security control.
-        //
-        // One-way on purpose: a `--consent` leaves `cfg.no_consent` false
-        // and therefore never clears an inherited refusal. Refusal inherits
-        // downward, permission does not (ocx-sh/ocx#400).
-        //
-        // Not resolution-affecting, unlike everything above it: it changes no
-        // resolution, only whether a side-effect write happens. It rides here
-        // because this is the one channel that crosses a clean env.
+        // `cfg.no_consent` is argv's only channel, else `--no-consent` fails open; the ambient read survives `--clean`.
         if cfg.no_consent || flag(keys::OCX_NO_CONSENT, false) {
             self.set(keys::OCX_NO_CONSENT, "1");
         } else {
@@ -1033,111 +448,35 @@ impl Env {
         }
     }
 
-    /// Resolve a command name to a full executable path using PATH
-    /// (and PATHEXT on Windows).
+    /// Resolve a command name through this env's `PATH` and, on Windows, its own `PATHEXT`.
     ///
-    /// On Windows, `PATHEXT` is read from *this* environment rather than from
-    /// the running process, so a clean child env still resolves the native
-    /// `<name>.exe` launcher shim correctly before the child is spawned (the
-    /// fallback default `.COM;.EXE;.BAT;.CMD` always advertises `.EXE`).
-    ///
-    /// # C-009 — the two arms differ, deliberately
-    ///
-    /// - A **path-bearing** `command` (`./hello`, `/abs/tool`, the Windows
-    ///   drive-relative `C:tool`) names a file directly, so this method keeps
-    ///   today's behaviour exactly, **including** falling back to the bare
-    ///   value when the lookup misses: the value already *is* a path, and
-    ///   handing it to the OS is a meaningful answer that four shipped tests
-    ///   depend on.
-    /// - A **bare** name that `PATH` cannot resolve is now
-    ///   [`CommandResolutionError::NotFound`]. The old
-    ///   `PathBuf::from(command)` fallback is deleted from this arm: it handed
-    ///   an unresolved name to `execvp`, which then performs its **own**
-    ///   ambient-`PATH` lookup — the exact escape from the composed
-    ///   environment ocx exists to prevent. The `log::warn!` that stood beside
-    ///   it is deleted with it; a function returning `Result` must not also log
-    ///   its own failure, or every caller that handles the error prints twice.
-    ///   [`Self::resolve_test_command`] deliberately keeps that warning,
-    ///   because its own contract is to fall through.
-    ///
-    /// The whole discrimination is `command_is_path`, the shipped helper
-    /// whose "exactly one `Component::Normal`" rule already handles the
-    /// `C:tool` trap a separator test misses. There is no second separator
-    /// test here.
-    ///
-    /// Empty `PATH` segments are dropped from the **lookup copy** before the
-    /// search — see `Self::lookup_path`. This env's own `PATH` is untouched.
-    ///
-    /// # C-069 — the answer is refused if it is a trampoline
-    ///
-    /// A successful lookup is gated once more before it is returned: an answer
-    /// that is itself an ocx launcher trampoline is
-    /// [`CommandResolutionError::TrampolineRefused`], never `Ok`. The gate
-    /// lives in `Self::resolve_command_in`, which both public resolvers route
-    /// through, so `Self::resolve_command_excluding` cannot acquire a different
-    /// posture by accident. WP-2 owns the refusal **and its call site**; the
-    /// only part of the loop guard left to WP-8 is C-058 — deriving the
-    /// exclusion set from `ToolchainStore::bin()` / `ToolchainHome::bin()` and
-    /// handing it to `Self::resolve_command_excluding`.
+    /// A path-bearing `command` falls back to the bare value on a miss; a bare name never does,
+    /// or `execvp` repeats the lookup on the ambient `PATH`. Never logs a miss, or callers print it twice.
     ///
     /// # Errors
     ///
-    /// [`CommandResolutionError::NotFound`] when `command` is a bare name that
-    /// no directory on this env's `PATH` provides, and
-    /// [`CommandResolutionError::TrampolineRefused`] when the answer is an
-    /// ocx-generated launcher trampoline (C-069).
+    /// [`CommandResolutionError::NotFound`] for a bare name no `PATH` directory provides;
+    /// [`CommandResolutionError::TrampolineRefused`] when the answer is an ocx launcher trampoline.
     pub fn resolve_command(&self, command: impl AsRef<OsStr>) -> Result<PathBuf, CommandResolutionError> {
         self.resolve_command_in(command.as_ref(), self.lookup_path())
     }
 
-    /// The one lookup both public resolvers route through, over an
-    /// already-prepared `PATH` copy.
-    ///
-    /// # Why the search space is a parameter — the C-010/C-069 ordering
-    ///
-    /// C-010's exclusion **shapes the input** to this lookup and C-069's
-    /// refusal **filters its output**, so the exclusion necessarily runs first
-    /// and no edit inside this function can reorder the two: by the time the
-    /// refusal has an answer to judge, the caller's `PATH` copy has already
-    /// decided which directories could produce one. That is what lets item 22
-    /// assert *which* guard caught a given input — the exclusion answers
-    /// "never looked there", the refusal answers "looked, found a trampoline".
-    ///
-    /// `NotFound`'s `searched` is re-split from **`path` itself**, on the miss
-    /// arm only: it must name the directories that were *actually* walked, and
-    /// a second derivation from the stored `PATH` would disagree with the copy
-    /// handed to `which_in` (finding S-1). Splitting the one value here also
-    /// keeps the vector off the success path, where a composed `PATH` of 15–60
-    /// segments would otherwise be allocated on every resolution for an error
-    /// that usually does not happen.
+    /// The one lookup both public resolvers route through, over an already-prepared `PATH` copy.
     fn resolve_command_in(&self, command: &OsStr, path: Option<OsString>) -> Result<PathBuf, CommandResolutionError> {
-        // cwd is only used by `which` when the command contains a path
-        // separator (e.g. `./hello`).  For bare names it is ignored.
         let cwd = std::env::current_dir().unwrap_or_else(|e| {
             log::debug!("Could not determine current directory: {}", e);
             PathBuf::new()
         });
 
-        // On Windows, `which_in` internally reads PATHEXT from the real
-        // process environment via `RealSys::env_windows_path_ext()`, not from
-        // our child `Env`. We therefore probe the child's PATHEXT ourselves so
-        // the native `<name>.exe` launcher shim is found even when the running
-        // process has a different PATHEXT.
-        //
-        // Bound to one variable rather than returned from two `#[cfg]` arms so
-        // there is a **single** success point for the C-069 gate below to sit
-        // on: a per-platform `return Ok(found)` would let an edit ship an
-        // ungated answer on the platform the other build never compiles.
+        // `which_in` reads the process PATHEXT, so Windows probes the child's itself.
+        // One binding, not two `#[cfg]` returns, or one platform can ship an answer the trampoline gate never saw.
         #[cfg(windows)]
         let found = self.resolve_command_windows(command, path.as_deref(), &cwd);
         #[cfg(not(windows))]
         let found = which::which_in(command, path.as_deref(), &cwd).ok();
 
         if let Some(found) = found {
-            // C-069, the only site that fires it. After the lookup, before the
-            // `Ok` — a trampoline answer re-enters `ocx exec` against its own
-            // home, and with two homes on one `PATH` that is an unbounded
-            // A → B → A loop with no error and no depth counter.
+            // A trampoline answer re-enters `ocx exec`; two homes on one `PATH` loop A → B → A forever.
             if is_ocx_trampoline(&found) {
                 return Err(CommandResolutionError::TrampolineRefused {
                     command: command.to_string_lossy().into_owned(),
@@ -1147,21 +486,9 @@ impl Env {
             return Ok(found);
         }
 
+        // Safe outside the gate: `execvp` does no `PATH` search for a path, and a real trampoline resolved above.
         if command_is_path(command) {
-            // Today's behaviour, unchanged: the value names a file, so hand it
-            // to the OS. `execvp` performs no `PATH` search for a value
-            // carrying a separator, so there is no ambient escape to close.
-            //
-            // Deliberately outside the C-069 gate: this arm is reached only
-            // when the lookup *failed*, so the named file does not exist or
-            // cannot be executed, and a file in that state cannot be the
-            // working trampoline the refusal exists to stop. A path-bearing
-            // command that does name a real trampoline resolves above and is
-            // refused there.
-            //
-            // `{:?}` on the command: it arrives from package metadata, from
-            // `ocx.lock` and from argv, and a raw newline in a log line forges
-            // a second one (CWE-117).
+            // `{:?}`: the command is untrusted, and a raw newline forges a log line (CWE-117).
             log::warn!(
                 "Could not resolve {:?} via PATH, falling back to OS lookup.",
                 command.to_string_lossy()
@@ -1171,10 +498,7 @@ impl Env {
 
         Err(CommandResolutionError::NotFound {
             command: command.to_string_lossy().into_owned(),
-            // Re-split the very value `which_in` was handed, so the reported
-            // search space cannot disagree with the searched one. No `PATH`
-            // key, or a `PATH` of nothing but empty segments, is `None` here
-            // and therefore an empty space — never an invented one.
+            // Re-split the value `which_in` searched, or the report can disagree with the search.
             searched: path
                 .as_deref()
                 .map(|value| std::env::split_paths(value).collect())
@@ -1182,46 +506,10 @@ impl Env {
         })
     }
 
-    /// The `PATH` value handed to `which_in`, with empty segments dropped.
+    /// A copy of `PATH` with empty segments dropped, since one means the CWD on Unix (CWE-426).
     ///
-    /// A copy: this env's own `PATH` is never rewritten, so the child process
-    /// still inherits every segment its composition established.
-    ///
-    /// An empty `PATH` segment (`/a::/b`, a leading or trailing `:`) means
-    /// *the current directory* on Unix — CWE-426, untrusted search path. It is
-    /// not exotic: [`Self::inherited`] carries whatever the invoking shell
-    /// exported, and an ocx invocation whose composed entries touch no `PATH`
-    /// key passes it through verbatim. Dropping the segments here makes a
-    /// resolution answer independent of where the user happened to `cd`.
-    ///
-    /// # `None` is the only spelling of "nothing to search"
-    ///
-    /// Returned both when the env carries no `PATH` key at all and when every
-    /// segment it carries is empty (`""`, `":"`, `"::"` — the shape
-    /// `PATH="$A:$B"` produces when both are unset). The empty *string* is not
-    /// an empty search space: `split_paths("")` yields one empty segment, and
-    /// `which` filters those on Windows only, so on Unix `which_in` would stat
-    /// the bare candidate against the **process working directory** — exactly
-    /// the CWE-426 probe this filter exists to remove. `None` is refused
-    /// outright (`CannotGetCurrentDirAndPathListEmpty`) and has no ambient
-    /// fallback, which is why the caller must never substitute `Some("")`.
-    ///
-    /// Re-joined with [`std::env::join_paths`], the exact inverse of the
-    /// [`split_paths`](std::env::split_paths) that produced the segments. On
-    /// Windows `split_paths` reads `"` as a quote, so a segment it yields
-    /// *can* contain the separator — std's own example is
-    /// `c:\foo;c:\som"e;di"r;c:\bar`, whose middle segment is `c:\some;dir`.
-    /// `join_paths` re-quotes such a segment; a manual
-    /// `push(PATH_SEPARATOR)` join would tear it into `c:\some` and `dir` and
-    /// hand `which_in` a directory nobody put on `PATH` — a widening in the
-    /// one function whose whole subject is narrowing the search space.
-    ///
-    /// Its rejection arm degrades to `None`, never to the value *unfiltered*:
-    /// an unfiltered value is precisely the empty-segment search this function
-    /// exists to prevent, whereas no search space at all is refused outright
-    /// by `which_in`. The arm is unreachable in practice — `join_paths`
-    /// rejects only what its own `split_paths` cannot emit (a `"` on Windows,
-    /// a `:` on Unix) — so failing closed there costs nothing.
+    /// Nothing to search is `None`, never `Some("")`, which Unix `which_in` stats against the CWD.
+    /// Re-joined with [`std::env::join_paths`], since a manual join tears a quoted Windows segment.
     fn lookup_path(&self) -> Option<OsString> {
         let path = self.get("PATH")?;
         let joined =
@@ -1232,51 +520,14 @@ impl Env {
         Some(joined)
     }
 
-    /// [`Self::resolve_command`] over a `PATH` from which `excluded` has been
-    /// removed (`plan_toolchain_activation.md` C-010).
+    /// [`Self::resolve_command`] with `excluded` removed (`adr_toolchain_activation.md`).
     ///
-    /// # The invariant
-    ///
-    /// **`excluded` is removed from the lookup copy of `PATH` only. This env's
-    /// own `PATH` must be byte-identical after the call.** The child process
-    /// still receives every segment its composition established, so a tool that
-    /// spawns a sibling tool still resolves that sibling through a trampoline.
-    /// Rewriting the stored value instead would silently convert "do not let
-    /// *this* lookup answer with a trampoline directory" into "no descendant
-    /// process may ever use one" — a different, much larger decision, and one
-    /// that would break the very re-entry the trampolines exist to provide.
-    ///
-    /// This is the opposite of what `ocx launcher shim` does with its own shim
-    /// directory: that site prunes the **child's** `PATH`
-    /// (`process_env.set("PATH", pruned)`) because a shim tree must not follow
-    /// the process it materialised. Do not unify the two.
-    ///
-    /// # Not a containment check
-    ///
-    /// Segments are dropped with
-    /// `ocx_util::path::remove_segment`,
-    /// whose own doc comment is explicit that a segment naming the same
-    /// directory by a different string — a trailing slash, a symlink alias,
-    /// `$OCX_HOME` spelled one way by the composing process and another by this
-    /// one — survives untouched, and that it "is therefore not a containment
-    /// check and must not be read as one". C-069's
-    /// [`is_ocx_trampoline`] re-check over the *resolved answer* is what closes
-    /// that gap, and it is a second, independent guard: deleting either one
-    /// alone must leave the other observably firing.
-    ///
-    /// C-058's caller derives `excluded` from the same resolver that produced
-    /// the homes (`ToolchainStore::bin()` / `ToolchainHome::bin()`), never from
-    /// a literal path join, so the set cannot drift from the tree shape. That
-    /// derivation — passing the set in — is the **whole** of what C-069 leaves
-    /// to WP-8; the refusal itself and its call site ship here, in the shared
-    /// `Self::resolve_command_in` this method routes through.
+    /// Only the lookup copy loses `excluded`, or no descendant reaches a sibling tool through a
+    /// trampoline; `ocx launcher shim` prunes its child's `PATH` instead — do not unify the two.
     ///
     /// # Errors
     ///
-    /// As [`Self::resolve_command`]: [`CommandResolutionError::NotFound`] when
-    /// a bare name resolves in no remaining directory, and
-    /// [`CommandResolutionError::TrampolineRefused`] when a directory that
-    /// survived the segment-exact exclusion answers with a trampoline anyway.
+    /// As [`Self::resolve_command`].
     pub fn resolve_command_excluding(
         &self,
         command: impl AsRef<OsStr>,
@@ -1285,66 +536,30 @@ impl Env {
         self.resolve_command_in(command.as_ref(), self.lookup_path_excluding(excluded))
     }
 
-    /// [`Self::lookup_path`] with every directory in `excluded` removed
-    /// (C-010).
-    ///
-    /// `None` means the same thing it means there, for the same reason: an
-    /// exhausted search space is nothing to search, never `Some("")`.
-    ///
-    /// Split out from [`Self::resolve_command_excluding`] so the exclusion is
-    /// an *input* to the shared lookup rather than a step inside it — see the
-    /// ordering argument on `Self::resolve_command_in`.
+    /// [`Self::lookup_path`] with every directory in `excluded` removed (segment-exact).
     fn lookup_path_excluding(&self, excluded: &[PathBuf]) -> Option<OsString> {
-        // Start from the copy `Self::lookup_path` already makes. Nothing below
-        // writes back through `self`, so this env's own `PATH` stays
-        // byte-identical — the invariant on `Self::resolve_command_excluding`.
-        //
-        // `None` propagates: no `PATH` key, or one carrying nothing but empty
-        // segments, leaves nothing to prune, and inventing a search space the
-        // env does not have is exactly what `lookup_path` refuses to do.
         let path = self.lookup_path()?;
         if excluded.is_empty() {
-            // An empty exclusion set is `Self::resolve_command`, byte for byte,
-            // because it *is* `lookup_path`'s value.
             return Some(path);
         }
 
-        // Segment-exact removal, one excluded directory at a time. A directory
-        // that is not on `PATH` simply matches nothing, which is why "exclude
-        // something absent" is a no-op rather than an error.
-        //
-        // `remove_segment` splits, drops empty segments and re-joins on every
-        // call, so it subsumes `lookup_path`'s CWE-426 empty-segment filter —
-        // re-filtering here would be a second copy of the same rule, free to
-        // drift from it.
         let pruned = excluded.iter().fold(path, |value, dir| {
             ocx_util::path::remove_segment(&value, dir.as_os_str())
         });
 
         if pruned.is_empty() {
-            // Every segment was excluded — the `None` case of `lookup_path`,
-            // reached by a different route and for the same CWE-426 reason.
+            // `Some("")` would search the CWD (CWE-426).
             return None;
         }
 
         Some(pruned)
     }
 
-    /// Windows-only: resolve `command` by probing `path` with each extension
-    /// from this env's PATHEXT, in order.
+    /// Windows-only: probe `path` with each extension from this env's PATHEXT, in order.
     ///
-    /// Returns `None` when the command cannot be found. `path` is the caller's
-    /// **lookup copy** (`Self::lookup_path`), not this env's stored `PATH`:
-    /// the empty-segment drop and C-010's exclusion both apply to the copy
-    /// only, and reading the field here would silently bypass both. PATHEXT is
-    /// still read from this `Env`, not the running process — that is the entire
-    /// point of this method vs. delegating to `which_in` which reads
-    /// `std::env::var_os`.
+    /// `path` is the caller's lookup copy; reading the stored `PATH` would bypass its filtering.
     #[cfg(windows)]
     fn resolve_command_windows(&self, command: &OsStr, path: Option<&OsStr>, cwd: &std::path::Path) -> Option<PathBuf> {
-        // For each extension, ask `which_in` if `command + ext` is found.
-        // `which_in` on a name-with-extension will not try to append further
-        // extensions — it just probes the PATH directories for that exact name.
         for ext in self.pathext() {
             let mut candidate = command.to_os_string();
             candidate.push(&ext);
@@ -1353,23 +568,12 @@ impl Env {
             }
         }
 
-        // Also try the bare name (covers fully-qualified paths and commands
-        // that already carry an extension like `foo.exe`).
         which::which_in(command, path, cwd).ok()
     }
 
-    /// Windows-only: the executable extensions to probe, in order.
+    /// Windows-only: this env's PATHEXT (else the default), in order.
     ///
-    /// Read from *this* env's PATHEXT, falling back to the Windows default when
-    /// absent so a bare `foo` can still resolve `foo.exe`.
-    ///
-    /// The OCX launcher shim is always `<name>.exe` post-`.cmd` cutover
-    /// (adr_windows_exe_shim.md). A hardened or customized child PATHEXT may
-    /// omit `.EXE` entirely (e.g. `PATHEXT=.BAT;.CMD`); the cutover removed the
-    /// PATHEXT inject/warn safety net on the premise that `.EXE` is
-    /// unconditionally resolvable, so it is guaranteed to be probed regardless
-    /// of the child PATHEXT. Probe order still respects the user's listed
-    /// extensions; `.EXE` is appended only when absent (case-insensitive).
+    /// `.EXE` is appended when absent, or a hardened `PATHEXT=.BAT;.CMD` hides every `<name>.exe` shim.
     #[cfg(windows)]
     fn pathext(&self) -> Vec<String> {
         let pathext_str = self
@@ -1391,70 +595,24 @@ impl Env {
         extensions
     }
 
-    /// Resolve a command for `ocx * test` / launcher re-entry: never silently
-    /// skip a same-named file the package under test ships.
+    /// Resolve a command for `ocx * test` / launcher re-entry, package-contributed `PATH` first,
+    /// or a packaged `tool` lacking the exec bit is tested against the host's `tool` and passes.
     ///
-    /// [`Self::resolve_command`] answers "what would the OS run", which walks
-    /// the composed package directories straight on into the ambient PATH and
-    /// skips a non-executable file without a word. For a test command that is
-    /// the wrong question: a package shipping `tool` with the executable bit
-    /// missing would silently be tested against the *host's* `tool`, and pass.
-    ///
-    /// So the package's own copy is decided first, and only a name the package
-    /// does not ship at all is looked up on the host PATH:
-    ///
-    /// 1. Scan the package-contributed PATH directories, in PATH order; the
-    ///    first executable match wins.
-    /// 2. A match that is present but not executable is a hard error — never a
-    ///    fall-through to a host copy.
-    /// 3. A name the package does not ship resolves through
-    ///    [`Self::resolve_command`], with a warning naming the directories that
-    ///    were searched — and a name the host does not provide either falls
-    ///    through to the bare name with its own warning, never an error. That
-    ///    fall-through is **deliberately retained** across C-009 (which deleted
-    ///    the equivalent one from [`Self::resolve_command`]): four production
-    ///    callers, the Starlark host among them, treat a total miss as "let the
-    ///    OS answer", and this method owns the warning that used to live one
-    ///    level down.
-    ///
-    /// A path-bearing `command` (`./tool`, an absolute path, a Windows
-    /// drive-relative `C:tool`) names a file directly, so there is no
-    /// package-versus-host question to answer and it delegates unchanged.
-    ///
-    /// On Windows a candidate is reached only by matching a PATHEXT extension,
-    /// which *is* the platform's definition of executable — there is no exec
-    /// bit to fail, so [`CommandResolutionError::NotExecutable`] cannot occur.
-    ///
-    /// Synchronous, like [`Self::resolve_command`] (whose `which_in` stats the
-    /// same directories): a handful of local `stat` calls, once per invocation,
-    /// immediately before the process execs a child and stops doing anything
-    /// else. Not worth an async seam the sibling resolver does not have.
+    /// Then [`Self::resolve_command`] with a warning; a total miss falls through to the bare name.
     ///
     /// # Errors
     ///
-    /// [`CommandResolutionError::NotExecutable`] when the package under test
-    /// ships the name but the file cannot be executed, and
-    /// [`CommandResolutionError::TrampolineRefused`] when the host lookup
-    /// answers with an ocx launcher trampoline (C-069). The fall-through in
-    /// step 3 is scoped to `NotFound` — the **total miss** C-011 describes —
-    /// and to nothing else: a refusal is not a miss, and mapping it back to
-    /// the bare name would hand that name to `execvp`, whose own ambient-`PATH`
-    /// lookup finds the same trampoline again. That is the unbounded
-    /// A → B → A re-entry C-069 exists to stop, restored one level up.
+    /// [`CommandResolutionError::NotExecutable`] (Unix) when the package ships the name but it is
+    /// not executable; [`CommandResolutionError::TrampolineRefused`] from the host lookup, never
+    /// mapped to the bare name, or `execvp` finds the same trampoline and loops.
     pub fn resolve_test_command(&self, command: impl AsRef<OsStr>) -> Result<PathBuf, CommandResolutionError> {
         let command = command.as_ref();
         if command_is_path(command) {
-            // C-009's path-bearing arm never errors, so this delegation carries
-            // the same answer it always did.
             return self.resolve_command(command);
         }
 
-        // The bare name comes last, and only for a command that already
-        // carries a PATHEXT extension (`-- tool.exe`): without it the package
-        // scan misses a file the package plainly ships. An extensionless bare
-        // name is deliberately NOT a candidate — Windows cannot exec it, and
-        // `resolve_command_windows` would never return one either, so matching
-        // it here would trade a working host fallback for a doomed exec.
+        // The bare name is a candidate only with a PATHEXT extension; an extensionless match
+        // would trade a working host fallback for a doomed exec.
         #[cfg(windows)]
         let candidates: Vec<OsString> = {
             let pathext = self.pathext();
@@ -1479,8 +637,7 @@ impl Env {
         #[cfg(not(windows))]
         let candidates: Vec<OsString> = vec![command.to_os_string()];
 
-        // The first present-but-not-executable hit, remembered across the whole
-        // scan so an executable match in a later directory still wins.
+        // Remembered across the scan so an executable match in a later directory still wins.
         let mut blocked: Option<(PathBuf, u32)> = None;
 
         for dir in std::env::split_paths(&self.package_path) {
@@ -1489,9 +646,6 @@ impl Env {
             }
             for name in &candidates {
                 let path = dir.join(name);
-                // `metadata` follows symlinks: a relative link inside the
-                // package to a real binary resolves, a dangling one is simply
-                // not a candidate.
                 let Ok(metadata) = std::fs::metadata(&path) else {
                     continue;
                 };
@@ -1513,22 +667,11 @@ impl Env {
             });
         }
 
-        // ponytail: warn, not error — strict upgrade = swap this arm for
-        // Err(OutsidePackage) when the owner flips decision #1 on #268.
-        //
-        // C-011: the total-miss fall-through is kept **intact** and is now
-        // detected by matching `resolve_command`'s `Result` directly, instead
-        // of by comparing its answer against the bare input string. Four
-        // production callers depend on the fall-through — including the
-        // Starlark host in `script/ocx_module.rs`, whose
-        // `bare_name_does_not_anchor_on_cwd` test panics if a total miss turns
-        // into an `Err`.
+        // ponytail: warn, not error; strict upgrade swaps the total-miss arm for Err(OutsidePackage).
+        // Four production callers need the fall-through (`bare_name_does_not_anchor_on_cwd` panics without it).
         let found = match self.resolve_command(command) {
             Ok(found) => found,
-            // The **total miss**, and only it. C-009 deleted the warning from
-            // `resolve_command`'s bare arm along with the fallback it
-            // described; this function still performs that fallback, so it
-            // owns the line or it disappears from the product silently.
+            // This function performs the fallback, so it owns the warning, or the line vanishes.
             Err(CommandResolutionError::NotFound { .. }) => {
                 log::warn!(
                     "Could not resolve {:?} via PATH, falling back to OS lookup.",
@@ -1536,24 +679,10 @@ impl Env {
                 );
                 return Ok(PathBuf::from(command));
             }
-            // C-069's `TrampolineRefused` above all. A blanket arm here hands
-            // the bare name to `execvp`, which repeats the lookup against the
-            // ambient `PATH` and finds the same trampoline — the guard fully
-            // defeated, and reachable from every installed launcher's re-entry
-            // (`launcher/exec.rs`), which prunes nothing and inherits the
-            // ambient `PATH` a `bin`-mode toolchain puts its trampolines on.
-            // Same rule, same spelling, as `update_check.rs`'s
-            // `query_installed_version` and `launcher/shim.rs`'s `execute`.
+            // Never a blanket fallback: `execvp` would find the same trampoline on the ambient `PATH`.
             Err(error) => return Err(error),
         };
-        // The host answered, so the composed packages did not ship the name —
-        // structurally, because a total miss returned above.
-        //
-        // `split_paths("")` yields one empty PathBuf; the scan skips those, so
-        // the message must too or a PATH-less package prints `[""]`. Every
-        // interpolation goes through `{:?}`, which quotes and escapes: these
-        // values arrive from `PATH`, from package metadata and from
-        // `ocx.lock`, and a raw newline forges a log line (CWE-117).
+        // `{:?}`: the values are untrusted, and a raw newline forges a log line (CWE-117).
         let searched: Vec<PathBuf> = std::env::split_paths(&self.package_path)
             .filter(|dir| !dir.as_os_str().is_empty())
             .collect();
@@ -1567,16 +696,10 @@ impl Env {
     }
 }
 
-/// True when `command` names a file directly rather than a bare name to look
-/// up on PATH.
+/// True unless `command` is exactly one [`Component::Normal`](std::path::Component).
 ///
-/// A bare name is *exactly one* [`Component::Normal`](std::path::Component) —
-/// anything else is path-bearing. The scan joins the name onto each package
-/// directory, and `Path::join` with a value carrying its own root or prefix
-/// discards the base, so a looser test lets the join stat outside every
-/// package directory and report the result as a copy the package ships. A
-/// separator test misses the Windows drive-relative form (`C:tool` has no
-/// separator, yet `join` keeps only the drive).
+/// `Path::join` discards the base for a rooted or prefixed value, so a looser test (a separator
+/// check misses `C:tool`) stats outside every package directory.
 fn command_is_path(command: &OsStr) -> bool {
     let mut components = std::path::Path::new(command).components();
     !matches!(
@@ -1585,25 +708,17 @@ fn command_is_path(command: &OsStr) -> bool {
     )
 }
 
-/// `Ok(())` when the candidate can be executed, `Err(mode)` carrying its
-/// permission bits when it cannot.
-///
-/// Mirrors the three-bit POSIX test in `package::bin_scan`'s
-/// `unix_is_executable` — named in prose, not linked: this module is
-/// `ocx_config` and the link would be the reach the split removes.
+/// `Ok(())` when the candidate can be executed, else `Err(mode)` with its permission bits.
 // ponytail: duplicated 3-line POSIX bit test; sharing would invert env→package layering
 #[cfg(unix)]
 fn executable_verdict(metadata: &std::fs::Metadata) -> Result<(), u32> {
     use std::os::unix::fs::PermissionsExt;
-    // The caller already filtered to `is_file()`, so this checks the bit only —
-    // a directory's `x` (traversable) can never reach here.
+    // Checks the bit only; correct because the caller already filtered to `is_file()`.
     let mode = metadata.permissions().mode();
     if mode & 0o111 != 0 { Ok(()) } else { Err(mode & 0o7777) }
 }
 
-/// Non-Unix hosts have no exec bit: a candidate is reached only by matching a
-/// PATHEXT extension, which is the platform's own executability rule, so every
-/// candidate that exists is executable.
+/// Non-Unix: a candidate matched a PATHEXT extension, so it is executable.
 #[cfg(not(unix))]
 fn executable_verdict(_metadata: &std::fs::Metadata) -> Result<(), u32> {
     Ok(())
@@ -1626,18 +741,7 @@ impl IntoIterator for Env {
 /// [`Env::resolve_command_excluding`] and [`Env::resolve_test_command`].
 #[derive(Debug, thiserror::Error)]
 pub enum CommandResolutionError {
-    /// A bare command name resolves in no directory of the composed `PATH`
-    /// (`plan_toolchain_activation.md` C-009).
-    ///
-    /// Terminal rather than a fall-through to the bare name: handing an
-    /// unresolved name to `execvp` makes the kernel repeat the search against
-    /// the **ambient** `PATH`, which is precisely the escape from the composed
-    /// environment ocx exists to prevent. A path-bearing command never reaches
-    /// this variant — it names a file, so there is no search to fail.
-    ///
-    /// `{command:?}` rather than `{command}`: a resolved value can carry a
-    /// newline, and a raw one forges log lines (CWE-117). `searched` goes
-    /// through `{:?}` for the same reason.
+    /// A bare command name resolves in no directory of the composed `PATH`.
     #[error("{command:?} does not resolve in the composed environment; searched: {searched:?}")]
     NotFound {
         /// The bare command name as invoked.
@@ -1646,26 +750,7 @@ pub enum CommandResolutionError {
         searched: Vec<PathBuf>,
     },
 
-    /// The resolution answer is itself an ocx-generated launcher trampoline
-    /// (`plan_toolchain_activation.md` C-069, divergence D-V1).
-    ///
-    /// A trampoline re-enters `ocx exec` against its own home. Executing one as
-    /// the *answer* to a resolution performed by `ocx exec` is a self-reference:
-    /// with two project homes on one `PATH`, each carrying a stale trampoline
-    /// for the same name, the invocation loops A → B → A forever, one full
-    /// compose per hop, with no error and no depth counter.
-    ///
-    /// A **distinct** kind from [`Self::NotFound`], and distinct from C-010's
-    /// `PATH` exclusion, so a test can assert *which* guard caught a given
-    /// input and each guard keeps its own reachable red state. C-010 removes
-    /// the known trampoline directories from the lookup copy of `PATH`; this
-    /// variant is what remains when a directory named by a different string
-    /// survived that segment-exact comparison. Deleting either guard alone must
-    /// leave the other observably firing.
-    ///
-    /// `{command:?}` **and `{path:?}`** for the CWE-117 reason above: the path
-    /// is a `PATH` segment plus a resolved file name, neither of which this
-    /// process chose, so `Path::display` would render an embedded newline raw.
+    /// The resolution answer is an ocx launcher trampoline, which would re-enter `ocx exec`.
     #[error(
         "{command:?} resolves to an ocx launcher trampoline at {path:?}; running it would re-enter ocx against itself"
     )]
@@ -1678,14 +763,7 @@ pub enum CommandResolutionError {
 
     /// The package under test ships this name, but the file cannot be exec'd.
     ///
-    /// Deliberately terminal: falling through to a same-named host binary
-    /// would run the test against something the package does not contain and
-    /// report a pass.
-    ///
-    /// `{command:?}` and `{path:?}`, the one spelling this enum uses (D-V15(e)
-    /// named this variant): the command arrives from package metadata and the
-    /// path from a composed `PATH` segment, so a raw render forges log lines
-    /// (CWE-117).
+    /// Every variant renders with `{:?}`: its values are untrusted, and a raw newline forges log lines (CWE-117).
     #[error(
         "{command:?} is present in the package under test at {path:?} but is not executable (mode {mode:04o}); \
          re-create the package with the executable bit set - ocx does not fall through to a host copy on PATH"
@@ -1700,178 +778,39 @@ pub enum CommandResolutionError {
     },
 }
 
-/// The marker every ocx-generated POSIX launcher **trampoline** carries, and
-/// the sole POSIX signal of [`is_ocx_trampoline`]
-/// (`plan_toolchain_activation.md` C-069, divergence D-V12).
+/// The marker on line two of every POSIX launcher trampoline, all [`is_ocx_trampoline`] matches.
 ///
-/// Defined here, beside the predicate that consumes it, and **imported** by
-/// the one emitter: `package_manager::launcher::body::unix_trampoline_body`
-/// writes this constant rather than re-spelling it — one canonical spelling
-/// with a producer and a consumer, the same split C-034's paired golden uses.
-///
-/// # The constraint on that emitter
-///
-/// The marker must be **exactly the second line** of the body — after the
-/// shebang, ahead of every interpolated value — because that is the whole of
-/// what [`is_ocx_trampoline`] matches. Not "somewhere in the head": line two,
-/// compared whole.
-///
-/// Two failures that position rules out, one on each side:
-///
-/// - A root deep enough to push the marker past
-///   [`TRAMPOLINE_PROBE_BYTES`] would disarm C-069 for any checkout roughly
-///   146 characters deep while every shallow-`tmp_path` test stayed green.
-///   `a_marker_beyond_the_probe_window_is_not_refused` pins that half.
-/// - A `$OCX_HOME` whose **own path text** spells this marker would otherwise
-///   land it inside the probed head of an ordinary package launcher — whose
-///   body interpolates that path — and get a file refused that must keep
-///   resolving (E-21). Line one and line two are the only bytes no baked value
-///   can reach. `a_launcher_whose_baked_path_spells_the_marker_is_not_refused`
-///   pins that half.
-///
-/// # Why not the shipped header
-///
-/// `# Generated by ocx at install time. Do not edit.` is emitted
-/// **byte-identically** by `unix_launcher_body` and `unix_shim_body` as well,
-/// both golden-pinned. A predicate keyed on it would refuse every ocx-generated
-/// package launcher and every lazy shim — files that are not trampolines,
-/// cannot start the two-home A → B → A loop, and must keep resolving. That
-/// refusal would break `ocx launcher exec` and `ocx package exec` outright.
-/// This marker is discriminating by construction.
+/// It must stay on line two, ahead of the baked root, or a deep checkout pushes it past
+/// [`TRAMPOLINE_PROBE_BYTES`] and silently disarms the check.
+/// The shared `# Generated by ocx` header cannot serve: refusing package launchers breaks `ocx launcher exec`.
 pub const TRAMPOLINE_MARKER: &str = "# ocx-toolchain-trampoline";
 
-/// How many bytes of a candidate file [`is_ocx_trampoline`] reads.
-///
-/// Enough to hold a shebang line plus [`TRAMPOLINE_MARKER`] with room to spare,
-/// and small enough that the read costs one `read(2)` on any filesystem. The
-/// bound is the point: see [`is_ocx_trampoline`].
-///
-/// It is deliberately **smaller than a whole trampoline body**. A C-028 body
-/// carries an absolute project root, so it passes 256 bytes as soon as the
-/// checkout is roughly 146 characters deep — which is why the probe reads a
-/// *prefix* and the marker is emitted on the second line.
+/// How many bytes of a candidate file [`is_ocx_trampoline`] reads: a shebang plus the marker,
+/// in one `read(2)`, deliberately smaller than a whole trampoline body.
 pub const TRAMPOLINE_PROBE_BYTES: usize = 256;
 
-/// Whether `path` — an already-**resolved** command answer — is an
-/// ocx-generated launcher trampoline (C-069).
+/// Whether an already-resolved command path is an ocx launcher trampoline.
 ///
-/// Fires **after** C-010's `PATH` exclusion, never instead of it, so a test can
-/// assert which of the two guards caught a given input and each keeps its own
-/// reachable red state. It identifies the *file*, not a directory list, which
-/// is what makes it independent of how many toolchain trees exist — the defect
-/// D-V1 records is two project homes on one `PATH`, where any exclusion set can
-/// only ever name this invocation's own two.
-///
-/// # POSIX signal
-///
-/// [`TRAMPOLINE_MARKER`] as **exactly the second line**, read out of a
-/// **bounded prefix** of [`TRAMPOLINE_PROBE_BYTES`] — never `contains()`, and
-/// never "anywhere in the prefix". Two mechanisms doing two different jobs:
-///
-/// - The **line-2 anchor** is the discriminator. It is what refuses a file, and
-///   equally what stops any *non*-line-2 occurrence from counting — an ordinary
-///   tool that merely embeds the string somewhere in its data
-///   (`a_file_that_merely_contains_the_marker_later_in_its_body_is_not_refused`),
-///   and a *baked* occurrence (E-21). The second case is the reachable one: WP-6
-///   interpolates an operator-controlled absolute path into every generated
-///   body, so a `$OCX_HOME` spelling the marker would otherwise put it inside
-///   the probed head of an ordinary package launcher and refuse it — breaking
-///   `ocx launcher exec` for that install, which is the exact class D-V12
-///   excluded when it rejected keying on the shared header
-///   (`a_launcher_whose_baked_path_spells_the_marker_is_not_refused`).
-/// - The **bound** is a read cap, not a discriminator, and owns exactly two
-///   effects the anchor does not. It makes the probe one `read(2)` rather than
-///   an allocation of whatever binary `PATH` resolved — this runs before every
-///   `exec`, including `/bin/sh`. And it decides that a marker which *is* the
-///   whole of line two but **begins past** [`TRAMPOLINE_PROBE_BYTES`] does not
-///   count, which is the one property that stops the bound being widened away:
-///   `a_marker_beyond_the_probe_window_is_not_refused` pins it, and reds when it
-///   is.
-///
-/// Nothing interpolated can reach line one (the shebang) or line two, so the
-/// anchor is discriminating by position as well as by spelling.
-///
-/// # Not `ocx_util::fs::read_bounded`
-///
-/// The catalog advertises that helper as "read a whole file under a byte
-/// ceiling, refusing anything that is not a regular file", which reads like an
-/// exact match for the paragraph above and is the first thing a
-/// search-before-writing reflex finds. It is the **wrong** helper here: it
-/// *errors* when the file exceeds the cap, and a C-028 trampoline body passes
-/// 256 bytes as soon as the project root is roughly 146 characters deep.
-/// Folded into the fail-open arm below, that error becomes "not a trampoline"
-/// — C-069 silently disarmed for exactly the deep-checkout case, with every
-/// test rooted at a shallow `tmp_path` still green. This is a prefix read
-/// (`File::open` + [`std::io::Read::take`]), where passing the cap is the
-/// normal case and carries no verdict.
-///
-/// # Windows signal
-///
-/// A sibling `.exec` sidecar beside the resolved `<stem>.exe`, plus a refusal
-/// of a resolved path whose *own* extension is `.exec`. C-069's original
-/// blob-content clause is **struck** (D-V15): every trampoline `.exe` and every
-/// lazy-shim-slot `.exe` is a hardlink of the one committed blob, so content
-/// cannot discriminate them and a content match would refuse shim slots —
-/// exactly the class D-V12 excluded on POSIX. The second half is not
-/// belt-and-braces: `which` treats any file carrying an extension as executable
-/// on Windows, so a `PATHEXT` containing `.EXEC` makes the sidecar *text file*
-/// itself a resolution answer.
-///
-/// # Regular files only, and the order is load-bearing
-///
-/// `std::fs::metadata` decides `is_file()` **before** anything is opened.
-/// Opening a FIFO for reading blocks until a writer appears — forever, on a
-/// resolution path that runs before every `exec`. A non-regular file is
-/// therefore "not a trampoline" without ever being opened.
-///
-/// # Fails open
-///
-/// Any I/O error answers *not a trampoline*. This is deliberately the opposite
-/// posture from `ocx launcher shim`'s `resolves_inside`, and correctly so:
-/// that predicate runs once, over one directory ocx itself created, where the
-/// unresolvable case is genuinely suspicious. This one runs on **every**
-/// resolution, including `/bin/sh`, so a fail-closed I/O arm would turn a
-/// transient `EACCES` on an unrelated binary into a refusal to run an ordinary
-/// command. The guard it backstops (C-010's exclusion) is still in force, and
-/// an attacker who can make the file unreadable can equally make it absent.
-///
-/// # Why this has a body while its sibling C-010 exclusion does not
-///
-/// It sits on `Env::resolve_command`'s success arm, which every bare-name
-/// resolution in the workspace reaches — including `/bin/sh`. A stub here is
-/// not a deferral, it is a panic on the hot path.
-///
-/// # Which validation row measures this
-///
-/// Item **37** (trampoline re-entry) is the only gate that ever observes this
-/// predicate's cost, because it is the only one that resolves a command.
-/// WP-12e's `bin`-mode reconcile row does **not**: the reconciler puts a
-/// directory on `PATH` and resolves nothing, so it measures the cheap half.
-/// Reporting the reconcile number as "the cost of C-069" answers a question
-/// nobody asked.
+/// Judges the file, not a directory list, so it catches two project homes on one `PATH`,
+/// which no exclusion set can name. Any I/O error answers "not a trampoline".
 pub fn is_ocx_trampoline(path: &std::path::Path) -> bool {
     trampoline_signal(path)
 }
 
-/// POSIX half of [`is_ocx_trampoline`]: [`TRAMPOLINE_MARKER`] in the first
-/// [`TRAMPOLINE_PROBE_BYTES`] bytes of a regular file.
-///
-/// Split per platform as two whole functions rather than two `#[cfg]` blocks
-/// inside one: the signals share no code, and a `cfg`-gated block in tail
-/// position is the shape that silently becomes `()` when someone edits it.
+/// POSIX half of [`is_ocx_trampoline`]: [`TRAMPOLINE_MARKER`] as line two of the probed prefix.
 #[cfg(not(windows))]
 fn trampoline_signal(path: &std::path::Path) -> bool {
     use std::io::Read as _;
 
-    // Ordered before the open, and load-bearing: opening a FIFO for reading
-    // blocks until a writer appears — forever, on the path that runs before
-    // every `exec`.
+    // Before the open: opening a FIFO blocks forever on the path that runs before every `exec`.
     if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
         return false;
     }
+    // Fails open: this runs before every exec, so failing closed refuses on a transient `EACCES`.
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
+    // A prefix read, never `read_bounded`, which errors past its cap and so disarms deep checkouts.
     let mut prefix = Vec::with_capacity(TRAMPOLINE_PROBE_BYTES);
     if file
         .take(TRAMPOLINE_PROBE_BYTES as u64)
@@ -1880,46 +819,25 @@ fn trampoline_signal(path: &std::path::Path) -> bool {
     {
         return false;
     }
-    // Bytes, not `str`: an arbitrary file on `PATH` need not be UTF-8, and a
-    // lossy conversion would both allocate and let a replacement character
-    // land inside the needle. Same idiom as `shim::contains_version_resource`.
-    //
-    // The SECOND line, matched whole — not "somewhere in the prefix" (E-21).
-    // WP-6 bakes an operator-controlled absolute path into every generated
-    // body, so a `$OCX_HOME` whose own path text spells the marker would land
-    // it inside the probed head of an ordinary *package launcher* and refuse a
-    // file that must keep resolving. A position no baked value can occupy is
-    // the discriminating one: line 1 is the shebang and line 2 is the marker,
-    // both emitted before anything interpolated.
-    //
-    // `split` yields one element for a `\n`-free prefix, so `nth(1)` is `None`
-    // there and the answer is false without a special case. A truncated line 2
-    // cannot arise: the marker sits at bytes 10..36 of a 256-byte window.
+    // Line two matched whole, never anywhere, or a baked path spelling the marker refuses an ordinary launcher.
     prefix
         .split(|byte| *byte == b'\n')
         .nth(1)
         .is_some_and(|line| line == TRAMPOLINE_MARKER.as_bytes())
 }
 
-/// Windows half of [`is_ocx_trampoline`]: the sibling `.exec` sidecar, and a
-/// resolved path whose own extension is `.exec`.
+/// Windows half of [`is_ocx_trampoline`]: a sibling `.exec` sidecar, or an `.exec` path itself.
 ///
-/// No content check (D-V15): every trampoline `.exe` and every lazy-shim-slot
-/// `.exe` is a hardlink of the one committed blob, so content cannot tell them
-/// apart and a content match would refuse shim slots.
+/// No content check: trampolines and lazy shims hardlink one blob, so a content match refuses shims.
 #[cfg(windows)]
 fn trampoline_signal(path: &std::path::Path) -> bool {
-    // The resolved path's *own* extension first: `which` treats any file
-    // carrying an extension as executable on Windows, so a `PATHEXT`
-    // containing `.EXEC` makes the sidecar text file itself an answer.
+    // A `PATHEXT` containing `.EXEC` makes the sidecar itself an answer.
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("exec"))
     {
         return true;
     }
-    // `with_extension` replaces `<stem>.exe` with `<stem>.exec` — the sidecar
-    // the trampoline generator writes beside the shim hardlink.
     std::fs::metadata(path.with_extension("exec")).is_ok_and(|sidecar| sidecar.is_file())
 }
 
@@ -1932,26 +850,14 @@ pub fn insecure_registries() -> Vec<String> {
         .collect()
 }
 
-/// Serializes a `(host, MirrorConfig)` mirror list into the single JSON
-/// object written to [`keys::OCX_MIRRORS`].
-///
-/// Returns `None` for an empty list so [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) removes any
-/// inherited value rather than setting an empty object. Each entry re-encodes
-/// as the F5b union shape (a bare string when both roles carry the same URL,
-/// a `{registry?, index?}` object otherwise) so a child ocx's [`mirrors`]
-/// parses it back through the same [`crate::mirror::parse_mirror_value`]
-/// shared branch as a `[mirrors]` TOML table entry.
+/// Serializes mirrors into the [`keys::OCX_MIRRORS`] JSON object that [`mirrors`] parses back;
+/// `None` for an empty list.
 fn encode_mirrors(mirrors: &[(String, crate::mirror::MirrorConfig)]) -> Option<String> {
     if mirrors.is_empty() {
         return None;
     }
     let mut object = serde_json::Map::with_capacity(mirrors.len());
     for (host, entry) in mirrors {
-        // Collapse to the bare-string form when both roles carry the same
-        // URL (or one role, mirrored — see doc: F5b "both roles"), matching
-        // the shape `parse_mirror_value` produces for a bare string. A
-        // `{registry?, index?}` object otherwise, carrying only the roles
-        // actually declared.
         let value = if entry.registry.is_some() && entry.registry == entry.index {
             serde_json::Value::String(entry.registry.clone().unwrap_or_default())
         } else {
@@ -1975,26 +881,14 @@ fn encode_mirrors(mirrors: &[(String, crate::mirror::MirrorConfig)]) -> Option<S
     }
 }
 
-/// Parses [`keys::OCX_MIRRORS`] (a JSON object of upstream-host → union
-/// mirror value, F5b) into a list of `(host, MirrorConfig)` pairs.
+/// Parses [`keys::OCX_MIRRORS`] into `(host, MirrorConfig)` pairs; absent or empty is an empty list.
 ///
-/// An absent or empty value yields an empty list. A present-but-broken value is
-/// a hard error: silently degrading a forwarded `OCX_MIRRORS` to an identity map
-/// would route reads to the firewall-blocked origin instead of the mirror — the
-/// exact failure mode replace semantics exist to prevent.
-///
-/// Each per-host JSON value is fed to
-/// [`crate::mirror::parse_mirror_value`] — the same shared branch a
-/// `[mirrors]` TOML table entry parses through
-/// ([`crate::mirror::deserialize_mirrors_table`]) — so a string or
-/// `{registry?, index?}` object value parses identically regardless of source
-/// format.
+/// A broken value is a hard error: degrading it would route reads to the blocked origin.
 ///
 /// # Errors
 ///
-/// Returns [`MirrorConfigError::MalformedEnvJson`] when the value is not valid
-/// JSON, and [`MirrorConfigError::InvalidShape`] / [`MirrorConfigError::NonStringRoleValue`]
-/// (naming the offending host) when a per-host value has an unrecognized shape.
+/// [`MirrorConfigError::MalformedEnvJson`] for invalid JSON; [`MirrorConfigError::InvalidShape`] /
+/// [`MirrorConfigError::NonStringRoleValue`] for an unrecognized per-host value.
 ///
 /// [`MirrorConfigError::MalformedEnvJson`]: crate::mirror::MirrorConfigError::MalformedEnvJson
 /// [`MirrorConfigError::InvalidShape`]: crate::mirror::MirrorConfigError::InvalidShape
@@ -2246,7 +1140,7 @@ mod tests {
         }
     }
 
-    // ── W-2: `Env::add_list` ──────────────────────────────────────────────
+    // ── `Env::add_list` ──────────────────────────────────────────────────
 
     #[test]
     fn add_list_appends_behind_the_existing_value() {
@@ -2309,7 +1203,7 @@ mod tests {
         assert!(env.get(keys::OCX_INDEX).is_none());
     }
 
-    /// C-013 (#488): a child env carries the home the parent resolved.
+    /// A child env carries the home the parent resolved.
     ///
     /// `--clean` strips `HOME` as well, so a child that inherits no `OCX_HOME`
     /// resolves `~/.ocx` from the passwd database — a different store than the
@@ -2428,8 +1322,8 @@ mod tests {
 
     #[test]
     fn apply_ocx_config_sets_ocx_global_when_set() {
-        // W2-P3 (adr_global_toolchain_tier.md §Decision 2, C2.2): `--global`
-        // is resolution-affecting, so `apply_ocx_config` MUST forward it to a
+        // `--global` (item 2, `adr_global_toolchain_tier.md` § Decisions (binding)) is
+        // resolution-affecting, so `apply_ocx_config` MUST forward it to a
         // child ocx as `OCX_GLOBAL=1` when set, and remove any inherited
         // value when unset (so a stale parent-shell export cannot beat the
         // outer ocx's parsed state). This plumbing is REAL (not a stub) — the
@@ -2466,7 +1360,7 @@ mod tests {
 
     #[test]
     fn apply_ocx_config_never_writes_the_lazy_keys() {
-        // C-006: `OCX_LAZY_MODE` / `OCX_LAZY_REPORT` are NOT
+        // `OCX_LAZY_MODE` / `OCX_LAZY_REPORT` are NOT
         // resolution-affecting — they change *when* content materializes,
         // never *which* digest resolves — so they are absent from
         // `OcxConfigView` and a child must not receive them as forwarded
@@ -2517,7 +1411,7 @@ mod tests {
         assert!(env.get(keys::OCX_INDEX).is_none(), "stale OCX_INDEX must be cleared");
     }
 
-    /// C-036: the conventional `env://` key variable is on the credential list.
+    /// The conventional `env://` key variable is on the credential list.
     ///
     /// The scrub test below iterates `CREDENTIAL_KEYS`, so it would stay green
     /// with this entry removed — it would simply test one variable fewer. The
@@ -2532,7 +1426,7 @@ mod tests {
         );
     }
 
-    /// C-066: `OCX_ANNOUNCE_GIT_TOKEN` is a credential; its sibling
+    /// `OCX_ANNOUNCE_GIT_TOKEN` is a credential; its sibling
     /// `OCX_ANNOUNCE_GIT_USERNAME` is not.
     ///
     /// Both polarities in **one** function, so a builder cannot ship half the
@@ -2811,7 +1705,7 @@ mod tests {
         );
     }
 
-    /// ocx-sh/ocx#400 — the consent opt-out survives the hop into a child ocx.
+    /// The consent opt-out survives the hop into a child ocx.
     ///
     /// `ocx exec --clean` composes its child from [`Env::clean`](crate::env::Env::clean), so a script
     /// it runs that itself calls `ocx pull` sees only what this function wrote.
@@ -2848,7 +1742,7 @@ mod tests {
         );
     }
 
-    /// ocx-sh/ocx#400 — an `ocx exec --no-consent` reaches the nested ocx a
+    /// An `ocx exec --no-consent` reaches the nested ocx a
     /// child launches, and an `ocx exec --consent` does not clear an inherited
     /// refusal.
     ///
@@ -3565,10 +2459,10 @@ mod tests {
     /// A bare name the composed PATH cannot resolve is an error, not the bare
     /// name handed back for `execvp` to look up against the **ambient** PATH.
     ///
-    /// Inverted from the pre-C-009 assertion this replaces, following
+    /// Inverted from the earlier assertion this replaces, following
     /// `interface_shim_names_refuses_the_literal_ocx_name`: the old test
-    /// asserted exactly the fallback C-009 deletes, so keeping it would have
-    /// pinned the escape the contract exists to close.
+    /// asserted exactly the fallback this contract deletes, so keeping it
+    /// would have pinned the escape the contract exists to close.
     #[test]
     fn resolve_command_errors_when_a_bare_name_does_not_resolve() {
         let mut env = Env::clean();
@@ -3645,9 +2539,9 @@ mod tests {
         );
     }
 
-    // ── C-008: `OCX_TOOLCHAIN_DIR` on the child env ────────────────────────
+    // ── `OCX_TOOLCHAIN_DIR` on the child env ────────────────────────────
 
-    /// C-008: a resolved `toolchain_dir` travels to a child ocx, because it
+    /// A resolved `toolchain_dir` travels to a child ocx, because it
     /// moves `<home>/toolchain/links/<group>/<entry>` and is therefore
     /// resolution-affecting.
     #[test]
@@ -3666,7 +2560,7 @@ mod tests {
         );
     }
 
-    /// C-008: the `None` arm is **load-bearing**, not symmetry for its own
+    /// The `None` arm is **load-bearing**, not symmetry for its own
     /// sake — without the remove, a stale `OCX_TOOLCHAIN_DIR` exported into the
     /// parent shell survives into every child and beats the outer ocx's parsed
     /// state, so the two frames of one launch read two different trees.
@@ -3687,21 +2581,21 @@ mod tests {
         );
     }
 
-    // ── C-009 / C-069 fixtures ─────────────────────────────────────────────
+    // ── resolve_command / trampoline-refusal fixtures ───────────────────────
 
     /// An executable POSIX body carrying [`TRAMPOLINE_MARKER`] on its second
-    /// line, exactly where C-028's generated trampoline puts it.
+    /// line, exactly where a real generated trampoline puts it.
     #[cfg(unix)]
     fn write_trampoline(dir: &std::path::Path, name: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
         std::fs::write(
             &path,
-            // The five-line C-028 shape WP-6 actually emits, including RUL-13's
-            // single-quoted `__ocx_binary` assignment. A four-line fixture
-            // spelling `${OCX_BINARY_PIN:-ocx}` would be a body this codebase
-            // no longer produces, and every C-069 row here would then be
-            // measured against a shape that cannot occur on disk.
+            // The five-line shape the launcher generator actually emits,
+            // including its single-quoted `__ocx_binary` assignment. A four-line
+            // fixture spelling `${OCX_BINARY_PIN:-ocx}` would be a body this
+            // codebase no longer produces, and every trampoline test here would
+            // then be measured against a shape that cannot occur on disk.
             format!(
                 "#!/bin/sh\n{TRAMPOLINE_MARKER}\nunset OCX_GLOBAL OCX_PROJECT\n\
                  __ocx_binary='/home/ocx/bin/ocx'\n\
@@ -3713,9 +2607,9 @@ mod tests {
         path
     }
 
-    // ── C-009: the fallible `resolve_command` ──────────────────────────────
+    // ── the fallible `resolve_command` ──────────────────────────────────────
 
-    /// C-009: a bare name a composed `PATH` directory provides resolves to that
+    /// A bare name a composed `PATH` directory provides resolves to that
     /// file's absolute path — the happy path the fallible signature keeps.
     #[cfg(unix)]
     #[test]
@@ -3735,7 +2629,7 @@ mod tests {
         assert!(resolved.is_absolute(), "the answer is a path, never the bare name back");
     }
 
-    /// C-009: the `NotFound` error **names the search space it walked**, so a
+    /// The `NotFound` error **names the search space it walked**, so a
     /// user can see which directories were actually consulted.
     #[cfg(unix)]
     #[test]
@@ -3768,7 +2662,7 @@ mod tests {
         );
     }
 
-    /// C-009: a **path-bearing** command keeps today's behaviour — including
+    /// A **path-bearing** command keeps today's behaviour — including
     /// the fall-through when the lookup misses. Only the bare-name arm changed.
     ///
     /// Every fixture is absolute or a name that cannot exist, so the answer
@@ -3802,7 +2696,7 @@ mod tests {
         }
     }
 
-    /// C-009: no `PATH` key at all is an empty search space, never an ambient
+    /// No `PATH` key at all is an empty search space, never an ambient
     /// fallback and never a panic.
     ///
     /// The probe is **`sh`**, not a name that exists nowhere: this test's whole
@@ -3829,8 +2723,8 @@ mod tests {
         );
     }
 
-    /// D-V15 (CWE-426), Block B: a `PATH` of nothing but empty segments is
-    /// **`None`**, never `Some("")`.
+    /// A `PATH` of nothing but empty segments is
+    /// **`None`**, never `Some("")` (CWE-426).
     ///
     /// Asserted on `Env::lookup_path` directly — the test module is this
     /// module, so the private helper is callable and the property needs no
@@ -3918,8 +2812,8 @@ mod tests {
         );
     }
 
-    /// D-V15 (CWE-426): an **empty `PATH` segment** means the current directory
-    /// on Unix, and it is dropped from the lookup copy before the search.
+    /// An **empty `PATH` segment** means the current directory
+    /// on Unix, and it is dropped from the lookup copy before the search (CWE-426).
     ///
     /// Asserted through `NotFound`'s `searched`, which the resolver derives
     /// from the very value it hands to `which_in` — so an unfiltered `PATH`
@@ -3972,7 +2866,7 @@ mod tests {
         );
     }
 
-    /// C-009: three things on `PATH` that carry the right *name* but cannot be
+    /// Three things on `PATH` that carry the right *name* but cannot be
     /// executed — a directory, a non-executable file, and a broken symlink —
     /// are each `NotFound`, never an answer.
     #[cfg(unix)]
@@ -4006,14 +2900,14 @@ mod tests {
         }
     }
 
-    // ── C-010: `resolve_command_excluding` ─────────────────────────────────
+    // ── `resolve_command_excluding` ──────────────────────────────────────────
     //
-    // Every test below was written from C-010 against the stub, not from the
-    // implementation: while `Env::lookup_path_excluding` was WP-2's one
-    // `unimplemented!()` each of them was an honest panic-red, so none of them
-    // can have been shaped to fit whatever the body turned out to do.
+    // Every test below was written against the exclusion contract before the
+    // implementation existed: while `Env::lookup_path_excluding` was still an
+    // `unimplemented!()` stub each of them was an honest panic-red, so none of
+    // them can have been shaped to fit whatever the body turned out to do.
 
-    /// C-010: the excluded directory is not consulted, and the answer comes
+    /// The excluded directory is not consulted, and the answer comes
     /// from elsewhere on `PATH`.
     #[cfg(unix)]
     #[test]
@@ -4039,7 +2933,7 @@ mod tests {
         );
     }
 
-    /// C-010, **the load-bearing invariant**: `excluded` is removed from the
+    /// **The load-bearing invariant**: `excluded` is removed from the
     /// *lookup copy* of `PATH` only. This env's own `PATH` must be
     /// byte-identical after the call, because a tool that spawns a sibling tool
     /// still resolves it through a trampoline.
@@ -4063,7 +2957,7 @@ mod tests {
         );
     }
 
-    /// C-010: an empty exclusion set behaves exactly as
+    /// An empty exclusion set behaves exactly as
     /// [`Env::resolve_command`].
     #[cfg(unix)]
     #[test]
@@ -4080,7 +2974,7 @@ mod tests {
         assert!(same_file(&resolved, &tool), "got {}", resolved.display());
     }
 
-    /// C-010: excluding a directory that is not on `PATH` is a no-op, never an
+    /// Excluding a directory that is not on `PATH` is a no-op, never an
     /// error.
     #[cfg(unix)]
     #[test]
@@ -4098,7 +2992,7 @@ mod tests {
         assert!(same_file(&resolved, &tool), "got {}", resolved.display());
     }
 
-    /// C-010: excluding **every** segment is `NotFound` — never a panic and
+    /// Excluding **every** segment is `NotFound` — never a panic and
     /// never an ambient fallback to the bare name.
     ///
     /// The probe is **`sh`** for the reason
@@ -4131,7 +3025,7 @@ mod tests {
         );
     }
 
-    /// C-010 ∧ C-069, the belt the two-guard design rests on: a directory that
+    /// The belt the two-guard design rests on: a directory that
     /// **survives** the segment-exact exclusion answers with a trampoline, and
     /// the refusal catches it.
     ///
@@ -4170,16 +3064,16 @@ mod tests {
         );
     }
 
-    // ── C-069: the trampoline-identity refusal ─────────────────────────────
+    // ── the trampoline-identity refusal ─────────────────────────────────────
 
-    /// C-069 / D-V1, **the input where only this guard defends**: a *foreign*
+    /// **The input where only this guard defends**: a *foreign*
     /// home's trampoline on the lookup `PATH`.
     ///
-    /// C-010's exclusion set can only ever name *this* invocation's own homes,
-    /// so a second project's `<home>/toolchain/active/bin` on the same `PATH` is a
-    /// directory the exclusion structurally cannot name. Under C-010 alone the
-    /// invocation loops A → B → A forever, one full compose per hop, with no
-    /// error and no depth counter.
+    /// The caller's exclusion set can only ever name *this* invocation's own
+    /// homes, so a second project's `<home>/toolchain/active/bin` on the same
+    /// `PATH` is a directory the exclusion structurally cannot name. Under the
+    /// exclusion alone the invocation loops A → B → A forever, one full compose
+    /// per hop, with no error and no depth counter.
     ///
     /// Kept a **unit** case on purpose: the acceptance form of this is an
     /// unbounded re-exec loop that hangs rather than fails, because
@@ -4209,14 +3103,14 @@ mod tests {
         );
     }
 
-    /// C-069 / finding S-1: a **symlink** on `PATH` pointing at a trampoline is
+    /// A **symlink** on `PATH` pointing at a trampoline is
     /// refused, and the refusal judges the *link* path.
     ///
     /// `which` answers with the uncanonicalized path it walked, so the
     /// predicate is handed a symlink; `std::fs::metadata` and `File::open` both
     /// follow it, which is why it fires today. Swapping either for
     /// `symlink_metadata` — the natural "harden this against link tricks" edit
-    /// — makes the answer "not a regular file" and silently disarms C-069 for
+    /// — makes the answer "not a regular file" and silently disarms this predicate for
     /// exactly the aliased-directory class `remove_segment` cannot strip. That
     /// is the defect [pyenv#2696](https://github.com/pyenv/pyenv/issues/2696)
     /// shipped, and nothing else in this file pins it.
@@ -4251,14 +3145,14 @@ mod tests {
         );
     }
 
-    /// C-069 / finding W-1: a body **longer than [`TRAMPOLINE_PROBE_BYTES`]**
+    /// A body **longer than [`TRAMPOLINE_PROBE_BYTES`]**
     /// is still refused when the marker sits inside the probed head — the deep
-    /// checkout case, where C-028's baked absolute project root pushes the body
-    /// past 256 bytes.
+    /// checkout case, where a trampoline's baked absolute project root pushes
+    /// the body past 256 bytes.
     ///
     /// `#[cfg(unix)]` like every other body-content row here: the probe window
     /// is the POSIX `trampoline_signal` only. The Windows half is the `.exec`
-    /// sidecar and has no content check at all (D-V15), so a shell body there
+    /// sidecar and has no content check at all, so a shell body there
     /// is not a trampoline no matter where its marker sits — the row would
     /// assert something the platform does not claim.
     #[cfg(unix)]
@@ -4279,13 +3173,13 @@ mod tests {
         );
     }
 
-    /// C-069 / finding W-1, the other half: a marker sitting **beyond** the
+    /// The other half of the previous test: a marker sitting **beyond** the
     /// probe window is **not** refused.
     ///
     /// This is the row that pins the **bound**, so the fixture has to be one
     /// only the bound can answer: line *one* outruns
     /// [`TRAMPOLINE_PROBE_BYTES`], and the marker sits on line two — the exact
-    /// position C-028 emits it at and the anchor accepts. The probed prefix
+    /// position a real trampoline emits it at and the anchor accepts. The probed prefix
     /// therefore holds no `\n` at all, `nth(1)` is `None`, and the file is not
     /// a trampoline. Widen the constant and this test goes red, which is the
     /// whole point of it.
@@ -4295,9 +3189,9 @@ mod tests {
     /// widened to a gigabyte, green with the bounded read deleted outright —
     /// and would pin nothing here.
     ///
-    /// Recorded as the constraint WP-6 must honour when it emits the
-    /// trampoline body: the marker has to land within the first
-    /// [`TRAMPOLINE_PROBE_BYTES`] bytes, which is why C-028 puts it on line
+    /// Recorded as the constraint the trampoline body generator must honour
+    /// when it emits the body: the marker has to land within the first
+    /// [`TRAMPOLINE_PROBE_BYTES`] bytes, which is why it puts the marker on line
     /// two, ahead of the line carrying the absolute project root. Together with
     /// the test above, this is what stops a future swap to a whole-file read
     /// silently disarming the guard for deep project roots, and a future
@@ -4315,11 +3209,11 @@ mod tests {
 
         assert!(
             !is_ocx_trampoline(&path),
-            "the probe reads a bounded prefix; WP-6 must emit the marker inside it"
+            "the probe reads a bounded prefix; the trampoline body must emit the marker inside it"
         );
     }
 
-    /// E-21 / T-12, the positive control for the row above: the same anchor
+    /// The positive control for the row above: the same anchor
     /// still refuses a real trampoline whose baked root is **deep**.
     ///
     /// Without this, `a_launcher_whose_baked_path_spells_the_marker_is_not_refused`
@@ -4353,10 +3247,10 @@ mod tests {
 
     /// The anchor is the SECOND line specifically, not "an early line". A
     /// marker on line one or line three is not a trampoline signal, so a
-    /// future re-ordering of the C-028 body disarms the guard loudly.
+    /// future re-ordering of the body disarms the guard loudly.
     ///
     /// `#[cfg(unix)]`: the line-two anchor is the POSIX signal. On Windows the
-    /// signal is the `.exec` sidecar and no body is read (D-V15), so the three
+    /// signal is the `.exec` sidecar and no body is read, so the three
     /// negatives would pass vacuously and the control — which is what makes
     /// them mean anything — cannot.
     #[cfg(unix)]
@@ -4392,7 +3286,7 @@ mod tests {
         );
     }
 
-    /// C-069: a file that merely *contains* the marker somewhere in its body is
+    /// A file that merely *contains* the marker somewhere in its body is
     /// not refused. An unbounded `contains()` would refuse any ordinary tool
     /// that happens to embed the string in its data — and would allocate a
     /// 200 MB binary on every resolution.
@@ -4411,7 +3305,7 @@ mod tests {
         );
     }
 
-    /// C-069: a 0-byte file is not a trampoline, and the probe does not panic
+    /// A 0-byte file is not a trampoline, and the probe does not panic
     /// on it.
     #[test]
     fn a_zero_byte_file_is_not_a_trampoline() {
@@ -4422,7 +3316,7 @@ mod tests {
         assert!(!is_ocx_trampoline(&path), "an empty file carries no marker");
     }
 
-    /// C-069: an unreadable file is **not** refused — the predicate fails
+    /// An unreadable file is **not** refused — the predicate fails
     /// *open*, the deliberate inverse of `ocx launcher shim`'s `resolves_inside`.
     ///
     /// This predicate runs on every resolution including `/bin/sh`, so a
@@ -4460,7 +3354,7 @@ mod tests {
         );
     }
 
-    /// C-069 / D-V15(b): a **FIFO** on the resolution path must not block.
+    /// A **FIFO** on the resolution path must not block.
     ///
     /// `std::fs::metadata` decides `is_file()` before anything is opened, and
     /// that ordering is the whole guard: opening a FIFO for reading blocks
@@ -4486,7 +3380,7 @@ mod tests {
         );
     }
 
-    /// C-069 / D-V15(a), Windows: the sibling `.shim` sidecar of a lazy shim
+    /// Windows: the sibling `.shim` sidecar of a lazy shim
     /// slot is **not** a trampoline signal.
     ///
     /// Every trampoline `.exe` *and* every shim-slot `.exe` is a hardlink of
@@ -4506,7 +3400,7 @@ mod tests {
         );
     }
 
-    /// C-069, Windows: a sibling `.exec` sidecar **is** the trampoline signal.
+    /// Windows: a sibling `.exec` sidecar **is** the trampoline signal.
     #[cfg(windows)]
     #[test]
     fn a_sibling_exec_sidecar_is_a_trampoline() {
@@ -4521,7 +3415,7 @@ mod tests {
         );
     }
 
-    /// C-069 / D-V15(a), Windows: a resolved path whose **own** extension is
+    /// Windows: a resolved path whose **own** extension is
     /// `.exec` is refused.
     ///
     /// `which` treats any file carrying an extension as executable on Windows,

@@ -3,17 +3,7 @@
 
 //! The in-toto Statement: build, parse, and subject binding.
 //!
-//! The predicate is a [`RawValue`] on both sides — spliced verbatim when
-//! building, borrowed as the exact sub-slice when parsing. Never a
-//! `serde_json::Value`: this crate enables `serde_json`'s `preserve_order`, so a
-//! `Value` round-trip would preserve key order but still re-spell whitespace and
-//! numbers, defeating the byte-fidelity contract (D-b, checklist row 2).
-//!
-//! Items are `pub` rather than the ADR's `pub(crate)` for the reason
-//! [`crate::attest`] records against its constants: no in-crate caller
-//! exists until the verify and sign pipelines land, and `pub(crate)` trips
-//! `dead_code` under `warnings = "deny"` until one does. Each of those work
-//! packages narrows what it consumes as it lands.
+//! The predicate stays a [`RawValue`]: a `serde_json::Value` round-trip re-spells whitespace and numbers.
 
 use std::collections::BTreeMap;
 
@@ -30,19 +20,15 @@ use ocx_oci::Digest;
 /// An in-toto Statement, the DSSE payload OCX signs and verifies.
 #[derive(Debug, Clone)]
 pub(crate) struct Statement {
-    /// The `_type` URI. OCX writes v1 and accepts the closed v1/v0.1 allowlist.
+    /// The `_type` URI.
     pub statement_type: String,
-    /// What this Statement is about. Every entry is checked on verify.
     pub subject: Vec<Subject>,
-    /// The resolved predicate-type URI.
     pub predicate_type: String,
     /// The predicate document, byte-for-byte as it arrived.
     pub predicate: Box<RawValue>,
 }
 
-// `RawValue` implements no comparison of its own, and byte equality of the
-// predicate slice is exactly the contract this type carries — two Statements
-// are the same Statement when their predicate bytes are the same bytes.
+// By hand: `RawValue` has no `PartialEq`, and predicate byte equality is the contract.
 impl PartialEq for Statement {
     fn eq(&self, other: &Self) -> bool {
         self.statement_type == other.statement_type
@@ -66,21 +52,15 @@ impl Serialize for Statement {
     }
 }
 
-/// The one DigestSet key that binds. Hardcoded per checklist row 6.
+/// The one DigestSet key that binds. Hardcoded so a co-present weaker algorithm never binds.
 const SUBJECT_DIGEST_ALGORITHM: &str = "sha256";
 
 /// Subjects and algorithm names a refusal is allowed to name.
 ///
-/// A hostile Statement fits hundreds of thousands of subjects inside
-/// `MAX_STATEMENT_PAYLOAD_BYTES`, and both refusals name what they saw. The cap
-/// is applied where the diagnosis is built, not where it is rendered: the
-/// `--json` envelope carries the structured fields straight out and would
-/// bypass a renderer-side truncation (PKG-26).
+/// Applied where the diagnosis is built, not rendered, or `--json` carries a hostile subject list out untruncated.
 const MAX_REPORTED_SUBJECTS: usize = 8;
 
-/// The JSON shape on the wire. Field order here IS the emitted order, and
-/// `predicate` stays a `RawValue` on both sides so the document survives the
-/// round trip byte-for-byte.
+/// The JSON shape on the wire. Field order here IS the emitted order.
 #[derive(Serialize, Deserialize)]
 struct WireStatement {
     #[serde(rename = "_type")]
@@ -94,14 +74,9 @@ struct WireStatement {
 /// One in-toto subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Subject {
-    /// Informational only — [`Self::digest`] is the sole binding (checklist row 4).
+    /// Informational only — [`Self::digest`] is the sole binding.
     ///
-    /// Optional on the read path because in-toto v1's ResourceDescriptor makes
-    /// it optional, and cosign's own image-signature Statement omits it
-    /// entirely (`golden/keyless_bundle.json`). Required here it would refuse
-    /// every cosign-written signature at the parse, before the binding that
-    /// actually decides anything ran. Serialization is unaffected — the sign
-    /// side always names its subject.
+    /// Defaulted: cosign's image-signature Statement omits it, so requiring it refuses every cosign signature.
     #[serde(default)]
     pub name: String,
     /// Algorithm-keyed digest set, e.g. `{"sha256": "<hex, no prefix>"}`.
@@ -134,16 +109,7 @@ pub(crate) fn build(
     })
 }
 
-/// Builds the in-toto Statement a cosign **image signature** carries.
-///
-/// Not [`build`]: an image signature has no predicate document and no
-/// timestamp, so there is nothing to wrap and no clock to read. Its
-/// `predicateType` is [`COSIGN_SIGN_PREDICATE_TYPE`] and its predicate is the
-/// literal `{}` — the shape cosign v3.1.1 writes, captured in
-/// `test/tests/fixtures/golden/keyless_bundle.json`.
-///
-/// `subject_name` is informational (checklist row 4); the digest is the sole
-/// binding, and it is what a cosign verifier matches the artifact against.
+/// Builds the in-toto Statement a cosign image signature carries: predicate `{}`, no timestamp.
 pub(crate) fn build_image_signature(subject_name: &str, subject_digest: &Digest) -> Statement {
     let (algorithm, hex) = subject_digest.parts();
     Statement {
@@ -153,41 +119,23 @@ pub(crate) fn build_image_signature(subject_name: &str, subject_digest: &Digest)
             digest: BTreeMap::from([(algorithm.to_owned(), hex.to_owned())]),
         }],
         predicate_type: COSIGN_SIGN_PREDICATE_TYPE.to_owned(),
-        // The empty predicate. `expect` states the invariant: a literal `{}`
-        // cannot fail to parse as JSON.
         predicate: serde_json::value::RawValue::from_string(EMPTY_PREDICATE.to_owned()).expect("`{}` is valid JSON"),
     }
 }
 
 /// The predicate document a cosign image-signature Statement carries.
-///
-/// A named constant so a red/green mutation has a value to change without
-/// leaving a `use` unused — a mutation that kills the build instead of the test
-/// proves nothing about the test.
 const EMPTY_PREDICATE: &str = "{}";
 
-/// Parses a verified payload.
+/// Parses a verified payload; `payload` must already be bounded at `MAX_STATEMENT_PAYLOAD_BYTES`.
 ///
-/// The bytes a signature covers are always `DsseEnvelope::payload`, never a
-/// re-serialization of the returned [`Statement`] — the parse is tolerant and
-/// drops unknown fields, so re-serializing would hand a verifier different
-/// bytes than the ones that were signed. This is the sigstore-rs defect the
-/// ADR names, and the reason `predicate` stays a [`RawValue`].
-///
-/// **Preconditions.** `payload` is already bounded: it reaches here decoded
-/// from `DsseEnvelope::parse`, which enforces `MAX_STATEMENT_PAYLOAD_BYTES`
-/// (checklist row 16). A caller obtaining a payload by any other route owes
-/// that bound itself.
+/// Never re-serialize the result as signed bytes: the parse drops unknown fields.
 ///
 /// # Errors
 ///
-/// Rejects malformed JSON and any `_type` outside `ACCEPTED_STATEMENT_TYPES`.
+/// Malformed JSON or a `_type` outside `ACCEPTED_STATEMENT_TYPES`.
 pub(crate) fn parse(payload: &[u8]) -> Result<Statement, VerifyErrorKind> {
     let wire: WireStatement = serde_json::from_slice(payload).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
 
-    // Row 18, in the D-b form: a closed two-element allowlist, because cosign
-    // v3 still writes v0.1 and refusing it would refuse every cosign-produced
-    // attestation in existence.
     if !ACCEPTED_STATEMENT_TYPES.contains(&wire.statement_type.as_str()) {
         return Err(VerifyErrorKind::StatementTypeUnsupported {
             statement_type: wire.statement_type,
@@ -202,27 +150,20 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Statement, VerifyErrorKind> {
     })
 }
 
-/// Checks that some subject binds `target` by `sha256` (checklist rows 4/5/6).
+/// Checks that some subject binds `target` by `sha256`.
 ///
 /// # Errors
 ///
-/// Three distinct refusals: no subjects at all, no `sha256` key in any digest
-/// set, or a `sha256` present that names another artifact. Each names at most
-/// [`MAX_REPORTED_SUBJECTS`] of what it saw.
+/// No subjects, no `sha256` in any digest set, or a `sha256` naming another artifact.
 pub(crate) fn binds_subject(statement: &Statement, target: &Digest) -> Result<(), VerifyErrorKind> {
-    // Row 5: nothing to compare is a different diagnosis from comparing and
-    // disagreeing, so it gets its own refusal.
     if statement.subject.is_empty() {
         return Err(VerifyErrorKind::StatementSubjectAbsent);
     }
 
-    // Row 6: `sha256` is hardcoded. A co-present weaker algorithm never
-    // satisfies the check, so a collision cannot stand in for the binding.
     let mut found = Vec::new();
     let mut found_total = 0usize;
     for subject in &statement.subject {
         match subject.digest.get(SUBJECT_DIGEST_ALGORITHM) {
-            // Row 4: every subject is checked, not `subject[0]` alone.
             Some(hex) if target.algorithm().prefix() == SUBJECT_DIGEST_ALGORITHM && hex == target.hex() => {
                 return Ok(());
             }
@@ -242,8 +183,6 @@ pub(crate) fn binds_subject(statement: &Statement, target: &Digest) -> Result<()
             .iter()
             .flat_map(|subject| subject.digest.keys().cloned())
             .collect();
-        // `dedup` only drops adjacent repeats, and the same algorithm can
-        // appear under two subjects without being adjacent.
         algorithms.sort();
         algorithms.dedup();
         algorithms.truncate(MAX_REPORTED_SUBJECTS);

@@ -3,54 +3,9 @@
 
 //! Per-shell prompt-hook and wrapper emission.
 //!
-//! Two rules govern every arm:
-//!
-//! - **Append-only, never clobbered** (C-043). `PROMPT_COMMAND` in both its
-//!   string and its Bash 5.1 array form, `add-zsh-hook precmd` (never a
-//!   `precmd()` definition), a named `--on-event fish_prompt` function, and a
-//!   *wrapped* PowerShell `prompt` calling through to the captured previous
-//!   definition.
-//! - **No emitted snippet ever calls bare `ocx`** (C-045). The wrapper is named
-//!   `ocx` and `command -v ocx` finds functions, so a bare call inside the
-//!   emitted stream would run the wrapper inside a command substitution and
-//!   capture its output into the env stream. Every call site uses the resolved
-//!   absolute binary path.
-//!
-//! Nothing here emits a diagnostic. A-21 deletes the startup message channel
-//! outright: `ocx self activate` emits a valid, project-empty stream and no
-//! message at all, and every deferred message rides the first `--reconcile`
-//! run's own output, which the hook `eval`s.
-//!
-//! ## powerlevel10k's instant prompt
-//!
-//! p10k captures stdout and stderr for the whole of `.zshrc` and warns "Console
-//! output during zsh initialization detected" if anything lands in the buffer.
-//! direnv, mise and nvm are its own named recurring culprits
-//! (romkatv/powerlevel10k#1023), so it is worth stating where ocx does and does
-//! not sit in that class.
-//!
-//! **Startup is already silent, in two independent places.** No emitted body
-//! prints anything — `no_emitted_body_prints_a_startup_diagnostic` refuses
-//! `printf`, `echo`, `Write-Host`, `Write-Output` and `>&2` in every arm — and
-//! every shim that runs `self activate` at shell start discards the binary's
-//! stderr (`setup/shims.rs`, `2>/dev/null` on all four families). So the
-//! registration line contributes zero bytes to p10k's buffer, and there is
-//! nothing here to gate behind a quieter posture that is not already gated.
-//!
-//! **What can still land in the buffer is the FIRST PROMPT, not startup.** The
-//! deferred messages A-21 routes through the eval'd `--reconcile` stream —
-//! `activation.rs`'s not-activated hint, the direnv-yield line, the consent-strip
-//! line — are printed by the shell when `__ocx_prompt_hook` runs, and
-//! `add-zsh-hook precmd` appends, so a `.zshrc` that sources ocx's activation
-//! before p10k puts our precmd ahead of p10k's fd restore. Same output, one
-//! prompt later than the review that raised this assumed.
-//!
-//! That is an ordering property of the user's `.zshrc`, not an output-discipline
-//! property of this module, and the fix is to say so: users on
-//! `POWERLEVEL9K_INSTANT_PROMPT` order the ocx activation after p10k's preamble.
-//! Suppressing the messages instead would delete the one diagnostic channel A-21
-//! and C-050 deliberately keep — the channel that tells a user *why* their
-//! project is inert — to silence a warning about a line they need to read.
+//! Every registration appends to its hook point, never clobbers it. Never emit a bare `ocx`: the
+//! wrapper owns that name, so a command substitution would re-enter it.
+//! Never suppress the deferred messages: they tell a user why a project is inert.
 
 use std::path::{Path, PathBuf};
 
@@ -60,121 +15,36 @@ use ocx_config::shell::GRANT_SIGNALS;
 
 /// The temp-file template the emitted body hands `mktemp` for its stamp.
 ///
-/// `mktemp` and not a deterministic per-shell path: the stamp lives in a
-/// world-writable directory, and the checkpoint truncates it (`: >|`). A
-/// predictable name lets any local user pre-create it as a symlink and have the
-/// next shell truncate the target, and the obvious defence — `set -C` so the
-/// create fails on an existing path — converts that into a denial instead: no
-/// stamp means the guard's `-z` term fires and **every** prompt execs. `mktemp`
-/// creates with `O_EXCL` at mode 600 under a name an attacker cannot predict, so
-/// neither failure is reachable. The file it leaves behind is removed by
-/// [`POSIX_STAMP_CLEANUP`] / [`FISH_STAMP_CLEANUP`] when the shell exits.
+/// Never a fixed path: the checkpoint truncates the stamp, so a pre-planted symlink would get its target truncated.
 const STAMP_TEMPLATE: &str = "ocx-env-stamp.XXXXXXXX";
 
-/// The project file the guard tests for at the shell's **live** `$PWD`
-/// ([ocx-sh/ocx#397](https://github.com/ocx-sh/ocx/issues/397)).
+/// The project file the guard tests for at the shell's **live** `$PWD`.
 ///
-/// Every other file term in the guard is a path *baked in at emission time*,
-/// taken from the watch set the last reconcile recorded — and
-/// [`super::reconcile::watch_paths`] contributes the project tier only when a
-/// project **resolved**. So in a directory that had no `ocx.toml`, the guard
-/// names none of the files a project is made of, and creating one moves nothing
-/// the guard can see: `ocx init` (and the `ocx shell allow` after it) left the
-/// shell inert until the next `cd` or a new terminal. The `$PWD` term does not
-/// cover it either — the directory did not change, the project did.
-///
-/// This term is a **trigger, not a staleness member**. The fingerprint stays the
-/// one definition of *what* changed (C-019); the guard only decides *whether to
-/// exec*, which is why `$PWD` and [`YIELD_SIGNALS`] are already terms with no
-/// watch-set member of their own. A fire that turns out to change nothing costs
-/// one reconcile, which emits a checkpoint and goes quiet again.
-///
-/// Evaluated against the live `$PWD` rather than baked, so it needs no
-/// re-emission to follow the shell around. Absent reads as older than the stamp
-/// in every arm — `-nt` is false when the left path does not exist,
-/// `GetLastWriteTimeUtc` returns 1601 — so the common case is one `stat` by a
-/// builtin and no exec (C-044).
-///
-/// **Ceiling**: an `ocx.toml` appearing in an *ancestor* of `$PWD` still waits
-/// for the next `cd`. Walking the chain would put one `stat` per ancestor on
-/// every prompt to catch a case the `$PWD` term already catches a moment later.
-///
-/// elvish has no term here and needs none: it has no in-shell mtime, but its
-/// `ocx` wrapper clears the recorded directory after **every** ocx invocation,
-/// so `ocx init` and `ocx shell allow` already reconcile at its next prompt.
+/// Without it, an `ocx.toml` created in a project-less directory stays inert until the next `cd`.
+/// Ceiling: one appearing in an *ancestor* of `$PWD` still waits for the next `cd`.
 const PROJECT_FILE: &str = "ocx.toml";
 
-/// The bash/zsh shell-exit cleanup for the `mktemp` stamp.
+/// The bash/zsh shell-exit cleanup, or one stamp file per shell leaks where nothing reaps `$TMPDIR`.
 ///
-/// One temp file per shell start accumulates without bound where nothing reaps
-/// `$TMPDIR` — a tmux-heavy desktop, a container, an `ssh -t host 'bash -lc …'`
-/// loop. `command rm` and not `rm`, on C-045's reasoning: the emitted stream never
-/// calls a name a user function could own.
+/// `command rm`, not `rm`: the emitted stream never calls a name a user function could own.
 const POSIX_STAMP_CLEANUP: &str = "command rm -f \"${__ocx_stamp-}\" 2>/dev/null";
 
 /// The fish form of [`POSIX_STAMP_CLEANUP`].
 const FISH_STAMP_CLEANUP: &str = "command rm -f \"$__ocx_stamp\" 2>/dev/null";
 
-/// The offline switch every emitted reconcile call carries.
+/// The offline switch every emitted reconcile call carries, sparing a `reqwest` client per index source (22 vs 58 ms).
 ///
-/// The reconcile path is *forbidden* to touch the network — it composes through
-/// `PackageManager::offline_view` with `Materialization::LocalOnly`, because a
-/// prompt must never block on a registry — but without this flag the process
-/// still builds a `reqwest` client and seeds a TLS root store per configured
-/// index source on the way in. Measured on an empty `$OCX_HOME`, min of 25
-/// interleaved spawns: 22.2 ms with the flag against 58.2 ms without, over a
-/// 4.1 ms `ocx version` floor. The flag buys 36 ms per prompt fire and changes
-/// nothing the reconcile can observe.
-///
-/// It sits **before** the subcommand because `--offline` is a root flag on
-/// `ContextOptions` and is not declared `global`: `ocx self activate
-/// --reconcile --offline` exits 64 with "unexpected argument".
+/// It must precede the subcommand: `--offline` is a root flag, and after it the call exits 64.
 const OFFLINE: &str = "--offline";
 
-/// The live-session sentinels every arm folds into its recorded checkpoint and
-/// re-reads in its guard (A-36; addendum A-43 enumerates the guard's full term
-/// set and the rule a new term has to clear).
+/// The live-session sentinels every arm records in its checkpoint and re-reads in its guard.
 ///
-/// Mirrors, exactly, the environment variables [`super::coexistence::detect`]
-/// reads. It has to: the guard decides whether ocx is invoked at all, so a
-/// sentinel the detector honours and the guard cannot see is a yield that never
-/// happens. That is the shipped A-36 defect — the guard tested the carrier,
-/// `$PWD`, the stamp and the watch paths baked in at shell start, and none of
-/// those move when `DIRENV_DIR` appears mid-session, so the reconciler that
-/// would have yielded was never reached and ocx's project scope sat beside
-/// direnv's for the rest of the shell's life.
-///
-/// The guard compares a **recorded snapshot** against the live values, so it
-/// fires in both directions by construction: a sentinel appearing and a sentinel
-/// going away are the same inequality. Leaving a direnv-managed directory, or
-/// unloading it, recomposes ocx's scope on the very next prompt — the composed-
-/// again half A-36 needs, which a one-way "is direnv live?" test would miss.
-///
-/// The **raw values** are compared, never the yield verdict: this is a
-/// "something moved" tripwire, and `detect` — which additionally compares
-/// `DIRENV_DIR` against the resolved project directory — owns the decision. A
-/// `DIRENV_DIR` naming some other directory therefore costs one reconcile that
-/// changes nothing, which is the same price the `$PWD` term already pays for a
-/// `cd` outside any project.
-///
-/// Every read is a parameter expansion in every arm, so the term adds no process
-/// to the quiet path (C-044).
+/// Must mirror what [`super::coexistence::detect`] reads, or a sentinel it honours never triggers a yield.
 const YIELD_SIGNALS: [&str; 3] = ["DIRENV_DIR", "MISE_SHELL", "__MISE_ORIG_PATH"];
 
-// `GRANT_SIGNALS` (imported above) is the second such list, and the guard
-// treats it identically — a recorded snapshot compared against the live values
-// — only the *reason* differs: a yield sentinel says another tool went live, a
-// grant signal says the user consented mid-session
-// ([ocx-sh/ocx#442](https://github.com/ocx-sh/ocx/issues/442)). The shipped
-// defect was the A-36 shape exactly: the fingerprint folded `OCX_CONSENT_PATHS`
-// (A-13), but nothing the guard read moved when it was exported, so the binary
-// that would have noticed was never invoked. It stays a separate list rather
-// than folding into `YIELD_SIGNALS` because that one is pinned, by test, to
-// mirror `coexistence::detect` exactly (A-43 rule 1), and it lives in
-// `config::shell` because the fingerprint fold reads it too.
+// The guard compares `GRANT_SIGNALS` too, or an `OCX_CONSENT_*` export mid-session never runs ocx.
 
-/// `keys` as one bash/zsh word, `set -u`-safe throughout: every sentinel is
-/// unset in most shells, which is the common case, not the edge.
+/// `keys` as one bash/zsh word, `set -u`-safe since most sentinels are unset.
 fn posix_signal(keys: &[&str]) -> String {
     keys.iter()
         .map(|key| format!("${{{key}-}}"))
@@ -182,25 +52,12 @@ fn posix_signal(keys: &[&str]) -> String {
         .join("|")
 }
 
-/// The fish form of [`posix_signal`].
-///
-/// fish auto-splits any variable whose name ends in `PATH` into a genuine list
-/// — but it also *re-joins a path variable with `:`* in a quoted expansion, and
-/// both uses of this string are quoted (`set -g __ocx_yield "…"` in the
-/// checkpoint, `test "$__ocx_yield" != "…"` in the guard), so the rendering
-/// round-trips faithfully rather than losing the separator. Measured on fish
-/// 4.2.0: `__MISE_ORIG_PATH=/a:/b:/c` gives `count 3` and `"[$__MISE_ORIG_PATH]"`
-/// → `[/a:/b:/c]`; a plain (non-`PATH`) list is what joins with a space. An
-/// earlier revision of this comment claimed the space-join and waved it through
-/// as "stable, not faithful" — the stability argument holds regardless (one
-/// spelling produces both sides of the comparison), but the premise was wrong.
+/// The fish form of [`posix_signal`]; both uses are quoted, so fish's `:` re-join of a `*PATH` value round-trips.
 fn fish_signal(keys: &[&str]) -> String {
     keys.iter().map(|key| format!("${key}")).collect::<Vec<_>>().join("|")
 }
 
-/// The PowerShell form of [`posix_signal`]. `$env:X` is `$null` when
-/// unset and interpolates to the empty string, which is the same shape the other
-/// arms get from their default expansion.
+/// The PowerShell form of [`posix_signal`].
 fn power_shell_signal(keys: &[&str]) -> String {
     keys.iter()
         .map(|key| format!("$($env:{key})"))
@@ -208,97 +65,23 @@ fn power_shell_signal(keys: &[&str]) -> String {
         .join("|")
 }
 
-/// The elvish form of [`posix_signal`], as the tail of
-/// [`elvish_pwd_value`]: a leading `' '` separator per sentinel, compounded onto
-/// the value the checkpoint records. `$E:X` on an unset variable is the empty
-/// string, never an exception — the same property the guard's carrier read
-/// already relies on.
+/// The elvish form of [`posix_signal`], as the tail of [`elvish_pwd_value`].
 fn elvish_signal(keys: &[&str]) -> String {
     keys.iter().map(|key| format!("' '$E:{key}")).collect()
 }
 
-/// How every wrapper hands its post-command reconcile to the prompt hook.
+/// How every wrapper hands its post-command reconcile to the guarded prompt hook, so an idle `ocx` execs nothing.
 ///
-/// The wrapper does not carry a reconcile of its own: [`registration`] and
-/// [`wrapper`] are emitted together and only together, so the guarded function
-/// is in scope wherever this line is, and reusing it means the wrapper inherits
-/// the prompt's zero-exec guard instead of running an unconditional reconcile.
-/// A command that moved nothing then costs the wrapper nothing — measured
-/// 61.3 ms through the wrapper against 4.3 ms direct for `ocx version` before
-/// this, a 14.4x tax on every read-only ocx invocation. `ocx add` still
-/// reconciles, because it writes `ocx.toml`/`ocx.lock` and those are watch
-/// members, so the guard's own `-nt` term fires.
-///
-/// `typeset -f` / `functions -q` / `Test-Path function:` are builtins, so the
-/// quiet path stays exec-free. The existence test is not decoration: without it
-/// a user's every ocx invocation would print `command not found` should the two
-/// emissions ever come apart.
-///
-/// `typeset -f` and not `command -v`, on the same rule the registration guards
-/// follow: **the probe's lookup domain must be no wider than the thing it is
-/// probing for**. `command -v` resolves aliases, builtins and `$PATH`
-/// executables as well as functions, so an executable file named
-/// `__ocx_prompt_hook` anywhere on `$PATH` satisfies it — and here that is worse
-/// than a false "already registered", because the next line *runs* what was
-/// found. `typeset -f` answers "is there a shell function by exactly this name"
-/// and nothing else; verified in bash 5 and zsh 5 that a `$PATH` executable and
-/// an alias both leave it non-zero while a real function makes it zero. It is a
-/// builtin in both, and cheaper than `command -v` — no `$PATH` walk.
+/// `typeset -f`, not `command -v`, which also finds a `$PATH` file of that name that the next line would run.
 const POSIX_HOOK_CALL: &str = "if typeset -f __ocx_prompt_hook >/dev/null 2>&1; then __ocx_prompt_hook; fi";
 
-/// The PowerShell form of [`POSIX_HOOK_CALL`].
-///
-/// pwsh has no separately named prompt hook to call — its check is inlined in
-/// `function global:prompt`, and calling *that* would print a prompt — so
-/// [`power_shell_registration`] gives the check its own name, `__ocxReconcile`,
-/// and both the prompt and the wrapper call it. Preference variables are looked
-/// up through the scope chain, so the caller's `$ErrorActionPreference` shadow
-/// still covers the callee.
+/// The PowerShell form of [`POSIX_HOOK_CALL`]; the check has its own name because calling `prompt` would print one.
 const PWSH_HOOK_CALL: &str = "if (Test-Path function:global:__ocxReconcile) { __ocxReconcile }";
 
-/// Emit the per-prompt hook registration for `shell` (C-043, C-044, C-046).
+/// Emit the idempotent per-prompt hook registration for `shell`, or `None` where it has no hook point.
 ///
-/// `binary` is the resolved absolute path to `ocx` — never the name (C-045).
-/// `watch_paths` is the fingerprint watch set (C-019) the emitted body compares
-/// against its stamp, so an unchanged prompt **execs nothing at all** (C-044).
-///
-/// The emitted body is idempotent: re-sourcing an activation stream registers
-/// nothing a second time. It reads no configuration and no enablement variable
-/// — hook presence is decided once, at shell start, by the caller (C-042).
-///
-/// Returns `None` for an arm that registers nothing here: [`Shell::Batch`], the
-/// strict-POSIX family ([`Shell::Ash`], [`Shell::Ksh`], [`Shell::Dash`]) and
-/// [`Shell::Nushell`] — whose hook is inlined in its shim body instead, because
-/// nushell has no string `eval` (A-24).
-///
-/// [`Shell::Elvish`] hooks `$edit:before-readline` and is the one arm whose
-/// guard carries **no watch-set term**: elvish 0.21 exposes no file timestamp
-/// (`os:stat` documents `name`/`size`/`type`/`perm`/`special-modes`/`sys` and
-/// states that timestamps are not exposed) and has no clock module, so there is
-/// nothing to compare a stamp against. Its guard is carrier-and-`$pwd` only, and
-/// the missing term is covered by the wrapper invalidating the recorded
-/// directory. Its idempotency keys on the shell rather than the process, so a
-/// shell that replaced its own image with `exec elvish` still registers.
-///
-/// Every arm's "am I already registered?" probe resolves in the namespace it is
-/// asking about and no wider — a shell function (`typeset -f`, `functions -q`), a
-/// global variable (`Test-Path variable:`), or a parsed parameter declaration on
-/// the closure itself (elvish). A probe that answers a broader question than the
-/// one asked reads as "already registered" for something that is not our
-/// registration, and the shell then runs unhooked for its whole life with no
-/// diagnostic; both forms of that shipped once, and
-/// `every_existence_probe_is_scoped_to_the_namespace_it_asks_about` is the guard.
-///
-/// Binding constraints on the body: every ledger read uses default expansion
-/// (`${__OCX_ENV_STATE-}` and per-shell equivalents), because the carrier is
-/// unset on the first prompt by construction (C-046); `$?` is preserved across
-/// the hook (C-043); the pwsh body is wrapped in `try { … } catch { }` with
-/// `$ErrorActionPreference` / `$PSNativeCommandUseErrorActionPreference` set in
-/// the hook's own scope and restored in a `finally`, and `$?` /
-/// `$global:LASTEXITCODE` captured on entry and restored on exit (A-22); a
-/// restricted shell (`rbash` / `rksh`) detects and silently no-ops, because it
-/// forbids both setting `PATH` and invoking any command containing `/`; and the
-/// hook path never fails a prompt (C-051).
+/// `binary` is the resolved absolute path; a restricted shell (`rbash`) no-ops.
+/// Every "already registered?" probe stays scoped to the namespace it asks about, or the shell runs unhooked for life.
 pub fn registration(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Option<String> {
     #[cfg(any(test, feature = "__testing"))]
     inject_latency_fault();
@@ -309,54 +92,14 @@ pub fn registration(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Opt
         Shell::Fish => Some(fish_registration(&binary, watch_paths)),
         Shell::PowerShell => Some(power_shell_registration(&binary, watch_paths)),
         Shell::Elvish => Some(elvish_registration(&binary)),
-        // Batch hosts no prompt hook at all. Ash, ksh and dash have no
-        // append-safe prompt-hook point: ksh93's only per-prompt seam is a
-        // `${ …; }` embedded in the user's own `PS1`, which cannot be appended
-        // to without rewriting it.
-        //
-        // Nushell's hook is a `++` append onto
-        // `($env.config.hooks?.env_change?.PWD? | default [])` inlined in the
-        // shim body (A-24) — it cannot come from here, because nushell has no
-        // string `eval` and the shim bodies carry no install-time substitution.
+        // No append-safe hook point; nushell's hook is inlined in its shim.
         Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Nushell | Shell::Batch => None,
     }
 }
 
-/// Re-emit the per-prompt gate for `shell` with a **new** watch set
-/// ([ocx-sh/ocx#347](https://github.com/ocx-sh/ocx/issues/347)).
+/// Re-emit only the guarded function for `shell` with a **new** watch set, never the one-time setup.
 ///
-/// [`registration`] bakes one newer-than term per watch path into the hook body
-/// at shell start, and that frozen list is what decides whether ocx is invoked
-/// at all. `run_reconcile` recomputes the watch set on every prompt, but until
-/// this existed it had no way to tell the shell — so a project entered
-/// mid-session composed once, on the `$PWD` term, and its `ocx.toml`/`ocx.lock`
-/// were never watched again. Editing them, or running `ocx add`, then reached no
-/// prompt at all until the user left the directory and came back.
-///
-/// **Only the guarded function is redefined**, never the registration around it.
-/// The shell is already registered — `PROMPT_COMMAND`, `precmd`, the `fish_prompt`
-/// event, the wrapped `prompt` all still call the same name — and every arm's
-/// registration is idempotent by construction (`if ! typeset -f __ocx_prompt_hook`,
-/// `if not functions -q`, the `-notmatch '__ocxReconcile'` probe), so re-emitting
-/// a *registration* would be a no-op and change nothing. It is also the one-time
-/// setup: the `mktemp` stamp, the `EXIT` trap, pwsh's three `$global:` seeds.
-/// Redefining a function in place, by contrast, is exactly what every arm here
-/// supports — bash/zsh replace the definition, fish rebinds the named
-/// `--on-event` handler, and pwsh's `prompt` resolves `__ocxReconcile` by name at
-/// call time.
-///
-/// **The new list takes effect one prompt later, and that is not a hole.** The
-/// prompt that reaches this call has already reconciled — that is *why* it is
-/// here — so the environment is correct as of now; what the re-emission buys is
-/// that the *next* prompt gates on the set this one discovered. The alternative,
-/// a shell-side loop over a `__ocx_watch` variable, would put an exec-free but
-/// per-prompt loop into nine hand-written gates for a delay of exactly zero
-/// prompts in the only case that differs.
-///
-/// Returns `None` for every arm whose guard carries no watch-set term — all of
-/// [`registration`]'s `None` arms, plus [`Shell::Elvish`], whose gate is
-/// carrier-and-`$pwd` only because elvish exposes no file timestamp. Those arms
-/// have no baked list to go stale.
+/// Without it a project entered mid-session is never watched. `None` where the guard has no watch-set term.
 pub fn redefinition(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Option<String> {
     let binary = binary.to_string_lossy();
     match shell {
@@ -367,18 +110,12 @@ pub fn redefinition(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Opt
             &single_quoted_doubled(&binary),
             watch_paths,
         )),
-        // Elvish's guard has no watch-set term to refresh (see [`registration`]);
-        // the rest host no prompt hook at all.
         Shell::Elvish | Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Nushell | Shell::Batch => None,
     }
 }
 
-/// The bash/zsh form of [`redefinition`].
-///
-/// Keeps the restricted-shell arm the two registrations carry. It is
-/// unreachable — `rbash` never got a hook to redefine — but a POSIX snippet this
-/// module emits either stands down in a restricted shell or it does not, and one
-/// arm quietly deciding otherwise is how that invariant stops being true.
+/// The bash/zsh form of [`redefinition`]; keeps the unreachable restricted-shell arm so every POSIX
+/// emit stands down in `rbash`.
 fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -> String {
     let quoted = posix_single_quoted(binary);
     format!(
@@ -392,21 +129,9 @@ fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -
     )
 }
 
-/// Testing-only latency fault injection for the C-044 benchmark gate.
+/// Testing-only latency fault for the shell-latency gate, in milliseconds from `__OCX_TESTING_LATENCY_INJECT_MS`.
 ///
-/// C-044 asks the gate's red state to come from extra work **inside the
-/// measured process**, and this is that seam. It sits in [`registration`] on
-/// purpose rather than in `main`: the delay is then reachable only when a hook
-/// is genuinely emitted, so a gate aimed at a command that emits none — `ocx
-/// version`, or the same command with `--no-hook` — records no delay at all and
-/// the `--expect-fail` run that demands a red fails instead. A `time.sleep` in
-/// the harness could not tell those apart; that is the whole defect this
-/// replaces (`test/bench/shell_latency.py`).
-///
-/// The blocking sleep is deliberate — the gate measures wall clock, so the
-/// injected fault has to consume some. It is unreachable in a release artifact:
-/// the `__testing` feature is never enabled outside the acceptance build.
-/// Unset, empty or unparseable is the shipped behaviour, no delay.
+/// In [`registration`], not `main`, so a gate aimed at a command that emits no hook cannot fake its red.
 #[cfg(any(test, feature = "__testing"))]
 fn inject_latency_fault() {
     let Some(raw) = std::env::var_os("__OCX_TESTING_LATENCY_INJECT_MS") else {
@@ -420,34 +145,15 @@ fn inject_latency_fault() {
     }
 }
 
-/// The freshness checkpoint a **successful** reconcile emits (C-044, D2).
+/// The freshness checkpoint a **successful** reconcile emits, or `None` for arms with no hook.
 ///
-/// Refreshes the shell-side stamp and records the directory the reconcile ran
-/// for, so the next prompt's zero-exec guard is quiet until something actually
-/// moves. It is emitted by `ocx self activate --reconcile` rather than written
-/// unconditionally into the hook body, and that placement is the whole point: a
-/// run that degraded emits nothing at all, so the stamp stays stale and the next
-/// prompt **retries**. A body-side refresh would bump the stamp past every watch
-/// member and latch the shell into a stale environment until some watched file's
-/// mtime happened to move again.
-///
-/// Returns `None` for every arm that hosts no hook — there is no stamp to
-/// refresh where nothing reconciles.
-///
-/// It also carries the C-044 latency fault-injection seam for the **reconcile**
-/// half of the gate, on the same reasoning that puts the other one in
-/// [`registration`]: a checkpoint is emitted by `--reconcile` and by nothing
-/// else, so a gate aimed at the wrong command records no delay and its
-/// `--expect-fail` run fails instead of certifying a measurement of something
-/// else. Two seams rather than one because the two budgets are asserted
-/// separately, and an injection that could only red the startup gate would leave
-/// the reconcile gate's red state undemonstrated.
+/// Emitted by the reconcile, never the hook body, or a failed run latches the shell into a stale environment.
+/// Carries a second latency seam: the two budgets are asserted separately and one seam cannot red both.
 pub fn checkpoint(shell: Shell) -> Option<String> {
     #[cfg(any(test, feature = "__testing"))]
     inject_latency_fault();
     Some(match shell {
-        // `>|` overrides a user's `noclobber`; failing to refresh costs a
-        // redundant exec next prompt and never correctness.
+        // `>|` overrides a user's `noclobber`.
         Shell::Bash | Shell::Zsh => format!(
             "if [ -n \"${{__ocx_stamp-}}\" ]; then : >| \"${{__ocx_stamp-}}\" 2>/dev/null || true; fi\n\
              __ocx_pwd=$PWD\n\
@@ -473,46 +179,15 @@ pub fn checkpoint(shell: Shell) -> Option<String> {
             yielded = power_shell_signal(&YIELD_SIGNALS),
             granted = power_shell_signal(&GRANT_SIGNALS)
         ),
-        // Elvish keeps its whole checkpoint in the process environment rather
-        // than in a shell variable: the emitted stream reaches the shell through
-        // `eval`, and an `eval` unit's `set` cannot be relied on to reach a
-        // variable in the caller's scope, while `set-env` writes the real
-        // environment from anywhere. There is no stamp to refresh — elvish has
-        // no in-shell mtime to compare one against (see [`registration`]) — so
-        // the recorded directory, its pid and the yield sentinels are the whole
-        // of it ([`elvish_pwd_value`]).
-        //
-        // It records the pid alongside the directory because an environment
-        // variable is inherited and a bare directory would read as
-        // already-reconciled in a child elvish standing in the same place — the
-        // one arm where that could happen.
         Shell::Elvish => format!("set-env {ELVISH_PWD_KEY} {value}", value = elvish_pwd_value()),
         Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Nushell | Shell::Batch => return None,
     })
 }
 
-/// Emit the `ocx` wrapper function for `shell` (C-045).
+/// Emit the `ocx` wrapper function for `shell`, or `None` wherever [`registration`] is.
 ///
-/// A latency optimization for same-command-line chaining, **never the
-/// correctness floor**: `ocx add --global foo && foo` sees the new environment
-/// within one command line, with no prompt in between. Every way of escaping
-/// the function name — an absolute-path invocation, `command ocx`, `\ocx`,
-/// `$(which ocx)`, any invocation from a script, a Makefile or a subshell —
-/// degrades to next-prompt correctness rather than breaking.
-///
-/// A-35 — the body captures the real binary's exit status **immediately after
-/// it returns, before running any other command including the reconcile call**,
-/// and returns exactly that value. An optimization that silently changes `$?`
-/// breaks the one case the wrapper exists to serve.
-///
-/// The post-command reconcile is the prompt hook's, called by name and behind
-/// the hook's own guard ([`POSIX_HOOK_CALL`], [`PWSH_HOOK_CALL`]) — so an ocx
-/// command that moved no watch member costs the wrapper nothing at all, and the
-/// wrapper carries no second copy of the guard to drift from the first.
-///
-/// Returns `None` for every arm [`registration`] returns `None` for: a wrapper
-/// without a hook has nothing to call, no stamp to refresh and no next-prompt
-/// floor to fall back on.
+/// A latency optimization, never the correctness floor. It must return the binary's own status,
+/// captured before the reconcile, or `ocx add … && next` breaks.
 pub fn wrapper(shell: Shell, binary: &Path) -> Option<String> {
     let binary = binary.to_string_lossy();
     match shell {
@@ -527,39 +202,14 @@ pub fn wrapper(shell: Shell, binary: &Path) -> Option<String> {
 // ── POSIX arms (bash, zsh) ───────────────────────────────────────────────
 
 fn bash_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
+    // `PROMPT_COMMAND` is probed apart from the function guard: an owner's overwrite drops our call
+    // while the function stays defined.
+    // ponytail: substring, not element equality, so a function named `…__ocx_prompt_hook…` suppresses it.
     let quoted = posix_single_quoted(binary);
+    // `EXIT` is trapped only when free: `trap` replaces, so taking it would drop the user's handler.
     let body = posix_hook_body(&quoted, "bash", watch_paths);
-    // `declare -p` names the variable's attributes, which is the only way to
-    // tell a Bash 5.1 array `PROMPT_COMMAND` from the string form; the fork it
-    // costs happens once per shell start, never per prompt. The `while` strips
-    // trailing separators before concatenating: a value already ending in `;`
-    // would otherwise produce `…;;__ocx_prompt_hook`, the Warp#5219 syntax
-    // error, and one ending in whitespace the `; ;` form of the same bug.
-    //
-    // The stamp cleanup goes on `EXIT` only when that slot is free. bash has no
-    // append-safe exit hook — `trap` replaces whatever is there, and `trap -p`
-    // gives back a re-executable line whose command would have to be re-parsed to
-    // append to — so C-043's append-only rule is honoured by standing down
-    // instead: a user who owns `EXIT` keeps it, and their shell leaks the one
-    // empty file it leaks today. The `$(...)` costs one fork at shell start,
-    // beside the two already there, and none per prompt.
-    //
-    // Two guards, each over its own subject (#347). The function guard covers
-    // the one-time setup — the `mktemp` fork and the `EXIT` trap must not be
-    // repeated. The registration guard is the `*__ocx_prompt_hook*` arm, and it
-    // asks about `PROMPT_COMMAND` itself, because that is the thing a prompt
-    // owner overwrites. Any `PROMPT_COMMAND=<theirs>` — an assigning prompt
-    // framework, or one line in a `.bashrc` — drops our call while leaving the
-    // function defined, so a guard on the function reads "registered" for a shell
-    // that no longer calls the hook, and re-sourcing the activation repairs
-    // nothing. The `declare -p` capture serves both arms from one fork: its
-    // output carries the value in either the string or the Bash 5.1 array form,
-    // so the substring test covers both without a second probe.
-    //
-    // ponytail: substring, not element equality — a user function whose name
-    // *contains* `__ocx_prompt_hook` would suppress registration; element-wise
-    // membership needs a loop over `"${PROMPT_COMMAND[@]}"` plus a separate
-    // string branch beside it.
+    // `declare -p` is the only way to tell an array `PROMPT_COMMAND` from the string form.
+    // Trailing `;` and whitespace are stripped first, or the append yields a `;;` syntax error.
     format!(
         "case $- in\n\
          *r*) : ;;\n\
@@ -585,26 +235,10 @@ fn bash_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
 }
 
 fn zsh_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
+    // `add-zsh-hook` is duplicate-safe for `precmd` and `zshexit` alike, so no probe is needed.
     let quoted = posix_single_quoted(binary);
     let body = posix_hook_body(&quoted, "zsh", watch_paths);
-    // `add-zsh-hook` is itself duplicate-safe and is how starship avoids
-    // clobbering; defining `precmd()` would replace whatever owns it. `zshexit`
-    // is the same append-safe registry, so the stamp cleanup needs no probe for
-    // an existing owner the way bash's `EXIT` trap does.
-    //
-    // The two `add-zsh-hook` calls sit **outside** the function guard (#347).
-    // `add-zsh-hook` already tests membership before appending — verified against
-    // zsh 5 by calling it three times and reading back a one-element
-    // `precmd_functions` — so calling it unconditionally is idempotent, and that
-    // is exactly the repair the guarded form cannot make. Anything that assigns
-    // `precmd_functions=(…)` wholesale drops our entry while the function stays
-    // *defined*, so a guard on the function reads "registered" and re-sourcing
-    // the activation never puts the entry back. Only the setup that must not
-    // repeat — the `mktemp` fork and the two function definitions — stays under
-    // the guard.
-    //
-    // (Frameworks that register *through* `add-zsh-hook` append and were never
-    // the problem; oh-my-zsh was checked and leaves our entry in place.)
+    // Outside the function guard, or a wholesale `precmd_functions=(…)` drops our entry for good.
     format!(
         "case $- in\n\
          *r*) : ;;\n\
@@ -622,9 +256,7 @@ fn zsh_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
 }
 
 fn posix_hook_body(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -> String {
-    // `local __ocx_status=$?` is the first statement: the word expansion runs
-    // before the builtin, so `$?` is still the status the prompt inherited.
-    // `return $__ocx_status` hands it back unchanged (vscode#158090).
+    // `local __ocx_status=$?` must stay first, or the prompt's inherited `$?` is lost.
     format!(
         "__ocx_prompt_hook() {{\n\
          local __ocx_status=$?\n\
@@ -636,20 +268,7 @@ fn posix_hook_body(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf
 }
 
 fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -> String {
-    // Every test in the guard is a shell builtin, so the unchanged prompt costs
-    // zero execs (C-044). An empty carrier is what makes the *first* prompt of
-    // every shell reconcile — "no record" counts as changed — and is also what
-    // makes `unset __OCX_ENV_STATE` take effect at the next prompt (C-012).
-    // `-` default expansion throughout keeps the guard `set -u`-safe, which it
-    // has to be: the carrier is unset on the first prompt by construction.
-    //
-    // The `$PWD` term is what makes `cd` reconcile (C-019 member 7). Without it
-    // the guard is blind to a directory change: the carrier is non-empty, the
-    // stamp is fresh, and the watch paths were baked into this body at shell
-    // start, so they are still the *previous* project's — entering a different
-    // project would never apply its environment, which is the feature's
-    // headline case. A builtin string compare, so C-044's zero-exec budget on
-    // the no-op path is untouched.
+    // Builtins only, so an unchanged prompt execs nothing; `-` defaults keep every read `set -u`-safe.
     let newer: String = watch_paths
         .iter()
         .map(|path| {
@@ -659,6 +278,7 @@ fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf
             )
         })
         .collect();
+    // The `$PWD` term makes `cd` reconcile: the baked watch paths are the previous project's.
     format!(
         "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ \"${{__ocx_grant-}}\" != \"{granted}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer} || [ \"$PWD/{PROJECT_FILE}\" -nt \"${{__ocx_stamp-}}\" ]; }}; then\n\
          {apply}\n\
@@ -670,16 +290,8 @@ fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf
 }
 
 fn posix_apply(quoted_binary: &str, shell_name: &str) -> String {
-    // The reconcile call's stderr is discarded and its status ignored, so a
-    // binary that predates `--reconcile` prints a clap error nowhere and breaks
-    // no prompt.
-    //
-    // The freshness checkpoint is **not** here: it rides the reconcile's own
-    // output ([`checkpoint`]), so a run that failed — and therefore emitted
-    // nothing — leaves the stamp stale and the next prompt retries. Refreshing
-    // it unconditionally here would bump the stamp past every watch member and
-    // latch the shell into a stale environment until some watched file moved
-    // again, which is D2's "every prompt re-converges" quietly made false.
+    // Stderr and status discarded, so a binary predating `--reconcile` breaks no prompt.
+    // Never refresh the stamp here: a failed run must leave it stale so the next prompt retries.
     format!(
         "eval \"$('{quoted_binary}' {OFFLINE} self activate --reconcile --shell={shell_name} 2>/dev/null)\" || true"
     )
@@ -707,8 +319,7 @@ fn posix_wrapper(binary: &str) -> String {
 
 fn fish_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
     let quoted = fish_single_quoted(binary);
-    // `--on-event fish_exit` is fish's append-safe exit registry — a named
-    // handler, so it displaces nothing another module registered.
+    // A named `--on-event fish_exit` handler displaces no other module's.
     format!(
         "if not functions -q __ocx_prompt_hook\n\
          set -g __ocx_stamp (command mktemp -t {STAMP_TEMPLATE} 2>/dev/null)\n\
@@ -721,11 +332,7 @@ fn fish_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
     )
 }
 
-/// The `__ocx_prompt_hook` function alone, without the one-time setup around it.
-///
-/// Split out so [`redefinition`] and [`fish_registration`] emit one spelling:
-/// a re-emission that drifted from the registration would install a gate the
-/// shell-start path never produces, and only the re-emission path would show it.
+/// The `__ocx_prompt_hook` function alone, shared by [`redefinition`] and [`fish_registration`] so they cannot drift.
 fn fish_hook_function(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
     format!(
         "function __ocx_prompt_hook --on-event fish_prompt\n\
@@ -758,15 +365,11 @@ fn fish_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
 }
 
 fn fish_apply(quoted_binary: &str) -> String {
-    // The checkpoint rides the reconcile's own output ([`checkpoint`]), so a
-    // failed run leaves the stamp stale and the next prompt retries.
     format!("'{quoted_binary}' {OFFLINE} self activate --reconcile --shell=fish 2>/dev/null | source")
 }
 
 fn fish_wrapper(binary: &str) -> String {
     let quoted = fish_single_quoted(binary);
-    // Same reuse as the POSIX arm ([`POSIX_HOOK_CALL`]): the prompt hook owns
-    // the guard, so a command that moved nothing execs nothing.
     format!(
         "function ocx\n\
          '{quoted}' $argv\n\
@@ -782,34 +385,13 @@ fn fish_wrapper(binary: &str) -> String {
 // ── PowerShell ───────────────────────────────────────────────────────────
 
 fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
+    // `Continue` preferences in the hook's own scope plus the `catch`, so a hook error never fails a prompt.
+    // `Remove-Variable -Scope Local` restores them; reading the PS 5.1-absent preference throws under StrictMode.
+    // `$?` and `$LASTEXITCODE` are captured on entry and restored, `$?` by the final statement's outcome.
     let quoted = single_quoted_doubled(binary);
-    // The stamp is an in-memory `[datetime]`, not a file: pwsh reads mtimes
-    // in-process, so no temp file is needed to get a newer-than comparison.
-    // `Remove-Variable … -Scope Local` in the `finally` drops the two
-    // preference shadows this scope created, restoring whatever the session
-    // had — exact, and safe under `Set-StrictMode` where reading a
-    // PS 5.1-absent `$PSNativeCommandUseErrorActionPreference` would throw.
-    // `$?` is read-only, so it is restored the only way pwsh allows: a final
-    // statement that succeeds or fails to match the captured value.
-    //
-    // The guard reads the live `prompt` function rather than the
-    // `$global:__ocxPrevPrompt` marker it used to (#347). A prompt owner that
-    // assigns `function global:prompt` wholesale drops our wrapper while leaving
-    // the marker variable behind, so the old guard read "installed" for a session
-    // that no longer reconciles and re-sourcing the activation repaired nothing.
-    // Testing the wrapper's own body for `__ocxReconcile` makes the guard's
-    // subject the registration, so a clobber re-wraps and re-captures
-    // `__ocxPrevPrompt` as the new owner's prompt — which is what keeps the chain
-    // correct, and what makes recursion unreachable: we capture only when the
-    // current prompt is demonstrably not ours. `\"$(…)\"` rather than
-    // `.ToString()` because the latter throws on a `$null` prompt under
-    // `Set-StrictMode`.
-    //
-    // ponytail: a prompt owner that *wraps* ours instead of replacing it leaves a
-    // body that does not name `__ocxReconcile`, so a re-source re-wraps and the
-    // reconcile runs twice per prompt — bounded, idempotent, and only on a
-    // deliberate re-source. Telling "wrapped" from "clobbered" would need an
-    // identity we cannot read back out of a captured scriptblock.
+    // Probe the live `prompt` body, not a marker variable a clobber leaves behind, so a clobber is re-wrapped.
+    // `"$(…)"`, not `.ToString()`, which throws on `$null` under StrictMode.
+    // ponytail: an owner that *wraps* ours makes a re-source re-wrap, so reconcile runs twice.
     format!(
         "if (\"$($function:prompt)\" -notmatch '__ocxReconcile') {{\n\
          $global:__ocxPrevPrompt = $function:prompt\n\
@@ -841,12 +423,9 @@ fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
     )
 }
 
-/// The `__ocxReconcile` function alone, without the `prompt` wrapper or the
-/// three `$global:` state variables the first install seeds.
+/// The `__ocxReconcile` function alone, for [`redefinition`].
 ///
-/// Split out for [`redefinition`], and deliberately *without* those three: a
-/// re-emission that reset `$global:__ocxStamp` to `MinValue` would make the very
-/// next prompt exec unconditionally, which is the cost C-044 exists to remove.
+/// Never reseeds the `$global:` state, or the reset stamp makes the next prompt exec unconditionally.
 fn power_shell_reconcile_function(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
     format!(
         "function global:__ocxReconcile {{\n\
@@ -857,9 +436,7 @@ fn power_shell_reconcile_function(quoted_binary: &str, watch_paths: &[PathBuf]) 
 }
 
 fn power_shell_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
-    // `GetLastWriteTimeUtc` returns 1601-01-01 for an absent path rather than
-    // throwing, so a watch member that does not exist yet reads as older than
-    // the stamp and starts counting the moment it is created.
+    // An absent path reads as 1601-01-01 rather than throwing, so it counts once created.
     let newer: String = watch_paths
         .iter()
         .map(|path| {
@@ -869,15 +446,8 @@ fn power_shell_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String
             )
         })
         .collect();
-    // [`PROJECT_FILE`]'s term reads `CurrentFileSystemLocation` and not `$PWD`,
-    // which is the *provider* location: under `Set-Location HKLM:` a `$PWD.Path`
-    // of `HKLM:\Software` is not a filesystem path at all, and PS 5.1's
-    // `[System.IO.Path]::Combine` on it raises `ArgumentException` — swallowed by
-    // the prompt's `catch`, but it takes the whole reconcile with it. The
-    // filesystem location is also, by construction, the working directory the
-    // reconcile process itself is launched with, so it is the one the walk sees.
-    // `[System.IO.Path]::Combine` and not `Join-Path` on C-045's rule: a static
-    // .NET call is not a name a user function could own.
+    // `CurrentFileSystemLocation`, not `$PWD`: under `HKLM:` PS 5.1's `Combine` throws and kills the reconcile.
+    // `[System.IO.Path]::Combine`, not `Join-Path`, which a user function could shadow.
     format!(
         "if (Test-Path -LiteralPath '{quoted_binary}' -PathType Leaf) {{\n\
          if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"{yielded}\" -or $global:__ocxGrant -ne \"{granted}\"{newer} -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, '{PROJECT_FILE}')) -gt $global:__ocxStamp) {{\n\
@@ -897,42 +467,13 @@ fn power_shell_apply(quoted_binary: &str) -> String {
 }
 
 fn power_shell_wrapper(binary: &str) -> String {
+    // `$?` is replayed with `Write-Error -ErrorAction Ignore`, or it reads true after a failed `ocx`.
+    // The `finally` reconciles even when the caller's `Stop` preferences make the call throw.
     let quoted = single_quoted_doubled(binary);
-    // A-35 covers the exit *code*; `$?` is a second observable a caller can
-    // branch on (`ocx install nope; if ($?) { Deploy }`), and an assignment
-    // always succeeds — so restoring `$LASTEXITCODE` as the final statement
-    // would leave `$?` reading `$true` after a failed subcommand. Replayed with
-    // the same `Write-Error -ErrorAction Ignore` idiom the prompt hook two
-    // functions up already uses for exactly this (A-22).
-    //
-    // The wrapped call deliberately runs under the *caller's* preferences, so
-    // wrapping changes nothing a user observes: under the hardened pair
-    // (`$ErrorActionPreference = 'Stop'` with
-    // `$PSNativeCommandUseErrorActionPreference = $true`) a non-zero ocx still
-    // throws exactly as an unwrapped invocation does. That is why the reconcile
-    // lives in a `finally` — on the throwing path there is no statement after
-    // the call to reach — and why the reconcile's own `$LASTEXITCODE` is
-    // discarded in favour of the captured one either way.
-    //
-    // ocx#524: the parameter binder claims the first bare `--` of a *function*
-    // call as its own end-of-parameters token and drops it before `$args` is
-    // populated — `$args`, `ValueFromRemainingArguments` and `[CmdletBinding()]`
-    // all lose it alike, while a native call keeps it. So `ocx exec -- tool -h`
-    // reached ocx as `exec tool -h`. The source line still holds the separator:
-    // parse `$MyInvocation.Line`, find this call by its column (so a nested or
-    // `;`-joined `ocx` on the same line is never mistaken for it), and count the
-    // elements *before* the first bare `--` to find its slot — a colon-form
-    // parameter (`-x:1`) is two `$args` entries, anything else one. Counting
-    // from the front is what makes a continued line safe: the lines `.Line`
-    // does not carry all sit after the separator. Two cases stay unrepaired
-    // rather than guessed at: a separator on a continuation line (`.Line` never
-    // sees it) and a splat before it (its width is unknowable from source).
-    // `.Line` and not `.Statement`, which Windows PowerShell 5.1 lacks. The
-    // `catch` is deliberate: any failure leaves `$args` exactly as the binder
-    // produced it, which is the pre-repair behaviour, never worse. Prior art:
-    // jdx/mise#13202; the binder behaviour is PowerShell/PowerShell#21208.
-    // Language constructs and .NET calls only — no cmdlet a user function
-    // could shadow, on the same rule as C-045.
+    // Workaround for PowerShell/PowerShell#21208: the binder eats a function call's first bare `--`.
+    // Re-insert it from `$MyInvocation.Line` (PS 5.1 has no `.Statement`), matching this call by column,
+    // or a nested or `;`-joined `ocx` is taken for it; `-x:1` binds as two `$args`.
+    // A `--` on a continuation line or after a splat stays unrepaired; the `catch` keeps `$args` as bound.
     format!(
         "function global:ocx {{\n\
          $__ocxSt = $null\n\
@@ -986,45 +527,14 @@ fn power_shell_wrapper(binary: &str) -> String {
 
 // ── elvish ───────────────────────────────────────────────────────────────
 
-/// The directory the last successful reconcile ran for, recorded in the
-/// **process environment** rather than a shell variable.
+/// The directory the last successful reconcile ran for, in the **process environment**.
 ///
-/// Elvish's whole activation stream arrives through `eval`, and an `eval` unit's
-/// `set` reaches the caller's scope only when the variable happens to be an
-/// upvalue there; `set-env` writes the real environment unconditionally. It also
-/// makes the value readable from the wrapper, which lives in a different scope
-/// again. Inside the reserved `__OCX_*` namespace
-/// [`ocx_util::env::is_reserved_ocx_key`] gates, on the same footing as
-/// [`super::reconcile::CARRIER_KEY`].
+/// Not a shell variable: an `eval` unit's `set` may not reach the caller's scope, nor the wrapper's.
 const ELVISH_PWD_KEY: &str = "__OCX_ENV_PWD";
 
-/// What [`ELVISH_PWD_KEY`] holds: the recording shell's pid, its `$pwd`, then
-/// [`YIELD_SIGNALS`] — every input elvish's guard can evaluate for free, folded
-/// into one recorded string.
+/// What [`ELVISH_PWD_KEY`] holds: the recording shell's pid, its `$pwd`, then the signal tails.
 ///
-/// The pid half is load-bearing, not decoration. The key is a real environment
-/// variable — the only per-shell store an `eval` unit can both write and read —
-/// so a child elvish inherits a value that already matches its own `$pwd`, and a
-/// bare `$pwd` recording would leave that child's first prompt quiet. Every other
-/// arm records the directory in a shell-local (`__ocx_pwd`), which a child never
-/// sees, so every other arm's first prompt reconciles. Folding the pid in makes
-/// an inherited value a mismatch by construction and restores that parity, which
-/// A-21 needs: the over-cap line, the direnv/mise yield line, the managed-strip
-/// reason and the inert-project hint all ride the first `--reconcile` run's own
-/// output, so a child that never reconciles never prints them.
-///
-/// Neither half leaks anything: `$pwd` and the pid are both already readable from
-/// `/proc` by anyone who can read this process's environment.
-///
-/// The yield tail is A-36: elvish has no shell-local a hook `eval` can both
-/// write and read, so the sentinels ride the one store it does have rather than
-/// costing a second exported variable. It is why the key's name is narrower than
-/// its contents — the value is the whole "has anything the guard can see moved?"
-/// question, of which `$pwd` is one term.
-///
-/// Spelled as elvish source rather than a rendered value because every part is
-/// evaluated by the shell, and the guard and the checkpoint have to agree
-/// byte for byte — one spelling is what makes that true by construction.
+/// The pid keeps a child elvish, which inherits the variable, from reading as already reconciled.
 fn elvish_pwd_value() -> String {
     format!(
         "(to-string $pid)' '$pwd{yielded}{granted}",
@@ -1033,44 +543,15 @@ fn elvish_pwd_value() -> String {
     )
 }
 
-/// The marker that says "this shell already registered", carried as the
-/// registered closure's **rest-argument name**.
+/// The "already registered" marker, carried as the registered closure's **rest-argument name**.
 ///
-/// It is a *declaration*, not text: `{|@__ocx-prompt-hook| … }` makes elvish
-/// parse the name into the closure's `arg-names` list, which
-/// [`elvish_already_registered`] reads back. Nothing a user writes — a comment, a
-/// string literal, a variable holding this exact word — can put a value into
-/// another closure's `arg-names`, so the probe cannot be satisfied by anything
-/// but a closure of the shape this module emits.
-///
-/// The rest form (`@`) rather than a fixed parameter because elvish invokes a
-/// `$edit:before-readline` hook with no arguments: a rest argument accepts that,
-/// and would still accept arguments a later elvish decided to pass.
+/// A declaration, so no user comment or string can forge it; `@` because elvish may pass hook arguments later.
 const ELVISH_HOOK_MARKER: &str = "__ocx-prompt-hook";
 
 /// The elvish expression that answers "does `list` already carry our closure?".
 ///
-/// One spelling, consumed by [`elvish_registration`] and — with a different
-/// `list` — by the live test that proves it discriminates, because a probe
-/// re-spelled in the test could pass against an emission that had stopped
-/// producing it.
-///
-/// It is a *structural* test, and that is the whole point. The form it replaces
-/// searched `to-string $edit:before-readline` for [`ELVISH_HOOK_MARKER`] as an
-/// undifferentiated substring; `to-string` renders every closure in the list
-/// together with its `&def` (its literal body, comments included) and its `&src`
-/// (the whole source of the `eval` unit that defined it), so a user's own
-/// pre-existing hook that merely *mentioned* the marker in a comment or a string
-/// made the probe true and **no ocx hook was registered at all**, silently, for
-/// that shell's whole life. Reading `arg-names` — a list elvish produces by
-/// parsing a parameter declaration — closes that by construction: text cannot
-/// forge an entry in it.
-///
-/// Total by construction, which C-051 needs: `kind-of` is defined for every
-/// value, `and` short-circuits so `[arg-names]` is indexed only on a closure
-/// (indexing a string raises, verified against elvish 0.21), and `has-value`
-/// over a list cannot raise. So no element of a user's hook list can abort the
-/// registration.
+/// Structural over `arg-names`: a substring probe matches a user hook's comment and silently leaves the shell unhooked.
+/// Only a `fn` is indexed with `[arg-names]` (indexing a string raises), so no user hook can abort registration.
 fn elvish_already_registered(list: &str) -> String {
     format!(
         "(has-value [(all {list} | each {{|__ocx_candidate| \
@@ -1078,13 +559,7 @@ fn elvish_already_registered(list: &str) -> String {
     )
 }
 
-/// The closure [`elvish_registration`] appends to `$edit:before-readline`.
-///
-/// Split out for the same reason as [`elvish_already_registered`]: the live test
-/// seeds a synthetic hook list with *this* closure, so what it proves the probe
-/// finds is the closure the emission actually registers.
-///
-/// `quoted_binary` is already escaped for a single-quoted elvish string.
+/// The closure [`elvish_registration`] appends; `quoted_binary` is already escaped for a single-quoted string.
 fn elvish_hook_closure(quoted_binary: &str) -> String {
     format!(
         "{{|@{ELVISH_HOOK_MARKER}|\n\
@@ -1097,66 +572,12 @@ fn elvish_hook_closure(quoted_binary: &str) -> String {
     )
 }
 
-// Register the per-prompt hook on `$edit:before-readline`. The `ocx` wrapper is
-// a separate emission — [`elvish_wrapper`], called by [`wrapper`] — and this
-// function does not produce it.
-//
-// The whole body rides inside `eval` of a string literal, and that is not
-// stylistic. The `edit:` namespace is bound only in an *interactive* elvish, and
-// elvish resolves every variable in a code chunk before executing any of it — so
-// a direct `$edit:before-readline` reference is a compile error in a
-// non-interactive `elvish -c`, and it kills the entire unit, including the `try`
-// that was meant to catch it. Indirection through `eval` turns that compile error
-// into a catchable runtime exception, which is the documented idiom and the same
-// shape the shipped completion block already needs. Verified both ways against
-// elvish 0.21.
-//
-// The guard carries no watch-set term, and this is the one arm where that is
-// true. Elvish 0.21 has no in-shell mtime — `os:stat` returns
-// `name`/`size`/`type`/`perm`/`special-modes`/`sys` and documents that timestamps
-// are not exposed, `sys` carries no `mtim` either — and no clock module, so there
-// is no stamp and nothing to compare one against. Reaching for an external
-// `test -nt` would put one exec on every quiet prompt, which is the exact cost
-// C-044 exists to remove. What survives is the pair elvish can evaluate for free:
-// an empty carrier (the first prompt, and `unset-env __OCX_ENV_STATE` as the
-// C-012 repair gesture) and a changed `$pwd` (C-019 member 7 — entering, leaving
-// or switching a project). The missing term is covered by `elvish_wrapper`, which
-// clears the recorded directory so the next prompt reconciles after any ocx
-// command that could have moved a watch member. An `ocx.toml` edited by hand, in
-// place, without changing directory is the residual: it reconciles at the next
-// `cd` or the next ocx command.
-//
-// The append idiom is `[$@edit:before-readline …]`, elvish's documented
-// safe-append form, so hooks other modules registered survive — the same rule
-// C-043 states for `PROMPT_COMMAND` and `precmd`.
-//
-// Idempotency keys on the SHELL, not the process, and the marker keys on the
-// REGISTRATION, not on text that describes it.
-//
-// It used to key on `$pid` held in an exported marker, which `exec elvish`
-// defeats outright: exec replaces the process image but keeps the pid and
-// inherits the environment, so the fresh shell read its own pid back out of the
-// marker, skipped the registration and ran with no hook for its whole life.
-// Nothing in the environment can distinguish those two shells, so the marker
-// moved to the one per-shell store an `eval` unit can both write and read:
-// `$edit:before-readline` itself, which a new process image starts empty. That
-// part stands — a variable lookup is not available as a substitute, because
-// elvish has no `has-var` and both obvious stand-ins are blind (a nested `eval`
-// referencing the name cannot see the outer unit's variables, and — verified
-// against elvish 0.21 — a variable installed with `edit:add-var` is not visible
-// from inside any `eval` unit either).
-//
-// What the list is asked is now a *structural* question rather than a substring
-// one: [`elvish_already_registered`] collects the `arg-names` of every closure in
-// the list and looks for [`ELVISH_HOOK_MARKER`] among them, where the marker got
-// there by being declared as the closure's rest argument. The rationale, and the
-// silent-suppression bug the substring form shipped, are on those two items.
-//
-// Keying on the hook list also makes this the one arm where re-sourcing an
-// activation stream *repairs* a registration some later module clobbered: the
-// marker cannot outlive the closure, because it is part of it.
+// The body rides in `eval`: a direct `$edit:` is a compile error in non-interactive elvish that no `try` catches.
 fn elvish_registration(binary: &str) -> String {
+    // No watch-set term: elvish has no in-shell mtime, and an external `test -nt` would exec every prompt.
+    // So an in-place `ocx.toml` edit reconciles only at the next `cd` or `ocx` call.
     let quoted = single_quoted_doubled(binary);
+    // The marker lives in `$edit:before-readline`, never the env: `exec elvish` keeps both and would skip registering.
     let body = format!(
         "if (not {probe}) {{\n\
          set edit:before-readline = [$@edit:before-readline {closure}]\n\
@@ -1164,40 +585,15 @@ fn elvish_registration(binary: &str) -> String {
         probe = elvish_already_registered("$edit:before-readline"),
         closure = elvish_hook_closure(&quoted),
     );
-    // The outer layer is a single-quoted elvish string, so every quote the body
-    // carries is doubled a second time. `catch e { }` swallows the
-    // non-interactive compile error and nothing else reaches it — C-051, a hook
-    // never fails a prompt.
     format!("try {{ eval '{}' }} catch e {{ }}", single_quoted_doubled(&body))
 }
 
-// The `ocx` wrapper, as it is spelled inside its own `eval`.
-//
-// It invalidates the guard rather than calling it, which is the deliberate
-// difference from every other arm. The other wrappers call the prompt hook's
-// guarded function so a command that moved no watch member costs nothing; here
-// there is no watch-member term to consult (see `elvish_registration`), so the
-// only thing a call could do is reconcile unconditionally — the 14.4x tax on
-// every read-only `ocx` invocation that C-045's guard reuse exists to avoid.
-//
-// Clearing the recorded directory does not avoid that reconcile: it guarantees
-// one at the very next prompt, the same single reconcile an inline guard call
-// would have run. What it buys is *when* — the work leaves the ocx command's
-// critical path and lands on the prompt, so `ocx version` keeps its direct cost.
-// The next prompt is also what C-045 already names as the correctness floor. What
-// elvish gives up is same-command-line chaining: `ocx add --global foo && foo`
-// sees the new environment at the next prompt rather than within the line.
-//
-// `defer` runs the clear on the way out including when the real binary raises —
-// elvish has no exit status, so a non-zero exit is an exception, and the
-// exception propagates unchanged. That is this arm's form of A-35: the wrapper
-// never swallows or rewrites the real binary's failure.
+// Clears the recorded directory instead of reconciling: with no watch term a call would reconcile after every `ocx`.
+// So elvish gives up same-line chaining; `ocx add --global foo && foo` sees the change a prompt later.
 fn elvish_wrapper(binary: &str) -> String {
-    // `edit:add-var` and not `fn`: a `fn` defined inside an `eval` unit does not
-    // escape it and would be invisible at the prompt. That also means the
-    // wrapper needs the interactive `edit:` namespace, so it carries the same
-    // `eval` indirection and the same catch as the registration.
+    // `edit:add-var`, not `fn`: a `fn` defined inside `eval` never escapes it.
     let quoted = single_quoted_doubled(binary);
+    // `defer` clears even when the binary raises, and the exception propagates unchanged.
     let body = format!(
         "edit:add-var ocx~ {{|@__ocx_args| defer {{ set-env {ELVISH_PWD_KEY} '' }}; '{quoted}' $@__ocx_args }}"
     );

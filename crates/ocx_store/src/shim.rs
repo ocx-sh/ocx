@@ -1,97 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Embedded prebuilt `ocx-shim` executable bytes (ADR Contract 3).
+//! Embedded prebuilt `ocx-shim` executable bytes (`adr_windows_exe_shim.md` Contract 3).
 //!
-//! Crate-root cross-cutting module (peer of [`crate::hardlink`],
-//! [`ocx_util::fs::symlink`], [`ocx_util::child_process`] per
-//! `arch-principles.md` "Cross-Cutting Modules"). The only consumer is
-//! `package_manager::launcher::generate`, which writes [`SHIM_BYTES`] verbatim
-//! as `<name>.exe` on Windows.
-//!
-//! The committed blob is built and refreshed out-of-band (uv/pixi model, no
-//! `build.rs`, no network). One blob per Windows arch is selected via `cfg`;
-//! non-Windows targets embed nothing so the launcher emission is skipped there
-//! and `ocx` carries zero shim weight on Linux/macOS.
-//!
-//! # Blob refresh-PR flow
-//!
-//! The committed blobs and their recorded [`SHIM_SHA256`] digests are
-//! refreshed in a **dedicated PR** whenever `crates/ocx_shim` source changes:
-//!
-//! 1. `task rust:shim:build TARGET=x86_64-pc-windows-gnullvm`
-//! 2. `task rust:shim:build TARGET=aarch64-pc-windows-gnullvm`
-//!    (cargo-zigbuild; the `shim` profile in the workspace `Cargo.toml` strips
-//!    symbols. The task sets `RUSTFLAGS` on the command line, not through
-//!    `env:`, because a task-level `env:` loses to an inherited variable —
-//!    see the comment on `shim:build` for the `/Brepro` trap that cost.)
-//! 3. Copy each `target/<triple>/shim/ocx-shim.exe` to
-//!    `crates/ocx_store/src/shims/ocx-shim-<arch>.exe`.
-//! 4. Record `sha256sum` of each blob in the per-arch `SHIM_SHA256` below.
-//! 5. CI (`build-windows-shims.yml`) rebuilds hermetically — the fresh build
-//!    must succeed — then validates the *committed* blob as a PE within
-//!    `SHIM_SIZE_BUDGET` whose `sha256` equals `SHIM_SHA256`, and attests it
-//!    with `actions/attest-build-provenance`. It does **not** compare bytes:
-//!    the gnullvm PE link is not reproducible run-to-run even with a pinned
-//!    Zig + rustc, so integrity rests on SLSA attestation, this SHA canary
-//!    and the job's build-input path filter (see
-//!    `adr_shim_hermetic_zigbuild.md` addendum 2, "gate redesign").
-//!
-//! # Toolchain that produced the committed blobs
-//!
-//! Recorded because nothing else in the tree names it: `rust-toolchain.toml`
-//! pins rustc, but **no file pins Zig**, and the `zig` a dev box happens to
-//! have on `PATH` may be a dev build whose tarball stops being downloadable.
-//!
-//! - rustc 1.95.0 (`59807616e1fa2540724bfbac14d7976d7e4a3860`), per
-//!   `rust-toolchain.toml`.
-//! - cargo-zigbuild 0.22.3, per `install:cargo-zigbuild`.
-//! - **Zig 0.16.0** — the version `build-windows-shims.yml` resolved on
-//!   2026-09-04. Obtained from the PyPI `ziglang==0.16.0` wheel (the Zig
-//!   project's own repackage), **not** from a shasum-verified
-//!   `ziglang.org` tarball; the binary used has
-//!   `sha256 = 2317bbb91798556d9d0f38aabdac23db83f0979b25f767259ae474546724087c`.
-//!   Selected via `CARGO_ZIGBUILD_ZIG_PATH`, since the only `zig` on the
-//!   builder's `PATH` was `0.16.0-dev`.
-//!
-//! This record makes the choice auditable; it is not itself a provenance
-//! control. The provenance control is the SLSA statement
-//! `actions/attest-build-provenance` signs over the committed blob on the pull
-//! request to `main` — that attestation covers these bytes, not this build.
-//! CI's Zig is still resolved as "latest stable at run time"; hard-pinning it
-//! is `adr_shim_hermetic_zigbuild.md`'s open implementation-plan item 2 and
-//! edits a workflow this crate does not own.
-//!
-//! See `.claude/artifacts/adr_windows_exe_shim.md` Contract 3 and
-//! `system_design_windows_exe_shim.md` §5.
+//! Refresh on every `crates/ocx_shim` change: `task rust:shim:build TARGET=<arch>-pc-windows-gnullvm`, copy to `shims/`, update [`SHIM_SHA256`].
 
-/// Hard upper bound on the embedded shim size, enforced fail-closed by the
-/// compile-time assertion below (Windows builds only).
-///
-/// 512 KiB ceiling: the cargo-zigbuild output is ~238–333 KiB (x86_64 is the
-/// larger). **Hermeticity** is what buys that size — Zig bundles its own
-/// clang/lld/libc, so no floating Microsoft SDK manifest can move the bytes
-/// (the cargo-xwin treadmill), and the toolchain's prebuilt std ships as-is
-/// because `-Zbuild-std` is neither reproducible nor available without a
-/// nightly bootstrap. Byte reproducibility is *not* claimed and was abandoned
-/// in `adr_shim_hermetic_zigbuild.md` addendum 2. Shrinking the blob is a
-/// tracked follow-up, not a blocker.
+// Blobs built with rustc 1.95.0, cargo-zigbuild 0.22.3, Zig 0.16.0 (PyPI `ziglang==0.16.0`, sha256
+// 2317bbb91798556d9d0f38aabdac23db83f0979b25f767259ae474546724087c): nothing else pins Zig.
+
+/// Upper bound on the embedded shim size, asserted at compile time on Windows.
 pub const SHIM_SIZE_BUDGET: usize = 512 * 1024;
 
-/// Verbatim bytes of the prebuilt `ocx-shim` executable for the target arch.
-///
-/// Empty on non-Windows targets — no shim is emitted there, so `ocx` carries
-/// no shim weight off Windows.
+/// The prebuilt `ocx-shim` for the target arch; empty off Windows.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
 
-/// Recorded SHA-256 of the committed blob (lowercase hex). Corruption canary
-/// for the blob↔source drift guard test (truncated `include_bytes!`, wrong
-/// path, partial checkout) — NOT a provenance control. Empty on non-Windows.
-///
-/// Refreshed in the dedicated blob-refresh PR (see module docs); the
-/// `shim_blob_matches_recorded_sha256_fail_closed_on_windows` test fails
-/// closed if this drifts from `sha256(SHIM_BYTES)`.
+/// SHA-256 of the committed blob: a corruption canary, not a provenance control; empty off Windows.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const SHIM_SHA256: &str = "6ed3c0a8d77dcce37a598b62a19c81a3597d463b92c1ce07910b7226f62dd427";
 
@@ -107,100 +31,22 @@ pub const SHIM_BYTES: &[u8] = &[];
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_SHA256: &str = "";
 
-/// Whether `image` carries a Win32 VERSIONINFO resource (C-019).
-///
-/// # Why this exists
-///
-/// One blob is hardlinked and served under N well-known tool names (`cmake`,
-/// `ctest`, `clang-format`, …). A VERSIONINFO resource carries a fixed
-/// `OriginalFilename` string, so the moment the blob grows one, every one of
-/// those names disagrees with the name baked into the image it runs — the
-/// image-vs-`OriginalFilename` mismatch behavioural detections key on
-/// (MITRE ATT&CK T1036.005, masquerading as a legitimate name). It would
-/// appear across every shimmed name at once, from a single build-flag change,
-/// with nothing in the diff to show for it.
-///
-/// The committed blobs carry no such resource today, which is exactly why this
-/// is a **canary** — same family as [`SHIM_SHA256`]: it does not fix anything,
-/// it notices when the property stops holding. It must land with the blob
-/// refresh, since a published blob is as one-way as the `.shim` format.
-///
-/// # What it does, and why that is not a PE parser
-///
-/// A byte scan for the UTF-16LE encodings of the two structure keys a
-/// VERSIONINFO resource cannot omit — `VS_VERSION_INFO` (the root block) and
-/// `StringFileInfo` (the block holding `OriginalFilename`). Both are literal,
-/// fixed strings written verbatim into `.rsrc` by every toolchain that emits
-/// the resource.
-///
-/// Deliberately NOT a PE resource-directory walk: parsing the section table,
-/// the resource tree and its three levels of directory entries would be a
-/// hand-owned parser for an external binary format
-/// (`quality-core.md` "Don't Own Non-Domain Code", Block-tier for wire
-/// formats), owned for the sake of one boolean. A substring search is the
-/// "few lines with no edge cases" rung instead. What that costs, stated so
-/// nobody mistakes this for more than it is: the scan is one-directional. A
-/// hit is conclusive; a miss is conclusive only for toolchains that write
-/// those keys literally, which is all of them today.
-///
-/// `image` is taken as a parameter rather than read from [`SHIM_BYTES`] so the
-/// scanner can be shown both red and green on the Linux CI host, where
-/// `SHIM_BYTES` is empty and a canary applied to it would be indistinguishable
-/// from one that never ran (`quality-core.md` "Unchecked Green").
+/// Whether `image` carries a Win32 VERSIONINFO resource, whose `OriginalFilename` would contradict every hardlinked name.
 pub fn contains_version_resource(image: &[u8]) -> bool {
-    /// The two structure keys a VERSIONINFO resource cannot omit, in the
-    /// UTF-16LE form a resource compiler writes into `.rsrc`.
     const STRUCTURE_KEYS: [&str; 2] = ["VS_VERSION_INFO", "StringFileInfo"];
 
     STRUCTURE_KEYS.iter().any(|key| {
         let needle: Vec<u8> = key.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        // Byte-aligned, not `chunks(2)`: a `.rsrc` key's offset relative to the
-        // start of the file is not guaranteed to be even, and a u16-aligned
-        // scan would miss half of them while passing every synthetic fixture
-        // that happens to land on an even offset.
+        // Byte-aligned, not `chunks(2)`: a key may sit at an odd offset, which a u16 scan misses.
         image.windows(needle.len()).any(|window| window == needle)
     })
 }
 
-/// Whether an already-published shim blob of `published_len` bytes may be
-/// served as-is, or must be republished because it cannot be `embedded`.
-///
-/// # Why a length check at all
-///
-/// `ShimBinStore::ensure` publishes "only when absent" and decides absence by
-/// **existence**, so a present-but-truncated blob is never repaired — it is
-/// hardlinked by every subsequent launcher instead. On Windows that blob is an
-/// *executed binary*, so one torn write from a crashed earlier run silently
-/// breaks every lazy launcher with no recovery path, and existence cannot tell
-/// that state from a healthy one. The store's own precedent is stricter:
-/// `BlobStore::persist_bytes` re-checks by byte comparison precisely so a
-/// corrupt entry can heal.
-///
-/// Length, not a full digest, because truncation is the realistic corruption
-/// and comparing one `u64` costs nothing on a path taken by every launcher
-/// generation. A `SHIM_SHA256` verify is the thorough form and would mean
-/// hashing 200-300 KiB per call.
-///
-/// # The empty-`embedded` clause
-///
-/// An empty `embedded` admits every length. Off Windows no blob is embedded,
-/// so a length carries no information there and the pre-check stays
-/// existence-only — which is also what keeps the store's existing
-/// specification tests (`ensure_does_not_rewrite_a_blob_that_is_already_published`
-/// and the lost-race test, both of which park a short sentinel at the
-/// published path and require it to survive) meaningful rather than
-/// self-defeating. On Windows, where the blob is what actually runs, the
-/// comparison is live.
-///
-/// `embedded` is a parameter rather than [`SHIM_BYTES`] read directly, so both
-/// outcomes are reachable in a host test.
+/// Whether a published blob of `published_len` bytes matches `embedded`; an empty `embedded` admits every length.
 pub fn published_blob_is_intact(published_len: u64, embedded: &[u8]) -> bool {
     embedded.is_empty() || published_len == embedded.len() as u64
 }
 
-// Fail-closed size guard. Only meaningful on Windows builds (the only targets
-// that embed a non-empty blob); cfg-gated so non-Windows `cargo check` is not
-// affected. The assertion is evaluated at compile time.
 #[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))]
 const _: () = assert!(
     SHIM_BYTES.len() <= SHIM_SIZE_BUDGET,

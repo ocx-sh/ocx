@@ -14,23 +14,14 @@ use crate::api::{
     data::env::{BinaryAttribution, EnvEntry},
 };
 
-/// Semantic role of a tree annotation. Text is stored raw; the [`Theme`]
-/// inks it at render time (`annotations`) so no style is hard-coded here.
-/// Each variant maps to one palette entry, so semantically identical things
-/// share a colour across every `inspect` view and follow the active theme.
+/// Semantic role of a tree annotation; the [`Theme`] inks each role from one palette entry at render time.
 #[derive(Clone)]
 enum SemanticAnnotation {
-    /// A content digest, or a whole digest-bearing identifier. In the tree
-    /// view a full `registry/repo:tag@digest` annotation is deliberately inked
-    /// as ONE digest-coloured span — not split into the per-part identifier
-    /// palette the root label uses — so an identifier read as an aside next to
-    /// a leaf stays a single visual unit.
+    /// A content digest, or a whole digest-bearing identifier inked as one span so it reads as a single aside.
     Digest(String),
-    /// An env-entry visibility tag — same palette entry as visibility
-    /// everywhere else (e.g. `ocx package deps`).
+    /// An env-entry visibility tag, in the same palette entry as everywhere else.
     Visibility(Visibility),
-    /// A short informational note next to a value: modifier kind, media
-    /// type, byte size, or dispatch-command divergence.
+    /// A short note next to a value: modifier kind, media type, byte size or dispatch-command divergence.
     Note(String),
     /// Carried verbatim with the renderer's default annotation style.
     Plain(String),
@@ -49,32 +40,8 @@ impl SemanticAnnotation {
     }
 }
 
-/// Read-only view of a package. The shape adapts to the requested reference
-/// and whether `--resolve` was given. Every shape carries `name` (how the
-/// caller addressed this entry — the raw request string for
-/// `ocx package inspect`, the `ocx.toml` binding for `ocx inspect`) and
-/// `identifier`. A shape that selected one artifact also carries
-/// `pinned_identifier` (the identifier with its digest, so a consumer never
-/// has to splice one together) and `pinned_digest`:
-///
-/// - **candidates** (default mode): the available platform children — `{ …,
-///   candidates: [...] }`. `ocx package inspect` reads them off an image index
-///   and pins the index itself; `ocx inspect` projects them from `ocx.lock`,
-///   which records per-platform leaf digests and no index digest, so the two
-///   pinned fields are absent there and each candidate's `media_type` / `size`
-///   with them.
-/// - **metadata** (default mode, ref is a single manifest): the declared
-///   metadata document plus the manifest's layers — `{ …, metadata, layers }`.
-/// - **resolution** (`--resolve`): platform-selected metadata and layers plus
-///   the OCI resolution chain — `{ …, platform, metadata, layers, resolution }`.
-///   Each `resolution.chain` entry carries `{ digest, role, media_type, size }`
-///   (role ∈ `index` | `manifest` | `config`); the layers live at the entry's
-///   top level, not inside `resolution`.
-///
-/// Plain format: a tree rooted at the pinned identifier — or at the plain
-/// identifier where nothing was pinned — inked with the active theme like
-/// every other identifier, with the shape-appropriate section(s). Byte sizes
-/// render human-readable (binary units); JSON keeps the raw integer `size`.
+/// Read-only view of a package, one `Body` variant per shape of reference and `--resolve`.
+/// A shape that selected one artifact adds `pinned_identifier` and `pinned_digest`.
 pub struct PackageInspect {
     name: String,
     identifier: ocx_oci::PackageRef,
@@ -82,23 +49,22 @@ pub struct PackageInspect {
 }
 
 enum Body {
+    /// Default mode over an image index: its platform children.
     Candidates {
         pinned: ocx_oci::PinnedPackageRef,
         candidates: Vec<CandidateOut>,
     },
-    /// A toolchain binding projected straight from `ocx.lock` — the locked
-    /// platform leaves, nothing resolved and nothing fetched.
-    ///
-    /// No `pinned`: the lock records one leaf digest per platform and never
-    /// the index digest that carried them, so there is no single artifact to
-    /// name until `--resolve` picks a platform.
+    /// A toolchain binding projected straight from `ocx.lock`, nothing resolved or fetched.
+    /// No `pinned`: the lock never records the index digest, so there is no single artifact to name.
     Locked { candidates: Vec<CandidateOut> },
+    /// Default mode over a single manifest: `{ …, metadata, layers }`.
     Manifest {
         pinned: ocx_oci::PinnedPackageRef,
         metadata: Metadata,
         layers: Vec<Layer>,
         closure: Option<ClosureOut>,
     },
+    /// `--resolve`: `{ …, platform, metadata, layers, resolution }`.
     Resolved {
         pinned: ocx_oci::PinnedPackageRef,
         platform: ocx_oci::Platform,
@@ -123,7 +89,7 @@ struct ClosureOut {
     conflicts: ConflictsOut,
 }
 
-/// One transitive dependency of a [`ClosureOut`], in transitive-closure order.
+/// One transitive dependency in the `--closure` object, in transitive-closure order.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ClosureDepOut {
     /// Short display name — the repository's final path segment (e.g.
@@ -153,7 +119,7 @@ struct ClosureDepOut {
     dependencies: Vec<ClosureEdgeOut>,
 }
 
-/// A declared dependency edge (as authored) inside a [`ClosureDepOut`].
+/// A declared dependency edge (as authored) of one closure dependency.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ClosureEdgeOut {
     identifier: String,
@@ -186,7 +152,7 @@ struct SurfaceOut {
     /// Integration namespace keys each admitted node declares, attributed to
     /// the declaring package. Payload-free — a closure node is not installed,
     /// so `${installPath}` has no value and the payload would be a half-truth,
-    /// the same reason [`SurfaceOut::env`] omits values.
+    /// the same reason `env` omits values.
     integrations: Vec<NamespaceAttribution>,
     /// `false` iff any admitted node has undeclared `binaries`
     /// ("couldn't determine \u{2260} determined zero"). Entrypoints have no
@@ -196,7 +162,7 @@ struct SurfaceOut {
 
 /// One env key exposed on the interface surface, attributed to the package that
 /// declares it. `type` is the modifier kind (`path` | `constant` | `list`).
-/// No value — see [`SurfaceOut::env`].
+/// No value: values are `${installPath}`-templated and only concrete after install.
 #[derive(Serialize, schemars::JsonSchema)]
 struct EnvVarAttribution {
     key: String,
@@ -213,8 +179,7 @@ struct EnvVarAttribution {
 }
 
 impl EnvVarAttribution {
-    /// Projects admitted `(identifier, ClosureEnvVar)` pairs into the wire
-    /// shape — the env sibling of [`BinaryAttribution::from_pairs`].
+    /// Projects admitted `(identifier, ClosureEnvVar)` pairs into the wire shape.
     fn from_pairs(pairs: &[(ocx_oci::PinnedPackageRef, ClosureEnvVar)]) -> Vec<Self> {
         pairs
             .iter()
@@ -228,14 +193,12 @@ impl EnvVarAttribution {
     }
 }
 
+// `namespace` matches the flat `ocx env` envelope's key: one concept, one spelling (`adr_package_integrations.md`).
 /// One integration namespace a closure node declares, attributed to the
-/// declaring package. The field is `namespace` — the same word the flat
-/// `ocx env` / `ocx package env` envelope uses (`IntegrationAttribution`), so
-/// one concept has one key spelling across both surfaces
-/// (`adr_package_integrations.md` D16).
+/// declaring package.
 ///
-/// No `value`: the closure envelope is payload-free — see [`SurfaceOut::env`]
-/// for the same reason applied to env values.
+/// No `value`: the closure envelope is payload-free — a closure node is not
+/// installed, so `${installPath}` has no value.
 #[derive(Serialize, schemars::JsonSchema)]
 struct NamespaceAttribution {
     namespace: String,
@@ -245,9 +208,7 @@ struct NamespaceAttribution {
 }
 
 impl NamespaceAttribution {
-    /// Projects admitted `(identifier, namespace key)` pairs into the wire
-    /// shape — the payload-free sibling of
-    /// [`IntegrationAttribution::from_pairs`](crate::api::data::env::IntegrationAttribution::from_pairs).
+    /// Projects admitted `(identifier, namespace key)` pairs into the wire shape.
     fn from_pairs(pairs: &[(ocx_oci::PinnedPackageRef, String)]) -> Vec<Self> {
         pairs
             .iter()
@@ -259,8 +220,8 @@ impl NamespaceAttribution {
     }
 }
 
-/// Install/compose-gate conditions detected over the interface projection
-/// (Codex C2). Both arrays always present; empty means the surface is
+/// Install/compose-gate conditions detected over the interface projection.
+/// Both arrays always present; empty means the surface is
 /// realizable. Inspect stays a view, not a gate — exit 0 either way.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ConflictsOut {
@@ -284,12 +245,7 @@ struct RepositoryConflictOut {
     digests: Vec<String>,
 }
 
-/// Projects a lib-level metadata closure into the wire shape — one `closure`
-/// object with `deps` (non-root nodes in transitive-closure order), the two
-/// `surface` projections, and interface-projection `conflicts`. Each surface
-/// attribution array is a `from_pairs` projection of the admitted-set pairs —
-/// the same `(PinnedIdentifier, claim)` shape `ocx env` / `ocx package env`
-/// already use for their attribution arrays.
+/// Projects a lib-level metadata closure into the wire shape: `deps`, both `surface` views and `conflicts`.
 fn project_closure(closure: InspectClosure) -> ClosureOut {
     let InspectClosure {
         nodes,
@@ -299,8 +255,7 @@ fn project_closure(closure: InspectClosure) -> ClosureOut {
     } = closure;
 
     ClosureOut {
-        // The root is excluded from `deps` — it is the inspected package, named
-        // by the top-level `identifier` and present in the surface attributions.
+        // The root is not a dep: the top-level `identifier` already names it.
         deps: nodes
             .into_iter()
             .filter(|node| !node.is_root)
@@ -314,7 +269,6 @@ fn project_closure(closure: InspectClosure) -> ClosureOut {
     }
 }
 
-/// Projects one lib-level [`Surface`] into its wire shape.
 fn surface_out(surface: Surface) -> SurfaceOut {
     SurfaceOut {
         binaries: BinaryAttribution::from_pairs(&surface.binaries),
@@ -325,13 +279,11 @@ fn surface_out(surface: Surface) -> SurfaceOut {
     }
 }
 
-/// Projects one non-root lib-level [`ClosureNode`] into a wire `deps` entry.
 fn closure_dep_out(node: ClosureNode) -> ClosureDepOut {
     ClosureDepOut {
         name: node.identifier.as_identifier().name().to_string(),
         identifier: node.identifier.to_string(),
-        // A non-root node always carries a composed-from-root visibility; the
-        // empty fallback is unreachable (the root is filtered out above).
+        // Unreachable fallback: every non-root node carries a composed visibility.
         effective_visibility: node
             .effective_visibility
             .map(|visibility| visibility.to_string())
@@ -345,7 +297,6 @@ fn closure_dep_out(node: ClosureNode) -> ClosureDepOut {
     }
 }
 
-/// Projects one lib-level [`ClosureEdge`] into its wire shape.
 fn closure_edge_out(edge: ClosureEdge) -> ClosureEdgeOut {
     ClosureEdgeOut {
         identifier: edge.identifier.to_string(),
@@ -354,7 +305,6 @@ fn closure_edge_out(edge: ClosureEdge) -> ClosureEdgeOut {
     }
 }
 
-/// Projects the lib-level [`ClosureConflicts`] (Codex C2) into its wire shape.
 fn conflicts_out(conflicts: ClosureConflicts) -> ConflictsOut {
     ConflictsOut {
         entrypoints: conflicts
@@ -384,10 +334,7 @@ struct CandidateOut {
     /// this child's digest attached. Emitted for the same reason the entry
     /// carries `pinned_identifier`: splicing one by hand means knowing where
     /// the tag goes relative to the digest.
-    ///
-    /// Named `pinned` rather than `pinned_identifier` because a candidate has
-    /// exactly one digest and so nothing to disambiguate against — the same
-    /// reason `resolution.pinned` is spelled that way.
+    // `pinned`, not `pinned_identifier`: a candidate has one digest, nothing to disambiguate.
     pinned: String,
     platform: String,
     /// Absent for a lock-projected candidate: `ocx.lock` records the leaf
@@ -430,8 +377,7 @@ struct Layer {
 }
 
 impl Layer {
-    /// Projects raw OCI layer descriptors onto the report surface, shared by
-    /// the default-manifest and resolved views.
+    /// Projects raw OCI layer descriptors onto the report surface.
     fn from_descriptors(descriptors: &[ocx_oci::Descriptor]) -> Vec<Self> {
         descriptors
             .iter()
@@ -445,11 +391,8 @@ impl Layer {
 }
 
 impl PackageInspect {
-    /// Builds one report entry from the task result. `name` is how the caller
-    /// addressed this package (the raw request string, or an `ocx.toml`
-    /// binding); `identifier` is the requested identifier (post
-    /// default-registry expansion); `platform` is the platform resolution
-    /// selected against (only meaningful in `--resolve` mode).
+    /// Builds one report entry; `name` is how the caller addressed the package, `identifier` the
+    /// expanded request, and `platform` matters only under `--resolve`.
     pub fn new(
         name: String,
         identifier: ocx_oci::PackageRef,
@@ -509,13 +452,8 @@ impl PackageInspect {
         }
     }
 
-    /// Builds one entry straight from a locked toolchain binding — the
-    /// `ocx inspect` default mode.
-    ///
-    /// `platforms` is the lock entry's platform-to-leaf map, so this is a pure
-    /// projection: no registry read, no host-leaf selection, and therefore no
-    /// pinned artifact at the entry level. Each platform becomes a candidate
-    /// naming the leaf it would resolve to.
+    /// Builds one entry straight from a locked toolchain binding (`ocx inspect` default mode): a pure
+    /// projection with no registry read and no pinned artifact.
     pub fn locked(
         name: String,
         identifier: ocx_oci::PackageRef,
@@ -558,14 +496,8 @@ impl Resolution {
 }
 
 impl PackageInspect {
-    /// The single artifact this entry pinned, when it pinned one — the
-    /// requested identifier with its resolved digest attached.
-    ///
-    /// Emitted as its own field so a consumer never has to splice `identifier`
-    /// and `pinned_digest` back together (and get the `:tag@digest` punctuation
-    /// right) to name the exact artifact. `None` for a lock projection, which
-    /// selects nothing: there the per-candidate `pinned_identifier` is the
-    /// pullable reference.
+    /// The single artifact this entry pinned, digest attached so a consumer never splices one;
+    /// `None` for a lock projection, which selects nothing.
     fn pinned_identifier(&self) -> Option<&ocx_oci::PinnedPackageRef> {
         match &self.body {
             Body::Candidates { pinned, .. } | Body::Manifest { pinned, .. } | Body::Resolved { pinned, .. } => {
@@ -575,20 +507,14 @@ impl PackageInspect {
         }
     }
 
-    /// The identifier the plain tree roots at: the pinned one where something
-    /// was pinned, else the identifier as addressed.
-    ///
-    /// A lock projection must root at the DECLARED identifier — the lock
-    /// stores the bare repository shared by every platform leaf, so rooting at
-    /// anything lock-derived would silently drop the `:tag` every other
-    /// inspect view shows.
+    /// The identifier the plain tree roots at: the pinned one, else the declared one. A lock
+    /// projection roots at the declared identifier, or the tree drops the `:tag` the lock does not store.
     fn root_identifier(&self) -> &ocx_oci::PackageRef {
         self.pinned_identifier()
             .map_or(&self.identifier, ocx_oci::PinnedPackageRef::as_identifier)
     }
 
-    /// The whole plain-format tree for this entry: the root identifier with
-    /// the shape-appropriate section(s) beneath it.
+    /// The whole plain-format tree for this entry.
     fn tree(&self) -> Node {
         let sections = match &self.body {
             Body::Candidates { candidates, .. } | Body::Locked { candidates } => vec![candidates_node(candidates)],
@@ -629,10 +555,7 @@ impl PackageInspect {
 
 impl Serialize for PackageInspect {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Field count varies by body shape; name + identifier are always
-        // present, the two pinned fields only when something was pinned.
-        // `closure` is additive-optional (present only under `--closure`) and
-        // nests deps + surface + conflicts under one key.
+        // Keep `len` in step with the fields written below, per body shape.
         let pinned = self.pinned_identifier();
         let len = 2
             + 2 * usize::from(pinned.is_some())
@@ -685,13 +608,10 @@ impl Serialize for PackageInspect {
     }
 }
 
-/// A plain-text tree node. Built only for `print_plain`; the JSON path uses
-/// the `Serialize` impls above.
+/// A plain-text tree node; the JSON path uses the `Serialize` impls.
 struct Node {
     label: String,
-    /// When set, the label is an identifier inked with the active theme at
-    /// render time (so the root reads like every other identifier). Takes
-    /// precedence over `label`.
+    /// When set, the label is this identifier inked at render time; takes precedence over `label`.
     identifier: Option<ocx_oci::PackageRef>,
     annotations: Vec<SemanticAnnotation>,
     children: Vec<Node>,
@@ -716,9 +636,7 @@ impl Node {
         }
     }
 
-    /// A branch whose label is an identifier — inked with the active theme
-    /// at render time so it matches digest/identifier colouring everywhere
-    /// else in the tree.
+    /// A branch whose label is an identifier inked at render time.
     fn identifier_branch(identifier: ocx_oci::PackageRef, children: Vec<Node>) -> Self {
         Self {
             label: String::new(),
@@ -778,11 +696,8 @@ fn metadata_node(metadata: &Metadata) -> Node {
         let vars = env
             .into_iter()
             .map(|var| {
-                // A tree render is not a gate: a modifier type this binary does
-                // not know still gets a row, labelled as such. The refusal is
-                // `ValidMetadata`'s, which every ingress path runs first — an
-                // unrecognised *token* reaches here unrefused by design (D14),
-                // and shows as the value the publisher wrote.
+                // A tree render is not a gate: an unknown modifier still gets a row, since `ValidMetadata`
+                // already refused bad input on every ingress path.
                 let note = match ModifierKind::try_from(&var.modifier) {
                     Ok(kind) => kind.to_string(),
                     Err(_) => "unknown type".to_string(),
@@ -815,9 +730,7 @@ fn metadata_node(metadata: &Metadata) -> Node {
             .iter()
             .map(|(name, entry)| {
                 let node = Node::leaf(name.to_string());
-                // Annotate the dispatch command only when it diverges from
-                // the invocable name — no noise for the common case where
-                // they coincide.
+                // Only when it diverges from the invocable name.
                 match entry.command() {
                     Some(cmd) if cmd.as_str() != name.as_str() => node.with_note(format!("-> {cmd}")),
                     _ => node,
@@ -827,8 +740,7 @@ fn metadata_node(metadata: &Metadata) -> Node {
         children.push(Node::branch("entrypoints", names));
     }
 
-    // `None` = undeclared (omit the node); `Some(empty)` = publisher asserts
-    // zero interface executables (render explicitly, distinct from absence).
+    // `None` = undeclared (no node); `Some(empty)` = declared zero executables, rendered explicitly.
     if let Some(binaries) = metadata.binaries() {
         children.push(binaries_node(binaries));
     }
@@ -845,10 +757,8 @@ fn binaries_node(binaries: &Binaries) -> Node {
 }
 
 fn candidates_node(candidates: &[CandidateOut]) -> Node {
-    // No media type: every child of an image index is an image manifest, so the
-    // column is a constant that pushes the size off a narrow terminal. Size is
-    // annotated only when known — a lock projection has no descriptor to read
-    // it from.
+    // No media type: every image-index child is a manifest, and the constant pushes size off a
+    // narrow terminal. A lock projection has no size.
     let entries = candidates
         .iter()
         .map(|c| {
@@ -862,17 +772,12 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
     Node::branch("candidates", entries)
 }
 
-/// The discriminating tail of a media type — `…image.layer.v1.tar+gzip` renders
-/// as `tar+gzip`. Every layer of a package repeats the same 30-character
-/// `application/vnd.oci.image.layer.v1` prefix, which pushes the layer size
-/// past the right edge; only the suffix tells two layers apart.
+/// The discriminating tail of a media type (`…image.layer.v1.tar+gzip` → `tar+gzip`).
 fn media_type_suffix(media_type: &str) -> &str {
     media_type.rsplit('.').next().unwrap_or(media_type)
 }
 
-/// Renders the manifest's layer descriptors as a `layers` branch — one indexed
-/// `[i]` leaf per layer with digest / media type suffix / human size. Shared by
-/// the default-manifest and resolved views.
+/// Renders the manifest's layers as a `layers` branch, one indexed leaf per layer.
 fn layers_node(layers: &[Layer]) -> Node {
     let entries = layers
         .iter()
@@ -887,18 +792,10 @@ fn layers_node(layers: &[Layer]) -> Node {
     Node::branch("layers", entries)
 }
 
-/// Renders the `resolution` branch: the platform the walk selected against, then
-/// the OCI walk itself. `platform` is the answer under `--platform` (a libc
-/// refinement in particular is invisible anywhere else in the tree), so it is
-/// rendered even though it also serializes at the top level.
+/// Renders the `resolution` branch: the selected platform, then the OCI walk. The platform shows
+/// here because a libc refinement is visible nowhere else in the tree.
 fn resolution_node(resolution: &Resolution, platform: &ocx_oci::Platform) -> Node {
-    // Chain entries render like layers — role label, then digest / size — so the
-    // OCI walk (index → manifest → config) is legible instead of an opaque
-    // positional digest list. The role doubles as the walk-order marker the bare
-    // `[i]` used to carry, and as the media type: an `index` role IS
-    // `image.index.v1+json`. Layers are not part of the walk; they render under
-    // the manifest itself, not here. No `pinned` leaf either — it is the tree
-    // root, byte for byte.
+    // No `pinned` leaf: it is the tree root, byte for byte.
     let chain = resolution
         .chain
         .iter()
@@ -914,18 +811,12 @@ fn resolution_node(resolution: &Resolution, platform: &ocx_oci::Platform) -> Nod
     )
 }
 
-/// Renders the `closure` flat array as a `(*)`-deduped tree rooted at the
-/// inspected package (ADR D2 plain format). Dedup is keyed by content digest
-/// (extracted from an edge's `identifier` suffix via [`edge_digest`]), not by
-/// the edge's own tag-bearing identifier string — a diamond's shared node
-/// renders in full once; every later visit is a `(*)`-marked leaf.
+/// Renders the `closure` as a `(*)`-deduped tree rooted at the inspected package. Dedup keys on
+/// content digest, not the tag-bearing identifier, so a diamond's shared node renders once.
 fn closure_node(closure: &ClosureOut) -> Node {
     let mut children = Vec::new();
 
-    // Flat dependency list in transitive-closure order — each dep once, with
-    // its composed-from-root visibility. No nested re-tree and no repetition of
-    // the inspected root (which already heads the whole inspect tree); the DAG
-    // edges live in the JSON `deps[].dependencies` for programmatic use.
+    // Flat list in transitive-closure order; the DAG edges live in the JSON `deps[].dependencies`.
     if !closure.deps.is_empty() {
         let deps = closure.deps.iter().map(closure_dep_leaf).collect();
         children.push(Node::branch("deps", deps));
@@ -933,10 +824,6 @@ fn closure_node(closure: &ClosureOut) -> Node {
 
     children.push(surfaces_node(&closure.surface));
 
-    // Interface-projection conflicts render as their own branches, one child per
-    // colliding party. This is the one place worth spending vertical space: it
-    // fires exactly when the user has a decision to make, and a joined list of
-    // pinned identifiers is the widest cell the whole view can produce.
     for conflict in &closure.conflicts.entrypoints {
         let packages = conflict
             .packages
@@ -959,8 +846,7 @@ fn closure_node(closure: &ClosureOut) -> Node {
     Node::branch("closure", children)
 }
 
-/// Renders one dependency as a flat leaf: the short name, the whole identifier
-/// as one digest-inked (blue) span, and the composed-from-root visibility tag.
+/// One dependency as a flat leaf: short name, digest-inked identifier and composed visibility.
 fn closure_dep_leaf(dep: &ClosureDepOut) -> Node {
     let mut leaf = Node::leaf(dep.name.clone()).with_digest(dep.identifier.clone());
     if let Some(visibility) = parse_visibility(&dep.effective_visibility) {
@@ -969,32 +855,24 @@ fn closure_dep_leaf(dep: &ClosureDepOut) -> Node {
     leaf
 }
 
-/// A wire identifier string with its digest stripped — `registry/repo:tag`. The
-/// conflict leaves answer *which packages* collide; the digest is not that
-/// answer, and repository conflicts report digests in their own branch. Falls
-/// back to the verbatim string if the wire value does not parse.
+/// A wire identifier without its digest, or verbatim when it does not parse.
 fn without_digest(identifier: &str) -> String {
     ocx_oci::PackageRef::parse(identifier)
         .map_or_else(|_| identifier.to_string(), |parsed| parsed.without_digest().to_string())
 }
 
-/// A wire digest string in its canonical short form (`sha256:` + 12 hex). Falls
-/// back to the verbatim string if the wire value does not parse.
+/// A wire digest in short form (`sha256:` + 12 hex), or verbatim when it does not parse.
 fn short_digest(digest: &str) -> String {
     ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }
 
-/// The short display name of a wire identifier string — the repository's final
-/// path segment, the same name [`ClosureDepOut::name`] carries, so the `deps`
-/// branch reads as the legend for every surface attribution. Falls back to the
-/// verbatim string if the wire value does not parse.
+/// The repository's final path segment, as [`ClosureDepOut::name`] carries it, so `deps` reads as
+/// the legend for every attribution; verbatim when it does not parse.
 fn attribution_name(identifier: &str) -> String {
     ocx_oci::PackageRef::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
 }
 
-/// Parses a wire `effective_visibility` string back into the palette-typed
-/// [`Visibility`] so the plain tree can reuse `SemanticAnnotation::Visibility`
-/// (same four canonical strings the `Display` impl produces).
+/// Parses a wire `effective_visibility` back into a [`Visibility`] for the palette.
 fn parse_visibility(text: &str) -> Option<Visibility> {
     match text {
         "sealed" => Some(Visibility::SEALED),
@@ -1005,8 +883,7 @@ fn parse_visibility(text: &str) -> Option<Visibility> {
     }
 }
 
-/// Renders the two surface projections under one `surface` branch: `interface`
-/// (consumer axis) and `private` (internal axis).
+/// Renders the `interface` and `private` surfaces under one `surface` branch.
 fn surfaces_node(surfaces: &SurfacesOut) -> Node {
     Node::branch(
         "surface",
@@ -1017,8 +894,7 @@ fn surfaces_node(surfaces: &SurfacesOut) -> Node {
     )
 }
 
-/// Renders one [`SurfaceOut`] as a labelled branch: binaries + entrypoints + env
-/// leaves, plus an incompleteness note when `binaries_complete == false`.
+/// Renders one [`SurfaceOut`], with a note when `binaries_complete == false`.
 fn surface_node(label: &str, surface: &SurfaceOut) -> Node {
     let mut children = Vec::new();
     if !surface.binaries.is_empty() {
@@ -1038,9 +914,8 @@ fn surface_node(label: &str, surface: &SurfaceOut) -> Node {
         children.push(Node::branch("integrations", leaves));
     }
     if !surface.binaries_complete {
-        // Wording matters: the trigger is an UNDECLARED claim (key absent), not
-        // a declared-empty one — `binaries: []` asserts zero and keeps the
-        // aggregate complete (tri-state, adr_declared_binaries_metadata.md §1).
+        // The trigger is an undeclared claim, never `binaries: []`, which asserts zero and keeps the
+        // aggregate complete (`adr_declared_binaries_metadata.md` §1).
         children.push(Node::leaf(
             "binaries incomplete: at least one admitted package leaves binaries undeclared",
         ));
@@ -1048,23 +923,17 @@ fn surface_node(label: &str, surface: &SurfaceOut) -> Node {
     Node::branch(label.to_string(), children)
 }
 
-/// Renders one [`BinaryAttribution`] as a leaf, attributing the claim to the
-/// owning package by its short name (see [`attribution_name`]) when known. The
-/// full pinned identifier would otherwise repeat once per binary per package —
-/// a 3-dependency, 5-binary closure prints it 15 times.
+/// One [`BinaryAttribution`] leaf, attributed by short name so a pinned identifier is not repeated per binary.
 fn binary_attribution_leaf(attribution: &BinaryAttribution) -> Node {
     attribution_leaf(&attribution.name, attribution.package.as_deref())
 }
 
-/// Renders one [`NamespaceAttribution`] as a leaf — the namespace key, and the
-/// declaring package's short name when known. Never the payload: the closure
-/// envelope carries none (`adr_package_integrations.md` D15/D16).
+/// One [`NamespaceAttribution`] leaf; never the payload, which the closure envelope does not carry.
 fn namespace_attribution_leaf(attribution: &NamespaceAttribution) -> Node {
     attribution_leaf(&attribution.namespace, attribution.package.as_deref())
 }
 
-/// The shape every surface attribution leaf shares: the claimed name, noted
-/// with the owning package's short name when attribution is known.
+/// A claimed name, noted with the owning package's short name when known.
 fn attribution_leaf(name: &str, package: Option<&str>) -> Node {
     let leaf = Node::leaf(name);
     match package {
@@ -1073,9 +942,7 @@ fn attribution_leaf(name: &str, package: Option<&str>) -> Node {
     }
 }
 
-/// Renders one [`EnvVarAttribution`] as a leaf: the env key, its modifier kind
-/// as a note (`path` / `constant`), and the owning package's short name when
-/// attribution is known.
+/// One [`EnvVarAttribution`] leaf: env key, modifier kind and owning package.
 fn env_var_attribution_leaf(attribution: &EnvVarAttribution) -> Node {
     let leaf = Node::leaf(attribution.key.clone()).with_note(attribution.kind.clone());
     match &attribution.package {
@@ -1085,49 +952,25 @@ fn env_var_attribution_leaf(attribution: &EnvVarAttribution) -> Node {
 }
 
 impl Printable for PackageInspect {
-    // Inspect output is inherently structured (nested sections), not a single
-    // table — same tree exemption `deps` uses.
     fn print_plain(&self, data: &DataInterface) {
         data.print_tree(&self.tree());
     }
 }
 
-/// The report both inspect commands emit: `ocx package inspect` over raw
-/// identifiers, and `ocx inspect` over an `ocx.toml` toolchain selection.
-///
-/// Plain format: each package's tree rendered in order (inspect holds the
-/// single-table exemption — its output is inherently a nested tree, not a row).
-///
-/// JSON format: `{ platform?, packages: [...], env: [...] }`.
-///
-/// `platform` is present only when the run actually selected a platform —
-/// `--resolve` / `--closure`, on either command. Default mode lists candidates
-/// without selecting, so there is no platform to report and `-p` stays inert,
-/// exactly as its help promises.
-///
-/// `packages` is an **array**, not an object keyed by request string: entry
-/// order is meaningful (input order for `ocx package inspect`, selection order
-/// for `ocx inspect`) and JSON object key order is not guaranteed. Each entry
-/// names itself via its `name` field.
-///
-/// `env` is the composed project-tier environment in application order —
-/// `[env]`, then each selected group's `[group.<name>.env]` in `-g` order, then
-/// `--env`. `ocx package inspect` reads no `ocx.toml`, so its `env` carries the
-/// `--env` overrides alone. Package-declared env is NOT here: it lives inside
-/// each entry's `closure.surface.env`, where it is attributed per package and
-/// carries no value (those are `${installPath}`-templated and only concrete
-/// after install). The array is always present, empty when nothing applies.
+/// The report both inspect commands emit: `ocx package inspect` over identifiers, `ocx inspect` over `ocx.toml`.
 pub struct InspectReport {
+    /// Present only when the run selected a platform, so `-p` stays inert in default mode.
     platform: Option<String>,
+    /// An array, not keyed by request: entry order is meaningful and JSON key order is not.
     packages: Vec<PackageInspect>,
+    /// The composed project-tier environment in application order, empty when nothing applies.
+    /// Package-declared env sits per entry in `closure.surface.env`: its templates are concrete only
+    /// after install.
     env: Vec<EnvEntry>,
 }
 
 impl InspectReport {
-    /// `platform` is `Some` only when the run selected one. Passing it
-    /// unconditionally would make `-p` observable in a default-mode
-    /// `ocx package inspect`, which selects no platform at all — the report
-    /// would then name a platform nothing was resolved against.
+    /// `platform` is `Some` only when the run selected one, or the report names a platform nothing resolved against.
     pub fn new(platform: Option<&ocx_oci::Platform>, packages: Vec<PackageInspect>, env: Vec<EnvEntry>) -> Self {
         Self {
             platform: platform.map(ToString::to_string),
@@ -1136,13 +979,8 @@ impl InspectReport {
         }
     }
 
-    /// Every interface-projection conflict the closure walk detected, across
-    /// every entry.
-    ///
-    /// Empty means the selection is realizable. A non-empty result is what
-    /// drives the command's exit code — install/compose would hard-reject this
-    /// set, so inspect reports it AND exits non-zero rather than handing back a
-    /// green that hides an unusable surface.
+    /// Whether the closure walk found any interface-projection conflict; true drives a non-zero exit,
+    /// since install would reject the set.
     pub fn has_conflicts(&self) -> bool {
         self.packages.iter().any(|package| {
             let closure = match &package.body {
@@ -1176,9 +1014,7 @@ impl Printable for InspectReport {
     }
 }
 
-// Both `Serialize` impls above build their field list at run time, so neither
-// schema can be derived. Written out here so the published contract says what
-// the serializer actually does.
+// Hand-written: both `Serialize` impls build their field list at run time.
 impl schemars::JsonSchema for InspectReport {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "InspectReport".into()
@@ -1188,7 +1024,7 @@ impl schemars::JsonSchema for InspectReport {
         schemars::json_schema!({
             "type": "object",
             "properties": {
-                // Omitted entirely when no platform was resolved — never null.
+                // Omitted, never null, when no platform was resolved.
                 "platform": {"type": "string"},
                 "packages": generator.subschema_for::<Vec<PackageInspect>>(),
                 "env": generator.subschema_for::<Vec<EnvEntry>>(),

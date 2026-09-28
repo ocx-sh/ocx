@@ -3,11 +3,6 @@
 
 //! Reading and writing a [`Description`] as an OCI artifact on the
 //! `__ocx.desc` tag.
-//!
-//! Free functions over an [`ocx_oci::Client`], not methods on it: the wire *shape*
-//! of a description — which layer carries the README, which media type the logo
-//! declares, which annotations ride the manifest — is the package layer's
-//! vocabulary, and the client only supplies blob and manifest primitives.
 
 use crate::error::Error as PackageError;
 use std::path::Path;
@@ -27,18 +22,12 @@ use ocx_oci::{
 };
 
 /// Pushes a description artifact to the `__ocx.desc` tag.
-///
-/// Builds an OCI ImageManifest with `artifact_type` set to the description media type,
-/// an empty config blob, layers for the README (and optional logo), and manifest-level
-/// annotations for catalog metadata (title, description, keywords).
 pub async fn push_description(
     client: &ocx_oci::Client,
     identifier: &OciIdentifier,
     description: &Description,
 ) -> Result<(), PackageError> {
     let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
-    // Push stays canonical (mirror-free): remote/proxy mirrors are read-only —
-    // `ensure_auth` routes a `Push` scope to the canonical host for that reason.
     client
         .ensure_auth(&desc_identifier, ocx_oci::RegistryOperation::Push)
         .await?;
@@ -97,12 +86,9 @@ pub async fn push_description(
         builder = builder.annotations(description.annotations.clone());
     }
     let parts = builder.build()?;
-    // Sanity: the empty-config blob digest computed by the builder must
-    // match the one we already pushed above.
     debug_assert_eq!(parts.config_digest.to_string(), config_digest.to_string());
     let manifest_data = parts.manifest_bytes;
 
-    // Push to the tag reference directly (not by digest) so the tag is created.
     client
         .push_manifest_raw(&desc_identifier, manifest_data, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
         .await?;
@@ -111,20 +97,11 @@ pub async fn push_description(
     Ok(())
 }
 
-/// Pulls the description artifact from the `__ocx.desc` tag, from the
-/// canonical registry.
+/// Pulls the description from the canonical registry's `__ocx.desc` tag, or
+/// `Ok(None)` when the tag is absent; blobs are staged in `temp_dir`.
 ///
-/// Returns `Ok(None)` if no description tag exists for the identifier.
-/// Uses a temporary directory to download blobs before reading them into memory.
-///
-/// Canonical by default because the two commands that copy a description
-/// (`package copy --description`, `package description push --from`) and the one
-/// that merges into it (`package description push`) all *write back* what this read
-/// returns: a mirror's answer applied to the canonical host is a decision
-/// about a repository nobody read (invariant 5). A description served by a
-/// mirror is `pull_description_addressed` with
-/// `ReadAddressing::Mirrored`, asked for by name (both crate-private, so this
-/// names them as text rather than as links that would not resolve).
+/// Canonical because callers write the result back to the canonical host,
+/// which a mirror's answer would not describe.
 pub async fn pull_description(
     client: &ocx_oci::Client,
     identifier: &OciIdentifier,
@@ -133,11 +110,8 @@ pub async fn pull_description(
     pull_description_addressed(client, identifier, temp_dir, ReadAddressing::Canonical).await
 }
 
-/// [`pull_description`] against a caller-chosen host.
-///
-/// `ReadAddressing::Mirrored` is for a description nothing is written from —
-/// a catalog page rendered for a human, an announce observation — see
-/// [`ReadAddressing`].
+/// [`pull_description`] against a caller-chosen host; use
+/// [`ReadAddressing::Mirrored`] only when nothing is written from the result.
 pub async fn pull_description_addressed(
     client: &ocx_oci::Client,
     identifier: &OciIdentifier,

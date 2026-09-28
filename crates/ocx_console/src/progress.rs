@@ -9,36 +9,20 @@ const PROGRESS_CHARS: &str = "=> ";
 const NEST_PREFIX: &str = "  ↳ ";
 
 tokio::task_local! {
-    /// The active parent bar for the current task, set by
-    /// [`Spinner::scope`]. Child bars created while this is set
-    /// (`bytes`/`spinner`) render indented beneath it. Plain
-    /// `indicatif` `Arc` handle — never a `tracing::Span` — so the
-    /// task-local carries no span-registry state.
+    /// The current task's parent bar, set by [`Spinner::scope`]; bars created under it render indented.
     static PARENT_BAR: indicatif::ProgressBar;
 }
 
-// ── Span-free progress (ADR adr_progress_architecture) ──────────────
-//
-// Progress is driven through `indicatif` directly rather than through
-// `tracing-indicatif`'s span-attached `IndicatifLayer`.
-// `indicatif::ProgressBar` is `Arc`-backed `Send + Sync + Clone` with no
-// global span registry, so concurrent updates from many tokio tasks
-// cannot hit the `tracing_subscriber::registry::sharded::clone_span`
-// ref-count assertion that the span-coupled model triggered under
-// concurrent span close.
+// ── Span-free progress ──────────────────────────────────────────────
+// Never span-attached `tracing-indicatif`: its span registry panics in `sharded::clone_span` under concurrent
+// span close (adr_progress_architecture.md).
 
 use std::borrow::Cow;
 
-/// Owns the `indicatif::MultiProgress` and hands out RAII bar guards.
-///
-/// Cheap to clone (shares one `MultiProgress` via `Arc`) so it can be
-/// threaded through facade structs whose fields must all be cheap to
-/// clone. A [`disabled`](Self::disabled) manager renders nothing — every
-/// guard method is a no-op — so library and test consumers pay no cost.
+/// Owns the `indicatif::MultiProgress` and hands out RAII bar guards; cheap to clone.
 #[derive(Clone)]
 pub struct ProgressManager {
-    /// `None` = disabled (no rendering). `Some` = a live `MultiProgress`
-    /// (its draw target decides terminal vs. hidden).
+    /// `None` = disabled; a live `MultiProgress`'s draw target decides terminal vs. hidden.
     multi: Option<Arc<indicatif::MultiProgress>>,
 }
 
@@ -52,12 +36,7 @@ impl ProgressManager {
         }
     }
 
-    /// A live manager whose `MultiProgress` never draws.
-    ///
-    /// Behaves like [`stderr`](Self::stderr) for ownership/lifetime
-    /// purposes (bars are added and cloned) but produces no terminal
-    /// output. Used by concurrency regression tests to exercise the
-    /// real bar lifecycle without a TTY.
+    /// A live manager whose `MultiProgress` never draws, for exercising the real bar lifecycle without a TTY.
     pub fn hidden() -> Self {
         Self {
             multi: Some(Arc::new(indicatif::MultiProgress::with_draw_target(
@@ -66,21 +45,12 @@ impl ProgressManager {
         }
     }
 
-    /// A manager that renders bars on the process's **controlling terminal**,
-    /// degrading to [`disabled`](Self::disabled) when none is reachable.
+    /// A manager that renders bars on the process's **controlling terminal**, degrading to
+    /// [`disabled`](Self::disabled) when none is reachable (`setsid`, Docker builds, CI).
     ///
-    /// Deliberately not [`stderr`](Self::stderr): a tool invoked by `make`, or
-    /// by any wrapper that captures stderr, still has a controlling terminal,
-    /// and that is the channel a long transfer has to render on — writing into
-    /// the wrapped tool's own stderr stream would corrupt it, and skipping it
-    /// because stderr is a pipe leaves the user staring at a silent hang.
-    ///
-    /// Opening it fails, and must degrade rather than error, in exactly the
-    /// environments this is best-effort for: `ENXIO` under `setsid`, in Docker
-    /// builds and on CI runners is the common case, not the exception.
+    /// Not [`stderr`](Self::stderr): bars there would corrupt the output of a wrapper capturing stderr.
     pub async fn controlling_terminal() -> Self {
-        // `open(2)` on a terminal can block (carrier detect on a serial
-        // console), so the probe runs off the runtime rather than on it.
+        // `open(2)` on a terminal can block (serial carrier detect), so it runs off the runtime.
         match tokio::task::spawn_blocking(open_controlling_terminal).await {
             Ok(Some(term)) => Self {
                 multi: Some(Arc::new(indicatif::MultiProgress::with_draw_target(
@@ -100,33 +70,15 @@ impl ProgressManager {
         Self { multi: None }
     }
 
-    /// The parent bar of the current task, if a [`Spinner::scope`] is
-    /// active. `None` outside any scope (top-level bar).
+    /// The current task's parent bar, if a [`Spinner::scope`] is active.
     fn parent() -> Option<indicatif::ProgressBar> {
         PARENT_BAR.try_with(|p| p.clone()).ok()
     }
 
-    /// Places `bar` in the `MultiProgress` and reports whether it is nested
-    /// (for indent styling). A disabled manager detaches the bar so updates
-    /// are cheap no-ops.
+    /// Places `bar` in the `MultiProgress` and reports whether it is nested; a disabled manager detaches it.
     ///
-    /// Nesting is **styling only**: the bar is always appended, never
-    /// positioned relative to its parent. `MultiProgress::insert_after`
-    /// unwraps `parent.index()`, which is `None` whenever the parent is not a
-    /// member of this `MultiProgress` — a parent whose [`Guard`] finished
-    /// before the child attached (observed as an abort of `ocx package exec
-    /// --lazy-mode always` on a real terminal, back when a task spinner was
-    /// carried across the layer-download `tokio::spawn`), or a parent created
-    /// by a [`disabled`](Self::disabled) manager (detached by construction)
-    /// while an enabled manager attaches the child.
-    ///
-    /// A membership pre-check cannot close it: `index()` is private to
-    /// `indicatif`, and the public `is_hidden`/`is_finished` pair still leaves
-    /// the window where the parent finishes between the check and
-    /// `insert_after` re-reading the index. So the positional API is dropped
-    /// altogether — `add` cannot fail this way. Children keep their indent
-    /// prefix; the only loss is adjacency, a child rendering at the bottom
-    /// rather than directly beneath its parent.
+    /// Always `add`, never `insert_after`: that unwraps `parent.index()` and aborts once the parent finished or
+    /// was detached, a race no pre-check closes.
     fn attach(&self, bar: indicatif::ProgressBar) -> (indicatif::ProgressBar, bool) {
         match &self.multi {
             Some(multi) => match Self::parent() {
@@ -140,12 +92,8 @@ impl ProgressManager {
         }
     }
 
-    /// A spinner for work of unknown or instant duration.
-    ///
-    /// `label` renders after the spinner glyph (e.g.
-    /// `⠋ Resolving 'cmake:3.28'`). The spinner ticks on its own timer
-    /// so it animates even while the task is `.await`-blocked. Under a
-    /// [`Spinner::scope`] it renders indented beneath its parent.
+    /// A spinner for work of unknown duration, ticking on its own timer so it animates while the task is
+    /// `.await`-blocked; indented under a [`Spinner::scope`].
     pub fn spinner(&self, label: impl Into<Cow<'static, str>>) -> Spinner {
         let (pb, nested) = self.attach(indicatif::ProgressBar::new_spinner());
         let template = if nested {
@@ -162,8 +110,7 @@ impl ProgressManager {
         Spinner(Guard::new(pb))
     }
 
-    /// A byte-transfer bar. `label` renders before the bar. Under a
-    /// [`Spinner::scope`] it renders indented beneath its parent.
+    /// A byte-transfer bar with `label` before it; indented under a [`Spinner::scope`].
     pub fn bytes(&self, label: impl Into<Cow<'static, str>>, total: u64) -> BytesBar {
         let (pb, nested) = self.attach(indicatif::ProgressBar::new(total));
         let template = if nested {
@@ -183,13 +130,7 @@ impl ProgressManager {
         BytesBar(Guard::new(pb))
     }
 
-    /// A writer that emits log lines without tearing active bars.
-    ///
-    /// Formatted output flushes inside [`indicatif::MultiProgress::suspend`], which hides
-    /// the bars for the duration of the write. When the manager is disabled it
-    /// writes straight to stderr with no suspend overhead. The binary adapts
-    /// this to whatever writer trait its log subscriber asks for; the console
-    /// itself names no subscriber.
+    /// A writer that emits log lines inside [`indicatif::MultiProgress::suspend`], so they never tear active bars.
     pub fn writer(&self) -> LogWriter {
         LogWriter {
             multi: self.multi.clone(),
@@ -197,17 +138,9 @@ impl ProgressManager {
     }
 }
 
-/// Opens the controlling terminal as an `indicatif` draw target, or `None`
-/// when the process has none.
+/// Opens the controlling terminal as a draw target, or `None` when the process has none; blocking.
 ///
-/// Blocking — call it from [`spawn_blocking`](tokio::task::spawn_blocking).
-///
-/// `console::Term` is the draw target rather than a hand-written one: it
-/// already owns the cursor-movement, width-probing and line-clearing that
-/// `indicatif::TermLike` asks for, and `read_write_pair` builds one over an
-/// arbitrary file descriptor. The `is_term` check is what makes a `/dev/tty`
-/// that opened but is not a terminal (a redirected slave, a captured pty)
-/// degrade instead of writing escape sequences into a file.
+/// The `is_term` check keeps a `/dev/tty` that is not a terminal from receiving escape sequences.
 #[cfg(unix)]
 fn open_controlling_terminal() -> Option<console::Term> {
     let write = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
@@ -217,8 +150,6 @@ fn open_controlling_terminal() -> Option<console::Term> {
             return None;
         }
     };
-    // `read_write_pair` wants both halves; the read side is never used for
-    // drawing, but `Term`'s feature probes read the write half's descriptor.
     let read = match write.try_clone() {
         Ok(file) => file,
         Err(error) => {
@@ -226,45 +157,24 @@ fn open_controlling_terminal() -> Option<console::Term> {
             return None;
         }
     };
-    // `is_dumb` is the same gate `ProgressDrawTarget::stderr` applies: an
-    // escape-sequence bar on a `TERM=dumb` console is garbage, whichever fd
-    // it reaches.
+    // `TERM=dumb` gets no escape-sequence bar, the gate `ProgressDrawTarget::stderr` applies too.
     let term = console::Term::read_write_pair(read, write);
     (term.is_term() && !console::is_dumb()).then_some(term)
 }
 
-/// Windows has no controlling-terminal draw target yet, so `progress` degrades
-/// to silence there.
+/// Windows has no controlling-terminal draw target, so progress degrades to silence there.
 ///
-/// `console::Term` exposes no constructor over an arbitrary console handle
-/// (`read_write_pair` is `#[cfg(unix)]`), and hand-rolling a VT `TermLike` over
-/// `CONOUT$` would mean owning terminal rendering — which is exactly what
-/// `quality-core.md` § *Don't Own Non-Domain Code* argues against.
-///
-/// **This is the end state, not a placeholder.** An earlier version of this
-/// comment deferred the `CONOUT$` arm to "the change that lands the Windows
-/// shim producer", on the premise that `LazyModeLadder::resolve_for_host`
-/// forced `LazyMode::Never` on Windows and nothing could ever be deferred
-/// there. That floor is gone (C-027), so the premise is false and the arm stays
-/// closed on its own merits: returning `None` degrades progress to
-/// `LazyReport::Silent`, which `LazyReport`'s own contract sanctions
-/// ("degrades to Silent on failure, never to an error"). A Windows user loses a
-/// progress bar during a deferred materialization, and nothing else.
+/// `console::Term` has no constructor over a console handle, and a hand-rolled VT `TermLike` would own
+/// terminal rendering.
 #[cfg(windows)]
 fn open_controlling_terminal() -> Option<console::Term> {
     log::debug!("Progress disabled: this phase opens no controlling terminal on Windows");
     None
 }
 
-/// RAII body for a bar guard.
-///
-/// On drop the bar is cleared from the `MultiProgress`. [`abandon`](Self::abandon)
-/// freezes the bar with a final message and suppresses the clear so a
-/// failure stays visible.
+/// RAII body for a bar guard: cleared on drop unless [`abandon`](Self::abandon) froze it with a final message.
 struct Guard {
     pb: indicatif::ProgressBar,
-    /// `true` once [`abandon`](Self::abandon) ran — the `Drop` clear is
-    /// then skipped so the failure message survives.
     abandoned: bool,
 }
 
@@ -291,18 +201,13 @@ impl Drop for Guard {
 pub struct Spinner(Guard);
 
 impl Spinner {
-    /// Runs `fut` with this spinner registered as the task-local parent.
-    ///
-    /// Any `bytes`/`spinner` guard created while `fut` is in flight (on
-    /// the same task — task-locals do not cross `tokio::spawn`) nests
-    /// beneath this spinner and renders indented. Drop the spinner after
-    /// the scope returns to clear it.
+    /// Runs `fut` with this spinner as the task-local parent, so bars created in it nest beneath it; task-locals
+    /// do not cross `tokio::spawn`.
     pub async fn scope<F: std::future::Future>(&self, fut: F) -> F::Output {
         PARENT_BAR.scope(self.0.pb.clone(), fut).await
     }
 
-    /// Replaces the spinner's trailing message (e.g. to show the active
-    /// stage of a multi-step task).
+    /// Replaces the spinner's trailing message.
     pub fn set_message(&self, msg: impl Into<Cow<'static, str>>) {
         self.0.pb.set_message(msg.into());
     }
@@ -317,13 +222,7 @@ impl Spinner {
 pub struct BytesBar(Guard);
 
 impl BytesBar {
-    /// A progress callback for transport methods.
-    ///
-    /// Captures a clone of the underlying `indicatif::ProgressBar` — a
-    /// plain `Arc` handle, **not** a `tracing::Span`. Invoking it from
-    /// any thread only touches indicatif's internal lock; it never
-    /// reaches the `tracing` span registry, so the concurrent
-    /// clone-after-close panic is impossible by construction.
+    /// A progress callback for transport methods, holding a plain `indicatif` handle, never a `tracing::Span`.
     pub fn callback(&self) -> Arc<dyn Fn(u64) + Send + Sync> {
         let pb = self.0.pb.clone();
         Arc::new(move |bytes: u64| pb.set_position(bytes))
@@ -335,12 +234,8 @@ impl BytesBar {
     }
 }
 
-/// Writer factory that routes formatted log events through
-/// [`indicatif::MultiProgress::suspend`] so they never interleave with bar redraws.
-///
-/// One handle is created per event by the caller; it buffers the formatted
-/// line and flushes on drop. Disabled managers write straight to stderr with
-/// no suspend.
+/// Writer factory routing formatted log events through [`indicatif::MultiProgress::suspend`], so they never
+/// interleave with bar redraws.
 #[derive(Clone)]
 pub struct LogWriter {
     multi: Option<Arc<indicatif::MultiProgress>>,

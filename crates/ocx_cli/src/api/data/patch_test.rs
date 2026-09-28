@@ -15,15 +15,14 @@ use crate::api::data::env::EntrySource;
 /// The optional `separator` field is present only for a `"type":"list"` entry. The
 /// optional `source` object is present only for companion overlay entries and
 /// names the rule glob + companion that produced the entry; base-native entries
-/// omit it. Shares [`EntrySource`] with `--show-patches`.
+/// omit it. The `source` object has the same shape `--show-patches` reports.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchTestEntry {
     pub key: String,
     pub value: String,
     #[serde(rename = "type")]
     pub kind: ModifierKind,
-    /// The separator a [`ModifierKind::List`] entry folds with; `None` on
-    /// every other kind. Skipped in JSON when `None`.
+    /// The separator a `list` entry folds with; omitted for every other `type`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub separator: Option<String>,

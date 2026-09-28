@@ -1,18 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! SBOM reading and summarization.
-//!
-//! An SBOM document is not an OCI concept: `oci::attest` produces the
-//! verified predicate bytes, this module only interprets them. This is a
-//! **leaf module** — it must not depend on `oci` — matching [`ocx_trust`]'s
-//! own leaf placement. See `.claude/artifacts/adr_sbom_attestations.md`
-//! "SBOM reading" (D-i).
-//!
-//! v1 parses and summarizes CycloneDX 1.5-1.7 only ([`cyclonedx`]); there is
-//! no `SbomFormat` trait. A trait is earned by a second real implementation
-//! or an exercised test double (ARCH-07), and neither exists here — one
-//! concrete module with inherent functions, per the ADR's D2/D-i.
+//! SBOM reading and summarization (CycloneDX only, [`cyclonedx`]).
 
 use thiserror::Error;
 
@@ -31,12 +20,7 @@ pub struct SbomSummary {
     pub top_level_component: Option<String>,
 }
 
-/// An SBOM summarization failure.
-///
-/// The bytes handed to a summarizer function have already passed DSSE
-/// signature verification and the caller's byte-size cap; this error type
-/// exists because that only bounds trust and size, never shape — every
-/// document is still attacker-shaped JSON.
+/// An SBOM summarization failure; the input is signature-verified but still attacker-shaped JSON.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SbomError {

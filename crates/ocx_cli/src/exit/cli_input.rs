@@ -4,14 +4,8 @@
 //! Exit-code classification for the errors a command raises about its own
 //! input ([`crate::error`]).
 //!
-//! These types are this crate's, not a library's, which makes this the one
-//! rung of the ladder that does not stand for an `ocx_*` crate. It is a rung
-//! all the same, deliberately: [`crate::exit::classify_error`] sweeps the
-//! CLI-local types over the whole chain **before** the library types, and that
-//! ordering is observable. Classifying `UsageError` in the first pass would
-//! put it ahead of every library cause that precedes it in a chain carrying
-//! both — a changed exit code with byte-identical stderr, which is the class
-//! DEC-23 exists for. It stays where it has always been answered from.
+//! On the library ladder deliberately: moving them into [`crate::exit::classify_error`]'s CLI-local pass
+//! would outrank earlier library causes, changing exit codes with byte-identical stderr.
 
 use ocx_exit::ExitCode;
 

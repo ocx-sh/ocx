@@ -2,61 +2,19 @@
 // Copyright 2026 The OCX Authors
 
 //! Frozen ● wire grammar for the ocx-index static-file format
-//! (`adr_index_indirection.md` §Data Model).
-//!
-//! These shapes are the ones shared verbatim by both consumers of the
-//! ocx-index format (Decision H) — the hosted `index.ocx.sh` site and every
-//! verbatim local copy of it (Decision A2):
-//!
-//! - [`crate::IndexStore`] — the local index collection,
-//!   reading/writing these shapes verbatim as bytes on disk.
-//! - [`super::OcxIndex`] — the remote `index.ocx.sh` client, parsing them
-//!   straight off the wire.
-//!
-//! The grammar this module owns is the **catalog**: the root document that
-//! names tags, and the `c/index.json` map that names roots. What a tag points
-//! *at* is not defined here and never was ours to define — an index is a
-//! catalog of OCI artifacts, so `tags[].content` names an **OCI image index**,
-//! whose shape belongs to the OCI image spec ([`ocx_oci::ImageIndex`]) and
-//! is stored byte-for-byte as the registry served it
-//! (`adr_oci_index_only_dispatch.md` D1).
-//!
-//! Two documents carry the format's version pin — `config.json` and the
-//! `c/index.json` envelope — so [`SUPPORTED_FORMAT_VERSION`] and the one
-//! [`gate_format_version`] that compares against it live here, with the
-//! grammar, rather than beside either reader. [`IndexFormatConfig`],
-//! `config.json`'s own struct, lives here for the same reason: it is no longer
-//! a single reader's private shape but a shared one. `OcxIndex` reads it off
-//! the wire today; `LocalIndex` will read it off disk (WP11, C-005), and the
-//! update path will **write** it (WP5, C-023) via
-//! [`serialize_config`](super::wire_writer::serialize_config)
-//! (`adr_servable_index_snapshot.md` C-001/C-025).
-//!
-//! Everything else about the format (catalog digest-diff sync, dispatch-object
-//! decode, `select_best` resolution) is downstream policy, not grammar — see
-//! `adr_index_indirection.md` Decisions A/C/F for that layer.
+//! (`adr_index_indirection.md` §Data Model), shared by the hosted `index.ocx.sh`
+//! site and every local copy.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
-/// The `format_version` OCX understands, shared by every document that carries
-/// one — `config.json` and the [`CatalogDocument`] envelope. A served value
-/// other than this is rejected (`adr_index_indirection.md` F1).
+/// The `format_version` OCX understands; any other served value is rejected.
 pub const SUPPORTED_FORMAT_VERSION: u64 = 1;
 
-/// The single wire-format version gate, and the only place
-/// [`SUPPORTED_FORMAT_VERSION`] is compared against — both documents that
-/// carry the pin route through it ([`CatalogDocument::into_packages`] for the
-/// `c/index.json` envelope, [`OcxIndex::check_format_version`](super::OcxIndex)
-/// for `config.json`), and the offline reader joins them in WP11.
-///
-/// One gate, so a fetched tree and a shipped copy can never be trusted
-/// differently (CWE-501). It takes a version, never an "was it there?" flag:
-/// an absent `config.json` is resolved to [`IndexFormatConfig::assumed_v1`] by
-/// the caller *before* the gate runs
-/// (`adr_servable_index_snapshot.md` C-004/C-005).
+/// The single wire-format version gate: every document carrying the pin routes
+/// through it, so a fetched tree and a shipped copy are never trusted differently (CWE-501).
 ///
 /// # Errors
 ///
@@ -69,62 +27,19 @@ pub(crate) fn gate_format_version(version: u64) -> super::error::Result<()> {
     Ok(())
 }
 
-/// `config.json` (● `{"format_version": 1}`) — the version pin and the index's
-/// own declaration of the names it can express.
-///
-/// Read once per source; an unknown `format_version` is a hard error
-/// (fail-closed, F1). An **absent** document is not an error either:
-/// [`Self::assumed_v1`] is substituted for it, so a served tree that never
-/// published a `config.json` still resolves (C-005). `OcxIndex` does that
-/// today; the offline `LocalIndex` reader joins it in WP11.
-///
-/// Forward-compatible: no `deny_unknown_fields`, so an unmodelled sibling (the
-/// withdrawn `min_ocx_version`, Decision E; or a future key) is ignored rather
-/// than fatal.
-///
-/// **Field order is load-bearing.** This type is serialized as well as parsed
-/// ([`serialize_config`](super::wire_writer::serialize_config)), and Python's
-/// `json.dumps` defaults `sort_keys=False`, so `ocx-sh/index`'s renderer
-/// (`render.py:334-338`) emits `format_version` then `name_segments`.
-/// Declaration order is that order. The type carries **no** OCX-only field —
-/// reordering or adding one is a wire break. `skip_serializing_if` on
-/// `name_segments` does *not* make an OCX-written config byte-identical to a
-/// Python-rendered one (the renderer always writes `name_segments`); it makes
-/// the two agree on form while OCX declines to guess a value it cannot derive —
-/// see [`serialize_config`](super::wire_writer::serialize_config) (C-001/C-025).
+/// `config.json` (● `{"format_version": 1}`); an absent document reads as [`Self::assumed_v1`].
+// Field order is wire: `ocx-sh/index`'s `render.py` emits the same order, so reordering or adding a field breaks it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IndexFormatConfig {
     pub format_version: u64,
-    /// Slash-separated segment count a package name must have under this index,
-    /// counted on the name **within** the namespace ([`ocx_oci::PackageRef::repository`]).
-    /// `index.ocx.sh` serves `2` — its root schema pins the logical name to
-    /// `<ns>/<pkg>`, so it can never hold a root for a flat name.
-    ///
-    /// Absent = this index declares no constraint and can express every name,
-    /// which is the historical behaviour verbatim. Deliberately **not** a
-    /// security control: an older client ignores the field entirely, so nothing
-    /// about the yank gate, the dispatch-object verify, or the authoritative
-    /// stop is delegated to it — it only ever narrows what a client asks for.
-    ///
-    /// `NonZeroU32` does the validation: `0` fails deserialization into the
-    /// existing [`Error::MalformedIndexDocument`](super::error::Error::MalformedIndexDocument)
-    /// path, so there is no hand-written validator to keep in sync.
-    ///
-    /// OCX never derives a value for it — `name_segments` is an operator
-    /// declaration — so a config OCX writes omits the key entirely, which is
-    /// what `skip_serializing_if` spells.
+    /// Slash-separated segment count a package name must have within the
+    /// namespace; absent = no constraint. Never a security control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_segments: Option<NonZeroU32>,
 }
 
 impl IndexFormatConfig {
-    /// The config substituted for an **absent** `config.json` — `{
-    /// format_version: 1, name_segments: None }` (C-005).
-    ///
-    /// Absence is resolved to this value *before* the version gate runs, so the
-    /// gate only ever sees a document and needs no "was it there?" parameter
-    /// (C-004). `name_segments: None` is the historical no-constraint reading:
-    /// a tree that declares nothing can express every name.
+    /// The config substituted for an absent `config.json`: version 1, no name constraint.
     pub fn assumed_v1() -> Self {
         Self {
             format_version: SUPPORTED_FORMAT_VERSION,
@@ -133,16 +48,11 @@ impl IndexFormatConfig {
     }
 }
 
-/// `p/<ns>/<pkg>.json` root document (●).
-///
-/// The machine lane is `tags`; the remaining fields are the human-governed
-/// lane surfaced (never silently acted on) per F3. No `deny_unknown_fields` —
-/// index documents are read by many client versions at once and must tolerate
-/// newer fields (fleet forward-compat).
+/// `p/<ns>/<pkg>.json` root document (●): machine lane `tags`, the rest human-governed.
+// No `deny_unknown_fields`: many client versions read one root, so a newer field must not fail older ones.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexRoot {
-    /// Physical OCI location the leaf manifests/layers are fetched from — an
-    /// `oci://host/path` reference (transport-only, never a storage key; C2/C3).
+    /// Physical `oci://host/path` location content is fetched from; transport-only, never a storage key.
     pub repository: String,
     /// Machine lane: tag → dispatch-object pointer.
     #[serde(default)]
@@ -157,39 +67,19 @@ pub struct IndexRoot {
 }
 
 /// A single tag pointer in a root's machine lane (●).
-///
-/// The wire object also carries an `observed` timestamp; it is tolerated (no
-/// `deny_unknown_fields`) but not consumed here — the snapshot stamps its own
-/// `observed` when it records the tag pointer.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RootTag {
-    /// The digest of the OCI image index this tag resolved to at the moment it
-    /// was observed — a tag is a floating pointer, and recording what it pointed
-    /// at is the whole job of an index. `ocx_oci::Digest`'s serde is exact-wire
-    /// (`"algo:hex"`), so a malformed value fails the WHOLE [`IndexRoot`]
-    /// deserialize, not just this one tag entry — the opposite blast-radius
-    /// trade from [`CatalogIndex`] below
-    /// (`adr_index_indirection.md` F1 blast-radius contract, amendment
-    /// 2026-07-19).
+    /// Digest of the OCI image index this tag resolved to; a malformed value
+    /// fails the whole [`IndexRoot`], unlike [`CatalogIndex`].
     pub content: ocx_oci::Digest,
-    /// Per-tag yank marker (human-governed, survives index regeneration).
-    /// Wire shape is an object (`{"reason": "...", "at": "..."}`), never a
-    /// bare boolean — absence means not yanked.
+    /// Per-tag yank marker; absence means not yanked.
     #[serde(default)]
     pub yanked: Option<YankMarker>,
 }
 
-/// Per-tag yank marker wire object (●) — a publisher's reason + timestamp for
-/// pulling a tag out of default resolution. A yank is a signal, never a
-/// delete (`ocx_index::surface_root_status`); presence alone (`.is_some()`)
-/// is what callers act on, the fields are for surfacing to the user.
-///
-/// Both fields are `#[serde(default)]`: an index root is read by many ocx
-/// versions at once, so a root serving only one of them must not fail the
-/// WHOLE [`IndexRoot`] parse and render the package unresolvable
-/// (`arch-principles.md`, fleet forward-compat on fleet-read config). Since
-/// callers act on `.is_some()`, an empty string degrades the surfaced text and
-/// nothing else.
+/// Per-tag yank marker wire object (●); callers act on presence alone, the fields
+/// only surface to the user.
+// Both fields default, or a root serving only one fails the whole parse and the package becomes unresolvable.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct YankMarker {
     #[serde(default)]
@@ -198,33 +88,15 @@ pub struct YankMarker {
     pub at: String,
 }
 
-/// The `packages` map inside a [`CatalogDocument`] (● `{"<ns>/<pkg>":
-/// "sha256:<root-digest>"}`).
+/// The `packages` map inside a [`CatalogDocument`] (● `{"<ns>/<pkg>": "sha256:<root-digest>"}`).
 ///
-/// Deliberately kept `String`-valued, NOT `ocx_oci::Digest` — a bad catalog
-/// entry must never fail the whole catalog parse (F1 blast-radius contract,
-/// `adr_index_indirection.md`): one malformed value is a per-entry
-/// staleness/recovery concern, resolved at the point that reads it, never a
-/// reason to lose every OTHER package's listing. [`RootTag::content`] above
-/// takes the opposite trade on purpose — a malformed dispatch-object digest is
-/// trust-boundary corruption, so it fails the whole document (amendment
-/// 2026-07-19).
+/// `String`-valued, not `Digest`, so one malformed entry never fails every other package's listing.
 pub type CatalogIndex = BTreeMap<String, String>;
 
 /// `c/index.json` catalog document (● `{"format_version": 1, "packages": {…}}`).
-///
-/// The envelope is the wire: the hosted site and every verbatim copy of it serve
-/// the version pin alongside the listing, the same versioned shape `config.json`
-/// carries. `packages` is the catalog; `format_version` is a gate, not data —
-/// see [`Self::into_packages`].
-///
-/// `format_version` is deliberately **not** `#[serde(default)]`: a listing with
-/// no version pin is not a catalog document, and defaulting it would silently
-/// admit an unversioned body as version 1. `packages` does default, so a
-/// freshly deployed index with nothing published yet reads as an empty catalog
-/// rather than a parse failure.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CatalogDocument {
+    // No `serde(default)`: it would admit an unversioned body as version 1.
     pub format_version: u64,
     #[serde(default)]
     pub packages: CatalogIndex,
@@ -241,13 +113,6 @@ impl CatalogDocument {
 
     /// Version-gates the envelope and yields the catalog map.
     ///
-    /// **Fail-closed** through the shared [`gate_format_version`] — one version
-    /// pin, one policy, one error, whichever document carries it. An unknown
-    /// version is refused outright, never "ignore the envelope and read
-    /// `packages` anyway": reading a newer catalog on the strength of a field
-    /// name OCX happens to recognise is exactly the mis-parse F1 exists to
-    /// prevent, and a catalog is the listing every other read fans out from.
-    ///
     /// # Errors
     ///
     /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
@@ -263,8 +128,7 @@ impl CatalogDocument {
 /// `index_bytes()`, `write_catalog()` — see that module's docstring for the
 /// served-tree layout these bytes populate). Parse-only checks:
 /// [`IndexRoot`] derives `Deserialize` only (the store keeps raw bytes
-/// verbatim, A2/A4 — there is nothing to re-serialize and compare byte-for-byte
-/// here).
+/// verbatim — there is nothing to re-serialize and compare byte-for-byte here).
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Single source of truth for env-var template resolution.
-//!
-//! `EnvResolver` resolves one `Var` at a time into an optional `Entry`
-//! (key, value, kind). It performs the template expansion and (for path
-//! modifiers) the required-path validation that previously lived duplicated
-//! across `Accumulator::resolve_var` and `Exporter::resolve_var`.
+//! Env-var template resolution.
 
 use crate::error::Error as PackageError;
 use std::collections::HashMap;
@@ -22,35 +17,20 @@ use crate::metadata::{
     template::{SelfEnvScope, TemplateResolver},
 };
 
-/// Whether the package being resolved has a materialized content tree on disk.
+/// Whether the package has a content tree on disk, which decides whether a
+/// `required` path is probed.
 ///
-/// The only thing this decides is whether a `required` path modifier fires its
-/// existence probe. That probe validates an **installed** tree; a deferred tool
-/// (plan contract C-013, [#302](https://github.com/ocx-sh/ocx/issues/302)) has
-/// none by construction, so its premise does not hold and it is suppressed —
-/// otherwise a package declaring `required: true` would fail compose on a cold
-/// store and succeed on a warm one, which is exactly the content-cache
-/// dependence C-013 and S-005 assert is absent. The check is not lost: the
-/// first invocation materializes through the ordinary install path and composes
-/// again with `content/` present.
-///
-/// A named type rather than a `bool` parameter deliberately — the two states
-/// are a domain fact, and `EnvResolver::with_content_state(false)` would say
-/// nothing at a call site.
+/// `Deferred` skips the probe, or `required: true` fails compose on a cold store
+/// and succeeds on a warm one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentState {
-    /// The package directory exists; a `required` path is genuinely required.
     Materialized,
-    /// The package is composed from ref-linked config blobs and will
-    /// materialize on first invocation; nothing under `content/` exists yet.
+    /// Nothing under `content/` exists until the first invocation.
     Deferred,
 }
 
 /// Resolves package metadata env-var templates against an install path and
 /// a dependency context map.
-///
-/// Borrowing form (`&'a Path`, `&'a HashMap`) means callers do not pay a
-/// `PathBuf` clone or a context map clone per resolution.
 pub struct EnvResolver<'a> {
     install_path: &'a Path,
     dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
@@ -66,49 +46,31 @@ impl<'a> EnvResolver<'a> {
         }
     }
 
-    /// Declares whether the package's content tree exists, returning `self` for
-    /// chaining after [`new`](Self::new).
-    ///
-    /// Only the lazy compose path passes [`ContentState::Deferred`]; every
-    /// other caller composes an installed package and keeps the default.
+    /// Declares whether the package's content tree exists (default: materialized).
     #[must_use]
     pub fn with_content_state(mut self, content_state: ContentState) -> Self {
         self.content_state = content_state;
         self
     }
 
-    /// Resolves a single `Var` into an [`Entry`] **that the caller is going to
-    /// emit**, so every filesystem and shape assertion runs.
+    /// Resolves a `Var` the caller will emit, running every filesystem and
+    /// shape assertion; `Ok(None)` when the var has no template value.
     ///
-    /// `self_env` is the scope `${self.env.KEY}` resolves against: the entries
-    /// this package's strictly-earlier vars already resolved to, in declaration
-    /// order (D6.1). Pass an empty [`SelfEnvScope`] where none exists.
-    ///
-    /// Returns `Ok(None)` when the var carries no template value (rare —
-    /// captures the existing semantics of `Var::value() -> Option<&str>`).
-    /// For path modifiers, validates that a `required` path exists on disk.
+    /// `self_env` holds the entries this package's earlier vars resolved to.
     ///
     /// # Errors
     ///
-    /// - [`crate::error::Error::EnvVarInterpolation`] on template
-    ///   resolution failure (unknown dep ref, unknown field, dep not installed,
-    ///   undefined or ambiguous `${self.env.*}` reference).
-    /// - [`crate::error::Error::RequiredPathMissing`] when a
-    ///   `required` path-modifier resolves to a path that does not exist —
-    ///   suppressed under [`ContentState::Deferred`], whose premise is that no
-    ///   content tree exists yet.
-    /// - [`crate::error::Error::SeparatorEdgedListValue`] when a
-    ///   list-modifier value *resolves* to one edged by its own separator.
+    /// - [`crate::error::Error::EnvVarInterpolation`] on template resolution failure.
+    /// - [`crate::error::Error::RequiredPathMissing`] when a `required` path is
+    ///   missing (not under [`ContentState::Deferred`]).
+    /// - [`crate::error::Error::SeparatorEdgedListValue`] when a list value
+    ///   resolves to one edged by its own separator.
     pub fn resolve(&self, var: &Var, self_env: &SelfEnvScope<Entry>) -> Result<Option<Entry>, PackageError> {
         self.resolve_inner(var, self_env, /* emit_assertions = */ true)
     }
 
-    /// The one resolution path; `emit_assertions` is D8's split.
-    ///
-    /// Both public entry points route through here, so the only thing that can
-    /// differ between them is which assertions run. The *value* a var resolves
-    /// to is the same either way — which is what lets `${self.env.KEY}` see
-    /// identical bytes whether or not the var it names crosses the surface.
+    /// Both entry points share this path, so a var resolves to the same bytes
+    /// either way and `${self.env.KEY}` cannot diverge from the emitted value.
     fn resolve_inner(
         &self,
         var: &Var,
@@ -135,29 +97,8 @@ impl<'a> EnvResolver<'a> {
             if path.is_relative() {
                 path = self.install_path.join(path);
             }
-            // Sync `path.exists()` is intentional: the entire env-resolution
-            // chain is synchronous and called many times per command
-            // invocation. A single `stat(2)` against an already-installed
-            // package's local content tree is a fast filesystem probe;
-            // wrapping in `block_in_place` per call would add scheduler
-            // overhead that dominates the probe itself. Switch to
-            // `tokio::fs::try_exists` only if the chain becomes async
-            // end-to-end.
-            //
-            // Strip the Windows `\\?\` verbatim prefix before the existence
-            // check and before writing the value into the child env.
-            //
-            // `install_path` (or a `self.install_path.join(relative)` result)
-            // may carry the `\\?\` prefix when the path originated from
-            // `tokio::fs::canonicalize` (which returns verbatim paths on
-            // Windows).  Relative metadata values (`bin` without `${installPath}`)
-            // reach this branch via the `join` above and inherit the prefix.
-            // `dunce::simplified` converts `\\?\C:\foo` → `C:\foo` so both the
-            // `path.exists()` probe and the exported string use the normal DOS
-            // form, which Windows path APIs handle correctly in all contexts.
-            // On POSIX and non-verbatim Windows paths the call is a no-op.
+            // Strip the Windows `\\?\` verbatim prefix, which many consumers of the exported path reject.
             let path = PathBuf::from(dunce::simplified(&path));
-            // Also suppressed for a deferred package: see [`ContentState`].
             if emit_assertions
                 && self.content_state == ContentState::Materialized
                 && path_modifier.required
@@ -168,14 +109,8 @@ impl<'a> EnvResolver<'a> {
             value = path.to_string_lossy().to_string();
         }
 
-        // A second separator-edge check, on the resolved bytes. The parse
-        // boundaries see the authored template, and `${installPath}` with
-        // separator `/` resolves to a `/`-edged value none of them could have
-        // seen — one that makes the fold's flank match ambiguous.
+        // Rechecked on the resolved bytes: `${installPath}` can edge a value no parse gate saw.
         let separator = if let Modifier::List(list_modifier) = &var.modifier {
-            // `None` is refused for package metadata by `ValidMetadata`, which
-            // runs on every load path; the fallback is what the human-facing
-            // surfaces authored through.
             let separator = list_modifier.separator.as_deref().unwrap_or(list::DEFAULT_SEPARATOR);
             if emit_assertions && list::is_separator_edged(&value, separator) {
                 return Err(crate::error::Error::SeparatorEdgedListValue {
@@ -192,39 +127,18 @@ impl<'a> EnvResolver<'a> {
         Ok(Some(Entry {
             key: var.key.clone(),
             value,
-            // `Var::value()` above returns `None` for an unknown modifier type,
-            // so this point is unreachable for one; `ValidMetadata` has also
-            // already refused it on every load path.
             kind: ModifierKind::try_from(&var.modifier)
                 .expect("a var with a resolvable value template names a known modifier kind"),
             separator,
         }))
     }
 
-    /// Resolves a single `Var` the caller is **not** going to emit — the value
-    /// only, with every filesystem and shape assertion suppressed.
-    ///
-    /// The composer resolves a package's whole `env` array so that a crossing
-    /// var can reference a non-crossing earlier one (D8), which means vars
-    /// nobody emits now resolve too. The split is stated as a rule, not a list:
-    /// *value resolution always; every filesystem and shape assertion on emit
-    /// only.* Concretely, relative to [`EnvResolver::resolve`] this suppresses
-    /// [`crate::error::Error::RequiredPathMissing`] (C-026),
-    /// [`crate::error::Error::SeparatorEdgedListValue`] — both
-    /// assertions about a contribution that never joins a fold — and, through
-    /// [`TemplateResolver::resolve_without_existence_checks`],
-    /// [`crate::metadata::template::TemplateError::DependencyNotInstalled`]
-    /// (C-027), which would otherwise turn a working install into exit 79 over a
-    /// value nobody reads.
-    ///
-    /// A template *fault* is not suppressed: an unrecognised token or an unknown
-    /// dep reference still fails here, because a package whose own metadata
-    /// cannot resolve is broken regardless of who is looking.
+    /// Resolves a `Var` the caller will not emit: value only, with the
+    /// filesystem and shape assertions of [`resolve`](Self::resolve) suppressed.
     ///
     /// # Errors
     ///
-    /// [`crate::error::Error::EnvVarInterpolation`] on template
-    /// resolution failure.
+    /// [`crate::error::Error::EnvVarInterpolation`] on a template fault.
     pub fn resolve_without_emit_assertions(
         &self,
         var: &Var,

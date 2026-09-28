@@ -1,165 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Host libc detection for platform-aware OCI index resolution.
+//! Host libc detection: the libc families the host can *execute*, as `os.features` tags.
 //!
-//! Enumerates the libc families present on the current host and maps them to
-//! `os.features` tag values consumed by [`super::is_compatible`].
-//!
-//! ## Self-linkage vs. host capability
-//!
-//! OCX installs **foreign** binaries, so the question detection answers is
-//! "what libc families can this host execute?" — NOT "what is ocx itself
-//! linked against?". These are orthogonal: a static-musl ocx on a pure-glibc
-//! Ubuntu host still runs glibc binaries fine. That rules out self-linkage
-//! probes (`/proc/self/maps`, `dl_iterate_phdr`) — those report ocx's own
-//! compile-time linkage, not host capability. OCX discovers the host's dynamic
-//! loaders on disk (read a system binary's `PT_INTERP`, scan canonical loader
-//! directories) and probes each instead.
-//!
-//! ## Detection algorithm — discovery-then-identify, set union
-//!
-//! Detection runs in two stages. **Discovery** produces a deduplicated set of
-//! candidate loader paths from three sources, in priority order:
-//!
-//! 1. **`PT_INTERP` (primary).** Read the ELF program headers of an ordered
-//!    allowlist of guaranteed-present, dynamically linked system binaries
-//!    (`/usr/bin/env`, `/bin/sh`, `/bin/ls`) and extract the `PT_INTERP`
-//!    string — the host's exact native loader path. This works wherever the
-//!    loader lives, including non-FHS layouts (NixOS `/nix/store`, Gentoo
-//!    Prefix, Homebrew-on-Linux, custom sysroots). A statically linked binary
-//!    (busybox `/bin/sh` on a minimal Alpine image) carries no `PT_INTERP` and
-//!    is skipped.
-//! 2. **Arch-filtered directory scan.** Scan the canonical loader directories
-//!    (`/lib`, `/lib64`, `/usr/lib`, `/usr/lib64`, plus their immediate
-//!    multiarch subdirectories) for loader files whose name matches the current
-//!    architecture (`ld-linux-x86-64` / `ld-musl-x86_64` on x86_64). Catches
-//!    multi-libc hosts the single-binary `PT_INTERP` step misses; foreign-arch
-//!    loaders (dpkg-multiarch) are filtered out by the arch name fragment.
-//! 3. **Hardcoded allowlist (fallback).** `GLIBC_LOADERS` / `MUSL_LOADERS`
-//!    — a last resort for the rare host where neither source above fired.
-//!
-//! **Identification** then classifies each discovered loader purely by its
-//! `--version` banner, independent of which source produced the path. Probes
-//! run concurrently in a [`tokio::task::JoinSet`] and **every** positive result
-//! is unioned into a sorted [`std::collections::BTreeSet`] of [`LibcFlavor`] —
-//! no early abort, no "first probe to complete wins". A host with both glibc
-//! and musl loaders (Ubuntu + `musl-tools`, multi-target CI runners) advertises
-//! `{Glibc, Musl}`. Determinism falls out of the set plus its sorted iteration
-//! order, independent of probe scheduling.
-//!
-//! Classifying by banner — not by which path the loader sits at — makes the
-//! Alpine gcompat case fall out for free: the gcompat stub sits at the glibc
-//! loader path but prints the **musl** banner, so it classifies as `Musl`. The
-//! ADR "identity, not equivalence" rule is preserved by construction, not by a
-//! special-case exclusion.
-//!
-//! Banner-parsing mechanics (the `--version` strings, musl's non-zero exit by
-//! design, the Ubuntu 20.04 exit-127 → `{loader} /bin/true` confirmation) are
-//! ported from cargo-bins/cargo-binstall `crates/detect-targets`; the discovery
-//! stage and the set-union aggregation are OCX's.
-//!
-//! Detection is Linux-only; macOS and Windows always return an empty set
-//! without spawning subprocesses.
-//!
-//! ## Known limitation — detect-env ≠ exec-env
-//!
-//! Detection answers "what libc can *this host* run?". When the resolved binary
-//! ultimately runs in a *different* namespace (distrobox/toolbox, a
-//! bind-mounted container, install-here-run-there), that target namespace may
-//! provide a different libc set than the one detected here. OCX's normal
-//! `ocx exec` runs on the same host/kernel, so the gap does not bite the common
-//! path. Exec-time / target-namespace detection is deferred to a separate ADR.
-//!
-//! ## NixOS / empty result
-//!
-//! On NixOS without nix-ld the loaders live under `/nix/store/...` and nothing
-//! sits at the FHS paths, so the set ends up empty. When `/nix` exists we
-//! `tracing::debug!` a note and return the empty set — never an error. An
-//! empty set yields empty `os_features`, degrading to `Any`-only matching;
-//! the user can override with `--platform`. nix-ld installs an FHS shim at the
-//! canonical loader path, so detection then works normally.
-//!
-//! See `.claude/artifacts/research_libc_detection_robustness.md` for the
-//! discovery-mechanism comparison (PT_INTERP / scan / allowlist / ldconfig /
-//! getconf / os-release) and the virtualization failure-mode survey, and
-//! `research_libc_detection_methods.md` for the original probe model.
-//!
-//! ## Cache lifecycle
-//!
-//! Two caches, one in front of the other.
-//!
-//! **Process cache.** Detection runs once at context init and memoizes into an
-//! `OnceLock` for the lifetime of the process. Embedders using `ocx_lib` as a
-//! library, or a future daemon mode, must invalidate or work around it.
-//!
-//! **Persisted record** (`$OCX_HOME/state/host/capabilities.json`, Linux only).
-//! Every `ocx` invocation is a fresh process, so the `OnceLock` alone left every
-//! command re-running the whole discovery pipeline — 15.4 ms of it, measured on
-//! a per-prompt shell reconcile that contains no other libc-dependent work
-//! (ocx-sh/ocx#340). The host's libc set is a per-host constant between package
-//! installs, so the answer is recorded on disk beside the referrers-capability
-//! and trust-root caches and in the same shape: atomic write, TTL-gated
-//! fail-open read, anything unusable treated as a miss.
-//!
-//! Freshness has two independent gates, because the two ways a record can go
-//! wrong are not equally dangerous:
-//!
-//! - **A libc was REMOVED or REPLACED.** The record would name a family the
-//!   host can no longer execute, and OCX would select an artifact that cannot
-//!   launch — a resolution failure, not a slow command. Closed exactly, and not
-//!   by the clock: the record carries every loader that classified positive
-//!   together with the file identity it had at the time (device, inode, size,
-//!   mtime — all off the `stat` the check needs anyway), and is honoured only
-//!   while every one of them is still the same file at the same path.
-//!   Uninstalling a libc removes its loader; reinstalling or swapping one keeps
-//!   the path but changes its identity. Either way the very next invocation
-//!   re-detects. Existence alone would not do: a libc replaced in place is the
-//!   ordinary case (package reinstall, container-layer swap), and the path
-//!   survives it while the executable behind it may now be a different libc.
-//! - **A libc was ADDED.** The record under-reports, so a package shipped only
-//!   for the new family resolves to `FeatureMismatch` (exit 65, which names the
-//!   platforms that *are* available) instead of installing. Recoverable and
-//!   self-diagnosing, so this is the direction the TTL clock bounds.
-//!
-//! The record states its evidence and nothing else. Its `os.features` answer is
-//! **derived** from the loaders it recorded, never stored beside them, so a
-//! record naming a family that no recorded loader classified as is not something
-//! the reader has to reject — it is not expressible. An empty loader list still
-//! parses and claims nothing, but it is never *written*: a pass that classified
-//! nothing is not recorded at all, because the record cannot tell it apart from
-//! a pass that could not look (see `record_detection`).
-//!
-//! The `__OCX_TEST_LIBC` seam is neither read from nor written to the record: a
-//! forced libc set can never be persisted onto a real host, and a record can
-//! never override the seam.
-//!
-//! ## Security
-//!
-//! ### The persisted record is not a trust boundary
-//!
-//! The record is a `0o600` file inside the user's own `$OCX_HOME`, written and
-//! read by the same user. Anyone who can write it can already do considerably
-//! worse — replace an installed binary, edit `config.toml`, rewrite a symlink —
-//! so it is not defended as attacker-controlled input and the checks below are
-//! not a mitigation for one. What they *do* enforce is that the reader accepts
-//! only records the writer could have produced: a claim with no evidence behind
-//! it, a stale format version, or a stray field all mean the file did not come
-//! from this code, and the answer to that is to probe, never to guess. Both
-//! `serde(deny_unknown_fields)` and the `RecordVersion` tag exist for that, not
-//! for an adversary. A record that names real, unmodified loaders but lies about
-//! which family each one classified as is still believed — detecting that needs
-//! the probe the record exists to avoid.
-//!
-//! ### Detection inputs
-//!
-//! `PT_INTERP` reads are constrained to a fixed allowlist of system binaries
-//! (`INTERP_PROBE_BINARIES`, never user-supplied paths); the loader path that
-//! read yields, and every path from the directory scan and the hardcoded
-//! allowlist, is spawned only with `--version` (or a `/bin/true` confirmation),
-//! each bounded by `PROBE_TIMEOUT`. No detection input ever comes from user
-//! data. Same threat model as cargo-binstall's `detect-targets`, widened only
-//! to spawn the loader a present system binary names as its own interpreter.
+//! Never what ocx itself links against, which answers the wrong question.
+//! Algorithm: `subsystem-oci.md` § libc Differentiation. Linux-only.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -169,46 +14,17 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 
 /// A libc family identified for the current host or read off a manifest.
 ///
-/// v1 uses unit variants for the two families OCX detects ([`Glibc`](Self::Glibc),
-/// [`Musl`](Self::Musl)). Future tuple forms (e.g. `Glibc(GlibcVersion)`) are
-/// deferred — see the implementation plan notes. Migrating from unit to tuple
-/// is a breaking API change; acceptable pre-1.0.
-///
-/// [`Unknown`](Self::Unknown) carries a `libc.*` tag suffix OCX does not
-/// recognise. It never arises from host detection (the probes only ever emit
-/// `Glibc` / `Musl`); it exists solely so *interpreting* an inbound `libc.*`
-/// `os.features` tag is total and lossless. Unknown families carry no
-/// semantic meaning for matching — they simply fail the subset check.
-///
-/// Derives `Ord`/`PartialOrd` so a [`BTreeSet<LibcFlavor>`] iterates in a
-/// stable, deterministic order regardless of probe scheduling. The unit
-/// variants sort first; `Unknown` sorts after them (and amongst itself by its
-/// inner string), keeping iteration deterministic.
+/// `Ord` keeps a `BTreeSet` of flavors in a stable order regardless of probe scheduling.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LibcFlavor {
-    /// GNU libc (glibc). Detected when a discovered dynamic loader's
-    /// `--version` banner identifies it as glibc (`GNU libc` / `GLIBC`).
     Glibc,
-    /// musl libc. Detected when a discovered dynamic loader's `--version`
-    /// banner identifies it as musl (`musl libc`).
     Musl,
-    /// A `libc.*` tag OCX does not recognise (e.g. `libc.uclibc`). Only
-    /// produced when parsing a foreign `os.features` tag; never emitted by
-    /// host detection. The inner string is the suffix after `libc.`.
+    /// A foreign `libc.*` suffix (e.g. `uclibc`); never produced by host detection.
     Unknown(String),
 }
 
 impl LibcFlavor {
-    /// Render this family as its canonical `os.features` tag.
-    ///
-    /// - [`Glibc`](Self::Glibc) → `"libc.glibc"`
-    /// - [`Musl`](Self::Musl) → `"libc.musl"`
-    /// - [`Unknown(s)`](Self::Unknown) → `"libc.{s}"`
-    ///
-    /// This is the single source of truth for the forward (family → tag)
-    /// direction; both [`HostCapabilities::os_features`] and
-    /// [`cached_libc_labels`] route through it so the wire tags cannot drift
-    /// from the reverse mapping in [`from_os_feature_tag`](Self::from_os_feature_tag).
+    /// The canonical `os.features` tag (`libc.glibc`); the one family → tag mapping.
     pub fn os_feature_tag(&self) -> String {
         match self {
             Self::Glibc => "libc.glibc".to_string(),
@@ -217,16 +33,7 @@ impl LibcFlavor {
         }
     }
 
-    /// Parse a `libc.*` `os.features` tag back into a [`LibcFlavor`].
-    ///
-    /// Strips the `libc.` prefix, then maps `"glibc"` → [`Glibc`](Self::Glibc),
-    /// `"musl"` → [`Musl`](Self::Musl), and any other suffix →
-    /// [`Unknown`](Self::Unknown). A tag that does not start with `libc.`
-    /// (e.g. `gpu.cuda`, `win32k`) is not a libc tag and yields `None` — it is
-    /// the caller's job to treat that as a non-libc feature.
-    ///
-    /// This is the inverse of [`os_feature_tag`](Self::os_feature_tag) and the
-    /// single source of truth for the reverse (tag → family) direction.
+    /// Inverse of [`os_feature_tag`](Self::os_feature_tag); `None` for a non-`libc.` tag.
     pub fn from_os_feature_tag(tag: &str) -> Option<Self> {
         let suffix = tag.strip_prefix("libc.")?;
         Some(match suffix {
@@ -237,33 +44,15 @@ impl LibcFlavor {
     }
 }
 
-/// A typed view of a single OCI `platform.os.features` tag.
-///
-/// `os.features` is an open string namespace: the `libc.*` slots carry libc
-/// identity ([`Feature::Libc`]), and anything else is an opaque feature OCX
-/// does not interpret ([`Feature::Other`]). Parsing is total and never errors —
-/// unrecognised features simply carry no semantic meaning.
-///
-/// Used where features are *interpreted for reporting* (e.g. extracting the
-/// host libc for `ocx about` / `ocx version`). Subset **matching** in the
-/// index/platform resolution path stays string-based and is unaffected by this
-/// model: an [`Other`](Self::Other) or [`Unknown`](LibcFlavor::Unknown) feature
-/// just fails to match, it never errors.
+/// A typed view of one `os.features` tag, for reporting only; matching stays string-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Feature {
-    /// A `libc.*` feature, decoded into a [`LibcFlavor`] (known or
-    /// [`Unknown`](LibcFlavor::Unknown)).
     Libc(LibcFlavor),
-    /// Any non-`libc.*` feature, carried verbatim. OCX assigns it no meaning.
+    /// Any non-`libc.*` feature, carried verbatim.
     Other(String),
 }
 
 impl Feature {
-    /// Interpret a single `os.features` tag. Never errors.
-    ///
-    /// A `libc.*` tag becomes [`Feature::Libc`] (with the family decoded, or
-    /// [`Unknown`](LibcFlavor::Unknown) for an unrecognised suffix). Every
-    /// other tag becomes [`Feature::Other`] carrying the raw string.
     pub fn parse(tag: &str) -> Self {
         match LibcFlavor::from_os_feature_tag(tag) {
             Some(flavor) => Self::Libc(flavor),
@@ -273,46 +62,19 @@ impl Feature {
 }
 
 /// Detected capabilities of the current host relevant to platform selection.
-///
-/// At v1 this carries only the set of libc families. Future fields (e.g. CPU
-/// microarch feature level) may be added here under new ADRs.
 #[derive(Debug, Clone)]
 pub struct HostCapabilities {
-    /// The set of libc families the host can execute. Empty when detection is
-    /// not applicable (non-Linux) or found nothing (NixOS, corrupt output, no
-    /// recognised loader). A `BTreeSet` gives deterministic, sorted iteration.
+    /// Empty off Linux or when detection found nothing.
     pub libcs: BTreeSet<LibcFlavor>,
 }
 
 impl HostCapabilities {
-    /// Detect host capabilities via discovery-then-identify probing.
-    ///
-    /// On Linux: discovers candidate loader paths (a system binary's
-    /// `PT_INTERP` ∪ an arch-filtered directory scan ∪ the hardcoded
-    /// allowlist), spawns each with `--version` (or a `/bin/true` fallback),
-    /// and unions every positively identified libc family into the set.
-    ///
-    /// On non-Linux platforms (macOS, Windows): returns immediately with an
-    /// empty set — no subprocesses are spawned.
-    ///
-    /// Failures (missing loaders, corrupt output, subprocess errors) are
-    /// handled gracefully and contribute nothing to the set rather than
-    /// producing an error.
+    /// Detect host capabilities; a failed probe contributes nothing, never an error.
     pub async fn detect() -> Self {
-        // Test-only seam: `__OCX_TEST_LIBC` short-circuits the real probe so
-        // acceptance tests can force a deterministic libc result in CI without
-        // a real Alpine / glibc host. Gated behind `cfg(test)` or the
-        // `__testing` Cargo feature so release artifacts physically lack the
-        // path. Canonical project seam pattern — mirrors `__OCX_SELF_IMAGE` in
-        // `package_manager/tasks/update_check.rs`. See `subsystem-tests.md`
-        // "Test-Only Seams".
-        //
-        // Value is a comma-separated set of family tokens:
-        //   "glibc"       → {Glibc}
-        //   "musl"        → {Musl}
-        //   "glibc,musl"  → {Glibc, Musl}
-        //   "none" / ""   → {} (force undetected)
-        // Once the var is set, the seam never falls through to the real probe.
+        // Test-only seam (subsystem-tests.md § Test-Only Seams):
+        // `__OCX_TEST_LIBC` short-circuits the real probe with comma-separated
+        // family tokens ("glibc"/"musl"/"glibc,musl"/"none" or "" for {}); once
+        // set, never falls through to the real probe.
         #[cfg(any(test, feature = "__testing"))]
         {
             if let Some(libcs) = test_libc_override() {
@@ -325,49 +87,15 @@ impl HostCapabilities {
         }
     }
 
-    /// Map the detected libc set to `os.features` tag values for OCI platform
-    /// matching.
-    ///
-    /// Return values:
-    /// - `[]` — no libc detected; `Platform::current()` will leave
-    ///   `os_features` empty, causing subset matching to accept only entries
-    ///   with empty `os_features` (legacy un-tagged packages).
-    /// - `["libc.glibc"]` — only GNU libc detected.
-    /// - `["libc.musl"]` — only musl libc detected.
-    /// - `["libc.glibc", "libc.musl"]` — a genuine dual-libc host.
-    ///
-    /// The returned `Vec` is sorted (the `BTreeSet` iterates in order), so a
-    /// dual-libc host advertises every family it provides and matches both a
-    /// `libc.glibc`- and a `libc.musl`-tagged index entry.
+    /// The detected libc set as sorted `os.features` tags.
     pub fn os_features(&self) -> Vec<String> {
         self.libcs.iter().map(LibcFlavor::os_feature_tag).collect()
     }
 
-    /// Detect host capabilities and populate the process-wide `os_features`
-    /// cache consumed by [`Platform::current`](super::platform::Platform::current).
+    /// Detect and populate the process cache [`Platform::current`](super::platform::Platform::current) reads.
     ///
-    /// This is the single entry point CLI context initialization calls at
-    /// startup. Detection failure is not an error — an empty set caches as an
-    /// empty `Vec`, which is a valid state (subset matching then accepts only
-    /// entries with empty `os_features`).
-    ///
-    /// Three tiers, cheapest first: the process `OnceLock` (2nd+ call in the
-    /// same process), the persisted record at `record` (2nd+ invocation on the
-    /// same host inside the TTL), then the full discovery-then-identify
-    /// pipeline. See the module-level "Cache lifecycle" note for what
-    /// invalidates the persisted tier — a slow answer is acceptable here, a
-    /// wrong one is not.
-    ///
-    /// `record` is the cache file, supplied by the caller —
-    /// `StateStore::host_capabilities_file`'s value in both binaries. `None`
-    /// means "detect uncached", which is what a host with no resolvable
-    /// `$OCX_HOME` gets; it is not an error. Taken as a parameter rather than
-    /// derived here because the state root's layout belongs to the store, and
-    /// deriving it made this module reach for one (ADR 1.14).
+    /// `record` is the persisted cache file; `None` detects uncached.
     pub async fn detect_and_cache(record: Option<&std::path::Path>) -> Self {
-        // Fast path: cache already populated (2nd+ call in same process).
-        // Reconstruct `HostCapabilities` from the cached feature tags instead
-        // of re-running the discovery-then-identify pipeline.
         if let Some(cached) = CACHED_OS_FEATURES.get() {
             return Self {
                 libcs: decode_libc_tags(cached),
@@ -379,12 +107,7 @@ impl HostCapabilities {
     }
 }
 
-/// Decode `os.features` tags back into the libc families they name, dropping
-/// anything that is not a recognised `libc.*` tag.
-///
-/// Shared by the two fast paths that reconstruct a [`HostCapabilities`] from
-/// tags — the process `OnceLock` and the persisted record — so they cannot
-/// disagree about what a tag means.
+/// Decode tags into known libc families; shared by both fast paths so they cannot disagree.
 fn decode_libc_tags<'tags>(tags: impl IntoIterator<Item = &'tags String>) -> BTreeSet<LibcFlavor> {
     tags.into_iter()
         .filter_map(|tag| LibcFlavor::from_os_feature_tag(tag))
@@ -420,61 +143,32 @@ fn parse_test_libc_set(value: &str) -> BTreeSet<LibcFlavor> {
         .collect()
 }
 
-/// What one detection pass found: every loader that classified, paired with the
-/// family it classified as.
+/// What one detection pass found: every loader that classified, with its family.
 ///
-/// The libc set is **derived** from that evidence ([`Detection::libcs`]) rather
-/// than carried beside it, so the two can never disagree — the same property the
-/// persisted record inherits by recording only this list. The loaders are
-/// carried out of the pipeline rather than discarded because the record
-/// re-checks them: a loader uninstalled or replaced since is what invalidates a
-/// record, and no clock can see that. See the module-level "Cache lifecycle"
-/// note.
+/// The loaders are kept because the record re-checks them: a replaced loader
+/// invalidates a record, which no clock can see.
 #[derive(Debug, Default)]
 struct Detection {
-    /// Every loader that classified positive with the family its `--version`
-    /// banner identified, sorted by path so the persisted record is byte-stable
-    /// across runs.
+    /// Sorted by path, so the persisted record is byte-stable.
     classified: Vec<(std::path::PathBuf, LibcFlavor)>,
 }
 
 impl Detection {
-    /// The families this pass found, derived from the loaders that classified.
-    ///
-    /// A `BTreeSet` makes the answer deterministic and independent of probe
-    /// scheduling, and unions duplicates — a dual-libc host with a glibc and a
-    /// musl loader reports both, a host with two glibc loaders reports one
-    /// family.
     fn libcs(&self) -> BTreeSet<LibcFlavor> {
         self.classified.iter().map(|(_, flavor)| flavor.clone()).collect()
     }
 }
 
-/// Probe the host for every libc family it provides.
-///
-/// Returns an empty result immediately on non-Linux targets without spawning any
-/// subprocess. On Linux it runs the discovery-then-identify pipeline: discover
-/// candidate loader paths (a system binary's `PT_INTERP` ∪ an arch-filtered
-/// directory scan ∪ the hardcoded allowlist, deduplicated by canonical path),
-/// then classify each by its `--version` banner and union every positive into
-/// the set — no early abort, no first-wins.
 #[cfg(target_os = "linux")]
 async fn run_detection() -> Detection {
     use tokio::task::JoinSet;
 
     let candidate_paths = discover_loader_paths().await;
 
-    // Classify every discovered loader concurrently and union the positives.
-    // No early abort: a host with both glibc and musl loaders must report
-    // {Glibc, Musl}. A probe task panicking must not crash detection — treat a
-    // join failure as "found nothing".
+    // No early abort, or a dual-libc host reports one family; a panicked probe found nothing.
     let mut probes: JoinSet<Option<(std::path::PathBuf, LibcFlavor)>> = JoinSet::new();
     for path in candidate_paths {
-        // SECURITY: `path` comes only from `discover_loader_paths` — the
-        // `PT_INTERP` of a fixed system-binary allowlist, an arch-filtered scan
-        // of canonical loader directories, or the hardcoded loader allowlist —
-        // never user input. It is spawned solely with `--version` (and a
-        // `/bin/true` confirmation), each bounded by `PROBE_TIMEOUT`.
+        // SECURITY: `path` comes only from `discover_loader_paths`, never user input.
         probes.spawn(probe_loader(path));
     }
 
@@ -484,14 +178,9 @@ async fn run_detection() -> Detection {
             classified.push(found);
         }
     }
-    // `join_next` yields in completion order, which is scheduling-dependent.
-    // Sort so the persisted record is byte-stable across runs.
+    // `join_next` yields in completion order; unsorted, the persisted record churns.
     classified.sort();
 
-    // NixOS / empty result: if nothing matched and `/nix` exists, the host is
-    // very likely a NixOS box without a nix-ld FHS shim and with statically
-    // linked probe binaries. Note it and degrade to the empty set (Any-only
-    // matching; `--platform` override available). Never an error.
     if classified.is_empty() && tokio::fs::try_exists("/nix").await.unwrap_or(false) {
         tracing::debug!(
             "no libc loader discovered (PT_INTERP, directory scan, and FHS \
@@ -503,32 +192,18 @@ async fn run_detection() -> Detection {
     Detection { classified }
 }
 
-/// Non-Linux platforms have a single fixed libc family per OS, so OCX does not
-/// probe them. Returns an empty result without spawning any subprocess.
 #[cfg(not(target_os = "linux"))]
 async fn run_detection() -> Detection {
     Detection::default()
 }
 
-/// Discover candidate dynamic-loader paths from three sources, deduplicated by
-/// canonical path so a symlink and its target are never probed twice.
-///
-/// Sources, in priority order:
-/// 1. The `PT_INTERP` of the first dynamically linked binary in
-///    [`INTERP_PROBE_BINARIES`] — the host's exact native loader, found wherever
-///    it lives (NixOS `/nix/store`, Gentoo Prefix, custom sysroots).
-/// 2. An arch-filtered scan of [`LOADER_SCAN_DIRS`] (and their immediate
-///    multiarch subdirectories) — catches additional libc families on a
-///    multi-libc host.
-/// 3. The hardcoded [`GLIBC_LOADERS`] / [`MUSL_LOADERS`] allowlist — fallback
-///    for the rare host where neither source above fired.
+/// Candidate loader paths, deduplicated by canonical path; order: `subsystem-oci.md` § libc Differentiation.
 #[cfg(target_os = "linux")]
 async fn discover_loader_paths() -> Vec<std::path::PathBuf> {
     let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     let mut discovered: Vec<std::path::PathBuf> = Vec::new();
 
-    // Source 1: PT_INTERP of a guaranteed-present system binary. The first
-    // binary that yields an interpreter wins — it is the host's native loader.
+    // The first binary with an interpreter names the host's native loader.
     for binary in INTERP_PROBE_BINARIES {
         if let Some(interpreter) = read_pt_interp(binary).await {
             consider_path(std::path::PathBuf::from(interpreter), &mut seen, &mut discovered).await;
@@ -536,12 +211,10 @@ async fn discover_loader_paths() -> Vec<std::path::PathBuf> {
         }
     }
 
-    // Source 2: arch-filtered directory scan.
     for path in glob_loader_paths().await {
         consider_path(path, &mut seen, &mut discovered).await;
     }
 
-    // Source 3: hardcoded allowlist fallback.
     for path in GLIBC_LOADERS.iter().chain(MUSL_LOADERS) {
         consider_path(std::path::PathBuf::from(*path), &mut seen, &mut discovered).await;
     }
@@ -549,8 +222,6 @@ async fn discover_loader_paths() -> Vec<std::path::PathBuf> {
     discovered
 }
 
-/// Push `path` onto `discovered` unless a path canonicalizing to the same
-/// target has already been recorded.
 #[cfg(target_os = "linux")]
 async fn consider_path(
     path: std::path::PathBuf,
@@ -562,22 +233,13 @@ async fn consider_path(
     }
 }
 
-/// Ordered allowlist of guaranteed-present, dynamically linked system binaries
-/// whose `PT_INTERP` reveals the host's native loader path.
+/// System binaries whose `PT_INTERP` names the host's native loader; first hit wins.
 ///
-/// SECURITY: this is a fixed list, never user input — the loader path it yields
-/// is later spawned with `--version`. Order matters: the first binary with a
-/// `PT_INTERP` wins. A statically linked binary (busybox `/bin/sh` on a minimal
-/// Alpine image) carries no `PT_INTERP`; it is skipped and discovery falls
-/// through to the next entry, then to the scan / allowlist sources.
+/// SECURITY: a fixed list, never user input — the loader it yields is spawned.
 #[cfg(target_os = "linux")]
 const INTERP_PROBE_BINARIES: &[&str] = &["/usr/bin/env", "/bin/sh", "/bin/ls"];
 
-/// Read the `PT_INTERP` (dynamic loader path) embedded in the ELF at `path`.
-///
-/// Returns `None` when the file is absent, is not a parseable ELF, or carries
-/// no `PT_INTERP` segment (a statically linked binary). `path` is always an
-/// entry of [`INTERP_PROBE_BINARIES`] — never user input.
+/// The `PT_INTERP` of the ELF at `path`; `None` when absent, unparseable or static.
 #[cfg(target_os = "linux")]
 async fn read_pt_interp(path: &str) -> Option<String> {
     let data = tokio::fs::read(path).await.ok()?;
@@ -590,17 +252,12 @@ async fn read_pt_interp(path: &str) -> Option<String> {
         let start = usize::try_from(program_header.p_offset).ok()?;
         let length = usize::try_from(program_header.p_filesz).ok()?;
         let raw = data.get(start..start.checked_add(length)?)?;
-        // The interpreter is a NUL-terminated string; take everything up to the
-        // first NUL and reject an empty result.
         let interpreter = raw.split(|&byte| byte == 0).next()?;
         if interpreter.is_empty() {
             return None;
         }
         let interpreter = String::from_utf8_lossy(interpreter).into_owned();
-        // SECURITY (CWE-426): the interpreter path is later spawned; reject a
-        // non-absolute one so it can never resolve against `$PATH` or the CWD. A
-        // genuine ELF always names an absolute loader (the module Security note
-        // and the unit tests both assume this).
+        // SECURITY (CWE-426): the path is spawned; a relative one would resolve against `$PATH` or the CWD.
         if !std::path::Path::new(&interpreter).is_absolute() {
             return None;
         }
@@ -609,52 +266,30 @@ async fn read_pt_interp(path: &str) -> Option<String> {
     None
 }
 
-/// Canonical base directories scanned by the directory-scan discovery source.
-/// Each is scanned for loader files directly and one level down (Debian/Ubuntu
-/// multiarch triplet dirs such as `/lib/x86_64-linux-gnu`).
+/// Scanned directly and one level down, for multiarch dirs like `/lib/x86_64-linux-gnu`.
 #[cfg(target_os = "linux")]
 const LOADER_SCAN_DIRS: &[&str] = &["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
 
-/// Scan [`LOADER_SCAN_DIRS`] for files whose name matches a current-arch loader
-/// fragment. Bounded to one level of subdirectory nesting.
+/// Scan [`LOADER_SCAN_DIRS`] for current-arch loader files.
 ///
-/// The whole walk runs in **one** `spawn_blocking` over `std::fs`, not as
-/// `tokio::fs` calls per entry. `tokio::fs` `asyncify`s every operation onto the
-/// blocking pool, so the per-entry `file_type()` this scan needs was one
-/// executor round-trip apiece for a `d_type` read that costs no syscall at all —
-/// ~7,800 of them on a usrmerge x86_64 host, measured at 15.2 ms against 2.5 ms
-/// for the identical `std::fs` walk (ocx-sh/ocx#340). That is the "no blocking
-/// I/O in async" rule read the right way round: short, local, uncontended
-/// filesystem work belongs on one blocking thread, not spread across thousands
-/// of hand-offs.
+/// One `spawn_blocking` over `std::fs`: per-entry `tokio::fs` measured 15.2 ms
+/// against 2.5 ms on a usrmerge host, on the startup path.
 #[cfg(target_os = "linux")]
 async fn glob_loader_paths() -> Vec<std::path::PathBuf> {
     match tokio::task::spawn_blocking(scan_loader_dirs).await {
         Ok(found) => found,
         Err(join_error) => {
-            // The scan is one of three discovery sources; losing it degrades
-            // discovery rather than failing detection, exactly as an unreadable
-            // directory already does.
             tracing::debug!("loader directory scan did not complete ({join_error}); continuing without it");
             Vec::new()
         }
     }
 }
 
-/// Blocking body of [`glob_loader_paths`].
 #[cfg(target_os = "linux")]
 fn scan_loader_dirs() -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     for base in dedup_scan_roots(LOADER_SCAN_DIRS) {
-        // Single pass over the base dir. `read_dir` follows a symlinked base
-        // (`/lib` → `/usr/lib` on usrmerge). Each entry is either a subdirectory
-        // (multiarch triplet dir — scanned one level deep, never further) or a
-        // candidate loader file. `file_type()` does not follow symlinks, so a
-        // symlinked subdir reports as a symlink (not a dir) and falls through to
-        // the loader-file check — the common case (a symlinked loader *file*
-        // such as /lib/ld-musl-x86_64.so.1) is included and later deduped by
-        // canonical path; real multiarch dirs are not symlinks, so bounding the
-        // recursion to genuine dirs loses nothing.
+        // A symlinked subdir is not recursed, since `file_type()` does not follow it; real multiarch dirs are never symlinks.
         let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
         };
@@ -677,17 +312,9 @@ fn scan_loader_dirs() -> Vec<std::path::PathBuf> {
     found
 }
 
-/// Reduce `dirs` to the distinct filesystem trees they name, keeping the first
-/// spelling of each.
+/// Reduce `dirs` to the distinct trees they name, so usrmerge is not walked twice.
 ///
-/// On every usrmerge distribution `/lib` → `/usr/lib` and `/lib64` →
-/// `/usr/lib64`, so [`LOADER_SCAN_DIRS`]' four entries name two real trees and
-/// the scan walked each of them twice. A path that does not exist, or fails to
-/// canonicalize, keeps its literal form as its own identity — so a
-/// non-usrmerge host still scans all four, and two distinct missing paths do not
-/// collapse into one.
-///
-/// Blocking; runs inside [`glob_loader_paths`]'s `spawn_blocking`.
+/// An uncanonicalizable path keeps its literal identity, or two missing paths collapse into one.
 #[cfg(target_os = "linux")]
 fn dedup_scan_roots(dirs: &[&str]) -> Vec<std::path::PathBuf> {
     let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
@@ -702,10 +329,6 @@ fn dedup_scan_roots(dirs: &[&str]) -> Vec<std::path::PathBuf> {
     roots
 }
 
-/// Append every non-directory entry of `dir` whose filename matches a
-/// current-architecture loader fragment to `out`.
-///
-/// Blocking; runs inside [`glob_loader_paths`]'s `spawn_blocking`.
 #[cfg(target_os = "linux")]
 fn collect_loader_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -723,10 +346,7 @@ fn collect_loader_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>
     }
 }
 
-/// True when `name` is a dynamic-loader filename for the **current**
-/// architecture. Foreign-arch loaders (e.g. an `aarch64` loader present via
-/// dpkg-multiarch on an x86_64 host) do not match, keeping them out of the
-/// candidate set.
+/// True for a current-architecture loader filename; a foreign-arch multiarch loader does not match.
 #[cfg(target_os = "linux")]
 fn is_current_arch_loader_name(name: &str) -> bool {
     LIBC_FAMILIES
@@ -735,12 +355,8 @@ fn is_current_arch_loader_name(name: &str) -> bool {
         .any(|fragment| name.contains(fragment))
 }
 
-/// Resolve `path` to its canonical form and record it; return `true` when this
-/// canonical path has not been seen yet (so it should be probed).
-///
-/// Paths that do not exist (or fail to canonicalize) are recorded under their
-/// literal form, so a missing loader is left for the caller's existence check
-/// rather than collapsing distinct missing paths together.
+/// Record `path` canonically; `true` when not seen yet. A missing path keeps
+/// its literal form, or distinct missing paths collapse together.
 #[cfg(target_os = "linux")]
 async fn dedup_unseen(path: &std::path::Path, seen: &mut std::collections::HashSet<std::path::PathBuf>) -> bool {
     let canonical = tokio::fs::canonicalize(path)
@@ -749,35 +365,20 @@ async fn dedup_unseen(path: &std::path::Path, seen: &mut std::collections::HashS
     seen.insert(canonical)
 }
 
-/// Per-probe subprocess timeout. Probes run concurrently and all are awaited,
-/// so on a healthy host the wall-clock cost is the slowest matching probe. The
-/// timeout only bites a hung or wedged loader. 1 s is tight enough to bound
-/// `detect_libcs` (and thus `Context::try_init`) while leaving ample headroom
-/// for process-spawn overhead on cold/loaded CI runners — 10 ms would produce
-/// false negatives on slow runners. Precedent:
-/// `update_check.rs::query_installed_version` uses 5 s for a version-query
-/// subprocess; loader `--version` is expected much faster so 1 s is appropriate.
+/// Per-probe timeout, bounding context init against a wedged loader; far
+/// shorter yields false negatives on loaded CI runners.
 #[cfg(target_os = "linux")]
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A libc family OCX can identify on the host, expressed as a table row so a
-/// third family (uClibc-ng, Bionic) is a one-row addition: its loader-name
-/// fragments (for the directory-scan arch filter) plus its `--version` banner
-/// predicate.
+/// One row of the libc family identification table.
 #[cfg(target_os = "linux")]
 struct LibcFamily {
-    /// The family this row identifies.
     flavor: LibcFlavor,
     /// Current-architecture loader filename fragments (e.g. `ld-linux-x86-64`).
-    /// Used to arch-filter the directory scan and, for glibc, as the name
-    /// heuristic in the exit-127 confirmation path.
     loader_name_fragments: &'static [&'static str],
-    /// Returns true when the combined `--version` banner identifies this family.
     banner_matches: fn(&str) -> bool,
 }
 
-/// Family identification table. Adding uClibc-ng / Bionic later is one row plus
-/// its loader-name fragments — no other code changes.
 #[cfg(target_os = "linux")]
 const LIBC_FAMILIES: &[LibcFamily] = &[
     LibcFamily {
@@ -792,43 +393,29 @@ const LIBC_FAMILIES: &[LibcFamily] = &[
     },
 ];
 
-/// glibc's loader prints a `GNU libc` / `GLIBC` banner on `--version`.
 #[cfg(target_os = "linux")]
 fn glibc_banner_matches(banner: &str) -> bool {
     banner.contains("GNU libc") || banner.contains("GLIBC")
 }
 
-/// musl's loader prints a `musl libc` banner (to stderr, exit non-zero by
-/// design — the exit status is deliberately ignored).
+/// musl's banner comes with a non-zero exit, so the status is ignored.
 #[cfg(target_os = "linux")]
 fn musl_banner_matches(banner: &str) -> bool {
     banner.contains("musl libc")
 }
 
-/// The verdict of classifying a loader from its `--version` banner.
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
 enum BannerClass {
-    /// The banner positively identifies a libc family.
     Identified(LibcFlavor),
-    /// No banner match, the loader name looks like glibc, and it exited 127
-    /// (Ubuntu 20.04 / glibc 2.31 quirk). The caller confirms by running
-    /// `{loader} /bin/true`.
+    /// A glibc-named loader exited 127 with no banner (Ubuntu 20.04); confirm with `{loader} /bin/true`.
     GlibcNeedsConfirmation,
-    /// The banner identifies no known family.
     Unrecognized,
 }
 
-/// Classify a loader purely from its `--version` output, filename, and exit
-/// code — table-driven over [`LIBC_FAMILIES`], independent of which discovery
-/// source produced the path.
+/// Classify a loader from its `--version` output, filename and exit code.
 ///
-/// Banner match takes precedence over the filename, so an Alpine gcompat stub
-/// sitting at the glibc loader path but printing the musl banner classifies as
-/// [`Musl`](LibcFlavor::Musl) — the ADR "identity, not equivalence" rule by
-/// construction. A glibc loader that exits 127 with no banner (Ubuntu 20.04)
-/// yields [`GlibcNeedsConfirmation`](BannerClass::GlibcNeedsConfirmation); the
-/// async caller resolves it with `{loader} /bin/true`.
+/// The banner outranks the filename, or a gcompat stub at the glibc path misclassifies as glibc.
 #[cfg(target_os = "linux")]
 fn classify_loader_banner(banner: &str, loader_name: &str, exit_code: Option<i32>) -> BannerClass {
     for family in LIBC_FAMILIES {
@@ -842,7 +429,6 @@ fn classify_loader_banner(banner: &str, loader_name: &str, exit_code: Option<i32
     BannerClass::Unrecognized
 }
 
-/// True when `loader_name` matches a current-arch glibc loader fragment.
 #[cfg(target_os = "linux")]
 fn loader_name_looks_glibc(loader_name: &str) -> bool {
     GLIBC_LOADER_FRAGMENTS
@@ -850,22 +436,11 @@ fn loader_name_looks_glibc(loader_name: &str) -> bool {
         .any(|fragment| loader_name.contains(fragment))
 }
 
-/// Identify the libc family of a single discovered loader at `path`.
+/// The libc family of the loader at `path`, or `None` when it is absent, fails or times out.
 ///
-/// Spawns `{path} --version` under [`PROBE_TIMEOUT`], classifies the banner via
-/// [`classify_loader_banner`], and resolves the Ubuntu 20.04 exit-127 case with
-/// a `{path} /bin/true` confirmation. Returns `None` when the loader is absent,
-/// fails to execute, times out, or identifies no known family — never panics.
-///
-/// A positive result hands `path` back with the family, because the persisted
-/// record keys its invalidation on exactly the loaders that classified.
-///
-/// SECURITY: `path` is always a discovery-sourced loader path (never user
-/// input); only `--version` / `/bin/true` are passed, each bounded by the
-/// timeout so a wedged loader cannot stall OCX startup.
+/// SECURITY: every spawn is bounded by [`PROBE_TIMEOUT`], or a wedged loader stalls startup.
 #[cfg(target_os = "linux")]
 async fn probe_loader(path: std::path::PathBuf) -> Option<(std::path::PathBuf, LibcFlavor)> {
-    // Skip the spawn entirely if the loader is not present.
     if tokio::fs::metadata(&path).await.is_err() {
         return None;
     }
@@ -887,8 +462,6 @@ async fn probe_loader(path: std::path::PathBuf) -> Option<(std::path::PathBuf, L
     match class {
         BannerClass::Identified(flavor) => Some((path, flavor)),
         BannerClass::GlibcNeedsConfirmation => {
-            // Confirm the loader is a live glibc loader by running it on
-            // `/bin/true`; exit 0 means it can actually launch a glibc program.
             let confirm = tokio::time::timeout(
                 PROBE_TIMEOUT,
                 tokio::process::Command::new(&path).arg("/bin/true").output(),
@@ -902,10 +475,7 @@ async fn probe_loader(path: std::path::PathBuf) -> Option<(std::path::PathBuf, L
     }
 }
 
-/// Canonical glibc dynamic-loader paths for the build target architecture,
-/// multiarch-aware (multiarch symlink + real file + Fedora usrmerge). Dedup by
-/// canonical path before spawning so a symlink and its target are not probed
-/// twice.
+/// Canonical glibc loader paths for the build target architecture.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const GLIBC_LOADERS: &[&str] = &[
     "/lib/ld-linux-x86-64.so.2",
@@ -923,27 +493,17 @@ const GLIBC_LOADERS: &[&str] = &[
     "/usr/lib64/ld-linux-aarch64.so.1",
 ];
 
-/// Canonical musl dynamic-loader path for the build target architecture. musl
-/// uses a single syslibdir path per arch.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const MUSL_LOADERS: &[&str] = &["/lib/ld-musl-x86_64.so.1"];
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const MUSL_LOADERS: &[&str] = &["/lib/ld-musl-aarch64.so.1"];
 
-// Other Linux architectures (arm, riscv64, …) are outside OCX's supported
-// platform set (`Architecture::current` returns `None` there), so host libc
-// detection has no entries to match against. Empty allowlists keep the probe a
-// no-op without an architecture-specific loader table.
+// Unsupported architectures: `Architecture::current` is `None` there, so nothing is probed.
 #[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 const GLIBC_LOADERS: &[&str] = &[];
 #[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 const MUSL_LOADERS: &[&str] = &[];
 
-/// Current-architecture loader filename fragments per family. Used to
-/// arch-filter the directory scan (a foreign-arch multiarch loader does not
-/// match) and, for glibc, as the name heuristic in the exit-127 confirmation
-/// path. The fragment is the arch-specific stem of the canonical loader name
-/// (`ld-linux-x86-64.so.2` → `ld-linux-x86-64`).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const GLIBC_LOADER_FRAGMENTS: &[&str] = &["ld-linux-x86-64"];
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -954,8 +514,6 @@ const GLIBC_LOADER_FRAGMENTS: &[&str] = &["ld-linux-aarch64"];
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const MUSL_LOADER_FRAGMENTS: &[&str] = &["ld-musl-aarch64"];
 
-// Unsupported architectures: empty fragments mirror the empty loader
-// allowlists, so the directory scan and name heuristic match nothing.
 #[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 const GLIBC_LOADER_FRAGMENTS: &[&str] = &[];
 #[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -963,109 +521,39 @@ const MUSL_LOADER_FRAGMENTS: &[&str] = &[];
 
 // ── Persisted host-capability record ──────────────────────────────────────
 
-/// Persisted-record TTL: 24 hours.
+/// Persisted-record TTL; bounds only a libc *added* since the record was written.
 ///
-/// The clock bounds one direction only — a libc **added** since the record was
-/// written; a libc **removed or replaced** invalidates the record immediately
-/// through [`HostCapabilityRecord::evidence_still_holds`], not through this
-/// constant (module-level "Cache lifecycle" note).
-///
-/// It was one hour until 2026-08-27, on the reasoning that a full re-detect is
-/// "unmeasurable beside the ~3.6 ms an `ocx` process costs to start at all".
-/// That reasoning did not survive the reconciler: the per-prompt reconcile is
-/// budgeted at `exec_floor + 3 ms` (C-044), and `test/bench/shell_latency.py`
-/// measures the **cold** detect — this record deleted before the spawn — at
-/// Δ 3.659–4.732 ms, over that budget on its own. So the first prompt of every
-/// TTL period lands over budget, and at one hour that was once an hour, per
-/// host, on a path whose whole contract is that a user never notices it.
-///
-/// Lengthening the clock is the fix rather than refreshing off the prompt path,
-/// because there is no off-prompt path to refresh on: every `ocx` is a fresh
-/// short-lived process that exits as soon as it has emitted, so a detached
-/// background refresh would be killed before it finished and would buy a
-/// complexity budget for nothing.
-///
-/// What 24 h costs is bounded, and it is the *recoverable* direction by
-/// construction: a libc **added** since the record was written makes the record
-/// under-report, which surfaces as `FeatureMismatch` (exit 65) naming the
-/// platforms that *are* available — self-diagnosing, and cleared by deleting
-/// `$OCX_HOME/state/host/capabilities.json`. The dangerous direction — a libc
-/// removed or replaced, where OCX would select an artifact that cannot launch —
-/// is not on this clock at all and still invalidates on the very next
-/// invocation.
-///
-/// Now the same 24 h as the trust-root cache. The note this replaces argued for
-/// something shorter, on the grounds that a local answer can change under the
-/// user's hands between two prompts while a remote's cannot. True, but it is the
-/// argument for `evidence_still_holds`, which is what actually catches those
-/// changes; the clock only ever covered the one case that check cannot see.
-///
-/// A record already on disk carries its own `ttl_seconds`, and
-/// [`HostCapabilityRecord::is_fresh`] clamps with `min`, so raising this
-/// constant never extends an existing record — the longer lifetime starts with
-/// the next one written.
+/// A removed or replaced one invalidates through [`HostCapabilityRecord::evidence_still_holds`].
+/// Rationale: `adr_platform_libc_os_features.md` § Rationale from code: ocx_oci.
 #[cfg(target_os = "linux")]
 const TTL_SECS: u64 = 86_400;
 
-/// On-disk format version of the host-capability record.
-///
-/// `serde_repr` refuses an unrecognised integer on deserialise by itself, so a
-/// record written by another ocx is a clean miss with no hand-written check to
-/// forget. Bumping this is the entire migration story: the record is per-host
-/// derived state behind a 1-hour TTL, so invalidating every existing one costs
-/// exactly one re-probe per host.
-///
-/// V1 (never represented here) stored `os_features` and `loaders` as two
-/// independent lists, which let a record claim a libc family no recorded loader
-/// had classified as, and keyed loader validity on path existence alone, which
-/// a replace-in-place survives.
+/// On-disk record version; an unknown value fails to parse, a clean miss, so bumping it is the whole migration.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 enum RecordVersion {
-    /// Evidence-only: one entry per classified loader carrying the family it
-    /// identified and the file identity it had when it did.
     V2 = 2,
 }
 
-/// The identity a loader file had at the moment it classified.
+/// A loader file's `stat` identity when it classified: tells a replaced loader from the same one.
 ///
-/// Recorded so the record can tell "the same loader is still there" from
-/// "something else is at that path now". Every field comes off the same `stat`
-/// the presence check already performs, so re-checking all four costs nothing
-/// beyond what checking existence alone cost.
-///
-/// **What it does not catch:** an overwrite that preserves the inode, the byte
-/// length *and* the mtime to the nanosecond — which takes a deliberate
-/// `touch -r` after writing an identically sized file. This is not a content
-/// hash on purpose: hashing each loader on every invocation measured 0.41 ms for
-/// one 960 KB glibc loader with a warm page cache, against the ~2.3 ms the whole
-/// record saves, so the exact answer would spend a fifth of the saving (more on
-/// a dual-libc host, more again on a cold cache) closing a case no package
-/// manager produces. Every ordinary replacement moves at least one field: a
-/// write-new-then-`rename` install moves the inode, an in-place rewrite moves
-/// the mtime, a container-layer or bind-mount swap moves the device — and two
-/// libc loaders are never the same size.
+/// Not a content hash: hashing costs a fifth of the record's whole saving, and
+/// every ordinary replacement moves inode, mtime, device or size.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoaderIdentity {
-    /// Device the loader lives on.
     device: u64,
-    /// Inode number.
     inode: u64,
-    /// Byte length.
     size: u64,
-    /// Modification time, whole seconds since the epoch.
     mtime_seconds: i64,
-    /// Modification time, nanosecond remainder — the axis that catches an
-    /// in-place rewrite of identical length.
+    /// Catches an in-place rewrite of identical length.
     mtime_nanoseconds: i64,
 }
 
 #[cfg(target_os = "linux")]
 impl LoaderIdentity {
-    /// Read the identity out of a `stat` result.
     fn of(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         Self {
@@ -1083,71 +571,32 @@ impl LoaderIdentity {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoaderRecord {
-    /// Absolute path the loader was probed at.
     path: String,
-    /// The canonical `os.features` tag this loader's `--version` banner
-    /// identified (`libc.glibc` / `libc.musl`). Held as the tag rather than a
-    /// serialized [`LibcFlavor`] so the record routes through the one
-    /// round-tripping mapping ([`LibcFlavor::os_feature_tag`] /
-    /// [`LibcFlavor::from_os_feature_tag`]) instead of minting a second
-    /// encoding that could drift from it.
+    /// The tag, not a serialized `LibcFlavor`, or a second encoding drifts from the one mapping.
     feature: String,
-    /// The loader's file identity when it classified.
     identity: LoaderIdentity,
 }
 
-/// A detection result recorded on disk at
-/// `$OCX_HOME/state/host/capabilities.json`.
+/// A detection result persisted at `$OCX_HOME/state/host/capabilities.json`.
 ///
-/// Advisory and fail-open in every direction: missing, unreadable, corrupt,
-/// expired or evidence-invalidated all mean "miss", and a miss simply re-runs
-/// detection. Nothing here can turn a slow command into a failed one.
-///
-/// `deny_unknown_fields` here and on every nested struct is not a defence
-/// against an attacker (see the module-level "The persisted record is not a
-/// trust boundary" note) — it is how the reader refuses a record this writer
-/// could not have produced. A stray key means the file came from somewhere
-/// else, and the only safe reading of somewhere else is "probe now". The
-/// project-wide ban on `deny_unknown_fields` covers the `Config` tree, whose
-/// forward-compatibility matters because one file is fleet-wide state; this is
-/// machine-local derived state with a version tag and a 1-hour TTL, where a
-/// refusal costs one re-probe.
+/// Fail-open: any unusable record is a miss and re-detects, never an error.
+/// `deny_unknown_fields` refuses a record this writer could not have produced.
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostCapabilityRecord {
-    /// On-disk format version; an unrecognised value fails to deserialise,
-    /// which is a miss.
     version: RecordVersion,
-    /// Every loader that classified positive, sorted by path.
-    ///
-    /// This is the record's **only** statement about the host, and the
-    /// `os.features` answer is derived from it
-    /// ([`HostCapabilityRecord::libcs`]) rather than stored beside it — so a
-    /// record claiming a family no recorded loader produced is not rejected,
-    /// it is unrepresentable. An empty list parses and, being evidence rather
-    /// than assertion, claims nothing — but [`record_detection`] never writes
-    /// one, since no record can distinguish a host on which nothing classified
-    /// from a pass that could not look.
+    /// The record's only claim; families derive from it, so one no loader produced is unrepresentable.
     loaders: Vec<LoaderRecord>,
-    /// Wall-clock time of the detection this record captures (UTC).
     detected_at: std::time::SystemTime,
-    /// TTL in seconds, clamped to [`TTL_SECS`] on read.
+    /// Clamped to [`TTL_SECS`] on read.
     ttl_seconds: u64,
 }
 
 #[cfg(target_os = "linux")]
 impl HostCapabilityRecord {
-    /// Capture a detection pass as a record stamped now, or `None` when a
-    /// classified loader's identity cannot be read.
-    ///
-    /// Re-stats each loader rather than carrying its identity out of the probe:
-    /// this is the write path, which has just run the whole discovery pipeline,
-    /// so one to three extra `stat`s are free, and it keeps the Linux-only
-    /// [`LoaderIdentity`] out of the cross-platform [`Detection`]. A loader that
-    /// vanished between its probe and here means the host changed mid-detection
-    /// — recording a partial answer would then be honoured for an hour, so
-    /// record nothing and let the next invocation re-detect.
+    /// Capture a detection pass stamped now, or `None` when a loader vanished
+    /// mid-detection: a partial answer would be honoured for the whole TTL.
     async fn capture(detection: &Detection) -> Option<Self> {
         let mut loaders = Vec::with_capacity(detection.classified.len());
         for (path, flavor) in &detection.classified {
@@ -1175,23 +624,12 @@ impl HostCapabilityRecord {
         })
     }
 
-    /// The libc families this record's own evidence supports.
-    ///
-    /// Every family named here is one a recorded loader classified as, because
-    /// there is nothing else to derive it from. An unrecognised `feature` tag
-    /// decodes to [`LibcFlavor::Unknown`] and is dropped, so a value this
-    /// binary does not understand contributes nothing rather than being
-    /// believed.
+    /// The families the recorded loaders support; an unrecognised tag is dropped, never believed.
     fn libcs(&self) -> BTreeSet<LibcFlavor> {
         decode_libc_tags(self.loaders.iter().map(|loader| &loader.feature))
     }
 
-    /// True while the record is inside its (clamped) TTL.
-    ///
-    /// Both halves of the lifetime come off disk, so neither is trusted: a
-    /// `detected_at` in the future (rewound clock, hand-edited file) reads as
-    /// stale, and `ttl_seconds` is clamped so a record can shorten its own
-    /// lifetime and never extend it.
+    /// True inside the clamped TTL; a future `detected_at` reads as stale, never as fresh forever.
     fn is_fresh(&self) -> bool {
         match std::time::SystemTime::now().duration_since(self.detected_at) {
             Ok(elapsed) => elapsed < std::time::Duration::from_secs(self.ttl_seconds.min(TTL_SECS)),
@@ -1199,23 +637,10 @@ impl HostCapabilityRecord {
         }
     }
 
-    /// True while every loader that classified for this record is still the
-    /// same file at the same path.
+    /// True while every recorded loader is still the same file at the same path.
     ///
-    /// This is the gate that closes the dangerous staleness direction. A record
-    /// naming a libc the host can no longer execute would make OCX select an
-    /// artifact that cannot launch, and no TTL short enough to bound that is
-    /// short enough to be worth caching under — so the change is detected
-    /// directly instead.
-    ///
-    /// Existence is not the check. Uninstalling a libc removes its loader, but
-    /// *replacing* one keeps the path: a package reinstall, an upgrade, a
-    /// container-layer swap all leave a file at the recorded path whose contents
-    /// this record never saw, and the executable there may belong to a different
-    /// libc or not run at all. So the recorded [`LoaderIdentity`] is compared,
-    /// not merely probed for presence — the same one `stat` per classified
-    /// loader (one to three on a real host) an existence check cost, against the
-    /// several thousand a full re-detect walks.
+    /// Compares identity, not presence: a replaced libc keeps its path, and a
+    /// stale record selects an artifact that cannot launch.
     async fn evidence_still_holds(&self) -> bool {
         for loader in &self.loaders {
             let Ok(metadata) = tokio::fs::metadata(&loader.path).await else {
@@ -1233,10 +658,6 @@ impl HostCapabilityRecord {
 #[cfg(target_os = "linux")]
 async fn read_record(path: &std::path::Path) -> Option<HostCapabilityRecord> {
     let bytes = tokio::fs::read(path).await.ok()?;
-    // A record OCX cannot decode is a record from another version, a damaged
-    // one, or one this writer could not have produced (an unknown field, a
-    // `version` outside `RecordVersion`). Every one of those means the answer
-    // has to be probed rather than read — never an error surfaced from a cache.
     let record: HostCapabilityRecord = match serde_json::from_slice(&bytes) {
         Ok(record) => record,
         Err(error) => {
@@ -1254,13 +675,7 @@ async fn read_record(path: &std::path::Path) -> Option<HostCapabilityRecord> {
     Some(record)
 }
 
-/// Persist `record` at `path`, best-effort.
-///
-/// Every failure is a debug log and nothing else: the record is an optimization,
-/// so a read-only or full `$OCX_HOME` must cost a slow command, never a failed
-/// one. Written through [`ocx_util::fs::write_bytes_atomic`] (private
-/// tempfile + rename) so a concurrent reader never sees a partial record — the
-/// same write the referrers and trust-root caches use.
+/// Persist `record` at `path`, best-effort: a read-only `$OCX_HOME` costs a slow command, never a failed one.
 #[cfg(target_os = "linux")]
 async fn write_record(path: std::path::PathBuf, record: &HostCapabilityRecord) {
     let Some(parent) = path.parent().map(std::path::Path::to_path_buf) else {
@@ -1289,9 +704,7 @@ async fn write_record(path: std::path::PathBuf, record: &HostCapabilityRecord) {
 
 /// Detect, consulting and refreshing the persisted record at `record`.
 ///
-/// `None` — the caller resolved no `$OCX_HOME` — detects uncached rather than
-/// failing: detection also runs on the static-command bypass
-/// (`ocx version --verbose`), which builds no `FileStructure`.
+/// `None` detects uncached: the static-command bypass builds no `FileStructure`.
 #[cfg(target_os = "linux")]
 async fn detect_with_persisted_record(record: Option<&std::path::Path>) -> HostCapabilities {
     // The test seam is checked before any disk access, so a forced libc set is
@@ -1321,28 +734,12 @@ async fn detect_with_persisted_record(record: Option<&std::path::Path>) -> HostC
     }
 }
 
-/// Persist `detection` at `path`, unless it classified nothing.
+/// Persist `detection` at `path`, unless it classified nothing: a degraded pass
+/// reads back as vacuously valid, persisting "could not look" for the whole TTL.
 ///
-/// The writer cannot record "I could not look" — the record has one shape, and
-/// an empty loader list read back through
-/// [`HostCapabilityRecord::evidence_still_holds`] is vacuously valid, so nothing
-/// short of the TTL can dislodge it. A *degraded* pass produces exactly that
-/// empty list: the directory scan losing its `spawn_blocking` join
-/// ([`glob_loader_paths`]), or every probe hitting [`PROBE_TIMEOUT`] on a loaded
-/// runner. Latching one would answer `os.features` with the empty set for an
-/// hour, and a package published only for glibc then fails to resolve
-/// (`FeatureMismatch`, exit 65) on every install until it expires.
-///
-/// So an empty classification is not recorded. It costs one re-detect per
-/// invocation — precisely what every invocation paid before the record existed —
-/// and it keeps "could not look" from being persisted as "looked and found
-/// nothing".
-///
-/// ponytail: a host that genuinely has no libc loader (a static-only image where
-/// `PT_INTERP`, the directory scan, and the FHS allowlist all come up empty)
-/// therefore never caches, paying the ~2.7 ms detection every invocation. Fixing
-/// that needs a second record shape that distinguishes a completed pass from a
-/// degraded one; a real complaint from such a host is what would justify it.
+/// ponytail: a host with genuinely no libc loader never caches, paying full
+/// detection every invocation — a second record shape distinguishing a
+/// completed pass from a degraded one would fix it, if it ever complains.
 #[cfg(target_os = "linux")]
 async fn record_detection(path: std::path::PathBuf, detection: &Detection) {
     if detection.classified.is_empty() {
@@ -1357,43 +754,19 @@ async fn record_detection(path: std::path::PathBuf, detection: &Detection) {
     }
 }
 
-/// Non-Linux detection spawns no subprocess and returns the empty set
-/// immediately, so reading a file would cost strictly more than the detection it
-/// would replace. No record is read or written there.
 #[cfg(not(target_os = "linux"))]
 async fn detect_with_persisted_record(_record: Option<&std::path::Path>) -> HostCapabilities {
     HostCapabilities::detect().await
 }
 
-// Process-wide cache for the detected os_features. Populated once by
-// `HostCapabilities::detect()` during context init, then read by every
-// `Platform::current()` call for the process lifetime.
 static CACHED_OS_FEATURES: OnceLock<Vec<String>> = OnceLock::new();
 
-/// Return the process-cached `os_features` value populated by a prior
-/// `HostCapabilities::detect()` call.
-///
-/// Returns an empty `Vec` when the cache has not been populated yet or when
-/// detection found no recognised libc.
-///
-/// This function is intentionally `pub(crate)` — it is only called from
-/// `Platform::current()` within this crate. External callers that need libc
-/// information should use `HostCapabilities::detect()` directly.
+/// The process-cached `os_features`; empty before [`HostCapabilities::detect_and_cache`] runs.
 pub(crate) fn cached_os_features() -> Vec<String> {
     CACHED_OS_FEATURES.get().cloned().unwrap_or_default()
 }
 
-/// Return the detected libc `os.features` tags from the process-wide cache, in
-/// deterministic sorted order. Empty when libc was undetected or the cache has
-/// not been populated.
-///
-/// Reads the **same** cache that [`Platform::current`](super::platform::Platform::current)
-/// consumes for index resolution, so `ocx version` / `ocx about` report
-/// exactly the libc tags the resolver would select against. Interprets each
-/// cached feature via [`Feature::parse`] and keeps only the `libc.*` ones,
-/// re-rendering them through [`LibcFlavor::os_feature_tag`] so the output is
-/// the canonical full tag (`"libc.glibc"` / `"libc.musl"`). Non-libc features
-/// are dropped — they carry no libc meaning.
+/// The cached libc tags, sorted; the same cache the resolver selects against, so reports match it.
 pub fn cached_libc_labels() -> Vec<String> {
     cached_os_features()
         .iter()
@@ -1404,36 +777,15 @@ pub fn cached_libc_labels() -> Vec<String> {
         .collect()
 }
 
-/// Populate the process-wide `os_features` cache from a detection result.
-///
-/// Called once during CLI context initialization (`Context::try_init`) after
-/// [`HostCapabilities::detect`] resolves. Idempotent: the first call wins and
-/// subsequent calls are no-ops (the cache is a one-shot `OnceLock`), so a
-/// double-init cannot corrupt the cached value.
-///
-/// Private because only [`HostCapabilities::detect_and_cache`] drives the
-/// cache; library consumers that need libc data call
-/// [`HostCapabilities::detect`] directly rather than relying on this
-/// process-global cache.
 fn init_cache(capabilities: &HostCapabilities) {
-    // Ignore the result: a second init is a benign no-op. The first writer
-    // (context init) establishes the value for the process lifetime.
+    // A second init is a benign no-op; the first value holds for the process.
     let _ = CACHED_OS_FEATURES.set(capabilities.os_features());
 }
 
-// ── Unit tests for HostCapabilities ───────────────────────────────────────
-//
-// Because detection probes the real filesystem (ld.so), tests that depend on
-// real filesystem layout are marked `#[ignore]` — they require the actual host
-// loader to be present. The main test vector uses the `__OCX_TEST_LIBC` env
-// var as the detection short-circuit for reproducible CI results.
-//
-// `__OCX_TEST_LIBC` values (comma-separated set):
-//   "glibc"       → {Glibc}
-//   "musl"        → {Musl}
-//   "glibc,musl"  → {Glibc, Musl}
-//   "none" / ""   → {} (undetectable)
-//   unset         → real probe (default)
+// Unit tests for HostCapabilities. Detection probes the real filesystem
+// (ld.so), so tests needing an actual host loader are `#[ignore]`d; the main
+// vector uses the `__OCX_TEST_LIBC` short-circuit (`HostCapabilities::detect`'s
+// doc comment) for reproducible CI results.
 
 #[cfg(test)]
 mod tests {

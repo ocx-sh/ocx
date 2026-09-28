@@ -3,41 +3,25 @@
 
 use std::path::{Path, PathBuf};
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, which is what every one of these
-/// functions used to return one conversion later.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Represents a single content-addressed blob directory within the blob store.
-///
-/// A blob directory has a fixed layout:
-/// - `data`   -- the raw blob content (single file)
-/// - `digest` -- full digest string for recovery
+/// One blob directory: the `data` file plus, when written, `digest`.
 pub struct BlobDir {
-    /// The root directory of this blob (parent of `data`, `digest`).
     pub dir: PathBuf,
 }
 
 impl BlobDir {
-    /// Path to the raw blob data file.
     pub fn data(&self) -> PathBuf {
         self.dir.join("data")
     }
 
-    /// Path to the digest marker file.
     pub fn digest_file(&self) -> PathBuf {
         self.dir.join(super::cas_path::DIGEST_FILENAME)
     }
 }
 
-/// Manages the content-addressed blob store on the local filesystem.
+/// Raw blobs at `{root}/{registry_slug}/{cas_shard_path}/data`.
 ///
-/// All blobs are stored under a single `root` directory, sharded by
-/// registry and digest (via [`super::cas_path::cas_shard_path`]) to avoid
-/// filesystem limits in any single directory.
-///
-/// Layout:
 /// ```text
 /// {root}/
 ///   {registry_slug}/
@@ -50,8 +34,6 @@ impl BlobDir {
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     root: PathBuf,
-    /// Test-only write counter, shared by every clone of this store. See
-    /// [`Self::write_call_count`].
     #[cfg(any(test, feature = "__test_scaffolding"))]
     write_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -65,102 +47,45 @@ impl BlobStore {
         }
     }
 
-    /// The root directory of the blob store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Returns the blob directory path for the given registry and digest.
     pub fn path(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.root
             .join(super::slugify(registry))
             .join(super::cas_path::cas_shard_path(digest))
     }
 
-    /// Returns the `data` file path for the given registry and digest.
-    ///
-    /// # Invariant
-    /// All writes to this path go through `BlobStore::write_blob`, which uses
-    /// `tempfile::NamedTempFile` + atomic rename. The content-addressed
-    /// invariant (same digest → same bytes) makes concurrent writers safe:
-    /// each writes byte-equivalent content, and the rename is idempotent.
+    /// Write only through [`Self::write_blob`] / [`Self::replace_blob`], whose atomic rename makes concurrent writers safe.
     pub fn data(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.path(registry, digest).join("data")
     }
 
-    /// Returns the `digest` file path for the given registry and digest.
     pub fn digest_file(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.path(registry, digest).join(super::cas_path::DIGEST_FILENAME)
     }
 
-    /// Idempotently write `bytes` to the CAS `data` path for `(registry, digest)`.
-    ///
-    /// Caller MUST have verified `digest == sha256(bytes)` upstream — this
-    /// function does not re-hash.
-    ///
-    /// Behavior:
-    /// 1. If the CAS `data` path already exists **and is non-empty**, return
-    ///    `Ok(())` (idempotent). A zero-byte file is treated as absent — it
-    ///    is a crash artifact from a kill-9 during a previous write and must
-    ///    be overwritten via the tempfile+rename path.
-    /// 2. Otherwise: `tempfile::NamedTempFile::new_in(cas_parent_dir)` →
-    ///    `write_all(bytes)` → `sync_data` → `persist(cas_path)`.
-    /// 3. On Windows `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED`
-    ///    (5) — caused by concurrent non-sharing readers or AV scanning —
-    ///    retry the persist with exponential backoff (3 retries:
-    ///    100ms / 400ms / 800ms with ±25% jitter). After exhausting retries,
-    ///    re-check the CAS path; if it now exists, return `Ok(())`
-    ///    (the writer that won the race is byte-equivalent by content-addressing).
-    ///    Matches rattler's `rename_with_retry` precedent for the same hazard.
+    /// Idempotently writes `bytes`; the caller must have verified `digest == sha256(bytes)`, as nothing re-hashes.
     ///
     /// # Errors
     ///
-    /// Returns `crate::Error::InternalFile(cas_path, io::Error)` on disk
-    /// failure after retry exhaustion.
-    ///
-    /// No `BlobGuard` is acquired — there is no advisory lock on the `data`
-    /// file. F1 (cross-process read of locked blob data) cannot recur because
-    /// the lock has been removed entirely, not relocated.
+    /// Disk failure after the persist retries are exhausted.
     pub async fn write_blob(&self, registry: &str, digest: &ocx_oci::Digest, bytes: &[u8]) -> Result<()> {
         let target = self.data(registry, digest);
-        // Check-first: idempotent fast path (content-addressed invariant).
-        // A zero-byte file is a crash artifact (kill-9 recovery window); treat
-        // it as absent so the tempfile+rename path overwrites it correctly.
+        // A zero-byte file is a kill-9 artifact, so only a non-empty one counts as present.
         if tokio::fs::metadata(&target).await.map(|m| m.len() > 0).unwrap_or(false) {
             return Ok(());
         }
         self.persist_bytes(&target, bytes).await
     }
 
-    /// Unconditionally replaces the CAS `data` file for `(registry, digest)`
-    /// via the same tempfile + atomic-rename publish [`Self::write_blob`]
-    /// uses, but WITHOUT its check-first existence fast path: a fresh
-    /// tempfile is always written and renamed over whatever is at `target` —
-    /// corrupt bytes or nothing — so there is no absence window and no
-    /// separate removal step that could itself fail and leave the corrupt
-    /// bytes in place.
-    ///
-    /// Caller MUST have verified `digest == sha256(bytes)` upstream, same
-    /// contract as [`Self::write_blob`].
-    ///
-    /// Exists for a caller that has already discovered a present-but-corrupt
-    /// entry (a digest-verify failure on read) and wants to heal it in place:
-    /// `write_blob`'s check-first fast path would short-circuit on the
-    /// still-present tampered file and never actually replace it (this was a
-    /// real regression caught in review — a remove-then-`write_blob` two-step
-    /// left a failure window where a removal error left the corrupt bytes in
-    /// place while `write_blob`'s own fast path would then re-accept them). A
-    /// single atomic replace has no such window.
+    /// [`Self::write_blob`] without the fast path, for healing a corrupt entry in one atomic replace; `bytes` must be verified.
     pub async fn replace_blob(&self, registry: &str, digest: &ocx_oci::Digest, bytes: &[u8]) -> Result<()> {
         let target = self.data(registry, digest);
         self.persist_bytes(&target, bytes).await
     }
 
-    /// Shared tempfile + atomic-rename publish body for [`Self::write_blob`]
-    /// (behind its check-first fast path) and [`Self::replace_blob`]
-    /// (unconditional) — one write body, no copy-pasted logic. Bumps this
-    /// store's test-only write counter ([`Self::write_call_count`]) once per
-    /// genuine write attempt, whichever public entry point triggered it.
     async fn persist_bytes(&self, target: &Path, bytes: &[u8]) -> Result<()> {
         #[cfg(any(test, feature = "__test_scaffolding"))]
         self.write_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -181,22 +106,8 @@ impl BlobStore {
             tmp.as_file().sync_data()?;
             match ocx_util::fs::persist_temp_file(tmp, &target_for_blocking) {
                 Ok(()) => Ok(()),
-                // A failed persist is success ONLY when the target now holds the
-                // exact bytes we meant to publish. `write_blob` reaches here past
-                // its check-first fast path (target absent/zero-byte) and
-                // `replace_blob` reaches it unconditionally to heal a
-                // present-but-corrupt entry — in the heal case the corrupt bytes
-                // are still on disk after a failed rename, so a bare `exists()`
-                // check would report success while leaving corruption behind.
-                // Re-read and byte-compare against the content we wrote: a
-                // genuine concurrent CAS writer published byte-equivalent content
-                // (same digest ⇒ same bytes) and matches; corrupt or absent
-                // content propagates the original error. Byte-compare rather than
-                // re-hash because `persist_bytes` has the intended bytes in hand
-                // but no digest — the check is equivalent under content
-                // addressing and needs no extra parameter. This re-check is valid
-                // ONLY because the path is content-addressed; it is deliberately
-                // NOT baked into the generic `persist_temp_file`.
+                // Success only if the target holds our bytes: an `exists()` check would accept `replace_blob`'s corrupt original.
+                // Byte-compare is valid only because the path is content-addressed; never move it into `persist_temp_file`.
                 Err(err) => match std::fs::read(&target_for_blocking) {
                     Ok(current) if current == bytes_owned => Ok(()),
                     _ => Err(err),
@@ -209,22 +120,7 @@ impl BlobStore {
         Ok(())
     }
 
-    /// Read the full blob bytes from the CAS `data` path.
-    ///
-    /// Returns `Ok(None)` if the path does not exist. No lock taken — the blob
-    /// is immutable by digest, race-free.
-    ///
-    /// # Trust
-    ///
-    /// Bytes are returned without re-hashing against `digest`. Integrity rests
-    /// on the write-side contract: [`Self::write_blob`] requires the caller to
-    /// have verified `digest == sha256(bytes)` upstream. A future code path
-    /// that writes to the CAS without that pre-verification would silently
-    /// break the integrity guarantee this method depends on. Any new writer
-    /// MUST honor the upstream-verification contract; this is enforced by
-    /// convention and code review (the audit in
-    /// `.claude/artifacts/discovery_file_lock_unification.md` §"Blob-store
-    /// content-addressed audit" validates today's three production writers).
+    /// Reads the blob, `Ok(None)` if absent; not re-hashed, so integrity rests on every writer verifying upstream.
     pub async fn read_blob(&self, registry: &str, digest: &ocx_oci::Digest) -> Result<Option<Vec<u8>>> {
         let target = self.data(registry, digest);
         match tokio::fs::read(&target).await {
@@ -234,19 +130,7 @@ impl BlobStore {
         }
     }
 
-    /// Removes the CAS `data` file for `(registry, digest)`, tolerating an
-    /// already-absent target (`Ok(())` when the file does not exist).
-    ///
-    /// A present-but-corrupt entry (bytes that no longer hash to `digest`) must
-    /// be removed before a re-fetch: [`Self::write_blob`]'s check-first fast
-    /// path would otherwise re-accept the corrupt file untouched. Callers that
-    /// discover corruption on a digest-verified read heal by remove-then-refetch
-    /// — the chain's dispatch recovery (`ChainedIndex::recover_absent_dispatch`)
-    /// and the install-staging shortcut (`stage_and_link_chain_blobs`).
-    ///
-    /// Removes only the `data` file — the write path stores no sibling `digest`
-    /// file, and the next write repopulates `data` in place; an orphaned shard
-    /// directory is reaped by GC.
+    /// Removes the `data` file, `Ok(())` if absent; a corrupt entry must go before a re-fetch, or the fast path re-accepts it.
     pub async fn remove_blob(&self, registry: &str, digest: &ocx_oci::Digest) -> Result<()> {
         let target = self.data(registry, digest);
         match tokio::fs::remove_file(&target).await {
@@ -256,10 +140,7 @@ impl BlobStore {
         }
     }
 
-    /// Lists all blob directories currently present in the store.
-    ///
-    /// A blob directory is identified by the presence of a `data` child file.
-    /// Returns an empty vec if the store root does not exist yet.
+    /// Lists every blob directory; empty if the root does not exist.
     pub async fn list_all(&self) -> Result<Vec<BlobDir>> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -271,19 +152,10 @@ impl BlobStore {
     }
 }
 
-/// Registry directory + CAS shard depth (algorithm/prefix/suffix).
 const MAX_WALK_DEPTH: usize = 1 + super::cas_path::CAS_SHARD_DEPTH;
 
-/// Directory names that are part of the blob layout and must not be
-/// recursed into during the store walk.
 const BLOB_SKIP_NAMES: &[&str] = &[];
 
-/// Classifies a directory for the generic walker.
-///
-/// - If a `data` file exists and the path is valid CAS → [`WalkDecision::leaf`]
-///   with a [`BlobDir`].
-/// - If `data` exists but the path is invalid → [`WalkDecision::skip`].
-/// - Otherwise → [`WalkDecision::descend`].
 fn classify_blob_dir(dir: &Path, _depth: usize) -> ocx_util::fs::WalkDecision<BlobDir> {
     if dir.join("data").is_file() {
         if super::cas_path::is_valid_cas_path(dir) {
@@ -295,25 +167,9 @@ fn classify_blob_dir(dir: &Path, _depth: usize) -> ocx_util::fs::WalkDecision<Bl
     ocx_util::fs::WalkDecision::descend_skip(BLOB_SKIP_NAMES)
 }
 
-/// Test-only write instrumentation, scoped to one store instance.
 #[cfg(any(test, feature = "__test_scaffolding"))]
 impl BlobStore {
-    /// How many genuine write attempts this store (and every clone of it) has
-    /// performed — one per [`Self::write_blob`] call that got past the
-    /// check-first fast path, plus every [`Self::replace_blob`] call.
-    ///
-    /// Used by `PullCoordinator::stage_blob_bytes` coalescing tests to assert
-    /// the singleflight dedup actually fires (the leader executes exactly
-    /// once, waiters short-circuit). Without this instrumentation,
-    /// content-addressing alone makes "both calls return Ok" a passing
-    /// condition even when no dedup happens — masking a regression that would
-    /// otherwise cost a duplicate download per concurrent caller.
-    ///
-    /// The count lives on the store, not in a process-global static, so a
-    /// sibling test writing blobs into its own store can never perturb it.
-    /// `cargo test` parallelises within a single test binary, and a global
-    /// counter made this assertion a race against every unrelated
-    /// blob-writing test in the crate.
+    /// Write attempts past the fast path, across clones; per store so parallel tests cannot perturb it.
     pub fn write_call_count(&self) -> usize {
         self.write_calls.load(std::sync::atomic::Ordering::SeqCst)
     }

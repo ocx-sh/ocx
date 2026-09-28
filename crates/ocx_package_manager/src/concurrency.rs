@@ -3,14 +3,8 @@
 
 //! Concurrency cap for parallel package operations.
 //!
-//! Used by [`PackageManager::pull_all`](super::PackageManager::pull_all) and
-//! its call sites to limit how many root packages dispatch in parallel. The
-//! cap is enforced via a shared `tokio::sync::Semaphore` acquired at the
-//! outer dispatch only — inner dependency and layer setup remain unbounded
-//! to prevent deadlock when transitive permits would block on the same pool.
-//!
-//! `--jobs 0` resolves to logical-core count at `Context::try_init` time
-//! (snapshot semantics — runtime CPU-affinity changes do not re-read).
+//! Permits are acquired at the outer (root-package) dispatch only; gating inner
+//! dependency and layer setup on the same pool deadlocks on transitive permits.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -18,11 +12,6 @@ use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Outer-dispatch concurrency cap for `pull_all`.
-///
-/// `Unbounded` is the legacy default — every requested root package spawns
-/// immediately and singleflight + per-package file locks already protect
-/// the registry. `Limit(N)` adds a semaphore so at most N root pulls run
-/// concurrently, useful for registry rate limiting and CI matrices.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Concurrency {
     #[default]
@@ -31,16 +20,13 @@ pub enum Concurrency {
 }
 
 impl Concurrency {
-    /// Resolves `--jobs 0` (= "use all logical cores") to an explicit `Limit`.
-    /// Falls back to a one-permit cap if the platform cannot report a count.
+    /// A `Limit` of the logical-core count, or one permit if the platform cannot report it.
     pub fn cores() -> Self {
         let n = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
         Self::Limit(n)
     }
 
-    /// Builds the shared semaphore used to gate outer dispatch, or `None`
-    /// when no cap is configured. Callers clone the returned `Arc` per
-    /// spawned task and acquire owned permits before doing work.
+    /// The shared semaphore gating outer dispatch, or `None` when unbounded.
     pub fn semaphore(self) -> Option<Arc<Semaphore>> {
         match self {
             Self::Unbounded => None,
@@ -49,10 +35,7 @@ impl Concurrency {
     }
 }
 
-/// Acquires an owned permit on the optional semaphore. `None` means
-/// unbounded — returns `None` immediately so the caller proceeds without
-/// gating. Panics only if the semaphore was closed, which never happens
-/// in the package-manager pipeline.
+/// Acquires an owned permit, or returns `None` at once when unbounded.
 pub async fn acquire_permit(semaphore: &Option<Arc<Semaphore>>) -> Option<OwnedSemaphorePermit> {
     match semaphore {
         None => None,

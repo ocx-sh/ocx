@@ -12,16 +12,15 @@ pub use super::modifier::{Modifier, ModifierKind};
 
 /// An environment variable declaration.
 ///
-/// Each variable has a key (the variable name), a [modifier](Modifier) that
-/// determines how the value is resolved, and a visibility that controls which
-/// exec surfaces load the entry. The modifier's type and fields are flattened
-/// into this object in JSON.
+/// Each variable has a key (the variable name), a modifier that determines
+/// how the value is resolved, and a visibility that controls which exec
+/// surfaces load the entry. The modifier's type and fields are flattened into
+/// this object in JSON.
 ///
-/// `visibility` defaults to [`Visibility::PRIVATE`] per ADR
-/// `adr_visibility_two_axis_and_exec_modes.md` Tension 1 (A): publishers must
-/// opt in explicitly to expose entries on the consumer axis. `"sealed"` is
-/// rejected at parse time — a `Var` invisible on every surface is dead config
-/// (ADR Tension 4).
+/// `visibility` defaults to `private`: publishers must opt in explicitly to
+/// expose entries on the consumer axis. `"sealed"` is rejected at parse time —
+/// a variable invisible on every surface is dead config.
+// Both decisions: `archive/adr_visibility_two_axis_and_exec_modes.md`.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Var {
@@ -32,10 +31,9 @@ pub struct Var {
     pub modifier: Modifier,
 
     /// Visibility on the entry axis — controls which exec surface (interface vs private)
-    /// sees this entry; see the package manager's composer. Defaults to
-    /// `private` — publishers explicitly mark contract entries as `public` or
-    /// `interface` to expose them to consumers. `"sealed"` is rejected at parse
-    /// time (ADR Tension 4).
+    /// sees this entry. Defaults to `private` — publishers explicitly mark
+    /// contract entries as `public` or `interface` to expose them to consumers.
+    /// `"sealed"` is rejected at parse time.
     #[serde(
         default = "default_entry_visibility",
         deserialize_with = "deserialize_entry_visibility"
@@ -45,10 +43,7 @@ pub struct Var {
 }
 
 impl Var {
-    /// Constructs a path-modifier `Var` with default visibility
-    /// ([`Visibility::PRIVATE`]). Post-ADR-flip semantics: callers that
-    /// want consumer-visible PATH entries must use
-    /// [`Var::new_path_with_visibility`].
+    /// A path-modifier `Var` with [`Visibility::PRIVATE`].
     pub fn new_path(key: impl ToString, value: impl ToString, required: bool) -> Self {
         Var {
             key: key.to_string(),
@@ -60,7 +55,6 @@ impl Var {
         }
     }
 
-    /// Constructs a path-modifier `Var` with the supplied visibility.
     pub fn new_path_with_visibility(
         key: impl ToString,
         value: impl ToString,
@@ -77,9 +71,7 @@ impl Var {
         }
     }
 
-    /// Constructs a constant-modifier `Var` with default visibility
-    /// ([`Visibility::PRIVATE`]). See [`Var::new_path`] note on the
-    /// post-ADR-flip default.
+    /// A constant-modifier `Var` with [`Visibility::PRIVATE`].
     pub fn new_constant(key: impl ToString, value: impl ToString) -> Self {
         Var {
             key: key.to_string(),
@@ -90,7 +82,6 @@ impl Var {
         }
     }
 
-    /// Constructs a constant-modifier `Var` with the supplied visibility.
     pub fn new_constant_with_visibility(key: impl ToString, value: impl ToString, visibility: Visibility) -> Self {
         Var {
             key: key.to_string(),
@@ -101,9 +92,7 @@ impl Var {
         }
     }
 
-    /// The unresolved value template, or `None` when there is nothing to
-    /// resolve — the case for a modifier type this binary does not know, whose
-    /// value fields it cannot interpret.
+    /// The unresolved value template; `None` for an unknown modifier type.
     pub fn value(&self) -> Option<&str> {
         match &self.modifier {
             Modifier::Path(path_var) => Some(&path_var.value),

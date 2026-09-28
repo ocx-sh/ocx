@@ -1,26 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Authoring-form package metadata — the `-metadata.json` sidecar a publisher
-//! edits, and `ocx package create`'s **input** format.
-//!
-//! The sole delta from the published [`Metadata`] is that a dependency
-//! identifier may omit its digest — a tag-only identifier means "resolve me at
-//! `ocx package create` time". Everything else is byte-identical, so every
-//! published `metadata.json` is itself valid authoring input (subset
-//! compatibility) and re-running `create` over a compiled sidecar resolves
-//! nothing.
-//!
-//! `create` pins each tag-only dependency against the selected index for its
-//! `--platform`, then projects the result with
-//! [`AuthoringMetadata::to_published`]. That projection is what gets written
-//! beside the bundle and pushed — publishers never hand a registry the
-//! authoring form.
-//!
-//! The platform a bundle was built for is not metadata: on the wire it lives
-//! in the OCI image index the registry serves, and between `create` and
-//! `push`/`test` in the build receipt written beside the bundle.
-//!
+//! Authoring-form package metadata: the `-metadata.json` sidecar that
+//! `ocx package create` reads, where a dependency may omit its digest.
 //! ADR: `adr_dependency_manifest_pinning.md`, `adr_platform_model_unification.md`.
 
 pub mod dependency;
@@ -39,8 +21,8 @@ use super::integrations::Integrations;
 
 /// OCX package metadata in authoring (sidecar) form.
 ///
-/// The published [`Metadata`] with one relaxation: dependency digests are
-/// optional. See the module docs.
+/// The published metadata with one relaxation: a dependency identifier may
+/// omit its digest, meaning "resolve at `ocx package create` time".
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthoringMetadata {
@@ -49,7 +31,7 @@ pub enum AuthoringMetadata {
 
 /// Bundle package metadata in authoring form.
 ///
-/// Same shape as the published [`Bundle`], with authoring-form (digest-optional)
+/// Same shape as the published bundle, with authoring-form (digest-optional)
 /// dependencies.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -81,7 +63,7 @@ pub struct AuthoringBundle {
     /// Rejection sentinel for the retired top-level `platform` key. Never
     /// carries a value — its only job is to make a pre-receipt sidecar fail
     /// loudly instead of having its recorded platform silently ignored. See
-    /// [`reject_retired_platform`].
+    /// `reject_retired_platform`.
     #[serde(
         rename = "platform",
         default,
@@ -93,14 +75,14 @@ pub struct AuthoringBundle {
     retired_platform: (),
 
     /// The interface-binaries claim, hand-authored or baked in by `ocx
-    /// package create`'s auto-scan step. Mirrors [`Bundle::binaries`] — see
-    /// `adr_declared_binaries_metadata.md` §1, §2.1.
+    /// package create`'s auto-scan step. Same shape as the published `binaries`.
+    // Mirrors `Bundle::binaries` — see `adr_declared_binaries_metadata.md` §1, §2.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Binaries>,
 
-    /// Vendor-namespaced configuration blocks. Mirrors
-    /// [`Bundle::integrations`] exactly — [`AuthoringMetadata::to_published`]
-    /// copies it through unchanged, so there is no authoring-form delta here.
+    /// Vendor-namespaced configuration blocks, published unchanged.
+    // Mirrors `Bundle::integrations` exactly: `AuthoringMetadata::to_published`
+    // copies it through unchanged.
     #[serde(default, skip_serializing_if = "Integrations::is_empty")]
     pub integrations: Integrations,
 }
@@ -112,8 +94,6 @@ impl AuthoringMetadata {
         }
     }
 
-    /// The interface-binaries claim, or `None` if undeclared / not yet
-    /// scanned.
     pub fn binaries(&self) -> Option<&Binaries> {
         match self {
             AuthoringMetadata::Bundle(bundle) => bundle.binaries.as_ref(),
@@ -121,11 +101,6 @@ impl AuthoringMetadata {
     }
 
     /// Returns `self` with the interface-binaries claim set to `binaries`.
-    ///
-    /// Called by `ocx package create`'s auto-scan step (Auto/Verify modes)
-    /// to bake the scanned or authored claim into the sidecar before
-    /// `to_published` projects it. See `adr_declared_binaries_metadata.md`
-    /// §2.1.
     #[must_use]
     pub fn with_binaries(self, binaries: Binaries) -> Self {
         match self {
@@ -138,14 +113,9 @@ impl AuthoringMetadata {
 
     /// Projects the authoring metadata into the published [`Metadata`].
     ///
-    /// Every dependency must carry a digest by now — `ocx package create`
-    /// resolves the tag-only ones against the index first, and the published
-    /// dependency type has no digest-less form.
-    ///
     /// # Errors
     ///
-    /// [`AuthoringError::UnpinnedDependency`] when a dependency still has no
-    /// digest.
+    /// [`AuthoringError::UnpinnedDependency`] when a dependency still has no digest.
     pub fn to_published(&self) -> Result<Metadata, AuthoringError> {
         match self {
             AuthoringMetadata::Bundle(bundle) => {
@@ -172,7 +142,6 @@ impl AuthoringMetadata {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AuthoringError {
-    /// A dependency carries no digest, so it has no published form.
     #[error(
         "dependency '{identifier}' is not pinned to a manifest digest; run `ocx package create --platform <PLATFORM>` to resolve it"
     )]
@@ -182,14 +151,8 @@ pub enum AuthoringError {
     Dependency(#[from] DependencyError),
 }
 
-/// Refuses a sidecar still carrying the retired top-level `platform` key.
-///
-/// Serde ignores unknown fields by design (forward-compatibility), which is
-/// right for a key nobody has written yet and wrong for one that used to mean
-/// something: a pre-receipt sidecar would parse clean, its recorded platform
-/// would vanish, and `create` would resolve against whatever `--platform` this
-/// invocation happens to pass. Rejected by name — unknown *future* keys stay
-/// tolerated.
+/// Refuses the retired top-level `platform` key by name; ignored, the sidecar's
+/// recorded platform would vanish and `create` would resolve against another.
 pub(super) fn reject_retired_platform<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
     serde::de::IgnoredAny::deserialize(deserializer)?;
     Err(serde::de::Error::custom(

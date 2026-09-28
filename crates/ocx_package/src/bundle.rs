@@ -9,26 +9,13 @@ use crate::error::Error as PackageError;
 type Result<T> = std::result::Result<T, PackageError>;
 
 /// Builds a compressed tar archive from a file or directory tree.
-///
-/// When the source is a directory, all files and subdirectories are added to
-/// the archive root.  When the source is a single file (e.g. an executable),
-/// it is archived under its filename.
-///
-/// The compression algorithm is determined by the file extension of the output
-/// path passed to [`BundleBuilder::create`]: `.tar.xz` selects LZMA (the
-/// default when the filename is inferred), `.tar.gz` / `.tgz` selects Gzip, and
-/// `.tar.zst` / `.tzst` / `.tar.zstd` selects Zstandard.
-/// The compression level can be overridden with [`BundleBuilder::with_compression`].
 pub struct BundleBuilder {
     source: PathBuf,
     compression: compression::CompressionOptions,
 }
 
 impl BundleBuilder {
-    /// Creates a new `BundleBuilder` for the given source path.
-    ///
-    /// The path may point to a directory or a single file.  It is stored as-is
-    /// and not validated until [`BundleBuilder::create`] is called.
+    /// `path` is a directory or a single file, validated only by [`create`](Self::create).
     pub fn from_path(path: impl AsRef<std::path::Path>) -> Self {
         Self {
             source: path.as_ref().to_path_buf(),
@@ -36,27 +23,14 @@ impl BundleBuilder {
         }
     }
 
-    /// Overrides the compression options (algorithm and level).
-    ///
-    /// When `algorithm` is `None` inside the options, the algorithm is inferred
-    /// from the output file extension at creation time.
+    /// Overrides the compression options; a `None` algorithm is inferred from the output extension.
     pub fn with_compression(mut self, compression: compression::CompressionOptions) -> Self {
         self.compression = compression;
         self
     }
 
-    /// Creates the archive at `output`.
-    ///
-    /// The compression algorithm is inferred from the output file extension if
-    /// not already set via [`BundleBuilder::with_compression`].
-    ///
-    /// If the source is a directory, all files and subdirectories are added to
-    /// the archive root (no extra top-level directory is inserted).  If the
-    /// source is a single file, it is added under its filename.
-    ///
-    /// The archive is first written to a temporary file alongside the output
-    /// path and atomically renamed on success.  If creation fails, the
-    /// temporary file is automatically cleaned up.
+    /// Atomically creates the archive at `output`; a directory source lands at
+    /// the archive root, a single file under its filename.
     pub async fn create(self, output: impl AsRef<std::path::Path>) -> Result<()> {
         let output = output.as_ref();
         let temp_path = temp_path_for(output);
@@ -78,9 +52,8 @@ impl BundleBuilder {
     }
 }
 
-/// Returns a temporary path in the same directory as `output` with a `._tmp_`
-/// prefix on the filename. This preserves the original file extension so that
-/// archive format detection works unchanged.
+/// A `._tmp_`-prefixed sibling of `output`; a prefix, not a suffix, keeps the
+/// extension that selects the compression.
 fn temp_path_for(output: &Path) -> PathBuf {
     let name = output.file_name().unwrap_or_default();
     let mut tmp_name = std::ffi::OsString::from("._tmp_");

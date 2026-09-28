@@ -25,8 +25,6 @@ pub struct PatchPublishReport {
 }
 
 impl PatchPublishReport {
-    /// Build a publish report from the library-layer
-    /// [`ocx_package_manager::PatchPublishReport`].
     pub fn new(inner: ocx_package_manager::PatchPublishReport) -> Self {
         Self {
             reference: inner.patch_reference,
@@ -38,8 +36,7 @@ impl PatchPublishReport {
 
 impl Printable for PatchPublishReport {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        // Column-major: each inner Vec is one column (Reference | Digest | Rules),
-        // matching `print_table`'s contract (`rows[c]` holds the cells of column c).
+        // Column-major: `rows[c]` holds column c.
         let rows: [Vec<String>; 3] = [
             vec![self.reference.clone()],
             vec![self.manifest_digest.clone()],

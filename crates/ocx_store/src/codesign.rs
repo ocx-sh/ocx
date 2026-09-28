@@ -5,36 +5,11 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, which is what every one of these
-/// functions used to return one conversion later.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Applies ad-hoc code signatures to all Mach-O binaries after extraction.
+/// Ad-hoc signs every Mach-O file under `content_path`, or Apple Silicon kills them; no-op off macOS, failures only warn.
 ///
-/// On macOS, unsigned Mach-O binaries are killed on Apple Silicon (`Killed: 9`) and blocked
-/// by Gatekeeper on Intel. This function recursively walks the extracted content directory,
-/// detects Mach-O files by their magic bytes, and applies ad-hoc signatures via `codesign --sign -`.
-///
-/// **Design: per-file signing only, no bundle sealing.**
-///
-/// Only individual Mach-O files are signed. Bundle seals (`_CodeSignature/CodeResources` inside
-/// `.app` / `.framework` directories) are intentionally left as-is (stale after re-signing).
-/// This is safe because:
-/// - OCX packages are run via `ocx exec`, not launched through Finder. The kernel only checks
-///   each binary's own embedded signature at load time — not the bundle-level `CodeResources`.
-/// - Signing at the individual file level avoids "bundle format is ambiguous" errors and Team ID
-///   conflicts from re-sealing third-party bundles (e.g. Qt frameworks signed by The Qt Company).
-/// - Only `entitlements` are preserved (`flags` and `requirements` are intentionally dropped —
-///   see `sign_binary` for the full rationale).
-///
-/// Hardlinked files (same inode) are signed only once. Symlinks are not followed.
-///
-/// On non-macOS platforms this is a no-op.
-///
-/// Signing failures are logged as warnings — they do not abort the installation.
-/// Disable with `OCX_NO_CODESIGN=1`.
+/// Per file, never per bundle: re-sealing third-party bundles raises Team ID conflicts (`adr_codesign_per_file_signing.md`).
 pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
     if cfg!(not(target_os = "macos")) {
         return Ok(());
@@ -58,9 +33,6 @@ pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
     Ok(())
 }
 
-// -- Mach-O detection ---------------------------------------------------------
-
-/// Mach-O magic bytes (native and byte-swapped variants).
 const MACHO_MAGIC: &[u32] = &[
     0xFEED_FACE, // MH_MAGIC (32-bit)
     0xFEED_FACF, // MH_MAGIC_64 (64-bit)
@@ -87,18 +59,7 @@ async fn is_macho(path: &Path) -> bool {
     MACHO_MAGIC.contains(&value)
 }
 
-// -- Recursive per-file signing -----------------------------------------------
-
-/// Recursively signs all Mach-O regular files under `path`.
-///
-/// - Recurses into subdirectories in parallel (symlinks are not followed).
-/// - Signs each regular Mach-O file in parallel within each directory, deduplicated by inode.
-/// - Bundle directories (`.app`, `.framework`) are recursed into but not
-///   sealed — only the individual Mach-O files inside are signed.
-///
-/// Returns an explicit `Pin<Box<dyn Future + Send>>` so that the recursive call inside
-/// `JoinSet::spawn` resolves to a concrete `Send` type, breaking the circularity that prevents
-/// the compiler from proving `Send` for recursive `async fn` futures.
+/// Boxed so the recursive `JoinSet::spawn` gets a nameable `Send` future, which a recursive `async fn` cannot prove.
 fn sign_directory(
     path: std::path::PathBuf,
     signed_inodes: Arc<Mutex<HashSet<u64>>>,
@@ -112,10 +73,11 @@ fn sign_directory(
         let mut files = Vec::new();
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
+            // `file_type` does not follow symlinks; following one would re-sign a host file outside the package
+            // or recurse on a loop.
             let Ok(ft) = entry.file_type().await else {
                 continue;
             };
-            // file_type() does NOT follow symlinks — symlinks are neither recursed nor signed.
             if ft.is_dir() {
                 subdirs.push(entry.path());
             } else if ft.is_file() {
@@ -123,8 +85,6 @@ fn sign_directory(
             }
         }
 
-        // Recurse into subdirectories in parallel. Each call returns a Send future (explicit
-        // return type above), so JoinSet::spawn accepts it without Box::pin.
         let mut subdir_tasks = tokio::task::JoinSet::new();
         for dir in subdirs {
             let inodes = Arc::clone(&signed_inodes);
@@ -159,7 +119,6 @@ fn sign_directory(
     })
 }
 
-/// Returns the inode number of a regular file, used for hardlink deduplication.
 #[cfg(unix)]
 async fn file_inode(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
@@ -171,17 +130,7 @@ async fn file_inode(_path: &Path) -> Option<u64> {
     None
 }
 
-// -- Signing ------------------------------------------------------------------
-
-/// Absolute paths to the two Apple-shipped tools this module drives.
-///
-/// Absolute and not bare names on purpose. These run **inside** package
-/// extraction, which `ocx launcher shim` drives with an inherited `PATH` that
-/// contains the shim directory of the package being extracted — so a package
-/// claiming a binary named `xattr` or `codesign` would put its own launcher
-/// ahead of `/usr/bin` and have it spawned here, once per Mach-O file, with
-/// no download left to gate it. Both live at these paths in every macOS base
-/// install; a `PATH` lookup buys nothing and costs the whole trust boundary.
+// Absolute, never a `PATH` lookup: extraction inherits a `PATH` holding the package's own shims, so a package could run its own `codesign`.
 const XATTR_BIN: &str = "/usr/bin/xattr";
 const CODESIGN_BIN: &str = "/usr/bin/codesign";
 
@@ -189,8 +138,6 @@ fn codesign_available() -> bool {
     std::path::Path::new(CODESIGN_BIN).is_file()
 }
 
-/// Remove quarantine extended attributes from the content directory.
-/// Fails silently — the attribute may not exist.
 async fn remove_quarantine(content_path: &Path) {
     let result = tokio::process::Command::new(XATTR_BIN)
         .args(["-dr", "com.apple.quarantine"])
@@ -216,29 +163,9 @@ async fn remove_quarantine(content_path: &Path) {
     }
 }
 
-/// Signs a Mach-O binary with an ad-hoc signature, retrying with an inode workaround on failure.
+/// Preserves only `entitlements`: keeping `flags` carries `CS_RUNTIME`, whose Library Validation then rejects every ad-hoc library.
 ///
-/// Preserved metadata from the original signature:
-/// - `entitlements`: app-declared capabilities (JIT, network extensions, sandbox) — must be
-///   retained so the binary runs correctly under its intended privilege model.
-///
-/// Intentionally NOT preserved:
-/// - `flags`: code signing flags such as `CS_RUNTIME` (hardened runtime). Preserving `CS_RUNTIME`
-///   from a Developer-ID-signed binary (e.g. Kitware's cmake-gui, Qt Company's Qt frameworks)
-///   enables Library Validation, which requires all loaded libraries to have the same Team ID as
-///   the process. After ad-hoc re-signing, every binary has Team ID = "" (none). Apple treats
-///   "" as "no Team ID" rather than a real Team ID, so Library Validation rejects ad-hoc libraries
-///   even when both the process and library have identical empty Team IDs — causing the
-///   "different Team IDs" dyld error at runtime. Dropping `flags` disables Library Validation,
-///   allowing ad-hoc libraries to load. Note: Homebrew's `--preserve-metadata=flags` works because
-///   Homebrew builds its own binaries from source; those binaries never have `CS_RUNTIME` to begin
-///   with. OCX re-signs third-party pre-built binaries which do.
-/// - `requirements`: the original Designated Requirement encodes the issuing certificate's Team ID.
-///   An ad-hoc signature cannot satisfy a third-party Team ID constraint.
-/// - `runtime`: SDK version metadata only; no effect on execution behavior.
-///
-/// If the first attempt fails (known Apple `codesign` bug with certain inodes), the file is
-/// copied to a temp path (new inode), signed there, and moved back.
+/// Keeping `requirements` pins a Team ID an ad-hoc signature cannot satisfy (`adr_codesign_per_file_signing.md § Signing command`).
 async fn sign_binary(path: &Path) {
     log::debug!("Signing Mach-O binary: {}", path.display());
 
@@ -248,17 +175,12 @@ async fn sign_binary(path: &Path) {
         return;
     }
 
-    // Retry: copy to new inode, sign, move back (Apple codesign bug workaround).
     log::debug!("Retrying with inode workaround: {}", path.display());
     if let Err(e) = retry_sign_with_copy(args, path).await {
         log::warn!("Failed to sign {} (even after retry): {}", path.display(), e);
     }
 }
 
-/// Runs `codesign` with the given arguments. Returns `true` on success.
-///
-/// Failures are logged at DEBUG level — callers are responsible for logging at WARN
-/// if all retry attempts are exhausted.
 async fn try_codesign(args: &[&str], path: &Path) -> bool {
     let result = tokio::process::Command::new(CODESIGN_BIN)
         .args(args)
@@ -286,14 +208,9 @@ async fn try_codesign(args: &[&str], path: &Path) -> bool {
     }
 }
 
-/// Copies the file to a temp path (new inode), signs it, and moves it back.
+/// Signs a copy on a fresh inode and renames it back, working around Apple `codesign` failing on some inodes.
 ///
-/// Works around a known Apple `codesign` bug where signing fails on certain inodes.
-/// Homebrew uses the same technique in `codesign_patched_binary`.
-///
-/// The temp file is placed alongside the original with `.codesign_tmp` appended to the
-/// full filename (not replacing the extension) to avoid collisions between files that share
-/// a stem but differ only in extension (e.g. `foo.bar` and `foo.baz`).
+/// The suffix is appended, not swapped for the extension, or `foo.bar` and `foo.baz` collide.
 async fn retry_sign_with_copy(args: &[&str], path: &Path) -> std::io::Result<()> {
     let tmp_name = format!(
         "{}.codesign_tmp",
@@ -325,8 +242,6 @@ fn format_process_output(stdout: &[u8], stderr: &[u8]) -> String {
         (true, true) => "(no output)".to_string(),
     }
 }
-
-// -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

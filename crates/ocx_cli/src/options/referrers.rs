@@ -3,13 +3,6 @@
 
 /// Whether a command also carries the artifacts anchored to each manifest —
 /// signatures, SBOMs, attestations.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--referrers` / `--no-referrers` flags. Carrying them is the default:
-/// `--referrers` is the affirmative form of the default, `--no-referrers` opts
-/// out. The two use POSIX last-wins semantics (`overrides_with`), matching
-/// [`KeepTag`](super::KeepTag). Resolve with [`Referrers::enabled`] —
-/// never by reading the two raw booleans at the call site.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Referrers {
     /// Carry the signatures, SBOMs and attestations anchored to each manifest
@@ -27,8 +20,7 @@ pub struct Referrers {
 }
 
 impl Referrers {
-    /// Resolve whether referrers travel. Default is on; only an explicit
-    /// (last-wins) `--no-referrers` turns it off.
+    /// Whether referrers travel; on unless `--no-referrers` won.
     pub fn enabled(&self) -> bool {
         !self.no_referrers
     }

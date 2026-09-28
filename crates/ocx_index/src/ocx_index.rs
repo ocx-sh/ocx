@@ -1,16 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `index.ocx.sh`-style static-file index source (`adr_index_indirection.md`
-//! Decision F).
-//!
-//! A pointer index, **not** a registry: no `/v2`, no blobs. An index is a
-//! catalog of OCI artifacts and defines no object shapes of its own, so a
-//! logical reference resolves through two verified HTTP hops — a root document
-//! that locks a floating tag, and the OCI image index that tag resolved to,
-//! served back byte-for-byte as the registry produced it
-//! (`adr_oci_index_only_dispatch.md` D1):
-//!
+//! Client of an `index.ocx.sh`-style static-file pointer index, not a registry
+//! (`adr_index_indirection.md` Decision F, `adr_oci_index_only_dispatch.md`):
 //! ```text
 //! logical id (ocx.sh/<ns>/<pkg>[:tag])
 //!   → GET /p/<ns>/<pkg>.json                root  → tags[tag].content = image-index digest
@@ -20,46 +12,10 @@
 //!   → root.repository (oci://…)             → physical fetch through the mirror seam
 //! ```
 //!
-//! Only the ● frozen wire shapes in the ADR's Data Model are contract; the
-//! image index's `manifests[].digest` leaves are already the doctrine-correct
-//! platform-manifest digests, each OCI-CAS-verified when its manifest is
-//! fetched from the physical registry (Decision D).
-//!
-//! ## Why the index and not the manifest is snapshotted
-//!
-//! A manifest is immutable by digest, and keeping it reachable is the registry
-//! operator's and the publisher's concern. An **image index** has neither
-//! property: adding a platform mints a new index, the tag moves to it, and the
-//! previous index becomes unreferenced in the ordinary course of correct
-//! publishing. So the thing that can disappear is the thing that is copied.
-//!
-//! ## Trust anchor
-//!
-//! The **root document** is the anchor: nothing pins it from above, so it is
-//! trusted on the strength of the channel it arrived over — TLS for an
-//! `https://` base (which is why [`Error::PlainHttpIndexNotAllowed`](super::error::Error::PlainHttpIndexNotAllowed)
-//! refuses an ungated plaintext one), or the operator's own filesystem for a
-//! `file://` shipped copy.
-//!
-//! Everything *below* the root is verified rather than trusted: the
-//! dispatch-object verify (`sha256(bytes) == <hex>`) is the one place OCX
-//! re-derives a digest it did not mint (F1), and a mismatch is a hard
-//! [`DataError`](ocx_exit::ExitCode::DataError), never a silent load. The
-//! bytes are publisher-controlled, so `annotations` and `artifactType` ride
-//! through stored but never rendered.
-//!
-//! ## Snapshot integration
-//!
-//! This source is a live [`IndexImpl`](super::index_impl::IndexImpl) chain source
-//! (like [`OciIndex`](super::OciIndex)). Its
-//! [`fetch_manifest_raw_bytes`](OcxIndex::fetch_manifest_raw_bytes) returns the
-//! verbatim image-index bytes (which hash to its digest, A3-valid) paired with
-//! the parsed index, so [`LocalIndex::persist_dispatch`](super::LocalIndex)
-//! writes them under that digest as the dispatch object — the physical
-//! platform-manifest leaf it names is fetched on demand, never copied into the
-//! local index (A3/B2). The read-back (`decode_index_manifest` in
-//! `local_index`) is the same single OCI parse, so a hosted index subtree
-//! copy-pasted into a machine's local index just works.
+//! The root is trusted on its channel (TLS, or the operator's filesystem for `file://`);
+//! everything below it is verified, a digest mismatch being a hard
+//! [`DataError`](ocx_exit::ExitCode::DataError). Publisher-controlled `annotations` and
+//! `artifactType` are stored, never rendered.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -78,70 +34,22 @@ use ocx_oci::transport_policy::{self, Attempt, RetryBudget, RetryPolicy, Transpo
 use ocx_util::fs::path::{FileReference, Spelling};
 use ocx_util::singleflight::{self, Acquisition};
 
-// ── Frozen wire shapes (● contract) ──────────────────────────────────────────
-//
-// `IndexRoot` / `RootTag` / `CatalogDocument` / `CatalogIndex` and the shared
-// `SUPPORTED_FORMAT_VERSION` pin live in `oci::index::wire`
-// (`adr_index_indirection.md` §Data Model) — the frozen grammar shared
-// verbatim by this remote client and the local store
-// (`crate::IndexStore`), imported above. What a tag points at
-// is an `ocx_oci::ImageIndex`, whose shape is the OCI image spec's, not ours.
-//
-// `IndexFormatConfig` (`config.json`) joined them there: no longer this
-// module's private struct but a shared one — this module reads it today, and
-// the local store will read it (WP11) while the update path writes it (WP5)
-// (`adr_servable_index_snapshot.md` C-001).
-
 use ocx_oci::client::MAX_INDEX_DOCUMENT_BYTES;
 
-/// Connect-phase timeout for an index document fetch (CWE-400). A dead or
-/// slow-to-accept endpoint must not stall a resolve indefinitely.
+/// Connect timeout for an index fetch, so a dead endpoint cannot stall a resolve (CWE-400).
 const INDEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Per-frame idle bound for an index document fetch (CWE-400), replacing the
-/// hard 60 s total-request deadline this path used to carry
-/// (`adr_index_sync_performance.md` D-011).
-///
-/// The old deadline bought slowloris protection at the price of the throttled
-/// link: a root document arriving honestly over 90 s through a corporate proxy
-/// failed at 60 s with nothing wrong. An idle bound gives both — a connection
-/// that goes genuinely quiet for 30 s still fires, an honest slow body never
-/// does, however long it runs.
+/// Per-frame idle bound for an index fetch (CWE-400, `adr_index_sync_performance.md`): idle
+/// rather than total, so an honest slow body over a throttled link never fails.
 const INDEX_IDLE_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Per-attempt outer cap for an index document fetch, the backstop
-/// [`INDEX_IDLE_BOUND`] alone cannot provide.
-///
-/// A peer dribbling one byte every 29 s never trips the idle bound and never
-/// reaches [`MAX_INDEX_DOCUMENT_BYTES`] in any human timeframe; multiplied by
-/// the sync fan-out, the run simply does not terminate.
-///
-/// # Why this is a memory bound, not only a liveness one
-///
-/// [`MAX_INDEX_DOCUMENT_BYTES`] is 32 MiB of *per-request* allocation,
-/// accumulated into an in-memory `Vec` by the body loop below. The sync's
-/// ceiling is `INDEX_REFRESH_CONCURRENCY` (8) x `TAG_REFRESH_CONCURRENCY` (64)
-/// = 512 in-flight requests, so the resident high-water mark is 16 GiB. The
-/// byte cap bounds that peak; only a deadline bounds the peak's *duration*, and
-/// duration is what turns a peak into exhaustion. Today's 60 s total deadline
-/// is what stops a hostile peer holding all 512 allocations at once, so
-/// dropping it with nothing in its place would be a regression rather than a
-/// relaxation. The retry ladder compounds it on the traffic axis: a peer
-/// serving `MAX_INDEX_DOCUMENT_BYTES - 1` and then resetting is a retryable
-/// transport error, so cumulative transfer per logical fetch is up to 3x the
-/// cap — bounded by the attempt count, which is why that bound is not optional
-/// either.
-///
-/// Generous because it is a backstop and not an SLA: it must not fire on any
-/// honest transfer.
+/// Per-attempt outer cap: without it a peer dribbling a byte every 29 s never trips
+/// [`INDEX_IDLE_BOUND`] and holds its [`MAX_INDEX_DOCUMENT_BYTES`] buffer, ×512 in flight, forever.
+/// A backstop, not an SLA: it must not fire on any honest transfer.
 const INDEX_OUTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Redacts any `user[:password]@` userinfo from `url`'s authority before it
-/// lands in an error or log line (CWE-532). A `[registries."<ns>"] index` or
-/// `[mirrors]` base may embed credentials, and the index HTTP errors below echo
-/// the full request URL; without this a captured error or debug log would leak
-/// them. Purely string-level (scheme `://`, then the authority up to the next
-/// `/`), so a malformed URL is returned untouched rather than dropped.
+/// Redacts `user[:password]@` userinfo from `url`'s authority before it reaches an error or
+/// log line (CWE-532); a URL with no `://` is returned untouched.
 fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
@@ -165,20 +73,12 @@ pub enum IndexFetch {
     NotFound,
 }
 
-/// Transport for the static-file index endpoints.
-///
-/// Two production impls, one per scheme [`OcxIndex::resolve_base_url`] admits:
-/// [`ReqwestIndexTransport`] over `https://` (or gated `http://`), and
-/// [`FileIndexTransport`](super::FileIndexTransport) over a `file://` shipped
-/// copy. It is also the seam that lets [`OcxIndex`] resolve without hitting the
-/// network in tests (mock this the way
-/// [`StubTransport`](super::super::client::test_transport::StubTransport) mocks
-/// the OCI transport).
+/// Transport for the static-file index endpoints: [`ReqwestIndexTransport`] for `https://`
+/// (or gated `http://`), [`FileIndexTransport`](super::FileIndexTransport) for `file://`.
 #[async_trait]
 pub trait IndexTransport: Send + Sync {
-    /// Fetch `url`. Unconditional — nothing here sends a validator, so an impl
-    /// must never answer with a not-modified outcome; the only outcomes are
-    /// the bytes, [`IndexFetch::NotFound`], or an error.
+    /// Fetch `url` unconditionally: bytes, [`IndexFetch::NotFound`], or an error, never a
+    /// not-modified outcome.
     async fn get(&self, url: &str) -> Result<IndexFetch>;
 
     fn box_clone(&self) -> Box<dyn IndexTransport>;
@@ -190,64 +90,28 @@ impl Clone for Box<dyn IndexTransport> {
     }
 }
 
-/// `reqwest`-backed [`IndexTransport`] — the production static-file client.
+/// `reqwest`-backed production [`IndexTransport`], on rustls like the `oci-client` fork.
 ///
-/// Reuses the workspace `reqwest` (already in the tree via the `oci-client`
-/// fork; F7). TLS is rustls, matching the fork so the build carries one
-/// provider.
-/// # Retry and budget
-///
-/// Every clone shares one [`RetryBudget`]: `IndexTransport` requires
-/// `box_clone` and the sync fan-out builds one index — and so one cloned
-/// transport — per package, so counters held as plain fields would meter
-/// per-package, which is exactly the uncapped per-request policy the budget
-/// replaces (D-010 rule 2).
+/// Every clone shares one [`RetryBudget`]; per-clone counters would let each package of the
+/// sync fan-out meter its own budget.
 #[derive(Clone)]
 pub struct ReqwestIndexTransport {
-    /// Built on first request, from [`Self::hardening`], and shared by every
-    /// clone — `reqwest::Client` is itself an `Arc` handle, so sharing one is
-    /// what cloning the built client already did.
-    ///
-    /// Deferred because [`build_index_http_client`] parses the ~150 bundled
-    /// Mozilla roots into a rustls trust store — ~38 ms of pure CPU on this
-    /// box — and an invocation that resolves every locked tool out of the local
-    /// store never sends a request. `Context::try_init` builds one
-    /// [`super::OcxIndex`] per index-bearing namespace whenever it is not
-    /// `--offline`, so before this the cost was unconditional on every online
-    /// invocation, including every rendered-trampoline `exec`.
+    /// Built on first request and shared by every clone: building parses the bundled roots
+    /// (~38 ms), which eager building charged to every online invocation, trampolines included.
     client: std::sync::Arc<std::sync::OnceLock<reqwest::Client>>,
     hardening: TransportHardening,
     policy: RetryPolicy,
     budget: RetryBudget,
-    /// Operator-supplied extra CA roots (ocx#448, C-007). Defaults to
-    /// [`ExtraRoots::default`](ocx_util::tls::ExtraRoots::default)
-    /// (empty); set via [`ReqwestIndexTransport::with_extra_roots`].
+    /// Operator-supplied extra CA roots, set via [`ReqwestIndexTransport::with_extra_roots`].
     extra_roots: ocx_util::tls::ExtraRoots,
 }
 
-/// Builds the index HTTP client with the bundled Mozilla CA roots, under
-/// `hardening`'s three timeout bounds.
-///
-/// Without an explicit root set, reqwest 0.13's rustls path uses the OS trust
-/// store via `rustls_platform_verifier::Verifier::new`, which **panics** on a
-/// host with an empty store (minimal container / CI runner) — the reported
-/// `No CA certificates were loaded` crash. Seeding any roots flips reqwest onto
-/// the `Verifier::new_with_extra_roots` branch that never touches the system
-/// store (reqwest client.rs:751). This mirrors the OCI half, which gets the
-/// same set from the `oci-client` fork's `ClientConfig::default()` (a
-/// different client type, so it cannot share a builder with this one); the
-/// root-seeding loop itself is shared with `forge::github`'s bare-`reqwest`
-/// client via [`ocx_util::tls::seed_embedded_roots`]. `extra_roots`
-/// chains operator-supplied CA roots (ocx#448, C-007) on top of that set —
-/// the default (empty) value changes nothing.
+/// Builds the index HTTP client under `hardening`'s bounds with the bundled Mozilla roots plus
+/// `extra_roots`; seeding roots keeps reqwest off the OS trust store, whose verifier panics on a
+/// host with none (minimal container / CI runner).
 fn build_index_http_client(hardening: &TransportHardening, extra_roots: &ocx_util::tls::ExtraRoots) -> reqwest::Client {
-    // Transport hardening applied to every build this function can return, so
-    // no unhardened client can escape it: bounded connect, a per-frame idle
-    // bound and a per-attempt outer cap (CWE-400, all three composed — see
-    // `TransportHardening`), and no redirect following (CWE-918 / CWE-319) —
-    // a static-file index needs no redirects, and a 3xx must not relocate the
-    // fetch to http:// or an internal host AFTER the plain-HTTP gate in
-    // `resolve_base_url` already ran.
+    // Every returned client goes through this: without `Policy::none()` a 3xx could move the
+    // fetch to http:// or an internal host after `resolve_base_url`'s plain-HTTP gate (CWE-918).
     let harden = |builder: reqwest::ClientBuilder| {
         builder
             .connect_timeout(hardening.connect_timeout)
@@ -257,54 +121,24 @@ fn build_index_http_client(hardening: &TransportHardening, extra_roots: &ocx_uti
     };
     let builder = extra_roots.seed(ocx_util::tls::seed_embedded_roots(harden(reqwest::Client::builder())));
     builder.build().unwrap_or_else(|error| {
-        // The bundled-roots build cannot hit the empty-store panic (roots are
-        // non-empty), and an operator root cannot fail it either: every
-        // `ExtraRoots` survived `parse_pem`'s probe build of the same set
-        // (C-004), so this arm never trades away a configured root (D-9). A
-        // different init failure is not expected; fall back so construction
-        // stays infallible, logging so it is not silent — the fallback keeps
-        // the same timeout + no-redirect hardening.
-        //
-        // There is deliberately no third arm. It used to be a bare
-        // `reqwest::Client::new()`, which carries reqwest's defaults — no
-        // timeouts, redirects *followed* up to 10 hops — i.e. remote-controlled
-        // egress that could relocate the fetch to http:// after the plain-HTTP
-        // gate already ran. It also bought nothing: `Client::new()` is itself
-        // `builder().build().expect(..)`, so "this build fails but that one
-        // succeeds" is unreachable, and the arm only traded a panic for an
-        // unhardened client (D-011b).
+        // Never drops a configured root: every `ExtraRoots` already survived `parse_pem`'s probe build.
         log::warn!("index HTTP client build with bundled roots failed ({error}); using hardened reqwest defaults");
+        // No bare-client third arm: it has no timeouts and would follow redirects past the plain-HTTP gate.
         harden(reqwest::Client::builder())
             .build()
             .expect("a client with no custom roots and only timeout and redirect settings always builds")
     })
 }
 
-/// The `__testing`-gated seam that replaces the three shipped index timeouts,
-/// as `connect,idle,outer` **milliseconds**.
-///
-/// Why it exists: the shipped bounds are minutes, and the one acceptance row
-/// that can prove the *shipped binary* carries them
-/// (`test_index_servable_snapshot.py::test_a_slow_but_progressing_root_outlives_the_retired_total_deadline`)
-/// had no way to say anything without out-waiting the retired 60 s deadline in
-/// real time — 64.6 s of the acceptance suite's wall clock, on a fixture whose
-/// only claim is a ratio between two durations. Scaling both sides of that ratio
-/// says the same thing in seconds.
-///
-/// Compile-gated to `test` / `__testing` and named `__OCX_TESTING_*`, so it is
-/// absent from release builds, from `Env::apply_ocx_config` (the prefix is
-/// reserved, see `env::is_reserved_ocx_key`) and from
-/// `website/src/docs/reference/environment.md`. Same shape as
-/// `__OCX_TESTING_FORGE_BASE_URL` and `__OCX_SELF_IMAGE`.
+/// Test seam replacing the three index timeouts, as `connect,idle,outer` milliseconds, so the
+/// acceptance row for the shipped bounds need not out-wait minutes in real time.
 #[cfg(any(test, feature = "__testing"))]
 const TESTING_TIMEOUTS_ENV: &str = "__OCX_TESTING_INDEX_TIMEOUTS_MS";
 
 /// [`TESTING_TIMEOUTS_ENV`] parsed, or `None` when it is unset.
 ///
-/// **Panics** on a malformed value rather than falling back to the shipped
-/// bounds. A seam that silently ignores what it was handed turns a typo into a
-/// test that quietly out-waits the real deadline and still passes — the exact
-/// class of green this seam is being introduced to remove.
+/// **Panics** on a malformed value: silently falling back would let a typo'd test out-wait the
+/// real deadline and still pass.
 #[cfg(any(test, feature = "__testing"))]
 fn testing_hardening_override() -> Option<TransportHardening> {
     let raw = std::env::var(TESTING_TIMEOUTS_ENV).ok()?;
@@ -341,16 +175,10 @@ impl ReqwestIndexTransport {
         Self::with_hardening(&testing_hardening_override().unwrap_or(shipped), RetryPolicy::default())
     }
 
-    /// Sets the operator-supplied extra CA roots (ocx#448) this transport's
-    /// client trusts in addition to the bundled Mozilla set (C-006/C-007).
+    /// Adds operator-supplied CA roots on top of the bundled Mozilla set.
     ///
-    /// **Must be called before the first request.** `client()` builds
-    /// and caches the `reqwest::Client` lazily on first use, into a
-    /// `OnceLock` shared by every clone; a client already built keeps
-    /// whatever roots it was built with, and this setter has no effect on
-    /// it once that has happened. [`OcxIndex::resolve_base_url`] calls this
-    /// once, right after construction, before the transport is handed to
-    /// [`OcxIndex::new`].
+    /// **Must be called before the first request**: the client is built once, on first use, and
+    /// keeps whatever roots it was built with.
     pub fn with_extra_roots(mut self, extra_roots: ocx_util::tls::ExtraRoots) -> Self {
         debug_assert!(
             self.client.get().is_none(),
@@ -360,33 +188,24 @@ impl ReqwestIndexTransport {
         self
     }
 
-    /// Construction with the bounds injected — the seam D-011 keeps so a
-    /// fixture can assert the same semantics in milliseconds rather than
-    /// waiting out the shipped minutes against a real socket.
+    /// Construction with the bounds injected, so a fixture can test them in milliseconds.
     fn with_hardening(hardening: &TransportHardening, policy: RetryPolicy) -> Self {
         Self {
             client: std::sync::Arc::new(std::sync::OnceLock::new()),
             hardening: *hardening,
             policy,
             budget: RetryBudget::new(),
-            // Empty by default; `resolve_base_url` sets the resolved
-            // `ExtraRoots` via `with_extra_roots` before any request.
             extra_roots: ocx_util::tls::ExtraRoots::default(),
         }
     }
 
-    /// The HTTP client, built on first use. Every request goes through here.
     fn client(&self) -> &reqwest::Client {
         self.client
             .get_or_init(|| build_index_http_client(&self.hardening, &self.extra_roots))
     }
 
-    /// One attempt at `url`: everything from dispatching the request to the
-    /// last body byte, classified for the ladder above it.
-    ///
-    /// Retryable outcomes carry the terminal value the caller gets if no
-    /// further attempt is admitted, so giving up costs nothing extra and never
-    /// changes the error the caller sees.
+    /// One attempt at `url`, from dispatch through the last body byte. A retryable outcome
+    /// carries its terminal value, so giving up never changes the error the caller sees.
     async fn attempt(client: &reqwest::Client, url: &str) -> Attempt<Result<IndexFetch>> {
         let mut response = match client.get(url).send().await {
             Ok(response) => response,
@@ -397,16 +216,10 @@ impl ReqwestIndexTransport {
         if status == reqwest::StatusCode::NOT_FOUND {
             return Attempt::Done(Ok(IndexFetch::NotFound));
         }
-        // Everything else — including a `304` answering this unconditional
-        // `GET` (RFC 9110 §15.4.5, a misbehaving edge) — is an error. Only a
-        // confirmed `404` above may read as absence: that `None` is what
-        // [`OcxIndex::jurisdiction`] settles an `Outside` verdict off, and the
-        // verdict is memoized, so one bad response would decide a name for the
-        // rest of the process.
+        // Everything else, a `304` included, is an error: a 404 is memoized as absence, so one
+        // misbehaving edge must not decide a name for the rest of the process.
         if !status.is_success() {
-            // Parsed before the error is built: ACR counts `Retry-After` down
-            // across polls, so every attempt reads its own header and none
-            // caches the first value seen.
+            // Read per attempt, never cached: ACR counts `Retry-After` down across polls.
             let retry_after = transport_policy::honours_retry_after(status.as_u16())
                 .then(|| {
                     response
@@ -421,9 +234,6 @@ impl ReqwestIndexTransport {
                 status: Some(status.as_u16()),
                 source: format!("unexpected status {status}").into(),
             };
-            // The classifier reads the typed field, not the formatted message
-            // (D-010a/C-024) — which is what makes the field load-bearing
-            // rather than decoration.
             let retryable = matches!(
                 &failure,
                 super::error::Error::IndexHttpFailed { status: Some(code), .. }
@@ -439,9 +249,7 @@ impl ReqwestIndexTransport {
             };
         }
 
-        // Reject a declared oversize body before reading a single byte (CWE-400).
-        // Not retryable: the server has already stated the size, and asking
-        // again gets the same answer.
+        // Refuse a declared oversize body unread (CWE-400); not retried, the size will not change.
         if let Some(declared) = response.content_length()
             && declared > MAX_INDEX_DOCUMENT_BYTES as u64
         {
@@ -455,16 +263,12 @@ impl ReqwestIndexTransport {
             }));
         }
 
-        // Stream the body under a hard cap (CWE-400): a server that omits or lies
-        // about Content-Length (chunked transfer, or a hostile endpoint) still
-        // cannot stream more than the cap into memory — the running total is
-        // checked before each chunk is appended. The cap, not the timeout, is
-        // what bounds memory here, and relaxing the deadline does not relax it.
+        // Checked before each append (CWE-400): an omitted or lying Content-Length must not
+        // stream past the cap, which, not the timeout, is what bounds memory.
         let mut body = Vec::new();
         loop {
             match response.chunk().await {
-                // A mid-body failure re-issues the whole `GET`, which is safe
-                // because every request on this path is idempotent (D-010c).
+                // Retried as a whole `GET`, safe because every request on this path is idempotent.
                 Err(source) => return Self::transport_failure(url, Some(status.as_u16()), source),
                 Ok(None) => break,
                 Ok(Some(chunk)) => {
@@ -485,10 +289,8 @@ impl ReqwestIndexTransport {
         Attempt::Done(Ok(IndexFetch::Found { bytes: body }))
     }
 
-    /// Wraps a `reqwest` failure as [`Error::IndexHttpFailed`], retryable only
-    /// for the transient transport class (connect, timeout, reset/close). A
-    /// certificate the verifier refused is terminal and carries the extra-CA
-    /// remedy in its chain ([`transport_policy::UntrustedCertificateHint`]).
+    /// Wraps a `reqwest` failure, retryable only for the transient transport class; a refused
+    /// certificate is terminal and carries [`transport_policy::UntrustedCertificateHint`].
     fn transport_failure(url: &str, status: Option<u16>, source: reqwest::Error) -> Attempt<Result<IndexFetch>> {
         let retryable = transport_policy::is_retryable_transport_error(&source);
         let source: Box<dyn std::error::Error + Send + Sync> = if transport_policy::is_tls_certificate_refusal(&source)
@@ -525,17 +327,10 @@ impl Default for ReqwestIndexTransport {
 
 #[async_trait]
 impl IndexTransport for ReqwestIndexTransport {
-    /// Fetches `url`, retrying the transient classes under
-    /// [`RetryPolicy`] and the run-global [`RetryBudget`] (D-010).
-    ///
-    /// The ladder wraps the whole attempt — dispatch through last body byte —
-    /// because a `GET` on this path is idempotent, so re-issuing one is always
-    /// safe. It is deliberately not wrapped in a wall-clock cap of its own:
-    /// retry *volume* is what the budget bounds, and per-attempt duration is
-    /// what `TransportHardening::outer_cap` bounds.
+    /// Fetches `url`, retrying transient failures under [`RetryPolicy`] and the run-global
+    /// [`RetryBudget`], which bounds retry volume as `outer_cap` bounds each attempt.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
-        // The in-process CLI seam's no-network guarantee reaches this client
-        // too, not only the registry transport; `false` outside tests.
+        // The in-process CLI seam's no-network guarantee; `false` outside tests.
         if ocx_oci::client::network_refused() {
             return Err(super::error::Error::IndexHttpFailed {
                 url: redact_url(url),
@@ -549,7 +344,7 @@ impl IndexTransport for ReqwestIndexTransport {
             if attempt > 0 {
                 // `debug!`, never `warn!`: a retried transient is a common
                 // benign state, and an operator-facing warning per retry across
-                // a 512-wide fan-out is noise, not signal (S-003). Redacted
+                // a 512-wide fan-out is noise, not signal. Redacted
                 // because an index base URL may embed `user:password@`
                 // (CWE-532) — same reason every error below this line is.
                 log::debug!(
@@ -571,20 +366,16 @@ impl IndexTransport for ReqwestIndexTransport {
 
 // ── Source ───────────────────────────────────────────────────────────────────
 
-/// A resolved index base: the URL every fetch is minted from, paired with the
-/// transport that serves that scheme — one value, because
-/// [`OcxIndex::resolve_base_url`] decides the scheme once and the caller never
-/// re-derives it (`adr_servable_index_snapshot.md` C-018).
+/// A resolved index base URL paired with the transport for its scheme, decided once by
+/// [`OcxIndex::resolve_base_url`] (`adr_servable_index_snapshot.md`).
 pub struct IndexBase {
     /// Trailing-slash-trimmed, as [`OcxIndex::new`] stores it.
     pub url: String,
-    /// The transport for `url`'s scheme.
     pub transport: Box<dyn IndexTransport>,
 }
 
 impl std::fmt::Debug for IndexBase {
-    // `Box<dyn IndexTransport>` cannot derive it, and the URL may carry
-    // `user:password@` userinfo (CWE-532), so it goes through `redact_url`.
+    // Hand-written so the URL, which may carry `user:password@`, goes through `redact_url` (CWE-532).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexBase")
             .field("url", &redact_url(&self.url))
@@ -593,38 +384,20 @@ impl std::fmt::Debug for IndexBase {
 }
 
 /// The lowercased scheme of `url`, or `None` when it carries none.
-///
-/// The same split [`ocx_config::mirror::parse_url`] does, applied *before*
-/// it so the closed scheme set can be checked on the configured base — a `file`
-/// base has to be diverted before that parser reads its empty authority as
-/// `MissingHost` (C-018 check 1).
 fn scheme_of(url: &str) -> Option<String> {
     url.split_once("://").map(|(scheme, _)| scheme.to_ascii_lowercase())
 }
 
-/// The tail of a `file:` base written with a single slash (`file:/srv/x`),
-/// which carries no `://` for [`scheme_of`] to find.
-///
-/// Matched case-insensitively, because [`scheme_of`] lowercases its own token
-/// and a base is not more or less valid for being shouted. `file://…` is
-/// deliberately not matched: that spelling has a scheme and belongs to
-/// [`resolve_file_base`].
+/// The tail of a single-slash `file:` base (`file:/srv/x`), which has no `://` for
+/// [`scheme_of`] to find; case-insensitive like [`scheme_of`].
 fn file_colon_tail(url: &str) -> Option<&str> {
     let (prefix, tail) = url.split_at_checked("file:".len())?;
     (prefix.eq_ignore_ascii_case("file:") && !tail.starts_with("//")).then_some(tail)
 }
 
-/// The [`Error::InvalidIndexUrl`](error::Error::InvalidIndexUrl) `origin` for a
-/// single-slash `file:` base.
-///
-/// The correction rides `origin` because that field is what an operator reads
-/// to learn which setting to change, and it is the only part of the message
-/// this module composes.
-///
-/// A tail that is not absolute gets the shape rather than a literal: turning
-/// `file:srv/x` into `file://srv/x` would name a non-empty authority, a
-/// spelling [`resolve_file_base`] refuses in turn, and inventing a leading
-/// slash would name a directory the operator never wrote.
+/// The [`Error::InvalidIndexUrl`](error::Error::InvalidIndexUrl) `origin` for a single-slash
+/// `file:` base, naming the correction. A relative tail gets the shape, not a literal:
+/// `file://srv/x` would name an authority, and a guessed leading slash a directory never written.
 fn file_colon_origin(tail: &str) -> String {
     let from = error::INDEX_URL_FROM_REGISTRIES;
     if tail.starts_with('/') {
@@ -642,34 +415,18 @@ fn invalid_index_url(
 ) -> error::Error {
     error::Error::InvalidIndexUrl {
         namespace: namespace.to_string(),
-        // A configured base or a mirror value may embed `user:password@`
-        // (CWE-532), and this error names the offending URL verbatim.
+        // A base or mirror value may embed `user:password@` (CWE-532).
         url: redact_url(url),
         origin,
         source: source.map(Box::new),
     }
 }
 
-/// Resolves a `file://` configured base into its [`IndexBase`] (C-018's `file`
-/// row, C-019).
-///
-/// Requires an **empty authority** — `file://host/srv/x` and
-/// `file://localhost/srv/x` are UNC/remote forms, not local trees — and an
-/// **absolute path**. Two paths are refused for naming no directory: the
-/// filesystem root (`file:///`), which survives the trailing-slash trim as the
-/// empty string, and a bare Windows drive (`file:///C:/`), which survives it as
-/// `/C:` and would otherwise reach [`file_root`] as the designator `C:` — a
-/// path Win32 resolves against the **per-drive working directory**, silently
-/// serving the whole index out of wherever `ocx` was launched.
+/// Resolves a `file://` base, requiring an empty authority (`file://host/…` is UNC, not local)
+/// and an absolute path other than `/`. A bare drive (`file:///C:/`) is refused: Win32 resolves
+/// `C:` against the per-drive working directory, serving the index from wherever `ocx` launched.
 fn resolve_file_base(namespace: &str, base: &str) -> Result<IndexBase> {
-    // `FileReference::absolute` is both the empty-authority check and the
-    // absolute-path check: a payload that does not lead with `/` has an
-    // authority before its first slash, and one that trims away to nothing
-    // (`file:///`, `file://`) names no directory.
-    //
-    // `path.len() == 3` is the whole of `/C:` — a drive with nothing under it.
-    // Refused on every platform, so a base is valid or not independently of
-    // where it is read; `/C:` is not a directory anyone means on Unix either.
+    // `len() == 3` is a bare `/C:` drive, refused on every platform so validity is host-independent.
     let path = FileReference::parse(base)
         .absolute()
         .filter(|path| !(has_drive_prefix(path) && path.len() == 3));
@@ -688,13 +445,8 @@ fn resolve_file_base(namespace: &str, base: &str) -> Result<IndexBase> {
     })
 }
 
-/// The absolute filesystem path a `file://` URL's tail names.
-///
-/// On Windows the tail `/C:/srv/x` is not itself an absolute path — the
-/// drive-letter form needs its leading separator stripped (C-018). Stripping it
-/// unconditionally would turn a legitimate Unix root literally named `/C:/…`
-/// into a **relative** path resolved against the process working directory, so
-/// it is gated on the target OS.
+/// The absolute filesystem path a `file://` tail names. The `/C:/…` separator strip is gated on
+/// Windows: elsewhere it would turn a Unix root named `/C:/…` into a relative path.
 fn file_root(path: &str) -> std::path::PathBuf {
     if cfg!(windows) && has_drive_prefix(path) {
         std::path::PathBuf::from(&path[1..])
@@ -703,131 +455,65 @@ fn file_root(path: &str) -> std::path::PathBuf {
     }
 }
 
-/// Whether `path` is a `file://` tail of the Windows drive-letter form
-/// (`/C:/…`). OS-independent so it stays testable off Windows.
+/// Whether `path` is a Windows drive-letter `file://` tail (`/C:/…`), on every OS.
 fn has_drive_prefix(path: &str) -> bool {
     let bytes = path.as_bytes();
     bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
-/// In-memory caches shared across [`OcxIndex`] clones (per-invocation).
-///
-/// Roots are volatile but cheap to re-read within one resolution (the tag →
-/// dispatch → physical hops all need the same root). This is the same "shared
-/// cache across clones" model [`OciIndex`](super::OciIndex) uses — it is not
-/// the committed local index.
+/// Per-invocation caches shared across [`OcxIndex`] clones; not the committed local index.
 #[derive(Default)]
 struct SourceCacheInner {
-    /// repository → root document, `None` for a confirmed 404. The negative
-    /// entry is what keeps a name the index does not hold from re-asking the
-    /// wire once per chain consult: it costs exactly one 404 per process, not
-    /// one per source loop.
+    /// repository → root, `None` for a confirmed 404, so an absent name costs one 404 per process.
     roots: BTreeMap<String, Option<CachedRoot>>,
-    /// Set once `config.json` has been fetched and its `format_version`
-    /// confirmed supported this invocation, so a repeat call skips the fetch
-    /// (F1 "read once"). Never set on a served-but-unsupported version (a
-    /// re-checked hard error, not a remembered steady state) NOR on an absent
-    /// `config.json` (assumed v1 and re-derived every call, so a tree that
-    /// later publishes one is picked up without restarting). Config-driven
-    /// construction means there is no probe outcome to soften a transport
-    /// failure into — that always propagates.
+    /// Set only for a served `config.json` that passed the version gate: an absent one is
+    /// re-asked so a later-published config is seen, an unsupported one stays a hard error.
     config: Option<Arc<IndexFormatConfig>>,
 }
 
-/// One memoized root: the **verbatim** `p/<repo>.json` bytes and the parse of
-/// them, together.
-///
-/// Together because the two consumers want different halves of the same
-/// request. [`OcxIndex::resolve_root`] wants the parse; `fetch_root_document`
-/// wants the bytes, and wants them verbatim rather than re-serialised — they
-/// hash to the catalog entry (F1) and carry keys this client does not model
-/// (A2). Memoizing only the parse is what made a **first-sight**
-/// digest-addressed resolve pay two `GET /p/<ns>/<pkg>.json` for one root
-/// (ocx#424): `physical_reference` resolves the root, then
-/// `ChainedIndex::record_routing_pointer` asks for its bytes and the memo had
-/// nothing to give.
-///
-/// Cost is one extra `Arc<Vec<u8>>` per repository this process touches — the
-/// map beside it already holds the strictly larger parse of the same bytes.
+/// One memoized root: the verbatim `p/<repo>.json` bytes beside their parse, so a first-sight
+/// digest-addressed resolve pays one `GET` for both [`OcxIndex::resolve_root`] and
+/// `fetch_root_document`.
 #[derive(Clone)]
 struct CachedRoot {
-    /// The bytes exactly as served, never a re-serialisation of `parsed`.
+    /// Exactly as served; a re-serialisation of `parsed` would stop hashing to the catalog entry.
     bytes: Arc<Vec<u8>>,
     parsed: Arc<IndexRoot>,
 }
 
-/// Max keys a source's singleflight group admits.
-///
-/// **Sized for the run, not copied.** `chained_index.rs`'s `1024` was chosen
-/// for a group whose keys are the identifiers of one refresh; these groups live
-/// for the process and are shared across every `box_clone`, so one key accrues
-/// per repository an `ocx index sync` touches. At `1024` a sync against a
-/// registry holding more packages than that answers `CapacityExceeded` →
-/// `TempFail(75)` — an exit code advertising "retry" for a condition no retry
-/// inside the process can clear — on **successes** alone.
-///
-/// This is a memory backstop, never a throughput limit: the entries front
-/// [`SourceCacheInner::roots`], which is itself unbounded, so a run that could
-/// reach this ceiling has already stored strictly more in the map beside it.
+/// Max keys a source's singleflight group admits, sized for a whole `ocx index sync`: the groups
+/// live for the process with one key per repository, and a small cap exits `TempFail(75)` on
+/// successes alone. A memory backstop, never a throughput limit.
 const SOURCE_SINGLEFLIGHT_MAX_KEYS: usize = 1 << 20;
 
-/// How long a coalesced caller blocks for the leader's fetch.
-///
-/// Derived from the transport underneath rather than copied: one index fetch is
-/// up to [`RetryPolicy::attempts`] attempts, each bounded by
-/// [`INDEX_OUTER_CAP`], plus a bounded backoff between them. A waiter that gave
-/// up before the leader could finish would turn one slow-but-honest link into a
-/// spurious `TempFail(75)` for every caller but one — the opposite of what the
-/// coalescing is for. Four attempt-caps covers the three attempts and the
-/// backoff between them.
+/// How long a coalesced caller waits for the leader: four [`INDEX_OUTER_CAP`]s cover three
+/// attempts plus backoff, and a shorter wait turns one slow link into `TempFail(75)` for waiters.
 const SOURCE_SINGLEFLIGHT_TIMEOUT: Duration = Duration::from_secs(INDEX_OUTER_CAP.as_secs() * 4);
 
 /// A live `index.ocx.sh`-style source.
 #[derive(Clone)]
 pub struct OcxIndex {
     transport: Box<dyn IndexTransport>,
-    /// The static-file base URL (`[registries."<ns>"] index` ▸ default, with
-    /// the `[mirrors."<host>"] index` role override applied), trailing slash
-    /// trimmed.
+    /// Static-file base URL, `[mirrors]` index override applied, trailing slash trimmed.
     base_url: String,
-    /// The logical registry this source serves (e.g. `"ocx.sh"`). An
-    /// identifier whose `registry()` differs is not this source's concern.
+    /// The logical registry this source serves (e.g. `"ocx.sh"`).
     namespace: String,
-    /// OCI client for the physical manifest/layer fetches (applies `[mirrors]`).
-    /// Built with an SSRF [`GuardedResolver`](ocx_oci::ssrf::GuardedResolver) so the
-    /// connect pins the address `physical_identifier` validated (resolve ->
-    /// validate -> pin).
+    /// Physical-fetch client; its `GuardedResolver` pins the address `physical_identifier` validated.
     client: ocx_oci::Client,
-    /// When false, a tag resolving to a yanked entry is refused (F3).
+    /// When false, a tag resolving to a yanked entry is refused.
     allow_yanked: bool,
-    /// SSRF escape hatch for this namespace: hosts / CIDRs whose resolved
-    /// addresses skip the default-on private/loopback/link-local/metadata
-    /// refusal (`[registries."<ns>"].trusted_hosts`, X2).
+    /// SSRF escape hatch (`[registries."<ns>"].trusted_hosts`).
     trusted_hosts: Vec<String>,
-    /// The `OCX_INSECURE_REGISTRIES` authorities this source may dial over
-    /// plain HTTP — the same value its `client` carries as
-    /// `plain_http_registries`. Read only to pick the dial scheme the SSRF
-    /// floor's proxy question depends on
-    /// ([`index_impl::IndexImpl::insecure_hosts`]).
+    /// Plain-HTTP authorities, the same list `client` carries; read only to pick the dial scheme.
     insecure_hosts: Vec<String>,
-    /// Proxy-route rules for this source's own SSRF pre-flight
-    /// ([`Self::physical_identifier`]) — see [`OcxIndexConfig::proxy_rules`].
+    /// Proxy-route rules for the SSRF pre-flight in [`Self::physical_identifier`].
     proxy_rules: Arc<ocx_oci::ssrf::ProxyRules>,
     cache: Arc<RwLock<SourceCacheInner>>,
-    /// Coalesces the concurrent cold misses on `config.json`. Only a **served**
-    /// document is broadcast as this group's answer — see
-    /// [`Self::check_format_version`] for why an assumed v1 must not be.
+    /// Coalesces cold `config.json` misses; broadcasts only a served document.
     config_group: singleflight::Group<(), Option<Arc<IndexFormatConfig>>>,
-    /// Coalesces the concurrent cold misses on `p/<repo>.json`, keyed exactly
-    /// like [`SourceCacheInner::roots`].
-    ///
-    /// Shared across `box_clone` like `cache`, deliberately — and this is the
-    /// half of `chained_index.rs`'s precedent that does **not** carry over
-    /// there. That group's key does not encode write policy, so its
-    /// `read_only()` / `remote_view()` build a *fresh* group rather than
-    /// coalescing a read-only resolve onto a persisting leader. `OcxIndex`
-    /// carries no write policy at all — nothing here writes locally — so
-    /// sharing is safe and is what makes the coalescing reach the fan-out.
+    /// Coalesces cold `p/<repo>.json` misses, keyed like [`SourceCacheInner::roots`]. Shared across
+    /// `box_clone` so coalescing reaches the fan-out; safe only because `OcxIndex` writes nothing
+    /// locally, unlike `ChainedIndex`, whose read-only views need fresh groups.
     root_group: singleflight::Group<String, Option<Arc<IndexRoot>>>,
 }
 
@@ -838,17 +524,12 @@ pub struct OcxIndexConfig {
     pub namespace: String,
     pub client: ocx_oci::Client,
     pub allow_yanked: bool,
-    /// SSRF escape hatch for the physical hosts this source dereferences
-    /// (`[registries."<ns>"].trusted_hosts`, X2). Empty = guard every host.
+    /// SSRF escape hatch (`[registries."<ns>"].trusted_hosts`); empty guards every host.
     pub trusted_hosts: Vec<String>,
-    /// The authorities dialled over plain HTTP (`OCX_INSECURE_REGISTRIES` plus
-    /// `[registries."<host>"] insecure`) — the same list `client` was built
-    /// with. Empty = every dial is HTTPS.
+    /// Plain-HTTP authorities, the same list `client` was built with; empty = all HTTPS.
     pub insecure_hosts: Vec<String>,
-    /// Whether a physical dial is proxied, which decides whether the SSRF
-    /// pre-flight resolves at all (ocx#407). Production passes
-    /// [`ocx_oci::ssrf::proxy_rules`]; tests pass explicit rules so the verdict
-    /// never depends on the developer's own environment.
+    /// Whether a physical dial is proxied; tests pass explicit rules so the verdict never
+    /// depends on the developer's environment.
     pub proxy_rules: Arc<ocx_oci::ssrf::ProxyRules>,
 }
 
@@ -875,46 +556,14 @@ impl OcxIndex {
         &self.namespace
     }
 
-    /// Whether `registry` is the one this source serves — a cheap, no-I/O
-    /// ownership test, and the single predicate behind every read-path guard
-    /// below.
-    ///
-    /// Distinct from [`Self::jurisdiction`]: ownership is per-**registry** and
-    /// decides local-subtree layout (the `c/index.json` catalog vs `p/`
-    /// enumeration), which is per-source and never per-name. Jurisdiction is
-    /// per-**name** and needs the published `config.json`.
+    /// Whether `registry` is the one this source serves; no I/O.
     pub fn serves_registry(&self, registry: &str) -> bool {
         registry == self.namespace
     }
 
-    /// Whether this source will answer for `identifier`, and what its silence
-    /// means — a configured index is **authoritative for its whole registry**
-    /// (ocx#251).
-    ///
-    /// | Case | Verdict |
-    /// |---|---|
-    /// | Foreign registry | [`Outside`](super::Jurisdiction::Outside) |
-    /// | This source's own registry | [`Authoritative`](super::Jurisdiction::Authoritative) |
-    ///
-    /// [`Outside`](super::Jurisdiction::Outside) now means only "another
-    /// registry entirely". A name this index holds no root for is a **hard
-    /// miss**, never a silent hand-off to the plain OCI registry the index
-    /// points at — that hand-off is what let a flat `ocx.sh/<tool>` name resolve
-    /// past the index, and with it past the yank and deprecation gate.
-    ///
-    /// Decided with **no I/O** — hence synchronous, where this used to be
-    /// `async`: the verdict is `identifier.registry()` against this source's
-    /// namespace and nothing else. There was a published
-    /// declaration (`config.json`'s `name_segments`) whose only job was to
-    /// interpret a missing root as "fall through"; with the fall-through gone it
-    /// bought a config fetch and a 404 per declined name and decided nothing, so
-    /// the client no longer reads it.
-    ///
-    /// Fail-closed is preserved where it matters: an absent, malformed,
-    /// unsupported or unreachable `config.json` cannot change this verdict, and
-    /// the [`resolve_root`](Self::resolve_root) that follows raises the real
-    /// `UnsupportedIndexFormat` / transport error — an index outage stays a loud
-    /// error and never degrades into "this package does not exist".
+    /// [`Authoritative`](super::Jurisdiction::Authoritative) for this source's own registry,
+    /// [`Outside`](super::Jurisdiction::Outside) otherwise, with no I/O. A name with no root is a
+    /// hard miss, never a hand-off to the plain OCI registry, which would skip the yank gate.
     pub fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> super::Jurisdiction {
         if self.serves_registry(identifier.registry()) {
             super::Jurisdiction::Authoritative
@@ -923,62 +572,33 @@ impl OcxIndex {
         }
     }
 
-    /// This source's own SSRF escape hatch (`[registries."<ns>"].trusted_hosts`,
-    /// X2) — read-only accessor over already-public construction input
-    /// ([`OcxIndexConfig::trusted_hosts`]), so callers can confirm a built
-    /// source carries exactly its own namespace's set and never another's.
+    /// This source's SSRF escape hatch ([`OcxIndexConfig::trusted_hosts`]).
     pub fn trusted_hosts(&self) -> &[String] {
         &self.trusted_hosts
     }
 
-    /// The physical-fetch client this source pulls resolved packages through
-    /// ([`OcxIndexConfig::client`]) — read-only accessor over construction
-    /// input, like [`Self::trusted_hosts`], so a caller can confirm the
-    /// client a built source carries (its extra CA roots, ocx#448) without a
-    /// dial.
+    /// The physical-fetch client ([`OcxIndexConfig::client`]).
     pub fn client(&self) -> &ocx_oci::Client {
         &self.client
     }
 
-    /// The authorities this source dials over plain HTTP, or empty when none
-    /// were configured — see [`OcxIndexConfig::insecure_hosts`]. Decides which
-    /// proxy setting applies to a physical dial, and nothing else.
+    /// The plain-HTTP authorities ([`OcxIndexConfig::insecure_hosts`]).
     pub fn insecure_hosts(&self) -> &[String] {
         &self.insecure_hosts
     }
 
-    /// Resolves the static-file base for `namespace` — the URL and the
-    /// transport that serves it, as one [`IndexBase`]: the
-    /// `[registries."<ns>"] index` base (already merged through the managed
-    /// tier) if present, else the configured `DEFAULT_INDEX_BASE_URL` default — then applies the
-    /// `[mirrors."<host>"] index` role override for the base's own traffic
-    /// host, if one is declared (`mirrors_index`, replace semantics, no
-    /// fallback). Minted **once** here, the single place base URLs come
-    /// from (`adr_index_indirection.md` F5c).
+    /// Resolves the static-file base for `namespace`: `[registries."<ns>"] index`, else the
+    /// default, then the `[mirrors."<host>"] index` override (replace, no fallback).
     ///
-    /// The scheme set is closed and checked twice — on the configured base,
-    /// and again on the post-override target, since a `[mirrors]` entry (table
-    /// or `OCX_MIRRORS`) replaces the scheme
-    /// (`adr_servable_index_snapshot.md` C-018/C-019/C-020):
-    ///
-    /// | Scheme | Target |
-    /// |---|---|
-    /// | absent / `https` | [`ReqwestIndexTransport`] |
-    /// | `http` | [`ReqwestIndexTransport`], only when the final host is in `insecure_hosts` (the union of `[registries."<host>"] insecure` and `OCX_INSECURE_REGISTRIES`) — the root document is the index path's trust anchor, so a plaintext index is an on-path takeover (CWE-319), gated exactly like the registry role |
-    /// | `file` | [`FileIndexTransport`](super::FileIndexTransport), as a **configured base only** — empty authority, absolute path, and no `[mirrors]` override (which is host-keyed, and a `file` base has no host) |
-    /// | anything else | refused |
-    ///
-    /// `extra_roots` is the caller's merged extra-CA view (C-007), threaded
-    /// into the `https`/`http` arm's [`ReqwestIndexTransport`]; the `file://`
-    /// arm ignores it — a local path has no TLS handshake to trust.
+    /// Schemes: `https` or none; `http` only for an `insecure_hosts` host (CWE-319); `file` only
+    /// on the configured base.
     ///
     /// # Errors
     ///
     /// [`Error::PlainHttpIndexNotAllowed`](super::error::Error::PlainHttpIndexNotAllowed)
     /// for an ungated `http://` target; [`Error::InvalidIndexUrl`](super::error::Error::InvalidIndexUrl)
-    /// for an unparseable `[registries."<ns>"] index` base, a scheme outside the
-    /// set above, or a `file://` base with a non-empty authority or a relative
-    /// path.
+    /// for an unparseable base, another scheme, or a `file://` base with an authority or a
+    /// relative path.
     pub fn resolve_base_url(
         config: &ocx_config::Config,
         namespace: &str,
@@ -994,26 +614,14 @@ impl OcxIndex {
             .filter(|url| !url.is_empty())
             .unwrap_or(ocx_config::index::DEFAULT_INDEX_BASE_URL);
 
-        // Check 1a, ahead of check 1 because check 1 cannot see it: `file:/srv/x`
-        // holds no `://`, so `scheme_of` reads it as schemeless and the `None`
-        // arm below waves it through as an https default. `parse_url` then
-        // splits it into host `file:` and path `srv/x`, and the invocation dies
-        // much later as a DNS lookup for a host named `file` instead of here as
-        // a config error naming the spelling the operator meant (#382).
+        // Check 1a: `file:/srv/x` has no `://`, so without this it passes as an https default
+        // and fails much later as a DNS lookup for a host named `file`.
         if let Some(tail) = file_colon_tail(base) {
             return Err(invalid_index_url(namespace, base, file_colon_origin(tail), None));
         }
 
-        // Check 1, on the CONFIGURED base and before `parse_url`: a `file` base
-        // is diverted here because it must never be host-keyed — it has no host
-        // to key a `[mirrors]` override by, and `parse_url` reads its empty
-        // authority as `MissingHost`.
-        //
-        // Routed on the shared `Spelling`, and on `FileUrl` **only**: this door
-        // refuses the bare spelling that the `key` door accepts, because a
-        // schemeless `index = "index.corp.example"` already means
-        // `https://index.corp.example`. Reading it as a path would silently
-        // reroute an operator's index to the filesystem.
+        // Check 1, before `parse_url`, which reads a `file` base's empty authority as `MissingHost`.
+        // Only the `FileUrl` spelling: a schemeless base means https, never a filesystem path.
         if FileReference::parse(base).spelling() == Spelling::FileUrl {
             return resolve_file_base(namespace, base);
         }
@@ -1029,8 +637,7 @@ impl OcxIndex {
             }
         }
 
-        // Reuse the mirror URL parser (scheme/host split, https default) so the
-        // plain-HTTP gate matches the registry role byte for byte.
+        // The mirror URL parser, so the plain-HTTP gate matches the registry role byte for byte.
         let parsed = ocx_config::mirror::parse_url(base).map_err(|source| {
             invalid_index_url(
                 namespace,
@@ -1040,9 +647,7 @@ impl OcxIndex {
             )
         })?;
 
-        // Index-role mirror override, keyed by the base's own traffic host —
-        // replace semantics, no fallback. The key is kept because it is what
-        // names the offending `[mirrors]` entry if check 2 refuses below.
+        // `upstream` is kept to name the offending `[mirrors]` entry if check 2 refuses.
         let upstream = parsed.host.clone();
         let overridden = mirrors_index.get(&upstream);
         let target = overridden.cloned().unwrap_or(parsed);
@@ -1053,9 +658,8 @@ impl OcxIndex {
         };
         let url = format!("{}://{}{}", target.protocol, target.host, path);
 
-        // Check 2, on the POST-override target. Not redundant with check 1: the
-        // override replaces the scheme, so a `[mirrors]` entry — including one
-        // injected through `OCX_MIRRORS` — bypasses a base-only check (C-020).
+        // Check 2, post-override: a `[mirrors]` entry (`OCX_MIRRORS` too) replaces the scheme,
+        // bypassing check 1.
         match target.protocol.as_str() {
             "https" => {}
             "http" if ocx_oci::ssrf::allows_plain_http(insecure_hosts, &target.host) => {}
@@ -1066,8 +670,7 @@ impl OcxIndex {
                 });
             }
             _ => {
-                // Check 1 admitted only http/https past its own branch, so a
-                // scheme reaching here can only have come from the override.
+                // Check 1 admitted only http/https, so this scheme came from the override.
                 let origin = if overridden.is_some() {
                     error::index_url_from_mirrors(&upstream)
                 } else {
@@ -1083,40 +686,23 @@ impl OcxIndex {
         })
     }
 
-    // ── config.json (F1) ─────────────────────────────────────────────────────
+    // ── config.json ──────────────────────────────────────────────────────────
 
-    /// Resolves this source's `config.json` and version-gates it, fetching it
-    /// once per source instance on success (F1 "read once") and skipping the
-    /// fetch on every later call. Config-driven construction
-    /// (`[registries."<ns>"].index` presence) already decided this host serves
-    /// an ocx-index, so there is nothing left to *probe* for — this only
-    /// guards the wire-format version and carries the declared name grammar
-    /// ([`IndexFormatConfig::name_segments`]) on the same fetch.
+    /// Resolves and version-gates this source's `config.json`, memoized once served.
     ///
-    /// An **absent** `config.json` (404) resolves to
-    /// [`IndexFormatConfig::assumed_v1`] and is deliberately **not** memoized,
-    /// so a tree that later publishes one is picked up without restarting the
-    /// process (`adr_servable_index_snapshot.md` C-005). A
-    /// served-but-unsupported `format_version` is a hard, fail-closed error
-    /// (F1), likewise never cached as a steady state. A transport failure
-    /// reaching `config.json` propagates as a hard error on every call — there
-    /// is no soft "maybe not an index yet" state to absorb it.
+    /// A 404 resolves to [`IndexFormatConfig::assumed_v1`] and is never memoized, so a tree
+    /// that later publishes one is picked up without a restart.
     ///
     /// # Errors
     ///
     /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
-    /// on a served-but-unknown version; the transport error otherwise. Both
-    /// arrive inside a transparent
-    /// [`Error::SourceFetchFailed`](super::error::Error::SourceFetchFailed)
-    /// when this call led the coalesced fetch — same message, same exit code,
-    /// one `source()` hop further down.
+    /// on a served-but-unknown version; the transport error otherwise. Either may arrive inside
+    /// a transparent [`Error::SourceFetchFailed`](super::error::Error::SourceFetchFailed).
     async fn check_format_version(&self) -> Result<Arc<IndexFormatConfig>> {
         if let Some(config) = &self.cache.read().await.config {
             return Ok(config.clone());
         }
-        // Coalesce the cold misses: this is a read-check-then-fetch, so under
-        // the sync fan-out every task read-checks together, all miss and all
-        // fetch the same document.
+        // Coalesced: under the sync fan-out every task misses together.
         let handle = match self
             .config_group
             .try_acquire(())
@@ -1125,18 +711,13 @@ impl OcxIndex {
         {
             Acquisition::Leader(handle) => handle,
             Acquisition::Resolved(Some(config)) => return Ok(config),
-            // The leader found no `config.json` and assumed v1. That answer is
-            // deliberately never memoized (C-005), and a group entry retains
-            // for the process — so this arm **bypasses the group** and asks the
-            // wire again, which is how a tree that later publishes one is
-            // picked up without a restart. Eviction-on-failure cannot cover
-            // this: the assumed value is an `Ok`.
+            // A group entry lives for the process, so an assumed v1 asks the wire itself here,
+            // or a later-published `config.json` would never be seen.
             Acquisition::Resolved(None) => return Ok(or_assumed_v1(self.fetch_format_config().await?)),
         };
         match self.fetch_format_config().await {
             Ok(served) => {
-                // Only a served document is broadcast, on the same terms it is
-                // memoized: `None` tells a waiter to derive its own assumed v1.
+                // `None` makes each waiter derive its own assumed v1.
                 handle.complete(served.clone());
                 Ok(or_assumed_v1(served))
             }
@@ -1144,14 +725,7 @@ impl OcxIndex {
         }
     }
 
-    /// One `GET config.json`, version-gated, memoizing **only** a document that
-    /// was actually served.
-    ///
-    /// `Ok(None)` is the absent-`config.json` case, which the caller resolves
-    /// to [`IndexFormatConfig::assumed_v1`] without memoizing it anywhere
-    /// (C-005). Splitting that distinction out of the return type is what lets
-    /// the coalescing group in [`Self::check_format_version`] retain the served
-    /// case and only the served case.
+    /// One version-gated `GET config.json`, memoizing only a served document; `Ok(None)` on a 404.
     async fn fetch_format_config(&self) -> Result<Option<Arc<IndexFormatConfig>>> {
         let url = format!("{}/config.json", self.base_url);
         match self.transport.get(&url).await? {
@@ -1163,38 +737,28 @@ impl OcxIndex {
                 Ok(Some(config))
             }
             IndexFetch::NotFound => {
-                // The substitution happens before the gate, which is why the
-                // gate takes a version and never a "was it there?" flag (C-004).
                 gate_format_version(IndexFormatConfig::assumed_v1().format_version)?;
                 Ok(None)
             }
         }
     }
 
-    // ── root (F1 volatile) ──────────────────────────────────────────────────
+    // ── root (volatile) ──────────────────────────────────────────────────────
 
-    /// Fetches (and caches) the root for `repository`. `Ok(None)` on a 404
-    /// miss — memoized like a hit, so a repeat ask costs nothing.
+    /// Fetches and memoizes the root for `repository`; `Ok(None)` on a 404, memoized like a hit.
     ///
     /// # Errors
     ///
-    /// [`Error::IndexHttpFailed`](super::error::Error::IndexHttpFailed) for any
-    /// non-404 failure the transport surfaces — inside a transparent
-    /// [`Error::SourceFetchFailed`](super::error::Error::SourceFetchFailed)
-    /// when this call led the coalesced fetch. Only a *confirmed* 404 reads as a
-    /// miss: this `None` is what [`Self::jurisdiction`] settles an `Outside`
-    /// verdict off, and it is memoized, so no other status may fold into it. A
-    /// failure memoizes nothing, and the singleflight entry is evicted on the
-    /// next read, so a repeat ask re-requests.
+    /// [`Error::IndexHttpFailed`](super::error::Error::IndexHttpFailed) for any non-404 failure,
+    /// possibly inside a transparent [`Error::SourceFetchFailed`](super::error::Error::SourceFetchFailed).
+    /// A failure memoizes nothing, so a repeat ask re-requests.
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
-        // The version gate runs before any root is consumed (F1). Absence is
-        // v1, not a refusal (C-005) — an unsupported served version still is.
+        // The version gate runs before any root is consumed.
         self.check_format_version().await?;
         if let Some(cached) = self.cache.read().await.roots.get(repository) {
             return Ok(cached.as_ref().map(|cached| cached.parsed.clone()));
         }
-        // Coalesce the cold misses: the per-tag fan-out asks for one
-        // repository's root once per tag, and all of them read-check together.
+        // Coalesced: the per-tag fan-out asks for one repository's root once per tag.
         let handle = match self
             .root_group
             .try_acquire(repository.to_string())
@@ -1202,16 +766,13 @@ impl OcxIndex {
             .map_err(error::Error::SingleflightFailed)?
         {
             Acquisition::Leader(handle) => handle,
-            // Both a hit and a confirmed miss are answers here, unlike the
-            // assumed v1 above: `resolve_root` memoizes each on the same terms.
+            // A hit and a confirmed miss are both answers, unlike an assumed v1.
             Acquisition::Resolved(root) => return Ok(root),
         };
         match self.fetch_root(repository).await {
             Ok(cached) => {
                 self.memoize_root(repository, cached.clone()).await;
-                // The singleflight broadcasts the parse alone: a waiter is a
-                // `resolve_root` caller, and the bytes reach `fetch_root_document`
-                // through the memo the line above just filled.
+                // Waiters get the parse; the bytes reach `fetch_root_document` through the memo.
                 let parsed = cached.map(|cached| cached.parsed);
                 handle.complete(parsed.clone());
                 Ok(parsed)
@@ -1220,14 +781,12 @@ impl OcxIndex {
         }
     }
 
-    /// One `GET p/<repo>.json`. `Ok(None)` on a confirmed 404, which is a
-    /// result and not a failure — nothing else may fold into it.
+    /// One `GET p/<repo>.json`; `Ok(None)` only on a confirmed 404.
     async fn fetch_root(&self, repository: &str) -> Result<Option<CachedRoot>> {
         let url = format!("{}/p/{}.json", self.base_url, repository);
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
-                // The bytes are kept, not dropped: see [`CachedRoot`].
                 Ok(Some(CachedRoot {
                     bytes: Arc::new(bytes),
                     parsed: Arc::new(parsed),
@@ -1237,30 +796,18 @@ impl OcxIndex {
         }
     }
 
-    /// Memoizes a root lookup under the key [`Self::resolve_root`] reads.
-    ///
-    /// The key is the bare repository — **no registry component** — so only a
-    /// call that actually issued `GET p/<repo>.json` against *this* source may
-    /// memoize (D-004a). A path that answered without contacting anything must
-    /// memoize nothing: caching a foreign identifier's `None` here would settle
-    /// [`Self::jurisdiction`] as `Outside` for the served registry's
-    /// identically-named repository, and that package would silently stop
-    /// resolving through the index for the rest of the process.
+    /// Memoizes a root under the bare repository key, which has no registry component: only a
+    /// call that actually asked *this* source may memoize, or a foreign identifier's `None`
+    /// silently hides the served registry's same-named package for the rest of the process.
     async fn memoize_root(&self, repository: &str, root: Option<CachedRoot>) {
         self.cache.write().await.roots.insert(repository.to_string(), root);
     }
 
-    // ── dispatch object (F1 immutable, VERIFIED) ─────────────────────────────
+    // ── dispatch object (immutable, VERIFIED) ────────────────────────────────
 
-    /// Fetches and verifies the dispatch object for `(repository, digest)` —
-    /// the OCI image index the tag resolved to — returning its verbatim bytes
-    /// alongside the parsed index.
-    ///
-    /// Verifies `sha256(bytes) == digest` before parsing — the index path's
-    /// trust anchor (F1). The bytes travel with the parsed form because they,
-    /// not a re-serialisation of it, are what the local copy stores: an
-    /// unmodelled key a newer writer added must survive the round trip
-    /// (`adr_oci_index_only_dispatch.md` A4). `Ok(None)` on a 404 miss.
+    /// Fetches the dispatch object for `(repository, digest)`, verifies its bytes hash to
+    /// `digest`, and returns them verbatim beside the parse, so the local copy keeps keys this
+    /// client does not model. `Ok(None)` on a 404.
     ///
     /// # Errors
     ///
@@ -1294,30 +841,20 @@ impl OcxIndex {
             });
         }
 
-        // Admission is on document KIND and image-spec semantics: this must be
-        // an image index, and a valid one — deserialisation proves shape only
-        // (`schemaVersion` is an unconstrained `u8`). It deliberately does NOT
-        // inspect `artifactType` — nothing in ocx reads an image index's
-        // artifact type, and gating on it would refuse or warn about documents
-        // that are structurally exactly what we asked for.
+        // Deserialisation proves shape only (`schemaVersion` is any `u8`), hence the validation;
+        // `artifactType` is deliberately not gated on, as nothing in ocx reads it.
         let index: ocx_oci::ImageIndex = parse_document(&bytes, &url)?;
         ocx_oci::manifest::validate_image_index(&index).map_err(super::error::Error::from)?;
         Ok(Some((bytes, index)))
     }
 
-    /// Surfaces the human-governed status lane (F3) for a live tag resolve —
-    /// delegates to the shared [`surface_root_status`] with this source's
-    /// `allow_yanked` opt-in. Called on the tag path only; a digest-pinned
-    /// resolve skips it (immutability).
+    /// [`surface_root_status`] with this source's `allow_yanked`; tag path only.
     fn surface_status(&self, identifier: &ocx_oci::PackageRef, root: &IndexRoot, tag: &RootTag) -> Result<()> {
         surface_root_status(identifier, root, tag, self.allow_yanked)
     }
 
-    /// Resolves a tag-addressed identifier to its dispatch object: root → tag →
-    /// status surfacing → content digest → fetch + verify.
-    ///
-    /// `Ok(None)` when the package or tag is absent. Errors on a yanked refusal
-    /// or a dispatch-object digest mismatch.
+    /// Resolves a tag-addressed identifier to its verified dispatch object, surfacing its status.
+    /// `Ok(None)` when the package or tag is absent.
     async fn resolve_tag(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -1338,31 +875,19 @@ impl OcxIndex {
         Ok(Some((content, index)))
     }
 
-    /// Builds the physical [`ocx_oci::OciIdentifier`] for `identifier` by dereferencing
-    /// the root's `repository` pointer. The logical tag/digest are copied onto
-    /// the physical location; the physical value is transport-only routing (C2).
+    /// The physical [`ocx_oci::OciIdentifier`] the root's `repository` pointer names, at
+    /// `identifier`'s tag/digest; transport-only.
     async fn physical_identifier(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
         };
         let physical = super::parse_repository_pointer(&root.repository)?;
         let registry = physical.registry();
-        // SSRF floor (X1-X3, ocx#218): `registry` is a host from remote-controlled
-        // index data, so validate it BEFORE the first physical registry request
-        // (`self.client.*` in every caller). `trusted_hosts` is the explicit
-        // per-namespace escape hatch. `self.client` additionally pins the
-        // validated address at connect time via its `GuardedResolver`, closing
-        // the resolve -> connect rebinding window. The resolved addresses are
-        // discarded here — the pin, not this pre-flight, drives the connection.
-        //
-        // Route-aware (ocx#407): when a configured proxy intercepts the dial the
-        // process never resolves `registry` — the name is text in the proxy's
-        // `CONNECT` line — so the floor judges a forbidden IP literal textually
-        // and performs no lookup. `insecure_hosts` picks the scheme, because
-        // which proxy setting applies (`HTTP_PROXY` vs `HTTPS_PROXY`) depends on
-        // it.
+        // SSRF floor: `registry` comes from remote-controlled index data, so it is validated before
+        // any physical request; `self.client`'s `GuardedResolver` pins the validated address.
         let (host, port) = ocx_oci::ssrf::split_host_port(registry);
         ocx_oci::ssrf::guard_destination(
+            // The scheme decides whether `HTTP_PROXY` or `HTTPS_PROXY` routes the dial.
             ocx_oci::ssrf::DialScheme::for_registry(self.insecure_hosts(), registry),
             host,
             port,
@@ -1379,35 +904,18 @@ impl OcxIndex {
         Ok(Some(physical.at_version_of(identifier)))
     }
 
-    // ── catalog sync (F2) ────────────────────────────────────────────────────
+    // ── catalog ──────────────────────────────────────────────────────────────
 
-    /// Fetches this source's `c/index.json` — the site's own listing, read live.
+    /// Fetches this source's live `c/index.json`; nothing is persisted from it.
     ///
-    /// Nothing is persisted from it: the local `c/index.json` is authored from
-    /// the roots this machine snapshotted, never mirrored from here. This is
-    /// what answers `ocx index catalog --remote`, and it is the only reason the
-    /// remote catalog is fetched at all.
-    ///
-    /// A `404` yields an empty catalog rather than an error — not a failure,
-    /// just an index with nothing to list. That tolerance is right for a
-    /// *listing* command and wrong for an enumeration that then acts on the
-    /// result; see [`Self::fetch_catalog_strict`].
+    /// A 404 yields an empty catalog; a caller acting on the enumeration wants
+    /// [`Self::fetch_catalog_strict`].
     pub async fn fetch_catalog(&self) -> Result<CatalogIndex> {
         Ok(self.fetch_catalog_document().await?.unwrap_or_else(CatalogIndex::new))
     }
 
-    /// [`Self::fetch_catalog`], but an **absent** catalog document is an error
-    /// rather than an empty one.
-    ///
-    /// For a caller that enumerates a source in order to act on the result,
-    /// "this source serves no catalog" and "this source serves a catalog
-    /// listing nothing" are different facts and only the second is a clean
-    /// enumeration. `index sync` collapsed them and so exited
-    /// 0 having refreshed nothing and printed nothing — C-013's
-    /// authoritative-stop rule requires the stop.
-    ///
-    /// A served catalog with zero packages still returns `Ok` and still exits 0
-    /// (C-027's Exit row): the source answered.
+    /// [`Self::fetch_catalog`], but an absent catalog is an error: read as empty, `index sync`
+    /// would exit 0 having refreshed nothing. A served catalog with zero packages is still `Ok`.
     pub async fn fetch_catalog_strict(&self) -> Result<CatalogIndex> {
         let url = format!("{}/c/index.json", self.base_url);
         self.fetch_catalog_document()
@@ -1418,11 +926,8 @@ impl OcxIndex {
             })
     }
 
-    /// The catalog document, or `None` when the source serves none. The two
-    /// public wrappers differ only in what they make of that `None`.
+    /// The catalog document, or `None` when the source serves none.
     async fn fetch_catalog_document(&self) -> Result<Option<CatalogIndex>> {
-        // The version gate runs before the listing every other read fans out
-        // from (F1).
         self.check_format_version().await?;
         let url = format!("{}/c/index.json", self.base_url);
         Ok(match self.transport.get(&url).await? {
@@ -1432,15 +937,9 @@ impl OcxIndex {
     }
 }
 
-/// Surfaces the human-governed status lane of a resolved tag (F3): warns on
-/// yank / deprecation / supersession, and **refuses** a yanked tag resolve
-/// unless `allow_yanked`. Shared verbatim by the live [`OcxIndex`] resolve
-/// (`surface_status`) and the OFFLINE committed-root resolve
-/// ([`LocalIndex::resolve_dispatch`](super::LocalIndex)) so a yank/deprecation
-/// is honored identically whether the root was just fetched or read from a
-/// shipped copy with zero network. Called on the TAG path only — a
-/// digest-pinned resolve skips it (a yank is a tag-lane signal, never checked on
-/// an immutable pin).
+/// Warns on yank / deprecation / supersession and refuses a yanked tag unless `allow_yanked`.
+/// Shared by the live resolve and [`LocalIndex::resolve_dispatch`](super::LocalIndex) so a yank
+/// is honored identically online and offline; tag path only, never on a digest pin.
 pub(super) fn surface_root_status(
     identifier: &ocx_oci::PackageRef,
     root: &IndexRoot,
@@ -1462,25 +961,20 @@ pub(super) fn surface_root_status(
             None => log::warn!("'{identifier}' is deprecated"),
         }
     }
-    // Advisory only — never auto-follows the successor (the C-46 identity
-    // binding: never override the requested identity).
+    // Advisory only: following the successor would override the requested identity.
     if let Some(successor) = &root.superseded_by {
         log::warn!("'{identifier}' is superseded by '{successor}' (advisory; not followed automatically)");
     }
     Ok(())
 }
 
-/// Resolves the absent-`config.json` case to [`IndexFormatConfig::assumed_v1`].
-///
-/// Kept as a substitution over `Option` rather than folded into the fetch so
-/// the one caller that must **not** memoize the result — every caller, per
-/// C-005 — cannot accidentally hand it to a memo or a coalescing group.
+/// Resolves the absent-`config.json` case to [`IndexFormatConfig::assumed_v1`], outside the
+/// fetch so the assumed value never reaches a memo or a coalescing group.
 fn or_assumed_v1(served: Option<Arc<IndexFormatConfig>>) -> Arc<IndexFormatConfig> {
     served.unwrap_or_else(|| Arc::new(IndexFormatConfig::assumed_v1()))
 }
 
-/// Parses `bytes` as `T`, wrapping a serde failure with the source `url` so a
-/// malformed index document reports where it came from.
+/// Parses `bytes` as `T`, naming the source `url` on failure.
 fn parse_document<T: for<'de> Deserialize<'de>>(bytes: &[u8], url: &str) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|source| super::error::Error::MalformedIndexDocument {
         url: redact_url(url),
@@ -1491,8 +985,6 @@ fn parse_document<T: for<'de> Deserialize<'de>>(bytes: &[u8], url: &str) -> Resu
 #[async_trait]
 impl index_impl::IndexImpl for OcxIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
-        // Only this source's namespace is served; a different registry is not
-        // this source's concern. The catalog is the offline listing source.
         if registry != self.namespace {
             return Ok(Vec::new());
         }
@@ -1521,9 +1013,7 @@ impl index_impl::IndexImpl for OcxIndex {
             return Ok(None);
         }
 
-        // Digest-addressed (a resolved platform-manifest leaf): the physical
-        // fetch. The OCI image-index hop is bypassed — the digest IS the
-        // platform manifest digest (C1).
+        // Digest-addressed: the digest is the platform-manifest leaf, fetched physically.
         if identifier.digest().is_some() {
             let Some(physical) = self.physical_identifier(identifier).await? else {
                 return Ok(None);
@@ -1535,8 +1025,6 @@ impl index_impl::IndexImpl for OcxIndex {
             ));
         }
 
-        // Tag-addressed: resolve the image index the tag was locked to and hand
-        // it straight to `fetch_candidates` / `select_best`.
         let Some((content, index)) = self.resolve_tag(identifier).await? else {
             return Ok(None);
         };
@@ -1551,11 +1039,9 @@ impl index_impl::IndexImpl for OcxIndex {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
-        // A digest-addressed identifier already names its manifest digest.
         if let Some(digest) = identifier.digest() {
             return Ok(Some(digest));
         }
-        // Tag-addressed: the dispatch-object digest is what the tag points at.
         Ok(self.resolve_tag(identifier).await?.map(|(digest, _)| digest))
     }
 
@@ -1563,8 +1049,6 @@ impl index_impl::IndexImpl for OcxIndex {
         if !self.serves_registry(blob_ref.as_identifier().registry()) {
             return Ok(None);
         }
-        // Layers are physical — dereference the root's repository pointer and
-        // pull through the mirror-aware client.
         let Some(physical) = self.physical_identifier(blob_ref.as_identifier()).await? else {
             return Ok(None);
         };
@@ -1579,8 +1063,7 @@ impl index_impl::IndexImpl for OcxIndex {
             return Ok(None);
         }
 
-        // Leaf: the physical registry serves the verbatim platform manifest,
-        // whose bytes hash to the leaf digest — A3-valid for an index write.
+        // Leaf: the physical registry's verbatim bytes hash to the leaf digest, valid to persist.
         if identifier.digest().is_some() {
             let Some(physical) = self.physical_identifier(identifier).await? else {
                 return Ok(None);
@@ -1591,10 +1074,7 @@ impl index_impl::IndexImpl for OcxIndex {
                 .await?);
         }
 
-        // Tag: the verbatim image-index bytes (which hash to the dispatch-object
-        // digest — A3-valid) paired with the parsed index. The persist layer
-        // writes the BYTES, not a re-serialisation of the parse, so a key this
-        // client does not model survives into the local copy.
+        // Tag: verbatim bytes, never a re-serialisation, so a key this client does not model survives.
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
         };
@@ -1611,36 +1091,22 @@ impl index_impl::IndexImpl for OcxIndex {
     }
 
     async fn fetch_root_document(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<(Vec<u8>, IndexRoot)>> {
-        // A published source serves the verbatim `p/<ns>/<pkg>.json` bytes paired
-        // with the parsed root, so `LocalIndex::persist_published_root` grows the
-        // local copy byte-for-byte (copy-a-mirror, A2). The bytes are returned
-        // verbatim (never re-serialized) so they hash to the catalog entry (F1).
-        // Memoizes NOTHING: no request was issued, and the memo key carries no
-        // registry (D-004a, and `memoize_root`'s doc comment).
+        // Verbatim bytes: re-serialised, they would stop hashing to the catalog entry.
+        // Checked before the memo: a foreign registry must memoize nothing (see `memoize_root`).
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
-        // The version gate runs before any root is consumed (F1).
+        // The version gate runs before any root is consumed.
         self.check_format_version().await?;
-        // A memoized root is the whole answer, hit and miss alike: a flat name
-        // costs one 404 per process however many times it is asked for, and a
-        // hit costs one GET, because [`CachedRoot`] carries the verbatim bytes
-        // beside the parse. Without the bytes a first-sight digest-addressed
-        // resolve paid two GETs for one root — `physical_reference` fetched it
-        // through `resolve_root`, then `record_routing_pointer` asked here for
-        // the bytes of the very same document (ocx#424).
+        // A memoized root is the whole answer, hit and miss alike.
         if let Some(cached) = self.cache.read().await.roots.get(identifier.repository()) {
             return Ok(cached
                 .as_ref()
                 .map(|cached| ((*cached.bytes).clone(), (*cached.parsed).clone())));
         }
         let url = format!("{}/p/{}.json", self.base_url, identifier.repository());
-        // Both arms below issued the request, so both memoize — the miss on
-        // exactly the same terms as the hit, because a confirmed 404 is what
-        // `jurisdiction` settles an `Outside` verdict off. Without this the
-        // per-tag fan-out that follows re-fetches this same root once per tag
-        // (D-004): a sequencing bug, not a race, which is why coalescing alone
-        // would not fix it — the leader finishes without ever registering.
+        // Both arms issued the request, so both memoize; otherwise the per-tag fan-out that
+        // follows re-fetches this root once per tag, which coalescing alone would not prevent.
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
                 let root: IndexRoot = parse_document(&bytes, &url)?;
@@ -1654,7 +1120,6 @@ impl index_impl::IndexImpl for OcxIndex {
                 .await;
                 Ok(Some((bytes, root)))
             }
-            // A 404 is a clean miss, never an error.
             IndexFetch::NotFound => {
                 self.memoize_root(identifier.repository(), None).await;
                 Ok(None)
@@ -1666,15 +1131,10 @@ impl index_impl::IndexImpl for OcxIndex {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
-        // Dereference the root's `repository` pointer, carrying the logical
-        // digest onto the physical location — transport-only (C2).
         self.physical_identifier(identifier).await
     }
 
     fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> super::Jurisdiction {
-        // Forwards to the inherent method (same shape as `namespace()`) so the
-        // one caller that holds a concrete `OcxIndex` — `ocx index update`'s
-        // source routing — reaches it without the private trait.
         OcxIndex::jurisdiction(self, identifier)
     }
 
@@ -4221,20 +3681,16 @@ mod tests {
 
 // ── Retry ladder and timeout inversion, at the wire ──────────────────────────
 
-/// `C-016`, `C-017`'s wiring, `C-019`, `C-021` and `C-028` against a real
-/// socket through the production [`ReqwestIndexTransport`].
+/// The retry ladder and the timeout bounds against a real socket through the
+/// production [`ReqwestIndexTransport`].
 ///
-/// These are the half the virtual-clock tests in
-/// [`ocx_oci::transport_policy`] cannot cover: that `get` *reads* the
-/// header, *classifies* the status and *composes* the three timeout bounds.
-/// The clock is real here on purpose — a paused clock auto-advances whenever
-/// the runtime is idle waiting on a socket, which fires the very timeouts
-/// [`TransportHardening`] exists to bound. The bounds are injected instead, so
-/// the same semantics cost milliseconds rather than the shipped minutes.
-///
-/// Pattern lifted from `oci/client/builder.rs`'s `push_wire_tests` /
-/// `read_timeout_tests` — the only place in the tree counting real wire
-/// requests — rather than invented here.
+/// These are the half the virtual-clock tests in [`ocx_oci::transport_policy`]
+/// cannot cover: that `get` *reads* the header, *classifies* the status and
+/// *composes* the three timeout bounds. The clock is real on purpose — a
+/// paused clock auto-advances whenever the runtime is idle waiting on a
+/// socket, which fires the very timeouts [`TransportHardening`] exists to
+/// bound. The bounds are injected instead, so the same semantics cost
+/// milliseconds rather than the shipped minutes.
 #[cfg(test)]
 mod transport_wire_tests {
     use super::*;
@@ -4941,7 +4397,7 @@ mod transport_wire_tests {
     }
 }
 
-// ── Diagnostic-surface guards (C-026, C-031) ─────────────────────────────────
+// ── Diagnostic-surface guards ─────────────────────────────────
 
 #[cfg(test)]
 mod diagnostic_surface_tests {

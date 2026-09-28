@@ -13,23 +13,19 @@ use crate::options;
 
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
 ///
-/// Loads the nearest `ocx.toml` together with its sibling `ocx.lock`, collects
-/// every digest-pinned lock entry across the requested groups, and pulls each
-/// one into the local object store. Distinct from `ocx package pull`: this
-/// command is project-tier (driven by the lock file) and never touches the
-/// candidate or current symlink namespace.
-///
-/// After a successful pull, `ocx.lock` is re-saved with byte-identical content
-/// so its mtime advances. This re-fires `direnv watch_file ocx.lock`, ensuring
-/// direnv refreshes the environment after the object store catches up to the
-/// declared lock. Skipped under `--dry-run`.
+/// Pulls every digest-pinned lock entry across the requested groups of the
+/// nearest `ocx.toml` into the local object store. Unlike `ocx package pull`
+/// it is project-tier (driven by the lock file) and never touches the
+/// candidate or current symlink namespace. A successful pull re-saves
+/// `ocx.lock` byte-identically so direnv's `watch_file` fires, except under
+/// `--dry-run`.
 #[derive(Parser, Clone)]
 pub struct Pull {
     /// Preview which locked packages are cached vs. would be fetched.
     ///
     /// Walks `ocx.lock`, resolves each entry through the local index
-    /// (cache-first, like `pull_all` does), and probes `find_plain` on
-    /// the resolved digest. No store writes; the only network surface is
+    /// (cache-first), and checks the store for the resolved digest.
+    /// No store writes; the only network surface is
     /// the cache-miss path of resolve, which lock has typically already
     /// populated. Combine with `--offline` to forbid any network probe.
     /// Honors `--format json` and `--quiet`. The staleness gate still
@@ -50,66 +46,30 @@ pub struct Pull {
     #[clap(flatten)]
     pub platform: options::PlatformOption,
 
-    /// Top tier of the `lazy-mode` ladder for every locked package this command
-    /// pre-warms.
-    ///
-    /// This command composes nothing, so `always` changes *what* is pre-warmed
-    /// rather than what reaches `PATH`: a package it applies to gets its metadata,
-    /// its dependency closure's config blobs and its generated launchers, and
-    /// no content. The content downloads the first time one of those launchers
-    /// runs, in whatever environment a later `ocx exec` or `ocx env` composes.
+    /// Under `always`, a package gets its metadata, closure config blobs and launchers but no
+    /// content, which downloads when one of those launchers first runs.
     #[clap(flatten)]
     pub lazy_mode: options::LazyMode,
 
-    // `--consent` (the default) / `--no-consent`. A `///` here would be dead
-    // text: clap renders the flattened struct's own field docs, not this one.
     #[clap(flatten)]
     pub consent: options::Consent,
 }
 
 impl Pull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // ── Phase 1: parse-time validation ───────────────────────────────
-        // Reject empty comma segments (`-g ci,,lint`) before any filesystem
-        // or network work.
         crate::app::project_context::ensure_group_segments_nonempty(&self.groups)?;
 
-        // ── Phase 2–3: project resolution, lock load, staleness gate ─────
-        // Errors propagate to the `main.rs` boundary: logged once via
-        // `log::error!` and classified by `app::classify_error` from
-        // `ProjectContextError`'s `ClassifyExitCode` impl.
-        // Consent write seam (C-024, A-29): `pull` is one of the commands
-        // that opt in. `load_project_with_lock`, which four read-only callers
-        // share, stamps nothing.
-        //
-        // The tri-state travels rather than a resolved bool: build tooling
-        // drives `pull` against a checkout its operator never chose, so
-        // `OCX_NO_CONSENT` must be able to suppress the stamp — but only where
-        // no flag spoke (ocx-sh/ocx#400). The seam resolves the ladder.
+        // The consenting load, unlike read-only callers: build tooling runs `pull` in checkouts no
+        // operator chose, so `OCX_NO_CONSENT` must be able to suppress the stamp.
         let ctx = load_project_with_lock_consenting(&context, self.consent.explicit()).await?;
 
-        // Validate requested groups against the loaded config (unknown → 64).
         crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;
 
-        // ── Phase 4: select tool set from the lock ───────────────────────
-
-        // No positional packages and no compose step: the lock is already
-        // authoritative. Walk it directly, preserving lock order (sorted
-        // by `(group, name)` at write time, so the result is deterministic).
-        //
-        // The pull id is the requested platform's leaf
-        // (`repository.clone_with_digest(leaf)`, host key → `Any`-offer
-        // fallback); an unshipped platform → clean pre-network `NoHostLeaf`
-        // (exit 78).
-        //
-        // `--platform` omitted → the host native platform.
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         let render_groups = render_groups(&self.groups, &ctx);
         let selected: Vec<&ocx_project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
-            // Expand `all` → default + every declared `[group.*]` before the
-            // filter, so `-g all` warms every group (matches `run`/`env`).
             let expanded = expand_all_keyword(&self.groups, &ctx.config);
             ctx.lock
                 .tools
@@ -126,32 +86,14 @@ impl Pull {
             }
         }
 
-        // ── Phase 4b: dry-run preview ────────────────────────────────────
-
-        // Dry-run runs after the staleness gate so a stale lock still
-        // exits 65 before any preview prints. No network, no store writes.
+        // After the staleness gate, so a stale lock exits 65 before any preview prints.
         if self.dry_run {
-            // Threaded into the request rather than short-circuited (S-007):
-            // the render's own dry-run arm reports the delta, performs no heal,
-            // and writes nothing — so the poisoned link is still there after.
             render_and_warn(&context, &ctx, &render_groups, &platform, true).await;
             return run_dry_run(&context, &pinned, platform).await;
         }
 
         let identifiers: Vec<ocx_oci::PackageRef> = pinned.iter().cloned().map(Into::into).collect();
 
-        // ── Phase 5: pull + report ───────────────────────────────────────
-
-        // The lazy split. This command composes nothing, so `always` changes
-        // *what* is pre-warmed: a deferred tool gets its metadata closure and
-        // its generated launchers, and no content. Deliberately NOT routed
-        // through `compose_roots`: the eager half here is `pull_all`, the
-        // pre-warm primitive, not the find-or-install a composing command runs.
-        //
-        // `pull_all` short-circuits on an empty slice (returns `Ok(vec![])`),
-        // so an unmatched group filter or an empty lock both exit 0 with
-        // an empty report — there is nothing to pre-warm, that is not a
-        // failure.
         let mut modes: Vec<ocx_project::lazy::LazyMode> = Vec::with_capacity(identifiers.len());
         for (tool, identifier) in selected.iter().zip(identifiers.iter()) {
             modes.push(lazy_mode_for_tool(
@@ -171,21 +113,14 @@ impl Pull {
             .manager()
             .pull_all(&eager, platform.clone(), context.concurrency())
             .await?;
-        // Keyed rather than positional: the report walks `identifiers`, which
-        // interleaves both halves, so a positional cursor into the eager
-        // results would depend on `pull_all` returning exactly one entry per
-        // input — a guarantee worth reading off the data instead of asserting.
+        // Keyed, not positional: nothing guarantees `pull_all` returns exactly one entry per input.
         let eager_paths: std::collections::HashMap<&ocx_oci::PackageRef, &_> = eager.iter().zip(info.iter()).collect();
 
-        // Both halves, in lock order, so the report stays a single ordered walk
-        // over `identifiers`.
         let mut warmed: Vec<api::data::warmed_paths::WarmedPath> = Vec::with_capacity(identifiers.len());
         let mut advisories: Vec<ocx_package_manager::LazyAdvisory> = Vec::new();
         for (identifier, mode) in identifiers.iter().zip(modes.iter()) {
             let entry = if *mode == ocx_project::lazy::LazyMode::Never {
-                // A pre-warm that produced no result for an identifier it was
-                // handed is a bug in `pull_all`, not something to report a
-                // fabricated path for — skip it rather than guess.
+                // A missing result is a `pull_all` bug; skipped rather than reported with a fabricated path.
                 let Some(info) = eager_paths.get(identifier) else {
                     continue;
                 };
@@ -204,18 +139,12 @@ impl Pull {
                             ocx_package_manager::error::PackageError::new(identifier.clone(), kind),
                         ])
                     })?;
-                // Both channels, never one: stderr is the human read of a
-                // warning, and `--format json` is the machine read C-015 asks
-                // for. A producer that only warned would put this command's
-                // advisories out of reach of the tooling ocx is a backend for,
-                // while its `ocx env` twin serialized the identical fact.
+                // Both channels, as `ocx env` does: stderr for humans, `--format json` for tooling.
                 for advisory in &prepared.advisories {
                     context.ui().warn(advisory.to_string());
                 }
                 advisories.extend(prepared.advisories);
-                // The shim directory, not the package directory: this run
-                // created the former and did not create the latter, and a
-                // machine-read `path` must name what exists.
+                // The shim directory: this run did not create the package directory.
                 api::data::warmed_paths::WarmedPath {
                     package: identifier.to_string(),
                     path: prepared.shim.root().to_path_buf(),
@@ -225,11 +154,7 @@ impl Pull {
             warmed.push(entry);
         }
 
-        // Re-save the lock with same bytes to advance its mtime, so direnv
-        // re-fires after a successful pull. The `tools_content_equal` guard
-        // inside `ProjectLock::save` freezes `generated_at` when content is
-        // unchanged — atomic rename still advances mtime. Skipped under
-        // `--dry-run` because dry-run must not cause any side effects.
+        // Re-saved byte-identical to advance the mtime so direnv re-fires; never under `--dry-run`.
         ctx.lock
             .save(
                 &ctx.lock_path,
@@ -239,9 +164,7 @@ impl Pull {
             )
             .await?;
 
-        // C-054 — the whole-compose pass, after the roots this invocation
-        // selected have resolved and after the lock's mtime bump, so the render
-        // stamp is the last thing written.
+        // After the lock re-save, so the render stamp is the last thing written.
         render_and_warn(&context, &ctx, &render_groups, &platform, false).await;
 
         let paths = api::data::warmed_paths::WarmedPaths::new(warmed)
@@ -252,16 +175,11 @@ impl Pull {
     }
 }
 
-/// Resolve a locked tool to its host-platform pull [`ocx_oci::PinnedPackageRef`].
+/// Resolves a locked tool to its host-platform pinned pull identifier.
 ///
-/// Delegates the V1/V2 host-leaf resolution to
-/// [`ocx_project::host_leaf_identifier`] — the single source of the
-/// absent-host-leaf error ([`ProjectErrorKind::NoHostLeaf`], exit 78) — then
-/// asserts the resolved identifier is digest-pinned via `try_into`. The
-/// `ProjectError` is converted to `anyhow::Error` so the chain still classifies
-/// at the `main.rs` boundary.
+/// # Errors
 ///
-/// [`ProjectErrorKind::NoHostLeaf`]: ocx_project::error::ProjectErrorKind::NoHostLeaf
+/// `ProjectErrorKind::NoHostLeaf` (exit 78) when the lock has no leaf for `host`.
 fn host_pull_pinned(
     tool: &ocx_project::LockedTool,
     host: &ocx_oci::Platform,
@@ -275,18 +193,9 @@ fn host_pull_pinned(
     })
 }
 
-/// Which groups this invocation's render covers (C-045, RUL-25).
-///
-/// A bare `ocx pull` is a **whole-home** pass: every group the lock declares,
-/// plus the default group unconditionally. The unconditional default is what
-/// makes `bin/` reconcilable when the lock declares nothing there — a lock whose
-/// last default-group tool was dropped by a hand edit would otherwise keep its
-/// trampolines forever, since the only group set derived from it is empty.
-///
-/// `-g` narrows, and narrowing away the default group leaves `bin/` **entirely
-/// untouched** rather than emptied (RUL-25): reconciling it would force the
-/// default group's metadata to resolve, growing a network dependency the user
-/// did not ask for.
+/// The groups this render covers: `-g` expanded, else every lock group plus the default group
+/// unconditionally, or `bin/` stops reconciling once a hand edit drops the last default-group tool.
+/// A `-g` without the default group leaves `bin/` untouched, since reconciling it needs the network.
 fn render_groups(selected: &[String], project: &crate::app::project_context::ProjectContext) -> Vec<String> {
     if !selected.is_empty() {
         return expand_all_keyword(selected, &project.config);
@@ -300,33 +209,10 @@ fn render_groups(selected: &[String], project: &crate::app::project_context::Pro
     groups
 }
 
-/// Render, then say on **stderr** what the render could not do (C-050, RUL-53).
+/// Renders the toolchain home and warns on stderr about what the render could not do.
 ///
-/// A render outcome is never `ocx pull`'s exit code. The command's product is a
-/// warmed object store, and it is finished before this runs; a read-only
-/// checkout, a foreign-owned `.ocx/`, or a metadata closure this offline
-/// invocation cannot walk are all states where warming still succeeded. Failing
-/// the pull over the tree would refuse a command whose work already landed.
-///
-/// stderr, via the user interface, and never stdout: `--quiet` and
-/// `OCX_QUIET` are contracts about the *payload*, and a warning is not one.
-///
-/// # What is here and what is in the library
-///
-/// The **sink** and the offline-quiet degradation are `ocx pull`'s alone — this
-/// command has a user interface and the four mutation commands do not (RUL-53).
-/// Everything else is [`PackageManager::render_home`](ocx_package_manager::PackageManager::render_home),
-/// which is D-V8 applied to the render half: `ocx pull` is the command D4 names
-/// the *primary* render trigger, so a second `RenderRequest` producer here
-/// would be the one out of reach of every non-CLI consumer and of unit test —
-/// on the exact contract `RenderRequest::surface`'s own doc says its type
-/// cannot express.
-///
-/// `groups` is what the invocation selected (C-045) and `dry_run` is S-007's
-/// flag; `pinned` resolves through the shared ladder with `None` for the `cli`
-/// tier, because `ocx pull` declares no `--pinned` (C-066, RUL-72) — the flag
-/// is inert on the tree, so an override here would read as if it changed
-/// something.
+/// Never the exit code, or a read-only checkout or an unwalkable offline closure fails a pull that
+/// already landed; stderr, since `--quiet` is a contract about the payload, not a warning.
 async fn render_and_warn(
     context: &crate::app::Context,
     project: &crate::app::project_context::ProjectContext,
@@ -357,9 +243,7 @@ async fn render_and_warn(
                 context.ui().warn(line);
             }
         }
-        // Quiet under `--offline`: a store that has never been warmed cannot
-        // resolve a surface, and that is the ordinary state there rather than a
-        // fault worth a line on every prompt.
+        // Debug-only under `--offline`, where an unwarmed store failing to resolve is the ordinary state.
         Err(error) if context.manager().is_offline() => {
             log::debug!("The toolchain home was not rendered: {error:#}");
         }
@@ -369,22 +253,12 @@ async fn render_and_warn(
     }
 }
 
-/// Walks `pinned` and reports cached / would-fetch status without
-/// modifying the store. Resolution mirrors `pull_all`'s first steps:
-/// resolve each identifier through the index chain (local-first, with
-/// the configured remote behind it), then probe `find_plain` on the
-/// resolved digest. The lock holds the image-index digest; the store
-/// keys by platform-manifest digest, so a direct `find_plain(lock.pinned)`
-/// would miss every multi-platform package — descending through `resolve`
-/// keeps dry-run aligned with what the real pull would short-circuit on.
-///
-/// Resolution failures (network errors when the local index is cold)
-/// surface as `would-fetch` rather than aborting the preview, so a stale
-/// or partial cache still produces a useful report.
-/// One dry-run probe result: the cached / would-fetch status plus the resolved
-/// object-store path when the package is already present.
+/// One dry-run probe: cached / would-fetch, plus the store path when present.
 type DryRunProbe = (api::data::pull_dry_run::PullStatus, Option<std::path::PathBuf>);
 
+/// Reports cached / would-fetch per pinned id without writing the store; a resolution failure
+/// reads as would-fetch. Resolves before `find_plain`, since the lock pins the image index and the
+/// store keys by platform manifest, so a direct probe misses every multi-platform package.
 async fn run_dry_run(
     context: &crate::app::Context,
     pinned: &[ocx_oci::PinnedPackageRef],
@@ -392,11 +266,7 @@ async fn run_dry_run(
 ) -> anyhow::Result<ExitCode> {
     use api::data::pull_dry_run::{DryRunEntry, PullDryRun, PullStatus};
 
-    // Fan out one resolve + probe per pinned id, tagged with its input index.
-    // `resolve` hits the index (network on a cold cache), so a sequential loop
-    // is an O(n) round-trip chain — the real pull already fans out via
-    // `pull_all`, so the preview must too. Same index-tagged JoinSet shape as
-    // `ocx package description pull` and `index update`.
+    // Fanned out: `resolve` hits the network on a cold cache, so a sequential loop chains n round trips.
     let mut join_set: tokio::task::JoinSet<(usize, anyhow::Result<DryRunProbe>)> = tokio::task::JoinSet::new();
     for (index, id) in pinned.iter().enumerate() {
         let manager = context.manager().clone();
@@ -421,8 +291,7 @@ async fn run_dry_run(
         });
     }
 
-    // Place successes by index; collect failures with their index so the
-    // input-order-first error is the one surfaced (deterministic exit code).
+    // Failures keep their input index, so the surfaced error and exit code are deterministic.
     let mut slots: Vec<Option<DryRunProbe>> = (0..pinned.len()).map(|_| None).collect();
     let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
     while let Some(joined) = join_set.join_next().await {
@@ -474,8 +343,8 @@ mod tests {
         );
     }
 
-    /// A second `--platform` occurrence is a usage error (D4 of
-    /// `adr_platform_model_unification.md`).
+    /// A second `--platform` occurrence is a usage error
+    /// (`adr_platform_model_unification.md`).
     #[test]
     fn rejects_repeated_platform_flag() {
         assert!(
@@ -491,13 +360,13 @@ mod tests {
         assert_eq!(pull.groups, vec!["all".to_owned()]);
     }
 
-    // ── RUL-54 — `--dry-run` stays `ocx pull`-only ───────────────────────────
+    // ── `--dry-run` stays `ocx pull`-only ─────────────────────────────────
 
-    /// The four mutation commands C-054 routes through the shared
-    /// `commit_and_render`. None of them grows a `--dry-run` implicitly by
-    /// coming through it (RUL-54): a dry run of a *mutation* would have to
-    /// decide what "wrote nothing" means for `ocx.toml` and `ocx.lock` as well
-    /// as for the tree, and no contract says.
+    /// The four mutation commands route through the shared
+    /// `commit_and_render`, but none of them grows a `--dry-run` implicitly
+    /// by coming through it: a dry run of a *mutation* would have to decide
+    /// what "wrote nothing" means for `ocx.toml` and `ocx.lock` as well as
+    /// for the tree, and no contract says.
     const MUTATION_COMMANDS: [(&[&str], &[&str]); 4] = [
         (&["add"], &["example.com/cmake:1.0.0"]),
         (&["remove"], &["cmake"]),
@@ -505,7 +374,7 @@ mod tests {
         (&["update"], &[]),
     ];
 
-    /// RUL-54 — `--dry-run` is `ocx pull`'s alone.
+    /// `--dry-run` is `ocx pull`'s alone.
     ///
     /// `UnknownArgument`, not merely "an error": that is what separates "there
     /// is no such flag here" from "this invocation was rejected for some other

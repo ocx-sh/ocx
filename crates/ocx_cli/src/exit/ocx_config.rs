@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the config, env, TLS-trust-material and managed-config error family — the `ocx_config` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_config` error family.
 
 use ocx_exit::ExitCode;
 
@@ -24,17 +23,7 @@ use ocx_package_manager::managed_config::ManagedConfigPublishError;
 use super::{ClassifyExitCode, downcast_arm};
 
 impl ClassifyExitCode for ToolchainRootError {
-    /// Exhaustive on purpose, with no wildcard: a refusal added later cannot
-    /// reach a user as an unclassified exit code without a decision here. Every
-    /// variant is 78 today — the operator's remedy is always to edit a
-    /// `toolchain_dir` value — but the match, not a blanket `Some`, is what
-    /// makes that a statement rather than an accident (D-V15(e)).
-    ///
-    /// Reachable from the CLI only through
-    /// [`config::error::Error::Toolchain`](ocx_config::error::Error), which
-    /// `crate::exit::classify` already downcasts. Deleting that variant leaves this impl
-    /// intact and flips the process exit from 78 to 1 — the mutation that
-    /// separates "classified" from "reachable".
+    /// Exhaustive, not a blanket `Some`, so a new refusal cannot ship unclassified.
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::Unexpandable { .. }
@@ -55,41 +44,16 @@ impl ClassifyExitCode for ToolchainRootError {
 
 impl ClassifyExitCode for ListSeparatorError {
     fn classify(&self) -> Option<ExitCode> {
-        // Declarations that cannot be honoured as written — malformed input,
-        // the same class as every other env-declaration refusal.
         Some(ExitCode::DataError)
     }
 }
 
 impl ClassifyExitCode for CommandResolutionError {
-    /// An **exhaustive match with no wildcard arm** (D-V15), copying the shape
-    /// of `ocx_lib::Error::classify`.
-    ///
-    /// It was a blanket `Some(DataError)`. Under a blanket, a variant added
-    /// later is silently 65 and **no test can catch it** — the wrong answer and
-    /// the right one are the same bytes. Under an exhaustive match, adding a
-    /// variant is a compile error until somebody classifies it. Every arm
-    /// happening to yield the same code today is not a reason to collapse them:
-    /// the match is a gate on the *decision*, not a dispatch table.
-    ///
-    /// This type is already registered in `crate::exit::classify`; the arms
-    /// below are the whole classification and nothing needs re-registering.
+    /// Keep exhaustive even though every arm is 65: a blanket `Some` would classify a new variant silently, and no test can tell.
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Parity with `BinScanError::DeclaredNotExecutable`: the package's
-            // own content contradicts what it claims to ship — malformed input
-            // data, not a usage error and not a config fault.
             Self::NotExecutable { .. } => Some(ExitCode::DataError),
-            // C-057/S-010: a name the composition does not provide is bad input
-            // data, the same class as a package claiming a binary it omits.
-            // Not `Failure` (1) — the caller can tell a missing tool from a
-            // crashed one — and not `Usage` (64), because the argv was
-            // well-formed; it is the *environment* that lacks the name.
             Self::NotFound { .. } => Some(ExitCode::DataError),
-            // C-069. Same code as its siblings on purpose: the exit code
-            // classifies the *class* of failure, and the guard identity lives
-            // in the message and the variant, which is where the item-22 test
-            // asserts which guard fired.
             Self::TrampolineRefused { .. } => Some(ExitCode::DataError),
         }
     }
@@ -97,9 +61,6 @@ impl ClassifyExitCode for CommandResolutionError {
 
 impl ClassifyExitCode for ForwardedEnvError {
     fn classify(&self) -> Option<ExitCode> {
-        // Every variant means the forwarded payload was malformed, truncated or
-        // forged — input data that failed validation, not a config-file fault
-        // and not a usage error (no user typed it).
         Some(ExitCode::DataError)
     }
 }
@@ -107,10 +68,7 @@ impl ClassifyExitCode for ForwardedEnvError {
 impl ClassifyExitCode for ManagedConfigFetchError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Network/auth failures delegate to the inner OCI client error's
-            // classification (Unavailable 69 / AuthError 80 / etc.).
             Self::FetchFailed { source } => source.classify(),
-            // Shape mismatches are malformed registry data.
             Self::UnexpectedManifest { .. }
             | Self::NoAnyPlatformEntry
             | Self::NoGzipLayer
@@ -147,7 +105,6 @@ impl ClassifyExitCode for ManagedConfigUpdateError {
 impl ClassifyExitCode for ManagedConfigPublishError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Payload rejections are operator config mistakes.
             Self::PayloadTooLarge { .. }
             | Self::InvalidToml { .. }
             | Self::ContainsManagedSection
@@ -156,17 +113,11 @@ impl ClassifyExitCode for ManagedConfigPublishError {
             | Self::ManagedConfigKeyByPath
             | Self::TrustedRootInvalid { .. }
             | Self::ExtraCaCertsPemInvalid { .. } => Some(ExitCode::ConfigError),
-            // The third door onto one refusal: a payload naming a recognised
-            // but unimplemented backend is "upgrade ocx", not "your config is
-            // malformed", and `--key` plus the local config tiers both already
-            // answer 85 for the identical value.
+            // Parity with `--key` and the local config tiers, which answer 85 for the same value.
             Self::InvalidTrustPolicy { source } if source.names_unsupported_backend() => {
                 Some(ExitCode::UnsupportedKeyBackend)
             }
             Self::InvalidTrustPolicy { .. } => Some(ExitCode::ConfigError),
-            // Content that fails C-004 (wrong PEM tag, empty, malformed) is a
-            // data error, not a config error — see the variant doc comment
-            // for why this deliberately diverges from `TrustedRootInvalid`.
             Self::ExtraCaCertsInvalid { .. } | Self::ExtraCaCertsNotUtf8 { .. } => Some(ExitCode::DataError),
             Self::ReadFailed { source, .. }
             | Self::TrustedRootReadFailed { source, .. }
@@ -176,11 +127,7 @@ impl ClassifyExitCode for ManagedConfigPublishError {
                 _ => ExitCode::IoError,
             }),
             Self::StageFailed { .. } => Some(ExitCode::IoError),
-            // Registry/bundling failures delegate to the inner cause's own
-            // classification (Unavailable 69 / AuthError 80 / …). Explicit
-            // delegation, not `None`: the boxed source's `TypeId` is
-            // `Box<ocx_lib::Error>`, which the chain walker's downcast ladder
-            // would never match.
+            // Delegated explicitly: a boxed source never downcasts in the chain walker.
             Self::BundleFailed { source } | Self::ListTagsFailed { source, .. } | Self::PushFailed { source } => {
                 source.classify()
             }
@@ -191,14 +138,9 @@ impl ClassifyExitCode for ManagedConfigPublishError {
 impl ClassifyExitCode for EditError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            // The loader refuses the same over-size file as a config error,
-            // and an edit that would produce one is the same refusal earlier.
             Self::TooLarge { .. } => ExitCode::ConfigError,
-            // The ADR's lock-timeout row: the holder is another ocx, and it
-            // will be gone on the retry (`adr_file_lock_unification.md`).
+            // `adr_file_lock_unification.md`: the holder is another ocx, gone on retry.
             Self::Locked { .. } => ExitCode::TempFail,
-            // One code for "the edit did not happen" (C-051): the read, the
-            // parse and the write it sits between are all the file's fault.
             Self::Io { .. } | Self::Parse { .. } | Self::Malformed { .. } => ExitCode::IoError,
         })
     }
@@ -208,17 +150,12 @@ impl ClassifyExitCode for ConfigError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::FileNotFound { .. } => ExitCode::NotFound,
-            // `SystemConfig` is 78, not the 74 its sibling `Io` takes: the
-            // operator fixes it by editing (or un-symlinking) a policy file,
-            // the same remediation a malformed one needs.
             Self::FileTooLarge { .. }
             | Self::Parse { .. }
             | Self::SystemConfig { .. }
             | Self::AmbiguousExtraCaCerts { .. } => ExitCode::ConfigError,
             Self::Io { .. } => ExitCode::IoError,
-            // Delegated, not restated: every `toolchain_dir` refusal is 78
-            // today, but duplicating that mapping here is how the two would
-            // silently disagree once one of them changes.
+            // Delegated, not restated as 78, or the two mappings drift apart silently.
             Self::Toolchain(refusal) => return refusal.classify(),
         })
     }
@@ -230,18 +167,12 @@ impl ClassifyExitCode for ManagedConfigError {
     }
 }
 
-/// Every variant is a malformed `[mirrors]` tier — a config fault whether it
-/// arrived from a config file or the forwarded `OCX_MIRRORS` env value. The
-/// plain-HTTP refusal included: the entry is well-formed but the operator has
-/// not allowed the transport it asks for, which is theirs to fix in config.
 impl ClassifyExitCode for MirrorConfigError {
     fn classify(&self) -> Option<ExitCode> {
         Some(ExitCode::ConfigError)
     }
 }
 
-/// Every variant is a malformed `[patches]` tier — a config fault whether it
-/// arrived from a config file or the forwarded `OCX_PATCHES` env value.
 impl ClassifyExitCode for PatchConfigError {
     fn classify(&self) -> Option<ExitCode> {
         Some(ExitCode::ConfigError)
@@ -249,12 +180,6 @@ impl ClassifyExitCode for PatchConfigError {
 }
 
 impl ClassifyExitCode for TlsError {
-    /// C-010: a file the operator named that this process could not use as
-    /// given is 74 (`Unreadable`, and `TooLarge` from a file — parity with
-    /// `[trust.sigstore]`'s `trust_resolve.rs`); content refused from a file
-    /// is the file's data being wrong, 65; the same refusal from inline text
-    /// (the env value, `extra_ca_certs_pem`) is the configuration itself
-    /// being wrong, 78.
     fn classify(&self) -> Option<ExitCode> {
         let code = match self {
             Self::Unreadable { .. } => ExitCode::IoError,

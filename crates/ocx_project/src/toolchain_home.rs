@@ -1,20 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Resolving a **project's** toolchain home root (C-002, D-V10).
-//!
-//! The tree's grammar is not here: [`ToolchainHome`] and its validation live
-//! in [`file_structure`](ocx_store::file_structure), because `project::consent`
-//! already reads [`StateStore`](ocx_store::file_structure::StateStore) and the
-//! reverse import would close a `use` cycle on the crate's foundational
-//! layer. That cycle would still *compile* — Rust module graphs may be cyclic
-//! within one crate — so the reason is layering plus the planned `ocx_lib`
-//! split, where a `use` cycle does not compile across a crate boundary
-//! ([ocx-sh/ocx#313](https://github.com/ocx-sh/ocx/issues/313)); the qualifier
-//! matters so a reader still recognises a genuine cross-crate cycle when they
-//! meet one. What *is* project domain is the keying — which project a home
-//! belongs to, and the file-first canonicalisation that answers it — so that
-//! is what this module owns.
+//! Resolving a project's toolchain home root.
 
 use std::path::Path;
 
@@ -22,77 +9,30 @@ use ocx_config::ToolchainRoot;
 use ocx_store::file_structure::ToolchainHome;
 use ocx_store::reference_manager::ReferenceManager;
 
-/// Resolve the toolchain home for the project rooted at `project_dir`
-/// (C-002, D-V10).
+/// Resolve the project's toolchain home: `<project_dir>/.ocx/toolchain`, or
+/// `<root>/<project-key>/toolchain` under a `toolchain_root`. Blocking.
 ///
-/// - `toolchain_root` absent → `<project_dir>/.ocx/toolchain`.
-/// - `toolchain_root` present → `<root>/<project-key>/toolchain`, where
-///   `<project-key>` is
-///   [`ReferenceManager::name_for_path`](ocx_store::reference_manager::ReferenceManager::name_for_path)
-///   over the canonical project **directory** — the same 16-hex key the
-///   `projects/` GC ledger and `state/projects/<key>/` already use.
-///
-/// The global home is not resolved here: it is
-/// [`FileStructure::toolchain`](ocx_store::file_structure::FileStructure), a field
-/// built once in `with_root`, and it ignores `toolchain_dir` entirely (C-016).
-///
-/// # Why this takes [`ToolchainRoot`] and not a path or a `&Config` (D-V10, R-W20)
-///
-/// Taking the whole `Config` would ship a branch that is permanently `None` for
-/// as long as no tier declares one, and is wider than this needs: one root,
-/// never the whole config.
-///
-/// Taking a bare `Option<&Path>` is the shape R-W20 records as a **compile-legal
-/// bypass**: `Config::toolchain_dir()` yields exactly that, so feeding one
-/// straight to the other type-checked and skipped every C-017–C-019 refusal.
-/// [`ToolchainRoot`] is constructible only by [`ToolchainRoot::resolve`], so an
-/// unvalidated path is now unspellable here — the funnel is closed by the type,
-/// not by a doc comment.
-///
-/// # Precondition on `project_dir` (D-V13)
-///
-/// `project_dir` must be the output of the shipped **file-first**
-/// canonicalisation — canonicalize the project *file*, take `.parent()`, then
-/// `dunce::canonicalize` — i.e. exactly what
-/// [`consent::canonical_project_dir`](crate::consent::canonical_project_dir)
-/// produces. Canonicalizing the directory instead is not the same derivation:
-/// a symlinked `ocx.toml` would key the home under the victim directory rather
-/// than under the file's real one, which is the defect that derivation exists
-/// to close, and on Windows the two spellings do not even produce the same
-/// string.
-///
-/// The implementation canonicalizes defensively anyway, so it is idempotent on
-/// an already-canonical input; the precondition is what makes the key **equal**
-/// to the consent key rather than merely well-formed, and a unit test asserts
-/// that parity.
-///
-/// Blocking: one filesystem resolution. Async callers wrap it in
-/// `spawn_blocking` — the same note, for the same reason, as
-/// [`consent::canonical_project_dir`](crate::consent::canonical_project_dir),
-/// which `activation.rs` wraps *because* the note is there.
+/// `project_dir` must be [`consent::canonical_project_dir`](crate::consent::canonical_project_dir)'s
+/// output, or a symlinked `ocx.toml` keys under the victim directory.
 ///
 /// # Errors
 ///
-/// The canonicalisation's own I/O failure, with the offending path attached.
+/// The canonicalisation's I/O failure, with the path attached.
 pub fn resolve_toolchain_home(
     project_dir: &Path,
+    // `ToolchainRoot`, not a bare path: a path would skip every
+    // `ToolchainRoot::resolve` refusal.
     toolchain_root: Option<&ToolchainRoot>,
 ) -> crate::Result<ToolchainHome> {
-    // `dunce::canonicalize`, never bare `std::fs::canonicalize`: the latter
-    // yields a `\\?\` verbatim path on Windows, whose bytes hash to a different
-    // key than every shipped producer's — the consent stamp and the `projects/`
-    // ledger both key on the `dunce` form. Canonicalizing at all is what makes
-    // `/w/proj` and `/w/proj/`, and a symlinked checkout and its target, resolve
-    // to one home; `name_for_path` hashes raw path bytes and would key each
-    // spelling separately.
+    // Canonicalized because `name_for_path` hashes raw bytes; `dunce`, not
+    // `std`, or a Windows `\\?\` path keys apart from the consent stamp and ledger.
     let canonical =
         dunce::canonicalize(project_dir).map_err(|e| crate::Error::InternalFile(project_dir.to_path_buf(), e))?;
 
     let root = match toolchain_root {
         None => canonical.join(".ocx").join("toolchain"),
-        // `<key>` first and `toolchain` second, never the reverse: the reverse
-        // order would land every project's tree inside a directory
-        // indistinguishable from a group directory (R-W1's data-loss path).
+        // `<key>` before `toolchain`: the reverse order collides with a group
+        // directory and loses data.
         Some(root) => root
             .as_path()
             .join(ReferenceManager::name_for_path(&canonical))

@@ -1,18 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Typed Starlark wrapper for [`Platform`].
-//!
-//! Exposed to scripts as the `ocx.target_platform` attribute (no parens) with
-//! three attributes of its own:
-//!
-//! - `p.is_any` — `bool`, `true` when the package is platform-agnostic
-//!   (`Platform::Any`); `False` for `Platform::Specific`.
-//! - `p.os` — [`OsValue`] for `Specific`, `None` for `Any`.
-//! - `p.arch` — [`ArchValue`] for `Specific`, `None` for `Any`.
-//!
-//! Follows the `T | None` + companion `is_*` convention codified in
-//! `subsystem-script.md` (no tagged-union types).
+//! Typed Starlark wrapper for [`Platform`], exposed as `ocx.target_platform`.
 
 use std::fmt;
 
@@ -27,9 +16,6 @@ use super::os_value::OsValue;
 use ocx_oci::Platform;
 
 /// Starlark-facing wrapper around an OCX [`Platform`].
-///
-/// `Allocative` is implemented manually (see [`super::os_value::OsValue`] for
-/// the rationale).
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize)]
 pub(super) struct PlatformValue {
     pub(super) is_any: bool,
@@ -47,10 +33,7 @@ impl PlatformValue {
     /// Starlark type tag (the result of `type()` in a script).
     pub(super) const TYPE: &'static str = "Platform";
 
-    /// Projects an OCX [`Platform`] into the typed Starlark wrapper. The
-    /// optional CPU `variant` / feature lists are not exposed in v1 — they
-    /// exist on the OCX `Platform` for OCI manifest fidelity, but a test
-    /// script that reads `p.os` / `p.arch` is the v1 contract.
+    /// Projects an OCX [`Platform`]; its CPU variant and feature lists are not exposed.
     pub(super) fn from_platform(p: &Platform) -> Self {
         match p {
             Platform::Any => Self {
@@ -68,15 +51,11 @@ impl PlatformValue {
 }
 
 impl fmt::Display for PlatformValue {
-    /// Mirrors [`Platform`]'s `Display`: `"any"` for the sentinel,
-    /// `"os/arch"` for the populated form.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.is_any, self.os, self.arch) {
             (true, _, _) => write!(f, "any"),
             (false, Some(os), Some(arch)) => write!(f, "{os}/{arch}"),
-            // Defensive: a non-any PlatformValue without os/arch is unreachable
-            // (from_platform never builds it), but render something legible
-            // rather than panic in a Display impl.
+            // Unreachable via `from_platform`; renders rather than panicking in `Display`.
             (false, _, _) => write!(f, "any"),
         }
     }
@@ -105,18 +84,13 @@ impl<'v> StarlarkValue<'v> for PlatformValue {
 }
 
 impl<'v> AllocValue<'v> for PlatformValue {
-    /// Allocates via `alloc_simple`: the value holds no heap pointers
-    /// (`Option<OsValue>` / `Option<ArchValue>` are plain Rust data with no
-    /// borrowed `Value`s), so the simple path is correct — no `Trace` impl
-    /// needed.
+    // `alloc_simple` is sound only while the value holds no `Value` pointers; add one and it needs `Trace`.
     fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
 
 impl AllocFrozenValue for PlatformValue {
-    /// Required so the per-run `ocx.target_platform` attribute can be set
-    /// as a frozen value in the `ocx` namespace during globals build.
     fn alloc_frozen_value(self, heap: &FrozenHeap) -> FrozenValue {
         heap.alloc_simple(self)
     }

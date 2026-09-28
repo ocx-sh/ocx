@@ -1,71 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The instant certificate validity is judged against, and where it came from.
+//! The instant certificate validity is judged against, tagged with the evidence it came from.
 //!
-//! # Carried constraint from G0 — read before touching verification time
-//!
-//! Verification anchors certificate validity to the **signing-time proof**,
-//! never to a wall-clock "is this certificate valid right now". A Fulcio
-//! certificate is short-lived *by design*: G0's keyless golden fixture
-//! (`test/tests/fixtures/golden/keyless_bundle.json`) carries one whose window
-//! is `02:07:54Z .. 02:17:54Z` — ten minutes, long elapsed by the time anyone
-//! verifies. A clock-reading check refuses that legitimately signed artifact,
-//! and every keyless signature older than an hour with it. The transparency-log
-//! timestamp is the only evidence that the signature happened while the
-//! certificate was live, which is why it, and not the clock, is the anchor.
-//!
-//! [`SigningInstant`] exists so a later edit cannot lose that rule by passing
-//! the wrong number into an `i64` parameter: the argument names its own
-//! provenance, and the type offers **no constructor that reads a clock** — no
-//! `Default`, no `From<SystemTime>`, nothing spelling "the present".
-//!
-//! # One variant, and that is the contract
-//!
-//! [`SigningInstant::TransparencyLog`] is a log entry's `integratedTime`,
-//! SET-checked before it reaches the window check — on the bundle path by
-//! [`super::pipeline`]'s `verify_rekor_set` (SET **and** inclusion proof), on
-//! the cosign sidecar path by [`super::simplesigning_read`] over the
-//! `dev.sigstore.cosign/bundle` annotation (SET only, which is all cosign's
-//! offline bundle carries).
-//!
-//! It used to have a sibling, `CallerSupplied`, and the sibling is why this
-//! paragraph exists. G1 froze it as the *legal* no-transparency-log shape:
-//! [`super::simplesigning_read`] passed the leaf certificate's own `notBefore`,
-//! reasoning that a sidecar carrying no log entry has no signing instant to
-//! discriminate against. That is circular — it asks the certificate when it was
-//! valid, then checks the certificate against its own answer, so the window
-//! check can never fail — and it reached further than it looked, because the
-//! synthesised entry handed to `sigstore` carried the same value and anchored
-//! that library's chain build *and* its expiry check on it too. Net effect: a
-//! Fulcio leaf valid for ten minutes a year ago verified for ever, and a
-//! later-revoked identity was undetectable. The contract is reversed: a keyless
-//! simplesigning sidecar verifies **only** with transparency-log evidence, and
-//! the variant is deleted rather than left reachable-in-name-only.
-//!
-//! The one place a certificate's `notBefore` still reaches `sigstore` is under
-//! the explicit `--allow-unlogged-signature` opt-out, where the library demands
-//! *some* entry to hold a bundle together; it is a bare `i64` there, is never
-//! spelled as a signing instant, and the window check this module guards is
-//! **skipped** rather than fed a value nothing proved.
-//!
-//! The guard that consumes this lives in [`super::tlog`]; the invariant that
-//! nothing on the verify path reads a clock for validity is pinned by
-//! `tests::the_certificate_validity_path_reads_no_clock`.
+//! Add no constructor that reads a clock (`Default`, `From<SystemTime>`): a Fulcio certificate lives ten minutes,
+//! so a wall-clock check refuses every keyless signature older than that
+//! (`tests::the_certificate_validity_path_reads_no_clock`).
+//! Add no `notBefore`-derived variant: judging the leaf against its own `notBefore` never fails, so an expired leaf
+//! verifies forever.
 
-/// The instant a certificate's validity window is judged against, tagged with
-/// the evidence it came from.
-///
-/// Deliberately **not** constructible from the present. See the module doc.
+/// The instant a certificate's validity window is judged against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SigningInstant {
-    /// A transparency-log entry's `integratedTime`, in seconds since the Unix
-    /// epoch. The SET over it is what makes it a *proof* of signing time.
+    /// A SET-checked transparency-log `integratedTime`, in Unix seconds.
     TransparencyLog(i64),
 }
 
 impl SigningInstant {
-    /// Seconds since the Unix epoch, whichever evidence supplied them.
+    /// Seconds since the Unix epoch.
     pub(super) const fn epoch_seconds(self) -> i64 {
         match self {
             Self::TransparencyLog(seconds) => seconds,

@@ -1,36 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Publish leg for the managed-config tier — `ocx config push`.
-//!
-//! Managed config is published as an **ordinary ocx package** whose content
-//! is a single `config.toml` file (managed-config v2, ADR
-//! `adr_managed_config_tier.md` v2 amendment). No custom artifact type, no
-//! parallel publish subsystem: the payload is staged as `config.toml`,
-//! bundled via [`ocx_package::bundle::BundleBuilder`] (tar+gzip), given a
-//! synthesized minimal bundle metadata, and pushed through the existing
-//! [`ocx_package::publisher::Publisher`] — so versioning, cascade tags, rollback
-//! and variants all reuse the package machinery.
-//!
-//! | Function | Concerns | Testable |
-//! |---|---|---|
-//! | [`validate_managed_config_payload`] | Pure: size cap, TOML parse as [`ocx_config::Config`], `[managed]` rejection, `[trust.sigstore]` XOR, `extra_ca_certs`/`extra_ca_certs_pem` XOR | Unit-testable with synthetic bytes |
-//! | [`inline_trusted_root`] | Pure: rewrite a path-form `trusted_root` into `trusted_root_json` | Unit-testable with synthetic text |
-//! | [`declared_extra_ca_certs`] | Pure: the path-form `extra_ca_certs` a payload declares, if any | Unit-testable with synthetic text |
-//! | [`inline_extra_ca_certs`] | Pure: rewrite a path-form `extra_ca_certs` into `extra_ca_certs_pem` | Unit-testable with synthetic text |
-//! | [`guard_inlined_payload_size`] | Pure: re-check the post-inline payload against [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`] | Unit-testable with synthetic bytes |
-//! | [`read_candidate_payload`] | I/O: the bounded candidate read `config push` and `config test` share | Unit-testable with a FIFO and an oversize file |
-//! | [`publish_managed_config`] | I/O + network: read the trust root and the CA bundle, stage, bundle, push (cascade-aware) | Acceptance test |
-//!
-//! ## Why the trust root is inlined at publish time
-//!
-//! `[trust.sigstore] trusted_root = "…"` names a path on the **operator's**
-//! machine. A fleet adopting the published payload has no such file, and the
-//! loader deliberately ignores a path-form `trusted_root` arriving from the
-//! managed tier — so publishing one unchanged would ship a silently inert
-//! trust root. [`publish_managed_config`] therefore reads the file, proves it
-//! parses as a Sigstore trusted root, and republishes it as the self-contained
-//! `trusted_root_json` string the fleet can actually consume.
+//! Publish leg for the managed-config tier — `ocx config push`: one `config.toml`
+//! as an ordinary package (`adr_managed_config_tier.md` v2 amendment).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -50,12 +22,10 @@ use ocx_util::fs::{BoundedReadError, read_bounded_async};
 /// Options for [`publish_managed_config`].
 #[derive(Debug, Clone)]
 pub struct ManagedConfigPublishOptions {
-    /// Update rolling variant tags derived from the pushed version tag
-    /// (e.g. `user-1.4.2` also updates `user-1.4`, `user-1`, `user`).
+    /// Also update the rolling tags derived from the pushed version tag.
     pub cascade: bool,
-    /// Platform entry written into the package index. Managed-config fetch
-    /// only consumes the platform-agnostic `any/any` entry, so anything else
-    /// produces a package `ocx config update` cannot use.
+    /// `ocx config update` consumes only the `any/any` entry, so any other
+    /// platform publishes a package it cannot use.
     pub platform: Platform,
 }
 
@@ -64,212 +34,130 @@ pub struct ManagedConfigPublishOptions {
 /// Errors raised while validating or publishing a managed-config payload.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedConfigPublishError {
-    /// Reading the payload file failed.
     #[error("failed to read managed config payload '{}'", path.display())]
     ReadFailed {
-        /// The payload path that could not be read.
         path: PathBuf,
-        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
 
-    /// The payload exceeds [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`].
+    /// Over [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`].
     #[error("managed config payload is {actual} bytes, exceeding the maximum allowed {maximum} bytes")]
     PayloadTooLarge {
-        /// Actual payload size in bytes.
+        /// Both sizes are in bytes.
         actual: u64,
-        /// The enforced ceiling in bytes.
         maximum: u64,
     },
 
-    /// The payload is not valid TOML (or not valid UTF-8), or does not match
-    /// the config schema.
+    /// Not UTF-8, not TOML, or not the config schema.
     #[error("managed config payload is not a valid config file")]
     InvalidToml {
-        /// The underlying TOML parse failure.
         #[source]
         source: toml::de::Error,
     },
 
-    /// The payload contains a `[managed]` section. The seed `[managed]` block
-    /// lives only in the local `$OCX_HOME/config.toml`; a published payload
-    /// carrying one would be stripped on the consumer side anyway (ADR
-    /// Decision I), so publishing it is rejected as an operator mistake.
+    /// A consumer strips a published `[managed]` section anyway.
     #[error("managed config payload must not contain a [managed] section")]
     ContainsManagedSection,
 
-    /// The payload's `[trust.sigstore]` declares both `trusted_root` and
-    /// `trusted_root_json`. Publishing either silently discards the other, and
-    /// which one wins is not predictable from the file.
+    /// Both `trusted_root` and `trusted_root_json`: which one wins is not predictable from the file.
     #[error("managed config payload declares both trusted_root and trusted_root_json in [trust.sigstore]: keep one")]
     AmbiguousTrustRoot,
 
-    /// The payload declares both `extra_ca_certs` and `extra_ca_certs_pem`
-    /// (C-003, S-005). Publishing either silently discards the other, and
-    /// which one wins is not predictable from the file — the sibling of
-    /// [`Self::AmbiguousTrustRoot`], for the same reason.
+    /// Both `extra_ca_certs` and `extra_ca_certs_pem`, for the same reason as [`Self::AmbiguousTrustRoot`].
     #[error("managed config payload declares both extra_ca_certs and extra_ca_certs_pem: keep one")]
     AmbiguousExtraCaCerts,
 
-    /// A `[[trust.policy]]` signer names its key by path (`key = "etc/acme.pub"`).
-    ///
-    /// The twin of [`Self::AmbiguousTrustRoot`], for the same reason: a managed
-    /// payload is a `config.toml` shipped as a package to a fleet, so a path in
-    /// one names the *operator's* disk and means nothing on any consumer's. The
-    /// refusal removes an incoherent state rather than adding a guard — inlining
-    /// the key with `key_pem` is the form that travels.
-    ///
-    /// Local tiers (project / operator / user config on the author's own disk)
-    /// leave `key` unrestricted; this applies only to a published payload.
+    /// A `[[trust.policy]]` key signer names a path, which exists only on the operator's disk.
     #[error("managed config payload declares a key signer by path in [[trust.policy]]: inline it as `key_pem` instead")]
     ManagedConfigKeyByPath,
 
-    /// A `[[trust.policy]]` entry in the payload does not compile.
-    ///
-    /// Caught here rather than left to the fleet: a payload is adopted by every
-    /// consumer at once, so an empty `signers` array or a malformed `key_pem`
-    /// would fail closed on every machine simultaneously, with the diagnostic
-    /// arriving at the consumer instead of the operator who wrote it. The path
-    /// form is already refused above, so compiling here reads no file.
+    /// A `[[trust.policy]]` entry does not compile, which would fail closed on every consumer at once.
     #[error("managed config payload declares an unusable [[trust.policy]] entry")]
     InvalidTrustPolicy {
-        /// Why the policy could not be compiled.
         #[source]
         source: ocx_trust::TrustPolicyError,
     },
 
-    /// Reading the trusted-root file named by `[trust.sigstore] trusted_root`
-    /// failed. The path is resolved relative to the payload's own directory.
     #[error("failed to read trusted root '{}' named by [trust.sigstore] trusted_root", path.display())]
     TrustedRootReadFailed {
-        /// The resolved trusted-root path that could not be read.
         path: PathBuf,
-        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
 
-    /// The file named by `[trust.sigstore] trusted_root` is not a usable
-    /// Sigstore trusted root. Caught here rather than on every machine in the
-    /// fleet after adoption.
     #[error("trusted root '{}' is not a usable Sigstore trusted root: {detail}", path.display())]
     TrustedRootInvalid {
         /// The resolved trusted-root path.
         path: PathBuf,
-        /// What the trust-root loader rejected.
         detail: String,
     },
 
-    /// Reading the file named by the root-level `extra_ca_certs` failed. The
-    /// path is resolved relative to the payload's own directory (D-1, same
-    /// grammar and relative rule as `trusted_root` above). Shaped like
-    /// [`Self::TrustedRootReadFailed`] (C-003), except that the path travels
-    /// as the [`ExtraRootsSource`] the runtime door uses, so a PEM body
-    /// pasted where a path belongs is redacted here exactly as it is there
-    /// (D-11, CWE-532) rather than echoed whole by `ocx config push`.
+    /// Carries [`ExtraRootsSource`], not a path, so a PEM body pasted where a
+    /// path belongs is redacted rather than echoed (CWE-532).
     #[error("cannot read {origin} named by the payload")]
     ExtraCaCertsReadFailed {
-        /// The resolved path, as the runtime door renders it.
         origin: ExtraRootsSource,
-        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
 
-    /// The file named by the root-level `extra_ca_certs` is not a usable CA
-    /// bundle (C-004): wrong PEM tag, empty, or malformed — the same
-    /// `config::tls::parse_pem` verdict every consumer
-    /// would reach, delivered to the operator instead. An over-size bundle
-    /// is NOT this variant: `read_bounded` refuses it before a byte is
-    /// parsed, so it surfaces as [`Self::ExtraCaCertsReadFailed`] (74).
-    /// Classified as a data error (65), not a config error like
-    /// [`Self::TrustedRootInvalid`]: the config names the file correctly,
-    /// the file's bytes are what is wrong — parity with the loader-side
-    /// `TlsError` classification for a file-typed source. The path is named
-    /// once, by the inner verdict's origin, never here as well.
+    /// The file named by `extra_ca_certs` is not a usable CA bundle (65: the
+    /// bytes are wrong); the inner verdict names the path, so this must not.
     #[error("the extra CA certificate bundle named by the payload is not usable")]
     ExtraCaCertsInvalid {
-        /// What the certificate parser rejected, naming the path.
         #[source]
         source: ocx_config::tls::TlsError,
     },
 
-    /// The root-level `extra_ca_certs_pem` the operator authored directly in
-    /// the payload is not a usable CA bundle (C-004, inline form). Caught
-    /// here, on the publisher's platform, so the diagnostic lands with the
-    /// operator; every consumer re-runs the same check with its own verifier
-    /// at adoption (`persistence.rs`, `ExtraCaCertsInvalid`) and keeps its
-    /// previous snapshot when that one refuses. Config (78), like the
-    /// loader's verdict on the same inline text: the payload's own content is
-    /// what is wrong, not a file it names. The key is named once, by the
-    /// inner verdict's origin, never here as well.
+    /// The inline `extra_ca_certs_pem` is not a usable CA bundle (78: the
+    /// payload's own content is wrong); the inner verdict names the key, so this must not.
     #[error("the extra CA certificate bundle inlined in the payload is not usable")]
     ExtraCaCertsPemInvalid {
-        /// What the certificate parser rejected.
         #[source]
         source: TlsError,
     },
 
-    /// The file named by the root-level `extra_ca_certs` is not UTF-8, so it
-    /// cannot be inlined into a TOML string unchanged. Strict, never lossy: a
-    /// lossy expansion could push a bundle that fits the 32 KiB read cap past
-    /// the same 32 KiB inline cap on every consumer. Data (65), like
-    /// [`Self::ExtraCaCertsInvalid`]: the file's bytes are what is wrong.
+    /// Strict, never lossy: a lossy decode can grow a bundle that fits the
+    /// read cap past the consumer's equal inline cap.
     #[error(
         "{origin} is not UTF-8 and cannot be inlined; strip the non-UTF-8 label lines outside the \
          -----BEGIN/-----END blocks"
     )]
     ExtraCaCertsNotUtf8 {
-        /// The resolved path, as the runtime door renders it.
         origin: ExtraRootsSource,
-        /// Where the decode stopped.
         #[source]
         source: std::str::Utf8Error,
     },
 
-    /// Staging the payload into the temporary publish directory failed.
     #[error("failed to stage managed config payload for publishing")]
     StageFailed {
-        /// The underlying I/O failure.
         #[source]
         source: std::io::Error,
     },
 
-    /// Bundling the staged payload into a tar+gzip archive failed.
     #[error("failed to bundle managed config payload")]
     BundleFailed {
-        /// The underlying bundling failure (boxed: `crate::Error` is large).
         #[source]
         source: Box<crate::Error>,
     },
 
-    /// Listing existing tags for a cascade push failed.
     #[error("failed to list existing tags for '{identifier}'")]
     ListTagsFailed {
-        /// The identifier whose tags could not be listed.
         identifier: Box<OciIdentifier>,
-        /// The underlying registry failure (boxed: `crate::Error` is large).
         #[source]
         source: Box<crate::Error>,
     },
 
-    /// The push itself failed.
     #[error("failed to push managed config package")]
     PushFailed {
-        /// The underlying push failure (boxed: `crate::Error` is large).
         #[source]
         source: Box<crate::Error>,
     },
 }
 
-/// Whether a `kind = "key"` signer names its key by **path**.
-///
-/// The refusal below is about paths, not about `key` being set at all: a KMS
-/// reference (`awskms://alias/release`) travels with the payload and means the
-/// same thing on every consumer's machine, so "inline it as `key_pem`" is
-/// advice no operator can follow for one. Unparseable references fall through
-/// to `compile()`, which names what is wrong with them.
+/// Whether a key signer names its key by path; a KMS reference travels with the
+/// payload and must not be refused, and an unparseable one is left to `compile()`.
 fn names_a_path(key: &ocx_trust::KeyMatcher) -> bool {
     key.key
         .as_deref()
@@ -279,24 +167,7 @@ fn names_a_path(key: &ocx_trust::KeyMatcher) -> bool {
 
 // ── Pure validation ───────────────────────────────────────────────────────────
 
-/// Validates a managed-config payload before publishing.
-///
-/// Pure function over the raw payload bytes:
-///
-/// 1. size ≤ [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`] (the same
-///    cap the consumer-side fetch enforces — an oversize payload could never
-///    be adopted),
-/// 2. parses as [`ocx_config::Config`] (unknown **top-level** sections are
-///    tolerated for forward compatibility, matching the loader's posture),
-/// 3. carries no `[managed]` section,
-/// 4. does not declare both `[trust.sigstore]` trust-root spellings at once,
-/// 5. names no `[[trust.policy]]` key by path — a fleet payload carries key
-///    material inline as `key_pem` or not at all,
-/// 6. compiles every `[[trust.policy]]` entry it declares.
-///
-/// Returns the payload as text so a caller that needs to look at it again
-/// ([`crate::managed_config::preview_managed_config`]) reuses this UTF-8
-/// decode instead of repeating its error mapping.
+/// Validates a managed-config payload purely over its bytes and returns it as text.
 ///
 /// # Errors
 ///
@@ -331,15 +202,9 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
     {
         return Err(ManagedConfigPublishError::AmbiguousTrustRoot);
     }
-    // Sibling of the check above, one table up: a root-level `extra_ca_certs`
-    // and `extra_ca_certs_pem` set together is the same unpredictable-winner
-    // ambiguity (C-003, S-005) — `ocx config test` refuses it for the same
-    // reason it refuses `AmbiguousTrustRoot`.
     if parsed.extra_ca_certs.is_some() && parsed.extra_ca_certs_pem.is_some() {
         return Err(ManagedConfigPublishError::AmbiguousExtraCaCerts);
     }
-    // The same rule one table over: key material a fleet receives must travel
-    // with the payload, so a signer names its key inline or not at all.
     if let Some(trust) = parsed.trust.as_ref()
         && trust.policy.iter().any(|policy| {
             policy
@@ -350,8 +215,7 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
     {
         return Err(ManagedConfigPublishError::ManagedConfigKeyByPath);
     }
-    // Only now that every remaining key is inline: compiling reads no file, so
-    // this is a pure shape + PEM check the operator gets instead of the fleet.
+    // After the key-by-path refusal, or compiling would read a file from the operator's disk.
     for policy in parsed.trust.iter().flat_map(|trust| trust.policy.iter()) {
         policy
             .compile()
@@ -361,44 +225,31 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
 }
 
 /// The path-form trust root a payload declares, if any.
-///
-/// Split out from [`inline_trusted_root`] so the caller can skip the file read
-/// entirely for the overwhelmingly common payload that names no trust root.
 #[must_use]
 pub fn declared_trusted_root(text: &str) -> Option<PathBuf> {
     let parsed: ocx_config::Config = toml::from_str(text).ok()?;
     parsed.trust?.sigstore?.trusted_root
 }
 
-/// The path-form `extra_ca_certs` a payload declares, if any. Sibling of
-/// [`declared_trusted_root`] (C-003) — a plain root-level field, so no
-/// `[trust.sigstore]` traversal.
+/// The path-form `extra_ca_certs` a payload declares, if any.
 #[must_use]
 pub fn declared_extra_ca_certs(text: &str) -> Option<PathBuf> {
     let parsed: ocx_config::Config = toml::from_str(text).ok()?;
     parsed.extra_ca_certs
 }
 
-/// The inline `extra_ca_certs_pem` a payload authors directly, if any —
-/// the form [`publish_managed_config`] proves usable before the fleet adopts
-/// it. A `_pem` the path arm inlined is never seen here: that text already
-/// passed `parse_pem` on the way in.
+/// The inline `extra_ca_certs_pem` a payload authors directly, if any.
 #[must_use]
 pub fn declared_extra_ca_certs_pem(text: &str) -> Option<String> {
     let parsed: ocx_config::Config = toml::from_str(text).ok()?;
     parsed.extra_ca_certs_pem
 }
 
-/// Rewrites a payload's path-form `extra_ca_certs` into the self-contained
-/// `extra_ca_certs_pem` string, leaving everything else — key order,
-/// comments, spacing — byte-identical. Sibling of [`inline_trusted_root`];
-/// unlike that function the key being replaced sits at the document root,
-/// not nested under `[trust.sigstore]`.
+/// Replaces a path-form `extra_ca_certs` with `extra_ca_certs_pem`, leaving the
+/// rest of the document byte-identical; a payload without one is returned unchanged.
 ///
 /// # Errors
-/// [`ManagedConfigPublishError::InvalidToml`] when the payload does not parse
-/// as TOML — which [`validate_managed_config_payload`] has already ruled out
-/// for every caller in this module.
+/// [`ManagedConfigPublishError::InvalidToml`] when the payload is not TOML.
 pub fn inline_extra_ca_certs(text: &str, pem: &str) -> Result<String, ManagedConfigPublishError> {
     use serde::de::Error as _;
 
@@ -414,16 +265,10 @@ pub fn inline_extra_ca_certs(text: &str, pem: &str) -> Result<String, ManagedCon
     Ok(document.to_string())
 }
 
-/// Re-checks a payload's size against
-/// [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`] after publish-time
-/// inlining (`trusted_root_json` and/or `extra_ca_certs_pem`) has potentially
-/// grown it past the cap the pre-inline check in
-/// [`validate_managed_config_payload`] could not see (C-003). Closes the same
-/// gap for the `trusted_root` sibling, which had no re-check before.
+/// Re-checks the size cap after inlining, which can grow the payload past it.
 ///
 /// # Errors
-/// [`ManagedConfigPublishError::PayloadTooLarge`] when the inlined payload
-/// exceeds the cap.
+/// [`ManagedConfigPublishError::PayloadTooLarge`] over the cap.
 fn guard_inlined_payload_size(bytes: &[u8]) -> Result<(), ManagedConfigPublishError> {
     let actual = bytes.len() as u64;
     let maximum = ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES;
@@ -433,19 +278,12 @@ fn guard_inlined_payload_size(bytes: &[u8]) -> Result<(), ManagedConfigPublishEr
     Ok(())
 }
 
-/// Rewrites a payload's path-form `[trust.sigstore] trusted_root` into the
-/// self-contained `trusted_root_json` string, leaving everything else — key
-/// order, comments, spacing — byte-identical.
-///
-/// Pure: `json` is the already-read, already-validated trusted-root document.
-/// A payload with no `[trust.sigstore] trusted_root` is returned unchanged, so
-/// this is safe to call unconditionally.
+/// Replaces a path-form `[trust.sigstore] trusted_root` with `trusted_root_json`,
+/// leaving the rest of the document byte-identical; a payload without one is returned unchanged.
 ///
 /// # Errors
 ///
-/// [`ManagedConfigPublishError::InvalidToml`] when the payload does not parse
-/// as TOML — which [`validate_managed_config_payload`] has already ruled out
-/// for every caller in this module.
+/// [`ManagedConfigPublishError::InvalidToml`] when the payload is not TOML.
 pub fn inline_trusted_root(text: &str, json: &str) -> Result<String, ManagedConfigPublishError> {
     use serde::de::Error as _;
 
@@ -468,33 +306,21 @@ pub fn inline_trusted_root(text: &str, json: &str) -> Result<String, ManagedConf
     Ok(document.to_string())
 }
 
-/// Resolves a path a payload declares (`trusted_root`, `extra_ca_certs`)
-/// against the payload's own directory, through the same [`FileReference`]
-/// grammar the loader applies to a local `config.toml`.
-///
-/// `to_string_lossy` is exact: the value is deserialized from a TOML string,
-/// so it is UTF-8 by construction.
+/// Resolves a declared path against the payload's directory with the loader's
+/// [`FileReference`] grammar; `to_string_lossy` is exact because TOML strings are UTF-8.
 fn anchor_declared_path(declared: &Path, config_path: &Path) -> PathBuf {
     let written = declared.to_string_lossy().into_owned();
     FileReference::parse(&written).anchored_at(config_path.parent().unwrap_or(Path::new(".")))
 }
 
 /// Reads and validates the bundle a path-form `extra_ca_certs` names, on the
-/// blocking pool — [`read_path`] is sync, and
-/// [`parse_pem`] probe-builds a client through the platform
-/// verifier, so the two go to the pool as one task rather than growing an
-/// async twin of either (the `oci/verify/trust_resolve.rs` precedent). A
-/// `JoinError` becomes an `Other` I/O error, never `NotFound`, so a
-/// panicking pool task is not reported as a missing file.
+/// blocking pool because [`read_path`] and [`parse_pem`] both block.
 ///
 /// # Errors
 ///
-/// [`ManagedConfigPublishError::ExtraCaCertsReadFailed`] — `NotFound` (79),
-/// `PermissionDenied` (77), any other I/O failure, a non-regular file or a
-/// bundle over [`ocx_util::tls::MAX_EXTRA_CA_CERTS_BYTES`] (74:
-/// `InvalidInput`, the file is there but is not one this process will read
-/// as given); [`ManagedConfigPublishError::ExtraCaCertsInvalid`] (65) when
-/// the bytes are not a usable CA bundle.
+/// [`ManagedConfigPublishError::ExtraCaCertsReadFailed`] for any read refusal,
+/// including an over-cap or non-regular file (74: `InvalidInput`);
+/// [`ManagedConfigPublishError::ExtraCaCertsInvalid`] (65) for unusable bytes.
 async fn read_extra_ca_certs(path: &Path) -> Result<Vec<u8>, ManagedConfigPublishError> {
     let origin = publish_origin(path);
     let target = path.to_path_buf();
@@ -518,10 +344,8 @@ async fn read_extra_ca_certs(path: &Path) -> Result<Vec<u8>, ManagedConfigPublis
     }
 }
 
-/// The origin a publish-side refusal names for a path-form `extra_ca_certs`:
-/// the runtime door's rendering (`extra_ca_certs=<path>`, redacted when the
-/// value is not a path) with no tier — the payload is the operator's source
-/// file, not one of the consumer's config tiers.
+/// The refusal origin for a path-form `extra_ca_certs`, with no tier because the
+/// payload is not one of the consumer's config tiers.
 fn publish_origin(path: &Path) -> ExtraRootsSource {
     ExtraRootsSource::ConfigPath {
         path: path.to_path_buf(),
@@ -529,17 +353,13 @@ fn publish_origin(path: &Path) -> ExtraRootsSource {
     }
 }
 
-/// Proves an `extra_ca_certs_pem` authored directly in the payload is a
-/// usable bundle, on the blocking pool for the same reason as
-/// [`read_extra_ca_certs`]: [`parse_pem`]'s probe build loads the
-/// platform trust store. The origin is the managed tier — the verdict every
-/// consumer's loader would reach, delivered to the operator instead.
+/// Proves an authored `extra_ca_certs_pem` is a usable bundle, on the blocking
+/// pool because [`parse_pem`] loads the platform trust store.
 ///
 /// # Errors
 ///
-/// [`ManagedConfigPublishError::ExtraCaCertsPemInvalid`] (78) when the text
-/// is not a usable CA bundle; [`ManagedConfigPublishError::StageFailed`] for
-/// a panicking pool task.
+/// [`ManagedConfigPublishError::ExtraCaCertsPemInvalid`] (78) for an unusable
+/// bundle; [`ManagedConfigPublishError::StageFailed`] for a panicking pool task.
 async fn validate_extra_ca_certs_pem(pem: String) -> Result<(), ManagedConfigPublishError> {
     tokio::task::spawn_blocking(move || {
         parse_pem(pem.as_bytes(), &ExtraRootsSource::ConfigInline(ConfigTier::Managed))
@@ -552,19 +372,14 @@ async fn validate_extra_ca_certs_pem(pem: String) -> Result<(), ManagedConfigPub
     })?
 }
 
-/// Reads the candidate payload `ocx config push` and `ocx config test`
-/// share, bounded at [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`] and
-/// refusing anything that is not a regular file before `open(2)` — a FIFO
-/// named as the candidate would otherwise block forever waiting for a writer,
-/// and `/dev/zero` would be read until memory ran out (CWE-400).
+/// Reads the candidate payload, bounded at
+/// [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`] and refusing a
+/// non-regular file before `open(2)`, or a FIFO hangs and `/dev/zero` exhausts memory.
 ///
 /// # Errors
 ///
-/// [`ManagedConfigPublishError::PayloadTooLarge`] (78) over the cap — `actual`
-/// is the file's length from its metadata, since the bounded read stopped one
-/// byte past the cap; [`ManagedConfigPublishError::ReadFailed`] otherwise —
-/// `NotFound` (79), `PermissionDenied` (77), any other I/O failure or a
-/// non-regular file (74: `InvalidInput`, naming the rule).
+/// [`ManagedConfigPublishError::PayloadTooLarge`] (78) over the cap;
+/// [`ManagedConfigPublishError::ReadFailed`] for any other refusal.
 pub async fn read_candidate_payload(path: &Path) -> Result<Vec<u8>, ManagedConfigPublishError> {
     let maximum = ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES;
     let read_failed = |source| ManagedConfigPublishError::ReadFailed {
@@ -574,6 +389,7 @@ pub async fn read_candidate_payload(path: &Path) -> Result<Vec<u8>, ManagedConfi
     match read_bounded_async(path, maximum).await {
         Ok(bytes) => Ok(bytes),
         Err(BoundedReadError::TooLarge { .. }) => {
+            // The bounded read stopped one byte past the cap, so the real size comes from metadata.
             let actual = tokio::fs::metadata(path).await.map_err(read_failed)?.len();
             Err(ManagedConfigPublishError::PayloadTooLarge { actual, maximum })
         }
@@ -583,22 +399,10 @@ pub async fn read_candidate_payload(path: &Path) -> Result<Vec<u8>, ManagedConfi
 
 // ── Publish orchestration ─────────────────────────────────────────────────────
 
-/// Publishes `config_path` as a managed-config package under `identifier`.
-///
-/// Stages the payload as `config.toml` (regardless of the input file name),
-/// bundles it into a tar+gzip layer, synthesizes minimal bundle metadata (no
-/// metadata JSON file involved), and pushes via [`Publisher::push`] /
-/// [`Publisher::push_cascade`]. The caller is responsible for
-/// [`Publisher::ensure_auth`].
-///
-/// A `[trust.sigstore] trusted_root` naming a local file is read (relative to
-/// `config_path`'s own directory), proved loadable as a Sigstore trusted root,
-/// and inlined as `trusted_root_json` — see the module docs for why. A
-/// root-level `extra_ca_certs` is treated the same way: read bounded, proved
-/// a usable CA bundle, and inlined as `extra_ca_certs_pem`; an
-/// `extra_ca_certs_pem` authored directly gets the same proof without the
-/// rewrite. The payload size is checked again after either rewrite, since
-/// inlining is what grows it.
+/// Publishes `config_path` as a managed-config package under `identifier`; the
+/// caller owns [`Publisher::ensure_auth`]. Path-form `trusted_root` and
+/// `extra_ca_certs` are proved usable and inlined, since the fleet cannot read
+/// the operator's files and would otherwise get a silently inert trust root.
 ///
 /// # Errors
 ///
@@ -614,30 +418,16 @@ pub async fn publish_managed_config(
     let text = match declared_trusted_root(text) {
         None => text.to_string(),
         Some(declared) => {
-            // Relative to the payload's own directory, exactly as the loader
-            // anchors it when reading a local `config.toml` — one grammar and one
-            // relative rule, through the same `FileReference` seam
-            // `SigstoreTrust::anchor_relative_root` goes through. "Exactly as the
-            // loader" is the whole point of this branch, so the two must not drift
-            // on Windows, and must not drift on the spelling either: this path
-            // never reaches `ConfigLoader::anchor_relative_paths`, so a payload
-            // writing `file:///x` would otherwise send the operator's own publish
-            // run looking for a file named `file:///x`.
+            // Through the loader's `FileReference` grammar, or `file:///x` is read as a file of that name.
             let path = anchor_declared_path(&declared, config_path);
-            // Bounded at the same ceiling verification puts on the same
-            // document, so the transport an operator chose does not change
-            // how large a trust root may be; a FIFO is refused before the
-            // open, and a file over the cap is a read failure (74), not a
-            // parse failure (78).
+            // Verification's own size cap, so a root publish accepts is never too large for a consumer.
             let json = read_bounded_async(&path, ocx_sign::verify::MAX_TRUSTED_ROOT_BYTES)
                 .await
                 .map_err(|refused| ManagedConfigPublishError::TrustedRootReadFailed {
                     path: path.clone(),
                     source: refused.into_io_error(),
                 })?;
-            // Prove it loads before a whole fleet adopts it. `load_trusted_root_json`
-            // is the same entry point verification uses, so "publish succeeded"
-            // means "every consumer can build a trust root from this".
+            // Verification's own loader, so a published root is one every consumer can build.
             ocx_sign::verify::TrustRoot::load_trusted_root_json(&json).map_err(|kind| {
                 ManagedConfigPublishError::TrustedRootInvalid {
                     path: path.clone(),
@@ -654,18 +444,13 @@ pub async fn publish_managed_config(
     };
     let text = match declared_extra_ca_certs(&text) {
         None => {
-            // The inline form the operator wrote by hand gets the same proof
-            // the path form gets on its way in — a bad root published here
-            // refuses every consumer's every command, `config update`
-            // included, until an out-of-band `OCX_EXTRA_CA_CERTS` override.
+            // A bad root published here breaks every consumer command, `config update` included.
             if let Some(pem) = declared_extra_ca_certs_pem(&text) {
                 validate_extra_ca_certs_pem(pem).await?;
             }
             text
         }
         Some(declared) => {
-            // Same grammar and relative rule as the trusted_root branch above
-            // (D-1: one CA-path grammar, not two).
             let path = anchor_declared_path(&declared, config_path);
             let pem = read_extra_ca_certs(&path).await?;
             let pem = std::str::from_utf8(&pem).map_err(|source| ManagedConfigPublishError::ExtraCaCertsNotUtf8 {
@@ -678,8 +463,7 @@ pub async fn publish_managed_config(
     let bytes = text.into_bytes();
     guard_inlined_payload_size(&bytes)?;
 
-    // Stage as `config.toml` in a temp dir so the archive entry name is
-    // canonical no matter what the operator's input file is called.
+    // The archive entry must be `config.toml` whatever the input file is called.
     let stage = tokio::task::spawn_blocking(tempfile::tempdir)
         .await
         .map_err(|join_error| ManagedConfigPublishError::StageFailed {
@@ -725,13 +509,8 @@ pub async fn publish_managed_config(
             }
         })?;
         let existing_versions = Publisher::parse_versions(&existing_tags);
-        // Keep tagging (`adr_index_indirection.md` Decision E) is a
-        // `ocx package push` CLI contract; managed-config publishing has no
-        // `--[no-]keep-tag` surface of its own, so it opts out to keep
-        // today's tag set unchanged. Index annotations are likewise a
-        // `ocx package push --annotation` contract with no `ocx config push`
-        // surface, so none are written. `--default` is a third such
-        // contract: a managed config publishes no variants.
+        // Keep tags (`adr_index_indirection.md` Decision E), annotations and `--default`
+        // have no `ocx config push` surface, so all three stay off.
         publisher
             .push_cascade(
                 identifier,
@@ -756,7 +535,7 @@ pub async fn publish_managed_config(
             })?
     };
 
-    // `stage` (TempDir) lives until here so the archive exists for the push.
+    // Held past the push, or the archive is deleted before it is read.
     drop(stage);
     Ok(outcome)
 }
@@ -810,7 +589,7 @@ mod tests {
         assert!(matches!(err, ManagedConfigPublishError::PayloadTooLarge { .. }));
     }
 
-    /// S1 boundary: a payload of EXACTLY `MAX_MANAGED_CONFIG_BYTES` validates —
+    /// Boundary: a payload of EXACTLY `MAX_MANAGED_CONFIG_BYTES` validates —
     /// the size gate is `> maximum` (strict), so the ceiling itself is
     /// admitted. Its MAX+1 twin is `validate_rejects_oversize_payload` above.
     /// (Padded as a single TOML comment line so the whole file is valid TOML.)
@@ -1104,13 +883,13 @@ trusted_root_json = "{}"
             .expect("a local tier resolves the very same reference");
     }
 
-    // ── `extra_ca_certs` → `extra_ca_certs_pem` inlining — C-003, S-003 ─────
+    // ── `extra_ca_certs` → `extra_ca_certs_pem` inlining ─────
 
     /// A real self-signed CA (the test stack's Fulcio root): the positive
     /// cases need material the certificate parser accepts, not a placeholder.
     const EXTRA_CA_CERTS_FIXTURE_PEM: &str = include_str!("../../../../test/sigstore/keys/fulcio-ca.crt.pem");
 
-    /// D-10: the per-file cap every `extra_ca_certs` read goes through.
+    /// The per-file cap every `extra_ca_certs` read goes through.
     const EXTRA_CA_CERTS_CAP_BYTES: usize = ocx_util::tls::MAX_EXTRA_CA_CERTS_BYTES;
 
     /// The identifier and publisher are inert: nearly every case below fails
@@ -1275,7 +1054,7 @@ trusted_root_json = "{}"
         format!("extra_ca_certs = {}\n", toml::Value::from(name))
     }
 
-    /// C-003, S-003: both spellings in one payload is the same
+    /// Both spellings in one payload is the same
     /// unpredictable-winner ambiguity as `trusted_root` / `trusted_root_json`,
     /// refused by the shared validator (78) so `ocx config test` refuses it too.
     #[test]
@@ -1300,7 +1079,7 @@ trusted_root_json = "{}"
         }
     }
 
-    /// C-003: the read is skipped for the overwhelmingly common payload that
+    /// The read is skipped for the overwhelmingly common payload that
     /// names no bundle — only the path form declares a file to read.
     #[test]
     fn declared_extra_ca_certs_finds_the_path_form_only() {
@@ -1316,7 +1095,7 @@ trusted_root_json = "{}"
         assert_eq!(declared_extra_ca_certs("[registry]\ndefault = \"ghcr.io\"\n"), None);
     }
 
-    /// C-003: the path is replaced by the bundle it named, as
+    /// The path is replaced by the bundle it named, as
     /// `extra_ca_certs_pem` at the document root — asserted through the
     /// parser, so a rewrite that lands the key under some table instead of
     /// at the root reads back as `None` here. Every untouched key survives,
@@ -1345,7 +1124,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// C-003: nothing to inline, nothing rewritten — byte-identical.
+    /// Nothing to inline, nothing rewritten — byte-identical.
     #[test]
     fn inline_extra_ca_certs_leaves_a_payload_with_no_path_form_untouched() {
         for payload in [
@@ -1360,7 +1139,7 @@ trusted_root_json = "{}"
         }
     }
 
-    /// S-003: a payload naming a bundle that does not exist exits 79 and the
+    /// A payload naming a bundle that does not exist exits 79 and the
     /// error names the resolved path — the operator wrote the wrong name, and
     /// the message has to say which file was looked for.
     #[tokio::test(flavor = "multi_thread")]
@@ -1388,7 +1167,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// D-11 at the publish door (review r1): a PEM body pasted under
+    /// Redaction at the publish door: a PEM body pasted under
     /// `extra_ca_certs` in the source config is a "path" over 256 bytes with
     /// newlines. The runtime door redacts it; `ocx config push` must too —
     /// the whole `{:#}` chain, since that is what the CLI prints.
@@ -1420,7 +1199,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// C-003: an unreadable bundle is 77, not a generic I/O failure — the fix
+    /// An unreadable bundle is 77, not a generic I/O failure — the fix
     /// is a chmod, not a different path. Observed-condition skip: under root
     /// the mode bits do not bite, so the test reads the file itself first.
     #[cfg(unix)]
@@ -1446,7 +1225,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// D-10: the read goes through `read_bounded`, which refuses a non-regular
+    /// The read goes through `read_bounded`, which refuses a non-regular
     /// file before reading a byte — `/dev/zero` would otherwise be an infinite
     /// bundle (the repo's own CWE-400 fix for `--key file:/dev/zero`). 74.
     #[cfg(target_os = "linux")]
@@ -1462,7 +1241,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// D-10, DX-8: a bundle over the 32 KiB cap is `read_bounded`'s `TooLarge`
+    /// A bundle over the 32 KiB cap is `read_bounded`'s `TooLarge`
     /// and surfaces as 74 (parity with `[trust.sigstore] trusted_root`), never
     /// as content error 65 — the file is well-formed PEM throughout, so the
     /// code can only come from the size gate.
@@ -1486,7 +1265,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// C-003, C-004, D-10: a file whose PEM block is not a `CERTIFICATE` —
+    /// A file whose PEM block is not a `CERTIFICATE` —
     /// a public key here, the pasted-private-key case in the wild — is refused
     /// as data (65), never silently skipped the way `reqwest`'s bundle parser
     /// would. Garbage that is no PEM at all takes the same door.
@@ -1516,7 +1295,7 @@ trusted_root_json = "{}"
         }
     }
 
-    /// C-003: a bundle the certificate parser accepts (the `pem` crate skips
+    /// A bundle the certificate parser accepts (the `pem` crate skips
     /// leading label text as bytes) but that is not UTF-8 cannot be inlined
     /// into a TOML string unchanged — refused as data (65), never expanded
     /// lossily.
@@ -1541,7 +1320,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// C-003 (inline form): an `extra_ca_certs_pem` authored directly in the
+    /// Inline form: an `extra_ca_certs_pem` authored directly in the
     /// payload is proved usable at push — garbage is refused as config (78,
     /// the loader's verdict on the same text) and nothing is pushed — while
     /// a valid one passes through to the push itself. The validator stays
@@ -1576,7 +1355,7 @@ trusted_root_json = "{}"
             .expect("a usable inline bundle publishes");
     }
 
-    /// C-003: the ambiguity is refused by the validator BEFORE any file is
+    /// The ambiguity is refused by the validator BEFORE any file is
     /// read — the path named here does not exist, so a publish that read
     /// first would answer 79 instead of 78.
     #[tokio::test(flavor = "multi_thread")]
@@ -1593,7 +1372,7 @@ trusted_root_json = "{}"
         );
     }
 
-    /// C-003: the size gate runs again AFTER inlining. The payload and the
+    /// The size gate runs again AFTER inlining. The payload and the
     /// bundle each sit under their own cap, so only their sum can trip it —
     /// a publish that checked size once, before the rewrite, would ship a
     /// payload no consumer can fetch.

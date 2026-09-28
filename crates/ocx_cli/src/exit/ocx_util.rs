@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the archive, compression and filesystem-utility error family — the `ocx_util` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_util` error family.
 
 use ocx_exit::ExitCode;
 
@@ -31,19 +30,7 @@ impl ClassifyExitCode for ArchiveError {
             | Self::GnuSparseUnsupported(_)
             | Self::ExtractionCapExceeded { .. } => ExitCode::DataError,
             Self::Internal(_) => ExitCode::Failure,
-            // E1: `Archive::create_with_compression` / `extract_with_options`
-            // drive the codec, so a codec failure now reaches the binary inside
-            // `ArchiveError` instead of as `ocx_lib::Error::Compression`. The
-            // code is **copied** from that arm — `Self::Compression(e) =>
-            // e.classify()` in `exit::classify` — not re-derived: the exit code
-            // is the codec's, and the archive wrapper renders nothing of its
-            // own (`#[error(transparent)]`).
             Self::Compression(error) => return error.classify(),
-            // E1: the extractor's symlink write raised `FileError` and let `?`
-            // fold it into `ocx_lib::Error::InternalFile`, whose arm is
-            // `Some(ExitCode::IoError)`. The code is **copied** from there by
-            // delegating to `FileError`'s own impl below, which carries that
-            // same 74 for that same reason.
             Self::File(error) => return error.classify(),
         })
     }
@@ -62,16 +49,9 @@ impl ClassifyExitCode for CompressionError {
 impl ClassifyExitCode for SingleflightError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Failed: return None so the chain walker continues via source()
-            // into the SharedError payload. SharedError::source() exposes the
-            // leader's typed error directly, letting classify_error downcast to
-            // the inner discriminant (e.g. PackageErrorKind::EntrypointCollision
-            // → DataError). If the inner error has no specific code the walker
-            // falls through to ExitCode::Failure.
+            // `None` lets the walker reach the leader's typed error; a `Some` would mask its code.
             Self::Failed(_) => None,
-            // Abandoned has no inner cause — return Failure directly.
             Self::Abandoned => Some(ExitCode::Failure),
-            // Transient: retry once in-flight blobs complete.
             Self::Timeout | Self::CapacityExceeded { .. } => Some(ExitCode::TempFail),
         }
     }
@@ -88,9 +68,6 @@ impl ClassifyExitCode for EmptyOrAbsentError {
 
 impl ClassifyExitCode for PathEscapeError {
     fn classify(&self) -> Option<ExitCode> {
-        // A rejected containment path is malformed input data — surfaced when a
-        // hostile manifest annotation is re-validated at read time (65). Publish
-        // (CLI parse) wraps it in `LayerRefParseError`, which maps to 64.
         Some(ExitCode::DataError)
     }
 }
@@ -102,40 +79,25 @@ impl ClassifyExitCode for SameFilesystemError {
 }
 
 impl ClassifyExitCode for BooleanStringError {
-    /// C-042: the value `ConfigError::InvalidBooleanString` carried, copied
-    /// from the arm it replaces rather than re-derived — a mistyped boolean in
-    /// `ocx.toml` or an `OCX_*` variable is bad input *data*, 65.
     fn classify(&self) -> Option<ExitCode> {
         Some(ExitCode::DataError)
     }
 }
 
 impl ClassifyExitCode for FileError {
-    /// C-042: the code `ocx_lib::Error::InternalFile` carries, copied from that
-    /// arm rather than re-derived. `utility` now raises this type where it used
-    /// to build that variant, and a `FileError` that reaches the binary through
-    /// a `utility` signature never passes through `ocx_lib::Error` on the way —
-    /// so without an arm of its own the chain walk finds nothing to downcast
-    /// and the run exits 1 instead of 74.
     fn classify(&self) -> Option<ExitCode> {
         Some(ExitCode::IoError)
     }
 }
 
 impl ClassifyExitCode for SerializationError {
-    /// The code `ocx_lib::Error::SerializationFailure` carries, for the same
-    /// reason and by the same copy.
     fn classify(&self) -> Option<ExitCode> {
         Some(ExitCode::DataError)
     }
 }
 
 impl ClassifyExitCode for UtilError {
-    /// The tier's two-arm union delegates to whichever concrete error it
-    /// carries. Both arms are `#[error(transparent)]`, so the *rendered* text
-    /// was never the problem — the exit code was: `SerdeExt::read_json` returns
-    /// this type, and `ocx package create` reads its metadata through it, so a
-    /// malformed sidecar exited 1 rather than 65 until this arm existed.
+    /// Both arms are `#[error(transparent)]`, so only this delegation reaches their codes.
     fn classify(&self) -> Option<ExitCode> {
         match self {
             Self::File(error) => error.classify(),

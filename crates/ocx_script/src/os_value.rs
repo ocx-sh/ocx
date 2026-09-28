@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Typed Starlark wrapper for [`OperatingSystem`].
-//!
-//! Projects the internal Rust enum [`OperatingSystem`] into the
-//! `ocx.os.{Linux,Darwin,Windows}` Starlark namespace. The wrapper is the only
-//! shape a `.star` script ever sees; the Rust enum stays internal.
-//!
-//! `Display` returns the OCI lowercase string (`"linux"`, `"darwin"`,
-//! `"windows"`) — `str(ocx.os.Linux) == "linux"`. `equals` compares the inner
-//! discriminant; cross-type equality (e.g. against an `ArchValue` or a plain
-//! string) returns `false` without panicking.
+//! Typed Starlark wrapper for [`OperatingSystem`], the `ocx.os.*` namespace.
 
 use std::fmt;
 
@@ -25,9 +16,7 @@ use ocx_oci::platform::OperatingSystem;
 
 /// Starlark-facing wrapper around an [`OperatingSystem`] variant.
 ///
-/// `Allocative` is implemented manually (not derived) so the inner
-/// [`OperatingSystem`] does not gain a transitive `Allocative` dependency —
-/// the wrapper sits inside the Starlark firewall, the enum does not.
+/// `Allocative` is implemented by hand, since deriving it would pull `allocative` into `ocx_oci`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ProvidesStaticType, NoSerialize)]
 pub(super) struct OsValue(pub(super) OperatingSystem);
 
@@ -39,15 +28,9 @@ impl Allocative for OsValue {
 
 impl OsValue {
     /// Starlark type tag (the result of `type()` in a script).
-    ///
-    /// Lowercase short form (`"os"`) matches the namespace name (`ocx.os`)
-    /// and the attribute name on `PlatformValue` (`p.os`). Follows the
-    /// starlark-rust convention for primitive/enum-like types — `"int"`,
-    /// `"bool"`, `"string"`, `"namespace"` are all lowercase common nouns.
     pub(super) const TYPE: &'static str = "os";
 
-    /// PascalCase variant name used as the attribute in the `ocx.os` namespace
-    /// (`Linux`, `Darwin`, `Windows`). Mirrors the Rust enum variant exactly.
+    /// The attribute name in the `ocx.os` namespace, spelled as the Rust variant.
     pub(super) fn starlark_name(self) -> &'static str {
         match self.0 {
             OperatingSystem::Linux => "Linux",
@@ -60,8 +43,6 @@ impl OsValue {
 }
 
 impl fmt::Display for OsValue {
-    /// Lowercase OCI string (`"linux"`, `"darwin"`, `"windows"`) — same as the
-    /// inner [`OperatingSystem`]'s `Display`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }

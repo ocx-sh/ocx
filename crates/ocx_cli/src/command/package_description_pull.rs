@@ -41,9 +41,7 @@ impl PackageDescriptionPull {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         options::Identifier::reject_duplicate_references(&identifiers)?;
 
-        // `--save-readme` / `--save-logo` write a fixed filename; with more than
-        // one package they would collide. clap cannot express this cross-arg
-        // rule, so it is a runtime usage error.
+        // Checked at runtime: the fixed save filenames collide across packages, a rule clap cannot express.
         if identifiers.len() > 1 && (self.save_readme.is_some() || self.save_logo.is_some()) {
             return Err(
                 crate::error::UsageError::new("--save-readme and --save-logo require exactly one package").into(),
@@ -53,18 +51,9 @@ impl PackageDescriptionPull {
         let client = context.remote_client()?.clone();
         let default_index = context.default_index().clone();
 
-        // Single secure RAII temp root (mode 0700, random name) instead of a
-        // predictable world-writable `ocx-info-{pid}` path — closes the
-        // symlink/TOCTOU race (CWE-377/379/59). Bound here so it outlives the
-        // drain loop below: `Drop` recursively removes every per-index subdir,
-        // including on the `resume_unwind` panic path the old manual
-        // `remove_dir_all` loop skipped.
+        // Random 0700 `TempDir`, never a predictable `ocx-info-{pid}` path, which reopens the symlink/TOCTOU race.
         let temp_root = tempfile::TempDir::new().map_err(|e| anyhow::anyhow!("failed to create temp dir: {e}"))?;
 
-        // Fan out the pulls, each tagged with its input index. `pull_description`
-        // returns `crate::Result<Option<Description>>` (not a PackageManager op),
-        // so `drain_package_tasks` does not fit; the index-tagged fan-out is
-        // inlined here (same shape as `index update`).
         let mut join_set: tokio::task::JoinSet<(usize, Result<Option<Description>, ocx_package::error::Error>)> =
             tokio::task::JoinSet::new();
         for (index, identifier) in identifiers.iter().enumerate() {
@@ -87,8 +76,7 @@ impl PackageDescriptionPull {
             });
         }
 
-        // Place successes by index; collect failures with their index so the
-        // input-order-first error is the one surfaced (deterministic exit code).
+        // The first failure in input order is surfaced, so the exit code is deterministic.
         let mut descriptions: Vec<Option<Option<Description>>> = (0..identifiers.len()).map(|_| None).collect();
         let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         while let Some(joined) = join_set.join_next().await {
@@ -111,14 +99,11 @@ impl PackageDescriptionPull {
             return Err(error);
         }
 
-        // Every slot is `Some` once no failure remains.
         let descriptions: Vec<Option<Description>> = descriptions
             .into_iter()
             .map(|slot| slot.expect("all slots filled on success"))
             .collect();
 
-        // Save flags are reachable only with a single package (rejected above
-        // for N>1), so the first (only) description is the target.
         if (self.save_readme.is_some() || self.save_logo.is_some())
             && let Some(Some(desc)) = descriptions.first()
         {
@@ -145,8 +130,7 @@ impl PackageDescriptionPull {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Writes the README and/or logo to the requested paths. Only invoked for
-    /// the single-package case (the flags are rejected for N>1 upstream).
+    /// Writes the README and/or logo to the requested paths (single package only).
     async fn save_files(&self, desc: &Description) -> anyhow::Result<()> {
         if let Some(ref save_path) = self.save_readme {
             let path = resolve_save_path(save_path, "README.md");

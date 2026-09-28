@@ -1,17 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Launcher generator entry point.
-//!
-//! Generates the Unix `.sh` launcher and the Windows native `.exe` shim
-//! (plus its `.shim` sidecar) at install time.
-//! Each launcher calls `ocx launcher exec '<baked-package-root>' -- "$@"`,
-//! preserving OCX's clean-env execution guarantee. The baked path carries the
-//! absolute package-root; `ocx launcher exec` reads `metadata.json` from that
-//! root and resolves `argv0` against the composed `PATH` from the package's
-//! `env` block at invocation time. Presentation flags and self-view selection
-//! are hidden inside the `launcher exec` subcommand — they are no longer baked
-//! into the launcher.
+//! Launcher generator: the Unix `.sh` launcher and the Windows `.exe` shim plus its `.shim` sidecar.
 
 use std::path::{Path, PathBuf};
 
@@ -25,34 +15,13 @@ use super::body::shim_sidecar_body;
 use super::body::{unix_launcher_body, utf8_baked_path};
 use super::safety::LauncherSafeString;
 
-/// Generates Unix and Windows launchers for all declared entrypoints.
-///
-/// Writes `<dest>/<name>` (Unix, chmod 0755) and, on Windows, the native
-/// `<dest>/<name>.exe` shim plus its `<dest>/<name>.shim` sidecar for each
-/// entry in `entries`. If `entries` is empty, no files are written and `dest`
-/// is not created.
-///
-/// `pkg_root` is the absolute package-root directory
-/// (`packages/<registry>/<algo>/<2hex>/<30hex>/`). The launcher bakes
-/// `<pkg_root>` and forwards `argv0` plus the user's args to
-/// `ocx launcher exec`, which reads `metadata.json` from that root and
-/// resolves `argv0` against the composed `PATH` at invocation time.
-///
-/// `shim_bin` is the shared content-addressed store
-/// ([`ocx_store::file_structure::FileStructure::shim_bin`]) every entry's
-/// `<name>.exe` hardlinks from on Windows — unused (and unreferenced) on
-/// other platforms, where no `.exe` is ever written.
+/// Generates the launchers baking `pkg_root` for every entrypoint into `dest`; empty `entries`
+/// does not create `dest`. `shim_bin` is used on Windows only.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - Creating the `dest` directory fails.
-/// - Writing any launcher file fails.
-/// - The `pkg_root` contains a character unsafe for either launcher
-///   template (see [`LauncherSafeString`]).
-/// - Publishing or hardlinking the shared Windows shim blob fails,
-///   including a cross-device `shim_bin` store (propagated unchanged, no
-///   copy fallback — see [`ocx_store::hardlink::create`]).
+/// A failed write, a `pkg_root` that is not UTF-8 or holds a [`LauncherSafeString`]-unsafe
+/// character, or a failed shim publish/hardlink (a cross-device `shim_bin` is not copied).
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub async fn generate(
     pkg_root: &Path,
@@ -64,45 +33,23 @@ pub async fn generate(
         return Ok(());
     }
 
-    // The third door onto a baked path (RUL-37): `to_string_lossy` here would
-    // substitute U+FFFD for an invalid byte, sail through `LauncherSafeString`
-    // — U+FFFD is not in its rejection set — and bake a package root that names
-    // nothing, in BOTH the `.sh` launcher and the `.shim` sidecar.
+    // Not `to_string_lossy`: its U+FFFD passes `LauncherSafeString` and bakes a root that names nothing.
     let pkg_root_str = LauncherSafeString::new(utf8_baked_path(pkg_root)?)?;
 
     tokio::fs::create_dir_all(dest)
         .await
         .map_err(|e| crate::error::file_error(dest, e))?;
 
-    // Spawn one task per launcher file (Unix + Windows for every entry).
-    // Each task is independent — there is no ordering constraint between
-    // entries or between platforms — so concurrent writes amortise per-file
-    // syscall latency over a large `entrypoints/` directory.
     let mut tasks: JoinSet<Result<(), crate::Error>> = JoinSet::new();
 
     for (name, _entry) in entries.iter() {
         let name = name.as_str();
 
-        // Unix launcher: write body, then set the executable bit.
         let unix_body = unix_launcher_body(&pkg_root_str);
         let unix_path = dest.join(name);
         tasks.spawn(write_unix_launcher(unix_path, unix_body));
 
-        // Windows native shim (`<name>.exe`) + its `<name>.shim` sidecar.
-        // The shim is the sole Windows launcher: `.EXE` is unconditionally in
-        // the default Windows `PATHEXT`, so cmd.exe / PowerShell resolve
-        // `<name>.exe` and Git-Bash resolves it directly — no `.cmd` is
-        // emitted (it had no functional dependency and its `%*` re-parse was
-        // the exact vector this shim closes). cfg-gated so the non-Windows
-        // path is byte-for-byte unchanged.
-        //
-        // F-4: spawn order is NOT write order. The `.exe` MUST be on disk
-        // before the `.shim` so the only recoverable partial state is
-        // shim-present-without-sidecar (E1, recoverable by re-running
-        // `generate()`) — never a `.shim` whose `.exe` is missing (the worse
-        // state). The two writes are therefore SEQUENCED inside ONE per-entry
-        // task (await `.exe`, then write `.shim`), still concurrent across
-        // entries (ADR Contract 2 write-ordering postcondition).
+        // No `.cmd` launcher: its `%*` re-parse is the injection vector this shim closes.
         #[cfg(windows)]
         {
             let exe_path = dest.join(format!("{name}.exe"));
@@ -117,10 +64,6 @@ pub async fn generate(
         }
     }
 
-    // Drain results, surfacing the first error. Aborting the rest on failure
-    // matches the previous serial behaviour: a single failed write halts the
-    // generator and the partial `entrypoints/` directory is left for the
-    // caller's atomic-move / cleanup contract.
     while let Some(join_result) = tasks.join_next().await {
         match join_result.expect(
             "BUG: write_unix_launcher / write_launcher_file are panic-free — only the JoinSet host task can fault here",
@@ -136,90 +79,24 @@ pub async fn generate(
     Ok(())
 }
 
-/// Resolves the absolute `ocx` a rendered trampoline re-enters through, or
-/// `None` when no absolute path can be established at all (R-W12).
-///
-/// # The ladder
-///
-/// Two rungs, tried in order, each a *different* way of knowing where `ocx`
-/// lives — and the third answer is "we do not know":
-///
-/// 1. **The install tree.** `$OCX_HOME/symlinks/<ocx cli
-///    id>/current/content/bin/ocx` — the same value `ocx self setup`'s private
-///    `ocx_install_bin_path` computes from
-///    [`ocx_store::file_structure::SymlinkStore::current`] and
-///    [`ocx_oci::ocx_cli_identifier`], joined with the platform's binary
-///    name. Derived from those two, never spelled as a literal: the identifier
-///    carries a test seam (`__OCX_SELF_IMAGE`) and the symlink layout is the
-///    store's to change, so a hard-coded string would be a second source of
-///    truth that drifts silently and only on the machines where it matters.
-///    Preferred over rung 2 because it *floats*: `ocx self update` swaps
-///    `current` and every already-rendered trampoline follows, where a baked
-///    `current_exe()` would pin the version that happened to render it.
-/// 2. **The running binary.** [`std::env::current_exe`] — the ocx that is
-///    rendering this trampoline right now. This is the rung for the
-///    bare-binary population: someone who downloaded one `ocx`, never ran `ocx
-///    self setup`, and therefore has no install tree at all. Their `ocx` still
-///    has an absolute path, and baking it is strictly better than emitting a
-///    bare name (see below). Same fallback shape `app::context::try_init`
-///    already uses to fill `OCX_BINARY_PIN`.
-///
-/// # Why each rung is probed rather than trusted
-///
-/// A trampoline that baked a path to a binary that is not there would fail with
-/// a bare `No such file or directory` from `/bin/sh` — worse than the `PATH`
-/// lookup it replaced. Each rung therefore has to answer two questions before
-/// it wins: is the path **absolute** (a relative one baked into a body that
-/// runs from an arbitrary CWD names an arbitrary file), and does it **exist**?
-///
-/// The probe is a single `stat` and it deliberately does **not** dereference
-/// further: `current` is a symlink, so `try_exists` follows it and answers
-/// `false` for a dangling one — which is the state a half-uninstalled tree is
-/// in, and the state the next rung is right for. `current_exe()` gets the same
-/// treatment, and needs it: on Linux a deleted-under-a-running-process binary
-/// still yields a path, spelled `<path> (deleted)`, that names nothing.
-///
-/// # What `None` actually means now
-///
-/// Not "the user never ran `ocx self setup`" — rung 2 covers that population.
-/// `None` is reached only when [`std::env::current_exe`] itself fails or
-/// answers something non-absolute or absent: a platform without the syscall, a
-/// binary unlinked out from under a long-running process, a `/proc` that is not
-/// mounted. There, [`super::body::unix_trampoline_body`] degrades to the
-/// bare-name fallback and R-W12's self-resolution loop is accepted — for a
-/// population that is now a rounding error rather than every bare-binary user.
-// WP-7's `render_toolchain` is the sole consumer and lands one wave later, so this
-// surface has no non-test caller yet. `expect`, not `allow`: the moment WP-7 wires
-// it up the expectation goes unfulfilled and the compiler forces this line out —
-// an `allow` would linger silently. `not(test)` because the goldens below DO use
-// it, so the lint never fires in the test build.
+/// Resolves the absolute `ocx` a rendered trampoline re-enters through: the install tree's
+/// binary (it floats across `ocx self update`), else [`std::env::current_exe`], else `None`
+/// (`adr_toolchain_activation.md` § "Rationale from code: launcher trampolines").
 pub(crate) async fn trampoline_ocx_binary(file_structure: &FileStructure) -> Option<PathBuf> {
-    // One spelling of the install `bin/` directory, workspace-wide (RUL-63,
-    // RUL-86, R-W29): a second derivation here and in `setup` would drift the
-    // day the store layout moves, and the per-prompt repair — which owns every
-    // segment under `$OCX_HOME` — would then delete one spelling and add the
-    // other on every prompt.
+    // Only via `ocx_install_bin_path`: a second spelling drifts from `setup`'s and the per-prompt repair then churns PATH every prompt.
     let installed = file_structure
         .ocx_install_bin_path()
         .join(if cfg!(windows) { "ocx.exe" } else { "ocx" });
-    // `current_exe()` failing is rung 2 declining, not an error: the ladder has
-    // a defined answer below it, and a warn here would fire on every render.
     let running = std::env::current_exe()
         .inspect_err(|e| log::debug!("Could not resolve the running ocx binary: {e}"))
         .ok();
     first_bakeable_ocx(installed, running).await
 }
 
-/// The rung ladder of [`trampoline_ocx_binary`], with both candidates supplied
-/// rather than read from the process — the seam that lets a test drive rung 2
-/// declining, which `std::env::current_exe()` cannot be made to do in-process.
+/// The first candidate that is absolute and exists; a test seam for [`trampoline_ocx_binary`].
 ///
-/// Each candidate must be **absolute** and must **exist** to win. Absoluteness
-/// is not belt-and-braces: the winner is interpolated into a body that runs
-/// from an arbitrary working directory, where a relative path names an
-/// arbitrary file. `try_exists` errors answer "this rung declines" — a probe
-/// that cannot read a path cannot recommend baking it, and the next rung (or
-/// the bare-name fallback) is always renderable.
+/// A relative winner would name an arbitrary file from the body's working directory, and a
+/// baked path to a missing binary fails worse than the bare-name `PATH` lookup.
 async fn first_bakeable_ocx(installed: PathBuf, running: Option<PathBuf>) -> Option<PathBuf> {
     for candidate in [Some(installed), running].into_iter().flatten() {
         if !candidate.is_absolute() {
@@ -232,7 +109,6 @@ async fn first_bakeable_ocx(installed: PathBuf, running: Option<PathBuf>) -> Opt
     None
 }
 
-/// Writes a launcher file at `path` with the supplied body.
 async fn write_launcher_file(path: PathBuf, body: String) -> Result<(), crate::Error> {
     tokio::fs::write(&path, body.as_bytes())
         .await
@@ -252,23 +128,9 @@ async fn write_unix_launcher(path: PathBuf, body: String) -> Result<(), crate::E
     Ok(())
 }
 
-/// Publishes the shared Windows shim blob into `shim_bin` (writing it only
-/// once, on first use — [`ShimBinStore::ensure`]) and hardlinks it to
-/// `<exe_path>`, then — only after the `.exe` link has fully landed — writes
-/// its one-line `<sidecar_path>.shim` sidecar.
+/// Hardlinks the shared shim blob to `exe_path`, then writes the sidecar.
 ///
-/// The link and the sidecar write are sequenced (not two independent
-/// `JoinSet` tasks) so the only recoverable partial state on a mid-generate
-/// fault is `.exe`-present / `.shim`-absent (ADR E1, recoverable by
-/// re-running `generate()`), never the reverse — a `.shim` without its
-/// `.exe` is the worse state (ADR Contract 2 write-ordering postcondition,
-/// plan F-4).
-///
-/// The hardlink shares its inode with `shim_bin`'s published blob, so
-/// `<exe_path>` is byte-identical to it by construction (no transform),
-/// preserving the Authenticode verbatim-copy property. A cross-device
-/// `shim_bin` store surfaces as `io::ErrorKind::CrossesDevices` and
-/// propagates unchanged — no copy fallback (plan decision D3).
+/// One task, not two: a split lets a fault leave a `.shim` without its `.exe`.
 #[cfg(windows)]
 async fn write_shim_exe_then_sidecar(
     shim_bin: ShimBinStore,
@@ -452,7 +314,7 @@ mod tests {
         );
     }
 
-    /// RUL-37's **third door**: the package root every ordinary launcher bakes.
+    /// The **third door** onto a baked path: the package root every ordinary launcher bakes.
     ///
     /// The trampoline's two doors are guarded in `body.rs`; this is the one an
     /// `ocx package install` reaches. `to_string_lossy` here would substitute
@@ -611,11 +473,11 @@ mod tests {
         );
     }
 
-    /// F-4 (plan Progress Log): the `.exe`/`.shim` JoinSet spawn order is NOT
+    /// The `.exe`/`.shim` JoinSet spawn order is NOT
     /// the write order — Contract 2's write-ordering postcondition requires
     /// the implementation to SEQUENCE the writes so `.exe` lands before
     /// `.shim`. The recoverable partial state is therefore
-    /// `.exe` present / `.shim` ABSENT (E1, recoverable by re-running
+    /// `.exe` present / `.shim` ABSENT (recoverable by re-running
     /// `generate()`), never the reverse (a `.shim` without its `.exe` is the
     /// worse state). This test injects a failure on the SECOND shim write
     /// (the `.shim`) by pre-creating `cmake.shim` as a directory so the file
@@ -693,7 +555,7 @@ mod tests {
         );
     }
 
-    /// C-002: off Windows no `.exe` is emitted, so [`ShimBinStore::ensure`]
+    /// Off Windows no `.exe` is emitted, so [`ShimBinStore::ensure`]
     /// must never be reached — the store root stays absent. Without this, an
     /// implementation that publishes the blob unconditionally (before the
     /// `cfg`-gated per-entry work) would litter `$OCX_HOME/.bin/ocx-shim/`
@@ -720,7 +582,7 @@ mod tests {
         );
     }
 
-    /// C-002 (#301): each `<name>.exe` is a **hardlink** to the one blob in the
+    /// Each `<name>.exe` is a **hardlink** to the one blob in the
     /// shared store, not an independent copy — one inode, one Authenticode
     /// signature, one Defender scan regardless of how many names a package
     /// declares.
@@ -793,7 +655,7 @@ mod tests {
         );
     }
 
-    // ── R-W12: the absolute `ocx` a trampoline re-enters through ──────────
+    // ── The absolute `ocx` a trampoline re-enters through ──────────
     //
     // Every rung is driven to both a winning and a declining outcome, because
     // the whole value of the ladder is telling the rungs apart — a test that
@@ -804,7 +666,7 @@ mod tests {
     // through the `first_bakeable_ocx` seam.
 
     /// The store layout the resolver must reproduce, derived the same way it
-    /// derives it — never the literal string, which is the drift R-W12 names.
+    /// derives it — never the literal string, which would drift.
     fn installed_ocx_path(file_structure: &ocx_store::file_structure::FileStructure) -> std::path::PathBuf {
         file_structure
             .symlinks
@@ -838,7 +700,7 @@ mod tests {
     }
 
     /// Rung 2 declining leaves the bare-name fallback — the only state in which
-    /// R-W12's self-resolution loop is accepted.
+    /// the self-resolution loop is accepted.
     ///
     /// Driven through the [`super::first_bakeable_ocx`] seam because
     /// `std::env::current_exe()` cannot be made to fail in-process, and a rung
@@ -931,7 +793,7 @@ mod tests {
         );
     }
 
-    /// R-W12 (E-18): a **dangling** `current` — the state a half-uninstalled
+    /// A **dangling** `current` — the state a half-uninstalled
     /// tree is in. `try_exists` follows the link and answers `false`, so rung 1
     /// declines and the ladder drops to the running binary.
     ///

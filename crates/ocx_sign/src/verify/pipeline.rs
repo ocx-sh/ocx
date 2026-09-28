@@ -1,35 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Verify pipeline — full keyless Sigstore verification state machine.
+//! Verify pipeline: resolve, list referrers, verify each candidate (ANY-of), emit [`VerifyResult`].
 //!
-//! Per
-//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
-//! S1-H: resolve target → list referrers (Referrers API, or the OCI referrers
-//! tag-schema fallback when the registry has none) → fetch the subject
-//! manifest → try each v0.3 bundle referrer (ANY-of) → hand the bundle to
-//! `sigstore`'s verifier → verify the Rekor SET and inclusion proof → match
-//! identity + issuer → emit [`VerifyResult`]. The first candidate that fully
-//! passes wins; if all fail the aggregate error is returned.
-//!
-//! **Where the cryptography lives.** Certificate-chain building, SCT
-//! verification, the ECDSA signature check, the transparency-log body binding
-//! (CVE-2022-36056 / GHSA-whqx class) and the certificate-validity-vs-integrated-time
-//! check are all `sigstore::bundle::verify::Verifier`'s. This module owns no
-//! X.509, ASN.1 or signature code. What it still owns is the Rekor Signed Entry
-//! Timestamp and the Merkle inclusion proof, which `sigstore` 0.14 leaves as
-//! `TODO`s (sigstore-rs#285) — those live in [`tlog`], computed by `sigstore`'s
-//! own crypto primitives.
-//!
-//! `Verifier` hashes a *preimage* rather than accepting a digest, so the
-//! pipeline fetches the subject manifest bytes and re-hashes them against the
-//! digest the index resolved. That is not overhead for its own sake: it is the
-//! only way to bind the verification to bytes the registry actually serves.
-//!
-//! The trust root (Fulcio CAs + CT log keys) is injected via
-//! [`VerifyContext::trust_root`] (C-S1-3); the Rekor public key used for SET
-//! verification is pinned from it, or fetched from
-//! [`VerifyContext::rekor_url`] `/api/v1/log/publicKey`.
+//! `sigstore`'s `Verifier` owns X.509, signature and log-body binding; the Rekor SET and Merkle proof are checked
+//! here ([`tlog`]) because `sigstore` 0.14 leaves them `TODO` (sigstore-rs#285).
 
 use sigstore::bundle::verify::Verifier;
 use sigstore::bundle::verify::policy::{PolicyResult, VerificationPolicy};
@@ -77,47 +52,19 @@ pub(super) const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
     "application/vnd.docker.distribution.manifest.v2+json",
 ];
 
-/// Maximum accepted size of a referrer manifest, in bytes.
-///
-/// A Sigstore-signature referrer manifest is an OCI image manifest carrying a
-/// config + one bundle layer + a subject descriptor — a few hundred bytes. The
-/// declared descriptor size (untrusted) is rejected up front when over-cap, and
-/// the actual fetched body is re-checked against this cap after the read (a
-/// registry can lie about the size) — see [`pull_referrer_manifest_capped`].
-/// 256 KiB is generous headroom.
+/// Maximum accepted size of a referrer manifest, in bytes (a real one is a few hundred).
 pub(super) const MAX_REFERRER_MANIFEST_BYTES: u64 = 256 * 1024;
 
 /// Maximum number of signature referrers examined during an ANY-of verify.
-///
-/// Bounds the work a hostile registry can force by listing many candidate
-/// referrers; combined with the per-item size caps this bounds total download.
 pub(super) const MAX_SIGNATURE_CANDIDATES: usize = 8;
 
 /// Cross-candidate byte budget over referrer-manifest descriptor sizes.
-///
-/// Belt to [`MAX_SIGNATURE_CANDIDATES`]: a registry cannot force unbounded
-/// aggregate manifest download by listing many candidates each just under the
-/// per-item cap. Each candidate's bundle blob is separately capped at
-/// [`MAX_BUNDLE_SIZE_BYTES`].
 const MAX_TOTAL_REFERRER_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Hard backstop on how many listed referrers one scan will iterate, whatever
-/// the per-mode candidate cap is.
-///
-/// A candidate discriminated as the other content kind costs a manifest and a
-/// bundle fetch without consuming a candidate slot — which is the point, since
-/// otherwise attestations crowd a signature out of the scan — so the candidate
-/// cap alone no longer bounds the loop. This bounds the number of iterations
-/// regardless of what each one costs, well above any legitimate referrer count
-/// for one subject.
+/// Hard backstop on listed referrers one scan iterates; other-kind candidates consume no candidate slot.
 const MAX_REFERRER_LISTING_ITERATION: usize = 256;
 
 /// How many answers a scan is looking for.
-///
-/// Kept apart from [`VerifyContentMode`] so "which content kind" and "how many
-/// answers" stay two questions: the signature scan is ANY-of because *is this
-/// signed* has one answer, and the attestation scan is collect-all because
-/// *which SBOMs does this carry* does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanArity {
     /// Stop at the first candidate that fully passes.
@@ -126,16 +73,11 @@ enum ScanArity {
     All,
 }
 
-/// What kind of signed content a verify run is looking for.
-///
-/// Selects the caps before the first fetch and gates which bundle content a
-/// candidate may carry. A candidate's own kind is unknowable until its bundle
-/// is parsed, so deriving the bounds from it would be circular — see
-/// `adr_sbom_attestations.md` D-d.
+/// What kind of signed content a verify run is looking for; selects the caps before the first fetch
+/// (`adr_sbom_attestations.md` D-d).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyContentMode {
-    /// An artifact message signature — what `ocx package verify` has always
-    /// looked for, and the mode every existing caller passes.
+    /// An artifact message signature.
     Signature,
     /// An in-toto attestation carried in a DSSE envelope.
     Attestation {
@@ -145,28 +87,16 @@ pub enum VerifyContentMode {
 }
 
 /// Whether a run demands cryptographic verification, or merely reads.
-///
-/// Resolved once per invocation from the flags and the trust policies, and
-/// carried into the pipeline rather than re-derived: "is there a policy" is a
-/// question about configuration, and the pipeline must not be able to answer it
-/// differently from the CLI that reported the mode to the user.
+// Resolved once by the caller and carried in, so the pipeline cannot disagree with the mode the CLI reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationMode {
-    /// Every document must carry a signature this run can verify against the
-    /// resolved policies. An unsigned attachment is refused, never listed.
+    /// Every document must verify against the resolved policies; an unsigned attachment is refused.
     Demand,
-    /// Nothing is verified and no cryptography runs. Every document — raw
-    /// attachment or bundle payload — is read and reported as unverified.
-    ///
-    /// This is what makes `ocx package sbom` usable with no Sigstore setup at
-    /// all. It is not a relaxation of `Demand`: no key, certificate or log
-    /// entry is consulted, so nothing here may ever be presented as verified.
+    /// No cryptography runs; every document is read and reported as unverified, never as verified.
     Permissive,
 }
 
 /// The untrusted-byte bounds one verify run enforces, chosen by content mode.
-///
-/// Three integers, fixed per mode: nothing here will grow a heap field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ContentCaps {
     /// Per-candidate bundle-blob cap, on the declared size and on bytes read.
@@ -179,11 +109,7 @@ struct ContentCaps {
 
 impl VerifyContentMode {
     /// The bounds this mode enforces, resolved before the first fetch.
-    ///
-    /// `Signature` returns exactly the shipped numbers; an attestation bundle
-    /// is a different artifact class (a whole SBOM, not a 500-byte signature)
-    /// and gets the `MAX_ATTESTATION_*` bounds instead. Hoisting the larger
-    /// numbers into the shared path would silently relax `ocx package verify`.
+    // Keep the attestation bounds on their own arm: shared, they would silently relax `ocx package verify`.
     fn caps(&self) -> ContentCaps {
         match self {
             Self::Signature => ContentCaps {
@@ -200,11 +126,7 @@ impl VerifyContentMode {
     }
 }
 
-/// A caller-supplied resolution, for the verify pipeline.
-///
-/// [`SubjectResolver`](crate::sign::pipeline::SubjectResolver) in the
-/// verify taxonomy: same reason it is the caller's, same place it is invoked,
-/// and the same answer — except that verify reads `index_members` out of it.
+/// A caller-supplied resolution: [`SubjectResolver`](crate::sign::pipeline::SubjectResolver) in the verify taxonomy.
 pub type VerifySubjectResolver<'a> = dyn Fn(
         &'a PackageRef,
         Option<&'a Platform>,
@@ -217,78 +139,37 @@ pub type VerifySubjectResolver<'a> = dyn Fn(
 pub struct VerifyContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
     pub identifier: &'a PackageRef,
-    /// Platform to narrow into, when one was requested (C-010).
-    ///
-    /// `None` acts on **whatever the reference resolved to**, index or bare
-    /// manifest; `Some(..)` narrows into an index and is an error when the
-    /// resolved object is not one. The branch is on what resolution returned,
-    /// never on the reference's form — see [`resolve_sign_target`](ocx_oci::resolve_target::resolve_sign_target).
+    /// Platform to narrow into; `None` acts on whatever the reference resolved to, `Some` requires an index.
     pub platform: Option<&'a Platform>,
-    /// Resolved ANY-of trust policies the signing certificate must satisfy: a
-    /// single exact pair when `--certificate-identity`/`--certificate-oidc-issuer`
-    /// are supplied (flag mode), or the scope-matched `[[trust.policy]]` set
-    /// (policy mode). See `ocx_trust`.
+    /// Resolved ANY-of trust policies the signature must satisfy.
     pub policies: &'a [ocx_trust::CompiledPolicy],
     /// When true, bypass the referrers-capability cache.
     pub no_cache: bool,
-    /// The dial-site SSRF floor, resolved for this run's logical registry —
-    /// see [`SignContext::dial`](crate::sign::SignContext::dial).
+    /// The dial-site SSRF floor, resolved for this run's logical registry.
     pub dial: DialPolicy<'a>,
-    /// The caller-supplied resolution (plan DEC-17), invoked exactly where the
-    /// index fetch used to sit.
-    ///
-    /// Verify reads one thing sign and attest do not: `index_members`, every
-    /// digest the enclosing index lists, which the C-008 membership test needs.
+    /// The caller-supplied resolution.
     pub resolve: Box<VerifySubjectResolver<'a>>,
-    /// Trust root (Fulcio CA certs + optional pinned Rekor key); C-S1-3 seam.
+    /// Trust root (Fulcio CA certs + optional pinned Rekor key); injection seam.
     pub trust_root: &'a TrustRoot,
-    /// Rekor URL (C-S1-3 injection seam). Default: `https://rekor.sigstore.dev`.
+    /// Rekor URL injection seam. Default: `https://rekor.sigstore.dev`.
     pub rekor_url: &'a Url,
-    /// The signing tier of the state-root layout, owning the
-    /// referrers-capability and trust-root cache layouts.
+    /// The signing tier of the state-root layout.
     pub state: SigningStatePaths,
-    /// When true, no Sigstore trust-services network: the Rekor key must come
-    /// from the (pinned/cached) trust root, never a fetch. The artifact registry
-    /// is still used (verify inherently reads the signature from where it lives).
-    /// On a successful online run the trust material is cached for later offline
-    /// verifies. See `adr_offline_verify_trust_cache.md`.
+    /// No Sigstore trust-services network: the Rekor key must come from the trust root; the registry is still read
+    /// (`adr_offline_verify_trust_cache.md`).
     pub offline: bool,
-    /// Which content kind to look for. `Signature` is today's behaviour.
+    /// Which content kind to look for.
     pub content: VerifyContentMode,
-    /// Whether this run demands verification. Inert for
-    /// [`VerifyContentMode::Signature`], whose entire purpose is to verify:
-    /// [`VerifyPipeline::run`] never reads it.
+    /// Whether this run demands verification; inert for [`VerifyContentMode::Signature`].
     pub verification: VerificationMode,
-    /// The cosign wire shape this run pins (D9).
-    ///
-    /// `None` prefers a bundle and falls back to a simplesigning sidecar only
-    /// when the bundle shape is **absent** — no candidate matched and none was
-    /// refused, so a fetched-and-rejected bundle fails closed with its own exit
-    /// code instead of promoting the weaker shape. `Some(..)` pins: the other shape
-    /// is never discovered — not discovered and then ignored — so a pinned
-    /// `simplesigning` against a subject carrying only a bundle answers "no
-    /// signatures found" rather than silently verifying the bundle.
+    /// The cosign wire shape this run pins; `None` prefers a bundle, falling back to a sidecar only when no bundle
+    /// candidate matched or was refused. A pinned shape never discovers the other.
     pub signature_format: Option<SignatureFormat>,
-    /// Accept a keyless simplesigning sidecar that carries **no**
-    /// transparency-log evidence (`--allow-unlogged-signature`).
+    /// Accept a keyless simplesigning sidecar with **no** transparency-log evidence (`--allow-unlogged-signature`).
     ///
-    /// Off by default, and off is the contract: a cosign `sha256-<hex>.sig`
-    /// whose layer has no `dev.sigstore.cosign/bundle` annotation proves nothing
-    /// about *when* its short-lived Fulcio certificate was used, so it is
-    /// refused. The opt-out exists for air-gapped CI, where the entry cannot be
-    /// fetched or was never written; it is the counterpart to cosign's
-    /// `--insecure-ignore-tlog` and, like it, is the caller saying they accept
-    /// a signature nothing timestamps. Inert on every other path — a bundle's
-    /// transparency evidence is mandatory under keyless and optional under a
-    /// key regardless of this flag.
+    /// Inert for bundles, whose evidence stays mandatory under keyless and optional under a key.
     pub allow_unlogged_signature: bool,
-    /// Widen the scan from ANY-of first-match to every candidate the caps allow.
-    ///
-    /// Set by the callers that render `signatures[]`; left `false` by the
-    /// install-time auto-verify hook, which asks only "is this signed" and pays
-    /// no crypto for candidates nobody reads. It widens the **report**, never
-    /// the verdict: [`VerifyPipeline::run`]'s answer is the first candidate that
-    /// fully passed under either setting.
+    /// Widen the scan from first-match to every candidate the caps allow; widens the report, never the verdict.
     pub report_all: bool,
 }
 
@@ -297,64 +178,28 @@ pub struct VerifyContext<'a> {
 pub struct VerifyResult {
     /// Digest of the subject manifest that was verified.
     pub subject_digest: Digest,
-    /// What carried this signature — and **not always a manifest**.
-    ///
-    /// [`Self::signature_format`] is the discriminator, and
-    /// [`Self::discovery_method`] is not. A [`SignatureFormat::Bundle`] result
-    /// names the OCI referrer manifest the listing pointed at; every
-    /// [`SignatureFormat::Simplesigning`] result names the **layer** blob,
-    /// because one layer is one signature there and the manifest digest would
-    /// name all of them at once (`simplesigning_read`'s [`SidecarScan::refused`]
-    /// states the same deviation for its own half).
-    ///
-    /// The door cannot stand in for the shape, because a cosign sidecar is
-    /// reachable through more than one: `scan_simplesigning` hands
-    /// `read_sidecar_manifest` the *listing's* `via`, so a `sha256-<hex>.sig`
-    /// referrer the Referrers API served reports a layer digest while
-    /// `discovery_method` reads `referrers_api`. A consumer keyed on the door
-    /// would address that layer as a manifest and 404 on the one case the rule
-    /// exists to catch.
-    ///
-    /// So: `GET /v2/<name>/manifests/<digest>` only under
-    /// `signature_format == "bundle"`; under `"simplesigning"` it is a blob.
-    ///
-    /// [`SidecarScan::refused`]: super::simplesigning_read::SidecarScan::refused
+    /// What carried this signature: the referrer manifest under [`SignatureFormat::Bundle`], the layer **blob**
+    /// under [`SignatureFormat::Simplesigning`]. Key on [`Self::signature_format`], never [`Self::discovery_method`].
     pub referrer_digest: Digest,
     /// What produced the signature: a Fulcio certificate, or a pinned key.
     pub key_backend: KeyBackendKind,
-    /// Cert SAN that signed the subject. **Absent under a key** — a key
-    /// signature carries no certificate, so there is no identity to read, and
-    /// an empty string here would report "signed by nobody" as if it were a
-    /// fact about the certificate rather than the absence of one.
+    /// Cert SAN that signed the subject; absent under a key.
     pub certificate_identity: Option<String>,
-    /// Cert OIDC issuer URL. Absent under a key, for the same reason.
+    /// Cert OIDC issuer URL; absent under a key.
     pub certificate_oidc_issuer: Option<String>,
-    /// Rekor integrated time (UTC epoch seconds) of the signature entry.
-    ///
-    /// Absent when the bundle carries no transparency entry — legal under a key
-    /// (D10), impossible under keyless.
+    /// Rekor integrated time (UTC epoch seconds); absent without a transparency entry, which only a key allows.
     pub signed_at: Option<u64>,
     /// Which cosign wire shape carried this signature.
     pub signature_format: SignatureFormat,
     /// Which discovery door this signature came through.
     pub discovery_method: DiscoveryMethod,
-    /// Rekor log index of the entry this signature's transparency evidence was
-    /// **verified** against, and the primary dedup key when present.
+    /// Rekor log index of the **verified** entry, and the primary dedup key when present.
     ///
-    /// Only ever set from an entry that passed [`verify_rekor_set`] — a
-    /// synthesised entry (the one `simplesigning_read` builds so `sigstore`'s
-    /// `CheckedBundle` has the one it demands) must never reach this field,
-    /// because a reported log index is read as a claim that the signature is in
-    /// the log at that position.
+    /// Only ever set from an entry that passed [`verify_rekor_set`], never a synthesized one.
     pub rekor_log_index: Option<u64>,
 }
 
-/// A verified signature plus the material D6's dedup key falls back on.
-///
-/// The signature bytes travel beside [`VerifyResult`] rather than on it: they
-/// are scan bookkeeping, and a reported result carrying raw signature bytes
-/// would invite a consumer to treat them as evidence of something the result
-/// already states.
+/// A verified signature plus the raw bytes the dedup key falls back on, kept off the reported [`VerifyResult`].
 #[derive(Debug)]
 pub struct VerifiedSignature {
     /// The verification facts, as reported.
@@ -363,19 +208,13 @@ pub struct VerifiedSignature {
     pub signature: Vec<u8>,
 }
 
-/// D6's dedup key: the Rekor log index when present, otherwise the material.
-///
-/// Two doors onto one signature (an OCI 1.1 referrer and the cosign sidecar
-/// tag; the Referrers API and the fallback tag) must contribute one row to
-/// `signatures[]`, not two. The fallback branch is not academic: key mode
-/// defaults to no Rekor upload, so the log index is absent in exactly the case
-/// where double-discovery is most likely.
+/// The dedup key that makes two discovery doors onto one signature one `signatures[]` row: the Rekor log index when
+/// present, otherwise the material (key mode usually has no log index).
 #[derive(Debug, PartialEq, Eq)]
 enum SignatureKey {
     /// The transparency log's own identifier for this entry.
     RekorLogIndex(u64),
-    /// No verified transparency evidence: the signature bytes, the subject they
-    /// bind, and the wire shape that carried them.
+    /// No verified transparency evidence.
     Material {
         signature: Vec<u8>,
         subject_digest: String,
@@ -397,15 +236,7 @@ impl VerifiedSignature {
     }
 }
 
-/// One verified attestation plus the verification facts about the candidate it
-/// came from.
-///
-/// [`VerifiedAttestation`] alone cannot populate the report: `referrer_digest`,
-/// `certificate_identity`, `certificate_oidc_issuer` and `signed_at` all live on
-/// [`VerifyResult`], and the default `ocx package sbom` listing promises all
-/// four. [`VerifyResult`] carries no attestation field for the mirror reason —
-/// an `Option` there plus a `Vec` here would be two contracts disagreeing about
-/// how many attestations a subject can have (D-d).
+/// One verified attestation plus the verification facts about the candidate it came from.
 #[derive(Debug)]
 pub struct AttestationMatch {
     /// Verification facts about the referrer this attestation came from.
@@ -415,10 +246,6 @@ pub struct AttestationMatch {
 }
 
 /// A candidate that was examined and refused, kept so a caller can report it.
-///
-/// A scan that returns matches has still usually looked at candidates that
-/// failed, and dropping those makes "3 attestations" indistinguishable from
-/// "3 attestations, 2 refused" — the second is the one worth acting on.
 #[derive(Debug)]
 pub struct RefusedCandidate {
     /// The referrer's digest, verbatim as the registry listed it.
@@ -427,60 +254,32 @@ pub struct RefusedCandidate {
     pub reason: VerifyErrorKind,
 }
 
-/// Everything an attestation scan found: what verified, and what did not.
-///
-/// Refusals travel beside the matches rather than failing the scan. Failing
-/// closed on any candidate error would hand a single malformed referrer the
-/// power to hide every valid attestation on the subject — the DoS the
-/// per-candidate independence exists to prevent.
+/// Everything an attestation scan found; refusals travel beside the matches, so one malformed referrer cannot hide
+/// every valid attestation.
 #[derive(Debug)]
 pub struct AttestationScan {
     /// Every candidate that verified, in listing order.
     pub matches: Vec<AttestationMatch>,
-    /// Every **unsigned** SBOM referrer found, in digest order.
-    ///
-    /// A separate list rather than an `Option` on [`AttestationMatch`], because
-    /// the two are not the same claim wearing different clothes: a verified
-    /// match carries a predicateType read out of a signed payload and a subject
-    /// digest a signature *proved*, and an unverified one carries a media type
-    /// the registry asserted and a subject it merely claims. Keeping them apart
-    /// makes a caller that ignores this field under-report rather than
-    /// mis-report, and leaves the verified path's shape untouched.
+    /// Every **unsigned** SBOM referrer found, in digest order; kept apart from `matches` so it is never mistaken
+    /// for a verified one.
     pub unverified: Vec<UnverifiedSbom>,
     /// Every candidate that was examined and refused, in listing order.
     pub refused: Vec<RefusedCandidate>,
-    /// The platform manifest `--platform` narrowed to, when this scan also read
-    /// the enclosing index behind it (**C-011**).
-    ///
-    /// A *fact about the scan*, not a preference: it says which of the two
-    /// subjects read was the per-platform one, and the shadowing decision keys
-    /// on it. `None` whenever a single subject was read — nothing was narrowed,
-    /// or membership could not be proved — which is what makes "nothing is
-    /// superseded" true by construction rather than by a caller remembering to
-    /// check.
+    /// The platform manifest `--platform` narrowed to, when this scan also read the enclosing index behind it;
+    /// `None` when a single subject was read.
     pub platform_subject: Option<Digest>,
 }
 
-/// An SBOM attached without a signature: the document itself as the referrer
-/// payload, typed by its own media type.
-///
-/// Nothing here is proven — the registry served the bytes and said what they
-/// are, and there is no certificate, envelope or log entry to check any of it
-/// against. That is the whole content of the type, and why every consumer must
-/// label it as unverified rather than fold it into a listing beside signed
-/// documents.
+/// An SBOM attached without a signature; nothing here is proven, so every consumer must label it unverified.
 #[derive(Debug)]
 pub struct UnverifiedSbom {
     /// Digest of the OCI referrer manifest carrying the document.
     pub referrer_digest: Digest,
-    /// The subject the referrer is attached to — the digest this scan
-    /// resolved, which the referrer claims rather than proves.
+    /// The subject the referrer claims, rather than proves, to be attached to.
     pub subject_digest: Digest,
-    /// The predicateType URI the referrer's `artifactType` stands for, so a
-    /// consumer compares one vocabulary across both trust classes.
+    /// The predicateType URI the referrer's `artifactType` stands for.
     pub predicate_type: String,
-    /// The document, verbatim as the registry served it. Not a `RawValue`:
-    /// `text/spdx` is tag-value text, so an SBOM payload is not always JSON.
+    /// The document, verbatim as served; not a `RawValue`, since `text/spdx` is not JSON.
     pub document: Vec<u8>,
 }
 
@@ -490,18 +289,7 @@ pub struct VerifyPipeline;
 impl VerifyPipeline {
     /// Run the verify pipeline against a [`VerifyContext`].
     ///
-    /// The registry transport is derived from `client` internally, so this
-    /// entry point takes no `&dyn OciTransport` (ADR Amendment 1, Option 3).
-    /// The crate does expose one elsewhere: OCX-C-1's
-    /// [`native_transport`](fn@ocx_oci::client::native_transport) constructs a
-    /// transport for `ocx-mirror`, and OCX-C-2's
-    /// [`list_signature_candidates`](super::list_signature_candidates) takes
-    /// one — neither reaches this pipeline.
-    ///
-    /// Returns every signature that verified, in scan order and deduplicated by
-    /// D6's key. **The verdict is the first element** and is the same under
-    /// either [`VerifyContext::report_all`] setting — widening the arity appends
-    /// candidates behind the answer, it never changes it.
+    /// Returns every verified signature, scan-ordered and deduplicated; **the verdict is the first element**.
     pub async fn run(client: &Client, ctx: VerifyContext<'_>) -> Result<Vec<VerifyResult>, VerifyError> {
         let identifier = ctx.identifier.clone();
         Self::run_inner(client, ctx)
@@ -509,28 +297,12 @@ impl VerifyPipeline {
             .map_err(|kind| VerifyError::new(identifier, kind))
     }
 
-    /// Collect **every** verified attestation on the target, bounded by the
-    /// attestation-mode caps.
-    ///
-    /// The two content modes share [`Self::verify_one_referrer`] and differ only
-    /// here: [`Self::run`] is ANY-of — the first fully-passing candidate wins,
-    /// which is the right answer to "is this artifact signed" — while this is
-    /// collect-all, because first-match is the wrong answer to "which SBOMs does
-    /// this artifact have". Under an `identity_regexp` policy, or across a
-    /// signing-identity rotation where old and new coexist as two ANY-of entries
-    /// by design, first-match would let the *registry's listing order* pick which
-    /// document a consumer reads.
-    ///
-    /// Candidates that failed are returned alongside the ones that passed
-    /// ([`AttestationScan::refused`]) rather than failing the scan, so a caller
-    /// can report "N verified, M refused" instead of silently under-reporting.
+    /// Collect **every** verified attestation on the target, bounded by the attestation-mode caps.
     ///
     /// # Errors
     ///
-    /// [`VerifyErrorKind::AttestationNotFound`] (79) when the scan ends with no
-    /// match, the most actionable per-candidate failure when one was recorded,
-    /// and the fail-closed cap refusals when a bound truncated the scan — an
-    /// incomplete list is a wrong answer to a question about *every* attestation.
+    /// [`VerifyErrorKind::AttestationNotFound`] (79) when no match was found, else the most actionable recorded
+    /// refusal, and the fail-closed cap refusals when a bound truncated the scan.
     pub async fn run_attestations(client: &Client, ctx: VerifyContext<'_>) -> Result<AttestationScan, VerifyError> {
         let identifier = ctx.identifier.clone();
         Self::run_attestations_inner(client, ctx)
@@ -544,40 +316,18 @@ impl VerifyPipeline {
     ) -> Result<AttestationScan, VerifyErrorKind> {
         let target = Self::resolve_target(client, &ctx).await?;
         let mut budget = ScanBudget::new(ctx.content.caps());
-        // **C-011.** The enclosing index is a second *subject to read*, not a
-        // fallback to try when the first one is empty. A signature run is ANY-of,
-        // so [`Self::scan_with_index_fallback`] can stop at the first answer; an
-        // attestation run is collect-all, and "which SBOMs does this carry" is
-        // answered wrongly by either subject alone — cosign attests a
-        // multi-platform tag at the index while OCX pins a platform manifest, so
-        // reading only one of them hides documents that are genuinely attached.
-        //
-        // The gate is the same one, and it is the whole gate: no enclosing index
-        // (nothing was narrowed, or it was unfetchable), or a subject the index
-        // does not list, and the second pass never runs.
+        // A second subject, not a fallback: cosign attests at the index while OCX pins a platform manifest.
         let index_target = target.index_signature_subject().map(|index_digest| ScanTarget {
             image: target.image.clone(),
             subject_digest: index_digest.clone(),
-            // The index is the subject of this pass. No further indirection: an
-            // index listing an index would need its own membership proof, which
-            // nothing here has.
+            // No further indirection: a nested index would need a membership proof nothing here has.
             enclosing_index: None,
             index_members: Vec::new(),
         });
-        // Reported so the shadowing decision has a fact to key on rather than a
-        // guess. `None` whenever only one subject was read — which is what makes
-        // "nothing was narrowed, so nothing is superseded" true by construction.
         let platform_subject = index_target.as_ref().map(|_| target.subject_digest.clone());
         let passes = || std::iter::once(&target).chain(index_target.as_ref());
 
         if ctx.verification == VerificationMode::Permissive {
-            // One budget across every pass, and no signed pass at all: with
-            // nothing being verified, a bundle referrer is read for its payload
-            // exactly as a raw attachment is read for its bytes, and both list as
-            // unverified. Reading them in one digest-ordered pass per subject is
-            // what makes the two kinds unable to starve each other — there is no
-            // second allowance for volume of one kind to spend on behalf of the
-            // other, and no second allowance a second subject buys either.
             let mut unverified = Vec::new();
             let mut refused = Vec::new();
             for pass in passes() {
@@ -586,9 +336,7 @@ impl VerifyPipeline {
                 refused.extend(pass_refused);
             }
             if unverified.is_empty() {
-                // Same ladder the signed pass ends on: a refusal that was
-                // recorded is more actionable than "none found", which would
-                // send a publisher looking for an attach that did happen.
+                // A recorded refusal beats "none found", which would deny an attach that happened.
                 return Err(best_failure(refused).unwrap_or(VerifyErrorKind::AttestationNotFound));
             }
             return Ok(AttestationScan {
@@ -599,20 +347,13 @@ impl VerifyPipeline {
             });
         }
 
-        // Demand. Raw attachments are refused wholesale and *without a fetch*,
-        // so untrusted volume cannot spend one byte or one candidate slot of
-        // the budget the signed pass needs — the starvation question is closed
-        // structurally here rather than by rationing a shared allowance.
+        // Demand: raw attachments are refused without a fetch, so they spend none of the signed pass's budget.
         let mut matches = Vec::new();
         let mut signed_refused = Vec::new();
         let mut unsigned_refused = Vec::new();
-        // The first pass's verdict, kept for the empty-scan ladder below. The
-        // platform manifest is the object the user named, so its answer is the
-        // more actionable one when neither subject carries anything.
+        // The first (user-named) pass's verdict wins the empty-scan ladder below.
         let mut scan_failure = None;
-        // The `.sbom` probe's own fault, kept for the same ladder and for the
-        // reason `refuse_unsigned` defers it: it may not fail a run that
-        // verifies, and it may not be silently spent as "nothing attached".
+        // Deferred: it may neither fail a run that verifies nor be spent silently as "nothing attached".
         let mut sidecar_fault = None;
         for pass in passes() {
             let (pass_refused, pass_fault) = Self::refuse_unsigned(client, &ctx, pass).await?;
@@ -621,24 +362,13 @@ impl VerifyPipeline {
             match Self::scan(client, &ctx, pass, ScanArity::All, &mut budget).await {
                 Ok(outcome) => {
                     for (verify, attestation) in outcome.matches {
-                        // `verify_one_referrer` returns `Some` for every candidate
-                        // it verified in attestation mode, so `None` here would
-                        // mean the mode and the outcome had drifted apart. Fail
-                        // closed rather than report a match with nothing in it.
+                        // `None` means mode and outcome drifted apart; fail closed rather than report an empty match.
                         let attestation = attestation.ok_or(VerifyErrorKind::AttestationNotFound)?;
                         matches.push(AttestationMatch { verify, attestation });
                     }
                     signed_refused.extend(outcome.refused);
                 }
-                // This subject carries nothing signed. Not fatal on its own —
-                // the other subject may well carry the document — so it is
-                // remembered and only spent if every pass comes back empty.
-                //
-                // `finish_scan` consumed this pass's per-candidate refusals to
-                // build the kind, so they do not reach the report. That loss is
-                // bounded to the case where this pass verified nothing *and*
-                // another one did — which before C-011 was not a listing at all
-                // but an outright failure carrying exactly this kind.
+                // The other subject may still match, so the kind is spent only if every pass is empty.
                 Err(kind @ (VerifyErrorKind::AttestationNotFound | VerifyErrorKind::NoSignaturesFound)) => {
                     scan_failure.get_or_insert(kind);
                 }
@@ -647,15 +377,7 @@ impl VerifyPipeline {
         }
 
         if matches.is_empty() {
-            // If unsigned attachments were refused on the way, that refusal is
-            // the actionable answer — "this SBOM is attached without a signature
-            // and you demanded one" tells an operator what to do, where "none
-            // found" states something false about the subject.
-            //
-            // A `.sbom` probe fault sits between the two: less actionable than
-            // a refusal that names a real attachment, more actionable than a
-            // "not found" that would state something this run never got to
-            // check.
+            // Ladder: unsigned-attachment refusal, then `.sbom` probe fault, then the scan's own verdict.
             let kind = scan_failure.unwrap_or(VerifyErrorKind::AttestationNotFound);
             return Err(best_failure(unsigned_refused).or(sidecar_fault).unwrap_or(kind));
         }
@@ -664,34 +386,14 @@ impl VerifyPipeline {
         refused.extend(unsigned_refused);
         Ok(AttestationScan {
             matches,
-            // Nothing unverified is ever listed under `Demand`: an unsigned
-            // attachment was refused above, and every signed match is in
-            // `matches`.
             unverified: Vec::new(),
             refused,
             platform_subject,
         })
     }
 
-    /// Read every SBOM the target carries **without verifying any of it**:
-    /// raw attachments (`cosign attach sbom` / `oras attach`) and the payloads
-    /// of Sigstore bundles alike.
-    ///
-    /// Reached only under [`VerificationMode::Permissive`]. No cryptography
-    /// runs, by construction rather than by omission: no certificate, no
-    /// transparency-log entry and no trust root is consulted on this path, so
-    /// nothing it returns may ever be presented as verified. What it does
-    /// enforce is structure — the caller's [`ScanBudget`], and each payload's
-    /// own claims about itself, which is all that is checkable without a key.
-    ///
-    /// Both referrer kinds are read in one digest-ordered pass over one
-    /// budget. That is what stops a registry starving one kind with volume of
-    /// the other: there is no second allowance to spend.
-    ///
-    /// Reachable only from [`Self::run_attestations`]. `ocx package verify
-    /// --attestation` goes through [`Self::run`], which never calls this, so a
-    /// document read here can never become a *verification* candidate — the
-    /// separation is structural, not a filter someone has to remember.
+    /// Read every SBOM the target carries, raw attachments and bundle payloads alike, **without verifying any of it**.
+    // Only `run_attestations` may call this, never `run`, or an unverified document becomes a verification candidate.
     async fn scan_unverified(
         client: &Client,
         ctx: &VerifyContext<'_>,
@@ -699,8 +401,6 @@ impl VerifyPipeline {
         budget: &mut ScanBudget,
     ) -> Result<(Vec<UnverifiedSbom>, Vec<RefusedCandidate>), VerifyErrorKind> {
         let VerifyContentMode::Attestation { .. } = &ctx.content else {
-            // Unreachable through the public API; a signature run always
-            // verifies and never reaches this pass.
             return Ok((Vec::new(), Vec::new()));
         };
         let transport = client.transport();
@@ -708,18 +408,8 @@ impl VerifyPipeline {
             image, subject_digest, ..
         } = target;
 
-        // The Unsupported verdict no longer refuses the operation: the OCI referrers
-        // tag-schema fallback (`list_referrers_with_fallback` /
-        // `append_referrer_fallback_index`) serves a registry without the Referrers
-        // API. See `adr_oci_referrers_signing_v1.md`, Amendment 10 — the fallback
-        // index is a mutable tag anyone with push access authors, and the residual
-        // attack surface that reverses S1-F is recorded there.
-        //
-        // One unfiltered listing rather than one request per artifact type. The
-        // client-side filter below is the real one either way: the OCI spec
-        // permits a registry to ignore the server-side `artifactType`
-        // parameter, so a filtered listing would still have to be re-filtered
-        // here — at several times the requests.
+        // Unfiltered: a registry may ignore the server-side `artifactType` filter, so the client-side one below is real
+        // (`adr_oci_referrers_signing_v1.md`, Amendment 10).
         let ReferrersListing {
             descriptors: listed,
             via,
@@ -727,27 +417,13 @@ impl VerifyPipeline {
             .list_referrers_with_fallback(image, subject_digest, None)
             .await
             .map_err(map_client_error)?;
-        // D-5 reports this on signatures[].discovery_method. Logged rather than
-        // dropped here: a listing served by the mutable fallback tag is a
-        // materially weaker provenance claim than one the registry computed.
         tracing::debug!("unverified SBOM referrers discovered via {via}");
-        // An absent `artifactType` is dropped, unlike in the signed scan where
-        // it is kept. The asymmetry is the point: there the bundle parse
-        // downstream fail-closes on a non-bundle, so keeping an untyped
-        // candidate costs a fetch and admits nothing. Here the artifactType is
-        // the only statement of what a raw payload is, so an untyped referrer
-        // is not an SBOM referrer — treating it as one would list an arbitrary
-        // blob under a predicate type nothing ever claimed.
-        // A prefilter, and only that: it decides which candidates are worth a
-        // request and which decode each one needs. `--type` is deliberately
-        // *not* applied here even though the listing appears to carry the
-        // answer, because the listing's `artifactType` is unchecked against the
-        // manifest it points at — narrowing on it would drop a referrer whose
-        // layer is the requested type, and admit one whose layer is not.
-        // Neither shape is narrowed before its payload's own claim is read.
+        // No `--type` here: the listing's `artifactType` is unchecked against the manifest, so narrowing on it
+        // misfilters.
         let mut candidates: Vec<(ocx_oci::Descriptor, UnverifiedPayload)> = listed
             .into_iter()
             .filter_map(|descriptor| {
+                // Drop an untyped referrer, or it is listed under a predicate type nothing claimed.
                 let artifact_type = descriptor.artifact_type.as_deref()?;
                 if is_unsigned_sbom_artifact_type(artifact_type) {
                     return Some((descriptor, UnverifiedPayload::Raw));
@@ -755,8 +431,7 @@ impl VerifyPipeline {
                 (artifact_type == SIGSTORE_BUNDLE_V03).then_some((descriptor, UnverifiedPayload::Bundle))
             })
             .collect();
-        // Digest order, for the reason `order_candidates` sorts: a total order
-        // the registry does not choose, so the listing is reproducible.
+        // Digest order: a total order the registry does not choose.
         candidates.sort_by(|(left, _), (right, _)| left.digest.cmp(&right.digest));
 
         let total_candidates = candidates.len();
@@ -772,11 +447,7 @@ impl VerifyPipeline {
             budget.examined();
             processed = processed.saturating_add(1);
             match Self::read_unverified_referrer(transport, ctx, budget, target, &descriptor, payload).await {
-                // Every layer the referrer carries. An empty `Vec` is a `--type`
-                // narrowing miss: this candidate is fine, it simply is not the
-                // document that was asked for. It spent a slot and records no
-                // failure, exactly as the signed scan's `TypeNarrowed` does
-                // (S-017).
+                // Empty is a `--type` narrowing miss: a spent slot, not a failure.
                 Ok(sboms) => found.extend(sboms),
                 Err(reason) => refused.push(RefusedCandidate {
                     referrer_digest: descriptor.digest.clone(),
@@ -785,15 +456,7 @@ impl VerifyPipeline {
             }
         }
 
-        // A truncated permissive pass is reported as a refusal, not raised as
-        // an error — the one place this pass's posture differs from the signed
-        // one's, and deliberately so. The signed pass fails closed because a
-        // partial answer about *signed* documents understates what a publisher
-        // vouched for. Here nothing is vouched for by anyone, and raising would
-        // let a registry turn a working listing into a hard failure by the
-        // cheapest means available: attach enough junk. The refusal travels out
-        // beside the results, turns the CLI summary to `partial_failure`, and
-        // names the first referrer that was not looked at.
+        // A refusal, not an error: raising would let attached junk turn a working listing into a hard failure.
         if let Some(stop) = budget.stop {
             refused.push(RefusedCandidate {
                 referrer_digest: first_unexamined.unwrap_or_default(),
@@ -801,32 +464,12 @@ impl VerifyPipeline {
             });
         }
 
-        // The `sha256-<hex>.sbom` sidecar tag — spec §WP5's SBOM half, and the
-        // third cosign shape that no listing can reach. Measured against cosign
-        // v3.1.1: `cosign attach sbom <ref>` writes a manifest carrying neither
-        // `artifactType` nor `subject`, and the Referrers API returns an empty
-        // index for the subject afterwards, so the tag is the whole discovery
-        // story exactly as it is for `.att`.
-        //
-        // Read after the referrers pass and unconditionally, not as a fallback
-        // for having found nothing. `.att`'s door is gated on `matches
-        // .is_empty()` because a signature scan is ANY-of and stops at the first
-        // answer; this one is collect-all — `ocx package sbom` must report every
-        // document the subject carries — so an SBOM found through the Referrers
-        // API must not hide one attached through the tag.
-        //
-        // Skipped once a bound has already stopped the pass: the refusal above
-        // has said the listing is partial, and opening one more door would spend
-        // budget the caller was just told had run out.
+        // The `.sbom` sidecar tag, which no listing reaches: read even when the listing found SBOMs,
+        // but never once a bound stopped the pass.
         if budget.stop.is_none() {
             budget.examined();
             match Self::read_sbom_sidecar_tag(transport, ctx, budget, target).await {
-                // Every layer the tag carries (#386). No tag, or a `--type`
-                // narrowing miss, is an empty `Vec` — neither is a failure.
                 Ok(sboms) => found.extend(sboms),
-                // `referrer_digest` is the tag's manifest digest when the read
-                // got far enough to learn it, and empty when it did not — the
-                // same convention the truncation row above uses.
                 Err((referrer_digest, reason)) => refused.push(RefusedCandidate {
                     referrer_digest: referrer_digest.map(|d| d.to_string()).unwrap_or_default(),
                     reason,
@@ -836,37 +479,9 @@ impl VerifyPipeline {
         Ok((found, refused))
     }
 
-    /// Read the documents behind cosign's `sha256-<hex>.sbom` sidecar tag —
-    /// **every** layer, not the first.
+    /// Read **every** layer behind cosign's `sha256-<hex>.sbom` sidecar tag; empty for no tag or a `--type` miss.
     ///
-    /// An empty `Vec` covers both "the subject carries no such tag" — the
-    /// overwhelmingly common case, and a 404 says exactly that — and a `--type`
-    /// narrowing that matched nothing.
-    ///
-    /// The error carries the manifest digest when one was learned, because the
-    /// caller has no descriptor to name the refusal with: this door is addressed
-    /// by tag, and the digest only exists once the registry has answered.
-    ///
-    /// # Why every layer, when cosign writes one
-    ///
-    /// Measured against cosign v3.1.1, a second `cosign attach sbom` against the
-    /// same subject *replaces* the tag's manifest, so cosign itself never writes
-    /// a second layer. That is a fact about one producer, and this reader does
-    /// not get to assume its producer: the tag is generic OCI, addressed by
-    /// name, and a registry can serve any manifest under it. Reading
-    /// `layers.first()` therefore did not mean "cosign wrote one document" — it
-    /// meant every document past the first was **silently dropped** from
-    /// `ocx package sbom`, which is a collect-all report (#386).
-    ///
-    /// One layer's refusal refuses the whole tag, and deliberately: the answer
-    /// this feeds is "every document the subject carries", and a short list
-    /// presented as complete is the worse failure. That is also exactly what the
-    /// first-layer reader did when the first layer was the bad one.
-    ///
-    /// The tag spends one candidate slot however many layers it holds — it is
-    /// one manifest fetch, and the slot cap bounds discovery breadth — while
-    /// every layer's bytes are charged to the byte budget by
-    /// [`Self::read_unverified_layer`], because layers are transfer.
+    /// The error carries the manifest digest once learned, since a tag-addressed door has no descriptor to name.
     async fn read_sbom_sidecar_tag(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
@@ -885,22 +500,14 @@ impl VerifyPipeline {
         budget.charge(manifest_bytes.len() as u64);
 
         let read = async {
-            // A plain image manifest, never a `ReferrerManifest`: cosign's
-            // `.sbom` manifest declares neither `artifactType` nor `subject`, so
-            // the referrer type's required fields would reject cosign's own
-            // bytes outright.
+            // Not a `ReferrerManifest`: its required `artifactType`/`subject` would reject cosign's own bytes.
             let manifest: ImageManifest =
                 serde_json::from_slice(&manifest_bytes).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
-            // A zero-layer manifest is unusable, and stays the same refusal it
-            // was when the reader took the first layer: the tag exists and holds
-            // nothing readable, which is not the same answer as "no tag".
+            // A present tag holding nothing is a refusal, not "no tag".
             if manifest.layers.is_empty() {
                 return Err(VerifyErrorKind::NoUsableBundle);
             }
-            // `Raw`: the layer *is* the document. A `.sbom` tag never carries a
-            // Sigstore bundle — cosign's signed path writes a referrer, not this
-            // tag — and passing `Bundle` here would ask `parse_bundle` to read an
-            // SBOM.
+            // `Raw`: a `.sbom` tag never carries a bundle, so `Bundle` would have `parse_bundle` read an SBOM.
             Self::read_every_layer(
                 transport,
                 ctx,
@@ -915,30 +522,7 @@ impl VerifyPipeline {
         read.await.map_err(|kind| (Some(referrer_digest), kind))
     }
 
-    /// Fetch one referrer and turn it into an unverified document: its
-    /// manifest, then its payload blob, then whatever decode its shape calls
-    /// for.
-    ///
-    /// The caps are the signed path's, reached through the same two helpers, so
-    /// a document read here is bounded by exactly the numbers an attestation
-    /// envelope is. Bytes are charged on the failure paths too — a rejected
-    /// read still cost up to the cap, because the bounded read stops at cap + 1
-    /// rather than at zero. That charge is deliberately pessimistic and cannot
-    /// be tightened: `pull_blob_capped` drops the buffer on the error
-    /// path, and a registry declaring one byte while streaming the cap would
-    /// otherwise be charged one byte.
-    ///
-    /// **Every** layer, for the reason [`Self::read_sbom_sidecar_tag`] reads
-    /// every layer of the sidecar tag: an OCI 1.1 referrer manifest is an
-    /// ordinary image manifest, whose `layers` array the spec bounds below at
-    /// one and not above, so "the payload is the first layer" was a statement
-    /// about OCX's own writer and not about the bytes a registry serves. Both
-    /// doors funnel into the same [`Self::read_unverified_layer`], so a reader
-    /// that fixed one and not the other would judge one shape two ways.
-    ///
-    /// An empty `Vec` is a `--type` narrowing miss, not a failure — see the
-    /// caller. One candidate slot per referrer however many layers it holds;
-    /// every layer's bytes are charged.
+    /// Fetch one referrer and read **every** layer into an unverified document; empty is a `--type` miss.
     async fn read_unverified_referrer(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
@@ -950,18 +534,16 @@ impl VerifyPipeline {
         let referrer_digest =
             Digest::try_from(descriptor.digest.as_str()).map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
 
-        // Cheap reject of a self-declared over-cap descriptor before any fetch;
-        // the actual body length is re-checked after the read, since a registry
-        // can lie about the declared size.
+        // The declared size is untrusted: only a pre-fetch reject, the body is re-checked after the read.
         if descriptor.size < 0 || descriptor.size as u64 > MAX_REFERRER_MANIFEST_BYTES {
             return Err(VerifyErrorKind::BundleParseFailed);
         }
-        // `clone_with_digest` drops the tag, so this stays digest-only — a
-        // `repo:tag@digest` reference keys a different registry path and 404s.
+        // Digest-only (`clone_with_digest` drops the tag): a `repo:tag@digest` reference 404s.
         let referrer_ref = target.image.clone_with_digest(descriptor.digest.clone());
         let referrer_bytes = match pull_referrer_manifest_capped(transport, &referrer_ref).await {
             Ok(bytes) => bytes,
             Err(kind) => {
+                // Charge the cap on failure: the buffer is dropped, so a lying registry would otherwise pay one byte.
                 budget.charge(MAX_REFERRER_MANIFEST_BYTES);
                 return Err(kind);
             }
@@ -985,13 +567,8 @@ impl VerifyPipeline {
         .await
     }
 
-    /// Read each of one manifest's payload layers into a document, dropping the
-    /// ones `--type` narrows out.
-    ///
-    /// The shared body of the two multi-layer readers above. One layer's
-    /// refusal refuses the manifest: the pass this feeds reports *every*
-    /// document a subject carries, so a partial list returned as a complete one
-    /// is the failure worth avoiding.
+    /// Read each payload layer into a document, dropping `--type` misses; one layer's refusal refuses the manifest,
+    /// so a partial list is never reported as complete.
     async fn read_every_layer(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
@@ -1013,21 +590,7 @@ impl VerifyPipeline {
         Ok(documents)
     }
 
-    /// Turn one already-located payload layer into an unverified document.
-    ///
-    /// Split out of [`Self::read_unverified_referrer`] rather than duplicated,
-    /// because the `.sbom` sidecar tag reaches layers of the same *kind*
-    /// through a different door: an OCI 1.1 referrer is addressed by digest and
-    /// parses as a [`ReferrerManifest`](ocx_oci::referrer::ReferrerManifest),
-    /// while cosign's `sha256-<hex>.sbom` manifest declares neither
-    /// `artifactType` nor `subject` and so parses only as a plain image
-    /// manifest. Both doors walk **all** of their manifest's layers through
-    /// [`Self::read_every_layer`], and everything after "here is the layer" —
-    /// the media-type gate, the `--type` narrowing, the size cap and the blob
-    /// read — is this one function, so the two cannot drift into judging the
-    /// same bytes differently.
-    ///
-    /// `Ok(None)` is a `--type` narrowing miss, not a failure.
+    /// Turn one located payload layer into an unverified document; `Ok(None)` is a `--type` miss.
     async fn read_unverified_layer(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
@@ -1038,17 +601,8 @@ impl VerifyPipeline {
         payload: UnverifiedPayload,
     ) -> Result<Option<UnverifiedSbom>, VerifyErrorKind> {
         let caps = budget.caps;
-        // For a raw attachment the layer's media type is *the* claim about what
-        // the document is, and the only one checkable without a key. It is
-        // therefore both the gate and the label: outside the SBOM set the
-        // referrer is refused, since otherwise it could declare
-        // `application/vnd.cyclonedx+json` in the listing, carry an executable,
-        // and be presented as an SBOM. Inside the set it names the
-        // predicateType reported for the bytes that were actually served —
-        // never the listing's echo, which nothing checks against this manifest,
-        // and which a registry can therefore use to label SPDX bytes CycloneDX.
-        // A bundle needs no such gate: its predicateType is inside the payload
-        // and the parse below fail-closes on anything that is not a bundle.
+        // The layer media type, never the listing's unchecked echo, gates and labels a raw attachment,
+        // or an executable passes as an SBOM.
         let raw_predicate_type = match payload {
             UnverifiedPayload::Raw => match sbom_predicate_type_uri(&layer.media_type) {
                 Some(uri) => Some(uri),
@@ -1060,12 +614,7 @@ impl VerifyPipeline {
             },
             UnverifiedPayload::Bundle => None,
         };
-        // `--type` narrows on the value that will be *reported*, which is the
-        // layer's. Applied here rather than after the blob pull only because
-        // the answer is already known: a narrowed-out raw referrer costs one
-        // manifest request and no payload bytes. A bundle is narrowed after its
-        // parse, in `extract_bundle_payload`, for the same reason in reverse —
-        // its predicateType is not knowable until then.
+        // Narrow before the fetch, so a narrowed-out raw referrer costs no payload bytes.
         if let Some(uri) = raw_predicate_type
             && let VerifyContentMode::Attestation {
                 predicate_type: Some(requested),
@@ -1093,9 +642,6 @@ impl VerifyPipeline {
         };
 
         let (predicate_type, document) = match raw_predicate_type {
-            // The registry served these bytes under this media type. That is
-            // the whole of it, which is why the caller labels the result
-            // unverified.
             Some(uri) => (uri.to_owned(), bytes),
             None => match Self::extract_bundle_payload(ctx, bytes, target).await? {
                 Some(extracted) => extracted,
@@ -1111,25 +657,8 @@ impl VerifyPipeline {
         }))
     }
 
-    /// Read a Sigstore bundle's DSSE payload with **nothing verified**: the
-    /// predicateType and the predicate document, as the envelope states them.
-    ///
-    /// Deliberately the existing structural parse chain and not a second one:
-    /// `parse_bundle` then [`dsse::verify_envelope`], the same two calls the
-    /// signed path makes before it verifies anything. `verify_envelope`'s name
-    /// says verify, but its own doc calls it "the structural half: everything
-    /// provable without a verifying key" — it consults no certificate, no key
-    /// and no log. Reusing it is what keeps the caps custody, the `_type`
-    /// allowlist and the subject binding identical across the two modes; a
-    /// separate reader would be a second parser to keep in step.
-    ///
-    /// What this must never do is carry signer identity out. The bundle has a
-    /// certificate in it and it would be one line to read a SAN off it, and
-    /// that line would put an unverified string in the column an operator reads
-    /// as provenance. [`UnverifiedSbom`] has nowhere to put it, which is the
-    /// enforcement.
-    ///
-    /// `Ok(None)` is a `--type` narrowing miss.
+    /// Read a Sigstore bundle's predicateType and predicate with **nothing verified**; `Ok(None)` is a `--type` miss.
+    // Never carry signer identity out: an unverified SAN would sit in the column operators read as provenance.
     async fn extract_bundle_payload(
         ctx: &VerifyContext<'_>,
         bundle_bytes: Vec<u8>,
@@ -1138,9 +667,7 @@ impl VerifyPipeline {
         let VerifyContentMode::Attestation { predicate_type } = &ctx.content else {
             return Ok(None);
         };
-        // Off the runtime worker for the same reason the signed path's parse
-        // is: serde passes over up to `MAX_ATTESTATION_ENVELOPE_BYTES` (32 MiB)
-        // of registry-supplied JSON with no await between them (ASYNC-01).
+        // `spawn_blocking`: up to 32 MiB of JSON parsing with no await would stall the runtime worker.
         let cap = ctx.content.caps().bundle_bytes;
         let subject_digest = target.subject_digest.clone();
         let requested = predicate_type.clone();
@@ -1151,8 +678,6 @@ impl VerifyPipeline {
                     verified.attestation.predicate_type,
                     verified.attestation.predicate.get().as_bytes().to_vec(),
                 ))),
-                // Only reachable when a type was requested; the candidate is
-                // sound, it is simply not the document that was asked for.
                 Err(VerifyErrorKind::PredicateTypeMismatch { .. }) if requested.is_some() => Ok(None),
                 Err(kind) => Err(kind),
             }
@@ -1164,15 +689,8 @@ impl VerifyPipeline {
         })?
     }
 
-    /// List the raw SBOM attachments on the target and refuse every one,
-    /// **without fetching any of them**.
-    ///
-    /// Under [`VerificationMode::Demand`] a raw attachment can never be an
-    /// answer, so there is nothing to learn from its bytes — and not fetching
-    /// is what makes untrusted volume unable to spend the budget the signed
-    /// pass needs. The rows are capped at the mode's candidate count for the
-    /// same reason: a registry listing ten thousand attachments must not be
-    /// able to turn a refusal into ten thousand report rows.
+    /// List the raw SBOM attachments on the target and refuse every one **without fetching any**, capped at the
+    /// mode's candidate count.
     async fn refuse_unsigned(
         client: &Client,
         ctx: &VerifyContext<'_>,
@@ -1186,12 +704,6 @@ impl VerifyPipeline {
             image, subject_digest, ..
         } = target;
 
-        // The Unsupported verdict no longer refuses the operation: the OCI referrers
-        // tag-schema fallback (`list_referrers_with_fallback` /
-        // `append_referrer_fallback_index`) serves a registry without the Referrers
-        // API. See `adr_oci_referrers_signing_v1.md`, Amendment 10 — the fallback
-        // index is a mutable tag anyone with push access authors, and the residual
-        // attack surface that reverses S1-F is recorded there.
         let ReferrersListing {
             descriptors: listed,
             via,
@@ -1199,10 +711,6 @@ impl VerifyPipeline {
             .list_referrers_with_fallback(image, subject_digest, None)
             .await
             .map_err(map_client_error)?;
-        // D-5 reports this on signatures[].discovery_method. Every row this pass
-        // emits is a refusal, so the discovery method is diagnostic here rather
-        // than reported — but it is still the difference between a
-        // registry-computed listing and a tag anyone with push access authored.
         tracing::debug!("unsigned SBOM attachments discovered via {via}");
 
         let mut digests: Vec<String> = listed
@@ -1215,62 +723,15 @@ impl VerifyPipeline {
             })
             .map(|descriptor| descriptor.digest)
             .collect();
-        // The `.sbom` sidecar tag is refused by the same rule, and it is the one
-        // place this pass reads a manifest at all.
-        //
-        // **The cost is unconditional**, not a rare path: this pass runs before
-        // the signed scan on every target of every `Demand` run, so a fully
-        // signed subject pays one extra manifest GET per target for a tag it
-        // almost never has. That is the price of the door being tag-addressed —
-        // a listing cannot report a tag, so the only way to name one is to ask
-        // for it. Deferring it until the signed scan came back empty would make
-        // it free on the common path and inconsistent with the rows above, which
-        // are reported *beside* a verified attestation; an unsigned referrer
-        // surfacing while an unsigned sidecar stayed hidden is the worse
-        // outcome, so the request stays.
-        //
-        // Reading a manifest here does not reopen what this pass exists to
-        // close. The rule is that *untrusted volume* must not spend the signed
-        // pass's budget, and this door is one tag rather than a listing — a
-        // registry cannot multiply it, which is exactly what it can do to the
-        // referrers the loop above deliberately refuses without fetching.
-        //
-        // Only the digest is kept: the manifest's layers say nothing a `Demand`
-        // run is allowed to act on.
-        //
-        // Where that digest ends up is the published contract, and it is not
-        // "always": it reaches `refused[].referrer_digest` when the subject
-        // *also* carries something that verified, and is collapsed away by
-        // `best_failure` — which maps a candidate to its `reason` alone — when
-        // the refusal is instead promoted to the run's own error. Documented in
-        // `command-line.md`'s `package sbom` exit-code table, on the
-        // `unsigned_rejected_by_policy` row — cited by row rather than by line
-        // because that file is edited from several directions at once and a
-        // stale line number still resolves, to the wrong thing. That is the
-        // identical path an unsigned
-        // *referrer* takes, through this same `digests` vec, and the parity is
-        // the point: a tag-addressed refusal and a listing-addressed one are
-        // reported the same way or the sidecar becomes a special case.
-        //
-        // A fault on this one probe is **deferred, not propagated**. This pass
-        // can only ever add a refusal — nothing it returns can make a run
-        // succeed — and it runs unconditionally, before the signed scan, on
-        // every target of every `Demand` run. Propagating would let a transient
-        // fault on a tag the subject almost never has fail a `--verify` that
-        // the signed pass was about to pass. It is not dropped either: the
-        // caller spends it if nothing verified, where "I could not finish
-        // looking" is the honest answer and must not read as "nothing is
-        // attached" — the same rule the `.sig` door in [`Self::scan`] states,
-        // applied at the one point where that door's "we only reach here with
-        // nothing verified" premise does not hold.
+        // The `.sbom` tag is fetched on every `Demand` run: no listing reports it, so skipping hides an unsigned
+        // sidecar.
         let mut sidecar_fault = None;
         match pull_sbom_sidecar_manifest(transport, image, subject_digest).await {
             Ok(Some((_, referrer_digest))) => digests.push(referrer_digest.to_string()),
             Ok(None) => {}
+            // Deferred: a transient fault here must not fail a run the signed pass would pass.
             Err(kind) => sidecar_fault = Some(kind),
         }
-        // Digest order, for the reason `order_candidates` sorts: a total order
-        // the registry does not choose, so the report is reproducible.
         digests.sort();
         Ok((
             digests
@@ -1288,10 +749,6 @@ impl VerifyPipeline {
     async fn run_inner(client: &Client, ctx: VerifyContext<'_>) -> Result<Vec<VerifyResult>, VerifyErrorKind> {
         let target = Self::resolve_target(client, &ctx).await?;
         let mut budget = ScanBudget::new(ctx.content.caps());
-        // Q3: arity is the caller's, not the mode's. `FirstMatch` returns the
-        // moment a candidate passes; `All` keeps going so `signatures[]` can
-        // list what else the subject carries. Either way the head of `matches`
-        // is the first candidate that fully passed, which is the verdict.
         let arity = if ctx.report_all {
             ScanArity::All
         } else {
@@ -1305,19 +762,7 @@ impl VerifyPipeline {
         Ok(results)
     }
 
-    /// Scan the pinned subject, and — only when C-008's membership proof holds
-    /// — the enclosing index behind it.
-    ///
-    /// A subject signed the cosign way carries its signature on the *index*:
-    /// `cosign verify <tag>` resolves a multi-platform tag to the index digest
-    /// and signs there, while OCX pins a platform manifest. So a second look,
-    /// addressed at the index, is what makes such a signature reachable at all.
-    ///
-    /// Its own function rather than an arm inside [`Self::run_inner`] so the
-    /// **gate** is testable: this is the one place that decides whether an
-    /// index's signatures may count for a child, and a caller that read
-    /// `enclosing_index` directly would have no check standing between it and
-    /// "assume membership".
+    /// Scan the pinned subject, then the enclosing index (where cosign signs) when the membership proof holds.
     async fn scan_with_index_fallback(
         client: &Client,
         ctx: &VerifyContext<'_>,
@@ -1329,48 +774,26 @@ impl VerifyPipeline {
             Ok(found) => return Ok(found),
             Err(kind) => kind,
         };
-        // `index_signature_subject` is the whole gate: no enclosing index, or a
-        // subject the index does not list, and the fall-through never runs, so
-        // the index's signatures are not considered at all. "Cannot prove
-        // membership" is never "assume membership".
+        // The whole membership gate: read `enclosing_index` directly and unproven membership is assumed.
         let Some(index_digest) = target.index_signature_subject() else {
             return Err(subject_failure);
         };
         let index_target = ScanTarget {
             image: target.image.clone(),
             subject_digest: index_digest.clone(),
-            // The index is the subject of this pass. No further indirection: an
-            // index listing an index would need its own membership proof, which
-            // nothing here has.
+            // No further indirection: a nested index would need a membership proof nothing here has.
             enclosing_index: None,
             index_members: Vec::new(),
         };
-        // One budget across both passes, the same way an attestation run spends
-        // one set of bounds over its two: a registry cannot buy a second
-        // allowance by stuffing the platform manifest with candidates, and
-        // exhausting the budget refuses rather than admits.
-        //
-        // The platform manifest's own verdict is the more actionable one when
-        // the index carries nothing either — it is the object the user named.
+        // One budget across both passes, or stuffing the platform manifest buys a second allowance.
         Self::scan(client, ctx, &index_target, arity, budget)
             .await
             .map_err(|_| subject_failure)
     }
 
-    /// Resolve the target once: the SSRF floor on the trust services, the
-    /// per-platform subject digest, and the registry reference every
-    /// referrer-facing call is addressed with.
-    ///
-    /// Extracted from [`Self::scan`] because an attestation run makes two
-    /// passes over the same subject — signed referrers, then unsigned ones —
-    /// and resolving twice would repeat an index select, a physical rewrite and
-    /// a dial-time DNS lookup to re-derive an answer that cannot have changed.
+    /// Resolve the target once: the trust-service SSRF floor, the subject digest, and the registry reference.
     async fn resolve_target(client: &Client, ctx: &VerifyContext<'_>) -> Result<ScanTarget, VerifyErrorKind> {
-        // 0. SSRF floor for the trust services (CWE-918). The CLI boundary
-        //    validated the URL as a *string*; this is where we find out where it
-        //    actually resolves, before anything dials it. Skipped under
-        //    `--offline`, which reaches no trust service at all -- resolving
-        //    there would make an air-gapped verify depend on DNS.
+        // SSRF floor on where the Rekor URL resolves (CWE-918); skipped offline, or an air-gapped verify needs DNS.
         if !ctx.offline {
             ocx_oci::endpoint::resolve_sigstore_url(ctx.rekor_url, ctx.dial.trusted_hosts)
                 .await
@@ -1380,40 +803,7 @@ impl VerifyPipeline {
                 })?;
         }
 
-        // 1. Resolve the reference's manifest **through the index chain**, not
-        //    through the registry transport. The transport path would bypass
-        //    `guard_local_physical` and the mirror map, and would break
-        //    `--offline` — an installed package resolves from the local index
-        //    with no network at all.
-        //
-        //    One fetch answers three questions at once: which digest the
-        //    reference names, whether that object is an index, and — when it is
-        //    — which children it lists. The children are what C-008's
-        //    membership test reads; before this they were fetched inside
-        //    `Index::select` and thrown away, which is why an index signature
-        //    could not be attributed to a pinned platform manifest at all.
-        //    Every digest the index lists comes back with it — attestation and
-        //    referrer entries included, not only the platform candidates: the
-        //    index digest binds each descriptor it carries, so a signature over
-        //    the index covers each of them, and narrowing that list to
-        //    `--platform` candidates would refuse membership for a child the
-        //    index demonstrably lists.
-        //
-        // 2. C-010's `--platform` optionality rule runs inside the resolution,
-        //    from the one module that owns it — shared with sign and attest so
-        //    the three cannot diverge. It *selects* a child and reports the
-        //    index it was reached through; it makes no validity decision and
-        //    tests no membership. That test is below, and is this pipeline's.
-        //
-        //    Index indirection travels with it: a logical name
-        //    (`ocx.sh/<ns>/<pkg>`) may point at a different physical registry,
-        //    so every transport-facing call below — capability probe, referrer
-        //    listing, referrer manifest + bundle blob pulls — targets the
-        //    physical address. Trust policy scope matching stays on the LOGICAL
-        //    identifier (`ctx.policies` are resolved from it by the caller):
-        //    only registry traffic moves. The SSRF floor on the returned host is
-        //    enforced upstream in the shared index choke point
-        //    (`ChainedIndex::guard_local_physical`).
+        // Through the index chain, never the registry transport, which bypasses the SSRF guard and mirror map.
         let ResolvedSubject {
             target: SignTarget {
                 subject_digest,
@@ -1422,22 +812,15 @@ impl VerifyPipeline {
             index_members,
             physical,
         } = (ctx.resolve)(ctx.identifier, ctx.platform).await?;
+        // Transport calls target `physical`; trust policy scope stays on the logical identifier.
         let resolved = ctx.identifier.clone_with_digest(subject_digest.clone());
-        // The pre-flight above had to tolerate a DNS lookup failure -- it runs on
-        // every resolve, including ones that never fetch, so it cannot fail on a
-        // missing resolver. Its own contract says the tolerance is safe only
-        // because the dial site re-validates fail-closed, which is here: a
-        // request is now imminent, and the shared client carries no SSRF
-        // resolver of its own. Without this the sign/verify paths held only the
-        // tolerant half of that split (CWE-918). Same call the pull path makes.
+        // Fail-closed dial-site re-check: the resolve-time guard tolerates DNS failure and the client has no resolver.
         ocx_oci::ssrf::guard_physical_dial(&ctx.dial, &resolved, &physical)
             .await
             .map_err(|error| VerifyErrorKind::ForbiddenRegistryTarget {
                 reason: error.to_string(),
             })?;
-        // The mirror map applies on top: `transport_reference` is the read seam
-        // every registry-facing reference must come from (T-arch-G1), so a
-        // `[mirrors]` entry for the physical host redirects this traffic too.
+        // Every registry-facing reference goes through `transport_reference`, or `[mirrors]` stops applying.
         let image = client.transport_reference(&physical);
         Ok(ScanTarget {
             image,
@@ -1447,15 +830,7 @@ impl VerifyPipeline {
         })
     }
 
-    /// The scan both entry points share: list the target's signature-bundle
-    /// referrer candidates and verify them under the requested content mode.
-    ///
-    /// `arity` is passed rather than derived from `ctx.content` so the two facts
-    /// stay separable — "which content kind" and "how many answers" are
-    /// different questions, and a test can vary either alone. `budget` is the
-    /// caller's so an attestation run's two passes spend one set of bounds
-    /// between them rather than one set each.
-    ///
+    /// List the target's signature referrer candidates and verify them under the requested content mode.
     async fn scan(
         client: &Client,
         ctx: &VerifyContext<'_>,
@@ -1468,70 +843,24 @@ impl VerifyPipeline {
             image, subject_digest, ..
         } = target;
 
-        // C-007 / D9. The pin decides what is **discovered**, never what is
-        // ignored after discovery: a pinned `simplesigning` against a subject
-        // carrying only a bundle must answer 79, and the only way to keep that
-        // true by construction is to never build the bundle candidate.
-        //
-        // Simplesigning is signature-shaped only. A sidecar layer carries a
-        // `SimpleSigningClaim`, not a DSSE statement, so it can never satisfy an
-        // attestation run's `AttestationMatch`. `.att` is the mirror image and
-        // gets its own gate below; `.sbom` is neither, and takes no gate here at
-        // all — its layer is an SBOM document, so it can only ever satisfy the
-        // permissive listing pass, where `scan_unverified` reads it. No
-        // `--signature-format` pin reaches that pass, because nothing on it is a
-        // signature to pin the format of.
+        // The pin decides what is discovered, never what is ignored after: a pinned shape never builds the other.
         let discover_bundles = ctx.signature_format != Some(SignatureFormat::Simplesigning);
         let discover_simplesigning = ctx.signature_format != Some(SignatureFormat::Bundle)
             && matches!(ctx.content, VerifyContentMode::Signature);
-        // Spec §WP5's `.att` half, and the mirror image of the line above: an
-        // `.att` layer is a DSSE envelope, so it can only ever satisfy an
-        // *attestation* run, exactly as a simplesigning claim can only ever
-        // satisfy a signature one. Gated on the same `--signature-format` pin,
-        // which means the same thing on both: `bundle` is the modern shape only.
-        //
-        // It is discovered by TAG and by nothing else. Measured against cosign
-        // v3.1.1: `attest` writes a `SIGSTORE_BUNDLE_V03` referrer (already a
-        // candidate above), the registry-without-referrers fallback writes a
-        // `sha256-<hex>` index of the same, and the `.att` manifest itself
-        // carries neither `artifactType` nor `subject` — so no listing can
-        // reach it and there is no cosign attestation artifact type to filter
-        // on. See `super::attestation_sidecar`'s module doc.
         let discover_attestation_sidecar = ctx.signature_format != Some(SignatureFormat::Bundle)
             && matches!(ctx.content, VerifyContentMode::Attestation { .. });
 
-        // 2. List signature referrers (the Referrers API, or the fallback tag
-        //    when the registry has none), then re-filter client-side into the
-        //    two shapes — the OCI spec permits a registry to ignore the
-        //    server-side artifactType filter, so the client-side pass is the
-        //    real one either way.
-        //
-        //    The server-side hint is kept only while the bundle shape is the one
-        //    thing being looked for; once a simplesigning referrer is also a
-        //    candidate, one unfiltered listing beats one request per artifact
-        //    type (the same reasoning `scan_unverified` states).
-        //
-        //    The bundle re-filter drops only referrers that declare a
-        //    *different* explicit artifactType. A referrer with no artifactType
-        //    (absent in the listing, or a transport that does not echo it) is
-        //    kept: the bundle parse downstream fail-closes on a non-bundle, so
-        //    tolerating an absent type here cannot admit a forged signature —
-        //    but rejecting it would drop a genuine server-matched referrer
-        //    (regression class: a registry that matched server-side but omits
-        //    the per-descriptor artifactType echo).
+        // A server-side hint only; the client-side re-filter below is the real one.
         let server_filter = (!discover_simplesigning).then_some(SIGSTORE_BUNDLE_V03);
         let ReferrersListing {
             descriptors: referrers,
             via,
         } = Self::list_signature_referrers(transport, image, subject_digest, server_filter).await?;
-        // Reported on `signatures[].discovery_method`. Carried out of the
-        // listing rather than dropped at it: a candidate reached through the
-        // mutable fallback tag and one the registry itself computed are not the
-        // same provenance claim, and the report says which.
         tracing::debug!("signature referrers discovered via {via}");
         let mut candidates: Vec<ocx_oci::Descriptor> = Vec::new();
         let mut sidecar_referrers: Vec<ocx_oci::Descriptor> = Vec::new();
         for descriptor in referrers {
+            // Keep an absent artifactType: some registries omit the echo, and the bundle parse fail-closes anyway.
             let artifact_type = descriptor.artifact_type.as_deref();
             let bundle_shaped = artifact_type.is_none_or(|declared| declared == SIGSTORE_BUNDLE_V03);
             let sidecar_shaped = artifact_type
@@ -1547,35 +876,12 @@ impl VerifyPipeline {
             && !discover_simplesigning
             && !discover_attestation_sidecar
         {
-            // Before the trust-root gate below: a subject with no bundle
-            // referrer at all is "not signed", and a missing trust root is not
-            // the thing to report about it. The caller promotes any refusal it
-            // recorded over this kind. Only reachable once the sidecar-tag door
-            // is closed too — otherwise there is still somewhere left to look.
+            // Before the trust-root gate: "not signed" is the thing to report, not a missing trust root.
             return Err(VerifyErrorKind::NoSignaturesFound);
         }
         order_candidates(&mut candidates, &ctx.content);
 
-        // Refused up front rather than at the first signature check: a keyless
-        // trust root is a configuration mistake with a fixed remedy, and it
-        // would otherwise surface as an opaque SCT failure per candidate.
-        // `sigstore` builds an empty CT keyring without complaint.
-        //
-        // Two conditions, both narrowing and neither weakening.
-        //
-        // *There is a bundle candidate.* A missing trust root is not the thing
-        // to report about a subject nothing was found for — "not signed" is —
-        // and with only the sidecar-tag door left there is nothing yet known to
-        // verify against.
-        //
-        // *A keyless signature could satisfy this run.* The CT log key is
-        // evidence for the keyless path alone: `cosign verify --key cosign.pub`
-        // requires no trust root at all, so a run whose applicable policies are
-        // all `PolicyBackend::Key` cannot want this remedy and must not be
-        // refused by it. Nothing is relaxed for keyless — a keyless candidate
-        // under an empty CT keyring is still refused, by `sigstore`'s own SCT
-        // check inside `verifier.verify`. This gate only decides whether that
-        // refusal is reported once, up front, with the fix in it.
+        // Refused up front, or a missing CT log key surfaces as an opaque SCT failure per candidate.
         let keyless_reachable = ctx.policies.is_empty()
             || ctx.policies.iter().any(|policy| {
                 policy
@@ -1586,52 +892,23 @@ impl VerifyPipeline {
         if !candidates.is_empty() && keyless_reachable && ctx.trust_root.ctfe_key_map().is_empty() {
             return Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCtLogKey));
         }
-        // Built once per run: compiling the trust root into a certificate pool
-        // and a CT keyring is per-material work, not per-candidate. The Rekor
-        // configuration is inert -- `sigstore` 0.14 never dials it, and ocx does
-        // its own Rekor work in `tlog` -- so the default opens no connection.
+        // The Rekor configuration is inert: `sigstore` 0.14 never dials it.
         let verifier = Verifier::new(RekorConfiguration::default(), ctx.trust_root.clone()).map_err(|e| {
             VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
                 source: Box::new(std::io::Error::other(format!("trust root unusable: {e}"))),
             })
         })?;
 
-        // 3. Verify each candidate independently. `FirstMatch` is the ANY-of
-        //    signature scan — the first candidate that fully passes crypto +
-        //    identity/policy wins, which fixes key rotation (a valid later
-        //    signature is no longer masked by an earlier one) and the
-        //    malformed-first-referrer DoS. `All` is the attestation scan, where
-        //    letting the registry's listing order pick one of several verified
-        //    documents would be the defect. Both are bounded by the mode's
-        //    candidate count, its total-bytes budget, and the listing backstop.
-        //    After all fail, return the most actionable error deterministically —
-        //    a fail-closed availability outcome, not forgery.
-        // Captured before `candidates` and `sidecar_referrers` are consumed
-        // below; read by the `.att` door's empty-scan verdict at the end.
         let anything_listed = !candidates.is_empty() || !sidecar_referrers.is_empty();
         let mut total_candidates = candidates.len();
-        // Every refusal is kept, not folded into one "best" as it arrives: the
-        // aggregate error is derived from this at the end (`best_failure`), and
-        // a scan that *does* find matches still carries the refusals out so the
-        // caller can report them.
         let mut refused: Vec<RefusedCandidate> = Vec::new();
         let mut matches: Vec<(VerifyResult, Option<VerifiedAttestation>)> = Vec::new();
-        // One memo for every door this scan opens (#374, #319). Born here
-        // because "per run" is what bounds it: a longer-lived cache would
-        // outlive the trust root its answers were resolved against.
+        // Per run: a longer-lived memo would outlive the trust root its keys were resolved against.
         let rekor_keys = RekorKeyMemo::default();
-        // D6's dedup set. A `Vec` rather than a hash set on purpose:
-        // `MAX_SIGNATURE_CANDIDATES` bounds it at single digits, so the linear
-        // scan is cheaper than hashing signature bytes.
         // ponytail: O(n^2) over <= 16 candidates; switch to a set if the cap grows.
         let mut seen: Vec<SignatureKey> = Vec::new();
-        // Resolved from the requested mode, before the first fetch (D-d).
         let caps = budget.caps;
-        // The signed artifact's bytes, not just its digest: `Verifier` hashes a
-        // preimage. Fetched once per run, after the referrer listing so an
-        // unsigned artifact costs no extra request — and skipped entirely when
-        // no bundle candidate exists, since the sidecar path signs a payload
-        // blob rather than the subject manifest.
+        // The bytes, not the digest: `Verifier` hashes a preimage.
         let subject_bytes = if candidates.is_empty() {
             Vec::new()
         } else {
@@ -1641,9 +918,7 @@ impl VerifyPipeline {
             if !budget.may_examine() {
                 break;
             }
-            // Cheap reject of a self-declared over-cap descriptor before any
-            // fetch. The actual body length is re-checked after the read, since
-            // the declared size is untrusted (a registry can lie about it).
+            // The declared size is untrusted: only a pre-fetch reject, the body is re-checked after the read.
             if descriptor.size < 0 || descriptor.size as u64 > MAX_REFERRER_MANIFEST_BYTES {
                 budget.examined();
                 refused.push(RefusedCandidate {
@@ -1652,8 +927,7 @@ impl VerifyPipeline {
                 });
                 continue;
             }
-            // `clone_with_digest` drops the tag, so this stays digest-only — a
-            // `repo:tag@digest` reference keys a different registry path and 404s.
+            // Digest-only (`clone_with_digest` drops the tag): a `repo:tag@digest` reference 404s.
             let referrer_ref = image.clone_with_digest(descriptor.digest.clone());
             let referrer_bytes = match pull_referrer_manifest_capped(transport, &referrer_ref).await {
                 Ok(bytes) => bytes,
@@ -1695,12 +969,8 @@ impl VerifyPipeline {
                         return Ok(ScanOutcome { matches, refused });
                     }
                 }
-                // Discriminated as the other content kind after fetch-and-parse.
-                // Charged bytes, never a candidate slot.
+                // No refusal recorded, so the simplesigning fallback still fires beside an attestation-only bundle.
                 Ok(CandidateOutcome::ModeMismatch) => budget.skipped_other_mode(),
-                // Verified, just not the predicate type that was asked for. It
-                // spent a slot (it was examined in-mode) but records no failure,
-                // so a scan that finds only these reports not-found (S-017).
                 Ok(CandidateOutcome::TypeNarrowed) => budget.examined(),
                 Err(kind) => {
                     budget.examined();
@@ -1712,32 +982,7 @@ impl VerifyPipeline {
             }
         }
 
-        // C-007 / D9's fallback: the simplesigning shape is looked at **only**
-        // when the bundle shape is ABSENT — no candidate matched *and none was
-        // refused*. Absent a pin that is the whole preference rule, and it is
-        // also what keeps the happy bundle path at exactly today's request
-        // count: the two extra doors below cost nothing until the preferred
-        // shape has come up empty.
-        //
-        // `refused.is_empty()` is the fail-closed half, and it is not a
-        // refinement of `matches.is_empty()` — it is a different question. A
-        // bundle that was fetched and *cryptographically refused* leaves the
-        // match set empty exactly as a missing one does, so the old single
-        // condition walked past a rejected signature onto a weaker one and
-        // exited 0 with nothing in the report naming what had failed. The
-        // trigger set {withheld, corrupted, replaced} splits here: only
-        // withheld is an absence; corrupted and replaced are the verifier
-        // having looked at a signature and rejected it, and a rejection must
-        // carry its own exit code out through `finish_scan`'s aggregate rather
-        // than be answered around.
-        //
-        // Scoped to refusals on purpose. A bundle-shaped candidate discriminated
-        // as the *other content kind* (`CandidateOutcome::ModeMismatch` — an
-        // attestation under a signature run) records no refusal and still lets
-        // the fallback fire: nothing about a signature was rejected there, and
-        // gating on `candidates.is_empty()` instead would refuse a subject whose
-        // only bundle is an attestation while a perfectly good signature sidecar
-        // sits beside it.
+        // `refused.is_empty()`: a refused bundle must exit with its own code, never be answered by a weaker sidecar.
         if discover_simplesigning && matches.is_empty() && refused.is_empty() {
             let (sidecar, examined) = Self::scan_simplesigning(
                 transport,
@@ -1768,72 +1013,24 @@ impl VerifyPipeline {
             }
         }
 
-        // The `.att` half of the same fallback rule: one door, one candidate
-        // slot, looked at only once nothing bundle-shaped verified. A collect-all
-        // run that already has a modern attestation does not pay a request for
-        // the legacy tag.
-        //
-        // `refused.is_empty()` carries the `.sig` gate's fail-closed half onto
-        // this door, and for the identical reason: a bundle-shaped attestation
-        // that was fetched and *refused* leaves `matches` empty exactly as a
-        // missing one does. Without it, breaking the current SLSA provenance
-        // bundle — one flipped byte, no forgery — opens this door onto a stale
-        // but validly-signed `.att` sidecar, which then passes on its own
-        // merits and is reported as the subject's provenance at exit 0. The
-        // attacker never signs anything; they choose which signed attestation
-        // OCX answers with by corrupting the others. `finish_scan`'s
-        // attestation arm already routes empty-matches-plus-refusals to
-        // `best_failure`, so the refusal carries its own exit code out.
-        //
-        // Not a refinement of `matches.is_empty()`, and not covered by
-        // `stop_reason()` either: that is a truncation probe, and a
-        // cryptographic refusal stamps no bound.
-        //
-        // It sits *after* `stop_reason()` on purpose. `&&` short-circuits, and
-        // `a_spent_last_candidate_slot_is_not_reported_as_a_truncation` is the
-        // only test that reds when this probe is replaced by the stamping
-        // `may_examine()` — its seed refuses one candidate, so a `refused`
-        // conjunct placed first would skip the probe and leave that swap
-        // green. Both operands are side-effect-free, so the order costs
-        // nothing and buys the mutation back.
-        //
-        // Whether *anything at all* was there to look at. The early return
-        // above answers this before the `.att` door in every other mode; an
-        // attestation run has to defer it until the door has been tried, and
-        // the answer must still be the same kind — `no_signatures_found` means
-        // "nothing to verify anywhere" and is deliberately distinct from
-        // `attestation_not_found`, which means candidates *were* examined
-        // (S-017; pinned by `test/tests/test_sbom.py`).
         let mut examined_anything = anything_listed;
-        // `stop_reason`, never `may_examine`: probing the bounds here must not
-        // *stamp* them. A run whose bundle loop spent exactly `caps.candidates`
-        // slots leaves `stop` unset and reports its own per-candidate verdict
-        // (`identity_mismatch`, say); a stamp from this probe would replace that
-        // with a truncation claiming `unexamined == 0` — including on the
-        // overwhelmingly common subject that carries no `.att` tag at all.
+        // `stop_reason`, never `may_examine`, which stamps a truncation onto a run that spent exactly its slots;
+        // kept before `refused` so `a_spent_last_candidate_slot_is_not_reported_as_a_truncation` can red.
         if discover_attestation_sidecar && matches.is_empty() && budget.stop_reason().is_none() && refused.is_empty() {
+            // Without `refused.is_empty()` a tampered current bundle opens this door onto a stale signed `.att` at exit
+            // 0.
             let predicate_type = match &ctx.content {
                 VerifyContentMode::Attestation { predicate_type } => predicate_type.as_ref(),
-                // Unreachable: `discover_attestation_sidecar` is this arm's negation.
                 VerifyContentMode::Signature => None,
             };
             total_candidates = total_candidates.saturating_add(1);
             budget.examined();
-            // The subject manifest's bytes: the keyless arm hands them to the
-            // same `Verifier` the bundle path does, and the fetch above was
-            // skipped when there were no bundle candidates to verify. One extra
-            // manifest GET, and only on a run that already found nothing signed
-            // and is about to ask for the legacy tag anyway.
             let subject_bytes = if subject_bytes.is_empty() {
                 pull_subject_manifest_verified(transport, image, subject_digest).await?
             } else {
                 subject_bytes
             };
             let remaining = caps.total_bytes.saturating_sub(budget.spent);
-            // The same gate `scan_simplesigning` builds for the `.sig` door:
-            // the crypto and policies a layer is judged against, plus how its
-            // `dev.sigstore.cosign/bundle` annotation is checked and whether a
-            // keyless layer carrying none may verify at all.
             let verify = simplesigning_read::SidecarVerification {
                 verifier: &verifier,
                 policies: ctx.policies,
@@ -1859,22 +1056,12 @@ impl VerifyPipeline {
                 if !sidecar.matches.is_empty() {
                     cache_sidecar_trust_material(ctx, &rekor_keys).await;
                 }
-                // The reader walks its own layers under its own caps, so a bound
-                // that stopped it can never show up in this budget's counters.
-                // Carried across so `finish_scan`'s fail-closed attestation arm
-                // refuses: a truncated scan has looked at fewer attestations
-                // than the sidecar carries, and returning the partial list as
-                // success is exactly the "every attestation" answer it cannot
-                // give. Without it, 32 duplicate layer descriptors ahead of the
-                // real one buy a clean exit 0.
+                // Carry the reader's stop across, or a truncated sidecar read reports a partial list as complete.
                 if let Some(stop) = sidecar.stop {
                     budget.record_stop(stop);
                 }
                 refused.extend(sidecar.refused);
-                // The same D6 dedup pass both other doors run. Pushing straight
-                // into `matches` let one layer descriptor repeated N times in
-                // the sidecar manifest contribute N rows of `signatures[]` off a
-                // single blob.
+                // Dedup, or one layer descriptor repeated N times yields N rows off a single blob.
                 for found in sidecar.matches {
                     let key = found.verified.dedup_key();
                     if seen.contains(&key) {
@@ -1886,24 +1073,15 @@ impl VerifyPipeline {
             }
         }
         if discover_attestation_sidecar && !examined_anything {
-            // No referrer, no legacy sidecar: the same verdict this run got
-            // before the `.att` door existed, and the reason the early return
-            // above could not simply be widened.
             return Err(VerifyErrorKind::NoSignaturesFound);
         }
         Self::finish_scan(ctx, caps, total_candidates, budget, matches, refused)
     }
 
-    /// The simplesigning half of the merge: both cosign sidecar doors, read
-    /// through the one `simplesigning_read` core.
+    /// Scan both cosign sidecar doors (OCI 1.1 referrer, then the `.sig` tag).
     ///
-    /// Returns what the two doors yielded plus the number of candidate slots
-    /// they spent, so the caller's `total_candidates` and `budget.considered`
-    /// stay in step — `aggregate_failure` reads their difference as truncation.
-    ///
-    /// A sidecar reachable through *both* doors yields the same layer digest and
-    /// the same signature bytes twice; the caller's dedup pass is what makes it
-    /// one row of `signatures[]` (S-009).
+    /// Returns the slots spent so `total_candidates` and `budget.considered` stay in step:
+    /// `aggregate_failure` reads their difference as truncation.
     #[expect(
         clippy::too_many_arguments,
         reason = "both sidecar doors, their shared budget, and the run-scoped Rekor key memo"
@@ -1923,9 +1101,6 @@ impl VerifyPipeline {
         } = target;
         let mut scan = SidecarScan::default();
         let mut examined = 0usize;
-        // Built once for both doors: the crypto and policies a layer is judged
-        // against, plus how its `dev.sigstore.cosign/bundle` annotation is
-        // checked and whether a keyless layer carrying none may verify at all.
         let verify = simplesigning_read::SidecarVerification {
             verifier,
             policies: ctx.policies,
@@ -1936,9 +1111,7 @@ impl VerifyPipeline {
             rekor_keys: rekor_keys.clone(),
         };
 
-        // Door 1 — the OCI 1.1 referrer. Its `via` is the listing's, so a
-        // sidecar the registry itself computed and one read off the mutable
-        // fallback tag stay distinguishable in the report.
+        // Door 1: the OCI 1.1 referrer, reported under the listing's `via`.
         for descriptor in referrers {
             if !budget.may_examine() {
                 break;
@@ -1986,11 +1159,8 @@ impl VerifyPipeline {
             }
         }
 
-        // Door 2 — the `sha256-<hex>.sig` sidecar tag, which needs no Referrers
-        // API at all. An absent tag is `Ok(None)`: "no legacy signature", the
-        // overwhelmingly common case. Any other transport fault propagates — we
-        // only reach here with nothing verified, so "I could not finish looking"
-        // is the honest answer and must not read as "not signed".
+        // Door 2: the `sha256-<hex>.sig` tag. Only an absent tag is `Ok(None)`; any other transport
+        // fault must propagate, or "could not finish looking" reads as "not signed".
         if budget.may_examine() {
             examined = examined.saturating_add(1);
             budget.examined();
@@ -2012,8 +1182,7 @@ impl VerifyPipeline {
         Ok((scan, examined))
     }
 
-    /// Turn a finished scan into its answer, or into the one failure that best
-    /// describes why there is none.
+    /// Turn a finished scan into its answer, or the one failure that best explains its absence.
     fn finish_scan(
         ctx: &VerifyContext<'_>,
         caps: ContentCaps,
@@ -2024,61 +1193,35 @@ impl VerifyPipeline {
     ) -> Result<ScanOutcome, VerifyErrorKind> {
         let unexamined = total_candidates.saturating_sub(budget.considered);
         match &ctx.content {
-            // A `FirstMatch` scan only ever arrives here having found nothing —
-            // it returns at its first match. An `All` scan (`report_all`, which
-            // is what populates `signatures[]`) runs the loop to the end and
-            // arrives here *with* its matches, so this arm cannot be
-            // unconditionally `Err` any more: that would discard the answer and
-            // report "no signatures found" about a subject that verified.
+            // An `All` scan arrives here with its matches: an unconditional `Err` would report
+            // "no signatures found" about a subject that verified.
             VerifyContentMode::Signature if !matches.is_empty() => Ok(ScanOutcome { matches, refused }),
-            VerifyContentMode::Signature => {
-                // Nothing verified: the aggregate is today's, over the candidates
-                // actually looked at rather than the ones that spent a slot. The
-                // refusals are consumed to build it — nothing survives this arm
-                // to report.
-                Err(aggregate_failure(
-                    total_candidates,
-                    budget.considered,
-                    best_failure(refused),
-                ))
-            }
-            // Fail-closed, and before any per-candidate failure: a truncated
-            // scan cannot answer a question about *every* attestation, so
-            // returning the partial list would understate what the subject
-            // carries. Which bound stopped it is the actionable part.
+            VerifyContentMode::Signature => Err(aggregate_failure(
+                total_candidates,
+                budget.considered,
+                best_failure(refused),
+            )),
+            // Truncation fails closed before any per-candidate failure: a partial list would
+            // understate what the subject carries.
             VerifyContentMode::Attestation { .. } => {
                 match budget.stop.map(|stop| truncation_failure(caps, stop, unexamined)) {
                     Some(kind) => Err(kind),
-                    // Every refusal recorded here is a real defect in a candidate of
-                    // the requested type — a narrowing miss records none — so an
-                    // empty result with nothing recorded is genuinely "not found".
+                    // A narrowing miss records no refusal, so nothing recorded is genuinely "not found".
                     None if matches.is_empty() => {
                         Err(best_failure(refused).unwrap_or(VerifyErrorKind::AttestationNotFound))
                     }
-                    // Matches *and* refusals travel out together. Failing here on a
-                    // recorded refusal would let one malformed referrer hide every
-                    // valid attestation beside it.
+                    // Failing on a recorded refusal would let one malformed referrer hide every valid
+                    // attestation beside it.
                     None => Ok(ScanOutcome { matches, refused }),
                 }
             }
         }
     }
 
-    /// Verify a single signature-referrer candidate end-to-end from its
-    /// already-fetched manifest bytes: parse → bundle blob → `sigstore`
-    /// verification (chain, SCT, signature, tlog-body binding, validity window)
-    /// → Rekor SET + inclusion proof → identity/policy → cache. Returns
-    /// [`VerifyResult`] on full success; any failure is one candidate's verdict,
-    /// which the ANY-of loop aggregates.
+    /// Verify one signature-referrer candidate end-to-end from its fetched manifest bytes.
     ///
-    /// The referrer manifest is fetched (and its read bounded) by the caller so
-    /// the cross-candidate byte budget is charged from bytes actually read.
-    /// `budget` carries that same budget: the bundle blob is fetched here, so it
-    /// is charged here, on the success and failure paths alike. Charging at the
-    /// one site that reads the bytes is what keeps the two paths in step —
-    /// leaving it to the caller is how the blob went uncharged while the budget
-    /// documented itself as bounding total download. The candidate counters are
-    /// the caller's: only it can see which of the three outcomes came back.
+    /// Any failure is this candidate's verdict, which the ANY-of loop aggregates. `budget` is
+    /// charged here for the bundle blob on success and failure alike, or total download is unbounded.
     #[expect(
         clippy::too_many_arguments,
         reason = "one candidate, its context, and the run-scoped material"
@@ -2108,18 +1251,10 @@ impl VerifyPipeline {
         let bundle_blob_digest =
             Digest::try_from(bundle_layer.digest.as_str()).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
 
-        // Bundle-blob size cap (CWE-400): the bundle-blob digest comes from the
-        // untrusted referrer manifest, so digest verification does not bound size.
-        // Reject an over-cap descriptor before opening a connection, then bound
-        // the actual read so a registry lying about the size still cannot force an
-        // unbounded allocation.
+        // CWE-400: the declared size is untrusted, so reject it pre-fetch and also cap the read itself.
         let caps = ctx.content.caps();
         if bundle_layer.size < 0 || bundle_layer.size as u64 > caps.bundle_bytes as u64 {
-            // Attestation mode names the bound it tripped (checklist row 15): an
-            // SBOM near the ceiling is a real authoring outcome, and "malformed
-            // referrer" would send its author looking in the wrong place.
-            // Signature mode keeps the kind `ocx package verify` has always
-            // reported for this shape.
+            // Attestation mode names the tripped bound; "malformed referrer" would misdirect an SBOM author.
             return Err(match &ctx.content {
                 VerifyContentMode::Signature => VerifyErrorKind::BundleParseFailed,
                 VerifyContentMode::Attestation { .. } => VerifyErrorKind::AttestationTooLarge {
@@ -2134,63 +1269,29 @@ impl VerifyPipeline {
                 bytes
             }
             Err(kind) => {
-                // A rejected read still cost up to the cap — the bounded read
-                // stops at cap + 1, not at zero. Same treatment the caller gives
-                // an over-cap referrer manifest.
+                // A rejected read still cost up to the cap (the bounded read stops at cap + 1).
                 budget.charge(caps.bundle_bytes as u64);
                 return Err(kind);
             }
         };
 
-        // Every structural pass over the candidate's bytes, on one blocking
-        // thread. The parse is bounded by the mode's per-candidate cap rather
-        // than the signature-bundle constant: the fetch above already accepted
-        // up to `caps.bundle_bytes`, and re-capping at 512 KiB here would refuse
-        // every SBOM larger than that after paying to download it.
-        //
-        // Why the whole block and not just the parse: in attestation mode these
-        // are serde passes over up to `MAX_ATTESTATION_ENVELOPE_BYTES` (32 MiB)
-        // of registry-supplied JSON with no await between them, and
-        // `verify_envelope` is the *heavier* half — it clones the payload,
-        // re-serializes the envelope and parses it twice more. Tens of
-        // milliseconds of pure CPU, once per candidate, up to `caps.candidates`
-        // candidates. Left inline any of it starves a runtime worker for the
-        // whole pass (ASYNC-01), including the sibling blob pulls of the same
-        // scan. Nothing here holds a lock or a guard, and every capture is moved
-        // rather than borrowed, so the boundary costs two clones of a mode and a
-        // digest.
+        // Blocking thread: up to 32 MiB of serde passes inline would starve the scan's sibling blob pulls.
         let bundle_cap = caps.bundle_bytes;
         let content = ctx.content.clone();
         let target_digest = subject_digest.clone();
         let parsed = tokio::task::spawn_blocking(move || {
+            // The mode's cap, not the 512 KiB signature constant, or every larger SBOM is refused post-download.
             let bundle = parse_bundle(&bundle_bytes, bundle_cap).ok_or(VerifyErrorKind::BundleParseFailed)?;
             let parts = match BundleParts::from_bundle(&bundle, &content) {
                 Ok(parts) => parts,
-                // `from_bundle` returns this kind for exactly one class of
-                // reason: the candidate's content oneof does not answer this
-                // mode — it carries the other kind, or no content at all. That
-                // is not a failure of the question this run asked, and charging
-                // it a candidate slot is how attestations crowd a signature out
-                // of the scan.
+                // Content of the other mode, not a failure: charging it a slot lets attestations crowd out a signature.
                 Err(VerifyErrorKind::NoUsableBundle) => return Ok(ParsedCandidate::ModeMismatch),
                 Err(kind) => return Err(kind),
             };
 
-            // D-d, the structural half: OCX's own checks run BEFORE the
-            // delegated call so their precise kinds are the ones a user sees.
-            // The delegated call refuses most malformed statements too, but with
-            // one generic error — ordering OCX's diagnosis first turns that
-            // refusal into redundancy rather than the only report.
+            // Runs before the delegated call, or its one generic error hides these precise kinds.
             let envelope = match &content {
-                // A cosign image signature IS an in-toto Statement (D2), so
-                // signature mode asks the same structural questions attestation
-                // mode does — the subject binding and the predicateType. The
-                // type is fixed rather than caller-chosen here, so a mismatch is
-                // a refusal and never the narrowing miss the attestation arm can
-                // return: `from_bundle` already routed every other predicateType
-                // to the attestation question, so a disagreement at this point
-                // means the tolerant router and the strict parser read the same
-                // field differently, which is a defect in the candidate.
+                // The predicate type is fixed here, so a mismatch is a refusal, never a narrowing miss.
                 VerifyContentMode::Signature => {
                     let cosign_signature = PredicateType::Uri(COSIGN_SIGN_PREDICATE_TYPE.to_owned());
                     Some(dsse::verify_envelope(&bundle, &target_digest, Some(&cosign_signature))?)
@@ -2198,9 +1299,7 @@ impl VerifyPipeline {
                 VerifyContentMode::Attestation { predicate_type } => {
                     match dsse::verify_envelope(&bundle, &target_digest, predicate_type.as_ref()) {
                         Ok(verified) => Some(verified),
-                        // A narrowing miss, only reachable when a type was
-                        // requested: this candidate is sound, it simply is not
-                        // the document that was asked for (S-017).
+                        // A narrowing miss: sound, just not the requested document.
                         Err(VerifyErrorKind::PredicateTypeMismatch { .. }) if predicate_type.is_some() => {
                             return Ok(ParsedCandidate::TypeNarrowed);
                         }
@@ -2215,11 +1314,7 @@ impl VerifyPipeline {
             })))
         })
         .await
-        // A panic in the structural pass is not a verdict about the candidate,
-        // so it keeps its own kind — and it is logged, because `Internal` ranks
-        // lowest in `failure_rank`, so any sibling refusal would otherwise be
-        // the only thing reported. The digest is the parsed one, whose format
-        // this function already validated.
+        // Logged: `Internal` ranks lowest in `failure_rank`, so any sibling refusal would hide the panic.
         .map_err(|error| {
             tracing::warn!("bundle verification task panicked for referrer {referrer_digest}: {error}");
             VerifyErrorKind::Internal(Box::new(error))
@@ -2237,18 +1332,8 @@ impl VerifyPipeline {
             ParsedCandidate::TypeNarrowed => return Ok(CandidateOutcome::TypeNarrowed),
         };
 
-        // Row 7 / D-e, the annotation direction. An annotation may order or
-        // pre-filter the scan; it may never decide it, so a candidate whose
-        // unsigned `predicateType` annotation disagrees with its signed payload
-        // is refused rather than silently relabelled. Reported as a failure
-        // (not a narrowing miss) on purpose: a registry that rewrites this one
-        // string must not be able to turn a signed SBOM into "none found".
-        //
-        // The ordering half of that sentence is [`order_candidates`], which
-        // demotes a `dev.sigstore.bundle.content` hint naming the other kind to
-        // the tail of the scan without ever dropping it. Neither half reads an
-        // annotation as an answer: this one only ever refuses, that one only
-        // ever reorders.
+        // An unsigned annotation may order the scan, never decide it: a disagreement is a failure, not a
+        // narrowing miss, or a registry rewriting it turns a signed SBOM into "none found".
         if let Some(verified) = verified_envelope.as_ref()
             && let Some(annotated) = referrer_manifest
                 .annotations
@@ -2262,51 +1347,21 @@ impl VerifyPipeline {
             });
         }
 
-        // The two key models diverge here, and only here. Everything above is
-        // shared — the referrer parse, the bounded blob read, the DSSE
-        // structural pass and the annotation cross-check all ask questions that
-        // have nothing to do with what produced the signature. Which arm runs is
-        // not a choice this function makes: it is the shape the bundle declared,
-        // and `BundleParts` already refused every mixture of the two.
-        // Set on both arms from an entry `verify_rekor_set` accepted, and never
-        // from anything else.
+        // Set on both arms only from an entry `verify_rekor_set` accepted.
         let mut rekor_log_index = None;
         let signer = match parts {
             BundleParts::Keyless { leaf_der, tlog } => {
-                // Everything an X.509 verifier must do, done by one: the chain is built
-                // against the trust root *at the certificate's own issuance time*, the
-                // embedded SCT is checked against the CT log keys, the signature is
-                // verified over the subject digest with the leaf key, the Rekor entry
-                // body is rebuilt from (digest, signature, certificate) and compared to
-                // the logged body (CVE-2022-36056 / GHSA-whqx class), and the integrated
-                // time is checked to fall inside the certificate's validity window.
-                //
-                // `offline: true` is deliberate and is not "skip a check": `sigstore`'s
-                // online branch does not fetch anything, it *refuses* a bundle carrying
-                // no inclusion proof. `verify_rekor_set` below refuses the same bundle
-                // (`RekorInclusionProofAbsent`) and additionally verifies the SET and
-                // the proof against a key the trust root pinned — so this path is a
-                // superset of the online branch, not a relaxation of it. That claim
-                // only holds while the proof stays mandatory there; do not make it
-                // conditional again.
+                // `offline: true` skips no check only while `verify_rekor_set` keeps the inclusion proof mandatory.
                 verifier
                     .verify(subject_bytes, bundle, &PolicyDeferredToOcx, true)
                     .await
                     .map_err(map_verification_error)?;
 
-                // Verify the Rekor SET against the log's public key — pinned from the
-                // trust root when present (offline-capable, closes the TOFU hole),
-                // otherwise fetched online. Returns the key PEM used, so a successful
-                // online run can cache the trust material for later offline verifies.
                 let rekor_key_pem = verify_rekor_set(ctx, &tlog, rekor_keys).await?;
-                // Recorded only after the SET and the inclusion proof passed, so
-                // a reported log index is always one the log itself vouched for.
+                // Only after the SET and inclusion proof passed, so a reported index is one the log vouched for.
                 rekor_log_index = Some(tlog.log_index);
 
-                // D-d, the tlog half: checklist row 12, over entry material the two
-                // calls above have already SET- and Merkle-checked. Splitting it out of
-                // the structural half is what lets the structural kinds be precise while
-                // this one still runs against a body known to be the logged one.
+                // After the SET and Merkle checks, so the binding runs against the logged body.
                 if let Some(verified) = verified_envelope.as_ref() {
                     dsse::verify_tlog_binding(
                         &tlog.canonicalized_body,
@@ -2315,74 +1370,39 @@ impl VerifyPipeline {
                     )?;
                 }
 
-                // Identity + issuer match against the resolved trust policies (ANY-of).
-                // The matched subset, not a boolean: the `builder` pin below is ANDed
-                // within a policy and ORed across the set, so it is decided from the
-                // policies this certificate actually satisfied.
+                // The matched subset, not a boolean: the builder pin is decided per satisfied policy.
                 let matched_policies = matching_policies(&leaf_der, ctx.policies)?;
 
-                // #103. Inert on a non-provenance predicate — which is what makes it
-                // inert for an image signature, whose predicate is empty (it is no
-                // longer inert by having no envelope to read). A refusal — never a skip
-                // — when a pin is in force and the provenance names another builder or
-                // none that can be read.
                 if let Some(verified) = verified_envelope.as_ref() {
                     dsse::enforce_builder_pin(&matched_policies, &verified.attestation)?;
                 }
 
-                // On a successful online run, cache the trust material for later offline
-                // verifies against the same Rekor instance. Best-effort + content-equal
-                // skip so a batch does not stampede the file or slide the 24h TTL on use.
                 if !ctx.offline {
                     cache_trust_material(ctx, rekor_key_pem).await;
                 }
 
                 let cert = parse_certificate(&leaf_der)?;
 
-                // Row 13 (CVE-2024-55655), re-asserted over the same parsed leaf the
-                // identity extraction below reads. Placed in the tail both content
-                // modes share, so "runs for attestations too" is structural. It has no
-                // key-mode twin because there is no certificate to bound.
+                // CVE-2024-55655, in the tail both content modes share, over the leaf identity is read from.
                 tlog::verify_integrated_time_within_certificate(
-                    // `TransparencyLog`, never the clock: this instant is the entry's
-                    // `integratedTime`, already SET- and inclusion-checked above.
-                    // Saturating rather than fallible: `BundleTlog::from_entry` widened a
-                    // non-negative i64 into this u64, so the conversion cannot trip,
-                    // and i64::MAX would fail closed against any real window.
+                    // Saturating is safe: the value is a widened non-negative i64, and i64::MAX fails closed.
                     SigningInstant::TransparencyLog(i64::try_from(tlog.integrated_time).unwrap_or(i64::MAX)),
                     &cert,
                 )?;
 
                 VerifiedSigner {
                     key_backend: KeyBackendKind::Keyless,
-                    // Read back off the verified leaf, so these report the
-                    // certificate that passed the chain, the SCT and the
-                    // signature — not merely one the bundle carried.
+                    // Off the verified leaf, not merely one the bundle carried.
                     certificate_identity: subject_identity(&cert),
                     certificate_oidc_issuer: oidc_issuer(&cert),
                     signed_at: Some(tlog.integrated_time),
                 }
             }
 
-            // Spec §WP9. `sigstore::bundle::verify` is bypassed here, and it has
-            // to be: `sign::to_bundle()` hardcodes `Content::X509CertificateChain`
-            // and the verifier reads its key exclusively from
-            // `tbs_certificate.subject_public_key_info`. Neither side has a
-            // `PublicKey` arm, so handing a key-mode bundle to that verifier does
-            // not verify it weakly — it cannot verify it at all. What replaces
-            // it is the same DSSE signature check the library performs, against
-            // a key the *policy* named rather than one the bundle carried, which
-            // is the stricter provenance of the two.
-            //
-            // Nothing else from the keyless tail applies. No chain, no SCT, no
-            // SAN, no validity window — those are not checks skipped here, they
-            // are checks over material this shape does not have, which is why
-            // `certificate_identity` and `certificate_oidc_issuer` come out
-            // absent rather than empty.
+            // `sigstore::bundle::verify` reads its key only from a certificate, so key mode checks the DSSE
+            // signature against a key the policy named instead.
             BundleParts::Key { hint, tlog } => {
-                // Always `Some` since D2 (both content modes produce a verified
-                // envelope); the refusal is the defensive floor, because the key
-                // path has no second source of signature bytes to fall back on.
+                // Defensive floor: the key path has no second source of signature bytes.
                 let envelope = verified_envelope.as_ref().ok_or(VerifyErrorKind::NoUsableBundle)?;
                 let signature = &envelope
                     .signatures
@@ -2390,29 +1410,18 @@ impl VerifyPipeline {
                     .ok_or(VerifyErrorKind::SignatureInvalid)?
                     .sig;
 
-                // The PAE, never the bare payload: a signature checked over the
-                // payload alone is forgeable across payload types (DSSE's whole
-                // reason for the encoding). `DsseEnvelope::parse` already refused
-                // any `payloadType` but this one, so the constant is the
-                // envelope's own declared type and not an assumption.
+                // The PAE, never the bare payload: a payload-only check is forgeable across payload types.
                 let pae = crate::attest::dsse::pae(crate::attest::DSSE_PAYLOAD_TYPE, &envelope.attestation.payload);
                 let matched_policies =
                     identity::matching_key_policies(&pae, signature, ctx.policies).inspect_err(|_| {
-                        // The hint is unauthenticated and decides nothing — but
-                        // it is the only thing that tells an operator staring at
-                        // the refusal *which* key the publisher claims to have
-                        // used.
+                        // The hint is unauthenticated and decides nothing; it is logged for the operator only.
                         tracing::debug!(
                             "no trusted key verified referrer {referrer_digest}; \
                              the bundle's public-key hint is {hint}"
                         );
                     })?;
 
-                // D10 / meta-plan D: transparency evidence is optional here and
-                // mandatory on the keyless arm. When it is present it is checked
-                // in full — the same SET, the same Merkle proof, the same
-                // logged-body binding — so "optional" narrows what must exist,
-                // never how hard what exists is looked at.
+                // Optional in key mode, but when present checked in full like the keyless arm.
                 let signed_at = match tlog {
                     Some(entry) => {
                         let rekor_key_pem = verify_rekor_set(ctx, &entry, rekor_keys).await?;
@@ -2427,25 +1436,16 @@ impl VerifyPipeline {
                         }
                         Some(entry.integrated_time)
                     }
-                    // Absent: `cosign sign --key` uploads to Rekor only when
-                    // asked, so there is no instant to report and none is
-                    // invented. The certificate-window check that would have
-                    // consumed it does not exist on this path either.
+                    // No logged instant exists, and none is invented.
                     None => None,
                 };
 
                 dsse::enforce_builder_pin(&matched_policies, &envelope.attestation)?;
 
                 VerifiedSigner {
-                    // Every `Scheme` `Scheme::is_implemented` admits reaches
-                    // `compile_key_reference` as raw PEM bytes — `file://` off
-                    // disk, `env://` out of the environment — so a
-                    // `PolicyBackend::Key` arriving here was compiled from a
-                    // local PEM whichever door it came through. A KMS backend,
-                    // which is a *remote* key rather than another way to spell a
-                    // local one, must widen this; that is why the field names the
-                    // backend rather than saying "key".
+                    // Only local PEM keys are admitted today; a KMS backend must widen this.
                     key_backend: KeyBackendKind::File,
+                    // No certificate, so the identity fields are absent rather than empty.
                     certificate_identity: None,
                     certificate_oidc_issuer: None,
                     signed_at,
@@ -2453,9 +1453,7 @@ impl VerifyPipeline {
             }
         };
 
-        // D6's fallback dedup key. The DSSE envelope's own signature, which both
-        // key models produce since D2 — the same bytes `sigstore` and the key
-        // arm each verified, so two doors onto one bundle key identically.
+        // The dedup key: the verified DSSE signature, so two doors onto one bundle key identically.
         let signature = verified_envelope
             .as_ref()
             .and_then(|verified| verified.signatures.first())
@@ -2481,45 +1479,17 @@ impl VerifyPipeline {
         })
     }
 
-    /// List the Sigstore-bundle referrers for the subject, and how they were
-    /// found. Empty → the caller maps to `NoSignaturesFound` (79).
+    /// List the signature referrers for the subject, and how they were found.
+    ///
+    /// `artifact_type` is only a server-side hint: the caller must re-filter, since a registry may ignore it.
     async fn list_signature_referrers(
         transport: &dyn OciTransport,
         image: &native::Reference,
         subject_digest: &Digest,
         artifact_type: Option<&str>,
     ) -> Result<ReferrersListing, VerifyErrorKind> {
-        // The Unsupported verdict no longer refuses the operation: the OCI referrers
-        // tag-schema fallback (`list_referrers_with_fallback` /
-        // `append_referrer_fallback_index`) serves a registry without the Referrers
-        // API. See `adr_oci_referrers_signing_v1.md`, Amendment 10 — the fallback
-        // index is a mutable tag anyone with push access authors, and the residual
-        // attack surface that reverses S1-F is recorded there.
-        //
-        // Server-side artifactType filter; the caller re-filters client-side,
-        // since the OCI spec permits a registry to ignore it.
-        //
-        // The cosign *simplesigning* shape reaches verification through two
-        // doors, and this is one of them: a referrer whose `artifactType` is
-        // `COSIGN_SIG_ARTIFACT_TYPE` or `COSIGN_SBOM_ARTIFACT_TYPE` carries the
-        // same payload `simplesigning_read` reads off a `sha256-<hex>.sig`
-        // sidecar tag, and the `via: DiscoveryMethod` this listing returns is
-        // what tells the two apart in the report. `artifact_type` is therefore
-        // the caller's: `Some(SIGSTORE_BUNDLE_V03)` while the bundle shape is
-        // the only one being discovered, `None` when both buckets are wanted out
-        // of one request.
-        //
-        // **Gap reported to G1, not minted here:** there is no frozen constant
-        // for a cosign *attestation* artifact type, so `.att` by OCI 1.1
-        // referrer has no spelling to code against and is out of scope.
-        //
-        // **The `.sbom` sidecar tag is not reached from here either**, and for a
-        // different reason than `.att`: it has a reader, but not on this path.
-        // Its layer is the SBOM document itself, so it belongs to
-        // `scan_unverified`'s permissive listing and never to a signature scan.
-        // `simplesigning_read::SidecarKind` still does not name it — that enum
-        // selects a simplesigning reader, and aiming one at a `.sbom` layer
-        // returns an empty scan for every sidecar that exists.
+        // The fallback index is a mutable tag anyone with push access authors
+        // (`adr_oci_referrers_signing_v1.md`, Amendment 10).
         transport
             .list_referrers_with_fallback(image, subject_digest, artifact_type)
             .await
@@ -2527,10 +1497,8 @@ impl VerifyPipeline {
     }
 }
 
-/// The verification facts the two key models establish differently.
-///
-/// Exists so the key-model match yields one named value instead of a tuple of
-/// two adjacent `Option<String>`s, where a swap type-checks silently.
+/// The verification facts the two key models establish differently; named fields, since two
+/// adjacent `Option<String>`s swap silently.
 struct VerifiedSigner {
     key_backend: KeyBackendKind,
     certificate_identity: Option<String>,
@@ -2538,29 +1506,19 @@ struct VerifiedSigner {
     signed_at: Option<u64>,
 }
 
-/// The Rekor transparency evidence one bundle carries, already structurally
-/// checked.
-///
-/// Its own type because its *presence* is not universal, and the two key models
-/// disagree about that: keyless requires it, key mode does not, because cosign's
-/// `sign --key` uploads to Rekor only when asked (D10). Splitting it out is what
-/// lets [`BundleParts`] make that asymmetry a property of the discriminant
-/// instead of a rule someone downstream has to remember.
+/// The Rekor transparency evidence one bundle carries, already structurally checked.
 struct BundleTlog {
     signed_entry_timestamp: Vec<u8>,
     canonicalized_body: Vec<u8>,
     integrated_time: u64,
     log_index: u64,
     log_id_hex: String,
-    /// The Merkle inclusion proof. Not optional: an entry without one is
-    /// refused in [`BundleTlog::from_entry`], so downstream code cannot
-    /// forget to check and cannot silently fall back to the SET alone.
+    /// Not optional, so no caller can fall back to the SET alone.
     inclusion_proof: ProtoInclusionProof,
 }
 
 impl BundleTlog {
-    /// Read one `tlogEntries` element, refusing a promise-only or proof-only
-    /// entry.
+    /// Read one `tlogEntries` element, refusing a promise-only or proof-only entry.
     fn from_entry(
         entry: &sigstore_protobuf_specs::dev::sigstore::rekor::v1::TransparencyLogEntry,
     ) -> Result<Self, VerifyErrorKind> {
@@ -2570,11 +1528,7 @@ impl BundleTlog {
             .map(|promise| promise.signed_entry_timestamp.clone())
             .ok_or(VerifyErrorKind::RekorSetAbsentTsaPresent)?;
 
-        // Mandatory. The SET is only a promise to include; the proof is the
-        // evidence that the entry is in a tree whose root the log signed.
-        // Bundle profile v0.1/v0.2 leaves the proof optional at the schema
-        // level, so without this a promise-only bundle would verify on strictly
-        // weaker evidence than `sigstore`'s own online branch accepts.
+        // Mandatory though v0.1/v0.2 schemas allow omitting it, or a promise-only bundle verifies on weaker evidence.
         let inclusion_proof = entry
             .inclusion_proof
             .clone()
@@ -2595,28 +1549,15 @@ impl BundleTlog {
     }
 }
 
-/// The verification material a parsed bundle offers, and the transparency
-/// evidence that came with it.
+/// The verification material a parsed bundle offers, and its transparency evidence.
 ///
-/// An enum, not a struct carrying an empty `leaf_der`: a key-mode bundle has
-/// **no** certificate at all, and an empty DER flowing into `parse_certificate`
-/// is exactly the silent-accept shape this split makes unrepresentable. The
-/// Rekor asymmetry rides the same discriminant — mandatory on the keyless arm,
-/// optional on the key arm — so "a keyless bundle with no tlog entry" cannot be
-/// *constructed*, rather than being refused by a check some later reader could
-/// relax.
+/// An enum so an empty certificate and a keyless bundle without a tlog entry are unrepresentable.
 enum BundleParts {
-    /// Keyless Sigstore: a Fulcio leaf certificate (DER) plus its mandatory
-    /// transparency evidence.
+    /// A Fulcio leaf certificate (DER) plus its mandatory transparency evidence.
     Keyless { leaf_der: Vec<u8>, tlog: BundleTlog },
-    /// Key mode (spec §WP9): no certificate, only the bundle's public-key hint,
-    /// and transparency evidence **only if the signer uploaded one**.
+    /// No certificate; transparency evidence only if the signer uploaded one.
     Key {
-        /// cosign's `publicKey.hint` — by the protobuf's own words an
-        /// *unauthenticated* hint, so it decides nothing here. It is logged
-        /// when no trusted key verified the signature, which is the one moment
-        /// an operator needs to know which key the publisher claims to have
-        /// used.
+        /// Unauthenticated, so it decides nothing; only logged on refusal.
         hint: String,
         tlog: Option<BundleTlog>,
     },
@@ -2627,30 +1568,7 @@ impl BundleParts {
         bundle: &sigstore_protobuf_specs::dev::sigstore::bundle::v1::Bundle,
         mode: &VerifyContentMode,
     ) -> Result<Self, VerifyErrorKind> {
-        // The candidate must answer the question this run asked. Both a cosign
-        // image signature and an attestation are DSSE envelopes over an in-toto
-        // Statement (D2), so the `content` oneof no longer tells them apart —
-        // the Statement's `predicateType` does. Both directions are a
-        // per-candidate verdict, not an abort: the scan records a mismatch as
-        // `ModeMismatch`, which charges the bytes and spends no candidate slot,
-        // and keeps going. A subject legitimately carries both kinds, and
-        // failing here is how an attestation crowds a signature out of a scan.
-        //
-        // `messageSignature` is refused in BOTH modes: it is the pre-parity
-        // shape and nothing on this path reads it any more.
-        //
-        // Still asked FIRST, before the verification material is read, and for
-        // the same reason as before the predicateType entered it: reading
-        // material first would report a malformed bundle of the *other* kind as
-        // this mode's failure and spend a slot on it — the crowd-out the
-        // non-consuming skip exists to prevent, reached through a different
-        // door. What changed is the cost, not the order: the discrimination now
-        // parses the DSSE payload rather than only reading the `content` oneof.
-        // Those bytes are already in memory and already capped by the caller's
-        // bounded blob read, and the probe is deliberately tolerant
-        // ([`dsse::is_cosign_image_signature`]) so an unreadable payload routes
-        // to the attestation question and keeps its precise refusal instead of
-        // vanishing into a skip.
+        // Mode first: reading the material first charges a malformed other-kind bundle as this mode's failure.
         let content_matches_mode = match bundle.content.as_ref() {
             Some(bundle::Content::DsseEnvelope(envelope)) => {
                 let image_signature = dsse::is_cosign_image_signature(envelope);
@@ -2659,6 +1577,7 @@ impl BundleParts {
                     VerifyContentMode::Attestation { .. } => !image_signature,
                 }
             }
+            // `messageSignature`, the pre-parity shape nothing here reads, is refused in both modes.
             _ => false,
         };
         if !content_matches_mode {
@@ -2669,8 +1588,7 @@ impl BundleParts {
             .verification_material
             .as_ref()
             .ok_or(VerifyErrorKind::BundleParseFailed)?;
-        // Read once, for both arms. A malformed entry is a refusal under either
-        // key model — only its *absence* is read differently below.
+        // A malformed entry is refused under either key model; only absence differs.
         let tlog = material.tlog_entries.first().map(BundleTlog::from_entry).transpose()?;
 
         match material.content.as_ref() {
@@ -2686,13 +1604,7 @@ impl BundleParts {
                 leaf_der: certificate.raw_bytes.clone(),
                 tlog: tlog.ok_or(VerifyErrorKind::RekorSetInvalid)?,
             }),
-            // Key mode (D10 / meta-plan D). The absent tlog entry that refuses a
-            // keyless bundle one arm up is legal here and *must* stay legal:
-            // cosign's `sign --key` writes no Rekor entry unless asked, so
-            // demanding one would refuse every offline key signature cosign
-            // produces. Nothing is weakened by it — the signature is still
-            // verified against a pinned public key, which is the whole of what
-            // key mode ever claimed.
+            // An absent tlog entry must stay legal, or every offline `cosign sign --key` signature is refused.
             Some(verification_material::Content::PublicKey(key)) => Ok(Self::Key {
                 hint: key.hint.clone(),
                 tlog,
@@ -2704,21 +1616,8 @@ impl BundleParts {
 
 /// Verify the Rekor transparency evidence, returning the log key PEM used.
 ///
-/// Checks the Signed Entry Timestamp and the Merkle inclusion proof, both
-/// mandatory. Both are computed by `sigstore-rs` in [`tlog`] — no signature,
-/// hash-chain or checkpoint parsing lives here.
-///
-/// Key source is [`RekorKeyMemo::resolve`]'s ladder, in order:
-/// 0. **Already resolved this run** — the memo, keyed on this entry's own
-///    `logId`, so N candidates cost one resolution and not N (#374, #319).
-/// 1. **Pinned** — the trust root carries a Rekor public key (from a TUF root or
-///    the trust-root cache). Used with no network; this is the offline path and
-///    the fix for #194's trust-on-first-use Rekor-key fetch.
-/// 2. **Offline, unpinned** — cannot fetch and no pinned key → fail. (The CLI
-///    gates this to an actionable exit-78 error before the pipeline runs; this
-///    is the defensive backstop.)
-/// 3. **Online, unpinned** — TOFU-fetch from `--rekor-url/api/v1/log/publicKey`
-///    (the prior behavior), and return it so the caller can cache it.
+/// Checks the SET and the Merkle inclusion proof, both mandatory. Offline with no pinned key
+/// fails here as the backstop to the CLI's exit-78 gate.
 async fn verify_rekor_set(
     ctx: &VerifyContext<'_>,
     entry: &BundleTlog,
@@ -2739,63 +1638,24 @@ async fn verify_rekor_set(
         },
     )?;
 
-    // The Merkle proof is independent evidence, and `BundleTlog` has already
-    // guaranteed it is present — the type carries the invariant so no caller
-    // can fall back to the SET alone.
     tlog::verify_inclusion(&key, &entry.inclusion_proof, &entry.canonicalized_body)?;
     Ok(pem)
 }
 
-/// The Rekor log public keys this verify run has already resolved, keyed on the
-/// entry's `logId` hex.
+/// The Rekor log public keys this verify run has resolved, so N candidates cost one fetch.
 ///
-/// One run resolves the key many times over: once per simplesigning layer of a
-/// cosign sidecar (#374) and once per candidate on the bundle path (#319).
-/// Unpinned, each of those was its own `/api/v1/log/publicKey` fetch.
-///
-/// **Keyed on `log_id_hex`, and that is the whole security of it.** The log id
-/// arrives from an untrusted sidecar manifest, and
-/// [`TrustRoot::rekor_public_key_pem_for`] answers *per log* — a trust root
-/// carrying two logs across a rotation returns a different key for each. A memo
-/// keyed on nothing would hand the first entry's key to every later one, so an
-/// entry from the second log would have its SET checked against the first
-/// log's key. That is precisely the confusion
-/// `the_rekor_key_is_selectable_by_log_id_and_falls_back_when_unknown` pins out
-/// of the selector, re-introduced one layer above it.
-///
-/// **Successes only.** A transient Rekor 5xx while resolving candidate 1 must
-/// not decide candidate 2: this scan is ANY-of — "one verified signature is the
-/// ANY-of answer" — and a cached `Err` would promote one flaky fetch into a
-/// whole-scan refusal.
-///
-/// Cheap to clone, and a clone is the *same* memo: the copy
-/// [`SidecarVerification`](super::simplesigning_read::SidecarVerification)
-/// carries and the one the bundle path holds share one map, so the two doors
-/// onto a subject do not each pay for their own resolution.
+/// Keyed on `log_id_hex`, or a second log's SET is checked against the first log's key
+/// (`the_rekor_key_is_selectable_by_log_id_and_falls_back_when_unknown` pins the selector).
+/// Successes only: a cached `Err` would turn one flaky fetch into a whole-scan refusal.
 #[derive(Clone, Default)]
 pub struct RekorKeyMemo {
-    /// `logId` hex → PEM.
-    ///
-    /// A `std::sync::Mutex`, and the guard is never held across an `.await`:
-    /// the fetch runs with the lock released, so two tasks racing the same cold
-    /// log id both fetch and the second insert wins — one wasted request, never
-    /// a deadlock.
+    /// `logId` hex → PEM. Never hold the `std::sync::Mutex` guard across the fetch's `.await`, or it deadlocks.
     resolved: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl RekorKeyMemo {
-    /// The Rekor public key PEM for `log_id_hex`: this run's memo first, then
-    /// pinned trust material, then an online fetch, and nothing at all when the
-    /// run is offline.
-    ///
-    /// Shared with the cosign sidecar path rather than duplicated, so the
-    /// `dev.sigstore.cosign/bundle` annotation cannot grow a second, subtly
-    /// different ladder — in particular one that forgets the offline refusal and
-    /// reaches for the network anyway.
-    ///
-    /// The memo is consulted ahead of the trust root, which costs nothing: the
-    /// answer is a function of `log_id_hex` and the run's trust root, and the
-    /// trust root does not change mid-run.
+    /// The Rekor public key PEM for `log_id_hex`: memo, then pinned trust material, then an online
+    /// fetch unless offline. The one ladder for both doors, so neither forgets the offline refusal.
     ///
     /// # Errors
     ///
@@ -2822,11 +1682,7 @@ impl RekorKeyMemo {
 
     /// The one Rekor log key this run resolved, when it resolved exactly one.
     ///
-    /// The trust-root cache holds a single key per Rekor authority
-    /// ([`super::trust_cache::cache_key_for_rekor`]), so a run that legitimately
-    /// read entries from two logs has no single answer to write there — and
-    /// writing either would hand a later offline verify the wrong one. `None`
-    /// then, and the cache keeps whatever it already had.
+    /// The cache holds one key per authority; writing either of two would hand a later offline verify the wrong one.
     fn single_key(&self) -> Option<String> {
         let resolved = self.lock();
         let mut keys = resolved.values();
@@ -2843,10 +1699,7 @@ impl RekorKeyMemo {
 
 /// Fetch the Rekor log's published public key PEM (trust-on-first-use, online).
 ///
-/// `pub` so the auto-verify hook can fetch the key ONCE for a batch and pin
-/// it, instead of every covered package re-fetching it inside the pipeline.
-/// The hook is `ocx_lib::package_manager::tasks::auto_verify`, so the
-/// extraction turned that reach into a cross-crate one.
+/// `pub` so the auto-verify hook fetches the key once per batch.
 pub async fn fetch_rekor_public_key_pem(rekor_url: &Url) -> Result<String, VerifyErrorKind> {
     let endpoint = rekor_url
         .join("api/v1/log/publicKey")
@@ -2866,17 +1719,9 @@ pub async fn fetch_rekor_public_key_pem(rekor_url: &Url) -> Result<String, Verif
     String::from_utf8(raw).map_err(|_| VerifyErrorKind::TransparencyLogUnavailable)
 }
 
-/// Pull a referrer payload blob with a hard in-memory read cap (CWE-400 defense).
+/// Pull a referrer payload blob, reading at most `cap + 1` bytes (CWE-400).
 ///
-/// Reads at most `cap + 1` bytes so an over-cap body is detected and rejected
-/// without buffering the whole thing — the pre-download descriptor check bounds
-/// the honest case, this bounds a registry that lies about the size. For an
-/// honest under-cap blob the native transport's `VerifyingStream` still checks
-/// the blob digest at stream end.
-///
-/// `cap` is always the *run's*, never the candidate's: the bundle path passes
-/// its [`VerifyContentMode`] ceiling, the simplesigning path its payload
-/// ceiling.
+/// `cap` is always the run's, never the candidate's declared size, which is untrusted.
 pub(super) async fn pull_blob_capped(
     transport: &dyn OciTransport,
     image: &native::Reference,
@@ -2900,15 +1745,9 @@ pub(super) async fn pull_blob_capped(
     Ok(bytes)
 }
 
-/// Fetch a referrer manifest, rejecting a body that exceeds the per-manifest
-/// cap ([`MAX_REFERRER_MANIFEST_BYTES`]).
+/// Fetch a referrer manifest, rejecting a body over [`MAX_REFERRER_MANIFEST_BYTES`] before parsing.
 ///
-/// The descriptor size in the referrers listing is untrusted — a registry can
-/// advertise a tiny size then return a huge body — so the *actual* body length
-/// is the bound that matters, checked after the read. `pull_manifest_raw`
-/// verifies the returned body against the referrer digest, so this does not
-/// weaken manifest-digest verification. An over-cap body is rejected before it
-/// is parsed as JSON.
+/// The listed descriptor size is untrusted, so the actual body length is the bound that matters.
 async fn pull_referrer_manifest_capped(
     transport: &dyn OciTransport,
     referrer_ref: &native::Reference,
@@ -2923,37 +1762,16 @@ async fn pull_referrer_manifest_capped(
     Ok(referrer_bytes)
 }
 
-/// Whether a referrers-listing `artifactType` names an **unsigned** SBOM
-/// attachment.
+/// Whether a referrers-listing `artifactType` names an **unsigned** SBOM attachment.
 ///
-/// Two independent conventions, both measured, and neither is the other's
-/// superset:
-///
-/// * the document's own media type, which is what `oras attach`, `syft attest
-///   --output` and OCX's own attach path put on the descriptor; and
-/// * [`COSIGN_SBOM_ARTIFACT_TYPE`], which is what `COSIGN_EXPERIMENTAL=1 cosign
-///   attach sbom --registry-referrers-mode oci-1-1` puts there while typing the
-///   *layer* by the document. Filtering on the first alone dropped every cosign
-///   OCI 1.1 SBOM referrer, which is the read half of the same gap the `.sbom`
-///   sidecar tag was.
-///
-/// Admitting a candidate is not accepting it: `read_unverified_layer` still
-/// gates on the layer's media type, which is the only claim about the bytes the
-/// registry actually served.
+/// Both conventions, since neither is the other's superset: the document's own media type, and
+/// [`COSIGN_SBOM_ARTIFACT_TYPE`], without which every cosign OCI 1.1 SBOM referrer is dropped.
+/// Admitting is not accepting: `read_unverified_layer` still gates on the layer's media type.
 fn is_unsigned_sbom_artifact_type(artifact_type: &str) -> bool {
     sbom_predicate_type_uri(artifact_type).is_some() || artifact_type == COSIGN_SBOM_ARTIFACT_TYPE
 }
 
-/// Fetch the manifest behind the `sha256-<hex>.sbom` sidecar tag, or `None`
-/// when the subject carries no such tag.
-///
-/// Returns the digest beside the bytes because this door is addressed by *tag*:
-/// the caller has no descriptor, so the only name it can give the attachment —
-/// in a listing row or in a refusal — is the one the registry answers with.
-///
-/// Bounded exactly as `simplesigning_read::read_sidecar_tag` bounds the `.sig`
-/// door: an over-cap body is rejected before it is parsed, and a 404 is not an
-/// error.
+/// Fetch the manifest and digest behind the `sha256-<hex>.sbom` sidecar tag, or `None` on a 404.
 async fn pull_sbom_sidecar_manifest(
     transport: &dyn OciTransport,
     image: &native::Reference,
@@ -2974,53 +1792,29 @@ async fn pull_sbom_sidecar_manifest(
 
 /// What one candidate turned out to be, once fetched and parsed.
 ///
-/// Three outcomes rather than `Result<VerifyResult, _>`, because the scan must
-/// account for them differently and only this function knows which is which: a
-/// candidate of the other content kind is not this run's question at all, and a
-/// candidate of the wrong predicate type is a narrowing miss rather than a
-/// defect. Collapsing either into an error is what let attestations crowd a
-/// signature out of the scan, and what would report a healthy artifact's missing
-/// SBOM as a data error.
+/// Not a `Result`: collapsing the skips into errors lets attestations crowd out a signature and
+/// reports a missing SBOM as a data error.
 #[derive(Debug)]
-// `Verified` is the success outcome, not a rare one: boxing it would move an
-// allocation onto the path that matters to save stack on two payload-free
-// variants. It is constructed at most `caps.candidates` times per run (32),
-// destructured immediately, and never crosses a task boundary.
+// Boxing `Verified` would allocate on the hot success path to save stack on two empty variants.
 #[expect(
     clippy::large_enum_variant,
     reason = "the large variant is the hot one; see the note above"
 )]
 enum CandidateOutcome {
-    /// Verified in the requested mode. `attestation` is `Some` iff the mode was
-    /// [`VerifyContentMode::Attestation`].
+    /// Verified; `attestation` is `Some` iff the mode was [`VerifyContentMode::Attestation`].
     Verified {
         verified: VerifiedSignature,
         attestation: Option<VerifiedAttestation>,
     },
-    /// The bundle carries the other content kind. Costs bytes (it had to be
-    /// fetched to be discriminated — annotations are hints, never authoritative)
-    /// but never a candidate slot.
+    /// The other content kind: costs bytes, never a candidate slot.
     ModeMismatch,
-    /// Verified, but its signed predicateType is not the one requested. Leaves
-    /// the scan reporting not-found rather than a data error: nothing is wrong
-    /// with the artifact, it just does not carry that document.
+    /// Verified, but not the requested predicate type: a not-found, not a data error.
     TypeNarrowed,
 }
 
 /// What the blocking structural pass produced, before any crypto has run.
-///
-/// The two skip variants mirror [`CandidateOutcome`]'s and are `Ok` outcomes the
-/// scan charges differently, so they travel back as values rather than errors —
-/// they are answers about which question this candidate belongs to, not
-/// failures. Kept separate from `CandidateOutcome` because that type's success
-/// variant carries the verification result, which does not exist yet here.
 enum ParsedCandidate {
-    /// Everything the crypto tail needs, moved across the task boundary once.
-    ///
-    /// Boxed because the skip variants below are the *common* case in exactly
-    /// the crowded scan `order_candidates` exists for: unboxed, every
-    /// mode-mismatched candidate would move ~500 bytes of enum to say one word.
-    /// The ready path already owns megabytes, so the allocation is free there.
+    /// Everything the crypto tail needs. Boxed because the skip variants are the common case.
     Ready(Box<ParsedBundle>),
     /// The bundle carries the other content kind.
     ModeMismatch,
@@ -3035,34 +1829,16 @@ struct ParsedBundle {
     envelope: Option<VerifiedEnvelope>,
 }
 
-/// Why a scan stopped before running out of candidates.
 /// What a scan produced: what verified, and what was examined and refused.
-///
-/// The `Option<VerifiedAttestation>` is populated only in attestation mode; the
-/// signature path ignores it. Both entry points reshape this into their own
-/// public return before it leaves the module.
 #[derive(Debug, Default)]
 struct ScanOutcome {
     matches: Vec<(VerifyResult, Option<VerifiedAttestation>)>,
     refused: Vec<RefusedCandidate>,
 }
 
-/// The subject one scan runs against, resolved once.
+/// Which referrer shape a candidate is, decided from its `artifactType` before any fetch.
 ///
-/// The pair travels together because they are two halves of one answer: the
-/// digest names *what* is being read and the reference names *where from*,
-/// after index indirection and the mirror map have both had their say. Split
-/// across two arguments they would be one transposition away from addressing
-/// the right host for the wrong subject.
-/// Which of the two referrer *shapes* a candidate is, decided from its
-/// `artifactType` before any fetch.
-///
-/// Shape only — deliberately not the predicate type. The listing's
-/// `artifactType` is a registry-served echo of what the referrer claims, and
-/// nothing checks it against the manifest it points at, so it may say which
-/// decode to run but must never decide the label the decode's result is
-/// reported under. That comes from the layer, in
-/// [`Self::read_unverified_referrer`].
+/// Shape only: the unchecked `artifactType` must never decide the reported label, which comes from the layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnverifiedPayload {
     /// The document itself, typed by the layer's own media type.
@@ -3071,50 +1847,36 @@ enum UnverifiedPayload {
     Bundle,
 }
 
+/// The subject one scan runs against, resolved once.
+///
+/// One value, so the right host is never addressed for the wrong subject by a transposition.
 struct ScanTarget {
     /// Registry reference every referrer-facing call is addressed with.
     image: native::Reference,
     /// The per-platform subject manifest digest.
     subject_digest: Digest,
-    /// The image-index digest [`subject_digest`](Self::subject_digest) was
-    /// reached **through**, when `--platform` narrowed into one.
+    /// The image-index digest [`subject_digest`](Self::subject_digest) was reached through.
     ///
-    /// `None` in both cases where membership cannot be proved: the reference
-    /// resolved straight to the acted-on object (a bare platform digest, or no
-    /// `--platform` at all), and an index that could not be fetched
-    /// (`OCX_OFFLINE`, absent from the cache). Both fail **closed** — see
-    /// [`Self::index_signature_subject`].
+    /// `None` when membership cannot be proved (no index, or an unfetchable one), which fails closed.
     enclosing_index: Option<Digest>,
     /// Every digest the enclosing index lists. Empty when there is no index.
     ///
-    /// The containment test reads this and nothing else. It is deliberately not
-    /// derived from the selection that produced `subject_digest`: `resolve_sign_target`
-    /// *selects*, and its own contract says it makes no validity decision, so a
-    /// trust gate that inferred membership from "the selector picked it" would
-    /// have no check in it at all.
+    /// Never derive membership from the selection: `resolve_sign_target` makes no validity decision.
     index_members: Vec<Digest>,
 }
 
 impl ScanTarget {
-    /// **C-008.** The digest whose signatures may also count for this subject,
-    /// or `None` when they may not.
+    /// The digest whose signatures may also count for this subject, or `None` when they may not.
     ///
-    /// `cosign verify <tag>` resolves to the *index* digest and signs there,
-    /// while OCX pins a *platform manifest*. The index digest binds every
-    /// descriptor the index lists, so a signature over the index covers each
-    /// child it names — but only once that containment is **proved**, by
-    /// finding this subject among [`index_members`](Self::index_members).
-    ///
-    /// Fails closed twice over, and neither case may ever read as "assume
-    /// membership": no enclosing index (nothing was narrowed, or the index was
-    /// unfetchable) returns `None`, and a subject the index does not list
-    /// returns `None` even when the index digest is known.
+    /// An index signature covers this subject only once it is found among
+    /// [`index_members`](Self::index_members); never assume membership.
     fn index_signature_subject(&self) -> Option<&Digest> {
         let enclosing = self.enclosing_index.as_ref()?;
         self.index_members.contains(&self.subject_digest).then_some(enclosing)
     }
 }
 
+/// Which bound ended a scan before its candidates ran out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScanStop {
     /// The per-mode candidate cap was reached.
@@ -3127,18 +1889,12 @@ pub(super) enum ScanStop {
 
 /// Candidate-budget accounting for one scan.
 ///
-/// Split out of the loop because the property that matters most here — a
-/// candidate of the *other* content kind never consumes the requested mode's
-/// slot — has no other seam: driving it through the pipeline needs a registry,
-/// and the regression it prevents (attestations crowding out a signature) is
-/// silent.
+/// A seam for the silent regression: an other-kind candidate must never consume this mode's slot.
 struct ScanBudget {
     caps: ContentCaps,
-    /// Candidates examined **in the requested mode**. This is what the
-    /// candidate cap bounds.
+    /// Candidates examined in the requested mode; the candidate cap bounds this.
     examined: usize,
-    /// Candidates the loop processed at all, mode-mismatched ones included.
-    /// This is what "were any left unlooked-at" is answered from.
+    /// Candidates processed at all, mode-mismatched ones included; truncation is read from this.
     considered: usize,
     /// Bytes actually read across candidates, never a declared size.
     spent: u64,
@@ -3159,13 +1915,7 @@ impl ScanBudget {
 
     /// Whether another candidate may be fetched, recording why not when not.
     ///
-    /// The byte budget is charged from bytes actually read, never a declared
-    /// size, so a registry cannot buy extra fetches by advertising size 0.
-    ///
-    /// One allowance, spent by one pass: an attestation run either verifies
-    /// (and then never fetches an unsigned attachment at all) or verifies
-    /// nothing (and then reads both referrer kinds in a single pass). Nothing
-    /// is rationed between passes, because there is only ever one that fetches.
+    /// Charged from bytes read, never a declared size, or advertising size 0 buys extra fetches.
     fn may_examine(&mut self) -> bool {
         match self.stop_reason() {
             Some(stop) => {
@@ -3178,13 +1928,7 @@ impl ScanBudget {
 
     /// The same three bounds, asked **without** recording an answer.
     ///
-    /// A caller that only wants to know whether a door is still affordable must
-    /// use this: [`Self::may_examine`] *stamps* `stop`, and a stamp is what
-    /// `finish_scan` reads as "this scan was truncated". Probing with the
-    /// recording form turns a run that merely declined to open the `.att` door
-    /// into one reporting a truncation with `unexamined == 0`, masking the
-    /// actionable per-candidate verdict behind it — on subjects carrying no
-    /// `.att` tag at all.
+    /// Probe with this, not [`Self::may_examine`], whose stamp `finish_scan` reads as a truncation.
     fn stop_reason(&self) -> Option<ScanStop> {
         if self.examined >= self.caps.candidates {
             Some(ScanStop::CandidateCap)
@@ -3199,10 +1943,7 @@ impl ScanBudget {
 
     /// Record a bound that stopped a *nested* scan, first one wins.
     ///
-    /// The `.att` reader walks its own layers under its own caps, so the bound
-    /// that stopped it is not one this budget's counters can ever reach. Without
-    /// this, `finish_scan`'s fail-closed attestation arm cannot fire and a
-    /// truncated sidecar scan returns its partial list as success.
+    /// Without it a truncated `.att` scan, bounded by its own caps, returns its partial list as success.
     fn record_stop(&mut self, stop: ScanStop) {
         self.stop.get_or_insert(stop);
     }
@@ -3220,69 +1961,25 @@ impl ScanBudget {
 
     /// Record a candidate that turned out to carry the other content kind.
     ///
-    /// Deliberately does **not** touch [`Self::examined`]: attaching five
-    /// attestations and re-running attest a few times would otherwise push a
-    /// correctly signed artifact's signature past the candidate cap in the
-    /// registry's listing order, and `ocx package verify` would report
-    /// `NoSignaturesFound` for it.
+    /// Never touches [`Self::examined`], or attestations push a valid signature past the candidate cap.
     fn skipped_other_mode(&mut self) {
         self.considered = self.considered.saturating_add(1);
     }
 }
 
-/// Put the candidate list in the order the scan walks it.
+/// Put the candidate list in scan order: two stable sorts, lexicographic in (disagrees-with-mode, digest).
 ///
-/// Two keys, applied as two stable sorts so the result is lexicographic in
-/// (disagrees-with-mode, digest):
-///
-/// 1. **Digest**, so the passing candidate and the aggregate error are
-///    reproducible regardless of registry listing order. No trust
-///    significance — it is a total order the registry does not choose.
-/// 2. **The `dev.sigstore.bundle.content` hint**, which demotes a candidate
-///    that positively names the *other* content kind to the tail. Without it a
-///    subject carrying nine SBOMs pushes its signature past
-///    [`MAX_SIGNATURE_CANDIDATES`] in digest order, and the run reports an
-///    honestly-signed artifact as unsigned: the slot-free `ModeMismatch` skip
-///    is only reachable *after* the bundle parses, so a candidate refused by
-///    the per-mode size gate before that spends a slot on the wrong kind.
-///
-/// The hint is producer-controlled and untrusted, which is why this orders and
-/// never filters: every candidate stays in the list, a demoted one is still
-/// fetched and discriminated on its bundle bytes when the scan reaches it, and a
-/// candidate carrying no hint keeps its digest position. The `&mut [_]`
-/// signature is what enforces that half — a slice cannot change length, so
-/// dropping a candidate here is a compile error rather than a review question.
-///
-/// Whether the scan reaches a tail candidate is the caps' decision, not this
-/// function's: the candidate slots, the cross-candidate byte budget and the
-/// per-mode declared-size gate all still bite there. Demotion changes the order
-/// in which those bounds are met; it never makes a candidate ineligible.
+/// Digest order keeps the verdict reproducible; the hint demotes other-kind candidates, or SBOMs push a
+/// signature past [`MAX_SIGNATURE_CANDIDATES`]. The hint is untrusted, so this orders and never filters.
 fn order_candidates(candidates: &mut [ocx_oci::Descriptor], mode: &VerifyContentMode) {
     candidates.sort_by(|a, b| a.digest.cmp(&b.digest));
     candidates.sort_by_key(|descriptor| annotation_disagrees_with_mode(descriptor, mode));
 }
 
-/// Whether a listed referrer's annotations positively name something other than
-/// what this run is looking for.
+/// Whether a listed referrer's annotations positively name something other than what this
+/// run is looking for.
 ///
-/// Two annotations, because since D2 it takes both to tell the kinds apart:
-///
-/// 1. `dev.sigstore.bundle.content` — **mode-independent** now. Both a cosign
-///    image signature and an attestation are `dsse-envelope`, so a hint naming
-///    anything else (the pre-parity `message-signature`, or a value from a tool
-///    nobody here knows) names a shape neither mode reads.
-/// 2. `dev.sigstore.bundle.predicateType` — what actually separates the two.
-///    Signature mode demotes every predicateType but cosign's image-signature
-///    one; attestation mode demotes exactly that one.
-///
-/// Without the second rule the availability defect this ordering exists to
-/// close would reopen the moment signatures became DSSE: nine SBOM referrers
-/// all hinting `dsse-envelope` would sort ahead of the signature by digest and
-/// exhaust the scan before it is reached.
-///
-/// Absent annotation → `false` on both rules: a referrer pushed by a tool that
-/// writes no hint, or a transport that does not echo listing annotations, must
-/// not be demoted behind one that does.
+/// An absent annotation is `false`, so a tool that writes no hint is not demoted behind one that does.
 fn annotation_disagrees_with_mode(descriptor: &ocx_oci::Descriptor, mode: &VerifyContentMode) -> bool {
     let Some(annotations) = descriptor.annotations.as_ref() else {
         return false;
@@ -3302,11 +1999,6 @@ fn annotation_disagrees_with_mode(descriptor: &ocx_oci::Descriptor, mode: &Verif
 }
 
 /// Name the bound that stopped a scan, for a caller reporting the truncation.
-///
-/// A truncated scan cannot answer a question about *every* SBOM a subject
-/// carries, so which bound ran out is the actionable part. Shared by both
-/// passes; how each one reports it differs — see
-/// [`VerifyPipeline::scan_unverified`].
 fn truncation_failure(caps: ContentCaps, stop: ScanStop, unexamined: usize) -> VerifyErrorKind {
     match stop {
         ScanStop::CandidateCap => VerifyErrorKind::TooManyAttestations { limit: caps.candidates },
@@ -3317,14 +2009,9 @@ fn truncation_failure(caps: ContentCaps, stop: ScanStop, unexamined: usize) -> V
     }
 }
 
-/// Pick the most actionable failure across the refused candidates (see
-/// [`failure_rank`]), consuming them — every caller of this is on a path that
-/// returns `Err` and reports nothing else.
+/// Pick the most actionable failure across the refused candidates (see [`failure_rank`]).
 fn best_failure(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind> {
-    // `min_by_key` returns the *first* minimum, so reversing the rank picks the
-    // first strict maximum — the listing-order tiebreak the incremental fold it
-    // replaced had. `max_by_key` returns the last, which would silently reorder
-    // which of two equally-ranked refusals a caller is shown.
+    // Not `max_by_key`: it returns the last maximum, reordering which of two equal-ranked refusals is shown.
     refused
         .into_iter()
         .min_by_key(|candidate| std::cmp::Reverse(failure_rank(&candidate.reason)))
@@ -3333,12 +2020,8 @@ fn best_failure(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind> {
 
 /// Decide the aggregate ANY-of failure once no candidate has passed.
 ///
-/// If the candidate cap or byte budget left candidates unexamined, report the
-/// limit distinctly ([`VerifyErrorKind::CandidateLimitExhausted`]) — the
-/// candidate order is by digest (no trust significance), so a valid signature
-/// may sort past the cap, and surfacing an examined candidate's error would
-/// misattribute the failure. Otherwise surface the most actionable examined
-/// failure, or [`VerifyErrorKind::NoSignaturesFound`] when none was recorded.
+/// Unexamined candidates report [`VerifyErrorKind::CandidateLimitExhausted`], since a valid signature may
+/// sort past the cap and an examined candidate's error would misattribute the failure.
 fn aggregate_failure(total: usize, examined: usize, best: Option<VerifyErrorKind>) -> VerifyErrorKind {
     let unexamined = total.saturating_sub(examined);
     if unexamined > 0 {
@@ -3347,9 +2030,7 @@ fn aggregate_failure(total: usize, examined: usize, best: Option<VerifyErrorKind
     best.unwrap_or(VerifyErrorKind::NoSignaturesFound)
 }
 
-/// Rank verify failures so the aggregate error across candidate referrers
-/// surfaces the most actionable one: a real signature failing identity beats an
-/// unrelated malformed referrer. Higher = more meaningful.
+/// Rank verify failures for the aggregate error; higher is more actionable.
 fn failure_rank(kind: &VerifyErrorKind) -> u8 {
     match kind {
         VerifyErrorKind::IdentityMismatch | VerifyErrorKind::IssuerMismatch => 5,
@@ -3363,17 +2044,9 @@ fn failure_rank(kind: &VerifyErrorKind) -> u8 {
     }
 }
 
-/// Cache the trust material a **simplesigning** verify used, at the exits the
-/// bundle path caches at (#374).
+/// Cache the trust material a **simplesigning** verify used, at the exits the bundle path caches at.
 ///
-/// The bundle path has the PEM in hand when a candidate verifies and caches it
-/// right there. A sidecar layer resolves its log key several frames down, inside
-/// `simplesigning_read::logged_entry`, and nothing it returns carries the key
-/// back out — so the run's memo is what the key is read from instead.
-///
-/// Silent on a run that resolved no key at all (a key-mode sidecar uploads
-/// nothing to Rekor, so there is none) and on one that resolved two — see
-/// [`RekorKeyMemo::single_key`] for why the second case must not guess.
+/// Reads the key from the run's memo; silent when it resolved none or two ([`RekorKeyMemo::single_key`]).
 async fn cache_sidecar_trust_material(ctx: &VerifyContext<'_>, rekor_keys: &RekorKeyMemo) {
     if ctx.offline {
         return;
@@ -3386,18 +2059,14 @@ async fn cache_sidecar_trust_material(ctx: &VerifyContext<'_>, rekor_keys: &Reko
 /// Cache the trust material of a successful online verify, skipping the write
 /// when a fresh entry already holds identical bytes.
 ///
-/// The content-equal skip avoids sliding the 24h TTL on every use and stops N
-/// concurrent batch verifies from each rewriting the same file. Best-effort: a
-/// cache-write failure never fails a valid verify.
+/// Best-effort: a cache-write failure never fails a valid verify.
 async fn cache_trust_material(ctx: &VerifyContext<'_>, rekor_key_pem: String) {
     let cache_key = super::trust_cache::cache_key_for_rekor(ctx.rekor_url);
     let der_certs = ctx.trust_root.der_certs().to_vec();
-    // The CT log keys travel with the anchors: without them a cache-loaded
-    // trust root cannot check the SCT, so an offline verify off this entry
-    // would fail where the online one that wrote it succeeded.
+    // Without the CT log keys, an offline verify off this entry cannot check the SCT.
     let ctfe_keys = ctx.trust_root.ctfe_key_map().clone();
 
-    // A fresh, content-equal entry needs no rewrite — leave its TTL alone.
+    // Skip a content-equal rewrite, or every use slides the 24h TTL and a batch stampedes the file.
     if let Ok(Some(existing)) = TrustRootCache::from_cache(&cache_key, &ctx.state).await
         && existing.fulcio_der_certs == der_certs
         && existing.ctfe_keys == ctfe_keys
@@ -3412,33 +2081,20 @@ async fn cache_trust_material(ctx: &VerifyContext<'_>, rekor_key_pem: String) {
     }
 }
 
-/// Fetch the subject manifest and prove it hashes to the digest the index
-/// resolved.
-///
-/// `sigstore`'s verifier takes a preimage, not a digest, so verification needs
-/// the manifest bytes. Re-hashing them here is what makes that safe: the bytes
-/// fed to the verifier are the bytes the registry served under a digest we
-/// independently resolved, so a registry cannot swap in a different artifact and
-/// have the signature check pass over the digest it prefers. Bounded by the same
-/// per-manifest cap as a referrer manifest.
+/// Fetch the subject manifest and prove it hashes to the resolved digest, or a registry can swap
+/// in a different artifact for the verifier.
 async fn pull_subject_manifest_verified(
     transport: &dyn OciTransport,
     image: &native::Reference,
     subject_digest: &Digest,
 ) -> Result<Vec<u8>, VerifyErrorKind> {
-    // Digest-addressed: `clone_with_digest` drops the tag, so this reads the
-    // exact manifest the index resolved rather than whatever the tag points at
-    // now.
+    // Digest-addressed, not whatever the tag points at now.
     let pinned = image.clone_with_digest(subject_digest.to_string());
     let (bytes, _) = transport
         .pull_manifest_raw(&pinned, ACCEPTED_MANIFEST_TYPES)
         .await
         .map_err(map_client_error)?;
-    // No size cap here, deliberately: the transport has already allocated the
-    // body by the time this runs, so a post-hoc length check prevents no
-    // allocation -- it would only refuse a genuine oversized manifest, since a
-    // forged one fails the digest check on the next line regardless. Bounding
-    // the read itself belongs in the transport.
+    // No size cap: the body is already allocated, so a cap would refuse only a genuine oversized manifest.
     let actual = subject_digest.algorithm().hash(&bytes);
     if !actual.hex().eq_ignore_ascii_case(subject_digest.hex()) {
         return Err(VerifyErrorKind::SubjectDigestMismatch);
@@ -3449,12 +2105,7 @@ async fn pull_subject_manifest_verified(
 /// A `sigstore` verification policy that accepts every certificate, because ocx
 /// enforces identity itself in [`matching_policies`].
 ///
-/// Not a hole: `matching_policies` runs unconditionally on the same leaf a few
-/// lines after `verify_digest` returns, and it is the richer check — `[[trust.policy]]`
-/// supports regex identities and ANY-of matching, and its verdict carries the
-/// distinction between a wrong identity and a wrong issuer that the exit-code
-/// contract exposes as 77. `sigstore`'s `PolicyError` cannot express either, so
-/// delegating identity here would flatten two user-visible outcomes into one.
+/// Safe only while `matching_policies` runs unconditionally on the same leaf afterwards.
 pub(super) struct PolicyDeferredToOcx;
 
 impl VerificationPolicy for PolicyDeferredToOcx {
@@ -3464,36 +2115,22 @@ impl VerificationPolicy for PolicyDeferredToOcx {
 }
 
 /// Map a `sigstore` verification failure into the ocx verify taxonomy.
-///
-/// The mapping preserves the exit-code contract: every certificate-side failure
-/// is 65 via [`VerifyErrorKind::CertChainInvalid`], a tlog-body inconsistency
-/// keeps its own 65 variant, and a signature failure stays
-/// [`VerifyErrorKind::SignatureInvalid`].
 pub(super) fn map_verification_error(error: sigstore::bundle::verify::VerificationError) -> VerifyErrorKind {
     use sigstore::bundle::verify::VerificationError as E;
     match error {
         E::Bundle(_) => VerifyErrorKind::BundleParseFailed,
         E::Certificate(_) => VerifyErrorKind::CertChainInvalid,
-        // Covers both a failed signature check and a tlog body that does not
-        // rebuild from this bundle (the GHSA-whqx splice). `sigstore` models the
-        // two as one enum whose payload type it does not export, so they cannot
-        // be told apart here; both are exit 65 either way, and the second now
-        // reports as `signature_invalid` rather than
-        // `transparency_body_mismatch`.
+        // Also a tlog-body splice (GHSA-whqx): `sigstore` cannot tell the two apart, so it reports as
+        // `signature_invalid`.
         E::Signature(_) => VerifyErrorKind::SignatureInvalid,
-        // Unreachable: `PolicyDeferredToOcx` never rejects, and the input is a
-        // slice rather than a reader, so no I/O can fail here.
+        // Unreachable: `PolicyDeferredToOcx` never rejects and the input is a slice.
         E::Policy(_) | E::Input(_) => VerifyErrorKind::Internal(Box::new(error)),
     }
 }
 
 /// Decide what a verify run acts on, given a resolution outcome.
 ///
-/// The verify twin of
-/// [`sign_target_from_resolution`](crate::sign::pipeline::sign_target_from_resolution):
-/// the same shared `--platform` rule, the same taxonomy mapping, and **no
-/// sha256 floor** — verify must keep *reading* whatever a registry holds, which
-/// is why that floor is the sign side's alone.
+/// No sha256 floor, unlike signing: verify must keep reading whatever a registry holds.
 ///
 /// # Errors
 ///
@@ -3515,20 +2152,12 @@ pub fn verify_target_from_resolution(
     Ok((target, members))
 }
 
-/// How a `--platform` request reads in an error message when none was made.
-///
-/// C-010 makes the flag optional, so "no manifest for platform " with nothing
-/// after it is now reachable; `any` is what the absence means — act on whatever
-/// resolved.
+/// How a `--platform` request reads in an error message; `any` when none was made.
 fn platform_label(platform: Option<&Platform>) -> String {
     platform.map_or_else(|| "any".to_string(), Platform::to_string)
 }
 
 /// Map the shared `--platform` decision's refusals into the verify taxonomy.
-///
-/// `PlatformNotFound` and `AmbiguousPlatform` land on [`VerifyErrorKind::TargetNotFound`],
-/// which is where the pre-C-010 `Index::select` refusals landed too — the
-/// message and the exit code are unchanged for them.
 fn map_resolve_target_error(error: ResolveTargetError) -> VerifyErrorKind {
     match error {
         ResolveTargetError::NotAnIndex { platform } => VerifyErrorKind::TargetNotAnIndex { platform },
@@ -3541,17 +2170,10 @@ fn map_resolve_target_error(error: ResolveTargetError) -> VerifyErrorKind {
 /// Map an OCI client error into the verify taxonomy.
 pub fn map_client_error(error: ClientError) -> VerifyErrorKind {
     match error {
-        // Not deleted, mapped: the arm below ends in `other => Internal(..)`, so
-        // dropping this one would silently reclassify a surviving client-layer
-        // verdict to exit 1 instead of failing to compile. `verify` reaches this
-        // only through a path that does not fall back to the tag schema, and the
-        // read-path answer to "this registry has no referrers for the subject" is
-        // 79 / `no_signatures_found` (D3) — 84 is now write-path only.
+        // Keep this arm: the catch-all would reclassify it to exit 1. Verify answers 79; 84 is write-path only.
         ClientError::ReferrersUnsupported { .. } => VerifyErrorKind::NoSignaturesFound,
         ClientError::ManifestNotFound(_) | ClientError::BlobNotFound { .. } => VerifyErrorKind::NoSignaturesFound,
-        // A registry that serves a spec-violating image index where a signature
-        // artifact was expected is malformed signature data, not an ocx defect:
-        // exit 65, not the catch-all's exit 1.
+        // Malformed signature data: exit 65, not the catch-all's exit 1.
         ClientError::InvalidImageIndex(_) => VerifyErrorKind::BundleParseFailed,
         other => VerifyErrorKind::Internal(Box::new(other)),
     }

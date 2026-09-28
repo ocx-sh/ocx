@@ -2,26 +2,9 @@
 // Copyright 2026 The OCX Authors
 
 //! Format-preserving rendering of a mutated [`ProjectConfig`] back to
-//! `ocx.toml`.
-//!
-//! `ocx add` / `ocx remove` mutate a typed config, but the file on disk is a
-//! document a person wrote: comments (the `#:schema` directive `ocx init` puts
-//! on line 1 among them), declaration order, spacing. Serializing the struct
-//! reproduces none of that — serde has no notion of a comment — so a mutation
-//! used to hand the user back a normalised file with their content stripped
-//! (issue #256).
-//!
-//! This module applies the mutation to the *document* instead: the edit touches
-//! the keys that actually changed and nothing else. What the typed model does
-//! not describe is never rewritten, and a key whose value is unchanged is not
-//! even re-inserted, so its decor survives verbatim.
-//!
-//! Two things do not survive, both of them `toml_edit` round-trip
-//! normalisations: CRLF line endings come back as LF, and a leading UTF-8 byte
-//! order mark (PowerShell 5.1 writes one) is dropped. That is what the
-//! whole-file serializer did too, so both are the status quo rather than a
-//! regression, and re-encoding the output by hand would corrupt a multi-line
-//! string that legitimately contains `\n`.
+//! `ocx.toml`: only changed keys are touched, so comments and `#:schema` survive.
+//! CRLF comes back as LF and a BOM is dropped; re-encoding by hand would
+//! corrupt a multi-line string containing `\n`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -33,21 +16,14 @@ use crate::config::{ProjectConfig, parse_tool_value};
 use crate::error::{ProjectError, ProjectErrorKind};
 use ocx_oci::PackageRef;
 
-/// Render `candidate` as `ocx.toml` text, preserving everything in `original`
-/// that the typed model does not own: comments, key order, spacing, and table
-/// style.
-///
-/// `path` is used solely for error context; nothing is read from or written to
-/// it.
+/// Render `candidate` as `ocx.toml` text, keeping `original`'s comments, key
+/// order, spacing and table style; `path` is for error context only.
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::ManifestEditParse`] — `original` does not parse as an
-///   editable TOML document.
-/// - [`ProjectErrorKind::ManifestEditDiverged`] — the edited document does not
-///   describe `candidate`. Fail-closed: a mutation this module cannot express
-///   (a surface it does not sync, an unexpected document shape) aborts the write
-///   rather than falling back to a lossy whole-file rewrite.
+/// - [`ProjectErrorKind::ManifestEditParse`] — `original` is not editable TOML.
+/// - [`ProjectErrorKind::ManifestEditDiverged`] — the edit does not describe
+///   `candidate`; fail-closed, never a lossy whole-file rewrite.
 pub fn render_preserving(original: &str, candidate: &ProjectConfig, path: &Path) -> Result<String, Error> {
     let mut document: DocumentMut = original
         .parse()
@@ -83,62 +59,37 @@ fn diverged(path: &Path) -> Error {
     ProjectError::new(path.to_path_buf(), ProjectErrorKind::ManifestEditDiverged).into()
 }
 
-/// Detach the leading trivia of a document that declares no table, so the
-/// caller can re-emit it above whatever the mutation creates.
-///
-/// `toml_edit` files every comment of a table-less `ocx.toml` — a hand-written
-/// minimal file, or one whose `[tools]` line was deleted — under the
-/// *document's* trailing trivia, there being no item to anchor it to. A
-/// `[tools]` (or `[group.<name>.tools]`) table created by the mutation then
-/// renders above it and pushes the `#:schema` directive `ocx init` puts on line
-/// 1 down the file. Once the document does declare a table, its comments belong
-/// to that table's decor and the trailing is a genuine end-of-file trailer —
-/// left alone.
+/// Detach a table-less document's trivia: `toml_edit` files it as trailing, so
+/// a created `[tools]` would push `#:schema` off line 1.
 fn take_header(document: &mut DocumentMut) -> String {
     if !document.as_table().is_empty() {
         return String::new();
     }
     let mut header = document.trailing().as_str().unwrap_or_default().to_owned();
     document.set_trailing("");
-    // A file whose last line carries no newline — a hand-written `ocx.toml`,
-    // a heredoc — would otherwise have the created table glued onto that
-    // line, commenting it out. The round-trip check catches the result, so
-    // the cost of omitting this is a refused `ocx add`, not a corrupt file.
+    // Without a final newline the created table glues onto the last line,
+    // commenting it out.
     if !header.is_empty() && !header.ends_with('\n') {
         header.push('\n');
     }
     header
 }
 
-/// Apply `candidate`'s binding surfaces to `document`.
-///
-/// `None` signals a document shape the sync cannot express — the caller turns
-/// that into [`ProjectErrorKind::ManifestEditDiverged`]. The `[env]`,
-/// `[package]` and `pinned` surfaces are deliberately not synced: no mutator
-/// touches them, and the round-trip check in [`render_preserving`] is what
-/// catches it if one ever starts.
-///
-/// `activate` **is** synced, because a mutator does touch it:
-/// `ocx self setup --toolchain-activate` writes it through
-/// [`crate::mutate::set_activate`]. Without this the round-trip gate
-/// fires on every such invocation — the guard working exactly as designed, on
-/// a mutation this module had no way to express.
+/// Apply `candidate`'s binding surfaces; `None` is a shape the sync cannot express.
+/// `[env]`, `[package]` and `pinned` are not synced; `activate` is, or the
+/// round-trip gate refuses every `set_activate` write.
 fn apply(document: &mut DocumentMut, candidate: &ProjectConfig) -> Option<()> {
     let root: &mut dyn TableLike = document.as_table_mut();
     sync_activate(root, candidate.activate);
     sync_section(root, "tools", &candidate.tools)?;
 
     if candidate.groups.is_empty() {
-        // Nothing to write. A bare `[group]` header already in the file is
-        // left exactly as the user wrote it — it parses to no groups, so the
-        // candidate still describes it. One that holds content does not: the
-        // round-trip check in `render_preserving` sees the groups the
-        // candidate dropped and fails the write.
+        // A bare `[group]` header parses to no groups and stays; one with
+        // content fails the round-trip check.
         return Some(());
     }
 
-    // `group` is an implicit super-table: `[group.ci.tools]` is the header the
-    // file carries, never a bare `[group]`.
+    // Implicit: the file carries `[group.ci.tools]`, never a bare `[group]`.
     let groups = ensure_table(root, "group", true)?;
     let stale: Vec<String> = groups
         .iter()
@@ -155,19 +106,8 @@ fn apply(document: &mut DocumentMut, candidate: &ProjectConfig) -> Option<()> {
     Some(())
 }
 
-/// Sync the root-level `activate` scalar.
-///
-/// `Some` writes it through [`write_binding`], so a key the file already
-/// carries keeps its comment and its spacing and only its value changes.
-/// `None` removes it — the typed model's absence has to be expressible in the
-/// document too, or the round-trip gate would refuse a mutation that unset the
-/// key.
-///
-/// No hoisting is needed to keep it above `[tools]`: TOML renders a table's own
-/// key/value pairs before its sub-tables, so a scalar inserted into the root
-/// table lands above every table header by construction. (That is what
-/// `shell_config::hoist_above_every_table` has to work around — it moves a
-/// *table*, which has no such guarantee.)
+/// Sync the root `activate` scalar; `None` removes it, or the round-trip gate
+/// refuses a mutation that unset it.
 fn sync_activate(root: &mut dyn TableLike, activate: Option<crate::activate::ActivateMode>) {
     match activate {
         Some(mode) => write_binding(root, "activate", mode.to_string()),
@@ -177,8 +117,7 @@ fn sync_activate(root: &mut dyn TableLike, activate: Option<crate::activate::Act
     }
 }
 
-/// Sync one `tools` table under `parent`, creating it only when there is
-/// something to put in it.
+/// Sync one `tools` table, creating it only when there is something to put in it.
 fn sync_section(parent: &mut dyn TableLike, key: &str, bindings: &BTreeMap<String, PackageRef>) -> Option<()> {
     if bindings.is_empty() && !parent.contains_key(key) {
         return Some(());
@@ -187,15 +126,9 @@ fn sync_section(parent: &mut dyn TableLike, key: &str, bindings: &BTreeMap<Strin
     Some(())
 }
 
-/// Bring `table` in line with `bindings`: drop what the candidate no longer
-/// declares, append what it gained, and leave an unchanged binding untouched so
-/// its spacing and trailing comment survive.
-///
-/// "Unchanged" is decided by parsing the cell, not by comparing its text
-/// against the rendered identifier: [`parse_tool_value`] injects `:latest` into
-/// a bare `registry/repo`, so `cmake = "ocx.sh/cmake"` renders as
-/// `ocx.sh/cmake:latest` and a text comparison would rewrite a line the
-/// mutation never targeted, taking its comments and key quoting with it.
+/// Bring `table` in line with `bindings`, leaving an unchanged binding's line
+/// untouched. Compared parsed, not as text: `parse_tool_value` injects
+/// `:latest`, so a text compare rewrites untargeted lines and drops their comments.
 fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageRef>) {
     let stale: Vec<String> = table
         .iter()
@@ -218,11 +151,8 @@ fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageR
     }
 }
 
-/// Set `key` to `rendered`, keeping the decor of a cell that already exists.
-///
-/// `Table::insert` reformats the key (dropping its leading comment block and
-/// its quoting) and replaces the value wholesale (dropping its trailing
-/// comment), so it is reserved for a key the file does not carry yet.
+/// Set `key`, keeping an existing cell's decor; `Table::insert` drops comments
+/// and quoting, so only a new key goes through it.
 fn write_binding(table: &mut dyn TableLike, key: &str, rendered: String) {
     match table.get_mut(key).and_then(Item::as_value_mut) {
         Some(existing) => {
@@ -236,11 +166,8 @@ fn write_binding(table: &mut dyn TableLike, key: &str, rendered: String) {
     }
 }
 
-/// Borrow `key` from `parent` as a table, creating an empty one when absent.
-///
-/// `implicit` applies to a freshly created table only — an existing table keeps
-/// whatever the user wrote. `None` when `key` holds something that is not
-/// table-like.
+/// Borrow `key` as a table, creating it when absent (`implicit` applies only
+/// then); `None` when `key` is not table-like.
 fn ensure_table<'a>(parent: &'a mut dyn TableLike, key: &str, implicit: bool) -> Option<&'a mut dyn TableLike> {
     if !parent.contains_key(key) {
         let mut created = Table::new();

@@ -1,44 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The spawn primitives, reachable only from [`crate::launch`].
+//! The spawn primitives, private to [`crate::launch`] so no command can skip [`Launch`](super::Launch).
 //!
-//! This module is declared `mod child_process;` — private — inside `launch.rs`.
-//! That nesting is what makes the seam's compile-time claim true at all: while
-//! a raw spawn primitive is publicly callable, a new command can skip
-//! [`Launch`](super::Launch) entirely and still compile. Visibility comes from
-//! module nesting rather than `pub(crate)`, per `arch-principles.md`.
-//!
-//! Both primitives take an `on_started` callback invoked with **the pid of the
-//! process that will run the tool**, at the one moment each platform can name
-//! it:
-//!
-//! - [`exec`] on Unix — before `execvp(2)`, with ocx's own pid, because the
-//!   syscall replaces this image in place and that pid *becomes* the tool.
-//! - [`exec`] elsewhere and [`spawn_and_wait`] everywhere — after the spawn,
-//!   with the child's pid, which does not exist until then.
-//!
-//! The callback is where the launch seam writes its record, so the ordering
-//! above is the record's pre-exec guarantee on Unix and the reason the seam
-//! probes the sink before spawning everywhere else.
-//!
-//! **That guarantee is Unix-only, and the difference is not cosmetic.** Where
-//! the pid only exists after the spawn, the pre-spawn probe writes zero bytes
-//! and the real record is written with the child already running: a mount that
-//! disappears, a full disk or a permission change between the two leaves a
-//! `required` launch returning exit 74 *after* the tool has begun work. The
-//! child is then stopped and reaped ([`stop_refused_child`]), but it ran. So
-//! fail-closed off Unix means "refused before the spawn if the sink was
-//! unwritable at probe time", not "no unrecorded child can ever have run".
-//! Suspending the child across the write would close it, and is rejected in the
-//! design record: it needs the child's *thread* handle to resume, which
-//! `std::process::Child` does not expose.
-//!
-//! Neither primitive knows what the callback does. `env` is applied after
-//! `env_clear()` on both paths, so no parent-shell variable can leak past the
-//! authoritative env the caller built (this is what makes `--clean` and
-//! [`Env::apply_ocx_config`](ocx_config::env::Env::apply_ocx_config)'s remove
-//! branches load-bearing).
+//! `on_started` receives the pid that will run the tool: ocx's own before `execvp(2)` on Unix,
+//! the child's after the spawn elsewhere (`adr_exec_resolution_record.md` § "Rationale from code: launch").
 
 use std::future::Future;
 use std::path::Path;
@@ -47,67 +13,34 @@ use std::process::ExitStatus;
 use super::LaunchError;
 use ocx_config::env::Env;
 
-/// Stop a child whose launch was refused after it had already started, and wait
-/// for it to be gone.
+/// Stop a child whose launch was refused after it started, and wait for it to be gone.
 ///
-/// Both halves matter and neither is automatic: `start_kill` can fail (the
-/// process may have exited already, or the signal may be refused), and without
-/// the `wait` the caller returns while the child is still running — so
-/// "the refused launch left nothing behind" would be an assumption rather than a
-/// fact. Neither failure is propagated: the caller is already returning the
-/// refusal, which is the more useful error.
-///
-/// The kill is attempted first but judged last, because its failure alone says
-/// nothing. A child that exited between the refusal and the signal refuses the
-/// kill and is still perfectly gone; what decides is whether the `wait` could
-/// account for it.
+/// Neither failure propagates: the caller is already returning the refusal.
 async fn stop_refused_child(child: &mut tokio::process::Child) {
     let kill = child.start_kill();
     match (kill, child.wait().await) {
         (Ok(()), Ok(_)) => {}
         (Err(kill_error), Ok(_)) => {
-            // Almost always "no such process". The wait reaped it regardless,
-            // which is the property the caller needs.
             log::debug!("the refused launch had already exited: {kill_error}");
         }
         (Ok(()), Err(wait_error)) => {
             log::warn!("failed to reap the refused launch: {wait_error}");
         }
-        // The signal was refused *and* the child could not be accounted for, so
-        // nothing establishes that it stopped — the one case where a tool the
-        // policy rejected may still be running.
         (Err(kill_error), Err(wait_error)) => {
             log::warn!("failed to stop the refused launch: {kill_error}; and to reap it: {wait_error}");
         }
     }
 }
 
-/// Platform-aware exit-status propagation that diverges via `process::exit`.
-///
-/// Delegates to [`ocx_util::child_process::exit_code_from_status`] for
-/// the exit-code computation, which `propagate_exit_code` shares, so the
-/// `128 + signum` convention and the Windows passthrough stay a single source
-/// of truth across the diverging and non-diverging paths.
+/// Exit with the child's status, skipping the drop chain.
 #[cfg(not(unix))]
 #[inline(never)] // ensure the diverging path is not inlined away in tests
 fn propagate_exit_status(status: ExitStatus) -> ! {
     std::process::exit(ocx_util::child_process::exit_code_from_status(status));
 }
 
-/// Run `program` with `args` and the exact `env` provided, replacing the
-/// running process when the platform supports it and otherwise faking
-/// replacement by spawning + waiting + exiting.
-///
-/// On Unix this calls `execvp(2)`: the child inherits the current PID, no fork
-/// happens, and the function only returns when exec itself fails. On Windows
-/// there is no exec syscall; the child is spawned, waited on, and the process
-/// exits with its status, so no Drop chain runs after the child finishes —
-/// keeping behaviour symmetrical with the Unix branch from the caller's point
-/// of view.
-///
-/// Returns only when the launch fails to reach the child: a start-up error, or
-/// an `on_started` that refused the launch. Success diverges, which is why the
-/// return type is a bare [`LaunchError`] and not a `Result`.
+/// Run `program` with `args` and exactly `env`, replacing the running process (`execvp(2)` on
+/// Unix; spawn, wait and exit elsewhere). Returns only on failure.
 pub async fn exec<F, Fut>(program: &Path, args: &[String], env: Env, on_started: F) -> LaunchError
 where
     F: FnOnce(u32) -> Fut,
@@ -117,17 +50,12 @@ where
     {
         use std::os::unix::process::CommandExt as _;
 
-        // `execvp` replaces this image in place, so ocx's own pid is the pid
-        // the tool will run under — known before anything starts, which is what
-        // lets the callback run strictly pre-exec.
         if let Err(error) = on_started(std::process::id()).await {
             return error;
         }
 
         let mut cmd = std::process::Command::new(program);
         cmd.args(args).env_clear().envs(env);
-        // `exec` only returns when the syscall fails — on success the running
-        // image is already gone.
         LaunchError::Spawn {
             resolved: program.to_path_buf(),
             source: cmd.exec(),
@@ -135,10 +63,7 @@ where
     }
     #[cfg(not(unix))]
     {
-        // Spawn and wait are split rather than fused into `status()`: the fused
-        // form yields no `Child`, so the pid of the process that runs the tool
-        // never exists while that process is alive and the record could not
-        // name it.
+        // Not `status()`: it yields no `Child`, so the record could never name the tool's pid.
         let mut child = match tokio::process::Command::new(program)
             .args(args)
             .env_clear()
@@ -154,23 +79,16 @@ where
             }
         };
 
-        // `id()` is `None` only once the child has been reaped, and nothing has
-        // awaited it between the spawn above and this line.
         let pid = child
             .id()
             .expect("a just-spawned child that has not been awaited still holds its pid");
 
         if let Err(error) = on_started(pid).await {
-            // The launch was refused after the child existed — the narrow
-            // window the seam's pre-spawn sink probe cannot close. Stop the
-            // child rather than let a refused launch keep running.
             stop_refused_child(&mut child).await;
             return error;
         }
 
         match child.wait().await {
-            // Emulate the Unix "no cleanup after the child" property by
-            // skipping the Drop chain via `process::exit`.
             Ok(status) => propagate_exit_status(status),
             Err(source) => LaunchError::Spawn {
                 resolved: program.to_path_buf(),
@@ -180,24 +98,11 @@ where
     }
 }
 
-/// Spawn `program` with `args` in the exact `env` provided, wait for it to
-/// finish, and return its [`ExitStatus`].
-///
-/// Unlike [`exec`] this function always returns — it does not replace the
-/// running process image. The caller is responsible for propagating the exit
-/// status (via [`ocx_util::child_process::propagate_exit_code`]) and for
-/// any cleanup that must happen after the child finishes (e.g. dropping a
-/// tempdir guard).
-///
-/// Stdin, stdout and stderr all inherit from the current process.
+/// Spawn `program` with `args` and exactly `env`, wait, and return its [`ExitStatus`].
 ///
 /// # Errors
 ///
-/// Returns [`LaunchError::Spawn`] only when the child cannot be started
-/// (program not found, permission denied) or `.wait()` returns an OS error, and
-/// whatever `on_started` returned when it refused the launch. Child failures
-/// (non-zero exit code) are reported via the returned [`ExitStatus`], not as an
-/// error.
+/// [`LaunchError::Spawn`] when the child cannot be started or waited on, or `on_started`'s refusal.
 pub async fn spawn_and_wait<F, Fut>(
     program: &Path,
     args: &[String],
@@ -217,36 +122,24 @@ where
         .args(args)
         .env_clear()
         .envs(env)
-        // Inherit stdio so the child's output reaches the terminal directly.
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        // kill_on_drop: if the async task holding this child is cancelled (e.g.
-        // via tokio::time::timeout or explicit abort), the OS process is killed
-        // automatically rather than becoming an orphan.
+        // Or a cancelled task (timeout, abort) orphans the child process.
         .kill_on_drop(true)
         .spawn()
         .map_err(spawn_error)?;
 
-    // This path never replaces the ocx image, so the tool runs in the spawned
-    // child on every platform and its pid is only knowable here.
     let pid = child
         .id()
         .expect("a just-spawned child that has not been awaited still holds its pid");
     if let Err(error) = on_started(pid).await {
-        // `kill_on_drop` would fire on the way out, but it neither reports a
-        // failed kill nor waits for the process to actually go — so a refused
-        // launch would only *probably* leave no running tool behind. Stop it
-        // explicitly instead, for the same reason the `exec` path does.
+        // Not `kill_on_drop`: it neither reports a failed kill nor waits for the process to go.
         stop_refused_child(&mut child).await;
         return Err(error);
     }
 
-    // On Unix, forward SIGINT and SIGTERM to the child so that Ctrl-C from the
-    // terminal and shell job-control signals reach the child correctly.
-    // On Windows, kill_on_drop + the default Ctrl-C handler suffices for the
-    // interactive case; the `select!` below compiles to `child.wait().await`
-    // only (the cfg blocks out the signal branches).
+    // On Unix, SIGINT/SIGTERM kill the child; elsewhere `kill_on_drop` plus the default Ctrl-C handler cover it.
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -258,7 +151,7 @@ where
             tokio::select! {
                 status = child.wait() => break status.map_err(spawn_error)?,
                 _ = sigint.recv() => {
-                    // Forward SIGINT to child; re-raise for the process group.
+                    // Best effort: the `wait` arm reports how the child ended.
                     let _ = child.start_kill();
                 }
                 _ = sigterm.recv() => {

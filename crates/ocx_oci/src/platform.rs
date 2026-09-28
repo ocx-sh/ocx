@@ -18,22 +18,9 @@ pub type Result<T> = std::result::Result<T, PlatformError>;
 
 const ANY_STR: &str = "any";
 
-/// Every `(os, arch)` pairing OCX accepts.
+/// Every `(os, arch)` pairing OCX accepts; the enums' cross product is not the legal set.
 ///
-/// [`OperatingSystem`] and [`Architecture`] are closed sets, but their cross
-/// product is not: `linux/wasm` and `wasip1/amd64` name no artifact anyone
-/// can build. This array is the single source of truth for which pairings
-/// exist, enforced at the two construction choke points
-/// ([`FromStr`](std::str::FromStr) and
-/// [`TryFrom<native::Platform>`](TryFrom)) by `validate_pair`.
-///
-/// Two tiers, and the distinction is load-bearing:
-///
-/// - **Native pairs** are the platforms OCX itself ships for and CI tests on.
-///   [`Platform::current`] can produce any of them.
-/// - **Wasm pairs** are distribution labels only. OCX never executes on a
-///   `wasip*` host, so host detection can never produce one and they are
-///   reachable exclusively through an explicit `--platform`.
+/// Wasm pairs are distribution labels only, reachable solely through an explicit `--platform`.
 pub const SUPPORTED_PAIRS: &[(OperatingSystem, Architecture)] = &[
     (OperatingSystem::Linux, Architecture::Amd64),
     (OperatingSystem::Linux, Architecture::Arm64),
@@ -47,9 +34,8 @@ pub const SUPPORTED_PAIRS: &[(OperatingSystem, Architecture)] = &[
 
 /// Rejects an `(os, arch)` pairing absent from [`SUPPORTED_PAIRS`].
 ///
-/// Called from both places a [`Platform::Specific`] is built out of separate
-/// `os` and `arch` values; every other site destructures an already-validated
-/// platform, so these two are the complete gate.
+/// Every site building a `Specific` from separate `os` and `arch` must call
+/// this, or an unsupported pair enters the model.
 fn validate_pair(os: OperatingSystem, arch: Architecture) -> std::result::Result<(), PlatformErrorKind> {
     if SUPPORTED_PAIRS.contains(&(os, arch)) {
         Ok(())
@@ -58,139 +44,52 @@ fn validate_pair(os: OperatingSystem, arch: Architecture) -> std::result::Result
     }
 }
 
-/// Target platform for an OCX package.
+/// Target platform for an OCX package: the OCI platform object over closed enums.
 ///
-/// This is OCX's owned representation of the
-/// [OCI Image Index platform object](https://github.com/opencontainers/image-spec/blob/main/image-index.md#image-index-property-descriptions).
-/// It wraps the same concept but uses closed enums ([`OperatingSystem`],
-/// [`Architecture`]) instead of the upstream open enums with `Other(String)`
-/// fallback, giving compile-time enforcement of supported values.
-///
-/// # `Any` — an OCX extension
-///
-/// The OCI specification does not define a concept of a platform-agnostic
-/// package. Every Image Index entry has a concrete `os`/`architecture` pair.
-/// OCX extends this with [`Platform::Any`] to represent packages that are
-/// not tied to any specific platform (e.g. Java JARs, shell scripts, data
-/// bundles). When serialized to OCI JSON, `Any` is represented as
-/// `{"os":"any","architecture":"any"}` — these are not valid OCI values but
-/// are a convention understood by OCX tooling.
-///
-/// # Serialization
-///
-/// Serde goes through [`native::Platform`] to guarantee OCI-compatible JSON
-/// field names (`"os"`, `"architecture"`, `"variant"`, `"os.features"`).
-/// Deserialization validates that the OS and architecture are in OCX's
-/// supported set, rejecting unsupported values from registries (e.g.
-/// `ppc64le`, `s390x`).
-///
-/// # String format
-///
-/// [`std::fmt::Display`] is the single canonical, lossless, injective string form and
-/// the inverse of [`std::str::FromStr`] — the same grammar backs the CLI `--platform`
-/// flag and every `ocx.lock` / dependency-pin map key:
-///
+/// [`std::fmt::Display`]/[`std::str::FromStr`] are the one canonical, injective
+/// grammar for `--platform`, `ocx.lock` and pin keys; paths use [`segments`](Self::segments):
 /// ```text
 /// os/arch[/variant][+feature[,feature...]]      |      any
 /// ```
-///
-/// `os.features` are a single `+` introducing a comma-separated list (sorted
-/// and deduped, so the output is canonical). Every registry-controlled value
-/// (`variant`, each feature) is percent-escaped so it can never forge a
-/// structural character (`% / + ,`). Examples: `"linux/arm/v7"`,
-/// `"windows/amd64"`, `"linux/amd64+libc.glibc,libc.musl"`,
-/// `"linux/arm64/v8+libc.glibc"`, `"any"`. `"any"` with any suffix (`any+…`,
-/// `any/…`) is an error — the agnostic platform carries no fields.
-/// Filesystem paths use [`segments`](Self::segments) /
-/// [`ascii_segments`](Self::ascii_segments) instead, so carrying features in
-/// `Display` does not affect path building.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Platform {
-    /// Platform-agnostic package. Not part of the OCI spec — this is an OCX
-    /// extension for packages that run on any OS and architecture.
-    /// Serializes to `{"os":"any","architecture":"any"}` in OCI JSON.
+    /// Platform-agnostic package, an OCX extension serialized as `{"os":"any","architecture":"any"}`.
     Any,
 
-    /// A concrete OS/architecture target, corresponding to a single entry
-    /// in an OCI Image Index.
     Specific {
-        /// Target operating system (required by OCI spec).
         os: OperatingSystem,
-        /// Target CPU architecture (required by OCI spec).
         arch: Architecture,
-        /// CPU variant, e.g. `"v7"` or `"v8"` for ARM. Defined by the
-        /// [OCI platform variants table](https://github.com/opencontainers/image-spec/blob/main/image-index.md#platform-variants).
+        /// CPU variant, e.g. `"v7"` for ARM ([OCI platform variants](https://github.com/opencontainers/image-spec/blob/main/image-index.md#platform-variants)).
         variant: Option<String>,
-        /// Mandatory OS features required for this image. For Windows, the
-        /// OCI spec defines `"win32k"` (image requires `win32k.sys` on the
-        /// host, which is missing on Nano Server). For other operating
-        /// systems, values are implementation-defined. An empty `Vec` means no
-        /// features are declared (undetected / no libc requirement).
+        /// Features the image requires of the host (e.g. `libc.glibc`); empty means none declared.
         os_features: Vec<String>,
     },
 }
 
 impl Platform {
-    /// Creates a platform-agnostic platform value.
-    ///
-    /// Use this to indicate that a package is compatible with any platform,
-    /// for example a Java JAR or a data bundle.
     pub fn any() -> Self {
         Self::Any
     }
 
-    /// Returns `true` if this is the platform-agnostic [`Any`](Self::Any) variant.
-    ///
-    /// This is an OCX concept with no direct equivalent in the OCI spec.
-    /// The OCI spec requires every Image Index entry to have a concrete
-    /// `os`/`architecture` pair; OCX uses the sentinel values `"any"/"any"`
-    /// as a convention for platform-agnostic packages.
     pub fn is_any(&self) -> bool {
         matches!(self, Self::Any)
     }
 
-    /// Extracts the platform from a single-image OCI manifest.
-    ///
-    /// Single-image manifests (as opposed to multi-platform Image Indexes)
-    /// do not carry platform metadata in the manifest itself — the platform
-    /// is only known from the Image Index entry that references it. When we
-    /// encounter a bare image manifest without index context, we treat it as
-    /// platform-agnostic.
+    /// A bare image manifest carries no platform, so it is treated as platform-agnostic.
     pub fn from_image_manifest(_manifest: &native::ImageManifest) -> Self {
         Self::Any
     }
 
-    /// The platform an image-index descriptor offers, or `None` when the
-    /// descriptor is not a platform candidate at all. Never an error.
+    /// The platform an image-index descriptor offers, or `None` for a non-candidate.
     ///
-    /// A published index carries descriptors that are not packages for a
-    /// platform — attestation and referrer entries, which the OCI spec has them
-    /// mark either by omitting `platform` entirely or by declaring the
-    /// placeholder `unknown/unknown`. Neither is a fault in the document and
-    /// neither is selectable, so both are simply not candidates:
-    ///
-    /// - **No `platform` key** — `TryFrom<Option<..>>` would answer
-    ///   `Platform::Any`, and an `Any` *offer* satisfies **every** requirement
-    ///   (`adr_platform_model_unification.md` D1). One such descriptor becomes a
-    ///   universal match; two make every selection ambiguous.
-    /// - **A platform OCX cannot represent** (`unknown/unknown`, an unsupported
-    ///   OS or architecture) — propagating the `TryFrom` error would abort the
-    ///   whole enumeration over one descriptor nobody asked to select.
-    ///
-    /// One predicate, both enumerations (`ocx_lib::oci::index::Index::fetch_candidates`,
-    /// still in `ocx_lib`, for selection, [`Self::from_image_index`] for `ocx index list --platforms`):
-    /// they got this wrong in opposite directions, and a single shared rule is
-    /// smaller than two guards that must agree forever.
+    /// A missing `platform` key must not answer `Any`: an `Any` offer matches
+    /// everything, so one attestation entry would become a universal match.
     pub fn candidate_from_descriptor(entry: &native::ImageIndexEntry) -> Option<Self> {
         let declared = entry.platform.as_ref()?;
         Self::try_from(declared.clone()).ok()
     }
 
-    /// Extracts the selectable platforms from an OCI Image Index manifest.
-    ///
-    /// Descriptors that are not platform candidates — attestation entries and
-    /// entries naming a platform OCX does not support — are skipped, never
-    /// listed and never an error (see [`Self::candidate_from_descriptor`]).
+    /// The selectable platforms of an image index; non-candidates are skipped, never an error.
     pub fn from_image_index(manifest: &native::ImageIndex) -> Vec<Self> {
         manifest
             .manifests
@@ -205,11 +104,6 @@ impl Platform {
             .collect()
     }
 
-    /// Extracts platforms from any OCI manifest type.
-    ///
-    /// Dispatches to [`from_image_manifest`](Self::from_image_manifest) for
-    /// single images or [`from_image_index`](Self::from_image_index) for
-    /// multi-platform indexes.
     pub fn from_manifest(manifest: &native::Manifest) -> Vec<Self> {
         match manifest {
             native::Manifest::Image(image_manifest) => vec![Self::from_image_manifest(image_manifest)],
@@ -217,12 +111,7 @@ impl Platform {
         }
     }
 
-    /// Returns the platform components as string segments.
-    ///
-    /// - `Any` → `["any"]`
-    /// - `Specific` → `["linux", "amd64"]` or `["linux", "arm64", "v8"]` etc.
-    ///
-    /// Used for constructing filesystem paths and display formatting.
+    /// Path segments: `["any"]` or `["linux", "arm64", "v8"]`.
     pub fn segments(&self) -> Vec<String> {
         match self {
             Self::Any => vec![ANY_STR.to_string()],
@@ -236,16 +125,10 @@ impl Platform {
         }
     }
 
-    /// Compares only the OS and architecture of two `Specific` platforms,
-    /// ignoring `variant` and `os_features`.
+    /// Compares only OS and architecture; `Any` equals only `Any`.
     ///
-    /// [`current`](Self::current) can only ever populate `os`/`arch` (the
-    /// remaining fields are always `None`/empty), so a full-struct equality
-    /// comparison (the deleted `matches` semantics) would wrongly reject a
-    /// host-runnable image-index entry that merely carries a `variant` or
-    /// `os_features` refinement. The host-only symlink gate
-    /// (issue #179) therefore compares os+arch only. Two [`Any`](Self::Any)
-    /// values compare equal; `Any` vs `Specific` never do.
+    /// Full equality would reject a host-runnable entry that merely carries a
+    /// `variant` refinement [`current`](Self::current) never populates.
     pub fn same_os_arch(&self, other: &Platform) -> bool {
         match (self, other) {
             (Self::Any, Self::Any) => true,
@@ -265,24 +148,14 @@ impl Platform {
         }
     }
 
-    /// Whether a package that resolved to `platform` is runnable on the current
-    /// host — the host-only symlink gate for `candidates/{tag}` and `current`
-    /// (issue #179).
+    /// Whether a package that resolved to `platform` runs on this host.
     ///
-    /// `None` (undeterminable platform) and [`any`](Self::any) (platform-agnostic
-    /// package) are always host-appropriate. A specific platform is
-    /// host-appropriate only when its os+arch equal the host's; when the host
-    /// itself is undeterminable, the write is allowed — never suppress on an
-    /// unknown host.
+    /// `None`, `Any` and an undeterminable host all answer `true`: never suppress on an unknown.
     pub fn host_can_run(platform: Option<&Platform>) -> bool {
         Self::host_can_run_on(platform, Self::current().as_ref())
     }
 
-    /// Host-injectable core of [`host_can_run`](Self::host_can_run).
-    ///
-    /// Takes the host platform explicitly so the gating contract can be unit
-    /// tested against literal os/arch pairs, independent of the test runner's
-    /// actual OS/arch (issue #179).
+    /// [`host_can_run`](Self::host_can_run) against an explicit host.
     pub fn host_can_run_on(platform: Option<&Platform>, host: Option<&Platform>) -> bool {
         match platform {
             None => true,
@@ -291,22 +164,13 @@ impl Platform {
         }
     }
 
-    /// Returns [`segments`](Self::segments) lowercased to ASCII.
     pub fn ascii_segments(&self) -> Vec<String> {
         self.segments().into_iter().map(|s| s.to_ascii_lowercase()).collect()
     }
 
-    /// Detects the platform of the current host.
+    /// The current host's platform; `None` only for an unsupported OS or architecture.
     ///
-    /// Delegates to [`OperatingSystem::current`] and [`Architecture::current`]
-    /// to map Rust's compile-time target to OCI values. Returns `None` if the
-    /// host OS or architecture is not in OCX's supported set.
-    ///
-    /// Note: an unsupported OS or arch returns `None` (no `Platform` at all),
-    /// whereas an undetected libc (non-Linux, NixOS, failed probe) returns
-    /// `Some(Specific { os_features: <empty>, .. })`. The host is known, but
-    /// its libc family is not — subset matching then only matches entries with
-    /// empty `os_features`.
+    /// An undetected libc yields empty `os_features`, which matches only offers declaring none.
     pub fn current() -> Option<Self> {
         let os = OperatingSystem::current()?;
         let arch = Architecture::current()?;
@@ -318,28 +182,10 @@ impl Platform {
         })
     }
 
-    /// This platform with every `os.features` entry in `feature`'s namespace
-    /// **replaced** by `feature`. `Display` sorts and dedupes, so the rendered
-    /// result is canonical and round-trips through `FromStr` — which is what
-    /// makes the result paste-ready as a `--platform` value.
+    /// This platform with every `os.features` entry in `feature`'s namespace replaced by `feature`.
     ///
-    /// A feature's namespace is the text before its first `.`
-    /// (`feature_namespace`), so `libc.glibc` replaces every `libc.*` entry
-    /// and leaves `win32k` — or any future namespace — untouched. A dotless
-    /// tag has no namespace and is never replaced by a dotted feature: a
-    /// declared bare `libc` survives `libc.glibc`, because it is a feature the
-    /// publisher wrote, not a member of the `libc.*` family.
-    ///
-    /// **Replace, never union.** `os.features` are ANDed by subset matching
-    /// ([`is_compatible`]), so a value carrying both `libc.glibc` and
-    /// `libc.musl` names a platform no single-libc host can satisfy —
-    /// unresolvable, and worse than saying nothing because it looks
-    /// authoritative. A namespace like `libc` is single-valued per artifact;
-    /// the honest statement for a glibc binary under a musl declaration is
-    /// "this is a glibc artifact", not "declare both".
-    ///
-    /// [`Any`](Self::Any) carries no fields, so there is nothing to add and it
-    /// is returned unchanged — total rather than panicking.
+    /// Replace, never union: features are ANDed by [`is_compatible`], so
+    /// `libc.glibc` plus `libc.musl` names a platform no host satisfies.
     pub fn with_os_feature(&self, feature: &str) -> Self {
         let Self::Specific {
             os,
@@ -353,9 +199,7 @@ impl Platform {
         let namespace = feature_namespace(feature);
         let mut os_features: Vec<String> = os_features
             .iter()
-            // A dotless feature names no namespace, so it evicts nothing —
-            // stated on both sides, or two bare tags would collide on `None`
-            // and one would silently evict the other.
+            // Checked on both sides, or two dotless tags collide on `None` and one evicts the other.
             .filter(|tag| namespace.is_none() || feature_namespace(tag) != namespace)
             .cloned()
             .collect();
@@ -369,54 +213,25 @@ impl Platform {
     }
 }
 
-/// The namespace an `os.features` tag belongs to: the text before its first
-/// `.`, or `None` for a tag carrying no dot (`libc.glibc` → `Some("libc")`,
-/// `win32k` → `None`).
-///
-/// `os.features` is an open string namespace whose only structure is this
-/// dotted prefix — the convention `libc.*` follows and any future family will.
-/// A dotless tag is a bare tag, **not** the namespace it happens to spell: a
-/// declared `libc` is not a member of the `libc.*` family, and treating it as
-/// one would evict a feature the publisher wrote.
+/// The text before a tag's first `.`; `None` for a dotless tag, which is not
+/// the namespace it spells, or a declared bare `libc` gets evicted.
 fn feature_namespace(feature: &str) -> Option<&str> {
     feature.split_once('.').map(|(namespace, _leaf)| namespace)
 }
 
-/// Defaults to [`Platform::Any`] (platform-agnostic).
 impl Default for Platform {
     fn default() -> Self {
         Self::any()
     }
 }
 
-// --- D1: directed compatibility relation, scoring, shared selection ---
-
-/// Returns `true` when `offered` satisfies the requirement `required`.
+/// Whether `offered` satisfies `required`; directed, not symmetric.
 ///
-/// Read "does `offered` satisfy the requirement `required`?". `required` is
-/// what the caller needs satisfied — the host ([`Platform::current`]), an
-/// explicit `--platform` value, or a project-lock host lookup key. `offered`
-/// is a candidate — an OCI image-index child platform, or a lock/pin map key.
-///
-/// The relation is **not symmetric**:
-///
-/// - **`Any` asymmetry.** An `Any` *offer* satisfies every requirement (a
-///   platform-agnostic artifact runs anywhere). An `Any` *requirement* is
-///   satisfied only by an `Any` offer — an unknown/undetected host can run
-///   only platform-agnostic content, never a `Specific` binary.
-/// - **`os_features` inversion.** `os_features` are mandatory host
-///   capabilities the offered binary demands, so the direction inverts
-///   relative to the `required`/`offered` naming:
-///   `offered.os_features ⊆ required.os_features` (the host's capabilities
-///   must be a superset of what the binary demands). `variant` does **not**
-///   invert — it is strict equality, gated on the *offer* declaring it: an
-///   offer that leaves the field `None` imposes no constraint.
-///
-/// See `adr_platform_model_unification.md` D1 for the full truth table.
+/// An `Any` offer satisfies everything, an `Any` requirement only an `Any`
+/// offer; `offered.os_features` ⊆ `required.os_features`, and a declared
+/// `variant` must match. See `adr_platform_model_unification.md` D1 for the table.
 pub fn is_compatible(required: &Platform, offered: &Platform) -> bool {
-    // An `Any` offer satisfies every requirement, checked before the
-    // `required`-is-`Any` branch so an `Any` requirement still accepts an
-    // `Any` offer.
+    // Before the `required`-is-`Any` arm, or an `Any` requirement refuses an `Any` offer.
     if offered.is_any() {
         return true;
     }
@@ -436,8 +251,6 @@ pub fn is_compatible(required: &Platform, offered: &Platform) -> bool {
         },
     ) = (required, offered)
     else {
-        // `offered` is not `Any` (checked above) but `required` is `Any` —
-        // an `Any` requirement is satisfiable only by an `Any` offer.
         return false;
     };
 
@@ -445,43 +258,19 @@ pub fn is_compatible(required: &Platform, offered: &Platform) -> bool {
         return false;
     }
 
-    // Strict equality on `variant`, gated on the offer declaring a value —
-    // an offer that leaves it `None` imposes no constraint.
     if offered_variant.is_some() && offered_variant != required_variant {
         return false;
     }
 
-    // Subset, inverted: every feature the offer demands must be present in
-    // what the requirement offers as host capabilities.
     offered_os_features
         .iter()
         .all(|feature| required_os_features.contains(feature))
 }
 
-/// Lexicographic compatibility score `(is_specific, matched_refinement_count,
-/// matched_os_feature_count)` for an `offered` platform, higher wins.
+/// Lexicographic score `(is_specific, refinements, os_features)`, higher wins; only meaningful for an [`is_compatible`] offer.
 ///
-/// Meaningful only for an `offered` that [`is_compatible`] with the
-/// requirement under evaluation — [`is_compatible`] already guarantees that
-/// whenever `offered` declares `variant` it equals the requirement's value
-/// (offer-gated strict equality) and that every `os_features` value it
-/// carries is a matched subset, so both counts are read straight off
-/// `offered` without re-consulting the requirement.
-///
-/// `matched_refinement_count` (0-1: one point for a declared `variant`)
-/// ranks **above** `matched_os_feature_count`: a refinement is a
-/// strict-equality constraint the offer opted into, a harder commitment than
-/// an `os_features` capability subset, so an offer that pins the exact
-/// `variant` outranks an unconstrained offer even when the unconstrained one
-/// matches more `os_features` (`(true, 1, 0) > (true, 0, 1)`). Without this
-/// axis a `variant`-exact offer and an offer that leaves `variant` unset
-/// scored identically whenever their `os_features` counts matched, tying at
-/// the maximum score and producing a spurious `Selection::Ambiguous` for
-/// what D1's truth table treats as two independently-compatible, rankable
-/// offers (rows #8/#9).
-///
-/// A `Specific` offer with zero matched refinements and zero matched
-/// features still outranks `Any` (`(true, 0, 0) > (false, 0, 0)`).
+/// Without the refinement axis a `variant`-exact offer ties an unconstrained
+/// one and selection turns spuriously `Ambiguous`.
 pub fn compatibility_score(offered: &Platform) -> (bool, usize, usize) {
     match offered {
         Platform::Any => (false, 0, 0),
@@ -494,27 +283,19 @@ pub fn compatibility_score(offered: &Platform) -> (bool, usize, usize) {
     }
 }
 
-/// Outcome of [`select_best`] — the shared selection contract for every
-/// consumer of the D1 compatibility relation (fresh-resolve, lock-read,
-/// authoring pin).
+/// Outcome of [`select_best`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection<T> {
-    /// Exactly one candidate reached the maximum compatibility score.
     Found(T),
-    /// Two or more candidates tied at the maximum score — the caller must
-    /// disambiguate (e.g. via an explicit `--platform`).
+    /// Candidates tied at the top score; the caller must disambiguate.
     Ambiguous(Vec<T>),
-    /// No candidate is compatible with the required platform.
     None,
 }
 
-/// Selects the max-scoring [`is_compatible`] candidate for `required` out of
-/// `candidates`, using [`compatibility_score`] as the tiebreaker.
+/// Selects the top-[`compatibility_score`] [`is_compatible`] candidate for `required`.
 ///
-/// The single shared helper behind every D1 consumer — fresh-resolve
-/// (`Index::select`), lock-read (`lookup_host_leaf`), and authoring pinning
-/// (`resolve_for_specific`) all route through this function so the three
-/// answer identically for the same `required` + candidate set.
+/// Fresh-resolve, lock-read and authoring pinning must all route through this,
+/// or they answer differently for the same candidates.
 pub fn select_best<T: Clone>(required: &Platform, candidates: &[(T, Platform)]) -> Selection<T> {
     let mut best_score: Option<(bool, usize, usize)> = None;
     let mut best: Vec<T> = Vec::new();
@@ -555,10 +336,6 @@ impl std::fmt::Display for Platform {
                 if let Some(variant) = variant {
                     write!(f, "/{}", escape_platform_component(variant))?;
                 }
-                // Append the normalized (sorted + deduped) `os.features` set
-                // as a single `+`-introduced, comma-separated list, so the
-                // output is canonical and round-trips through `FromStr`.
-                // Empty set → no suffix.
                 let normalized = normalize_os_features(os_features);
                 if !normalized.is_empty() {
                     write!(f, "+")?;
@@ -588,17 +365,12 @@ impl std::str::FromStr for Platform {
             return Ok(Self::Any);
         }
 
-        // Peel the optional `+feature-list` suffix first. A raw `+` is
-        // always the feature-list introducer: a literal `+` inside a
-        // registry-controlled value is percent-escaped to `%2B` by
-        // `escape_platform_component`, so it never appears unescaped.
+        // A raw `+` is always the feature-list introducer; a value's own `+` is escaped to `%2B`.
         let (core, os_features) = match value.split_once('+') {
             Some((head, feature_list)) => (head, split_feature_list(feature_list).ok_or_else(invalid)?),
             None => (value, Vec::new()),
         };
 
-        // `os`/`arch`/`variant` are `/`-separated; any `/` inside a `variant`
-        // value was escaped to `%2F`, so a literal `/` is always a separator.
         let parts: Vec<&str> = core.split('/').collect();
         if parts.len() < 2 || parts.len() > 3 {
             return Err(invalid());
@@ -632,20 +404,13 @@ impl std::str::FromStr for Platform {
             os,
             arch,
             variant,
-            // Normalize (sort + dedup) so the parsed value matches the
-            // canonical wire form used everywhere else.
             os_features: normalize_os_features(&os_features),
         })
     }
 }
 
-/// Sort + dedup `os_features` so the value is canonical.
-///
-/// Returns an empty `Vec` for an empty input. Keeps cascade eviction
-/// (positional `Vec` equality on the wire) and `Display` output deterministic
-/// regardless of the order the caller supplied.
+/// Sort + dedup `os_features`; cascade eviction compares them as positional `Vec`s.
 fn normalize_os_features(os_features: &[String]) -> Vec<String> {
-    // Fast path: 0 or 1 element is already sorted and deduplicated.
     if os_features.len() <= 1 {
         return os_features.to_vec();
     }
@@ -655,26 +420,12 @@ fn normalize_os_features(os_features: &[String]) -> Vec<String> {
     features
 }
 
-// --- D2: canonical Display/FromStr grammar escaping ---
-//
-// The single escaping scheme for the canonical grammar: `Display`/`FromStr`,
-// the CLI `--platform` flag, and every `ocx.lock` / dependency-pin map key
-// all share this one codec (see `adr_platform_model_unification.md` D2). The
-// former `lock_key` family — a second, parallel encoding invented only
-// because `Display` used to be lossy — is gone; `Display` is now unconditionally
-// injective (see the `features` field deletion note on `Platform::Specific`),
-// so no second codec is needed.
+// --- Canonical grammar escaping (`adr_platform_model_unification.md` D2) ---
 
-/// Percent-escapes every character that is structural in the canonical
-/// [`Display`]/[`FromStr`](std::str::FromStr) grammar (D2): `/` (the
-/// os/arch/variant separator), `+` (the feature-list introducer), `,` (the
-/// feature separator), and `%` itself (the escape introducer).
+/// Percent-escapes the grammar's structural characters `% / + ,`.
 ///
-/// Applied to every registry-controlled string that enters the grammar
-/// (`variant` and each `os_features` value) so none of them can forge a
-/// structural character and misparse. All other bytes pass through verbatim,
-/// so the common values (`v7`, `v8`, `libc.glibc`) are byte-identical to
-/// their raw form.
+/// Every registry-controlled value entering the grammar must pass through
+/// this, or it forges a separator and misparses.
 fn escape_platform_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -689,12 +440,7 @@ fn escape_platform_component(value: &str) -> String {
     out
 }
 
-/// Reverses [`escape_platform_component`]: decodes the four percent-escapes
-/// it emits (`%25 %2F %2B %2C`) back to their literal bytes, passing every
-/// other character through verbatim.
-///
-/// Returns `None` on a malformed escape (`%` not followed by one of the four
-/// known two-character codes) — the input is not a value this codec produced.
+/// Reverses [`escape_platform_component`]; `None` on any other `%` escape.
 fn unescape_platform_component(value: &str) -> Option<String> {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
@@ -715,13 +461,7 @@ fn unescape_platform_component(value: &str) -> Option<String> {
     Some(out)
 }
 
-/// Splits a `+`-introduced feature-list segment on unescaped `,` and
-/// unescapes each component — the inverse of the `+`-joined [`Display`]
-/// suffix.
-///
-/// Returns `None` for an empty segment (`linux/amd64+`) or an empty feature
-/// token (`linux/amd64+a,,b`) — a feature-list carries at least one
-/// non-empty value.
+/// Splits and unescapes a feature list; `None` for an empty list or an empty token.
 fn split_feature_list(segment: &str) -> Option<Vec<String>> {
     if segment.is_empty() {
         return None;
@@ -757,23 +497,13 @@ impl From<&Platform> for native::Platform {
                 variant,
                 os_features,
             } => {
-                // Normalize (sort + dedup) so the wire format is canonical.
-                // Cascade eviction at `oci/client.rs` compares `os_features`
-                // by positional `Vec` equality; a reordered array would
-                // otherwise fail to evict the prior entry and bloat the index.
-                // Convert OCX's empty-`Vec`-means-none to the native
-                // `Option<Vec>` at this boundary so an empty set is omitted
-                // from the serialized JSON (`skip_serializing_if`).
+                // Unnormalized, cascade eviction's positional compare misses the prior entry and bloats the index.
                 let normalized = normalize_os_features(os_features);
                 native::Platform {
                     os: (*os).into(),
                     architecture: (*arch).into(),
                     variant: variant.clone(),
-                    // `features` is RESERVED by OCI v1.1.1 and no longer
-                    // exists on `Platform::Specific` — always emit `None`.
                     features: None,
-                    // `os_version` has no OCX platform-model concept —
-                    // always emit `None`.
                     os_version: None,
                     os_features: if normalized.is_empty() { None } else { Some(normalized) },
                 }
@@ -817,9 +547,7 @@ impl TryFrom<native::Platform> for Platform {
             kind,
         })?;
 
-        // `features` is RESERVED by OCI v1.1.1. Foreign manifests written by
-        // stale tooling may still carry a value — warn and drop it rather than
-        // hard-erroring, so OCX stays interoperable with such registries.
+        // Warn and drop, never refuse, or manifests from stale tooling become unreadable.
         if platform.features.is_some() {
             tracing::warn!(
                 "dropping RESERVED `features` field from platform '{}' (OCI v1.1.1 reserves it)",
@@ -827,9 +555,6 @@ impl TryFrom<native::Platform> for Platform {
             );
         }
 
-        // `os.version` has no OCX platform-model concept. Foreign manifests
-        // may still carry a value — warn and drop it, the same pattern as
-        // the RESERVED `features` field above.
         if platform.os_version.is_some() {
             tracing::warn!(
                 "dropping unsupported `os.version` field from platform '{}' (OCX platform model has no os_version concept)",
@@ -841,12 +566,7 @@ impl TryFrom<native::Platform> for Platform {
             os,
             arch,
             variant: platform.variant,
-            // Convert the native `Option<Vec>` to OCX's empty-means-none `Vec`
-            // at this boundary: both `None` and `Some(empty)` become an empty
-            // set. Normalize (sort + dedup) inbound: foreign manifests may carry
-            // duplicated or unordered `os_features`, and selection scores
-            // specificity by `os_features.len()` — an un-deduped array would
-            // inflate that score and skew candidate ranking.
+            // Unnormalized, duplicates inflate the selection score's feature count.
             os_features: normalize_os_features(&platform.os_features.unwrap_or_default()),
         })
     }
@@ -863,20 +583,9 @@ impl TryFrom<Option<native::Platform>> for Platform {
     }
 }
 
-/// Renders a raw fork wire-type [`native::Platform`] using OCX's canonical
-/// `os/arch[/variant][+feature[,feature...]]` grammar (the same grammar
-/// [`Platform`]'s [`Display`](std::fmt::Display) impl produces).
+/// Renders a raw [`native::Platform`] in the canonical grammar, total over unsupported platforms.
 ///
-/// Display-only, not a codec: unlike [`TryFrom<native::Platform> for
-/// Platform`], this is **total** over every `os`/`architecture` value the
-/// fork can hold, including a platform OCX's closed [`OperatingSystem`] /
-/// [`Architecture`] enums do not support (e.g. `freebsd/amd64`) — callers
-/// that must keep such real-but-unsupported platforms around (the cascade
-/// fold's registry-graph diff) still get a human-readable cell instead of
-/// the fork's verbose `Debug`-style [`Display`](std::fmt::Display). The
-/// result carries no round-trip guarantee back to a `native::Platform` and
-/// ignores the deprecated `features` field and `os_version`, neither of
-/// which the canonical grammar has a slot for.
+/// Display-only: no round-trip, and `features`/`os_version` are dropped.
 pub fn render_native_platform(platform: &native::Platform) -> String {
     let mut rendered = format!("{}/{}", platform.os, platform.architecture);
     if let Some(variant) = platform.variant.as_deref().filter(|value| !value.is_empty()) {
@@ -896,21 +605,13 @@ pub fn render_native_platform(platform: &native::Platform) -> String {
     rendered
 }
 
-// --- Serde via native::Platform ---
-//
-// Serialization converts to native::Platform first, ensuring OCI-compatible
-// JSON field names. Deserialization goes the reverse path: JSON → native::Platform
-// → Platform (via TryFrom, which validates supported OS/arch).
-
 impl Serialize for Platform {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         native::Platform::from(self).serialize(serializer)
     }
 }
 
-// `Serialize` writes the OCI platform object (via `oci_client::manifest::Platform`,
-// a foreign type that cannot carry our derive), so the schema mirrors the OCI
-// image-spec object rather than this enum's variants.
+// The schema mirrors what `Serialize` writes, the OCI object, not this enum's variants.
 impl schemars::JsonSchema for Platform {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Platform".into()

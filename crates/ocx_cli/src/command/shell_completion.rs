@@ -19,11 +19,10 @@ pub struct ShellCompletion {
     /// it into a file wants. With it, the same policy `ocx self activate`
     /// applies decides whether anything is printed at all: `OCX_NO_COMPLETIONS`,
     /// then `completions` under `[shell]` in config.toml, then whether the
-    /// session is interactive. The `$OCX_HOME/env.sh` and `env.elv` shims pass
-    /// it, because they inject completions through this command rather than
-    /// through the activation stream.
+    /// session is interactive.
     ///
     /// https://ocx.sh/docs/in-depth/shell-integration
+    // The `env.sh` and `env.elv` shims pass it; renaming it breaks their completion injection.
     #[clap(long = "if-enabled")]
     if_enabled: bool,
 
@@ -67,16 +66,7 @@ impl ShellCompletion {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Resolve the C-039 completions ladder for this invocation.
-    ///
-    /// Rungs 1 and 2 are unreachable here by construction, so
-    /// [`options::Completion::default`] is the right input: `--if-enabled` is
-    /// itself the caller's way of asking for a decision, and its absence is the
-    /// unconditional answer this command has always given. What is left —
-    /// `OCX_NO_COMPLETIONS`, `[shell] completions`, session interactivity — is
-    /// evaluated by the one shared implementation, so a shim's separate
-    /// completion injection and `ocx self activate`'s inline one can never
-    /// disagree about whether completions are wanted.
+    /// Resolve the completions ladder through the implementation `ocx self activate` shares, so the two never disagree.
     async fn completions_enabled(&self, options: &ContextOptions) -> bool {
         let (shell_config, _tiers) = load_shell_config(options).await;
         options::Completion::default().enabled(
@@ -86,17 +76,9 @@ impl ShellCompletion {
     }
 }
 
-/// Render the completion script for `shell`, adding the zsh `compinit` guard so
-/// the output registers wherever it is sourced.
+/// Render the completion script for `shell`; shared with `ocx self activate`'s inline stream.
 ///
-/// clap_complete's zsh script ends in `compdef _ocx ocx`, which requires
-/// `compinit` to have run. The guard self-loads it, so the script is correct
-/// even when sourced before the user's `.zshrc` runs `compinit` (e.g. from
-/// `.zprofile`) — otherwise `compdef` is undefined and registration fails.
-///
-/// Shared by `ocx shell completion` (this command) and the inline completion
-/// stream of `ocx self activate`, so both emit identical, self-sufficient
-/// scripts.
+/// The zsh prefix self-loads `compinit`, or sourcing from `.zprofile` leaves `compdef` undefined.
 pub(crate) fn render_completion_script(cmd: &mut clap::Command, cmd_name: &str, shell: clap_complete::Shell) -> String {
     let mut buf = Vec::new();
     clap_complete::generate(shell, cmd, cmd_name.to_string(), &mut buf);

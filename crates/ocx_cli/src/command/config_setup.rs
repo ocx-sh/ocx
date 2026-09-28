@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx config setup` — config-only managed-config adoption.
+//! `ocx config setup`: config-only managed-config adoption.
 //!
-//! The automation/CI counterpart to `ocx self setup --managed-config`: adopts
-//! (or clears) the corporate managed-config tier without bootstrapping the ocx
-//! binary, writing env shims, or touching shell profiles. Both entry points
-//! share the single lib implementation (`ocx_setup::apply_managed_config`),
-//! so precedence, the fetch-first ordering, and the dirty-fence contract are
-//! identical by construction.
+//! Shares `ocx_setup::apply_managed_config` with `ocx self setup --managed-config`, so precedence,
+//! fetch-first ordering and the dirty-fence contract match by construction.
 
 use std::process::ExitCode;
 
@@ -19,46 +15,14 @@ use crate::api::data::config_setup::ConfigSetupData;
 
 /// Adopt (or clear) the corporate managed-config tier.
 ///
-/// Resolves an OCI reference to a managed-config artifact, synchronously
-/// fetches and persists a snapshot, and only then writes the `[managed]`
-/// seed fence in `$OCX_HOME/config.toml` - a fetch failure leaves no
-/// partial state. Pass an empty string (`--managed-config ""`) to clear an
-/// existing seed and delete the snapshot.
+/// Resolves the source (flag, then `OCX_MANAGED_CONFIG`, then the existing
+/// seed), fetches and persists a snapshot, and only then writes the
+/// `[managed]` seed fence, so a fetch failure leaves no partial state. Every
+/// run re-syncs an already-adopted seed; an unreachable registry keeps the
+/// snapshot and still succeeds. Nothing resolved is a usage error: unlike
+/// `ocx self setup`, this command exists only to set up the tier.
 ///
-/// Precedence when the flag is omitted: `OCX_MANAGED_CONFIG` env var, then
-/// the existing seed (a bare run re-adopts and self-heals a wiped or
-/// mismatched snapshot). Nothing resolved at any level is a usage error -
-/// unlike `ocx self setup`, this command exists only to set up the tier.
-///
-/// Every run reconciles an already-adopted seed against the registry, so a
-/// newer published config is picked up without a separate `ocx config update`.
-/// If that refresh cannot reach the registry, the existing snapshot is kept
-/// and the run still succeeds. A digest-pinned seed, `--offline`, and an
-/// in-force `ocx config update --pause` each skip the refresh.
-///
-/// Unlike `ocx self setup`, no binary is installed and no shell profile is
-/// touched - this is the configuration-only entry point for automation and
-/// CI environments.
-///
-/// # Exit codes
-///
-/// | Outcome | Exit |
-/// |---|---|
-/// | adopted / refreshed / already adopted / cleared | 0 |
-/// | would adopt / would refresh (`--dry-run`) | 0 |
-/// | the refresh fetch of an already-adopted seed failed (snapshot kept; a snapshot-write failure still exits 74) | 0 |
-/// | nothing to set up (no flag, no env var, no seed) | 64 |
-/// | the fetched managed-config package is malformed (digest mismatch, no `any/any` entry, missing `config.toml`, over 64 KiB, or invalid TOML) | 65 |
-/// | the registry is unreachable while fetching the snapshot | 69 |
-/// | writing the snapshot or the `[managed]` fence failed | 74 |
-/// | invalid ref, or a system-locked tier would be redirected/cleared | 78 |
-/// | package not found in registry | 79 |
-/// | authentication failed while fetching the snapshot | 80 |
-/// | the `[managed]` fence carries user edits (no `--force`) | 82 |
-///
-/// The registry codes (69 / 79 / 80) apply only while the tier is being
-/// adopted for the first time, or when the snapshot on disk is missing or
-/// belongs to another source.
+/// Exit codes: <https://ocx.sh/docs/reference/command-line#config-setup>
 #[derive(Parser)]
 pub struct ConfigSetupArgs {
     /// Adopt (or clear) this managed-config source.
@@ -79,23 +43,13 @@ pub struct ConfigSetupArgs {
     force: bool,
 }
 
-/// Resolve the effective `--managed-config` value the lib layer consumes.
+/// Resolve the effective `--managed-config` value: `Some(ref)` adopts, `Some("")` clears, `None`
+/// leaves the tier untouched. An explicit flag passes through; an omitted one falls back to
+/// [`ocx_config::managed::resolve_managed_target`]. Shared by `config setup` and `self setup`.
 ///
-/// The lib contract is deliberately simple: `Some(ref)` adopts, `Some("")`
-/// clears, `None` leaves the tier untouched. This CLI seam owns the precedence
-/// the lib no longer applies — when the flag is omitted it falls back to the
-/// same runtime `[managed]` resolution [`ocx_config::managed::resolve_managed_target`]
-/// uses (`OCX_MANAGED_CONFIG` non-empty over the `[managed].source` seed,
-/// honoring a system-lock). An explicit flag — including `--managed-config ""`
-/// to clear — is passed through verbatim.
+/// # Errors
 ///
-/// Shared by `ocx config setup` and `ocx self setup` (which re-adopts a
-/// configured seed on a bare re-run so the lib's Current-fence arm can
-/// self-heal a wiped or mismatched snapshot).
-///
-/// A system-locked tier refuses an explicit value that would clear or redirect
-/// it (exit 78) — a lock only tightens, and clearing/refetching would otherwise
-/// corrupt the required tier the lock protects.
+/// A system-locked tier refuses an explicit value that would clear or redirect it (78).
 pub fn resolve_managed_config_arg(
     flag: Option<&str>,
     config: &ocx_config::Config,
@@ -116,9 +70,7 @@ impl ConfigSetupArgs {
             context.managed_config_env_override(),
         )?;
 
-        // Nothing resolved anywhere: unlike `self setup` (which has other
-        // phases to run and treats this as a no-op), an explicit
-        // `config setup` with nothing to set up is a usage error.
+        // Unlike `self setup`, which has other phases, nothing to set up here is a usage error.
         let Some(value) = resolved else {
             return Err(crate::error::UsageError::new(
                 "nothing to set up: pass --managed-config <REF>, set OCX_MANAGED_CONFIG, \
@@ -137,9 +89,7 @@ impl ConfigSetupArgs {
         )
         .await?;
 
-        // The dirty-fence contract mirrors `self setup`: left untouched
-        // without --force → exit 82 so scripts can `case $? in 82)`.
-        // Dry-run reports would-adopt and never returns 82.
+        // Exit 82 on an untouched dirty fence, as `self setup`; dry-run never returns it.
         let dirty = matches!(outcome, ocx_setup::ManagedConfigSetupOutcome::Dirty);
         let exit = if dirty && !self.force && !self.dry_run {
             OcxExitCode::DirtyRcBlock.into()

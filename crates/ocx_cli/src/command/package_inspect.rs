@@ -10,47 +10,13 @@ use crate::{conventions, options};
 /// Inspect what sits at one or more package references. Read-only - nothing
 /// is installed and no symlinks are created. Accepts a tag or an `@digest`.
 ///
-/// With multiple packages, JSON output is an object keyed by the requested
-/// identifier (`{"<id>": {...}}`); plain output renders each package's tree in
-/// order.
-///
-/// Output adapts to each reference's shape:
-///
-/// - Default, reference is an image index: list the platform **candidates**
-///   (platform, child digest, media type, size). No metadata is loaded and
-///   no platform is selected.
-/// - Default, reference is a single image manifest (flat tag or `@digest`):
-///   emit the declared **metadata** (bundle version, strip_components, env
-///   vars, dependencies, entrypoints) plus the manifest's **layers**. No
-///   resolution chain.
-/// - `--resolve`: platform-select through the index (honoring
-///   `-p/--platform`), then emit metadata and layers plus the **resolution**
-///   chain - the pinned identifier and the walk-order chain blob digests
-///   (index, manifest, config).
-/// - `--closure`: compute the metadata-only dependency closure without
-///   installing. Adds one `closure` object to JSON output holding `deps` (the
-///   transitive dependencies in transitive-closure order, each with its
-///   effective visibility) and `surface` (the `interface` and `private`
-///   projections - the binaries, entrypoints and env keys that would land on
-///   PATH for a consumer versus internally, plus each side's declared
-///   integration namespaces). Plain output adds a `closure` branch with a
-///   flat dependency list and the two surface summaries. On a
-///   multi-platform reference, `--closure` first platform-selects (honoring
-///   `-p/--platform`) to read the declared dependencies, so the output is the
-///   same platform-selected body `--resolve` produces, with the closure
-///   attached.
-///
-/// A script deciding whether `--closure` ran should check for the `closure`
-/// key in JSON output, not for `resolution` (which reflects the shape of the
-/// reference, not whether `--closure` was requested).
-///
-/// `-p/--platform` applies with `--resolve` and `--closure`. Honors the global
-/// `--offline` / `--remote` / `--format` flags. JSON is the primary consumer
-/// surface (OCX is a backend tool).
-///
-/// Exits 65 when `--closure` finds a conflict that would make the surface
-/// unrealizable — the conflict is still reported in full, so a caller reads the
-/// detail from the payload and branches on the exit code.
+/// Output adapts to each reference's shape: an image index lists its platform
+/// candidates, a single manifest emits its metadata and layers, `--resolve`
+/// adds the resolution chain and `--closure` the dependency closure. Several
+/// packages render as a JSON object keyed by identifier. A script testing
+/// whether `--closure` ran checks the `closure` key, not `resolution`, which
+/// follows the reference's shape. Exits 65 when `--closure` finds a conflict,
+/// still reported in full.
 #[derive(Parser)]
 pub struct PackageInspect {
     #[clap(flatten)]
@@ -68,18 +34,17 @@ pub struct PackageInspect {
     resolve: bool,
 
     /// Compute the metadata-only dependency closure without installing.
-    ///
-    /// Adds one `closure` object to the output holding `deps` (the transitive
-    /// dependencies in transitive-closure order, each with its effective
-    /// visibility) and `surface` (the `interface` and `private` projections -
-    /// the binaries, entrypoints and env keys that would land on PATH for a
-    /// consumer versus internally, plus each side's declared integration
-    /// namespaces). Plain output adds a `closure` branch with a flat
-    /// dependency list and the two surface summaries.
-    ///
-    /// For a multi-platform reference, `--closure` first selects a platform
-    /// (honoring `-p/--platform`, the host platform by default) to read the
-    /// declared dependencies - the same selection `--resolve` performs.
+    #[arg(long_help = "\
+        Compute the metadata-only dependency closure without installing.\n\n\
+        Adds one `closure` object to the output holding `deps` (the transitive dependencies in \
+        transitive-closure order, each with its effective visibility) and `surface` (the \
+        `interface` and `private` projections - the binaries, entrypoints and env keys that would \
+        land on PATH for a consumer versus internally, plus each side's declared integration \
+        namespaces). Plain output adds a `closure` branch with a flat dependency list and the two \
+        surface summaries.\n\n\
+        For a multi-platform reference, `--closure` first selects a platform (honoring \
+        `-p/--platform`, the host platform by default) to read the declared dependencies - the same \
+        selection `--resolve` performs.")]
     #[clap(long)]
     closure: bool,
 
@@ -98,9 +63,7 @@ impl PackageInspect {
         options::Identifier::reject_duplicate_references(&identifiers)?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
 
-        // A relative `:path` value anchors to the invocation directory — the one
-        // base a calling script can compute. This command reads no `ocx.toml`,
-        // so `--env` is the whole of its project-tier env surface.
+        // A relative `:path` anchors to the invocation directory, the only base a calling script can compute.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
@@ -110,8 +73,7 @@ impl PackageInspect {
             closure: self.closure,
         };
 
-        // `inspect_all` preserves input order, so zipping the results back with
-        // `self.packages` (the raw request strings) is sound.
+        // The zip below relies on `inspect_all` preserving input order.
         let results = context
             .manager()
             .inspect_all(identifiers.clone(), platform.clone(), inspect_options)
@@ -127,10 +89,7 @@ impl PackageInspect {
             })
             .collect();
 
-        // `-p` only applies with `--resolve` / `--closure`; default mode lists an
-        // index's candidates without selecting. Reporting a platform there would
-        // both name one nothing resolved against and make `-p` observable in a
-        // mode its own help calls inert.
+        // Default mode selects no platform, so reporting one would make `-p` observable where its help calls it inert.
         let selected_platform = (self.resolve || self.closure).then_some(&platform);
         let report = InspectReport::new(selected_platform, packages, conventions::env_entries(&env_overrides));
         context.api().report(&report)?;

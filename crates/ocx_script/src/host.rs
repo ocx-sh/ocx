@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Per-run host state shared with the `#[starlark_module]` host functions.
-//!
-//! `starlark::Evaluator` is `!Send` and its `extra` slot requires a
-//! `'static`-lifetime `AnyLifetime` payload, which would force the borrowed
-//! sandbox roots / composed `Env` to be cloned with non-trivial lifetime
-//! gymnastics. `run_script` is sync and single-threaded (invoked via
-//! `tokio::task::block_in_place`), so a thread-local scoped to the call is the
-//! simplest sound channel for host state. The [`scoped`] guard installs the
-//! state for the duration of one evaluation and removes it on drop (RAII), so
-//! state never leaks across runs on a reused worker thread.
+//! Per-run host state shared with the `#[starlark_module]` host functions, held in thread-locals.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -21,18 +12,15 @@ use ocx_oci::Platform;
 
 /// Host state available to the `ocx.*` host functions during one script run.
 pub(super) struct HostState {
-    /// Read-only materialized package root — the package *store* directory
-    /// (`content/`, `refs/`, `metadata.json`, ...), not the bundle's files.
+    /// Read-only package store directory, not the bundle's files.
     pub package_root: PathBuf,
-    /// Read-only root the bundle's own files live under (`<package_root>/content`).
-    /// This — not [`Self::package_root`] — is the read-side fallback base, so a
-    /// script spells `bin/javac`, never `content/bin/javac`.
+    /// Read-only root of the bundle's own files, and the read-side fallback base.
     pub content_root: PathBuf,
     /// Read-write sandbox root (sibling of the package root).
     pub scratch_root: PathBuf,
-    /// Target platform reflecting the `-p` flag (NOT the host).
+    /// Target platform from the `-p` flag, not the host's.
     pub platform: Platform,
-    /// The composed package env (already through `Env::apply_ocx_config`).
+    /// The composed package env.
     pub env: Env,
     /// Per-`ocx.run` child-process wall-clock kill deadline.
     pub wall_clock: Duration,
@@ -42,25 +30,14 @@ pub(super) struct HostState {
 
 thread_local! {
     static HOST: RefCell<Option<HostState>> = const { RefCell::new(None) };
-    /// Survives the [`HostScope`] drop so the report layer can read the last
-    /// `ocx.run` result after evaluation finishes.
+    /// Outlives the [`HostScope`] so the report layer can read it after evaluation.
     static LAST_RUN: RefCell<Option<super::run_result::RunResult>> = const { RefCell::new(None) };
-    /// The `expect.*` assertion identity recorded by the most recently failing
-    /// assertion host fn. Read by `engine::classify` to attribute a `Failed`
-    /// outcome to a specific assertion kind (plan C5 stable contract). Set just
-    /// before an `expect.*` fn returns its error; `Fail`-builtin path leaves it
-    /// unset (engine defaults attribution accordingly).
+    /// The kind of the most recently failing `expect.*` assertion; the `fail()` builtin leaves it unset.
     static LAST_ASSERTION: RefCell<Option<super::AssertionKind>> = const { RefCell::new(None) };
-    /// Set by the `ocx.run` per-child wall-clock kill branch (Codex C4) so
-    /// `engine::classify` can map the resulting terminal error to the
-    /// documented [`super::ScriptOutcomeKind::Timeout`] instead of collapsing
-    /// it into the generic `Failed` bucket. Reset by [`scoped`] every run.
+    /// Set when `ocx.run` kills a child on its deadline, so the outcome is `Timeout`, not `Failed`.
     static TIMED_OUT: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// Records that an `ocx.run` child was killed for exceeding its per-call
-/// wall-clock deadline (Codex C4). Read back by `engine::classify` to surface
-/// the typed `Timeout` outcome/status.
 pub(super) fn note_timeout() {
     TIMED_OUT.with(|cell| *cell.borrow_mut() = true);
 }
@@ -70,21 +47,14 @@ pub(super) fn timed_out() -> bool {
     TIMED_OUT.with(|cell| *cell.borrow())
 }
 
-/// Records the assertion identity for the failing `expect.*` host fn so the
-/// engine can attribute the terminal `Failed` outcome to it (plan C5).
 pub(super) fn note_assertion(kind: super::AssertionKind) {
     LAST_ASSERTION.with(|cell| *cell.borrow_mut() = Some(kind));
 }
 
-/// Reads the last-recorded assertion identity without clearing it. The
-/// [`HostScope`] drop clears `HOST`; `LAST_ASSERTION` is reset by [`scoped`]
-/// at the start of every run so a reused worker thread never sees a stale kind.
 pub(super) fn last_assertion() -> Option<super::AssertionKind> {
     LAST_ASSERTION.with(|cell| *cell.borrow())
 }
 
-/// Stashes the final `ocx.run` result so it outlives the [`HostScope`].
-/// Called by `engine::evaluate` immediately before the scope drops.
 pub(super) fn stash_last_run(run: Option<super::run_result::RunResult>) {
     LAST_RUN.with(|cell| *cell.borrow_mut() = run);
 }
@@ -105,15 +75,11 @@ pub fn take_last_run() -> Option<super::RunSummary> {
 /// RAII guard: installs `state` for the current thread and clears it on drop.
 pub(super) struct HostScope;
 
-/// Installs `state` for the current thread for the lifetime of the returned
-/// guard. Dropping the guard removes it (so a reused Tokio worker thread never
-/// observes stale state from a previous run).
+/// Installs `state` for the current thread for the lifetime of the returned guard.
 pub(super) fn scoped(state: HostState) -> HostScope {
     HOST.with(|cell| *cell.borrow_mut() = Some(state));
-    // Reset the per-run assertion attribution so a reused worker thread never
-    // observes a stale kind from a previous run.
+    // Reset per run, or a reused worker thread reports the previous run's kind and timeout.
     LAST_ASSERTION.with(|cell| *cell.borrow_mut() = None);
-    // Same for the wall-clock timeout flag (Codex C4).
     TIMED_OUT.with(|cell| *cell.borrow_mut() = false);
     HostScope
 }
@@ -124,10 +90,7 @@ impl Drop for HostScope {
     }
 }
 
-/// Runs `f` with a shared reference to the installed host state.
-///
-/// Panics only if called outside a [`scoped`] region — that is a host bug, not
-/// a script-reachable path (every host fn runs inside `evaluate`).
+/// Runs `f` with the installed host state; panics outside a [`scoped`] region.
 pub(super) fn with<R>(f: impl FnOnce(&HostState) -> R) -> R {
     HOST.with(|cell| {
         let borrow = cell.borrow();
@@ -138,20 +101,14 @@ pub(super) fn with<R>(f: impl FnOnce(&HostState) -> R) -> R {
     })
 }
 
-/// Runs `f` with a shared reference to the installed host state if one is
-/// present, returning `None` when called outside a [`scoped`] region.
+/// Runs `f` with the installed host state, or returns `None` outside a [`scoped`] region.
 ///
-/// Unlike [`with`], this never panics. The globals builder runs in two
-/// contexts: inside a script run (a host scope is installed, so the per-run
-/// `ocx.target_platform` reflects the `-p` flag) and outside one (LSP globals
-/// build and the structural variant-parity test, where there is no run and the
-/// attribute falls back to `Platform::Any`). The fallible accessor lets the
-/// builder degrade gracefully in the latter rather than abort.
+/// The globals builder also runs with no scope installed (LSP, tests), so it must use this, not [`with`].
 pub(super) fn try_with<R>(f: impl FnOnce(&HostState) -> R) -> Option<R> {
     HOST.with(|cell| cell.borrow().as_ref().map(f))
 }
 
-/// Runs `f` with a mutable reference to the installed host state.
+/// Runs `f` with the installed host state mutably; panics outside a [`scoped`] region.
 pub(super) fn with_mut<R>(f: impl FnOnce(&mut HostState) -> R) -> R {
     HOST.with(|cell| {
         let mut borrow = cell.borrow_mut();

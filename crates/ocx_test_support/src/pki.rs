@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Test-only PKI for the extra-CA-roots tests (ocx#448): a minted P-256 root,
-//! a leaf for `localhost` / `127.0.0.1` signed by it, and an in-process
-//! `tokio-rustls` server that answers any request with an empty `200 OK`.
-//!
-//! Shared by the `tls`, `oci::index::ocx_index`, `ocx_oci::endpoint` and
-//! `forge::http` handshake tests — the one cross-OS proof that a seeded root
-//! is consulted at handshake time rather than merely stored (S-002 / S-007 at
-//! unit tier). The certificate recipe is `oci/verify/trust_root.rs`'s
-//! `real_cert_der`, extended with a leaf profile and a SAN.
-//!
-//! PEM and DER bytes only (D-066): the trust type the consumer feeds them to
-//! lives in the crate under test, so this crate keeps zero `ocx_*`
-//! dependencies and callers build their own value from `root_pem()`.
+//! Test-only PKI for the extra-CA-roots handshake tests: a minted P-256 root, a `localhost` / `127.0.0.1`
+//! leaf it signed, and an in-process TLS server answering every request with an empty `200 OK`.
 
 use std::net::SocketAddr;
 use std::str::FromStr as _;
@@ -34,8 +23,7 @@ use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
 use x509_cert::time::Validity;
 
-/// A root plus a leaf it signed, with the leaf's private key — everything
-/// an in-process TLS server needs, and the root PEM a client is seeded with.
+/// A root, a leaf it signed, and the leaf's private key.
 pub struct TestPki {
     pub root_der: Vec<u8>,
     pub leaf_der: Vec<u8>,
@@ -50,8 +38,7 @@ fn validity() -> Validity {
     Validity::from_now(Duration::from_secs(3600)).expect("validity")
 }
 
-/// A self-signed CA root — `Profile::Root` adds `basicConstraints ca=true`
-/// and `keyCertSign`, which is what makes it acceptable as a trust anchor.
+/// A self-signed CA root; `Profile::Root` adds the CA extensions a trust anchor needs.
 pub fn mint_root(name: &str) -> (SigningKey, Vec<u8>) {
     let key = SigningKey::random(&mut OsRng);
     let builder = CertificateBuilder::new(
@@ -71,22 +58,8 @@ pub fn mint_root(name: &str) -> (SigningKey, Vec<u8>) {
     (key, der)
 }
 
-/// A version-2 self-signed certificate: no v3 extensions, an
-/// `issuerUniqueID` present. x509-cert decodes it; webpki's trust-anchor
-/// parser allows only v3 (with a dedicated v1 fallback, so a v1 root is
-/// *accepted*) and a v2 body fails both parsers — `BadEncoding` from the
-/// probe build. CryptoAPI and Security.framework decode any version, so
-/// this is the block the *platform* probe rejects, and only on Linux.
-///
-/// The builder's opt-out of the v3 extension set (`Profile::Manual`) is
-/// behind x509-cert's `hazmat` feature, which the workspace does not
-/// enable, so the TBS is assembled by hand and signed with the same P-256
-/// key type the builder recipe uses — the version `x509_cert`'s own
-/// `finalize` would pick for a unique id and no extensions.
-///
-/// Gated like its one consumer: on Windows and macOS the platform probe
-/// accepts a v2 root, so the test does not exist there and an ungated
-/// helper is `dead_code` under `-D warnings`.
+/// A version-2 self-signed root, which webpki rejects with `BadEncoding` and CryptoAPI and
+/// Security.framework accept, so only the Linux platform probe refuses it.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn mint_v2_root() -> Vec<u8> {
     use p256::ecdsa::signature::Signer as _;
@@ -140,10 +113,7 @@ impl TestPki {
                 GeneralName::IpAddress(OctetString::new([127, 0, 0, 1]).expect("octets")),
             ]))
             .expect("san");
-        // `serverAuth` is load-bearing on macOS: Security.framework's SSL
-        // policy refuses a leaf without it (`EkuError`), while webpki and
-        // CryptoAPI tolerate an absent extension. Every backend accepts
-        // it present, so the one recipe serves all three verifiers.
+        // Without `serverAuth` macOS refuses the leaf (`EkuError`); webpki and CryptoAPI do not notice.
         builder
             .add_extension(&ExtendedKeyUsage(vec![
                 x509_cert::der::oid::db::rfc5280::ID_KP_SERVER_AUTH,
@@ -162,8 +132,7 @@ impl TestPki {
         }
     }
 
-    /// The root as a one-block LF PEM bundle — what an operator would put
-    /// in `OCX_EXTRA_CA_CERTS`.
+    /// The root as a one-block LF PEM bundle, the form `OCX_EXTRA_CA_CERTS` takes.
     pub fn root_pem(&self) -> String {
         pem_block("CERTIFICATE", &self.root_der)
     }
@@ -177,10 +146,7 @@ pub fn pem_block(tag: &str, der: &[u8]) -> String {
     )
 }
 
-/// An HTTPS server on an ephemeral loopback port, presenting `pki`'s leaf,
-/// answering every request with an empty `200 OK`. A client that does not
-/// trust the root aborts during the handshake and never reaches the
-/// request loop — that is the negative half of every handshake test.
+/// An HTTPS server on an ephemeral loopback port presenting `pki`'s leaf, answering every request with `200 OK`.
 pub async fn serve_https(pki: &TestPki) -> SocketAddr {
     use tokio_rustls::TlsAcceptor;
     use tokio_rustls::rustls::ServerConfig;
@@ -225,15 +191,8 @@ pub async fn serve_https(pki: &TestPki) -> SocketAddr {
     addr
 }
 
-/// Every `Display` down the `source` chain, joined — so an assertion sees
-/// rustls's `UnknownIssuer` under reqwest's "error sending request".
-/// The unseeded half of every handshake proof: the platform verifier
-/// refused the minted root. webpki (Linux) and CryptoAPI (Windows) both
-/// surface `UnknownIssuer`; Security.framework (macOS) reports
-/// `errSecNotTrusted` (-67843) as `"“<CN>” certificate is not trusted"`.
-/// A timeout, a refused connection or a name mismatch matches neither,
-/// so the assertion still discriminates a missing root from a dead
-/// server.
+/// Asserts the platform verifier refused the minted root: `UnknownIssuer` (webpki, CryptoAPI) or macOS's
+/// "certificate is not trusted"; a timeout, refused connection or name mismatch matches neither.
 pub fn assert_untrusted_root(chain: &str) {
     assert!(
         chain.contains("UnknownIssuer") || chain.contains("certificate is not trusted"),
@@ -241,6 +200,7 @@ pub fn assert_untrusted_root(chain: &str) {
     );
 }
 
+/// Every `Display` down the `source` chain, joined, so an assertion sees rustls's `UnknownIssuer`.
 pub fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();

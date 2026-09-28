@@ -1,57 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Hidden `ocx launcher shim` subcommand — the first-invocation entry point of
-//! a deferred tool.
+//! Hidden `ocx launcher shim` subcommand — the first-invocation entry point of a deferred tool.
+//! Generated shims call `ocx launcher shim '<pinned-id>' -- "$(basename "$0")" "$@"`.
 //!
-//! Generated shims call:
-//!   `ocx launcher shim '<pinned-id>' -- "$(basename "$0")" "$@"`
-//!
-//! The sibling of [`super::exec`], and the same two-token wire commitment
-//! (`launcher` + `shim`, then the positional shape). It differs in what it is
-//! handed and what it must do first: `launcher exec` receives a package root
-//! that already exists and dispatches into it, while `launcher shim` receives a
-//! pinned identifier whose package is deliberately *absent* and materializes it
-//! before anything can be dispatched.
-//!
-//! Order of work, which is contract rather than convenience:
-//!
-//! 1. Validate `argv0` — it must parse as a
-//!    [`BinaryName`](ocx_package::metadata::BinaryName) and be a member of
-//!    the deferred tool's composed name set. The grammar leg is what stops a
-//!    wire value carrying a path separator from bypassing `PATH` resolution
-//!    entirely; the membership leg is what stops a well-formed name the package
-//!    never claimed from triggering a download.
-//! 2. Materialize the package — the ordinary pull, by digest, through
-//!    [`PackageManager::read_only_view`](ocx_package_manager::PackageManager::read_only_view).
-//!    The read-only view is not incidental: a deferred tool is composed from
-//!    `ocx.lock`, so its materialization is the same index-free resolve the
-//!    lock already promises. A writing view would let a lazily composed tool
-//!    grow the local index where its eager twin does not — a `tag@digest`
-//!    pull skips the tag pointer but still persists a dispatch object under
-//!    `index/` — which breaks the byte-identical-to-eager property on the
-//!    index axis, and would leave a `--frozen` first invocation writing there
-//!    at all.
-//! 3. Compose the tool's consumer-facing environment (`self_view = false`),
-//!    drop this tool's own shim directory from the composed `PATH`, resolve
-//!    `argv0` on what is left, and exec it. A name still absent at that point is
-//!    reported as an unfulfilled claim naming the package, never as a bare
-//!    `ENOENT`, so a wrong `binaries` claim is attributed to the publisher
-//!    rather than read as a missing package.
-//!
-//!    **The strip is what makes step 3 terminate**, not a tidiness measure. The
-//!    process inherits the `PATH` its launcher was found on and composed entries
-//!    only prepend, so without it a claimed-but-unshipped name resolves back to
-//!    the same launcher and `execvp` re-enters this process with no depth
-//!    counter. The refusal below is unreachable in that state, which is how a
-//!    guard written against a false premise ("`PATH` yields nothing") survived
-//!    review — it was never once observed firing.
-//!
-//! **What this verb does not close.** Write access to the shim store is
-//! equivalent to write access to the package store: whoever can rewrite a shim
-//! body controls both the identifier it bakes and the name it passes, so no
-//! check here authenticates the caller. Integrity rests where it already does —
-//! the full-digest fetch and its content verification.
+//! Shim-store write access equals package-store write access, so nothing here authenticates the
+//! caller; integrity rests on the full-digest fetch.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
@@ -99,12 +53,9 @@ impl LauncherShim {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let manager = context.manager();
 
-        // Step 1 — both `argv0` legs, before anything downloads. An unclaimed
-        // name must not be able to trigger a materialization, so the check runs
-        // against the store's own claim set first.
-        // The child's own arguments are `argv[1..]`, but they are never bound
-        // here: the launch seam derives them from the record's `argv`, so the
-        // record cannot name one argument list while the tool receives another.
+        // Both `argv0` legs before anything downloads: grammar stops a path separator bypassing `PATH`,
+        // membership stops an unclaimed name triggering a download. Args stay unbound: the launch seam
+        // derives them from the record's `argv`.
         let (argv0, _) = self
             .argv
             .split_first()
@@ -112,57 +63,33 @@ impl LauncherShim {
         let claimed = manager.claimed_shim_names(&self.identifier).await?;
         let name = validate_argv0(argv0, &self.identifier, &claimed).map_err(anyhow::Error::new)?;
 
-        // Fold `[records]` before the download, the same point the three sibling
-        // frames fold at: a malformed name template is a configuration error,
-        // and the operator should hear about it before a multi-hundred-megabyte
-        // transfer rather than after. Like `launcher exec` this frame has no
-        // flag tier — the shim wire ABI carries a pinned identifier and an argv,
-        // not options — so the sink comes from the config chain and the
-        // environment, exactly as that sibling resolves it.
+        // Folded before the download, so a malformed name template fails before a large transfer.
         let records = context.records(ocx_package_manager::record::RecordsOptions::default())?;
 
-        // Step 2 — materialize. The report tier is resolved here, at download
-        // time, from whatever project this process happens to stand in; the
-        // library helper owns the read-only-view routing that keeps `index/` at
-        // zero bytes.
+        // `materialize_deferred` owns the read-only-view routing that keeps `index/` at zero bytes.
         let report = self.report(project_in_scope(&context).await.as_ref());
         let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let found = manager
             .materialize_deferred(&self.identifier, platform.clone(), report)
             .await?;
-        // The one frame where a lazy tool's content is downloaded, so the only
-        // place `resolution.autoInstalled` can truthfully report that event for
-        // a deferred tool. A second invocation finds the same package already in
-        // the store and records an empty set.
+        // The one frame that downloads a lazy tool, so the only place `resolution.autoInstalled` can
+        // truthfully report it.
         let auto_installed: Vec<PackageRef> = match found.arrival {
             Arrival::Pulled => vec![self.identifier.as_identifier().clone()],
             Arrival::Cached => Vec::new(),
         };
         let packages = [Arc::new(found.info)];
 
-        // Step 3 — compose the tool's CONSUMER-facing environment. `self_view`
-        // is false, unlike `launcher exec`: that verb dispatches a package's own
-        // entrypoint from inside the package, while this one resolves a name the
-        // package publishes to the outside world.
-        //
-        // `resolve_env_with_attribution` rather than the attribution-dropping
-        // wrapper: the record names which package claimed each executable on
-        // `PATH`, and that derivation already exists here.
-        // The patch provenance is kept, not dropped: the record names every
-        // companion the site tier overlaid onto this composition, and this call
-        // is the only place that attribution exists.
+        // Consumer view, unlike `launcher exec`: this resolves a name the package publishes outward. The
+        // attribution-keeping variant, since the record needs both and only this call has them.
         let (mut entries, _, patch_companions, admitted) = manager
             .resolve_env_with_attribution(&packages, false, EnvScope::package_tier(), &platform)
             .await?;
-        // Same per-key list-separator agreement `ocx exec` and `ocx package exec`
-        // settle before applying: this process composes the closure afresh, so
-        // two contributors disagreeing on one key's separator has to fail here
-        // too rather than fold with a silently chosen one.
+        // As in `ocx exec`: contributors disagreeing on a key's separator fail, not fold silently.
         reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
 
         let mut process_env = env::Env::new();
-        // No forwarded payload: a shim is invoked from a bare `PATH` lookup, not
-        // from an `ocx exec` parent, so there is no project `[env]` to replay.
+        // No forwarded payload: a shim runs from a bare `PATH` lookup, never under `ocx exec`.
         process_env.apply_child_env(
             ChildEnv {
                 composed: &entries,
@@ -171,41 +98,22 @@ impl LauncherShim {
             context.config_view(),
         );
 
-        // Drop the shim directory this process was invoked from before
-        // resolving anything on the composed `PATH`.
-        //
-        // Without it the guard below cannot fire and the failure is not a bad
-        // error message but an unbounded `execve` loop. `Env::new()` inherits
-        // the caller's `PATH`, which necessarily contains this shim `bin/` —
-        // that is the only reason the launcher ran at all — and composed
-        // entries *prepend*, so it survives lower down. Materialization never
-        // retires the shim tree. So a claimed name the package does not ship
-        // walks past the now-real package directories and finds the same
-        // launcher again: `resolved` is an absolute path, the bare-name
-        // comparison is false, and `child_process::exec` is `execvp(2)` — no
-        // return, no depth counter. One process at 100% CPU forever, from
-        // nothing more than publishing a `binaries` claim naming an executable
-        // the package does not contain. `prepare_lazy` cannot verify such a
-        // claim by construction: no content exists yet.
+        // Strip the shim `bin/` first, or an unshipped claimed name resolves back here and `execvp(2)`
+        // re-enters forever at 100% CPU. `prepare_lazy` cannot catch that claim: no content exists yet.
         let shim_bin = context.file_structure().shims.shim_dir(&self.identifier).bin();
         if let Some(path) = process_env.get("PATH") {
             let pruned = ocx_util::path::remove_segment(path, shim_bin.as_os_str());
             process_env.set("PATH", pruned);
         }
 
-        // Two signals, because `remove_segment` compares segments exactly: a
-        // name the composed `PATH` does not provide at all (`resolve_claimed`),
-        // and — belt for a segment the strip could not recognize — any answer
-        // that *resolves* back inside the shim tree. Either way the claim went
-        // unfulfilled; neither may be allowed to reach `exec`.
+        // Two signals, since `remove_segment` compares exactly: a name `PATH` lacks, and an answer that
+        // resolves back inside the shim tree. Neither may reach `exec`.
         let resolved = resolve_claimed(&process_env, &self.identifier, name.clone())?;
         if resolves_inside(resolved.clone(), shim_bin.clone()).await? {
             return Err(shim_claim_unfulfilled(&self.identifier, name));
         }
 
-        // Resolved once above, then handed to both the record and the launch: a
-        // second resolution could disagree with the first and make the audit
-        // trail name a binary other than the one that ran.
+        // Resolved once for record and launch, or the audit trail could name a binary that did not run.
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -218,15 +126,12 @@ impl LauncherShim {
                 argv: &self.argv,
                 config: context.config_view(),
                 insecure_registries: context.insecure_hosts(),
-                // Already in memory: the snapshot is read once at `try_init` and
-                // identity-gated there, so naming it here costs no I/O.
+                // Read and identity-gated once at `try_init`; no I/O here.
                 managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
-                // Likewise read once at `try_init`, alongside the pins it
-                // describes.
+                // Likewise read once at `try_init`.
                 patch_snapshot_digest: context.patch_snapshot_digest(),
                 platform: Some(&platform),
-                // `Env::new()` inherits this process's environment, which is the
-                // whole reason the `PATH` prune above is necessary.
+                // `Env::new()` inherits this process's environment, hence the `PATH` prune above.
                 clean_env: false,
                 auto_installed: &auto_installed,
                 scope: Scope::LauncherShim {
@@ -236,25 +141,14 @@ impl LauncherShim {
             &records,
         )?;
 
-        // Replace this process with the tool on Unix (`execvp(2)`); on Windows
-        // spawn+wait then `process::exit`. Either way the seam diverges on
-        // success — only start-up failures fall through here.
+        // Diverges on success on every platform; only start-up failures fall through.
         Err(anyhow::Error::from(launch::exec(launch).await))
     }
 
-    /// Resolves the `lazy-report` setting for this materialization.
+    /// Resolves `lazy-report`: `--lazy-report` ▸ `[package."<id>"]` ▸ toolchain ▸ `OCX_LAZY_REPORT`.
     ///
-    /// Four tiers, not five: `--lazy-report` ▸ `[package."<id>"]` ▸ toolchain
-    /// ▸ `OCX_LAZY_REPORT`. Resolution happens *here* rather than in the
-    /// command that composed the shim onto `PATH`, because this is the process
-    /// that performs the download the setting describes — and because a value
-    /// resolved now reflects what the user configured today, not what they
-    /// configured when the shim was generated. The same fact is why there is
-    /// no `[group.<g>]` tier: nothing on the wire says which group composed
-    /// the tool, so that tier could only ever be written and never read.
-    ///
-    /// `project` is `None` when this process resolves no project, which is the
-    /// ordinary case for a shim invoked from a directory outside one.
+    /// Resolved where the download runs, so it reflects today's configuration. No `[group.<g>]`
+    /// tier: nothing on the wire names the composing group, so it could be written but never read.
     fn report(&self, project: Option<&ProjectConfig>) -> lazy::LazyReport {
         lazy::LazyReportLadder {
             cli: self.lazy_report.mode(),
@@ -268,20 +162,11 @@ impl LauncherShim {
     }
 }
 
-/// Resolves the claimed `name` on the already-pruned composed `PATH`, mapping
-/// **only** a total miss back to the claim refusal.
+/// Resolves the claimed `name` on the pruned composed `PATH`, mapping **only** a total miss to the
+/// claim refusal.
 ///
-/// The seam exists because `execute` needs a full `Context` and ends in
-/// `execvp`, so the mapping has no other place a test can drive it — and the
-/// property is worth a test rather than a source scan: `ShimClaimUnfulfilled`
-/// and `CommandResolutionError::NotFound` both classify to 65, so replacing
-/// this with a bare `?` keeps the exit code and loses the attribution that
-/// names the publisher and quotes the claim.
-///
-/// `NotFound` is that first signal. **Any other kind — C-069's
-/// `TrampolineRefused` — is not a claim failure and propagates as itself**: the
-/// package did provide the name, an ocx trampoline answered for it, and calling
-/// that an unfulfilled claim would blame the publisher for a loop guard firing.
+/// A bare `?` would keep exit 65 but lose the attribution naming the publisher. Any other kind,
+/// including a refused trampoline, propagates as itself: the package did provide the name.
 fn resolve_claimed(
     process_env: &env::Env,
     identifier: &PinnedPackageRef,
@@ -296,12 +181,8 @@ fn resolve_claimed(
 
 /// The claim-unfulfilled refusal, built at both of the guard's signals.
 ///
-/// Reported as an unfulfilled claim rather than left to the exec's bare
-/// `ENOENT`, so a wrong `binaries` claim is attributed to the publisher instead
-/// of reading as a missing package. One function because C-009 split the guard
-/// into a `match` arm and an `if`, and the error must be byte-identical from
-/// both — the message is the only thing distinguishing this from a generic
-/// resolution failure, since the two share an exit code.
+/// One function so both sites emit a byte-identical error: the message is all that tells it from a
+/// generic resolution failure with the same exit code.
 fn shim_claim_unfulfilled(package: &PinnedPackageRef, name: BinaryName) -> anyhow::Error {
     anyhow::Error::new(PackageErrorKind::ShimClaimUnfulfilled(Box::new(ShimClaim {
         package: package.clone(),
@@ -309,26 +190,12 @@ fn shim_claim_unfulfilled(package: &PinnedPackageRef, name: BinaryName) -> anyho
     })))
 }
 
-/// Whether `resolved` lands inside `shim_bin` once both paths are resolved.
+/// Whether `resolved` lands inside `shim_bin` once both paths are canonicalized.
 ///
-/// The strip above compares `PATH` segments as strings, so every segment that
-/// names the shim directory by a *different* string survives it: a trailing
-/// slash, a symlink alias, `$OCX_HOME` spelled one way by the process that
-/// composed the `PATH` and another way by this one (nothing canonicalizes it —
-/// it is used as given). Resolving both sides is what collapses those spellings
-/// onto one answer, which is why this covers what the strip structurally
-/// cannot, rather than merely repeating it in another form.
-///
-/// **Fails closed.** A path that cannot be resolved counts as inside the tree:
-/// the alternative is `exec`ing a path this process could not identify, and the
-/// refusal it would skip is the only thing standing between a false `binaries`
-/// claim and an `execve` loop with no depth counter.
-///
-/// [`dunce::canonicalize`] rather than [`std::fs::canonicalize`], per the
-/// project's cross-platform path rule: the latter yields Windows verbatim
-/// (`\\?\`) paths, and a prefix comparison is only as good as both sides
-/// agreeing on a spelling. It blocks, hence the blocking pool — `execvp` being
-/// two statements away does not make a stray `stat` on the reactor correct.
+/// Catches what the string-compare strip cannot: a trailing slash, a symlink alias, a differently
+/// spelled `$OCX_HOME`. **Fails closed**: an unresolvable path counts as inside, the only thing
+/// between a false `binaries` claim and an endless `execve` loop. [`dunce::canonicalize`] avoids
+/// Windows verbatim `\\?\` paths.
 async fn resolves_inside(resolved: std::path::PathBuf, shim_bin: std::path::PathBuf) -> anyhow::Result<bool> {
     let inside = tokio::task::spawn_blocking(move || {
         let resolved = dunce::canonicalize(&resolved);
@@ -345,13 +212,8 @@ async fn resolves_inside(resolved: std::path::PathBuf, shim_bin: std::path::Path
 
 /// The `ocx.toml` this process stands in, if any — best effort.
 ///
-/// A shim is invoked as a bare `PATH` lookup from wherever the user happens to
-/// be, so the ordinary precedence chain (`--global` ▸ `--project` ▸
-/// `OCX_PROJECT` ▸ CWD walk) is the only sensible reading of "which project
-/// configured this". No project, an unreadable one, or a malformed one all
-/// resolve to `None` with a debug log rather than a failure: the value decides
-/// nothing but whether a progress bar renders, and refusing to run a user's
-/// tool over it would be absurd.
+/// Any failure is `None` with a debug log: the value only decides whether a progress bar renders,
+/// never whether the tool runs.
 async fn project_in_scope(context: &crate::app::Context) -> Option<ProjectConfig> {
     let (config_path, _lock_path) = crate::app::project_context::resolve_project_paths(context, None)
         .await
@@ -370,11 +232,8 @@ async fn project_in_scope(context: &crate::app::Context) -> Option<ProjectConfig
 
 /// Parses the baked positional into a digest-bearing identifier.
 ///
-/// The wire value is always fully qualified, so it goes through
-/// [`PackageRef::parse`] rather than the default-registry form: a shim body is
-/// written by ocx and must not depend on the ambient default registry of
-/// whatever shell later runs it. A value that fails either step is a clap
-/// invalid-value error, so a malformed shim body exits 64 and names the field.
+/// [`PackageRef::parse`], not the default-registry form: a shim body must not depend on the ambient
+/// default registry. A failure is a clap invalid-value error, exit 64.
 fn parse_pinned_identifier(value: &str) -> Result<PinnedPackageRef, String> {
     let identifier = PackageRef::parse(value).map_err(|error| error.to_string())?;
     PinnedPackageRef::try_from(identifier).map_err(|error| error.to_string())
@@ -382,38 +241,23 @@ fn parse_pinned_identifier(value: &str) -> Result<PinnedPackageRef, String> {
 
 /// Validates the wire's `argv0` against both legs of the name contract.
 ///
-/// `claimed` is the deferred tool's composed name set, read from the shim
-/// directory's own `bin/` listing: the generated launchers **are** that set,
-/// one file per claimed name. Re-deriving it from the ref-linked config blobs
-/// would cost a closure walk on every first invocation and buy nothing —
-/// whoever can write the shim store controls the body and the name equally, so
-/// the trust boundary this crosses is the one C-011 already concedes.
+/// `claimed` is the shim directory's own `bin/` listing: the generated launchers are that set, and
+/// whoever can write the shim store controls body and name alike.
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::ShimNameInvalid`] when `argv0` does not satisfy the
-///   [`BinaryName`] grammar, which forbids `/`, `\` and the Windows-reserved
-///   device names.
-/// - [`PackageErrorKind::ShimNameNotClaimed`] when `argv0` is well-formed but
-///   `package` claims no such name.
-// `PackageErrorKind` is 128 bytes — exactly clippy's ceiling — and `BinaryName`
-// is one `String`, so the `Err` variant dominates the `Ok` one and the lint
-// fires where it does not for the manager's own `Result<InstallInfo, _>`
-// returns. Boxing here would give this one signature a shape no sibling
-// refusal has, to shrink a path taken only on a malformed shim invocation; the
-// house answer is the same `allow` the seven cold error paths in `ocx_lib`
-// already carry.
+/// - [`PackageErrorKind::ShimNameInvalid`] when `argv0` fails the [`BinaryName`] grammar.
+/// - [`PackageErrorKind::ShimNameNotClaimed`] when `package` claims no such name.
+// `PackageErrorKind` sits at clippy's 128-byte ceiling; boxing would give this cold path a shape no
+// sibling refusal has.
 #[allow(clippy::result_large_err)]
 fn validate_argv0(
     argv0: &str,
     package: &PinnedPackageRef,
     claimed: &BTreeSet<BinaryName>,
 ) -> Result<BinaryName, PackageErrorKind> {
-    // Grammar first. It is the security leg — a value carrying `/` or `\` would
-    // bypass `PATH` resolution entirely — and asking membership first would
-    // report an ill-formed name as merely unclaimed, describing the wrong
-    // defect. The type makes the order structural too: membership cannot be
-    // asked until a `BinaryName` exists.
+    // Grammar first: it is the security leg (`/` or `\` bypasses `PATH`), and membership first would
+    // report an ill-formed name as merely unclaimed.
     let name = BinaryName::try_from(argv0).map_err(PackageErrorKind::ShimNameInvalid)?;
     if claimed.contains(&name) {
         return Ok(name);
@@ -430,7 +274,7 @@ mod tests {
     //! legs and its exit-code rows, and the four-tier `lazy-report` ladder
     //! C-006 leaves this process to resolve.
     //!
-    //! Written from `plan_lazy_package_loading.md`, never from the bodies
+    //! Written from the contract, never from the bodies
     //! below: everything the Implement phase still owns fails here with
     //! `unimplemented`, which is what says these tests describe the contract
     //! rather than restate the code.

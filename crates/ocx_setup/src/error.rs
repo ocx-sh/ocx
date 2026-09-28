@@ -3,10 +3,8 @@
 
 //! Error type for the `ocx self setup` subsystem.
 //!
-//! A dirty RC block refused without `--force` is **not** an error — it is a
-//! non-error [`crate::ProfileOutcome::SkippedDirty`] outcome, and the
-//! CLI decides exit code 82 by inspecting the outcomes, not by matching an
-//! error variant.
+//! A dirty RC block refused without `--force` is the outcome
+//! [`crate::ProfileOutcome::SkippedDirty`], not an error.
 
 use std::path::PathBuf;
 
@@ -26,18 +24,12 @@ pub enum Error {
         source: std::io::Error,
     },
     /// A profile-detection subprocess (PowerShell `$PROFILE` / exec-policy probe) failed.
-    ///
-    // reserved: no current caller — the PowerShell probes in `profiles.rs`
-    // degrade subprocess failure to `None` / `false` by contract (PowerShell
-    // absence is non-fatal), so this variant is never constructed today. Kept
-    // because plan contract 6 declares it with a `Subprocess → 69` classify
-    // mapping for a future probe site that surfaces the failure as a typed error.
+    // Never constructed today: the `profiles.rs` probes degrade failure to `None`/`false`.
     #[error("profile subprocess failed")]
     Subprocess(#[source] std::io::Error),
     /// The VERSION argument could not be parsed as a valid version spec.
     ///
-    /// Surfaced via the clap `value_parser` so clap renders it as a usage error
-    /// (exit 64). `reason` describes which part of the syntax was invalid.
+    /// Returned from the clap `value_parser`, so it exits 64 as a usage error.
     #[error("invalid version spec {input:?}: {reason}")]
     InvalidVersionSpec {
         /// The raw input string that was rejected.
@@ -45,11 +37,7 @@ pub enum Error {
         /// Human-readable description of why the input was rejected.
         reason: String,
     },
-    /// A `tag@digest` pin was specified but the tag resolved to a different
-    /// digest than the one pinned (fail-closed immutability assertion, plan D9).
-    ///
-    /// The error message names both digests so the operator can diagnose
-    /// whether the index is stale (see `hint`).
+    /// A `tag@digest` pin was specified but the tag resolved to a different digest.
     #[error(
         "pin digest mismatch for {tag}: expected {expected} but registry resolved {resolved}{hint}",
         hint = if let Some(h) = hint { format!("; {h}") } else { String::new() }
@@ -61,16 +49,11 @@ pub enum Error {
         expected: ocx_oci::Digest,
         /// The digest the registry (or local index) resolved for the tag.
         resolved: ocx_oci::Digest,
-        /// Optional hint shown when resolution was against the local index and
-        /// the mismatch may be caused by a stale index
-        /// (e.g. `"run \`ocx index update\` to refresh the local index"`).
+        /// Stale-index hint; `ensure_pinned` always sets it, since it cannot tell whether the local index resolved
+        /// the tag.
         hint: Option<String>,
     },
-    /// The `--managed-config` ref could not be re-parsed as a valid OCI
-    /// identifier at write time (defensive re-validation, CWE-74 guard —
-    /// the fence body is real TOML serialization, never `format!`
-    /// interpolation of the raw ref, but the ref itself must still be a
-    /// well-formed identifier before it is adopted at all).
+    /// The `--managed-config` ref failed re-validation as an OCI identifier at write time.
     #[error("managed config source '{value}' is not a valid OCI identifier")]
     InvalidManagedConfigSource {
         /// The rejected `--managed-config` value.
@@ -79,55 +62,32 @@ pub enum Error {
         #[source]
         source: ocx_oci::package_ref::error::IdentifierError,
     },
-    /// The synchronous fetch+persist step during `--managed-config` adoption
-    /// failed. Per ADR "Setup ordering", no fence is written on failure — the
-    /// caller sees zero partial state.
+    /// Fetching and persisting the managed-config snapshot failed; no fence is
+    /// written (`adr_managed_config_tier.md` § Setup ordering).
     #[error("failed to sync the managed-config snapshot")]
     ManagedConfigUpdateFailed(#[from] ocx_config::managed_config::ManagedConfigUpdateError),
-    /// A system-locked managed tier refused an explicit override that would
-    /// clear or redirect it (locks only tighten — exit 78). The CLI seam
-    /// (`resolve_managed_config_arg`) rejects this before calling in, but
-    /// [`crate::apply_managed_config`] re-checks so the public library
-    /// function cannot be bypassed by a direct caller.
+    /// A system-locked managed tier refused an override that would clear or
+    /// redirect it (exit 78).
+    // Re-checked in `apply_managed_config`, or a direct library caller bypasses the CLI's check.
     #[error(transparent)]
     ManagedConfigLocked(#[from] ocx_config::managed::ManagedConfigError),
-    /// A directory cannot be encoded for this host's session-PATH format, so
-    /// the session-PATH registration was refused **before** anything was
-    /// written (C-037, exit 78).
+    /// A directory cannot be encoded for this host's session-PATH format;
+    /// refused before anything was written (exit 78).
     ///
-    /// This is the only way a session-PATH failure reaches an `Err`. A write
-    /// that is attempted and fails is
-    /// [`crate::SessionPathOutcome::Failed`] — an outcome carried in the
-    /// `Ok` arm, warned about, and exit 0 (C-036). The split is the contract:
-    /// a refused run left the machine byte-identical, whereas a failed write
-    /// left it as it was and is worth a warning, not an abort.
+    /// A write that fails is [`crate::SessionPathOutcome::Failed`] in the `Ok` arm, not this.
     #[error(transparent)]
     SessionPath(#[from] crate::session_path::SessionPathError),
-    /// Phase 0.5 (C-008, ocx#448): `OCX_EXTRA_CA_CERTS` resolved to material
-    /// `config::tls::parse_pem` refused (C-004) — the
-    /// single choke point every extra-CA-roots byte passes through before any
-    /// write. `#[error(transparent)]` forwards `source()` straight past this
-    /// variant to `TlsError`'s own cause, so `TlsError` is never itself a
-    /// chain link the walker can downcast — classification is delegated
-    /// inline instead, mirroring [`Error::SessionPath`] above (not
-    /// `Bootstrap`/`ManagedConfigUpdateFailed`, whose `#[from]` field carries
-    /// its own `#[error("...")]` message and so IS a walkable link).
+    /// `OCX_EXTRA_CA_CERTS` resolved to material `parse_pem` refused, before any write.
+    // Transparent: `TlsError` is never a walker link, so the classifier matches this variant.
     #[error(transparent)]
     ExtraCaCerts(#[from] ocx_config::tls::TlsError),
-    /// A `config.toml` read-modify-write ([`ocx_config::edit`]) did not
-    /// land: the lock timed out (75), or the read, parse, shape check or
-    /// atomic write failed (74). Transparent and delegating like
-    /// [`Error::ExtraCaCerts`], so the edit's own message and code reach the
-    /// CLI unwrapped — the path is named once, by the edit.
+    /// A `config.toml` read-modify-write ([`ocx_config::edit`]) did not land:
+    /// lock timeout (75), or read, parse, shape check or write failure (74).
     #[error(transparent)]
     ConfigEdit(#[from] ocx_config::edit::EditError),
-    /// Phase 0.5: the bundle `OCX_EXTRA_CA_CERTS` names is valid PEM but not
-    /// UTF-8 (a Latin-1 label line ahead of a block), so it cannot be
-    /// persisted as a TOML string. The registry/index/forge clients still
-    /// trust it — `parse_pem` is bytes-native — only the persistence refuses,
-    /// and as data (65, the `ManagedConfigPublishError::ExtraCaCertsNotUtf8`
-    /// precedent): the file's bytes are what is wrong. Carries the byte count
-    /// only, never the bytes (D-11).
+    /// The `OCX_EXTRA_CA_CERTS` bundle is valid PEM but not UTF-8, so it cannot
+    /// be persisted as a TOML string (exit 65).
+    // Carries the byte count only, never the bytes.
     #[error(
         "OCX_EXTRA_CA_CERTS names a bundle that is not UTF-8 ({bytes} bytes) and cannot be persisted; strip the \
          non-UTF-8 label lines outside the -----BEGIN/-----END blocks, or set `extra_ca_certs = \"<path>\"` in \
@@ -137,12 +97,9 @@ pub enum Error {
         /// The bundle's length.
         bytes: usize,
     },
-    /// Phase 0.5: the `config.toml` document `extra_ca_certs_pem` would
-    /// render into is, or would be, over the loader's own size ceiling
-    /// (64 KiB, `config::loader::MAX_CONFIG_SIZE`) — refused before any
-    /// write, so a value that would make the file unloadable is never
-    /// persisted. "Would leave", not "would grow": a file already over the
-    /// ceiling is refused with its size on disk, before the bundle is added.
+    /// Persisting `extra_ca_certs_pem` would leave `config.toml` over the
+    /// loader's size ceiling; refused before any write, also when the file is
+    /// already over it.
     #[error(
         "persisting OCX_EXTRA_CA_CERTS would leave {path} at {bytes} bytes, over the {}-byte config limit; shrink the \
          file, or set `extra_ca_certs = \"<path>\"` in it instead",

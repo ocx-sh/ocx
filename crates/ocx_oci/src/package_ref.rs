@@ -14,17 +14,11 @@ pub const DEFAULT_REGISTRY: &str = OCX_SH_REGISTRY;
 
 const MAX_REPOSITORY_LENGTH: usize = 255;
 
-/// A parsed OCI identifier with registry, repository, optional tag, and optional digest.
+/// The **package** identifier a user, lock or metadata spells:
+/// `registry/repository[:tag][@digest]`, never injecting `"latest"`.
 ///
-/// Unlike `oci_spec::Reference`, this type does not inject `"latest"` when no tag
-/// is present, does not default to `docker.io`, and provides structured parse errors
-/// via [`IdentifierError`].
-///
-/// This is the **package** identifier — the name a user, a lock or package
-/// metadata spells. It is never dialled: a registry request takes a
-/// [`crate::OciIdentifier`], and the only way from one to the other is routing
-/// it through the index (`ocx_index::Index::route`). The two types have no
-/// conversion either way (ocx#504).
+/// Never dialled: a request takes a [`crate::OciIdentifier`], reached only
+/// through `ocx_index::Index::route`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct PackageRef {
     registry: String,
@@ -34,10 +28,7 @@ pub struct PackageRef {
 }
 
 impl PackageRef {
-    /// Creates an identifier from explicit repository and registry strings.
-    ///
-    /// No parsing is performed — the values are taken as-is.
-    /// The resulting identifier has no tag and no digest.
+    /// An identifier from explicit repository and registry strings, unparsed and unversioned.
     pub fn new_registry(repository: impl Into<String>, registry: impl Into<String>) -> Self {
         Self {
             registry: registry.into(),
@@ -49,17 +40,10 @@ impl PackageRef {
 
     /// Parses an identifier string that must contain an explicit registry.
     ///
-    /// Returns [`IdentifierErrorKind::MissingRegistry`] if the input does not
-    /// contain an explicit registry (e.g. `"cmake:3.28"` or `"myorg/tool"`).
-    /// Returns [`IdentifierErrorKind::DirectoryTraversal`] if any path segment
-    /// is `.` or `..`.
+    /// # Errors
     ///
-    /// This parser does **not** inject `"latest"` when the input has no tag
-    /// — bare-repo inputs like `"ocx.sh/cmake"` parse to `tag = None`. The
-    /// project-config layer (`ocx_project::config::ProjectConfig::from_toml_str`,
-    /// still in `ocx_lib`) applies its own `:latest` default at the schema boundary so an
-    /// `ocx.toml` entry without a tag resolves predictably; that default
-    /// does not apply to other [`PackageRef::parse`] callers.
+    /// [`IdentifierErrorKind::MissingRegistry`] without one (`"cmake:3.28"`),
+    /// or any other grammar violation.
     pub fn parse(input: &str) -> Result<Self, IdentifierError> {
         validate_segments(input)?;
         if !has_explicit_registry(input) {
@@ -71,31 +55,16 @@ impl PackageRef {
         parse_internal(input, DEFAULT_REGISTRY)
     }
 
-    /// Parses an identifier string, using `default_registry` for inputs that
-    /// do not contain an explicit registry (e.g. `"cmake:3.28"` or `"myorg/tool"`).
-    ///
-    /// If the input already contains a registry (detected by a `.` or `:` in the
-    /// first path segment, or `"localhost"`), the default is ignored.
+    /// Parses an identifier string, using `default_registry` when the input names none.
     pub fn parse_with_default_registry(s: &str, default_registry: &str) -> Result<Self, IdentifierError> {
         validate_segments(s)?;
         parse_internal(s, default_registry)
     }
 
-    /// Validates a bare repository path against the grammar [`parse`] enforces
-    /// on the repository half of an identifier.
+    /// Validates a repository path a caller will use verbatim.
     ///
-    /// For callers that take a repository from a foreign source and use it
-    /// **verbatim** — a catalog key read off an index someone else authored,
-    /// say, which [`new_registry`] then adopts without parsing. Parsing such a
-    /// string and discarding the result is not this check: `parse` splits the
-    /// tag and digest off *before* the uppercase, length and character-class
-    /// guards run, so `ns/pkg:<anything>` passes as the repository `ns/pkg`
-    /// while the caller goes on to use the whole string. This applies every
-    /// guard to the string as given, and additionally rejects a `.` or `..`
-    /// segment, which `parse` catches earlier via its own whole-input pass.
-    ///
-    /// [`parse`]: Self::parse
-    /// [`new_registry`]: Self::new_registry
+    /// Not replaceable by parse-and-discard: `parse` splits off `:tag` first,
+    /// so `ns/pkg:<anything>` would pass while the caller keeps the whole string.
     ///
     /// # Errors
     ///
@@ -110,11 +79,8 @@ impl PackageRef {
         }
     }
 
-    /// Returns a new identifier with the given tag, dropping any existing digest.
-    ///
-    /// The digest is dropped because changing the tag semantically creates a
-    /// different reference — the old digest no longer applies.
-    /// Any `+` in the tag is normalized to `_` (OCI tags do not allow `+`).
+    /// Returns a new identifier with the given tag, dropping any existing digest;
+    /// `+` normalizes to `_`.
     pub fn clone_with_tag(&self, tag: impl Into<String>) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -124,7 +90,6 @@ impl PackageRef {
         }
     }
 
-    /// Clones with the given digest, preserving the existing tag.
     pub fn clone_with_digest(&self, digest: Digest) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -134,7 +99,6 @@ impl PackageRef {
         }
     }
 
-    /// Useful for matching entries that differ only by digest (e.g., candidate vs content mode).
     pub fn without_digest(&self) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -144,7 +108,6 @@ impl PackageRef {
         }
     }
 
-    /// Strips the tag, preserving registry, repository, and digest.
     pub fn without_tag(&self) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -154,9 +117,6 @@ impl PackageRef {
         }
     }
 
-    /// Returns a new identifier with only registry and repository — tag and digest stripped.
-    ///
-    /// Useful for grouping or deduplicating by package identity regardless of version.
     pub fn without_specifiers(&self) -> Self {
         Self {
             registry: self.registry.clone(),
@@ -166,92 +126,53 @@ impl PackageRef {
         }
     }
 
-    /// Returns the registry hostname (and optional port), e.g. `"ghcr.io"` or `"localhost:5000"`.
     pub fn registry(&self) -> &str {
         &self.registry
     }
 
-    /// Returns the repository path within the registry, e.g. `"library/ubuntu"` or `"cmake"`.
     pub fn repository(&self) -> &str {
         &self.repository
     }
 
-    /// Returns the last segment of the repository path as the package name.
-    ///
-    /// For `"myorg/cmake"` this returns `"cmake"`.
-    /// For a single-segment repository like `"python"` this returns `"python"`.
+    /// The last repository path segment.
     pub fn name(&self) -> &str {
         self.repository.rsplit('/').next().unwrap_or(&self.repository)
     }
 
-    /// Returns the **first** segment of the repository path — the org.
-    ///
-    /// For `"acme/tools/cmake"` this returns `"acme"`; for a single-segment
-    /// repository like `"python"` it returns `"python"`. The mirror image of
-    /// [`name`](Self::name), which returns the last segment.
-    ///
-    /// The unit of shell-activation consent (C-026): `<registry>/<first path
-    /// segment>` is the org — the unit an operator controls and the unit an
-    /// attacker must register. Registry granularity alone would be nearly
-    /// vacuous (consent to one GHCR org would consent to all of GHCR); full
-    /// repository granularity would re-prompt on every ordinary tool addition.
-    ///
-    /// Lives on the coordinate rather than in `project::consent` because it is
-    /// a property of the coordinate, and `ocx shell state`'s diagnostics are
-    /// already a second consumer.
+    /// The first repository path segment: the unit of shell-activation consent
+    /// (`adr_shell_env_overhaul.md` § Rationale from code: ocx_oci).
     pub fn first_path_segment(&self) -> &str {
         self.repository.split('/').next().unwrap_or(&self.repository)
     }
 
-    /// Returns the tag if one was explicitly provided, or `None` otherwise.
-    ///
-    /// Unlike `oci_spec::Reference`, this does **not** inject `"latest"` when
-    /// no tag is present. Use [`tag_or_latest`](Self::tag_or_latest) when a
-    /// fallback to `"latest"` is desired.
     pub fn tag(&self) -> Option<&str> {
         self.tag.as_deref()
     }
 
-    /// Returns the tag if present, or `"latest"` as a default.
     pub fn tag_or_latest(&self) -> &str {
         self.tag.as_deref().unwrap_or("latest")
     }
 
-    /// Content-addressed digest, if pinned.
     pub fn digest(&self) -> Option<Digest> {
         self.digest.clone()
     }
 
-    /// Whether `location` names this identifier's registry and repository.
-    ///
-    /// The one comparison between a package identifier and a physical OCI
-    /// location, and deliberately a comparison of coordinates rather than a
-    /// conversion: the two types never turn into each other. Tag and digest are
-    /// ignored — routing carries them over, so they cannot tell a rewrite from
-    /// a passthrough.
+    /// Whether `location` names this identifier's registry and repository;
+    /// tag and digest are ignored, since routing carries them over either way.
     pub fn is_located_at(&self, location: &crate::OciIdentifier) -> bool {
         self.registry == location.registry() && self.repository == location.repository()
     }
 }
 
-/// Returns the canonical, untagged OCX CLI identifier (`ocx.sh/ocx/cli`).
+/// The canonical, untagged OCX CLI identifier (`ocx.sh/ocx/cli`).
 ///
-/// This is the single source of truth for the well-known self identifier used
-/// by self-update, self-setup, and activation. Self-management is opinionated
-/// about its registry, so the value is fixed rather than configurable.
-///
-/// The seam below is a **test-only** override, gated behind `cfg(test)` or the
-/// `__testing` Cargo feature so release artifacts physically lack the code
-/// path. The override only honors loopback registries.
+/// The `__OCX_SELF_IMAGE` override is compiled only for tests, and honours loopback registries only.
 pub fn ocx_cli_identifier() -> PackageRef {
     #[cfg(any(test, feature = "__testing"))]
     {
         if let Ok(spec) = std::env::var("__OCX_SELF_IMAGE")
             && let Some((registry, repository)) = parse_self_image_spec(&spec)
         {
-            // Defense-in-depth: even with the seam compiled in, refuse any
-            // override that does not point at a loopback registry. Asserts
-            // loudly in tests; release builds never link this branch.
             assert!(
                 is_loopback_registry(registry),
                 "__OCX_SELF_IMAGE override must target a loopback registry; got `{registry}`"
@@ -262,31 +183,20 @@ pub fn ocx_cli_identifier() -> PackageRef {
     PackageRef::new_registry("ocx/cli", OCX_SH_REGISTRY)
 }
 
-/// Parses the `__OCX_SELF_IMAGE` test-only seam value.
-///
-/// Format: `<registry>/<repo>` where the first `/` separates registry from
-/// repo (registry may contain `:port`, repo may contain further `/` segments).
-/// Returns `None` on malformed input.
+/// Parses `__OCX_SELF_IMAGE` as `<registry>/<repo>`, split at the first `/`.
 #[cfg(any(test, feature = "__testing"))]
 fn parse_self_image_spec(spec: &str) -> Option<(&str, &str)> {
     spec.split_once('/').filter(|(r, p)| !r.is_empty() && !p.is_empty())
 }
 
-/// Loopback-registry check for the `__OCX_SELF_IMAGE` seam.
-///
-/// Accepts `localhost`, `127.0.0.1`, and the IPv6 loopback `::1` (with or
-/// without bracketed `[::1]` host syntax), each with an optional `:port`.
 #[cfg(any(test, feature = "__testing"))]
 fn is_loopback_registry(registry: &str) -> bool {
-    // Bracketed IPv6 form: `[host]` or `[host]:port`. Extract the host inside.
     let host = if let Some(stripped) = registry.strip_prefix('[') {
         match stripped.split_once(']') {
             Some((inner, _)) => inner,
             None => return false,
         }
     } else {
-        // Bare host or `host:port`. IPv4 / DNS names never contain `:` so the
-        // first `:` always splits host from port.
         registry.split_once(':').map_or(registry, |(host, _)| host)
     };
     host == "localhost" || host == "127.0.0.1" || host == "::1"
@@ -334,7 +244,6 @@ impl<'de> Deserialize<'de> for PackageRef {
 
 // ── Parser ───────────────────────────────────────────────────────────
 
-/// Validates that no path segment is `.` or `..` (directory traversal defence).
 fn validate_segments(input: &str) -> Result<(), IdentifierError> {
     let name_part = input.split_once('@').map_or(input, |(name, _)| name);
     for segment in name_part.split('/') {
@@ -349,19 +258,14 @@ fn validate_segments(input: &str) -> Result<(), IdentifierError> {
     Ok(())
 }
 
-/// Whether a leading path segment names a host rather than a path component.
+/// Whether a leading path segment names a host: it carries a `.` or `:`, or is `localhost`.
 ///
-/// The rule every caller shares: a segment is a host when it carries a `.` (a
-/// domain), a `:` (an explicit port), or is the bare name `localhost`. Anything
-/// else is an ordinary path segment. Exported because the forge coordinate
-/// grammar (`[HOST/]NAMESPACE/PROJECT`) asks the identical question, and two
-/// spellings of it would drift apart the first time either is relaxed.
+/// Shared with the forge coordinate grammar, or the two spellings drift apart.
 #[must_use]
 pub fn segment_is_host(segment: &str) -> bool {
     segment.contains('.') || segment.contains(':') || segment == "localhost"
 }
 
-/// Checks whether the input contains an explicit registry in the first path segment.
 fn has_explicit_registry(input: &str) -> bool {
     let name_part = input.split_once('@').map_or(input, |(name, _)| name);
     match name_part.split_once('/') {
@@ -378,28 +282,21 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<PackageRef, Ide
         });
     }
 
-    // Split off digest portion (everything after '@').
     let (name_part, digest) = match input.split_once('@') {
         Some((name, digest_str)) => (name, Some(parse_digest(input, digest_str)?)),
         None => (input, None),
     };
 
-    // Split tag from the name portion.
-    // We need to find the tag in the last path segment only (after the last '/'),
-    // so that registry ports like `localhost:5000` are not mistaken for tags.
     let (name_without_tag, tag) = split_tag(name_part);
 
-    // Prepend default domain if needed.
     let full_name = prepend_domain(name_without_tag, default_registry);
 
-    // Split registry from repository.
     let (registry, repository) = split_registry_repository(&full_name).ok_or_else(|| IdentifierError {
         input: input.to_string(),
         kind: IdentifierErrorKind::InvalidFormat,
     })?;
 
-    // Validate repository. Reported against the whole input, which is what the
-    // caller passed and what every existing error message quotes.
+    // Reported against the whole input, which every error message quotes.
     if let Some(kind) = repository_error_kind(&repository) {
         return Err(IdentifierError {
             input: input.to_string(),
@@ -415,22 +312,8 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<PackageRef, Ide
     })
 }
 
-/// The reason `repository` is not a legal repository path, or `None`.
-///
-/// The single statement of the repository grammar: [`parse_internal`] applies it
-/// to the repository it decomposed, [`PackageRef::validate_repository`] applies
-/// it to a string a caller means to use verbatim. Returns the *kind* rather than
-/// a full error so each caller can quote the input the user actually gave.
-///
-/// Extracting it widened `parse_internal` by one rule: the `.`/`..` segment
-/// check used to run only in `validate_segments`, which
-/// [`PackageRef::parse`] and [`PackageRef::parse_with_default_registry`] call
-/// and [`FromStr`] does not. So `"ocx.sh/ns/../evil".parse::<PackageRef>()`
-/// was `Ok` with a traversing repository and is now
-/// [`IdentifierErrorKind::DirectoryTraversal`]. Deliberate — a traversing
-/// repository is never a legal one, and the two entry points disagreeing about
-/// that is the defect, not the fix. Every kind classifies to exit 65, so no exit
-/// code moves; only the accepted-input set narrows.
+/// The reason `repository` is not a legal repository path, or `None` — the one
+/// statement of the grammar every entry point applies.
 fn repository_error_kind(repository: &str) -> Option<IdentifierErrorKind> {
     if repository.chars().any(|c| c.is_ascii_uppercase()) {
         return Some(IdentifierErrorKind::UppercaseRepository);
@@ -438,22 +321,13 @@ fn repository_error_kind(repository: &str) -> Option<IdentifierErrorKind> {
     if repository.len() > MAX_REPOSITORY_LENGTH {
         return Some(IdentifierErrorKind::RepositoryTooLong);
     }
-    // A `.`/`..` segment is charset-legal (`.` is a permitted byte), so the
-    // traversal check cannot be folded into the byte scan below. `parse` reaches
-    // this via `validate_segments` on the whole input first; a caller validating
-    // a bare repository has no other guard, and `..` in a repository is what
-    // walks a request URL out of an index's declared base path.
+    // Not foldable into the byte scan (`.` is a legal byte), and the only guard
+    // for `validate_repository`: a `..` walks a request URL out of an index's base path.
     for segment in repository.split('/') {
         if segment == "." || segment == ".." {
             return Some(IdentifierErrorKind::DirectoryTraversal);
         }
     }
-    // Character-class guard (OCI distribution spec repository grammar,
-    // narrowed to what the uppercase check above doesn't already cover): each
-    // `/`-segment must be non-empty and contain only lowercase alphanumerics,
-    // `.`, `_`, or `-`. Catches garbage input (spaces, punctuation) that would
-    // otherwise silently parse into a syntactically well-formed but
-    // registry-illegal identifier.
     if repository
         .split('/')
         .any(|segment| segment.is_empty() || !segment.bytes().all(is_repository_segment_byte))
@@ -463,12 +337,10 @@ fn repository_error_kind(repository: &str) -> Option<IdentifierErrorKind> {
     None
 }
 
-/// Whether `byte` is a legal character inside one `/`-separated repository segment.
 fn is_repository_segment_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
 }
 
-/// Parses a digest string like `sha256:abcdef...` into a `Digest`.
 fn parse_digest(input: &str, digest_str: &str) -> Result<Digest, IdentifierError> {
     Digest::try_from(digest_str).map_err(|_| IdentifierError {
         input: input.to_string(),
@@ -476,10 +348,7 @@ fn parse_digest(input: &str, digest_str: &str) -> Result<Digest, IdentifierError
     })
 }
 
-/// Splits the tag from the name portion. Returns `(name_without_tag, Option<tag>)`.
-///
-/// Only looks for a `:` in the last path segment (after the last `/`),
-/// so registry ports like `localhost:5000` are not mistaken for tags.
+/// Splits the tag off the last path segment only, or a `localhost:5000` port reads as a tag.
 fn split_tag(name: &str) -> (&str, Option<String>) {
     let last_slash = name.rfind('/');
     let last_segment = match last_slash {
@@ -500,20 +369,12 @@ fn split_tag(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Normalizes `+` to `_` in a tag string.
-///
-/// OCI tags do not allow `+` (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`).
-/// This is the earliest boundary where user input enters the system.
+/// OCI tags forbid `+`; normalized here, at the earliest boundary user input crosses.
 fn normalize_tag(tag: String) -> String {
     tag.replace('+', "_")
 }
 
-/// Splits `full_name` into `(registry, repository)`.
-///
-/// The first segment (before the first `/`) is the registry if it contains
-/// a `.` or `:`, or is `"localhost"`. Otherwise the entire string is the
-/// repository under the default registry (but that case is handled by
-/// `prepend_domain` before this function is called).
+/// Splits at the first `/`; `prepend_domain` must already have supplied a registry.
 fn split_registry_repository(full_name: &str) -> Option<(String, String)> {
     let (first, rest) = full_name.split_once('/')?;
     Some((first.to_string(), rest.to_string()))
@@ -551,7 +412,7 @@ mod tests {
 
     // ── Path segments ────────────────────────────────────────────────────
 
-    /// C-026: the first repository segment is the org — the mirror image of
+    /// The first repository segment is the org — the mirror image of
     /// [`PackageRef::name`], and the half of a consent source that is not the
     /// registry.
     #[test]

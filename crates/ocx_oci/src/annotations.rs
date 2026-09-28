@@ -18,8 +18,6 @@ pub const LICENSES: &str = "org.opencontainers.image.licenses";
 // OCX-specific annotations.
 pub const KEYWORDS: &str = "sh.ocx.keywords";
 
-// Per-layer placement annotations carried on a manifest layer descriptor.
-// Written only when the publisher explicitly supplies layout (BC2); read at
-// assemble time via `crate::layer_layout::resolve_layer_placement`.
+// Per-layer placement, written only when the publisher supplies a layout.
 pub const LAYER_STRIP_COMPONENTS: &str = "sh.ocx.layer.strip-components";
 pub const LAYER_PREFIX: &str = "sh.ocx.layer.prefix";

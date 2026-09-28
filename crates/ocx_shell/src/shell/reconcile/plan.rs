@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The typed three-way reconciliation planner ([ocx-sh/ocx#345](https://github.com/ocx-sh/ocx/issues/345)):
-//! diffs desired (D) against current (C), scoped by the
-//! [`super::Ledger`] (L), and produces the [`Plan`] a shell arm renders
-//! (C-011).
-//!
-//! The carrier is **untrusted input** (C-007): its only permitted effects are
-//! naming the revert set and supplying the equality operand for the exit
-//! guard. Nothing here constructs a path from it, re-grants consent, or
-//! selects a value for a key it is not reverting.
+//! The typed three-way reconciliation planner: diffs desired (D) against current (C), scoped by
+//! the [`super::Ledger`] (L), and produces the [`Plan`] a shell arm renders.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
@@ -33,34 +26,23 @@ use super::ledger::{Applied, LEDGER_VERSION, ProjectScope, ScopeId, Scopes};
 #[cfg(test)]
 use super::unquote;
 
-/// The structural version of [`Plan`]'s JSON wire shape (A-23).
+/// The structural version of [`Plan`]'s JSON wire shape; bumps on a breaking reshape, never on an added field.
 ///
-/// Bumps on a breaking reshape, never on an added field. A consumer seeing an
-/// absent or unrecognised `v` applies nothing that prompt and returns silently.
+/// A consumer seeing an absent or unrecognised `v` applies nothing that prompt.
 pub const PLAN_VERSION: u8 = 1;
 
-/// The typed three-way diff a single prompt executes (C-011).
+/// The typed three-way diff a single prompt executes; it never contains shell text.
 ///
-/// A-23 — the JSON wire shape carries a top-level `"v": 1` on the same envelope
-/// discipline as the ledger: `v` is **structural only**, bumping on a breaking
-/// reshape and never on an added field, and the nushell consumer applies one
-/// rule — `v` absent or unrecognised ⇒ apply nothing this prompt and return
-/// silently (C-048).
-///
-/// The wire shape is `{"v":1,"sets":[…LedgerEntry-shaped…],"removes":[[key,
-/// element,sep|null],…],"restores":[[key,value|null],…]}`. `Plan` never
-/// contains shell text (C-009) — per-shell rendering stays in `Shell`.
+/// Wire shape: `{"v":1,"sets":[…LedgerEntry-shaped…],"removes":[[key,element,sep|null],…],
+/// "restores":[[key,value|null],…]}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
-    /// Structural wire version (A-23).
     pub v: u8,
     /// Apply: constants and list/path contributions.
-    // `Entry` derives no serde at all, so the wire shape borrows
-    // `LedgerEntry`'s — which is also what makes `type` the field name here.
+    // Serialized as `LedgerEntry`, which is what makes `type` the wire field name.
     #[serde(serialize_with = "serialize_sets")]
     pub sets: Vec<Entry>,
-    /// Remove one element: `(key, element, separator)`. The separator rides
-    /// per element — the whole point of C-014's signature.
+    /// Remove one element: `(key, element, separator)`; the separator names the kind (`None` path, `Some` list).
     pub removes: Vec<(String, String, Option<String>)>,
     /// Restore a constant: `(key, prior)`, where `None` means unset it.
     pub restores: Vec<(String, Option<String>)>,
@@ -73,33 +55,13 @@ where
     serializer.collect_seq(sets.iter().map(LedgerEntry::from))
 }
 
-/// Diff desired against current, scoped by the ledger (C-010).
+/// Diff desired against current, scoped by the ledger.
 ///
-/// **Pure but for one `realpath` per owned prefix** ([`owned_spellings`], and
-/// only when there is a path-kind key to repair): no clock, no env reads beyond
-/// `current`, platform-neutral and unit-testable. Called once per scope-stack
-/// pass, producing one [`Plan`] covering both scopes in emission order — global
-/// first, project second for all three kinds (C-018, A-07).
-///
-/// `owned_prefixes` is **required, not optional**: both the degradation rule
-/// (C-006) and the ownership rule (C-016) make `plan` responsible for repairing
-/// lists when the ledger is lost, which needs `$OCX_HOME`. Ownership is
-/// component-wise, never a byte prefix (A-09), and each prefix counts in the
-/// spelling the caller gave **and** in its resolved spelling — see
-/// [`owned_spellings`] for why both, and why the segment side is never resolved.
-///
-/// A-10 — before anything reaches [`Plan`] or the ledger, `plan` drops four
-/// classes with one warn-once line each: a key failing
-/// [`ocx_util::env::is_valid_env_key`]; a path-kind value containing
-/// [`ocx_util::env::PATH_SEPARATOR`]; an empty list or path element; an element
-/// containing LF or CR. A-02 — it also refuses [`ModifierKind::Constant`] for
-/// `PATH` and `PATHEXT`, compared case-insensitively on Windows.
+/// Pure but for one `realpath` per owned prefix. `owned_prefixes` drives the lost-ledger repair,
+/// which removes every segment under them that D does not want.
 pub fn plan(desired: &[Entry], current: &Env, ledger: &Ledger, owned_prefixes: &[&Path]) -> Plan {
     let emittable = emittable(desired);
-    // `declared` answers rule (b) — "what kind does D give this key *now*" —
-    // and `contributed` answers "is this exact element still wanted". Both are
-    // keyed by the platform's own key-equality so a Windows `Path`/`PATH` pair
-    // is one slot, as `EnvKey` already treats it.
+    // Keyed by `key_norm`, so a Windows `Path`/`PATH` pair is one slot.
     let declared = declared_index(&emittable);
     let contributed = contributed_elements(&emittable);
     let recorded = recorded_index(ledger);
@@ -134,72 +96,14 @@ pub fn plan(desired: &[Entry], current: &Env, ledger: &Ledger, owned_prefixes: &
     plan
 }
 
-/// The human-facing change summary for one prompt, or `None` when nothing
-/// changed.
+/// The human-facing change summary for one prompt, or `None` when nothing changed.
 ///
-/// A **delta against the ledger**, not a transcript of what was applied. The
-/// ledger is the record of the previously-applied state, so the two sides of
-/// the comparison are `previous` and `next`, and each variable the plan touches
-/// gets exactly one token:
-///
-/// - `+KEY` — no previous ledger recorded it; this prompt starts setting it.
-/// - `~KEY` — both ledgers record it; what ocx sets for it changed.
-/// - `-KEY` — the previous ledger recorded it and the next one does not; this
-///   prompt stops setting it.
-///
-/// There is no fourth mark for the lost-ledger repair (C-006): it retires
-/// ocx-owned segments from a variable D still declares, so it rides that key's
-/// own `+` rather than producing a token of its own. A key **neither** ledger
-/// records reads `+` too — the session `PATH` directories are desired on every
-/// prompt that composes a desired set at all (C-042's stat-only fast path
-/// composes none) and recorded on none (C-059, RUL-92), and a prompt whose only
-/// `PATH` contribution is that block is starting to set the variable, not
-/// stopping.
-///
-/// When this prompt **changed which project is in effect** — both ledgers name
-/// a project and they differ — the line ends with that project's directory
-/// name. A switch is the one transition where the marks alone are ambiguous: a
-/// bare `ocx: ~PATH` says a variable moved without saying what moved it.
-/// Entering from a project-free prompt, or leaving to one, is not ambiguous —
-/// the `+`/`-` marks already say which direction — so neither is named.
-///
-/// **Folded per variable, never per statement.** A `PATH` seven scopes
-/// contribute to is one token — the reader is being told which variables moved,
-/// and repeating `+PATH` once per contribution tells them only how many
-/// statements the emitter wrote.
-///
-/// **Sorted by key** (case-folded on Windows, as [`key_norm`] already folds
-/// them). Emission order would be equally deterministic, but a variable both
-/// scopes contribute to *has* no single position in it, and a per-key sort is
-/// the ordering a reader can predict.
-///
-/// Variables the plan does not touch never appear: a key whose composed value
-/// is already live is dropped by [`apply_set`] before it reaches [`Plan`], so a
-/// settled prompt produces an empty plan and no line at all.
-///
-/// # Colour
-///
-/// `theme` inks the marks ([`ink`]) and dims the chrome — the `ocx:` prefix and
-/// the project name. The **decision** is the caller's: this takes a resolved
-/// [`Theme`] and never asks the environment anything, so `--color never`,
-/// `NO_COLOR` and a non-terminal destination are all answered in one place
-/// upstream. With colour off, [`Theme`]'s paint methods are the identity and
-/// this returns the same bytes it always did.
-///
-/// The line rides the **eval'd** `--reconcile` stream (A-21): it reaches the
-/// user through `Shell::emit_message`, which passes it to that arm's `printf`
-/// as a format *argument* inside a quoted literal. An SGR sequence is therefore
-/// data on every arm — no arm's escaper touches `\x1b`, and none of the nine
-/// can parse it as source. `the_inked_line_survives_every_arms_quoting` pins
-/// exactly that, and `Shell`'s own live round trip runs it through real shells.
+/// One `+KEY`/`~KEY`/`-KEY` token per touched variable, a delta against the ledger; a project
+/// switch appends the new project's directory name.
 pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> Option<String> {
     let before = applied_keys(previous);
     let after = applied_keys(next);
 
-    // `BTreeMap` for the sort; the value keeps the key **as the plan spells
-    // it**, so the line shows the user's own casing rather than the folded
-    // form. The mark is a function of the normalized key alone, so every
-    // occurrence of one variable agrees and first-seen wins without ambiguity.
     let mut marks: BTreeMap<String, String> = BTreeMap::new();
     let touched = plan
         .sets
@@ -213,20 +117,7 @@ pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> 
             (false, true) => '+',
             (true, true) => '~',
             (true, false) => '-',
-            // Reachable, and `+` is the honest mark. The two session `PATH`
-            // directories (C-059) are in the desired set of every prompt that
-            // composes one — C-042's stat-only fast path composes none and
-            // never reaches here — but are deliberately **not** recorded in the
-            // ledger (RUL-92): they are
-            // unconditional, so there is nothing for a later prompt to retire
-            // or revert. A prompt whose only `PATH` contribution is the session
-            // block therefore names a key neither ledger records — and this
-            // prompt does start setting it, which is what `+` says. `-` said
-            // "ocx stops setting PATH" on the very prompt it started.
-            //
-            // The lost-ledger repair (C-006) never lands here: it retires a
-            // segment of a key D still declares, so that key is in `after` and
-            // the repair rides its `(false, true)` `+`.
+            // Reachable via the unrecorded session `PATH` dirs; `-` would claim ocx stopped setting a key it just set.
             (false, false) => '+',
         };
         marks.entry(norm).or_insert_with(|| ink(theme, mark, key));
@@ -244,37 +135,18 @@ pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> 
 }
 
 /// One `+KEY` / `~KEY` / `-KEY` token, inked by what its mark means.
-///
-/// The marks are the whole content of the line, so they are what carries the
-/// colour — and the inks come from the vocabulary the rest of the CLI already
-/// uses rather than a palette of this line's own: [`Theme::ok`] for a variable
-/// this prompt starts setting, [`Theme::tag`] — the neutral value-token accent —
-/// for one whose value moved, [`Theme::alert`] for one it stops setting.
-///
-/// Mark and key are inked as **one** token. A coloured sigil in front of a bare
-/// key reads as two things, and a reader glancing at a prompt is scanning for
-/// one.
 fn ink(theme: &Theme, mark: char, key: &str) -> String {
     let token = format!("{mark}{key}");
     match mark {
         '+' => theme.ok(token),
         '~' => theme.tag(token),
-        // Retirement. `-` is the only mark that reaches here: the caller's
-        // four arms produce three marks, and both arms that yield `+` are
-        // matched above.
         _ => theme.alert(token),
     }
 }
 
-/// The directory name of the project now in effect, but **only** when this
-/// prompt changed which project that is.
+/// The new project's directory name, only when this prompt switched from one project to another.
 ///
-/// A switch is the one transition the marks cannot describe: leaving `/w/a` for
-/// `/w/b` retires one project's contributions and applies another's, and every
-/// variable both touch comes back as a bare `~`. Entering from a project-free
-/// prompt and leaving to one are already unambiguous, so neither is named — and
-/// the recorded directory is advisory (C-007 rule (a), A-03), which is why only
-/// its final component is rendered and nothing is ever built from it.
+/// Only the final component is rendered: the recorded directory is untrusted.
 fn switched_project(previous: &Ledger, next: &Ledger) -> Option<String> {
     let entered = next.scopes.project.as_ref()?;
     let left = previous.scopes.project.as_ref()?;
@@ -291,7 +163,6 @@ fn switched_project(previous: &Ledger, next: &Ledger) -> Option<String> {
     )
 }
 
-/// Every variable a ledger records as applied, folded by [`key_norm`].
 fn applied_keys(ledger: &Ledger) -> HashSet<String> {
     ledger
         .applied_in_emission_order()
@@ -299,26 +170,11 @@ fn applied_keys(ledger: &Ledger) -> HashSet<String> {
         .collect()
 }
 
-/// Capture the pre-apply values a later revert restores (C-015 rules 3–4, A-05).
+/// Capture the pre-apply values a later revert restores.
 ///
-/// `applied` is the scope's own record and `current` the environment **this
-/// scope is about to be applied to** — for the project scope that is the
-/// post-global environment (C-018), so a prior captured at project entry holds
-/// global's value and reverting the project leaves the global scope intact; for
-/// the global scope it is the pre-global environment, which is what makes a
-/// retired global constant restorable at all (R1).
-///
-/// `previous` is the same scope's record from the previous prompt: its applied
-/// list and its priors map. Both halves are needed and neither is optional — the
-/// applied list answers "is the live value still what ocx wrote", and only if it
-/// is does the recorded prior carry forward. Anything else — a genuine `[env]`
-/// change, a mid-session override, or a value the user typed that happens to
-/// equal D — re-captures, so leaving never unsets a variable the user set by
-/// hand. A tuple rather than a scope type because the two scopes store the pair
-/// differently: [`ProjectScope`] nests them, [`Scopes`] keeps them as siblings.
-///
-/// Set-ness, never truthiness: an existing empty variable is [`Prior::Value`]
-/// with an empty string and never [`Prior::Unset`] (A-05).
+/// `current` must be the environment this scope is about to be applied to: post-global for the
+/// project scope, pre-global for the global one. A `previous` prior carries forward only while the
+/// live value is still what ocx wrote, so leaving never unsets a hand-set variable.
 pub fn capture_priors(applied: &[LedgerEntry], current: &Env, previous: Option<(&[LedgerEntry], &Priors)>) -> Priors {
     let mut priors = Priors::new();
     for entry in applied {
@@ -344,27 +200,7 @@ pub fn capture_priors(applied: &[LedgerEntry], current: &Env, previous: Option<(
     priors
 }
 
-// ---------------------------------------------------------------------------
-// Planner internals
-// ---------------------------------------------------------------------------
-
-/// A-10's gate. Every emitter returns `None` for an invalid key, so without
-/// this L would carry a key no arm can ever remove; `L ⊆ emittable(D)` is the
-/// invariant it buys. Warned once per key so a repeated contribution does not
-/// print per occurrence.
-///
-/// **One admission rule, in one place** (E6): the per-entry predicate is
-/// [`crate::shell::is_emittable`], shared with `conventions::emit_lines` so the
-/// export path and the reconciler cannot drift. Two copies of an admission rule
-/// drift, and the export path had none at all — a `type = "path"` value
-/// embedding the separator grew `PATH` without bound on ksh, dash and pwsh.
-///
-/// A-02's "`PATH`/`PATHEXT` are never constant-kind" stays **here**, deliberately.
-/// It is a *revert*-shaped rule and not an emit-shaped one: every arm can
-/// perfectly well emit `export PATH=...`, and the refusal exists because a
-/// forged or mistaken constant claim on those two keys makes the whole variable
-/// ocx's to overwrite. Only the ledger has that stake, so it is the reconciler's
-/// rule, not the emitters'.
+/// The admission gate, warning once per refused key; without it the ledger records keys no arm can ever remove.
 fn emittable(desired: &[Entry]) -> Vec<&Entry> {
     let mut warned: HashSet<(&str, &str)> = HashSet::new();
     let mut kept = Vec::with_capacity(desired.len());
@@ -381,7 +217,6 @@ fn emittable(desired: &[Entry]) -> Vec<&Entry> {
     kept
 }
 
-/// The admission rule itself, so the two consumers cannot hold different ones.
 fn admits(entry: &Entry) -> Result<(), &'static str> {
     if matches!(entry.kind, ModifierKind::Constant) && is_never_constant(&entry.key) {
         Err("PATH and PATHEXT are never constant-kind")
@@ -390,40 +225,14 @@ fn admits(entry: &Entry) -> Result<(), &'static str> {
     }
 }
 
-/// [`emittable`] without its logging, for the ledger builder.
-///
-/// `L ⊆ emittable(D)` (A-10) is a property of the **ledger**, and the ledger is
-/// built next to `plan`, not inside it — so the gate has a second consumer, and
-/// that consumer must not print `plan`'s warn-once lines a second time on the
-/// same prompt. The stake is the ledger's alone: an entry no arm emits, recorded
-/// as applied, is a key ocx claims to own and can never remove — and for
-/// `PATH`/`PATHEXT` a refused constant claim recorded anyway hands the whole
-/// variable's restore to a prior that was never captured from an apply.
+/// [`emittable`] without its logging, for the ledger builder; the ledger must record only what `plan` admits.
 pub fn emittable_entries(desired: &[Entry]) -> Vec<&Entry> {
     desired.iter().filter(|entry| admits(entry).is_ok()).collect()
 }
 
-/// C-015 rules 0 and 1 — **nothing is set where applying it would change
-/// nothing**, so a quiet prompt emits an empty plan and the reconciler has a
-/// fixed point.
+/// The entries whose application would change something, so a quiet prompt emits an empty plan.
 ///
-/// Two rules, because the two kinds settle against different things:
-///
-/// - **Rule 1, a constant**, compares against the *ledger*: ocx re-asserts it
-///   only where the composed value moved since it last wrote it, so a
-///   mid-session override survives every recompose of an unchanged value.
-///   Comparing against the live environment instead would re-emit over exactly
-///   that override.
-/// - **Rule 0, a path or list key**, compares against the *live environment*,
-///   through [`settled_keys`]. Its application is idempotent, so re-emitting is
-///   harmless — but not free: each re-emitted entry is a `while`-loop of
-///   in-shell string surgery over the user's whole `PATH`, on every prompt,
-///   forever ([ocx-sh/ocx#342](https://github.com/ocx-sh/ocx/issues/342)).
-///
-/// This is what makes `plan` depend on `current` for path kinds. It costs the
-/// lost-ledger repair (C-006) nothing: [`repair_owned_segments`] reads `current`
-/// directly and is unaffected, and a key whose fold is already live needs no
-/// repair by definition.
+/// A constant compares against the ledger, not the live env, or it re-emits over a mid-session override.
 fn apply_set(emittable: &[&Entry], recorded: &BTreeMap<String, &LedgerEntry>, current: &Env) -> Vec<Entry> {
     let settled = settled_keys(emittable, current);
     emittable
@@ -439,24 +248,9 @@ fn apply_set(emittable: &[&Entry], recorded: &BTreeMap<String, &LedgerEntry>, cu
         .collect()
 }
 
-/// The path/list keys whose whole fold is **already live**, under the
-/// comparison rule the key's kind gives it ([`value_settled`]).
+/// The path/list keys whose whole fold via [`EnvEntriesExt::apply_entries`] is **already live**.
 ///
-/// Answered by folding `emittable` into a copy of `current` with
-/// [`EnvEntriesExt::apply_entries`] and asking which keys came back unchanged — never by
-/// re-deriving the ordering rule here. That is the whole point: `apply_entries`
-/// is the same [`move_to_front`](ocx_util::path::move_to_front) /
-/// [`append_unique`](ocx_util::list::append_unique) fold the emitted shell
-/// arms are contracted to equal byte for byte, so "the in-process fold changes
-/// nothing" *is* "the emitted lines would change nothing". A second copy of the
-/// prepend-and-dedupe rule would be a second thing to drift.
-///
-/// Settling is **per key and all-or-nothing**: a key settles only when the whole
-/// group of entries contributing to it is a no-op together, which is what makes
-/// dropping them all safe. A key any scope declares [`ModifierKind::Constant`]
-/// for never settles here — its rule is C-015 rule 1's ledger comparison in
-/// [`apply_set`], and deciding it from `current` would clobber a mid-session
-/// override.
+/// A key any scope declares constant never settles here, or a mid-session override is clobbered.
 fn settled_keys(emittable: &[&Entry], current: &Env) -> HashSet<String> {
     let mut candidates: BTreeMap<String, (&str, ModifierKind)> = BTreeMap::new();
     let mut constants: HashSet<String> = HashSet::new();
@@ -470,12 +264,7 @@ fn settled_keys(emittable: &[&Entry], current: &Env) -> HashSet<String> {
                 let slot = candidates
                     .entry(norm)
                     .or_insert((entry.key.as_str(), entry.kind.clone()));
-                // Where one key carries both kinds, the *narrower* rule decides
-                // it: a list element is opaque and compares byte-exact on every
-                // platform (A-19 E5), so comparing such a key segment-wise
-                // could call two spellings settled that the emitter would have
-                // rewritten. Refusing to settle only re-emits, which is
-                // idempotent; over-settling silently drops a change.
+                // Mixed kinds take the byte-exact list rule; over-settling silently drops a change.
                 if matches!(entry.kind, ModifierKind::List) {
                     slot.1 = ModifierKind::List;
                 }
@@ -487,13 +276,6 @@ fn settled_keys(emittable: &[&Entry], current: &Env) -> HashSet<String> {
     }
 
     let folded: Vec<Entry> = emittable.iter().map(|entry| (*entry).clone()).collect();
-    // Seeded with the candidate keys' live values rather than cloned from
-    // `current`. The fold reads and writes only the keys `emittable` names, and
-    // every one of those that this function will *query* is a candidate — so a
-    // whole-environment copy (plus its `package_path` accumulator) buys nothing
-    // and is the second such copy on the same prompt, after `next_ledger`'s.
-    // `apply_entries` is still the fold, which is the property that matters: the
-    // in-process answer stays the one the emitted arms are contracted to equal.
     let mut probe = Env::clean();
     for (key, _) in candidates.values() {
         if let Some(value) = current.get(key) {
@@ -511,37 +293,20 @@ fn settled_keys(emittable: &[&Entry], current: &Env) -> HashSet<String> {
         .collect()
 }
 
-/// Whether the folded value and the live one are the **same value under the
-/// kind's own comparison rule** — never `==` on the raw whole value.
+/// Whether folded and live are equal under the kind's own rule, never raw `==`.
 ///
-/// A byte-exact whole-value compare has no fixed point on Windows. The fold
-/// re-joins segments that came out of `std::env::split_paths`, which unquotes
-/// there — the premise [`element_eq`] already states — so a retained
-/// `"C:\Program Files\x"` comes back stripped, the compare is false forever, and
-/// [#342](https://github.com/ocx-sh/ocx/issues/342) stays unfixed on exactly the
-/// platform that quotes. The emitted pwsh arm keeps such a segment byte for byte
-/// and normalises only what it compares against, so the honest question is
-/// A-19's, and [`element_eq`] is the one place A-19 lives.
+/// Raw `==` has no fixed point on Windows: `split_paths` unquotes, so a quoted segment never compares equal.
 fn value_settled(folded: Option<&OsStr>, live: Option<&OsStr>, kind: &ModifierKind) -> bool {
     match (folded, live) {
         (None, None) => true,
         (None, Some(_)) | (Some(_), None) => false,
-        // The unquoting is per segment, so the comparison has to be too.
         (Some(folded), Some(live)) => match kind {
             ModifierKind::Path => path_segments_eq(folded, live),
-            // A list element compares byte-exact on every platform, and joining
-            // on one separator is injective — so the whole value under that rule
-            // *is* `OsStr` equality, without a lossy round-trip through `str`.
-            // A constant never reaches here (`settled_keys` excludes it); the
-            // arm keeps the match total, and its rule is the same byte-exact one
-            // for the whole value.
             ModifierKind::List | ModifierKind::Constant => folded == live,
         },
     }
 }
 
-/// Segment-wise [`element_eq`] under [`ModifierKind::Path`], over both values
-/// split by the platform's own `PATH` splitter.
 fn path_segments_eq(left: &OsStr, right: &OsStr) -> bool {
     let mut left = std::env::split_paths(left);
     let mut right = std::env::split_paths(right);
@@ -549,16 +314,13 @@ fn path_segments_eq(left: &OsStr, right: &OsStr) -> bool {
         match (left.next(), right.next()) {
             (None, None) => return true,
             (Some(left), Some(right)) if path_segment_eq(&left, &right) => continue,
-            // Unequal segments, or one value out of segments before the other.
             _ => return false,
         }
     }
 }
 
 fn path_segment_eq(left: &Path, right: &Path) -> bool {
-    // Byte-identical first, so an unchanged non-UTF-8 segment still settles. A
-    // *changed* one falls to `false`: a segment no arm can name is one no
-    // comparison can normalise, and re-emitting is the harmless direction.
+    // Byte-identical first, so an unchanged non-UTF-8 segment still settles.
     left == right
         || match (left.to_str(), right.to_str()) {
             (Some(left), Some(right)) => element_eq(left, right, &ModifierKind::Path),
@@ -566,28 +328,19 @@ fn path_segment_eq(left: &Path, right: &Path) -> bool {
         }
 }
 
-/// C-016/C-017 — an element L records and D no longer wants is removed. Rule
-/// (b) re-derives the kind and separator from D wherever D still declares the
-/// key, so L's copies decide nothing but membership of the revert set.
+/// Remove an element L records and D no longer wants; L's kind and separator decide only revert-set membership.
 fn retire_recorded_element(
     entry: &LedgerEntry,
     declared: &BTreeMap<String, &Entry>,
     contributed: &HashSet<(String, String)>,
 ) -> Option<(String, String, Option<String>)> {
     let current = declared.get(&key_norm(&entry.key));
-    // Rule (b) again, this time for the *comparison*: wherever D still declares
-    // the key, D's kind decides how its elements compare, so the membership test
-    // here and the entry `contributed_elements` recorded were normalised the
-    // same way. Where D declares nothing, L's own kind is all there is — and a
-    // kind switch therefore misses, which retires the old element and lets the
-    // new kind apply its own, the safe direction.
+    // D's kind, so this lookup normalises exactly as `contributed_elements` did.
     let kind = current.map_or(&entry.kind, |declared| &declared.kind);
     if contributed.contains(&(key_norm(&entry.key), element_norm(&entry.value, kind))) {
         return None;
     }
     let separator = match current {
-        // A constant overwrite retires the whole variable; removing an element
-        // of it first would be a no-op the emitters still have to render.
         Some(current) => match current.kind {
             ModifierKind::Constant => return None,
             ModifierKind::Path => None,
@@ -601,11 +354,8 @@ fn retire_recorded_element(
     Some((entry.key.clone(), entry.value.clone(), separator))
 }
 
-/// C-015 rule 2 + C-017 — a constant L records and D no longer declares is
-/// reverted to its recorded prior, never discarded, and only while the current
-/// value is still what ocx wrote. A key with no recorded prior is left alone:
-/// C-006 forbids guess-unsetting a constant, and "restore the recorded prior"
-/// has no operand without one.
+/// Restore a constant L records and D no longer declares to its prior, only while the live value is
+/// still what ocx wrote; with no recorded prior it is left alone, never guess-unset.
 fn retire_recorded_constant(
     entry: &LedgerEntry,
     declared: &BTreeMap<String, &Entry>,
@@ -625,15 +375,9 @@ fn retire_recorded_constant(
     }
 }
 
-/// C-016's structural half, and the whole of the lost-ledger repair (C-006).
+/// The lost-ledger repair: remove every prefix-owned segment of C that D does not want.
 ///
-/// **Subtractive, and the wording is load-bearing**: remove every prefix-owned
-/// segment of C that D does not want, rather than merely ensuring D's segments
-/// are in front. The additive reading leaves both `…/packages/<old>/bin` and
-/// `…/packages/<new>/bin` on PATH after a digest bump — different strings, so
-/// move-to-front reorders rather than dedupes. Segments are enumerated as they
-/// appear in C and named verbatim in the removal, so selection and removal
-/// share one byte-exact operand (A-09).
+/// Subtractive, not move-to-front, or a digest bump leaves both the old and new `packages/…/bin` on `PATH`.
 fn repair_owned_segments(
     declared: &BTreeMap<String, &Entry>,
     recorded: &BTreeMap<String, &LedgerEntry>,
@@ -656,8 +400,7 @@ fn repair_owned_segments(
     if keys.is_empty() {
         return Vec::new();
     }
-    // Derived here rather than per segment: once per reconcile is inside
-    // C-044's budget, once per `PATH` element is not.
+    // Once per reconcile, never per segment: a `realpath` per `PATH` element busts the prompt budget.
     let owned = owned_spellings(owned_prefixes);
 
     let mut removals = Vec::new();
@@ -668,11 +411,8 @@ fn repair_owned_segments(
             if segment.is_empty() || !is_owned(&segment, &owned) {
                 continue;
             }
-            // A segment no arm can name is a segment no arm can remove; leaving
-            // it is the only honest outcome.
+            // A non-UTF-8 segment is one no arm can name, so none can remove it.
             let Some(segment) = segment.to_str() else { continue };
-            // Every key in this loop is path-kind by construction, so the
-            // segment compares under A-19 and nothing else.
             if contributed.contains(&(norm.clone(), element_norm(segment, &ModifierKind::Path))) {
                 continue;
             }
@@ -683,8 +423,7 @@ fn repair_owned_segments(
 }
 
 fn declared_index<'a>(emittable: &[&'a Entry]) -> BTreeMap<String, &'a Entry> {
-    // Later wins, matching the emission order the caller hands in: project's
-    // declaration of a key overrides global's.
+    // Later wins, so project's declaration of a key overrides global's.
     emittable.iter().map(|entry| (key_norm(&entry.key), *entry)).collect()
 }
 
@@ -695,8 +434,7 @@ fn recorded_index(ledger: &Ledger) -> BTreeMap<String, &LedgerEntry> {
         .collect()
 }
 
-/// The elements D still wants, each normalised under **its own kind** — a list
-/// element byte-exact, a path element under A-19.
+/// The elements D still wants, each normalised under its own kind.
 fn contributed_elements(emittable: &[&Entry]) -> HashSet<(String, String)> {
     emittable
         .iter()
@@ -705,26 +443,12 @@ fn contributed_elements(emittable: &[&Entry]) -> HashSet<(String, String)> {
         .collect()
 }
 
-/// One removal's identity under the comparison rule its kind gives it — the
-/// hashable form of the `key_eq`/`element_eq`/separator triple.
+/// One removal's identity, the hashable form of the `key_eq`/`element_eq`/separator triple.
 type RemovalIdentity = (String, String, Option<String>);
 
-/// Push a removal unless the same removal is already planned.
+/// Push a removal unless the same key, element and separator is already planned.
 ///
-/// "The same" is key, element **and separator**: the separator is what names the
-/// kind, so two removals that disagree on it render through different emitter
-/// arms and neither can stand in for the other. Only once they agree is the
-/// element comparison unambiguous — a `None` separator is path-kind, `Some` is
-/// list-kind.
-///
-/// Membership goes through a set rather than a scan of `removes`, because the
-/// feeding loop is `Ledger::applied_in_emission_order` and the carrier is
-/// user-writable: a linear scan per push is quadratic in a length only
-/// [`MAX_CARRIER_BYTES`](super::MAX_CARRIER_BYTES) bounds, so 1000 recorded
-/// entries D no longer wants cost ~5·10⁵ `element_eq` calls on one prompt.
-/// [`key_norm`] and [`element_norm`] are by construction the hashable form of
-/// the same equivalence classes [`key_eq`] and [`element_eq`] decide, so the
-/// answer is unchanged — only the cost is.
+/// A set, not a scan of `removes`: the carrier is user-writable, so a scan is quadratic in its length.
 fn push_removal(removes: &mut Vec<RemovalIdentity>, seen: &mut HashSet<RemovalIdentity>, removal: RemovalIdentity) {
     let kind = removal_kind(&removal.2);
     let identity = (key_norm(&removal.0), element_norm(&removal.1, &kind), removal.2.clone());
@@ -733,8 +457,6 @@ fn push_removal(removes: &mut Vec<RemovalIdentity>, seen: &mut HashSet<RemovalId
     }
 }
 
-/// C-014's signature carries the kind in the separator: `None` is path-kind and
-/// means the platform path separator, `Some` is list-kind.
 fn removal_kind(separator: &Option<String>) -> ModifierKind {
     match separator {
         None => ModifierKind::Path,
@@ -742,29 +464,9 @@ fn removal_kind(separator: &Option<String>) -> ModifierKind {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Ownership primitives
-// ---------------------------------------------------------------------------
-
-/// A-09's prefix set: every owned prefix in the spelling the caller gave **and**
-/// in its resolved spelling.
+/// Every owned prefix in the caller's spelling **and** its resolved one.
 ///
-/// `$OCX_HOME` is routinely a symlink, and whatever put ocx's own directory on
-/// `PATH` may have resolved it — so the element carries the resolved spelling
-/// while the caller still hands in the link. Testing one spelling makes ocx's
-/// own segment foreign to ocx, and the C-006 ledger-loss repair leaves the
-/// stale directory behind ([ocx-sh/ocx#350](https://github.com/ocx-sh/ocx/issues/350)).
-/// Canonicalizing the prefix *instead of* the caller's spelling only moves the
-/// blind spot onto the unresolved elements, which are the commoner half.
-///
-/// The segment side is never resolved, for two reasons. It would put one
-/// `realpath` on every `PATH` element of every prompt (measured: ~1.4 µs here
-/// against ~145 ns for the second `starts_with` this does instead), and — the
-/// decisive one — the segment a lost-ledger repair is hunting is frequently a
-/// directory that no longer exists, which `realpath` cannot resolve at all.
-///
-/// A prefix that does not resolve (it need not exist yet) contributes its raw
-/// spelling alone.
+/// `$OCX_HOME` is often a symlink that `PATH` holds resolved; either spelling alone leaves stale segments behind.
 fn owned_spellings(owned_prefixes: &[&Path]) -> Vec<PathBuf> {
     let mut spellings: Vec<PathBuf> = Vec::with_capacity(owned_prefixes.len());
     for prefix in owned_prefixes {
@@ -778,9 +480,7 @@ fn owned_spellings(owned_prefixes: &[&Path]) -> Vec<PathBuf> {
     spellings
 }
 
-/// A-09 — component-wise, never a byte prefix, so `.ocx-backup` and `.ocxevil`
-/// are foreign to an `$OCX_HOME` of `.ocx`. `owned` carries both spellings
-/// [`owned_spellings`] derives, and neither of them widens that boundary.
+/// Component-wise, never a byte prefix, or `.ocx-backup` counts as owned by an `$OCX_HOME` of `.ocx`.
 fn is_owned(segment: &OsStr, owned: &[PathBuf]) -> bool {
     let segment = Path::new(segment);
     owned.iter().any(|prefix| segment.starts_with(prefix))

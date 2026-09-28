@@ -8,19 +8,7 @@ use ocx_package::install_info::InstallInfo;
 
 use super::super::PackageManager;
 
-/// How a package reached the store for this invocation.
-///
-/// An enum rather than a bool because the two states are named domain facts, not
-/// a flag: a caller reading `Pulled` learns *why* it matters, which is that this
-/// invocation resolved a floating tag and materialized the package on the spot.
-/// Together with a `sh.ocx.resolved-from: tag` annotation that is the drift
-/// signal an execution record reports as `resolution.autoInstalled` — the one
-/// state no pull-time record can capture.
-///
-/// `Arrival` rather than `Materialization`: this is the per-root **outcome**,
-/// and [`composer::Materialization`](crate::composer::Materialization)
-/// is the **policy** the same call passes in. One name for both, in one call,
-/// reads as one concept.
+/// How a package reached the store for this invocation; `Pulled` surfaces as `resolution.autoInstalled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arrival {
     /// Already materialized in the package store when this invocation started.
@@ -29,26 +17,15 @@ pub enum Arrival {
     Pulled,
 }
 
-/// One package resolved by [`PackageManager::find_or_install_all`], together
-/// with how it got into the store.
+/// One package resolved by [`PackageManager::find_or_install_all`], with how it got into the store.
 #[derive(Debug)]
 pub struct FoundPackage {
-    /// The resolved package.
     pub info: InstallInfo,
-    /// Whether this invocation had to pull it.
     pub arrival: Arrival,
 }
 
 impl PackageManager {
-    /// Finds a package locally; if absent, falls through to [`pull`].
-    ///
-    /// In offline mode, `pull` no longer requires network when the manifest,
-    /// metadata config blob, and every layer are already in the local CAS —
-    /// see the offline-safe paths in `setup_owned` and `extract_layer_atomic`.
-    /// This lets `--offline exec` re-assemble a package whose `packages/`
-    /// tree was deleted but whose `blobs/` and `layers/` are still present.
-    /// When any cached input is missing, `pull` surfaces the underlying
-    /// `OfflineMode` error and the caller sees a clear failure.
+    /// Finds a package locally; if absent, falls through to [`pull`], which offline re-assembles from the local CAS.
     async fn find_or_install(
         &self,
         package: &ocx_oci::PackageRef,
@@ -70,11 +47,7 @@ impl PackageManager {
                 }
                 self.pull(package, platform).await.map(|info| FoundPackage {
                     info,
-                    // An offline re-assembly from the local CAS reaches this arm
-                    // too. It is still a materialization this invocation
-                    // performed, which is what the field states — the record's
-                    // own `resolution.offline` says whether a network was
-                    // involved.
+                    // An offline re-assembly is still a materialization; `resolution.offline` records the network.
                     arrival: Arrival::Pulled,
                 })
             }
@@ -82,17 +55,7 @@ impl PackageManager {
         }
     }
 
-    /// Finds each package locally and, when a package is absent and the manager
-    /// is online, installs it automatically.
-    ///
-    /// `concurrency` caps the outer dispatch in the multi-package case (matches
-    /// [`pull_all`](PackageManager::pull_all) semantics). Single-package fast
-    /// path is naturally serial and ignores the cap.
-    ///
-    /// Results are in input order, so a caller needing to know *which*
-    /// identifiers were pulled can zip this against the slice it passed in —
-    /// which is why the input is borrowed rather than consumed: every such
-    /// caller previously cloned the whole vector just to keep it alive.
+    /// Finds each package locally, installing absent ones; results are in input order.
     pub async fn find_or_install_all(
         &self,
         packages: &[ocx_oci::PackageRef],

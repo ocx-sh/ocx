@@ -1,61 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The refusal taxonomy for interpolation-token resolution, and how each
-//! refusal reads.
+//! The refusal taxonomy for interpolation-token resolution: every variant is exit 65
+//! except [`TemplateError::DependencyNotInstalled`] (79).
 //!
-//! Every variant is malformed publisher input (exit 65) except
-//! [`TemplateError::DependencyNotInstalled`], which is a missing resource (79).
-//! Publisher-controlled text reaching a message is escaped at the site that
-//! captures it — `scanner::for_message` — never here.
+//! Publisher text is escaped where it is captured (`scanner::for_message`), never here.
 
 use super::scanner;
 use crate::metadata::dependency::DependencyName;
 
-/// Which guidance a [`TemplateError::UnknownToken`] message carries (D13).
-///
-/// Three states, because the advice a blocked publisher needs differs by *how*
-/// the token is unknown — and one of the three is defined by what it must
-/// **not** say. Under the claim-all rule the natural message is "escape it as
-/// `$${…}`", which for a typo is precisely wrong advice: it tells the publisher
-/// to fix the error by shipping the typo as literal text into a digest-pinned
-/// artifact. [`Self::SuggestedRoot`] is what keeps that out, and
-/// [`Self::SupportedBodies`] is why the escape hint is not offered on a token
-/// whose root OCX recognises.
-///
-/// An enum rather than an `Option<String>` because the three branches are not
-/// "a suggestion or nothing": absence of a suggestion is itself two distinct
-/// messages, and a two-state field cannot tell them apart without re-reading
-/// the token text at render time.
+/// Which guidance a [`TemplateError::UnknownToken`] message carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnknownTokenHint {
-    /// Branch 1 — the token's root run is within the length-scaled edit
-    /// distance of this recognised root, so the likeliest fault is a typo in a
-    /// token the publisher meant to write.
+    /// The token's root is within edit distance of this recognised root: likely a typo.
     SuggestedRoot(String),
-    /// Branch 2 — an unrecognised root with no near miss: most likely another
-    /// tool's token, whose only correct spelling under D3 is the escape.
+    /// An unrecognised root with no near miss: likely another tool's token, needing the escape.
     Escape,
-    /// Branch 3 — a recognised root carrying a body outside the closed set.
-    /// The publisher was writing an OCX token, so the message enumerates the
-    /// bodies that exist and offers **no** escape hint.
+    /// A recognised root with a body outside the closed set; lists the bodies, no escape hint.
     SupportedBodies,
 }
 
 impl UnknownTokenHint {
-    /// The clause appended after the token in the message.
-    ///
-    /// Takes `token` because the escape branch shows the escaped spelling of
-    /// this very token — `$${workspaceFolder}` — rather than a generic `$${…}`
-    /// the publisher then has to translate.
+    /// The clause appended after the token; the escape branch spells this token escaped.
     fn advice_for(&self, token: &str) -> String {
         match self {
-            // No escape hint: it would advise "fixing" a typo by shipping it as
-            // literal text into a digest-pinned artifact.
+            // No escape hint: it would ship the typo as literal text into a digest-pinned artifact.
             Self::SuggestedRoot(root) => format!(": did you mean root '{root}'"),
-            // A token the echo cut short cannot be spelled back: the escaped
-            // form of a prefix is a literal the publisher never wrote. The rule
-            // is stated instead, and it is the same rule.
+            // A truncated token's escaped form is a literal the publisher never wrote; state the rule.
             Self::Escape if token.ends_with(scanner::TRUNCATION_MARKER) => {
                 ": ocx expands every ${…}; write '$${' for every '${' to emit a literal".to_owned()
             }
@@ -63,10 +34,7 @@ impl UnknownTokenHint {
                 ": ocx expands every ${{…}}; write '{}' to emit a literal",
                 scanner::escape(token)
             ),
-            // The placeholders are spelled out because the publisher this
-            // branch exists for wrote `${deps.Python.installPath}`: printing
-            // `${deps.NAME.installPath}` at them without saying what `NAME`
-            // stands for reads as confirmation that what they wrote was right.
+            // Placeholders explained, or `${deps.NAME.installPath}` reads as confirming `${deps.Python…}`.
             Self::SupportedBodies => format!(
                 ": supported bodies are {}, where NAME is a lowercase dependency name and KEY is an env-var key",
                 scanner::RECOGNISED_BODIES
@@ -79,22 +47,12 @@ impl UnknownTokenHint {
     }
 }
 
-/// Renders [`TemplateError::UndefinedSelfEnvRef`]'s declared-key list.
-///
-/// Quoting happens here rather than in the field, which stays clean data for a
-/// programmatic reader. Each entry is already `scanner::for_message`-escaped, and
-/// `str::escape_debug` escapes both quote characters — a key containing `'`
-/// arrives as `\'` — so the delimiter cannot appear unescaped inside an entry and
-/// no key can close its own quoting. It also settles what `A, PATH` means: one
-/// declared key, not two.
-///
-/// A trailing elision marker is ours, not the publisher's, and stays bare —
-/// quoting it would read as a declared key literally named `…`.
+/// Renders [`TemplateError::UndefinedSelfEnvRef`]'s declared-key list, each key quoted and a
+/// trailing elision marker bare.
+// Keys arrive `for_message`-escaped, quotes included, so no key can close its own quoting.
 fn render_declared_before(declared_before: &[String]) -> String {
-    // ponytail: a publisher whose LAST declared key is literally `…`, in a list
-    // short enough not to be elided, gets that one key rendered bare. Cosmetic,
-    // and the price of carrying the marker inline; splitting elision into its
-    // own field is the upgrade if it ever matters.
+    // ponytail: a non-elided list whose last key is literally `…` renders it bare; give
+    // elision its own field if that ever matters.
     let (keys, elided) = match declared_before.split_last() {
         Some((last, rest)) if last == scanner::TRUNCATION_MARKER => (rest, true),
         _ => (declared_before, false),
@@ -107,11 +65,7 @@ fn render_declared_before(declared_before: &[String]) -> String {
     rendered.join(", ")
 }
 
-/// Errors produced during template string resolution.
-///
-/// These are template-level failures only — they carry no `var_key`. The wrapping error
-/// variant [`crate::error::Error::EnvVarInterpolation`] adds the `var_key` context
-/// for the env-variable layer.
+/// Template resolution errors; [`crate::error::Error::EnvVarInterpolation`] adds the var key.
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
     /// A `${deps.NAME.*}` token names a dependency that is not declared.
@@ -124,22 +78,15 @@ pub enum TemplateError {
         declared: Vec<DependencyName>,
     },
 
-    /// Two direct dependencies share the same interpolation name (name field or basename) and
-    /// the template references that name — the publisher must set `name` to disambiguate.
-    ///
-    /// Constructed only by the publish gate in `validation`. `TemplateResolver::resolve`
-    /// never constructs this variant — it receives a pre-disambiguated map.
+    /// Two direct dependencies share the referenced interpolation name; the publisher must set
+    /// `name`. Only the publish gate constructs it.
     #[error(
         "references ambiguous dependency name '{ref_name}': \
          matches both {first} and {second}"
     )]
     AmbiguousDependencyRef {
         ref_name: DependencyName,
-        /// Boxed, with `second` and `DependencyNotInstalled`'s identifier: a
-        /// bare `PinnedPackageRef` is ~100 bytes, and three of them across two
-        /// variants put every `Result<_, TemplateError>` in this subsystem over
-        /// clippy's `result_large_err` threshold — a cost the `Ok` path pays on
-        /// every call to silence a lint on a path taken once, at the end.
+        // Boxed, like `second` and `dep_identifier`, or every `Result<_, TemplateError>` trips `result_large_err`.
         first: Box<ocx_oci::PinnedPackageRef>,
         second: Box<ocx_oci::PinnedPackageRef>,
     },
@@ -151,23 +98,13 @@ pub enum TemplateError {
         dep_identifier: Box<ocx_oci::PinnedPackageRef>,
     },
 
-    /// A `${…}` OCX does not recognise: a body that fails the anchored grammar,
-    /// a recognised root whose body is outside the closed set, or an
-    /// unrecognised root. The catch-all of the grammar — everything the more
-    /// specific variants below cannot locate.
-    ///
-    /// `hint` selects which of D13's three message branches renders. It is
-    /// computed at construction, from the root run the scanner already has
-    /// (R2.2), and never re-derived from `token` at render time: a second
-    /// reading of the token text here would be a second recogniser, free to
-    /// disagree with the one that decided the token was unknown.
+    /// A `${…}` OCX does not recognise, where no more specific variant applies.
+    // `hint` comes from the scanner at construction, never re-derived from `token`, or a
+    // second recogniser could disagree with the first.
     #[error("unknown token '{token}'{advice}", advice = hint.advice_for(token))]
     UnknownToken { token: String, hint: UnknownTokenHint },
 
-    /// A recognised namespace shape with exactly one unknown leaf —
-    /// `${self.foo}` (`namespace` = `self`) or `${deps.cmake.version}`
-    /// (`namespace` = `deps.cmake`). Everything else is
-    /// [`TemplateError::UnknownToken`].
+    /// A recognised namespace with one unknown leaf (`${self.foo}`, `${deps.cmake.version}`).
     #[error(
         "unknown field '{field}' under '{namespace}'; supported: [{supported}]",
         supported = supported.join(", ")
@@ -185,48 +122,32 @@ pub enum TemplateError {
     )]
     UnknownModifier { modifier: String, supported: Vec<String> },
 
-    /// A render modifier on a token whose value OCX cannot know is a path —
-    /// today exactly `${self.env.KEY}` (D5).
-    ///
-    /// The modifier flips slash direction across the *whole* resolved value, so
-    /// on a var holding a regex, a compiler flag, or a `list` it rewrites
-    /// backslashes the publisher meant to keep. A `self.env` value composed from
-    /// a path still renders — the modifier belongs on the token inside the
-    /// declaring var, which is what the advice says.
+    /// A render modifier on `${self.env.KEY}`, whose value may not be a path.
+    // Refused because it would flip every slash in the value, corrupting a regex or compiler flag.
     #[error(
         "render modifier '{modifier}' does not apply to '{token}'; \
          modifiers apply to install-path tokens only — set it where the var is declared"
     )]
     ModifierNotApplicable { modifier: String, token: String },
 
-    /// `${self.env.KEY}` where `KEY` is not declared strictly earlier in the
-    /// same package's `env` array — covers forward references and a var
-    /// referencing itself, which are the same fault seen twice (D6.3).
+    /// `${self.env.KEY}` where `KEY` is not declared strictly earlier (forward or self reference).
     #[error(
         "references undefined env var '{key}'; declared before it: [{declared_before}]",
         declared_before = render_declared_before(declared_before)
     )]
     UndefinedSelfEnvRef { key: String, declared_before: Vec<String> },
 
-    /// `${self.env.KEY}` where `KEY` is declared two or more times earlier.
-    /// Both candidates are legally visible and neither is privileged, so the
-    /// reference is refused rather than resolved to an arbitrary one (D7).
+    /// `${self.env.KEY}` where `KEY` is declared more than once earlier; neither is privileged.
     #[error("references ambiguous env var '{key}': declared more than once before it")]
     AmbiguousSelfEnvRef { key: String },
 
-    /// A recognized token class is present but not permitted by the current
-    /// [`AllowedTokens`] capability set.
+    /// A recognised token the active [`AllowedTokens`] forbids.
     ///
     /// [`AllowedTokens`]: super::AllowedTokens
     #[error("token '{token}' is not permitted here; '${{deps.*}}' and '${{self.env.*}}' are only valid in env values")]
     DisallowedToken { token: String },
 
     /// The resolved value grew past [`MAX_RESOLVED_VALUE_BYTES`].
-    ///
-    /// Reached by a `${self.env.KEY}` chain that doubles per var — the
-    /// substituted value is the referenced var's *resolved* one, so a document
-    /// small enough to publish resolves to an arbitrarily large one on every
-    /// consumer.
     ///
     /// [`MAX_RESOLVED_VALUE_BYTES`]: super::MAX_RESOLVED_VALUE_BYTES
     #[error("resolved value exceeds the {limit}-byte budget")]

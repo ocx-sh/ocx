@@ -2,16 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! GitHub REST forge client.
-//!
-//! Copy-and-own port of grimoire's GitHub forge flow (`src/catalog/forge.rs`,
-//! same owner), transport-adjusted to REST-only and owned by OCX (design
-//! register S5). Enforces the X5 invariants: a single no-redirect client per
-//! run, bearer via header only, fork parent verified against the upstream,
-//! endpoints rebuilt only from a response-body identity, a bounded readiness
-//! poll, and a bounded replay of the whole commit sequence for GitHub's "fork
-//! metadata ready before git objects" write race and for transient forge
-//! faults. Commits are multi-file atomic via the git data API (design register
-//! C15).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -33,74 +23,36 @@ use super::{
     ForgeIdentity, ForkIdentity, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
 };
 
-/// Canonical github.com REST base URL — a dedicated API origin, not a path on
-/// the web host. Overridable only under the test seam.
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
-/// GitHub REST API version header value.
 const API_VERSION: &str = "2022-11-28";
-/// JSON media type for GitHub REST responses.
 const ACCEPT_JSON: &str = "application/vnd.github+json";
-/// Raw media type — returns file bytes directly from the contents API.
+/// Makes the contents API answer the raw file bytes rather than base64 JSON.
 const ACCEPT_RAW: &str = "application/vnd.github.raw+json";
-/// Total per-request timeout for ordinary forge calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Backoff delays before each replay of the git-data commit sequence.
-///
-/// Three replays, ~39s of waiting at worst: long enough to ride out a fresh
-/// fork's object provisioning (design register X5) and a short forge fault,
-/// short enough not to stretch a push job that has already published to the
-/// registry and only owes the index its announce.
+/// ~39 s at worst: outlasts a fresh fork's object provisioning without stalling a push that
+/// already published to the registry.
 const GIT_DATA_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(27)];
 
-/// The value GitHub's ref-update endpoint expects in its `force` field.
 fn force_flag(update: RefUpdate) -> bool {
     matches!(update, RefUpdate::Reset)
 }
 
 /// GitHub REST forge client.
-///
-/// One no-redirect [`reqwest::Client`] per instance (design register X5); the
-/// bearer token is applied per request as a header and never appears in a URL.
 pub struct GitHubForge {
     client: reqwest::Client,
     credentials: ForgeCredentials,
     base_url: String,
-    /// The backoff before each replay of the git-data commit sequence —
-    /// [`GIT_DATA_RETRY_DELAYS`] for every client this crate builds, and a
-    /// field only so [`Self::with_retry_delays`] can hand a test a shorter
-    /// one. See that method for why.
+    /// Always [`GIT_DATA_RETRY_DELAYS`] outside tests; see [`Self::with_retry_delays`].
     retry_delays: &'static [Duration],
 }
 
 impl GitHubForge {
-    /// Build a client for `host` — `None` for github.com, `Some` for a GitHub
+    /// Build a client for `host`: `None` for github.com, `Some` for a GitHub
     /// Enterprise Server instance.
-    ///
-    /// The two differ in more than the hostname: github.com serves its API from
-    /// a dedicated `api.github.com` origin, while Enterprise Server serves it
-    /// from the instance itself under `/api/v3`. Composing the wrong one yields
-    /// 404s that look like missing repositories.
-    ///
-    /// Under `cfg(any(test, feature = "__testing"))` the
-    /// `__OCX_TESTING_FORGE_BASE_URL` env var redirects the client so the
-    /// acceptance fake forge can intercept it; production ignores it.
-    ///
-    /// This client is REST-only, and takes no write transport, because there is
-    /// no second one to take: the git transport creates its merge request
-    /// through push options, which GitHub has no equivalent of, so
-    /// [`super::ForgeKind::validate_transport`] refuses the pair before a client
-    /// is ever built. A stored transport here could never be anything but
-    /// `api`.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
-    /// be constructed.
-    ///
-    /// The client is built with `extra_roots` already trusted (ocx#448,
-    /// C-007): [`super::ForgeKind::client`], the one caller, always has the
-    /// operator's merged root set in hand before a client is needed, so
-    /// there is no default-then-rebuild.
+    /// Returns [`ForgeError::ClientBuild`] when the HTTP client cannot be built.
     pub fn new(
         credentials: ForgeCredentials,
         host: Option<&str>,
@@ -114,26 +66,14 @@ impl GitHubForge {
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
-    /// be constructed.
+    /// Returns [`ForgeError::ClientBuild`] when the HTTP client cannot be built.
     #[cfg(any(test, feature = "__testing"))]
     pub fn with_base_url(credentials: ForgeCredentials, base_url: String) -> Result<Self, ForgeError> {
         Self::build(credentials, base_url, &ocx_util::tls::ExtraRoots::default())
     }
 
-    /// Replace the shipped [`GIT_DATA_RETRY_DELAYS`] for one client.
-    ///
-    /// Why it exists: the first replay waits 3 s, and
-    /// `tests::commit_files_resyncs_the_fork_before_replaying_the_sequence`
-    /// can only observe that the re-sync runs *between* two attempts by
-    /// driving a replay — 3 s of the unit suite's wall clock for a claim
-    /// about request **order**, which is identical at 3 s and at 1 ms. The
-    /// schedule's own shape is asserted without sleeping, at
-    /// `tests::the_shipped_git_data_retry_schedule_is_three_delays`.
-    ///
-    /// Compile-gated on the same terms as [`Self::with_base_url`]: release
-    /// artifacts have no way to reach it, so the shipped schedule is the only
-    /// one a real announce can run.
+    /// Replace the shipped [`GIT_DATA_RETRY_DELAYS`] so a test can drive a replay without
+    /// seconds of wall clock.
     #[cfg(any(test, feature = "__testing"))]
     #[must_use]
     pub fn with_retry_delays(mut self, delays: &'static [Duration]) -> Self {
@@ -158,17 +98,14 @@ impl GitHubForge {
         format!("{}{path}", self.base_url)
     }
 
-    /// An authorized request builder — bearer via header only (design register
-    /// X5/X6); the token never enters the URL. The `Authorization` header is
-    /// omitted entirely when the token is empty (the tokenless `--out` path),
-    /// so the request reads as unauthenticated rather than sending a GitHub-
-    /// rejected empty bearer.
+    /// The token rides only the `Authorization` header, never the URL every [`ForgeError`] carries.
     fn request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
         let builder = self
             .client
             .request(method, url)
             .header(ACCEPT, ACCEPT_JSON)
             .header("X-GitHub-Api-Version", API_VERSION);
+        // No header for an empty token (tokenless `--out`): GitHub rejects an empty bearer.
         if self.credentials.api().0.is_empty() {
             builder
         } else {
@@ -197,11 +134,8 @@ impl GitHubForge {
         Ok((status, body))
     }
 
-    /// A non-success status as an error, carrying the forge's own reason.
-    ///
-    /// GitHub puts the reason in the response body (`{"message": ...}`) and
-    /// nowhere else, so every non-success return goes through here rather than
-    /// dropping the body and reporting a bare number.
+    /// GitHub's reason lives only in the response body, so every non-success return routes
+    /// through here to keep it.
     fn status_error(&self, url: &str, status: StatusCode, body: &[u8]) -> ForgeError {
         ForgeError::Status {
             url: url.to_string(),
@@ -217,7 +151,7 @@ impl GitHubForge {
         })
     }
 
-    /// GET a JSON resource. `None` on 404; error on any other non-success.
+    /// `None` on 404; any other non-success is an error.
     async fn get_json_optional(&self, url: &str) -> Result<Option<Value>, ForgeError> {
         let (status, body) = self.send(self.request(Method::GET, url), url).await?;
         if status == StatusCode::NOT_FOUND {
@@ -229,7 +163,6 @@ impl GitHubForge {
         Ok(Some(Self::parse_json(url, &body)?))
     }
 
-    /// POST a JSON body and parse the success response.
     async fn post_json(&self, url: &str, body: &Value) -> Result<Value, ForgeError> {
         let (status, response) = self.send(self.json_request(Method::POST, url, body)?, url).await?;
         if !status.is_success() {
@@ -256,9 +189,8 @@ impl GitHubForge {
             })
     }
 
-    /// Bounded readiness poll on the fork's own endpoint (rebuilt from the
-    /// verified identity, never an API-returned URL). Each probe carries a short
-    /// per-request timeout so one black-holed GET cannot eat the deadline.
+    /// Polls a URL rebuilt from the verified identity, never one the API returned, which could
+    /// aim the bearer at another host.
     async fn wait_fork_ready(&self, identity: &ForkIdentity) -> Result<(), ForgeError> {
         let url = self.url(&format!("/repos/{}", identity.full_path));
         let schedule = PollSchedule::default();
@@ -276,6 +208,7 @@ impl GitHubForge {
         })
     }
 
+    /// Its own short timeout, so one black-holed GET cannot eat the poll deadline.
     async fn probe_ready(&self, url: &str, request_timeout: Duration) -> bool {
         matches!(
             self.request(Method::GET, url).timeout(request_timeout).send().await,
@@ -283,20 +216,15 @@ impl GitHubForge {
         )
     }
 
-    // ── git data API (multi-file atomic commit, design register C15) ──
+    // ── git data API (multi-file atomic commit) ──
 
     async fn base_tree_sha(&self, repo: &RepoCoordinate, base_sha: &str) -> Result<String, ForgeError> {
         let url = self.url(&format!("/repos/{}/git/commits/{base_sha}", repo.full_path()));
-        // A 404 here is NOT a malformed response: this is the first request of
-        // the commit sequence, and a brand-new fork's git object store may not
-        // be provisioned yet (design register X5). Surface it as the status it
-        // was so [`Self::commit_files`] can retry the whole sequence;
-        // `MissingField` stays reserved for a 200 whose body lacks `tree.sha`.
+        // A 404 stays a `Status`, never `MissingField`: a fresh fork's unprovisioned object store
+        // answers it, and `commit_files` replays only on a status.
         let body = self.get_json_optional(&url).await?.ok_or_else(|| ForgeError::Status {
             url: url.clone(),
             status: StatusCode::NOT_FOUND.as_u16(),
-            // Synthesised from an absent resource, not from a response body:
-            // there is no forge message to quote.
             detail: String::new(),
         })?;
         body.get("tree")
@@ -342,28 +270,14 @@ impl GitHubForge {
         object_sha(&url, &value)
     }
 
-    /// `POST /merge-upstream` — the request behind [`Forge::sync_fork`], kept
-    /// separate from it so the commit retry can re-run the sync and report what
-    /// it answered, which the trait method deliberately swallows.
+    /// `POST /merge-upstream`; unlike [`Forge::sync_fork`] it returns the answer, which the
+    /// commit retry reports.
     async fn merge_upstream(&self, fork: &RepoCoordinate, branch: &str) -> Result<(), ForgeError> {
         let url = self.url(&format!("/repos/{}/merge-upstream", fork.full_path()));
         self.post_json(&url, &json!({ "branch": branch })).await.map(|_| ())
     }
 
-    /// Point `refs/heads/<branch>` at `commit_sha`, creating the ref when it
-    /// does not yet exist.
-    ///
-    /// Under [`RefUpdate::FastForward`] — every ordinary announce — the update is
-    /// a compare-and-swap (design register C4): a non-fast-forward, meaning a
-    /// concurrent announce advanced the branch, surfaces as
-    /// [`ForgeError::NonFastForward`] for the caller to re-read and retry, never
-    /// a silent force-overwrite. Under [`RefUpdate::Reset`] the rewrite is the
-    /// point, so no such rejection can occur.
-    ///
-    /// A rejected update costs one extra request: GitHub reports "absent ref"
-    /// and "not a fast-forward" with the same 422, so the ref is read to tell
-    /// them apart. That read is off the happy path entirely — a successful
-    /// update returns without it.
+    /// Point `refs/heads/<branch>` at `commit_sha`, creating the ref when absent.
     async fn upsert_branch(
         &self,
         repo: &RepoCoordinate,
@@ -382,20 +296,13 @@ impl GitHubForge {
         if status.is_success() {
             return Ok(());
         }
-        // GitHub answers **422 for both** rejection modes of this endpoint: a
-        // fast-forward-only update that is not an ancestor (the concurrent-
-        // advance CAS case) AND a ref that does not exist at all (verified live:
-        // `{"message":"Reference does not exist"}`, 422 — not the 404 the shape
-        // of the endpoint suggests). The two are told apart by asking the ref
-        // itself, never by matching GitHub's English prose, which is not a
-        // stable API contract. 404 joins the same path: it is not observed for
-        // an absent ref, but a fresh fork whose git objects are still
-        // provisioning can answer it, and the probe classifies that as absent
-        // too — so the create below runs and its own 404 drives the X5 retry,
-        // exactly as before.
+        // GitHub answers 422 both for a non-fast-forward and for a missing ref, so read the ref to
+        // tell them apart; its English message is no stable contract.
         if status != StatusCode::UNPROCESSABLE_ENTITY && status != StatusCode::NOT_FOUND {
             return Err(self.status_error(&update_url, status, &update_response));
         }
+        // 404 falls through too: a still-provisioning fork answers it, and the create's own 404
+        // then drives the commit retry.
         if self.get_ref_sha(repo, &format!("heads/{branch}")).await?.is_some() {
             return Err(ForgeError::NonFastForward {
                 branch: branch.to_string(),
@@ -409,8 +316,7 @@ impl GitHubForge {
         if create_status.is_success() {
             return Ok(());
         }
-        // A concurrent first announce created the branch between our probe and
-        // this create — treat it as a CAS conflict and retry as an update.
+        // A concurrent first announce created the branch after the probe: a CAS conflict.
         if create_status == StatusCode::UNPROCESSABLE_ENTITY {
             return Err(ForgeError::NonFastForward {
                 branch: branch.to_string(),
@@ -419,15 +325,7 @@ impl GitHubForge {
         Err(self.status_error(&create_url, create_status, &create_response))
     }
 
-    /// One attempt at the [`Forge::commit_files`] sequence: base tree -> blobs ->
-    /// tree -> commit -> fast-forward-only ref update.
-    ///
-    /// A [`FileChange::Delete`] is a tree entry whose `sha` is `null`, which is
-    /// how the git data API spells a removal against `base_tree`. The path is
-    /// **read first** and an absent one contributes no entry at all: GitHub's
-    /// contract does not say what a null for a path the base tree never carried
-    /// answers, and C-001 owes the caller a no-op rather than whatever that
-    /// turns out to be.
+    /// One attempt at the [`Forge::commit_files`] sequence.
     async fn commit_files_once(
         &self,
         repo: &RepoCoordinate,
@@ -445,11 +343,11 @@ impl GitHubForge {
                     let blob_sha = self.create_blob(repo, contents).await?;
                     tree_entries.push(json!({ "path": path, "mode": "100644", "type": "blob", "sha": blob_sha }));
                 }
-                // ponytail: one read per deleted path. One
-                // `GET /git/trees/<base>?recursive=1` is the upgrade path if a
-                // run ever removes many at once — it carries a truncation
-                // premise (GitHub caps that response) this form does not.
+                // ponytail: one read per deleted path; one `GET /git/trees/<base>?recursive=1` if
+                // runs ever delete many, minding GitHub's truncation cap on that response.
                 FileChange::Delete => {
+                    // An absent path adds no null-`sha` entry: GitHub leaves that case undefined,
+                    // and the trait owes a no-op.
                     if self.get_file_contents(repo, path, base_sha).await?.is_none() {
                         continue;
                     }
@@ -464,27 +362,9 @@ impl GitHubForge {
     }
 }
 
-/// The GitHub REST realization of the announce operation set.
-///
-/// Every method below holds the [`Forge`] contract with GitHub's own wire
-/// shapes; the notes on each are GitHub specifics, not restatements of the
-/// contract, which lives on the trait.
 #[async_trait::async_trait]
 impl Forge for GitHubForge {
-    /// `GET /user`, whose `type` field carries GitHub's own bot assertion.
-    ///
-    /// C-009's `Ok(None)` — "the credential has no user" — is the GitHub App
-    /// installation token, and that credential answers this endpoint **403
-    /// with `Resource not accessible by integration`**, never 404. So the 403
-    /// is matched on its message, not on the bare status: an ordinary
-    /// permission failure (SAML enforcement, a missing scope) must stay an
-    /// error the operator sees at exit 80, not an absent account the owner
-    /// ladder silently falls through. A 404 answers `Ok(None)` as well — the
-    /// same "nothing behind this credential" reading.
-    ///
-    /// `UsersApiUnavailable` has no GitHub arm: it is scoped to a credential
-    /// forbidden the users API as a whole (a GitLab job token), and the one
-    /// GitHub credential without a user is the `Ok(None)` case above.
+    /// An App installation token has no user and answers 403 `NO_INTEGRATION_USER`: `Ok(None)`.
     async fn authenticated_identity(&self) -> Result<Option<ForgeIdentity>, ForgeError> {
         let url = self.url("/user");
         let body = match self.get_json_optional(&url).await {
@@ -496,18 +376,9 @@ impl Forge for GitHubForge {
         Ok(Some(identity_from_body(&url, &body)?))
     }
 
-    /// `GET /users/{login}`, `None` on 404.
     async fn resolve_user(&self, login: &str) -> Result<Option<ForgeIdentity>, ForgeError> {
-        // `.` and `..` are the only two logins that cannot travel as a path
-        // segment at all: percent-encoded they become `%2E`/`%2E%2E`, which the
-        // URL parser still collapses as dot segments, retargeting the request at
-        // the API root — which answers 200 with no `login` field. Every other
-        // spelling is inert once escaped (`%2e%2e` typed literally becomes
-        // `%252e%252e`). The empty login is the third: it composes `/users/`,
-        // GitHub's *list-users* endpoint, whose 200 array carries no `login`
-        // field. No account carries any of the three names, so "no such
-        // account" is the honest answer rather than a new refusal the ladder
-        // would have to learn.
+        // Escaped `.`/`..` still collapse as dot segments and empty hits the `/users/` list, each
+        // retargeting the request; no account bears these names.
         if matches!(login, "" | "." | "..") {
             return Ok(None);
         }
@@ -518,12 +389,6 @@ impl Forge for GitHubForge {
         Ok(Some(identity_from_body(&url, &body)?))
     }
 
-    /// Read a file's bytes at `r#ref`, or `None` when the path does not exist.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status
-    /// other than 404, or a response-decode failure.
     async fn get_file_contents(
         &self,
         repo: &RepoCoordinate,
@@ -545,13 +410,6 @@ impl Forge for GitHubForge {
         Ok(Some(body.to_vec()))
     }
 
-    /// Resolve a git ref to its commit SHA, or `None` when the ref does not
-    /// exist. `r#ref` is a ref path such as `heads/<branch>`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status
-    /// other than 404, or a missing `object.sha` field in the response.
     async fn get_ref_sha(&self, repo: &RepoCoordinate, r#ref: &str) -> Result<Option<String>, ForgeError> {
         let url = self.url(&format!("/repos/{}/git/ref/{}", repo.full_path(), r#ref));
         let Some(body) = self.get_json_optional(&url).await? else {
@@ -568,31 +426,8 @@ impl Forge for GitHubForge {
         Ok(Some(sha.to_string()))
     }
 
-    /// How `head_owner:head_branch` stands relative to `base`.
-    ///
-    /// One compare call answers ancestry exactly, which a bare ref-SHA equality
-    /// check cannot. The four states are kept distinct rather than collapsed to
-    /// a boolean because [`BranchComparison::Diverged`] and
-    /// [`BranchComparison::Ahead`] demand *opposite* handling — see that type's
-    /// documentation.
-    ///
-    /// Fails closed on anything else. A 404 here is an **indeterminate** compare,
-    /// not a verdict: the only caller asks this after already observing that the
-    /// announce branch exists, so neither ref should be unresolvable, and both a
-    /// TOCTOU ref deletion and an inaccessible compare land on the same status.
-    /// Reading it as "not ahead" would let the C6 unchanged path return success
-    /// while a committed update sits on the branch with no pull request — the
-    /// stranded-commit window the C6 amendment exists to close. Erroring is
-    /// chosen over a second, equally racy pair of ref reads: two more requests
-    /// still cannot distinguish "deleted" from "cannot see", and the caller's
-    /// correct response to either is the same — surface it, do not silently
-    /// report a clean no-op.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, any non-success status
-    /// (404 included), a missing `status` field, or a `status` value the client
-    /// does not model.
+    /// A 404 is an error, never "not ahead", which would report success over a committed update
+    /// that has no pull request.
     async fn compare_branch(
         &self,
         repo: &RepoCoordinate,
@@ -609,7 +444,6 @@ impl Forge for GitHubForge {
             return Err(ForgeError::Status {
                 url,
                 status: StatusCode::NOT_FOUND.as_u16(),
-                // Synthesised from an absent comparison, not a response body.
                 detail: String::new(),
             });
         };
@@ -623,17 +457,7 @@ impl Forge for GitHubForge {
         parse_compare_status(&url, status)
     }
 
-    /// The open pull request whose head is `head`'s `branch`, or `None`.
-    ///
-    /// Read-only, and deliberately scoped to **open** pull requests: the
-    /// announce branch is per package and outlives every pull request opened
-    /// from it, so "a pull request exists" is not the same question as "this
-    /// branch is still carrying one".
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status, or
-    /// a malformed pull-request response body.
+    /// Open only: the per-package announce branch outlives every pull request opened from it.
     async fn find_open_pull_request(
         &self,
         index: &RepoCoordinate,
@@ -656,18 +480,8 @@ impl Forge for GitHubForge {
         pull_request_from_body(&pulls_url, existing, true).map(Some)
     }
 
-    /// Whether pull request `number` on `index` merges cleanly.
-    ///
-    /// The single-pull GET, not the list endpoint: `mergeable` is absent from
-    /// every listed pull request, and this GET is also what *asks* GitHub to
-    /// compute the merge commit in the first place. One request, no poll — a
-    /// verdict GitHub has not finished computing is [`Mergeability::Unknown`],
-    /// which the caller re-asks on the next run.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure or a non-success status
-    /// other than 404.
+    /// The single-pull GET, never the list: listed pull requests omit `mergeable`, and this GET
+    /// is what starts GitHub computing it.
     async fn pull_request_mergeability(&self, index: &RepoCoordinate, number: u64) -> Result<Mergeability, ForgeError> {
         let url = self.url(&format!("/repos/{}/pulls/{number}", index.full_path()));
         let Some(body) = self.get_json_optional(&url).await? else {
@@ -676,20 +490,6 @@ impl Forge for GitHubForge {
         Ok(mergeability_from_body(&body))
     }
 
-    /// Look up an existing fork of `upstream` at `fork`, **without creating
-    /// one**. `None` when nothing is there, or when what is there is not a
-    /// verified fork of `upstream` (a same-named stranger repository).
-    ///
-    /// Read-only by contract: the caller resolves the fork's real identity
-    /// before deciding whether any write is needed at all, so a pure no-op run
-    /// never provokes a fork create. It honours the full requested coordinate —
-    /// a fork renamed away from the upstream's project name resolves here, where
-    /// deriving the path from the upstream's own project name would miss it.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status
-    /// other than 404, or a verified fork living under an unexpected owner.
     async fn find_fork(
         &self,
         upstream: &RepoCoordinate,
@@ -700,8 +500,7 @@ impl Forge for GitHubForge {
         let Some(body) = self.get_json_optional(&url).await? else {
             return Ok(None);
         };
-        // A same-named stranger repository is "no fork here", not a hard error:
-        // the caller's create path is what refuses it (X5).
+        // A same-named stranger is "no fork here", not an error: the create path refuses it.
         let Ok(identity) = verify_github_fork(&body, upstream) else {
             return Ok(None);
         };
@@ -714,31 +513,24 @@ impl Forge for GitHubForge {
         upstream: &RepoCoordinate,
         target_owner: Option<&str>,
     ) -> Result<ForkIdentity, ForgeError> {
-        // The fork must live under an explicit target namespace, else the token
-        // identity. This anchor is verified against the fork's own identity.
         let expected_namespace = match target_owner {
             Some(owner) => owner.to_string(),
             None => self.authenticated_login().await?,
         };
-        // A namespace cannot fork a repository it already owns. GitHub answers
-        // that POST with an opaque 403, and the publisher's real intent — a pull
-        // request from a branch on the index itself — is a different code path
-        // entirely, so name it rather than letting the fork API refuse it.
+        // GitHub refuses a self-fork with an opaque 403, so name the refusal here.
         if expected_namespace.eq_ignore_ascii_case(&upstream.namespace) {
             return Err(ForgeError::SelfForkRefused {
                 upstream: upstream.to_string(),
                 namespace: expected_namespace,
             });
         }
-        // Reuse a verified existing fork at the conventional path. A renamed
-        // fork (or a same-named stranger) fails verification and falls through
-        // to the idempotent create below.
+        // A renamed fork misses here, and the idempotent create below adopts it.
         let conventional = upstream.with_namespace(expected_namespace.clone());
         if let Some(identity) = self.find_fork(upstream, &conventional).await? {
             return Ok(identity);
         }
-        // Create (or adopt a renamed) fork; the identity is built ONLY from the
-        // response body, never a composed `{namespace}/{project}`.
+        // The identity comes only from the response body: a composed `{namespace}/{project}`
+        // misses a renamed fork.
         let create_url = self.url(&format!("/repos/{}/forks", upstream.full_path()));
         let (status, body) = self
             .send(
@@ -756,30 +548,14 @@ impl Forge for GitHubForge {
         Ok(identity)
     }
 
-    /// Fast-forward `fork`'s `branch` onto its upstream — GitHub's "Sync fork".
+    /// GitHub's "Sync fork": a fork far behind upstream answers writes parented on an upstream
+    /// SHA with a 5xx or a reasonless 422.
     ///
-    /// An announce commit is written to the fork but parents off a SHA read
-    /// from the **upstream** repository, so that object reaches the fork only
-    /// through the shared fork network. A fork whose own branches never advance
-    /// leans on that sharing for every write it ever makes, and GitHub answers
-    /// those writes with a 5xx — or a 422 carrying no validation reason — once
-    /// the fork has fallen far enough behind: on 2026-08-02 the shared announce
-    /// fork stood 33 commits behind and every mirror in the fleet failed its
-    /// announce against `POST /git/commits`. Syncing first puts the base commit
-    /// in the fork's own history, so the git-data sequence stops depending on
-    /// cross-repository object reach.
-    ///
-    /// Best-effort by construction: this only moves *where* the base object
-    /// lives, so it is never a precondition of the commit that follows. A fork
-    /// that has diverged from upstream answers 409, one with nothing to pull
-    /// answers non-success too, and in both cases the commit sequence is
-    /// unaffected — so a failure is logged and the announce proceeds.
+    /// Best-effort: a diverged or up-to-date fork answers non-success, so a failure is only logged.
     async fn sync_fork(&self, fork: &RepoCoordinate, branch: &str) {
         if let Err(error) = self.merge_upstream(fork, branch).await {
-            // WARN, not debug: this is the single most useful fact when the ref
-            // write later 404s, and CI runs at INFO — at debug a skipped sync was
-            // invisible, so the 404 read as a credential, permission, or ruleset
-            // fault and cost ~15 probes to rule all three out.
+            // WARN, not debug: CI logs at INFO, and without this line a later ref-write 404 reads
+            // as a credential, permission or ruleset fault.
             tracing::warn!(
                 %error,
                 fork = %fork.full_path(),
@@ -788,45 +564,12 @@ impl Forge for GitHubForge {
         }
     }
 
-    /// Verify the credential may push a branch to `repo`, before anything is
-    /// written there.
-    ///
-    /// The fork-free announce path commits onto the index repository itself, so
-    /// a credential without push permission fails partway through the git-data
-    /// sequence — and GitHub reports an unauthorised write as 404 at least as
-    /// often as 403, which [`Self::commit_files`] would then mistake for the
-    /// fresh-fork provisioning race, sleep 3s, replay the whole sequence, and
-    /// finally surface a bare status code naming a URL. One read of the
-    /// repository's own `permissions.push` collapses all of that into a named
-    /// error before any write is attempted.
-    ///
-    /// A readable `permissions.push == false` is an ordinary denial and needs
-    /// no exception. The **exception** is the pair where the field cannot be
-    /// read at all: a repository the credential cannot see answers 404 rather
-    /// than 403, and an unauthenticated read omits `permissions` entirely.
-    /// C-011 says an unreadable field reports [`super::CheckStatus::Unknown`]
-    /// without failing the call; this probe predates that vocabulary and
-    /// refuses instead, because refusing before any write is the point of it,
-    /// and because neither shape can be told from "you may not push here".
-    ///
-    /// So GitHub's `push-access` row has two outcomes only — `Passed`, or a
-    /// raised error — and a caller that must report `skipped` (the
-    /// credential-free `--out` run) does so by not calling this at all and
-    /// seeding [`PushAccess::skipped_all`] itself.
-    ///
-    /// Only `push-access` is upgraded, and only from the read above. GitHub has
-    /// no job-token capability to report and this client carries no `git`
-    /// binary — the git write transport is refused for GitHub before a client
-    /// is built — so the other three rows stay
-    /// [`super::CheckStatus::Skipped`]. A row is `Passed` only where a probe
-    /// genuinely observed the capability; anything else would put a claim in
-    /// the report that nothing checked.
+    /// GitHub answers an unauthorised write with 404 as often as 403, which
+    /// [`Self::commit_files`] would replay as the fresh-fork race, so refuse before any write.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::PushAccessDenied`] when the repository is invisible
-    /// to the credential or reports no push permission, or any other
-    /// [`ForgeError`] on transport, status, or decode failure.
+    /// Returns [`ForgeError::PushAccessDenied`] when `permissions.push` is not `true`.
     async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
         let url = self.url(&format!("/repos/{}", repo.full_path()));
         let allowed = self
@@ -834,6 +577,8 @@ impl Forge for GitHubForge {
             .await?
             .and_then(|body| body.get("permissions")?.get("push")?.as_bool())
             .unwrap_or(false);
+        // An unreadable `permissions.push` (invisible repo, unauthenticated read) refuses too,
+        // never `Unknown`: the point is to refuse before any write.
         if !allowed {
             return Err(ForgeError::PushAccessDenied { repo: repo.full_path() });
         }
@@ -842,29 +587,15 @@ impl Forge for GitHubForge {
         Ok(access)
     }
 
-    /// Commit `files` atomically onto `branch` at `base_sha`, returning the new
-    /// commit SHA. One commit carries the root plus every CAS file via the git
-    /// data API — never a loop over the single-file contents API (design
-    /// register C15).
+    /// One git-data-API commit, never a loop over the single-file contents API, so the root and
+    /// its CAS files land atomically.
     ///
-    /// The **whole** sequence is retried once, after a fixed delay, when any of
-    /// its requests 404s. That absorbs GitHub's fresh-fork race: a fork's
-    /// metadata reads ready before its git objects finish provisioning, so the
-    /// readiness poll (which asks `GET /repos/{fork}` — metadata) can pass while
-    /// the git object store still answers 404. The race is not confined to one
-    /// request: the sequence *opens* with `GET /git/commits/{base_sha}`, so
-    /// wrapping only a later write would leave the first two requests exposed.
-    /// A settled fork never 404s here, so the retry only ever fires inside the
-    /// provisioning window (design register X5). Every step is idempotent — git
-    /// objects are content-addressed and nothing is published until the final
-    /// ref update — so replaying the sequence cannot double-commit.
+    /// Replay cannot double-commit: objects are content-addressed and nothing publishes before
+    /// the ref update.
     ///
     /// # Errors
     ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status, or
-    /// a malformed git-data-API response. A rejected fast-forward-only ref
-    /// update surfaces as [`ForgeError::NonFastForward`] and is **not** retried
-    /// here — it needs the caller's re-read-and-regenerate (design register C4).
+    /// [`ForgeError::NonFastForward`] is never retried here: it needs the caller to regenerate.
     async fn commit_files(
         &self,
         repo: &RepoCoordinate,
@@ -874,6 +605,8 @@ impl Forge for GitHubForge {
         files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
+        // Replay from the top: the opening `GET /git/commits` also 404s in a fresh fork's
+        // provisioning window, which the metadata readiness poll does not cover.
         let mut outcome = self
             .commit_files_once(repo, branch, base.sha, message, files, update)
             .await;
@@ -886,11 +619,8 @@ impl Forge for GitHubForge {
             }
             tracing::debug!(%error, "replaying the git-data commit sequence");
             tokio::time::sleep(delay).await;
-            // A base in another repository reaches this one only through the
-            // shared fork network (see `sync_fork`), so a fork that has fallen
-            // behind fails every replay identically — replaying blind waits out
-            // three delays and surfaces the same status. Re-sync first, and keep
-            // what the sync said for the error below.
+            // A fork behind a cross-repo base fails every blind replay identically, so re-sync
+            // first and keep its answer for the error.
             if cross_repo_base {
                 sync = Some(match self.merge_upstream(repo, base.branch).await {
                     Ok(()) => "ok".to_string(),
@@ -909,14 +639,6 @@ impl Forge for GitHubForge {
         outcome
     }
 
-    /// Open a pull request from `head`'s `branch` into `index`'s `base`, or
-    /// reuse the existing open one (never duplicate — design register C9).
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status
-    /// other than the "pull request already exists" 422/409, or a malformed
-    /// pull-request response body.
     async fn open_or_update_pull_request(
         &self,
         index: &RepoCoordinate,
@@ -936,10 +658,7 @@ impl Forge for GitHubForge {
             let value = Self::parse_json(&pulls_url, &response)?;
             return pull_request_from_body(&pulls_url, &value, false);
         }
-        // 409, or a 422 that says so, = "a pull request already exists" — the
-        // branch update already refreshed it; reuse the open one, never
-        // duplicate. Any other 422 (notably "No commits between base and head")
-        // is a genuine failure and must not fall into list-and-reuse.
+        // 409, or a 422 saying so, means one is already open, and the branch update refreshed it.
         let already_exists =
             status.as_u16() == 409 || (status.as_u16() == 422 && pull_request_already_exists(&response));
         if !already_exists {
@@ -954,52 +673,31 @@ impl Forge for GitHubForge {
     }
 }
 
-/// Everything that is not unreserved must be escaped in a path segment.
-///
-/// `NON_ALPHANUMERIC` less `-`, `_` and `~`. That is the RFC 3986 unreserved
-/// set **minus `.`**, which stays escaped on purpose: `.` is the one unreserved
-/// mark the URL parser gives structural meaning to, and leaving it raw would
-/// let a `.`/`..` login travel as a dot segment. Escaping does not defeat that
-/// on its own — [`GitHubForge::resolve_user`] refuses those two logins outright
-/// — but nothing here hands the parser a shortcut. A login is operator input
-/// (`--owner`) with no parse guard of its own, so interpolating it raw would
-/// also let `?` end the path and `/` retarget the request at a different
-/// endpoint.
+/// RFC 3986 unreserved minus `.`: a login is unvalidated operator input (`--owner`), and an
+/// unescaped `?` or `/` would end or retarget the path.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
 
-/// Percent-encode one path segment.
 fn encode_segment(value: &str) -> String {
     utf8_percent_encode(value, SEGMENT).to_string()
 }
 
-/// GitHub's own words for "this credential is an App installation token, and an
-/// installation has no user account behind it".
+/// GitHub's 403 message for an App installation token, which has no user account.
 const NO_INTEGRATION_USER: &str = "Resource not accessible by integration";
 
-/// Whether a failed `GET /user` is that refusal rather than a permission
-/// failure.
+/// Matches the message, not the bare 403, or a SAML or missing-scope failure reads as an absent
+/// account instead of an error.
 ///
-/// The body is already in hand: every non-success return carries it as
-/// [`ForgeError::Status`]'s `detail`, via `status_detail`, which redacts the
-/// credential and caps the text at 300 characters. GitHub puts `message` first
-/// in its error bodies, so the marker survives the cap — and reading the detail
-/// back costs nothing, where re-reading the response would need a second
-/// request path beside [`GitHubForge::get_json_optional`].
+/// `status_detail` caps `detail` at 300 characters; GitHub's `message` leads the body, so the
+/// marker survives the cap.
 fn no_user_behind_the_credential(error: &ForgeError) -> bool {
     matches!(error, ForgeError::Status { status: 403, detail, .. } if detail.contains(NO_INTEGRATION_USER))
 }
 
-/// A [`ForgeIdentity`] from GitHub's user shape, shared by both identity reads.
+/// `id` is required: a defaulted zero mismatches every `--owner LOGIN:ID` and refuses for the
+/// wrong reason.
 ///
-/// `login` and `id` are required: `id` is what C-048 compares `--owner
-/// LOGIN:ID` against, and a defaulted zero would disagree with every real
-/// account and refuse for the wrong reason. `type` is **not** required — it is
-/// absent from some shapes and reads `Organization` in others, and neither is a
-/// bot, so demanding it would turn a legitimate account into a decode failure.
-///
-/// `bot` is that `type` field and nothing else (C-008): a login ending in
-/// `[bot]` is a naming convention, not the forge's assertion, and the value
-/// gates whether a claim may be authored at all.
+/// `type` is optional, since some shapes omit it and demanding it fails a legitimate account.
+/// `bot` reads only `type == "Bot"`, never a `[bot]` login suffix, because it gates claim authorship.
 fn identity_from_body(url: &str, body: &Value) -> Result<ForgeIdentity, ForgeError> {
     let missing = |field: &str| ForgeError::MissingField {
         url: url.to_string(),
@@ -1017,12 +715,7 @@ fn identity_from_body(url: &str, body: &Value) -> Result<ForgeIdentity, ForgeErr
     })
 }
 
-/// The REST base URL for a GitHub host.
-///
-/// github.com answers on `api.github.com`; every Enterprise Server instance
-/// answers on itself under `/api/v3`. Always https: the announce credential
-/// rides these requests as a bearer header, and a plaintext scheme would put it
-/// on the wire.
+/// Always https: the bearer header would otherwise cross the wire in plaintext.
 fn api_base_url(host: Option<&str>) -> String {
     match host {
         None => DEFAULT_BASE_URL.to_string(),
@@ -1033,8 +726,6 @@ fn api_base_url(host: Option<&str>) -> String {
     }
 }
 
-/// The fork-create request body: `organization` when a target owner is named
-/// (design register S12), an empty object for the token-identity default.
 fn fork_create_body(target_owner: Option<&str>) -> Value {
     match target_owner {
         Some(owner) => json!({ "organization": owner }),
@@ -1042,14 +733,8 @@ fn fork_create_body(target_owner: Option<&str>) -> Value {
     }
 }
 
-/// The GitHub owner of a coordinate, refusing a nested namespace.
-///
-/// GitHub organizations do not nest: every repository is exactly `owner/repo`.
-/// The coordinate type is forge-neutral and permits `a/b/c` so GitLab subgroups
-/// are expressible, so the flatness rule lives here, at the one forge that has
-/// it — and it is enforced before any request, since GitHub would otherwise
-/// answer a nested path with a bare 404 that reads as "no such repository"
-/// rather than "that path shape cannot exist here".
+/// The GitHub owner of a coordinate, refusing a nested namespace before any request, which
+/// GitHub would answer with a bare 404 that reads as a missing repository.
 pub(super) fn require_flat_namespace(coordinate: &RepoCoordinate) -> Result<&str, ForgeError> {
     if coordinate.namespace.contains('/') {
         return Err(ForgeError::NestedNamespaceUnsupported {
@@ -1060,16 +745,12 @@ pub(super) fn require_flat_namespace(coordinate: &RepoCoordinate) -> Result<&str
     Ok(&coordinate.namespace)
 }
 
-/// The cross-repo pull-request head, `owner:branch`.
 fn pr_head(head_owner: &str, branch: &str) -> String {
     format!("{head_owner}:{branch}")
 }
 
-/// Classify a compare response's `status` into "carries unmerged commits".
-///
-/// Exhaustive over GitHub's documented four values; an unmodelled value is an
-/// error, never a guess — a wrong "not ahead" strands a committed announce with
-/// no pull request (design register C6 amendment).
+/// An unmodelled `status` is an error, never a guess: a wrong "not ahead" strands a committed
+/// announce with no pull request.
 fn parse_compare_status(url: &str, status: &str) -> Result<BranchComparison, ForgeError> {
     match status {
         "identical" => Ok(BranchComparison::Identical),
@@ -1083,30 +764,8 @@ fn parse_compare_status(url: &str, status: &str) -> Result<BranchComparison, For
     }
 }
 
-/// Whether a failed git-data attempt is worth replaying.
-///
-/// A 404 is GitHub's "fork metadata ready before git objects" provisioning
-/// window (design register X5). A 429 or a 5xx is throttling or a server-side
-/// fault: on 2026-08-02 the shared announce fork answered `POST /git/commits`
-/// with 500 for every mirror in the fleet, and each run had already published
-/// to the registry by then, so giving up left the registry ahead of the index.
-/// Replaying the whole sequence is safe — blobs and trees are content-addressed
-/// so a repeat write returns the same SHA, and the ref update stays a
-/// compare-and-swap.
-///
-/// A 422 is deliberately NOT replayed. GitHub spends it on both "the endpoint
-/// has been spammed" and genuine validation failure, and nothing outside the
-/// response body tells them apart; replaying the latter only defers the same
-/// error. A rejected fast-forward needs the caller's regeneration against the
-/// winning head, never a blind replay of the same commit.
-/// Rename a spent-retry 404 on a base that lives in another repository into its
-/// cause.
-///
-/// Only that shape: the base object reaches the target only through the shared
-/// fork network, so a 404 there is what a fork left behind upstream looks like
-/// from the git-data API — not a missing repository, and not the credential,
-/// permission, or ruleset fault a bare status naming an endpoint reads as.
-/// `sync` is what the last re-sync answered, which is the fact that explains it.
+/// Name a spent-retry 404 on a cross-repo base as the fork lagging upstream, which a bare
+/// status misreads as a credential, permission or ruleset fault.
 fn fork_base_unreachable(
     error: &ForgeError,
     target: &RepoCoordinate,
@@ -1126,6 +785,11 @@ fn fork_base_unreachable(
     })
 }
 
+/// 5xx is replayed because giving up after the registry push leaves the registry ahead of the
+/// index.
+///
+/// 422 is never replayed: GitHub also spends it on real validation failures, and a rejected
+/// fast-forward needs regeneration, not a blind replay.
 fn is_retryable(error: &ForgeError) -> bool {
     matches!(
         error,
@@ -1136,12 +800,8 @@ fn is_retryable(error: &ForgeError) -> bool {
     )
 }
 
-/// Whether a 422 from pull-request create means "one already exists".
-///
-/// GitHub answers 422 for that **and** for "No commits between base and head".
-/// Only the former may fall through to list-and-reuse: the latter finds no open
-/// pull request and would surface as a misleading `MissingField`
-/// (`pull_request`) instead of the real reason.
+/// GitHub also answers 422 for "No commits between base and head", which list-and-reuse would
+/// misreport as a missing `pull_request`.
 fn pull_request_already_exists(body: &[u8]) -> bool {
     String::from_utf8_lossy(body).to_lowercase().contains("already exists")
 }
@@ -1180,15 +840,8 @@ fn pull_request_from_body(url: &str, value: &Value, updated: bool) -> Result<Pul
     })
 }
 
-/// GitHub's `mergeable` tri-state as a [`Mergeability`].
-///
-/// The field is `null` — present but empty — for as long as GitHub is computing
-/// the background merge commit, and the first GET of a pull request is what
-/// starts that computation. Reading `null` as either verdict is therefore
-/// wrong in opposite directions: as `false` it reports a conflict on a
-/// perfectly mergeable request the very first time it is asked, as `true` it
-/// clears a conflicting one. Absent is treated the same as `null`, since a
-/// shape that carries no field carries no verdict either.
+/// A `null` or absent `mergeable` means GitHub is still computing: read as `false` it flags a
+/// clean request, as `true` it clears a conflicting one.
 fn mergeability_from_body(value: &Value) -> Mergeability {
     match value.get("mergeable").and_then(Value::as_bool) {
         Some(true) => Mergeability::Mergeable,

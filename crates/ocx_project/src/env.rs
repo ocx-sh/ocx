@@ -3,9 +3,7 @@
 
 //! Project-tier environment declarations (`[env]` and `[group.<name>.env]`).
 //!
-//! A project declares environment variables the same way it declares tools:
-//! in `ocx.toml`, checked in beside the code. The value grammar is a union —
-//! a bare string is a constant, a table names its modifier explicitly:
+//! A bare string is a constant; a table names its modifier explicitly:
 //!
 //! ```toml
 //! [env]
@@ -14,18 +12,8 @@
 //! PATH = { type = "path", value = "node_modules/.bin" }
 //! ```
 //!
-//! `constant` replaces, `path` prepends. A relative `path` value resolves
-//! against the project root (the directory holding `ocx.toml`); an absolute
-//! one passes through. That is what makes deferring interpolation viable —
-//! `PATH` prepending, the one case that genuinely needs a dynamic value, is
-//! expressible with no template engine and no `${projectRoot}` token.
-//!
-//! Deliberately **not** [`ocx_package::metadata::env::var::Var`]: `Var`
-//! carries a `visibility` axis and `${installPath}` templating, and neither
-//! has project-tier meaning. A project is never a dependency of anything, so
-//! there is no edge to gate — `--self` has no effect on these entries.
-//!
-//! Values are literal in v1. No interpolation of any kind.
+//! `constant` replaces, `path` prepends (a relative value resolves against the
+//! project root). Values are literal, never interpolated.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map;
@@ -35,35 +23,22 @@ use super::error::ProjectErrorKind;
 use ocx_package::metadata::env::entry::Entry;
 use ocx_package::metadata::env::modifier::ModifierKind;
 
-/// TOML table path of the default group's env, used as the `scope` in every
-/// [`ProjectErrorKind`] this module raises. Named groups build theirs as
-/// `group.<name>.env`.
+/// The default group's env table path, the `scope` in this module's errors.
 pub const DEFAULT_ENV_SCOPE: &str = "env";
 
-/// One declared project-tier environment value: a modifier and a literal.
-///
-/// Normalized — the string shorthand and the `{ type, value }` table both
-/// land here, so nothing downstream branches on which spelling was written.
+/// One declared env value, normalized from either spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvValue {
-    /// How the value combines with any existing binding for the key:
-    /// [`ModifierKind::Constant`] replaces, [`ModifierKind::Path`] prepends,
-    /// [`ModifierKind::List`] appends.
     pub kind: ModifierKind,
-    /// The string a [`ModifierKind::List`] value is joined to the key's
-    /// existing value with. `None` on every other kind, and on a list that
-    /// declared none — this surface has a human to tell, so it may omit the
-    /// separator where package metadata may not, and
-    /// [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators)
-    /// settles what the omission inherits.
+    /// A `List` value's join string; `None` otherwise or when omitted, and
+    /// `reconcile_list_separators` settles what an omission inherits.
     pub separator: Option<String>,
     /// The literal value, verbatim as written. Never interpolated.
     pub value: String,
 }
 
 impl EnvValue {
-    /// A [`ModifierKind::Constant`] value — the bare-string shorthand's
-    /// meaning, and the overwhelmingly common case.
+    /// A [`ModifierKind::Constant`] value, the bare-string shorthand.
     pub fn constant(value: impl Into<String>) -> Self {
         Self {
             kind: ModifierKind::Constant,
@@ -82,7 +57,6 @@ impl EnvValue {
     }
 
     /// A [`ModifierKind::List`] value, appended to the key's existing value.
-    /// `separator` is `None` when the table omitted it.
     pub fn list(value: impl Into<String>, separator: Option<String>) -> Self {
         Self {
             kind: ModifierKind::List,
@@ -92,19 +66,15 @@ impl EnvValue {
     }
 }
 
-/// The `[env]` / `[group.<name>.env]` table: declared keys in sorted order.
-///
-/// Sorted rather than insertion-ordered so a serializer round-trip and the
-/// resolved [`Entry`] order are both deterministic regardless of how the
-/// author laid the file out.
+/// The `[env]` / `[group.<name>.env]` table, sorted so round-trips and the
+/// resolved [`Entry`] order are deterministic.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProjectEnv {
     entries: BTreeMap<String, EnvValue>,
 }
 
 impl ProjectEnv {
-    /// `true` when nothing is declared. Drives `skip_serializing_if` so an
-    /// untouched config never grows an empty `[env]` table on write-back.
+    /// `true` when nothing is declared; keeps an empty `[env]` off write-back.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -119,44 +89,24 @@ impl ProjectEnv {
         self.entries.iter()
     }
 
-    /// Parse a raw `[env]` table, validating both the key policy and the
-    /// value grammar.
-    ///
-    /// `scope` is the TOML table path (`"env"`, `"group.ci.env"`) and appears
-    /// verbatim in every error, so a diagnostic names the table the user has
-    /// to go edit. This is the canonical parse entry point — the
-    /// [`serde::Deserialize`] impl below exists only to satisfy derives.
-    ///
-    /// Key validation must delegate to [`ocx_util::env::is_valid_env_key`], the
-    /// single shared validator already gating both shell emitters and both CI
-    /// flavors; do not write a second one. The value grammar must be factored
-    /// so this method and the `Deserialize` impl share one branch, per the
-    /// [`ocx_config::mirror::parse_mirror_value`] precedent — two copies
-    /// of a union grammar drift.
+    /// Parse a raw `[env]` table; the canonical entry point. `scope` is the
+    /// TOML table path named in every error.
     ///
     /// # Errors
     ///
     /// - [`ProjectErrorKind::EnvReservedKey`] — an `OCX_*` / `__OCX_*` key.
-    /// - [`ProjectErrorKind::EnvInvalidKey`] — a key outside the POSIX
-    ///   environment-name grammar.
-    /// - [`ProjectErrorKind::EnvUnknownModifier`] — a table `type` outside the
-    ///   modifier vocabulary.
-    /// - [`ProjectErrorKind::EnvSeparatorOnNonList`] — a `separator` on a type
-    ///   that does not fold.
+    /// - [`ProjectErrorKind::EnvInvalidKey`] — a key outside the POSIX grammar.
+    /// - [`ProjectErrorKind::EnvUnknownModifier`] — an unknown table `type`.
+    /// - [`ProjectErrorKind::EnvSeparatorOnNonList`] — a `separator` off `list`.
     /// - [`ProjectErrorKind::EnvInvalidSeparator`] /
-    ///   [`ProjectErrorKind::EnvSeparatorEdgedValue`] — a separator the fold
-    ///   cannot use, or one the value's own flank fuses with.
-    /// - [`ProjectErrorKind::EnvPathSeparatorInValue`] — a `path` value naming
-    ///   more than one directory.
+    ///   [`ProjectErrorKind::EnvSeparatorEdgedValue`] — an unusable separator.
+    /// - [`ProjectErrorKind::EnvPathSeparatorInValue`] — a multi-directory `path`.
     /// - [`ProjectErrorKind::EnvUnknownValueField`] — any other field.
-    /// - [`ProjectErrorKind::EnvInvalidValue`] — a value that is neither a
-    ///   string nor a well-formed `{ type, value }` table.
+    /// - [`ProjectErrorKind::EnvInvalidValue`] — neither a string nor a table.
     pub fn from_table(scope: &str, raw: &toml::Table) -> Result<Self, ProjectErrorKind> {
         let mut entries = BTreeMap::new();
         for (key, value) in raw {
-            // Reserved before grammar: an `OCX_*` key that also breaks the
-            // POSIX grammar is reserved either way, and saying so first spares
-            // the user a fix-then-fail-again round.
+            // Reserved before grammar, so an `OCX_*` key is not fixed only to fail again.
             if ocx_util::env::is_reserved_ocx_key(key) {
                 return Err(ProjectErrorKind::EnvReservedKey {
                     scope: scope.to_string(),
@@ -174,34 +124,19 @@ impl ProjectEnv {
         Ok(Self { entries })
     }
 
-    /// Materialize the declared entries as resolved [`Entry`] values, ready
-    /// to append to the vector `resolve_env*` returns.
-    ///
-    /// Relative [`ModifierKind::Path`] values resolve against `project_root`
-    /// (the directory holding `ocx.toml`), never the current directory —
-    /// `ocx exec` from a subdirectory must see the same `PATH` as from the
-    /// root. Absolute values pass through untouched.
-    ///
-    /// Infallible: the key policy and the value grammar were already enforced
-    /// by [`Self::from_table`], and joining a declared value onto the root is
-    /// the whole of the remaining work.
+    /// The declared entries as resolved [`Entry`] values. A relative `Path`
+    /// resolves against `project_root`, never the cwd, so a subdirectory
+    /// `ocx exec` sees the same `PATH`.
     pub fn to_entries(&self, project_root: &Path) -> Vec<Entry> {
         self.entries
             .iter()
             .map(|(key, declared)| Entry {
                 key: key.clone(),
                 value: match declared.kind {
-                    // A list contribution is literal text like a constant — the
-                    // project root anchors directories, not option strings.
+                    // Literal text: the root anchors directories, not option strings.
                     ModifierKind::Constant | ModifierKind::List => declared.value.clone(),
-                    // `join` is the whole resolution: an absolute value
-                    // replaces the root outright, a relative one lands under
-                    // it. On Windows a driveless-but-rooted value (`/opt/bin`,
-                    // written by a POSIX author) is not `is_absolute()`, and
-                    // joining is what anchors it to the project's drive
-                    // instead of leaving it dependent on the process's current
-                    // drive — which is the cwd-independence this method owes
-                    // `ocx exec` from a subdirectory.
+                    // `join`, not an `is_absolute` check: a Windows rooted
+                    // driveless `/opt/bin` must anchor to the project's drive.
                     ModifierKind::Path => project_root.join(&declared.value).to_string_lossy().into_owned(),
                 },
                 kind: declared.kind.clone(),
@@ -211,26 +146,12 @@ impl ProjectEnv {
     }
 }
 
-/// The one value-grammar branch: a bare string is a
-/// [`ModifierKind::Constant`], a `{ type, value }` table names its modifier,
-/// and a `list` table may add a `separator`.
-///
-/// Shared by [`ProjectEnv::from_table`] and — through it — the
-/// [`serde::Deserialize`] impl, per the [`ocx_config::mirror::parse_mirror_value`]
-/// precedent. Two copies of a union grammar drift.
+/// The one value-grammar branch, shared by [`ProjectEnv::from_table`] and the
+/// `Deserialize` impl.
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::EnvUnknownModifier`] for a `type` outside the modifier
-/// vocabulary; [`ProjectErrorKind::EnvSeparatorOnNonList`],
-/// [`ProjectErrorKind::EnvInvalidSeparator`] and
-/// [`ProjectErrorKind::EnvSeparatorEdgedValue`] for a `separator` in the wrong
-/// company, unusable, or fused with the value's own flank;
-/// [`ProjectErrorKind::EnvPathSeparatorInValue`] for a `path` value embedding the
-/// platform path separator;
-/// [`ProjectErrorKind::EnvUnknownValueField`] for any other field;
-/// [`ProjectErrorKind::EnvInvalidValue`] for any other shape, carrying the
-/// TOML type name of the offending value.
+/// The `Env*` [`ProjectErrorKind`] naming the fault.
 fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvValue, ProjectErrorKind> {
     if let Some(constant) = value.as_str() {
         return Ok(EnvValue::constant(constant));
@@ -248,10 +169,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
     let Some(declared_type) = table.get("type").and_then(toml::Value::as_str) else {
         return Err(invalid_value());
     };
-    // Through `ModifierKind`'s own `FromStr` rather than a local match: the
-    // same grammar is parsed by `ocx exec --env KEY:TYPE=VALUE`, and two
-    // hand-rolled copies of one union drift. The error only supplies `found` —
-    // the scope/key context that makes the message actionable is added here.
+    // `ModifierKind::from_str`, shared with `ocx exec --env`, so the grammar has one copy.
     let kind = declared_type
         .parse::<ModifierKind>()
         .map_err(|error| ProjectErrorKind::EnvUnknownModifier {
@@ -267,9 +185,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
         Some(raw) => Some(raw.as_str().ok_or_else(invalid_value)?),
     };
 
-    // `separator` parameterizes the fold, so it belongs to `list` and nowhere
-    // else. Checked before the unknown-field sweep below, which would
-    // otherwise report a field this ocx knows perfectly well as unknown.
+    // Before the unknown-field sweep, which would call `separator` unknown.
     let folds = kind == ModifierKind::List;
     if declared_separator.is_some() && !folds {
         return Err(ProjectErrorKind::EnvSeparatorOnNonList {
@@ -279,14 +195,8 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
         });
     }
 
-    // Reject anything beyond the fields the declared type admits, matching the
-    // generated schema's `additionalProperties: false` and `Group`'s
-    // `deny_unknown_fields`. Accepting-and-ignoring would let a file authored
-    // against a newer ocx run here with materially different semantics and no
-    // signal — `required` on a path entry is a deferred ADR feature, so
-    // `{ type = "path", value = "bin", required = true }` would silently drop
-    // the caller's fail-if-absent intent. It would also leave the editor
-    // (which validates against the schema) disagreeing with the CLI.
+    // Unknown fields are refused as the schema does: ignoring a newer ocx's
+    // field (`required = true`) would silently change its semantics.
     if let Some(unknown) = table.keys().find(|name| match name.as_str() {
         "type" | "value" => false,
         "separator" => !folds,
@@ -299,16 +209,10 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
         });
     }
 
-    // A-10, second half. A path entry names ONE directory: every split-based
-    // emitter reads an embedded separator as two segments and matches neither
-    // against the whole operand, so the apply's dedup never fires and each
-    // re-source prepends another copy — and `remove_segment` cannot take it out
-    // again. The reconciler drops such an entry, but `ocx exec` / `ocx exec`
-    // composition and the `--shell` / `direnv export` emitters never reach the
-    // reconciler, so the refusal has to exist here too — independently, which is
-    // the word the addendum uses. Here the author gets a scope/key message at
-    // exit 65 instead of a warn line the prompt hook discards.
+    // A path entry names one directory: an embedded separator splits into
+    // segments the dedup and `remove_segment` never match.
     if kind == ModifierKind::Path && literal.contains(ocx_util::env::PATH_SEPARATOR) {
+        // Refused here: `ocx exec` and the shell emitters never reach the reconciler's drop.
         return Err(ProjectErrorKind::EnvPathSeparatorInValue {
             scope: scope.to_string(),
             key: key.to_string(),
@@ -316,10 +220,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
         });
     }
 
-    // The same two predicates the wire form and `--env` fold into their own
-    // exit codes. An omitted separator is unchecked on purpose: what it will
-    // inherit is not known until compose time, so judging the value against
-    // the bare default here would refuse entries that end up correct.
+    // An omitted separator is unchecked: what it inherits is known only at compose time.
     if let Some(separator) = declared_separator {
         if !ocx_package::metadata::env::list::separator_is_valid(separator) {
             return Err(ProjectErrorKind::EnvInvalidSeparator {
@@ -346,19 +247,12 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
 }
 
 impl serde::Serialize for ProjectEnv {
-    /// Emits the shorthand where it applies: a [`ModifierKind::Constant`]
-    /// serializes as a bare string, a [`ModifierKind::Path`] as the
-    /// `{ type, value }` table. One shape in, the same shape out.
+    /// Emits the bare-string shorthand for a constant, the table otherwise.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap as _;
 
-        /// The table arm. `kind` serializes through [`ModifierKind`]'s own
-        /// derive, so the `path`/`constant`/`list` spelling has one source.
-        ///
-        /// `separator` is skipped when absent — unlike the wire form, which
-        /// keeps the field so the published schema can require it. Here the
-        /// omission is legal input, so emitting `separator = ""` for it would
-        /// write back something the parser refuses.
+        /// `separator` is skipped when absent: `separator = ""` would write
+        /// back something the parser refuses.
         #[derive(serde::Serialize)]
         struct TableForm<'a> {
             #[serde(rename = "type")]
@@ -387,36 +281,23 @@ impl serde::Serialize for ProjectEnv {
 }
 
 impl<'de> serde::Deserialize<'de> for ProjectEnv {
-    /// NOT the canonical parse path — [`ProjectEnv::from_table`] is, and it
-    /// is what `ocx.toml` loading actually calls. This impl exists so
-    /// `ProjectConfig` and `Group` can keep their `Deserialize` derives; it
-    /// has no scope context, so it reports every fault against
-    /// [`DEFAULT_ENV_SCOPE`] and flattens the typed error through
-    /// `de::Error::custom`.
+    /// Not the canonical path ([`ProjectEnv::from_table`] is): it exists for
+    /// the `Deserialize` derives and reports every fault against [`DEFAULT_ENV_SCOPE`].
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = <toml::Table as serde::Deserialize>::deserialize(deserializer)?;
         Self::from_table(DEFAULT_ENV_SCOPE, &raw).map_err(serde::de::Error::custom)
     }
 }
 
+// Hand-written: a derive publishes only the table arm, and taplo would then
+// flag every `CI = "1"` in `ocx.toml`.
 impl schemars::JsonSchema for ProjectEnv {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("ProjectEnv")
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        // Hand-written because schemars reads the field's Rust TYPE and so
-        // cannot see the string-or-table union the hand-rolled Deserialize
-        // accepts. A derive would publish the table arm only — and the
-        // string arm is the common case (`CI = "1"`), so nearly every
-        // correct `[env]` block would be red-underlined in any taplo-enabled
-        // editor. `taplo.toml` binds this schema live to every `ocx.toml`.
-        //
-        // The `type` vocabulary is NOT hand-spelled: it `$ref`s
-        // `ModifierKind`'s own derive, so adding a modifier updates the
-        // published `ocx.toml` schema without anyone remembering this file.
-        // Draft 2020-12 permits keywords beside `$ref`, so the description
-        // stays local to the field.
+        // `$ref` to `ModifierKind`'s derive, so a new modifier needs no edit here.
         let mut modifier_kind = generator.subschema_for::<ModifierKind>();
         modifier_kind.ensure_object().insert(
             "description".to_owned(),

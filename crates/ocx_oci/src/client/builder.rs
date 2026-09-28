@@ -7,140 +7,59 @@ use super::Client;
 use super::MirrorMap;
 use super::native_transport::NativeTransport;
 
-/// Largest upload request body a registry is known to accept.
-///
-/// GHCR rejects any single blob-upload request whose body exceeds 4 MiB with
-/// `416 REQUESTED_RANGE_NOT_SATISFIABLE` — "the request body is too large and
-/// exceeds the maximum permissible limit of 4.00MiB". Every chunk ocx sends must
-/// stay at or under this, or layers above the cap become unpublishable on GHCR.
+/// Largest upload request body GHCR accepts; any larger request is refused with `416`, so no chunk may exceed it.
 pub(crate) const MAX_UPLOAD_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Body size of one chunked-push `PATCH`.
 ///
-/// A blob at or under this goes up in a single request; anything larger is split
-/// into this many bytes per `PATCH`, each carrying its own `Content-Range`, with
-/// the whole-blob digest committed by the final `PUT`. Held below
-/// `MAX_UPLOAD_REQUEST_BYTES` (4 MiB) with a 1 MiB margin so transfer framing cannot
-/// push a request over the registry's cap. Independent of the 128 KiB
-/// progress-frame size in `native_transport::progress_body_stream` — that governs
-/// progress granularity, this governs request size.
+/// 1 MiB under `MAX_UPLOAD_REQUEST_BYTES`, or transfer framing can push a request over the registry's cap.
 pub const PUSH_CHUNK_SIZE: usize = MAX_UPLOAD_REQUEST_BYTES - 1024 * 1024;
 
-/// Bound on every registry HTTP request, mapped to
-/// [`reqwest::ClientBuilder::read_timeout`].
+/// Per-frame idle bound on a registry response body, and a hard deadline on connect, TLS, upload and redirects.
 ///
-/// # Two semantics, not one
-///
-/// The name `read_timeout` undersells it. reqwest creates the sleep at dispatch
-/// and resets it only per *response-body* frame, so one value governs two
-/// different things:
-///
-/// - **Per-frame idle bound** on the response body. An honest slow download is
-///   unaffected however long it runs, as long as frames keep arriving; a body
-///   that goes quiet for this long is treated as dead.
-/// - **Hard deadline** on everything before the first body frame: connect, TLS
-///   handshake, request-body upload, the whole redirect chain, and the
-///   registry's time-to-first-response-byte. None of these reset the sleep.
-///
-/// # Why 120 s
-///
-/// The goal is a bounded hang, not a tight SLA — the fork defaults this to
-/// `None`, which hangs forever, and nothing on the pull path retries
-/// (`pull_local.rs` propagates with `?`). So the value only has to be small
-/// enough to fail eventually and large enough that no honest transfer trips it.
-///
-/// The binding constraint is the *upload* half, where the deadline is hard: a
-/// `PUSH_CHUNK_SIZE` (3 MiB) `PATCH` must complete inside it, which at 120 s
-/// needs ~26 KiB/s of sustained uplink — below any link that could publish at
-/// all. At 30 s the same chunk demands ~105 KiB/s, which a domestic uplink or a
-/// throttled CI runner misses. The empty-body committing `PUT ?digest=` is the
-/// other case: the registry does its whole-blob commit server-side before
-/// answering, and that wait is time-to-first-byte, i.e. deadline, not idle.
-/// 120 s sits in the same neighbourhood as containerd's 5-minute default.
-///
-/// # Relation to the pull-path drain
-///
-/// Bounded-hang complement to the trailer drain in `Client::pull_layer`: a
-/// registry that stalls mid-body — including after the tar's end-of-archive
-/// marker but before the drain has pulled the codec trailer — now surfaces an
-/// error instead of blocking the pull forever. Mid-download it lands as
-/// [`ClientError::ShortBlobRead`](super::error::ClientError::ShortBlobRead) via
-/// the completeness discriminator: `TempFail` (75), retryable, which is the
-/// correct taxonomy for a transport that went quiet.
+/// Unset, a mid-body stall hangs `Client::pull_layer` forever; much shorter, a `PUSH_CHUNK_SIZE` `PATCH`
+/// fails on a throttled uplink.
 pub const REGISTRY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Bound on the connect phase of every registry request, mapped to
-/// [`reqwest::ClientBuilder::connect_timeout`].
+/// Bound on the connect phase of every registry request.
 ///
-/// The fork defaults this to `None`, which is unbounded: a host that accepts
-/// nothing and refuses nothing — a black-holing firewall, a load balancer with
-/// no backend — leaves the socket in SYN_SENT until the OS gives up, which on
-/// Linux is over two minutes and on some tunings far longer.
-/// [`REGISTRY_READ_TIMEOUT`] does not cover this, because a connect that never
-/// completes never dispatches a request for reqwest to time.
-///
-/// 30 s matches `INDEX_CONNECT_TIMEOUT` in `oci/index/ocx_index.rs`, the
-/// sibling bound on the index-document fetch: both are the connect phase
-/// against a registry-class endpoint, and one number is easier to reason about
-/// than two.
+/// [`REGISTRY_READ_TIMEOUT`] never times a connect that never completes, so unset a black-holing host hangs
+/// for minutes.
 pub const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Everything [`TransportRecipe::build`] needs, and nothing that costs anything
-/// to hold — the deferred half of [`ClientBuilder`].
+/// The cheap, `Clone` inputs the transport is built from lazily, on first use.
 ///
-/// The recipe exists because building the transport is **not** cheap and the
-/// warm path never uses it. `crate::native::ClientConfig::default()` copies the
-/// ~150 bundled Mozilla roots, and `crate::native::Client::new` then hands them to
-/// **two** `reqwest::Client` builds (the redirect-following one and its
-/// no-redirect twin), each of which parses the whole set into a rustls trust
-/// store: ~28 ms of pure CPU on every invocation that constructs a [`Client`],
-/// paid whether or not a request is ever made. A rendered trampoline
-/// (`<home>/toolchain/active/bin/<name>`) constructs one on every `cmake`, and resolves
-/// every locked tool out of the local store without dialling anything.
-///
-/// So the recipe is what a [`Client`] carries around, and the transport is built
-/// on the first call to [`Client::transport`]. Every field here is `Clone` and
-/// holds no trust store, no socket and no thread — which is the property that
-/// lets [`Client`] stay `Clone` without either re-running the build per clone or
-/// keeping a `ClientConfig` (which is not `Clone`) alive.
+/// Holds no `ClientConfig`: building one parses the bundled roots (~28 ms), which the warm path would pay for
+/// no request.
 #[derive(Clone, Default)]
 pub(super) struct TransportRecipe {
     auth: auth::Auth,
     /// Hosts to contact over plain HTTP; `None` is HTTPS everywhere.
     plain_http_registries: Option<Vec<String>>,
     dns_resolver: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
-    /// Operator-supplied extra CA roots (ocx#448, C-006), appended by
-    /// [`Self::config`] after the bundled set. Empty unless
-    /// `Context::try_init` resolved a source.
+    /// Operator CA roots, appended after the bundled set.
     extra_roots: ocx_util::tls::ExtraRoots,
 }
 
 impl TransportRecipe {
-    /// The operator roots [`Self::config`] will append (C-006).
+    /// The operator roots [`Self::config`] will append.
     pub(super) fn extra_roots(&self) -> &ocx_util::tls::ExtraRoots {
         &self.extra_roots
     }
 
-    /// The config the transport is built from — the whole of what deferring
-    /// costs, materialised. `ClientConfig::default()` is where the ~150 bundled
-    /// roots get copied, so calling this is already most of the price.
+    /// The config the transport is built from; most of the transport's cost.
     pub(super) fn config(&self) -> crate::native::ClientConfig {
         let mut config = crate::native::ClientConfig {
             push_chunk_size: PUSH_CHUNK_SIZE,
             read_timeout: Some(REGISTRY_READ_TIMEOUT),
             connect_timeout: Some(REGISTRY_CONNECT_TIMEOUT),
-            // CA roots are seeded by the fork's `ClientConfig::default()`
-            // (self-contained on hosts with no system trust store), inherited
-            // here via `..Default::default()`. Single source of truth: the fork.
             ..Default::default()
         };
         if let Some(registries) = &self.plain_http_registries {
             config.protocol = crate::native::ClientProtocol::HttpsExcept(registries.clone());
         }
         config.dns_resolver = self.dns_resolver.clone();
-        // Operator roots go after the bundled set, never instead of it (D-2);
-        // every DER here already passed `ExtraRoots::from_pem`'s probe build,
-        // so the fork's `convert_certificates` cannot fail on it (C-004).
+        // Appended to the bundled set; each DER passed `ExtraRoots::from_pem`'s probe, so the fork cannot reject it.
         config
             .extra_root_certificates
             .extend(
@@ -155,8 +74,7 @@ impl TransportRecipe {
         config
     }
 
-    /// Constructs the transport. Called at most once per [`Client`] cell, from
-    /// [`Client::transport`].
+    /// Constructs the transport, at most once per [`Client`].
     pub(super) fn build(&self) -> Box<dyn super::transport::OciTransport> {
         Box::new(NativeTransport::new(
             crate::native::Client::new(self.config()),
@@ -197,11 +115,6 @@ impl ClientBuilder {
     }
 
     /// Per-upstream-host registry mirror map, applied on the read path.
-    ///
-    /// The builder takes an already-parsed [`MirrorMap`] (parsing and the
-    /// `url`-required validation happen in the config layer), mirroring the
-    /// [`plain_http_registries`](Self::plain_http_registries) precedent of
-    /// taking parsed primitives rather than the `Config` tree.
     pub fn mirrors(mut self, mirrors: MirrorMap) -> Self {
         self.mirrors = mirrors;
         self
@@ -213,15 +126,10 @@ impl ClientBuilder {
         self
     }
 
-    /// Pins every connection through an SSRF [`GuardedResolver`](crate::ssrf::GuardedResolver)
-    /// carrying `trusted_hosts`.
+    /// Pins every connection through an SSRF [`GuardedResolver`](crate::ssrf::GuardedResolver) exempting
+    /// `trusted_hosts`.
     ///
-    /// Used for the physical-fetch client of an index source, whose target host
-    /// comes from remote-controlled root `repository` pointers: the resolver
-    /// re-validates the resolved addresses at connect time (resolve -> validate
-    /// -> pin), so the address a pre-flight approved cannot rebind to a forbidden
-    /// range before the socket opens. Hosts / CIDRs in `trusted_hosts` skip
-    /// validation (the private-registry escape hatch).
+    /// Re-validates at connect, so a host a pre-flight approved cannot rebind to a forbidden range.
     pub fn ssrf_guard(mut self, trusted_hosts: Vec<String>) -> Self {
         let resolver: std::sync::Arc<dyn reqwest::dns::Resolve> = std::sync::Arc::new(
             crate::ssrf::GuardedResolver::new(std::sync::Arc::new(trusted_hosts), crate::ssrf::proxy_rules()),
@@ -230,27 +138,18 @@ impl ClientBuilder {
         self
     }
 
-    /// Operator-supplied extra CA roots (ocx#448), appended to the transport's
-    /// own certificate list alongside the bundled Mozilla set — never a
-    /// replacement (D-2).
+    /// Operator CA roots, appended to the bundled Mozilla set, never replacing it.
     pub fn extra_roots(mut self, extra_roots: ocx_util::tls::ExtraRoots) -> Self {
         self.recipe.extra_roots = extra_roots;
         self
     }
 
-    /// The `ClientConfig` [`build`](Self::build) would hand the transport —
-    /// the one composition of timeouts, plain-HTTP hosts, resolver and CA
-    /// roots, materialised. The production path holds none: the recipe
-    /// composes it on demand, so this is how the `ocx login` probe (which
-    /// drives the fork's `Client` directly to send one explicit credential)
-    /// and the tests get the real, shipped config without a second
-    /// construction path.
+    /// The `ClientConfig` [`build`](Self::build) hands the transport, for callers driving the fork's `Client` directly.
     pub(crate) fn config(&self) -> crate::native::ClientConfig {
         self.recipe.config()
     }
 
-    /// Returns a client whose transport is **not built yet** — see
-    /// `TransportRecipe` for why, and [`Client::transport`] for where it is.
+    /// Returns a client whose transport builds on first use, in [`Client::transport`].
     pub fn build(self) -> Client {
         Client {
             transport_cell: std::sync::Arc::new(std::sync::OnceLock::new()),

@@ -10,8 +10,6 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-// ── StatusKind ────────────────────────────────────────────────────────────────
-
 /// Top-level status discriminant for a `ocx self setup` run.
 ///
 /// Serde serializes each variant to its `snake_case` name, matching the JSON
@@ -41,8 +39,6 @@ impl std::fmt::Display for StatusKind {
     }
 }
 
-// ── per-profile outcome ───────────────────────────────────────────────────────
-
 /// JSON-serialized per-profile outcome (`{"path":"…","outcome":"completed"}`).
 #[derive(Serialize, schemars::JsonSchema)]
 struct ProfileEntry {
@@ -50,7 +46,7 @@ struct ProfileEntry {
     outcome: ProfileOutcomeKind,
 }
 
-/// Serde-facing mirror of [`ProfileOutcome`] (`snake_case` discriminant).
+/// A profile's outcome, as its `snake_case` name.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ProfileOutcomeKind {
@@ -82,8 +78,6 @@ impl std::fmt::Display for ProfileOutcomeKind {
     }
 }
 
-// ── per-store session-PATH outcome ────────────────────────────────────────────
-
 /// JSON-serialized per-store session-PATH outcome
 /// (`{"location":"…","outcome":"written"}`).
 ///
@@ -96,7 +90,7 @@ struct SessionPathEntry {
     outcome: SessionPathOutcomeKind,
 }
 
-/// Serde-facing mirror of [`SessionPathOutcome`] (`snake_case` discriminant).
+/// A session-PATH store's outcome, as its `snake_case` name.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum SessionPathOutcomeKind {
@@ -134,15 +128,13 @@ impl std::fmt::Display for SessionPathOutcomeKind {
     }
 }
 
-// ── bootstrap outcome ─────────────────────────────────────────────────────────
-
 /// JSON-serialized bootstrap outcome.
 ///
 /// Unpinned path (no VERSION): `{"status":"already_present"}` or
 /// `{"status":"pulled","version":"1.2.3"}`.
 /// Pinned path (VERSION given): same shapes plus `"digest":"sha256:<hex>"` when
-/// resolution produced one. `digest` is omitted on unpinned fast-path runs so
-/// existing JSON consumers stay byte-identical (plan D7).
+/// resolution produced one. `digest` is omitted on unpinned fast-path runs.
+// `digest` stays omitted when absent, keeping existing JSON consumers byte-identical.
 #[derive(Serialize, schemars::JsonSchema)]
 struct BootstrapEntry {
     status: ApiBootstrapStatus,
@@ -150,16 +142,12 @@ struct BootstrapEntry {
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     version: Option<String>,
     /// Resolved content digest; present when pinning produced one.
-    ///
-    /// Stringified at this API boundary — lib carries [`ocx_oci::Digest`].
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     digest: Option<String>,
 }
 
-/// API-layer status discriminant (mirrors `ocx_setup::BootstrapStatus`).
-///
-/// Named `ApiBootstrapStatus` to avoid shadowing the lib type imported above.
+/// Bootstrap status, as its `snake_case` name.
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ApiBootstrapStatus {
@@ -178,7 +166,6 @@ impl BootstrapEntry {
         Self {
             status,
             version: outcome.version.clone(),
-            // Stringify the typed Digest at the API serialization boundary.
             digest: outcome.digest.as_ref().map(|d| d.to_string()),
         }
     }
@@ -189,24 +176,23 @@ impl BootstrapEntry {
             (ApiBootstrapStatus::AlreadyPresent, _) => "already present".to_string(),
             (ApiBootstrapStatus::Pulled, Some(version)) => format!("pulled {version}"),
             (ApiBootstrapStatus::WouldPull, Some(version)) => format!("would pull {version}"),
-            // `version` is always Some for Pulled / WouldPull (contract 2).
+            // `version` is always `Some` for `Pulled`/`WouldPull`.
             (ApiBootstrapStatus::Pulled, None) => "pulled".to_string(),
             (ApiBootstrapStatus::WouldPull, None) => "would pull".to_string(),
         }
     }
 }
 
-// ── managed-config adoption outcome (phase 1.5) ──────────────────────────────
-
 /// JSON-serialized managed-config adoption outcome:
 /// `{"status":"…"}` or, for the adopt/refresh paths,
 /// `{"status":"…","digest":"sha256:<hex>"}` (the digest is the operator's
 /// TOFU signal — always visible on adopt paths). `refreshed` additionally
 /// carries `previous_digest`; `refresh_unavailable` carries `reason`. Both are
-/// omitted everywhere else, so existing consumers stay byte-identical.
+/// omitted everywhere else.
 ///
-/// Shared with `api/data/config_setup.rs` — `ocx config setup` reports the
-/// same entry shape so fleet tooling parses both commands with one schema.
+/// `ocx config setup` reports the same entry shape, so fleet tooling parses both
+/// commands with one schema.
+// Refresh-only keys are omitted elsewhere, keeping existing consumers byte-identical.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ManagedConfigEntry {
     status: ManagedConfigStatusKind,
@@ -223,7 +209,7 @@ pub struct ManagedConfigEntry {
     reason: Option<String>,
 }
 
-/// Serde-facing mirror of [`ManagedConfigSetupOutcome`] (`snake_case` discriminant).
+/// Managed-config adoption status, as its `snake_case` name.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ManagedConfigStatusKind {
@@ -239,8 +225,7 @@ enum ManagedConfigStatusKind {
 }
 
 impl ManagedConfigEntry {
-    /// The common shape: a status with an optional digest and neither of the
-    /// two refresh-only fields.
+    /// A status with an optional digest and no refresh-only fields.
     fn with_digest(status: ManagedConfigStatusKind, digest: Option<String>) -> Self {
         Self {
             status,
@@ -280,11 +265,8 @@ impl ManagedConfigEntry {
         }
     }
 
-    /// Plain-text summary of the adoption outcome for the key/value table.
-    ///
-    /// The `refresh_unavailable` cause is deliberately not repeated here — it
-    /// is already on stderr as a warning, and a registry error string would
-    /// blow the plain-table column budget.
+    /// The adoption outcome's plain row; the `refresh_unavailable` cause stays on stderr, too wide for
+    /// the column budget.
     pub fn summary(&self) -> String {
         let digest = || self.digest.clone().unwrap_or_default();
         match self.status {
@@ -312,16 +294,15 @@ impl ManagedConfigEntry {
     }
 }
 
-// ── extra CA roots persistence outcome (phase 0.5, ocx#448) ─────────────────
-
-/// JSON-serialized `OCX_EXTRA_CA_CERTS` persistence outcome (C-009):
+/// JSON-serialized `OCX_EXTRA_CA_CERTS` persistence outcome.
+///
 /// `{"status":"…"}` or, once a value has been resolved,
 /// `{"status":"…","certificates":N}`. `status` is `persisted` / `unchanged` /
 /// `not_configured` normally, and `would_persist` / `unchanged` /
-/// `not_configured` under `--dry-run` — the same dry-run convention
-/// [`ManagedConfigEntry`] uses (`would_adopt` / `would_refresh`).
-/// `system_locked` (no count, in either mode) says the value was set but the
-/// system tier locks the pair, so nothing was validated or written (ocx#469).
+/// `not_configured` under `--dry-run`, the same dry-run convention
+/// `managed_config` uses (`would_adopt` / `would_refresh`). `system_locked` (no
+/// count, in either mode) says the value was set but the system tier locks the
+/// pair, so nothing was validated or written.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ExtraCaCertsEntry {
     status: ExtraCaCertsStatusKind,
@@ -330,7 +311,7 @@ pub struct ExtraCaCertsEntry {
     certificates: Option<usize>,
 }
 
-/// Serde-facing mirror of [`ExtraCaCertsOutcome`] (`snake_case` discriminant).
+/// Extra CA roots persistence status, as its `snake_case` name.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ExtraCaCertsStatusKind {
@@ -367,11 +348,9 @@ impl ExtraCaCertsEntry {
         }
     }
 
-    /// Plain-text summary for the key/value table — omitted entirely when
-    /// `not_configured` (mirrors [`ManagedConfigEntry`]'s row-suppression).
+    /// The plain key/value row, omitted when `not_configured`.
     pub fn summary(&self) -> String {
-        // Every resolved outcome carries a count (`From<&ExtraCaCertsOutcome>`
-        // above), so the default is unreachable rather than a `?` to explain.
+        // Every resolved outcome carries a count, so the default is unreachable.
         let count = self.certificates.unwrap_or_default();
         let certificates = || format!("{count} certificate{}", if count == 1 { "" } else { "s" });
         match self.status {
@@ -384,41 +363,26 @@ impl ExtraCaCertsEntry {
     }
 }
 
-// ── SelfSetupData ─────────────────────────────────────────────────────────────
-
-/// CLI wrapper around [`SetupOutcome`] for API reporting.
+/// Report of `ocx self setup`.
 ///
-/// Plain format: a key/value table — `Status`, `Bootstrap`, written shims,
-/// per-profile outcomes, and any advisory (exec-policy / conflicting ocx /
-/// reload hint) — with empty rows suppressed.
+/// Plain format: a key/value table (`Status`, `Bootstrap`, written shims,
+/// per-profile outcomes, and any advisory), with empty rows suppressed.
 ///
-/// JSON format (discriminated by `status`):
-/// - `{"status":"completed","bootstrap":{…},"shims":[…],"profiles":[{"path":"…","outcome":"completed"}],"managed_config":{"status":"not_configured"}}`
-/// - dirty → `{"status":"skipped",…,"dirty_profiles":["…"]}`
-/// - `managed_config` is always present: `{"status":"…"}`, plus `"digest"` on
-///   the adopt/refresh paths (`adopted` / `already_adopted` / `refreshed` /
-///   `refresh_unavailable` / `would_refresh`), `"previous_digest"` on
-///   `refreshed`, and `"reason"` on `refresh_unavailable`.
-/// - `extra_ca_certs` is always present: `{"status":"…"}`, plus
-///   `"certificates":N` once a value has resolved (`unchanged` / `persisted` /
-///   `would_persist`; never on `system_locked`).
-/// - `session_path` is always present, one entry per store this host owns:
-///   `[{"location":"…","outcome":"written"}]`. Empty only where the platform
-///   has no session-PATH facility at all.
-/// - `exec_policy_warning`, `conflicting_ocx`, and `reload_hint` appear only
-///   when present.
+/// JSON format: an object discriminated by `status` (`skipped` on a dirty
+/// profile). `managed_config`, `extra_ca_certs` and `session_path` are always
+/// present; `session_path` has one entry per store this host owns, empty only
+/// where the platform has no session-PATH facility at all. `dirty_profiles`,
+/// `exec_policy_warning`, `conflicting_ocx` and `reload_hint` appear only when set.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfSetupData {
     status: StatusKind,
     bootstrap: BootstrapEntry,
     shims: Vec<String>,
     profiles: Vec<ProfileEntry>,
-    /// Per-store session-PATH outcomes (C-036).
+    /// Per-store session-PATH outcomes, serialized in every state.
     ///
-    /// Always serialized, in every state — including `skipped_opt_out` and
-    /// `skipped_unsupported` — because a `failed` store that reached no payload
-    /// would be an outcome computed and discarded, and absence-as-signal is not
-    /// this report's convention (`managed_config` is always present too).
+    /// Present including for `skipped_opt_out` and `skipped_unsupported`.
+    // Always serialized, or a `failed` store with no payload is an outcome computed and discarded.
     session_path: Vec<SessionPathEntry>,
     /// Profiles skipped because the user edited the managed block; present iff
     /// status = `skipped`. Carried separately for a script to `case` on without
@@ -440,12 +404,13 @@ pub struct SelfSetupData {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     reload_hint: bool,
-    /// Result of adopting/clearing the `--managed-config` tier (phase 1.5).
+    /// Result of adopting/clearing the `--managed-config` tier.
     managed_config: ManagedConfigEntry,
-    /// Result of persisting `OCX_EXTRA_CA_CERTS` into `config.toml` (phase
-    /// 0.5, ocx#448). Always present; only `certificates` is omitted, on
-    /// `not_configured`. The plain table suppresses its row the same way
-    /// `managed_config`'s does, when `not_configured`.
+    /// Result of persisting `OCX_EXTRA_CA_CERTS` into `config.toml`.
+    ///
+    /// Always present; only `certificates` is omitted, on `not_configured`. The
+    /// plain table suppresses its row the same way `managed_config`'s does, when
+    /// `not_configured`.
     extra_ca_certs: ExtraCaCertsEntry,
 }
 
@@ -494,11 +459,7 @@ impl SelfSetupData {
     }
 }
 
-/// Reduce the per-profile outcomes (and shim writes) to one top-level status.
-///
-/// Precedence: any dirty profile → `Skipped`; else any migrated → `Migrated`;
-/// else any completed work (a written shim or a completed profile) →
-/// `Completed`; else `NoOp`.
+/// Reduces the profile outcomes and shim writes to one status: dirty > migrated > completed > no-op.
 fn derive_status(outcome: &SetupOutcome) -> StatusKind {
     let profile_outcomes = || outcome.profiles.iter().map(|(_, profile_outcome)| *profile_outcome);
 
@@ -520,7 +481,7 @@ fn derive_status(outcome: &SetupOutcome) -> StatusKind {
 
 impl Printable for SelfSetupData {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        // Key/value layout: only rows with payload appear (mirrors SelfUpdateData).
+        // Only rows with a payload appear.
         let mut fields: Vec<Cell> = vec!["Status".into(), "Bootstrap".into()];
         let mut values: Vec<Cell> = vec![
             Cell::from(self.status.to_string()),

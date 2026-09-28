@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Single canonical primitive for in-place locked file I/O. F2-safe by
-//! construction (all I/O routes through the lock-owning handle, never opens a
-//! second handle on the locked range).
+//! Single canonical primitive for in-place locked file I/O.
 //!
-//! Owns the file handle and the advisory lock together; every in-place read
-//! or write routes through the lock-owning handle. F2-safe by construction
-//! (cannot accidentally open a second handle on the locked range). F1-safe by
-//! use: only used on files that have no external concurrent reader (sentinels,
-//! `ocx.toml`, tag JSON, `install_status`).
+//! Only for files with no unlocked concurrent reader: writes land in place, never by rename.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
@@ -23,51 +17,19 @@ const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A file opened with an advisory lock held for the lifetime of this guard.
 ///
-/// All in-place reads and writes are routed through the lock-owning handle,
-/// making this type F2-safe by construction. Dropping the guard releases the
-/// OS advisory lock.
+/// All I/O goes through the lock-owning handle: Windows fails a second handle on the range with `ERROR_LOCK_VIOLATION`.
 #[derive(Debug)]
 pub struct LockedFile {
     lock: FileLock,
     path: PathBuf,
 }
 
-/// Returns `true` when the locked handle still refers to the file currently at
-/// `path` — i.e. the file was not unlinked or replaced while we waited to lock.
+/// Whether the locked handle still refers to the file at `path`, i.e. it was not unlinked or replaced while we waited.
 ///
-/// This closes the flock+unlink-by-path race: advisory locks live on the inode,
-/// but a lock *file* is addressed by path, so a holder that removes it by path
-/// (then releases) can let an opener that was blocked on the same inode acquire
-/// a lock on a now-dangling inode while the path no longer exists. Comparing the
-/// held handle's identity against the path's detects exactly that.
-///
-/// A file that is *replaced* rather than unlinked — by an atomic publish, as
-/// `auth::store` does — is the same race seen from the other side, and Windows
-/// is not exempt from it: `rename` over a target Rust holds open succeeds,
-/// because std opens with `FILE_SHARE_DELETE`. So this is deliberately not
-/// `cfg`-split. `same_file::Handle` is `(dev, ino)` on Unix and
-/// `(volume serial, file index)` on Windows; std's own accessors for the latter
-/// are still unstable (`windows_by_handle`, rust#63010).
-///
-/// Both Windows claims are measured, not inferred from the Unix rule — a
-/// standalone probe run as a native process reported the rename over a held-open
-/// target succeeding, the replacement detected afterwards, and the lock still
-/// held across the duplicate below. Scope: a `windows-gnu` build under WSL
-/// interop, so it establishes the platform behaviour of three ABI-independent
-/// Win32 calls, not the `windows-msvc` build CI ships. The msvc answer comes
-/// from the un-gated tests in this file.
-///
-/// Path gone (unlinked mid-acquire) or unreadable: a mismatch, so the caller
-/// reopens and re-materializes the lock file.
+/// Not `cfg`-split: std opens with `FILE_SHARE_DELETE`, so Windows also lets a rename replace a held file.
+/// A gone or unreadable path is a mismatch; the caller reopens.
 fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
-    // `Handle::from_file` consumes the file, so it gets a duplicate. Duplicating
-    // is what makes that safe: `dup(2)` shares the open file description, and
-    // `flock(2)` releases on the last close of *that* description, not of a
-    // descriptor — so dropping the clone leaves the lock held. `DuplicateHandle`
-    // and `LockFileEx` behave the same way, whose locks live on the file object
-    // the duplicate still refers to — measured on Windows, not inferred from the
-    // Unix rule (see above), and asserted by
-    // `try_exclusive_blocking_returns_none_under_contention`.
+    // A duplicate shares the open file description, so dropping it leaves the lock held (Windows likewise).
     let Ok(duplicate) = lock.file_mut().try_clone() else {
         return false;
     };
@@ -81,21 +43,12 @@ fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
 }
 
 impl LockedFile {
-    /// Acquire an exclusive lock on `path`. Creates the file (and parents)
-    /// if absent. Blocks until acquired or [`DEFAULT_LOCK_TIMEOUT`] elapses.
+    /// Acquire an exclusive lock on `path`, creating it and its parents, within [`DEFAULT_LOCK_TIMEOUT`].
     pub async fn open_exclusive(path: impl Into<PathBuf>) -> Result<Self, FileError> {
         Self::open_exclusive_with_timeout(path, DEFAULT_LOCK_TIMEOUT).await
     }
 
-    /// Acquire an exclusive lock on `path` with a caller-supplied timeout.
-    ///
-    /// Creates the file (and all parent directories) if absent. Blocks until
-    /// the lock is acquired or `timeout` elapses.
-    ///
-    /// Runs the whole open→lock→inode-verify dance on a blocking thread via the
-    /// synchronous [`Self::open_exclusive_blocking_with_timeout`], so both the
-    /// async and sync exclusive-acquire paths share one flock+unlink-safe
-    /// implementation (see that method for the verify rationale).
+    /// [`Self::open_exclusive`] with a caller-supplied timeout.
     pub async fn open_exclusive_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> Result<Self, FileError> {
         let path = path.into();
         let error_path = path.clone();
@@ -105,15 +58,12 @@ impl LockedFile {
         }
     }
 
-    /// Acquire a shared lock on `path`. Returns `Ok(None)` if the file does
-    /// not exist (reader sees "no content yet" without racing a writer).
+    /// Acquire a shared lock on `path`; `Ok(None)` if the file does not exist.
     pub async fn open_shared(path: impl Into<PathBuf>) -> Result<Option<Self>, FileError> {
         Self::open_shared_with_timeout(path, DEFAULT_LOCK_TIMEOUT).await
     }
 
-    /// Acquire a shared lock on `path` with a caller-supplied timeout.
-    ///
-    /// Returns `Ok(None)` if the file does not exist.
+    /// [`Self::open_shared`] with a caller-supplied timeout.
     pub async fn open_shared_with_timeout(
         path: impl Into<PathBuf>,
         timeout: Duration,
@@ -137,15 +87,7 @@ impl LockedFile {
         Ok(Some(Self { lock, path }))
     }
 
-    /// Try to acquire an exclusive lock without blocking.
-    ///
-    /// Returns `Ok(None)` on contention (another process holds the lock).
-    /// Creates the file (and parents) if absent.
-    ///
-    /// Runs the synchronous [`Self::try_exclusive_blocking`] on a blocking
-    /// thread, so the async and sync non-blocking paths share the one
-    /// flock+unlink-safe implementation — the `(dev, ino)` re-verify lived only
-    /// on the sync side until a cross-model gate noticed this one lacked it.
+    /// Try an exclusive lock without blocking, creating the file and its parents; `Ok(None)` on contention.
     pub async fn try_exclusive(path: impl Into<PathBuf>) -> Result<Option<Self>, FileError> {
         let path = path.into();
         let error_path = path.clone();
@@ -155,24 +97,13 @@ impl LockedFile {
         }
     }
 
-    /// Read the full file contents under the lock, through the lock-owning
-    /// handle. Seeks to position 0 first. Empty file returns an empty `Vec`.
+    /// Read the full contents from offset 0 through the lock-owning handle.
     ///
-    /// Crate-private: the codec wrappers below are the only callers. The
-    /// project tier held the one cross-crate use until ocx#494 moved `ocx.toml`
-    /// to rename-publish, which needs no lock-owning handle to read through.
-    ///
-    /// Uses `tokio::task::block_in_place` so the blocking syscalls do not
-    /// starve other async tasks on the current thread without requiring
-    /// ownership transfer to a separate blocking thread (which would prevent
-    /// routing through the lock-owning handle).
+    /// `block_in_place`, since `spawn_blocking` would need the handle moved off this guard.
     ///
     /// # Panics
     ///
-    /// `tokio::task::block_in_place` requires a multi-thread Tokio runtime.
-    /// Calling this method from a `current_thread` runtime will panic with
-    /// "can call blocking only when running on the multi-threaded runtime".
-    /// Tests that exercise `LockedFile` must use `#[tokio::test(flavor = "multi_thread")]`.
+    /// On a `current_thread` Tokio runtime.
     pub(crate) async fn read_bytes(&mut self) -> Result<Vec<u8>, FileError> {
         let path = &self.path;
         let file = self.lock.file_mut();
@@ -184,25 +115,13 @@ impl LockedFile {
         })
     }
 
-    /// Truncate to zero, write `bytes`, and `sync_data` for durability — all
-    /// through the lock-owning handle. Order: `set_len(0)` → `seek(0)` →
-    /// `write_all` → `sync_data`. Caller must hold an exclusive lock.
+    /// Truncate, write `bytes` and `sync_data` through the lock-owning handle; the caller holds an exclusive lock.
     ///
-    /// Crate-private, and **not** a publish primitive: an in-place rewrite is
-    /// observable mid-flight by any unlocked reader. Correct only where the
-    /// file *is* its own lock target and has no such reader — the codec
-    /// wrappers below. Anything with outside readers publishes by rename
-    /// ([`super::write_bytes_atomic`], or a mode-preserving equivalent).
-    ///
-    /// Uses `tokio::task::block_in_place` so the blocking syscalls do not
-    /// starve other async tasks without requiring ownership transfer.
+    /// Not a publish primitive: an unlocked reader sees the rewrite mid-flight, so shared files publish by rename.
     ///
     /// # Panics
     ///
-    /// `tokio::task::block_in_place` requires a multi-thread Tokio runtime.
-    /// Calling this method from a `current_thread` runtime will panic with
-    /// "can call blocking only when running on the multi-threaded runtime".
-    /// Tests that exercise `LockedFile` must use `#[tokio::test(flavor = "multi_thread")]`.
+    /// On a `current_thread` Tokio runtime.
     pub(crate) async fn replace_bytes(&mut self, bytes: &[u8]) -> Result<(), FileError> {
         let path = &self.path;
         let file = self.lock.file_mut();
@@ -215,7 +134,6 @@ impl LockedFile {
         })
     }
 
-    /// Returns the path of the locked file.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -229,22 +147,9 @@ impl LockedFile {
         lock_matches_path(&mut self.lock, &path)
     }
 
-    // ── Synchronous API ───────────────────────────────────────────────────
-    //
-    // The async constructors and `read_bytes` / `replace_bytes` route through
-    // `spawn_blocking` / `block_in_place` so an async runtime can hand the
-    // blocking syscalls to a blocking thread without starving other tasks.
-    // Sync callers (already running on a blocking thread — e.g. inside a
-    // `tokio::task::spawn_blocking` body, or a non-async test) cannot await
-    // those wrappers. The blocking variants below run the same logic directly
-    // so callers do not need a runtime context.
+    // ── Synchronous API, for callers already on a blocking thread ──────────
 
     /// Synchronous sibling of [`Self::open_exclusive_with_timeout`].
-    ///
-    /// Creates the file (and parent directories) if absent, then acquires the
-    /// exclusive advisory lock by polling in a 25 ms tick loop until either
-    /// the lock is acquired or `timeout` elapses. Use from inside
-    /// `tokio::task::spawn_blocking` or from a non-async test.
     pub fn open_exclusive_blocking_with_timeout(
         path: impl Into<PathBuf>,
         timeout: Duration,
@@ -267,14 +172,7 @@ impl LockedFile {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let mut lock = FileLock::lock_exclusive_blocking_with_timeout(file, remaining)
                 .map_err(|e| FileError::new(&path, e))?;
-            // The flock+unlink race (a concurrent holder that removes the lock
-            // file by path while we waited — e.g. `ocx clean`'s temp sweep) would
-            // otherwise leave us holding a lock on a dangling inode with no file
-            // at `path`, so a *later* scan sees the guarded directory as an
-            // unlocked orphan and removes it out from under us. Confirm the handle
-            // still names the file at `path`; on mismatch drop it and reopen so we
-            // lock the live inode. `create(true)` on reopen re-materializes the
-            // lock file when it was unlinked, so the guard is present again.
+            // A lock file unlinked while we waited leaves us a dangling inode, and a later `clean` removes the guarded dir.
             if lock_matches_path(&mut lock, &path) {
                 return Ok(Self { lock, path });
             }
@@ -291,10 +189,7 @@ impl LockedFile {
         }
     }
 
-    /// Synchronous, non-blocking sibling of [`Self::try_exclusive`].
-    ///
-    /// Returns `Ok(None)` on contention. Creates the file (and parent
-    /// directories) if absent.
+    /// Synchronous sibling of [`Self::try_exclusive`].
     pub fn try_exclusive_blocking(path: impl Into<PathBuf>) -> Result<Option<Self>, FileError> {
         let path = path.into();
         if let Some(parent) = path.parent()
@@ -302,13 +197,7 @@ impl LockedFile {
         {
             std::fs::create_dir_all(parent).map_err(|e| FileError::new(parent, e))?;
         }
-        // Bounded verify-and-retry: a genuine contention returns `None`
-        // immediately, but an inode mismatch means the file was unlinked while we
-        // held the lock (the flock+unlink race — see
-        // `open_exclusive_blocking_with_timeout`). Reopening re-creates a fresh
-        // inode we can lock at once, so a few iterations always suffice; the
-        // bound stops a pathological churn from spinning. Falling back to `None`
-        // on exhaustion is safe — the caller (`clean`) treats it as "busy, skip".
+        // Bounded: a mismatch reopens a fresh inode at once, and `None` on exhaustion reads as busy.
         for _ in 0..8 {
             let file = std::fs::OpenOptions::new()
                 .create(true)
@@ -331,20 +220,14 @@ impl LockedFile {
 
 // ── Codec wrappers ────────────────────────────────────────────────────────────
 
-/// `serde_json` codec wrapper over [`LockedFile`].
-///
-/// Bound: `T: Serialize + DeserializeOwned` — no additional bounds.
-///
-/// Empty file → `Ok(None)`. Unparseable → `Ok(None)` + `warn` log
-/// (kill-9 recovery contract, mirrors `TagGuard::read_disk`).
+/// `serde_json` codec over [`LockedFile`]; an empty or unparseable file reads as `None` (kill-9 recovery).
 pub struct LockedJsonFile<T> {
     inner: LockedFile,
     _marker: PhantomData<T>,
 }
 
 impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
-    /// Acquire an exclusive lock on `path`. Creates the file (and parents) if
-    /// absent.
+    /// Acquire an exclusive lock on `path`, creating it and its parents.
     pub async fn open_exclusive(path: impl Into<PathBuf>) -> Result<Self, FileError> {
         let inner = LockedFile::open_exclusive(path).await?;
         Ok(Self {
@@ -353,9 +236,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
         })
     }
 
-    /// Acquire an exclusive lock on `path` with a caller-supplied timeout.
-    ///
-    /// Creates the file (and all parent directories) if absent.
+    /// [`Self::open_exclusive`] with a caller-supplied timeout.
     pub async fn open_exclusive_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> Result<Self, FileError> {
         let inner = LockedFile::open_exclusive_with_timeout(path, timeout).await?;
         Ok(Self {
@@ -364,8 +245,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
         })
     }
 
-    /// Acquire a shared lock on `path`. Returns `Ok(None)` if the file does
-    /// not exist.
+    /// Acquire a shared lock on `path`; `Ok(None)` if the file does not exist.
     pub async fn open_shared(path: impl Into<PathBuf>) -> Result<Option<Self>, FileError> {
         let maybe_inner = LockedFile::open_shared(path).await?;
         Ok(maybe_inner.map(|inner| Self {
@@ -374,9 +254,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
         }))
     }
 
-    /// Acquire a shared lock on `path` with a caller-supplied timeout.
-    ///
-    /// Returns `Ok(None)` if the file does not exist.
+    /// [`Self::open_shared`] with a caller-supplied timeout.
     pub async fn open_shared_with_timeout(
         path: impl Into<PathBuf>,
         timeout: Duration,
@@ -388,10 +266,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
         }))
     }
 
-    /// Read and parse the file under the lock.
-    ///
-    /// - Empty file → `Ok(None)`
-    /// - Unparseable → `Ok(None)` + `warn` log (kill-9 recovery contract)
+    /// Read and parse under the lock; empty or unparseable is `Ok(None)`.
     pub async fn read(&mut self) -> Result<Option<T>, FileError> {
         let bytes = self.inner.read_bytes().await?;
         if bytes.is_empty() {
@@ -409,28 +284,21 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
         }
     }
 
-    /// Serialize `value` as pretty-printed JSON and write it to the file via
-    /// `LockedFile::replace_bytes`.
+    /// Write `value` as pretty-printed JSON in place.
     pub async fn write(&mut self, value: &T) -> crate::error::Result<()> {
         let bytes = serde_json::to_vec_pretty(value).map_err(SerializationError::from)?;
         Ok(self.inner.replace_bytes(&bytes).await?)
     }
 }
 
-/// `toml` codec wrapper over [`LockedFile`].
-///
-/// Bound: `T: Serialize + DeserializeOwned` — no additional bounds.
-///
-/// Empty file → `Ok(None)`. Unparseable → `Ok(None)` + `warn` log
-/// (kill-9 recovery contract, mirrors `TagGuard::read_disk`).
+/// `toml` codec over [`LockedFile`]; an empty or unparseable file reads as `None` (kill-9 recovery).
 pub struct LockedTomlFile<T> {
     inner: LockedFile,
     _marker: PhantomData<T>,
 }
 
 impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
-    /// Acquire an exclusive lock on `path`. Creates the file (and parents) if
-    /// absent.
+    /// Acquire an exclusive lock on `path`, creating it and its parents.
     pub async fn open_exclusive(path: impl Into<PathBuf>) -> Result<Self, FileError> {
         let inner = LockedFile::open_exclusive(path).await?;
         Ok(Self {
@@ -439,9 +307,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
         })
     }
 
-    /// Acquire an exclusive lock on `path` with a caller-supplied timeout.
-    ///
-    /// Creates the file (and all parent directories) if absent.
+    /// [`Self::open_exclusive`] with a caller-supplied timeout.
     pub async fn open_exclusive_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> Result<Self, FileError> {
         let inner = LockedFile::open_exclusive_with_timeout(path, timeout).await?;
         Ok(Self {
@@ -450,8 +316,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
         })
     }
 
-    /// Acquire a shared lock on `path`. Returns `Ok(None)` if the file does
-    /// not exist.
+    /// Acquire a shared lock on `path`; `Ok(None)` if the file does not exist.
     pub async fn open_shared(path: impl Into<PathBuf>) -> Result<Option<Self>, FileError> {
         let maybe_inner = LockedFile::open_shared(path).await?;
         Ok(maybe_inner.map(|inner| Self {
@@ -460,9 +325,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
         }))
     }
 
-    /// Acquire a shared lock on `path` with a caller-supplied timeout.
-    ///
-    /// Returns `Ok(None)` if the file does not exist.
+    /// [`Self::open_shared`] with a caller-supplied timeout.
     pub async fn open_shared_with_timeout(
         path: impl Into<PathBuf>,
         timeout: Duration,
@@ -474,12 +337,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
         }))
     }
 
-    /// Read and parse the file under the lock.
-    ///
-    /// - Empty file → `Ok(None)`
-    /// - Invalid UTF-8 → `Ok(None)` + `warn` log (kill-9 recovery; TOML is
-    ///   defined as UTF-8 so invalid bytes are equivalent to corruption)
-    /// - Unparseable TOML → `Ok(None)` + `warn` log (kill-9 recovery contract)
+    /// Read and parse under the lock; empty, invalid UTF-8 or unparseable is `Ok(None)`.
     pub async fn read(&mut self) -> Result<Option<T>, FileError> {
         let bytes = self.inner.read_bytes().await?;
         if bytes.is_empty() {
@@ -507,8 +365,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
         }
     }
 
-    /// Serialize `value` as TOML and write it to the file via
-    /// `LockedFile::replace_bytes`.
+    /// Write `value` as TOML in place.
     pub async fn write(&mut self, value: &T) -> Result<(), FileError> {
         let text = toml::to_string(value).map_err(|e| FileError::new(self.inner.path(), std::io::Error::other(e)))?;
         self.inner.replace_bytes(text.as_bytes()).await

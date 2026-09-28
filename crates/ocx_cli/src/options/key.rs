@@ -4,77 +4,37 @@
 use ocx_trust::key_ref::{KeyRef, KeyRefError};
 
 /// Sign or verify with a key pair instead of keyless Sigstore.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add `--key`. Resolve with
-/// [`KeyOpt::reference`] and never read the field directly: the raw string is
-/// an unparsed reference, and the difference between an unimplemented backend
-/// (exit 85) and a malformed reference (exit 64) is decided by the parser.
-///
-/// **Arg id: `key`** -- the field name, and the frozen half of this contract.
-/// A command that carries both this group and a keyless-only flag declares
-/// `conflicts_with = "key"` on that flag, in its own command file. Renaming the
-/// field silently unhooks every one of those declarations, so
-/// `the_arg_id_stays_key` pins it here.
+// Arg id `key` is frozen: keyless-only flags declare `conflicts_with = "key"`, so a rename silently
+// unhooks them; `the_arg_id_stays_key` pins it.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct KeyOpt {
     /// Sign or verify with a key pair instead of keyless Sigstore.
     ///
-    /// Takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://`
-    /// one, names a file. `env://VAR` reads the key PEM out of the environment
-    /// variable `VAR` itself -- the variable holds the key, not a path to it --
-    /// for a runner with no writable disk. The `awskms`, `gcpkms`, `azurekms`,
-    /// `hashivault` and `k8s` schemes are recognised and rejected by name.
-    /// Leave it unset to sign or verify keyless. The password for an encrypted
-    /// private key is read from `OCX_KEY_PASSWORD`.
-    ///
-    /// Name the variable `OCX_SIGNING_KEY` unless you have a reason not to:
-    /// that one is stripped from every child process ocx spawns, and a name
-    /// ocx does not know is inherited by plugins and generated launchers.
+    /// Takes a key reference, `[scheme://]<rest>`: a bare path or `file://` names
+    /// a file; `env://VAR` reads the key PEM from the variable `VAR` itself (it
+    /// holds the key, not a path), for a runner with no writable disk. Name it
+    /// `OCX_SIGNING_KEY` unless you have a reason not to: ocx strips that one from
+    /// every child process it spawns, while a name ocx does not know is inherited
+    /// by plugins and generated launchers. The `awskms`, `gcpkms`, `azurekms`,
+    /// `hashivault` and `k8s` schemes are recognised and rejected by name. Unset
+    /// means keyless; an encrypted key's password comes from `OCX_KEY_PASSWORD`.
     #[clap(long = "key", value_name = "REF")]
     key: Option<String>,
 }
 
-/// # This block no longer carries `expect(dead_code)`
-///
-/// It did while nothing attached this group: `[workspace.lints.rust] warnings =
-/// "deny"` makes an uncalled inherent method a build failure, because the
-/// `clap::Args` derive keeps the *type* live through its foreign-trait impls
-/// but not its methods. `expect` rather than `allow` was the point -- an
-/// unfulfilled expectation is itself a build failure, so the suppression could
-/// not outlive its reason. Loop C attached the last resolver, the expectation
-/// went unfulfilled, and deleting the attribute became the only way to compile:
-/// exactly the self-cleaning the placement was chosen for.
-///
-/// The attribute sits on the **block**, never on the individual methods, and
-/// that placement is part of the frozen contract. A block-level `expect` stays
-/// fulfilled while any one item under it is still unattached, so a command that
-/// attaches only some of these resolvers compiles without editing this file;
-/// only the command attaching the last one sees the unfulfilled-expectation
-/// error, and at that point deleting the attribute is both correct and
-/// unavoidable. Per-method attributes would make *every* attaching command edit
-/// this file instead -- several authors writing to one frozen file, which is
-/// the collision the freeze exists to prevent.
-///
-/// `cfg_attr(not(test), ...)` because the tests below are callers, so the lint
-/// never fires in a test build and an unconditional `expect` would be
-/// unfulfilled there instead.
+// A future `#[expect(dead_code)]` goes on this block, never per method, or every attaching command edits this file.
 impl KeyOpt {
     /// Parse the reference. `Ok(None)` means keyless.
     ///
     /// # Errors
-    /// [`KeyRefError`] verbatim. The caller maps it into its own taxonomy with
-    /// `SignErrorKind::from` or `VerifyErrorKind::from`, which is what routes
-    /// an unimplemented backend to exit 85 and everything else to exit 64.
+    /// [`KeyRefError`] verbatim; the caller's `SignErrorKind::from` or
+    /// `VerifyErrorKind::from` routes an unimplemented backend to 85, the rest to 64.
     pub fn reference(&self) -> Result<Option<KeyRef>, KeyRefError> {
         self.key.as_deref().map(KeyRef::parse).transpose()
     }
 
-    /// Whether key mode was selected, without parsing the reference.
-    ///
-    /// For the callers that only branch on the key model -- the Rekor upload
-    /// rule is the one that matters -- so that a malformed reference is
-    /// reported once, by [`Self::reference`], rather than twice in two
-    /// different vocabularies.
+    /// Whether key mode was selected, without parsing, so a malformed reference
+    /// is reported once, by [`Self::reference`].
     pub fn is_key_mode(&self) -> bool {
         self.key.is_some()
     }
@@ -136,9 +96,9 @@ mod tests {
         assert!(parse(&["--key", "awskms://alias/release"]).is_key_mode());
     }
 
-    /// C-034: every scheme is described the way it actually behaves -- an
-    /// implemented one by the spelling that reaches it, an unimplemented one
-    /// as a bare name in the rejected list.
+    /// Every scheme is described the way it actually behaves -- an implemented
+    /// one by the spelling that reaches it, an unimplemented one as a bare
+    /// name in the rejected list.
     ///
     /// Nothing compiler-enforces this: `Scheme` gaining a variant, or one
     /// flipping to implemented, changes no string in this file. The loop
@@ -173,8 +133,8 @@ mod tests {
         }
     }
 
-    /// C-030/C-034: `--key env://VAR` reaches the library grammar as an env
-    /// reference, so the flag and the parser agree on what the spelling means.
+    /// `--key env://VAR` reaches the library grammar as an env reference, so
+    /// the flag and the parser agree on what the spelling means.
     #[test]
     fn an_env_reference_parses_through_the_library_grammar() {
         let opt = parse(&["--key", "env://OCX_SIGNING_KEY"]);

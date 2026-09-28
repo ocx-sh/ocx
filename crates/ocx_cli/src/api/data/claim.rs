@@ -1,16 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The `ocx package claim` report (C-060).
-//!
-//! Six of its keys — `forge`, `transport`, `credential_kind`,
-//! `push_credential_kind`, `branch` and `capability_checks` — are the same keys
-//! and the same value vocabularies the announce report gains under C-061. Their
-//! renderers therefore live in the neutral
-//! [`forge_report`](super::forge_report) module (DX-59), not here: one
-//! vocabulary across two commands means one renderer, and putting it in the
-//! newer, more specific report would point the older, more general one at it
-//! for the life of the branch.
+//! The `ocx package claim` report; keys shared with the announce report render through
+//! [`forge_report`](super::forge_report).
 
 use ocx_announce::claim::{ClaimOutcome, ClaimStatus, OwnerIdentitySource, ResolvedOwner};
 use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
@@ -36,10 +28,7 @@ pub struct OwnerEntry {
 }
 
 impl OwnerEntry {
-    /// Project one library-side owner into its wire shape.
-    ///
-    /// A projection rather than a re-export of [`ResolvedOwner`]: the wire shape
-    /// is this layer's contract, and the library type carries no `Serialize`.
+    /// Projects one library-side owner into its wire shape.
     fn from_resolved(owner: ResolvedOwner) -> Self {
         Self {
             login: owner.login,
@@ -51,39 +40,15 @@ impl OwnerEntry {
 /// Result of a successful `ocx package claim`.
 ///
 /// Plain format: a one-row table (`Package`, `Status`, `Transport`, `Branch`,
-/// `Pull Request`) — a dash marks a field the run did not produce. `owners`,
-/// `author`, `author_identity_source` and `capability_checks` are JSON-only,
-/// the plain table being at its five-column budget.
+/// `Pull Request`); a dash marks a field the run did not produce. `owners`,
+/// `author`, `author_identity_source` and `capability_checks` are JSON-only.
 ///
-/// JSON format: `{ "package", "name", "status", "forge", "transport",
-/// "credential_kind", "push_credential_kind", "author",
-/// "author_identity_source", "owners", "owner_identity_source", "branch",
-/// "pull_request_url", "pull_request_number", "fork", "written_paths",
-/// "capability_checks" }`, in that order. The value vocabularies are contracted
-/// as tightly as the keys: `status` is `"unchanged"` or `"updated"`;
-/// `credential_kind` is
-/// `"job-token"`, `"token"` or `"none"`; `push_credential_kind` is
-/// `"job-token"`, `"token"`, `"git-helper"` or `null`, and always `null` under
-/// the `api` transport; `owner_identity_source` is `"resolved"`, `"asserted"`
-/// or `"ci-environment"`; `author_identity_source` is `"resolved"`,
-/// `"ci-environment"` or `null`, never `"asserted"`. `capability_checks` is
-/// non-empty on every run,
-/// inapplicable rows carrying `"skipped"`, ordered by `CapabilityName`'s
-/// declaration order so the array is stable across runs.
-///
-/// `status` uses announce's two words over a **different subject**: claim
-/// compares against the open claim branch, not the committed root, because a
-/// committed root has already exited 65. A claim `--out` run is therefore
-/// always `"updated"`, where an announce `--out` run can report `"unchanged"`.
-///
-/// **Every closed vocabulary above is held as its own enum, never as a
-/// `String`.** The report is a published schema (`report_roots!`), so a
-/// stringly-typed field would promise an open string where C-060 contracts a
-/// closed set — and would let this layer spell a word the library cannot
-/// produce. The two credential kinds are this crate's own enums and carry
-/// `Serialize`; the four `ocx_lib` owns render through
-/// [`serialize_display`](super::forge_report::serialize_display), which is why
-/// their JSON bytes are unchanged from the `.to_string()` form they replaced.
+/// JSON format: an object with one key per field below, in that order; every
+/// value vocabulary is closed as its field states. `status` compares against the
+/// open claim branch, not the committed root, so a claim `--out` run is always
+/// `"updated"`, where an announce `--out` run can report `"unchanged"`.
+// JSON-only keys stay off the plain table: it is at its five-column budget.
+// Closed vocabularies stay enums: a `String` would publish an open string where the schema is a closed set.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ClaimReport {
     /// The claimed `<namespace>/<package>` identifier, as given.
@@ -112,35 +77,32 @@ pub struct ClaimReport {
     /// pushes nothing. `"git-helper"` means nothing was injected and git's own
     /// credential helpers authenticated the push.
     pub push_credential_kind: Option<PushCredentialKind>,
-    /// The identity that authored the request — the token identity, else the
-    /// CI-environment identity. `null` when neither is available. Distinct from
-    /// [`Self::owners`] by construction: authorship is not ownership.
+    /// The identity that authored the request, or `null` when none is available.
     ///
-    /// **Not attested.** The second rung is an ordinary environment read —
-    /// `GITLAB_USER_LOGIN`/`GITLAB_USER_ID`, else `GITHUB_ACTOR`/`GITHUB_ACTOR_ID`
-    /// — and an earlier pipeline step can set those to anything. Only the first
-    /// rung is the forge's own answer about the credential. A consumer must not
-    /// treat this key as an attestation of who ran the command; which rung
-    /// answered is [`Self::author_identity_source`].
+    /// The token identity, else the CI-environment identity; distinct from
+    /// `owners`, as authorship is not ownership. **Not attested**: the second rung
+    /// is an ordinary environment read (`GITLAB_USER_LOGIN`/`GITLAB_USER_ID`, else
+    /// `GITHUB_ACTOR`/`GITHUB_ACTOR_ID`) an earlier pipeline step can set to
+    /// anything; only the first rung is the forge's own answer about the
+    /// credential. A consumer must not treat this key as an attestation of who ran
+    /// the command; `author_identity_source` says which rung answered.
     pub author: Option<OwnerEntry>,
-    /// Which rule produced [`Self::author`]: `"resolved"` when the forge's own
-    /// answer about the credential did, `"ci-environment"` when the CI pair did.
-    /// `null` exactly when `author` is.
+    /// Which rule produced `author`: `"resolved"`, `"ci-environment"`, or `null` exactly when `author` is.
     ///
-    /// The sibling of [`Self::owner_identity_source`] over a different subject,
-    /// and the key that makes `author` usable: the login alone cannot say
-    /// whether the forge asserted it or a pipeline step wrote it into an
-    /// environment variable, and a governance consumer needs that difference.
-    /// `"asserted"` is unreachable here — no operator word is ever taken for
-    /// the author.
+    /// `"resolved"` means the forge's own answer about the credential, and
+    /// `"ci-environment"` the CI pair. The key makes `author` usable: the login
+    /// alone cannot say whether the forge asserted it or a pipeline step wrote it
+    /// into an environment variable, and a governance consumer needs that
+    /// difference. `"asserted"` is unreachable here: no operator word is ever
+    /// taken for the author.
     #[serde(serialize_with = "serialize_optional_display")]
     #[schemars(with = "Option<String>")]
     pub author_identity_source: Option<OwnerIdentitySource>,
     /// The resolved owner list written into the root, in the order given.
     pub owners: Vec<OwnerEntry>,
-    /// Which rule produced [`Self::owners`]: `"resolved"`, `"asserted"` or
-    /// `"ci-environment"`. The same word appears on stderr and in the request
-    /// body.
+    /// Which rule produced `owners`: `"resolved"`, `"asserted"` or `"ci-environment"`.
+    ///
+    /// The same word appears on stderr and in the request body.
     #[serde(serialize_with = "serialize_display")]
     #[schemars(with = "String")]
     pub owner_identity_source: OwnerIdentitySource,
@@ -158,19 +120,17 @@ pub struct ClaimReport {
     pub fork: Option<String>,
     /// The relative paths written under the `--out` directory; empty otherwise.
     pub written_paths: Vec<String>,
-    /// Every preflight row, including the ones that did not apply. Non-empty on
-    /// every run, so a pipeline can assert the preflight ran rather than
-    /// trusting a bare success.
+    /// Every preflight row, including the ones that did not apply.
+    ///
+    /// Non-empty on every run, so a pipeline can assert the preflight ran rather
+    /// than trusting a bare success. Inapplicable rows carry `"skipped"`; rows
+    /// follow a fixed capability order, so the array is stable across runs.
     pub capability_checks: Vec<CapabilityCheckEntry>,
 }
 
 impl ClaimReport {
-    /// Build the report from a claim outcome and the boundary-resolved values
-    /// the outcome does not carry.
-    ///
-    /// `forge`, `transport` and `credentials` are passed in because all three
-    /// are decided at the CLI boundary — the forge never reads the environment
-    /// for itself — and the outcome describes only what the claim did.
+    /// Builds the report from a claim outcome plus the forge, transport and credentials the CLI
+    /// boundary resolved.
     #[must_use]
     pub fn from_outcome(
         outcome: ClaimOutcome,
@@ -178,33 +138,25 @@ impl ClaimReport {
         transport: WriteTransport,
         credentials: &ForgeCredentials,
     ) -> Self {
-        // `capability_checks` comes from `outcome.push_access.checks()`, which
-        // is a `PushAccess` and not a `Vec` (DX-40.1), and every row is
-        // projected — filtering the `skipped` ones is what S-011 forbids.
-        // Read before the outcome's owned fields move out of it.
+        // Every row is projected: the report contract forbids filtering out `skipped` ones.
         let capability_checks = CapabilityCheckEntry::from_checks(outcome.push_access.checks());
         Self {
             package: outcome.package,
             name: outcome.name,
-            // The outcome's own status, never a literal of this layer's: claim
-            // compares against the open claim branch, so `--out` is `updated`.
+            // The outcome's own status, never a literal of this layer's.
             status: outcome.status,
-            // Both resolved at the CLI boundary, neither carried on the
-            // outcome — a second resolution here would be free to disagree.
+            // Resolved once at the CLI boundary; a second resolution here could disagree.
             forge,
             transport,
             credential_kind: super::forge_report::credential_kind(credentials),
             push_credential_kind: super::forge_report::push_credential_kind(credentials, transport),
-            // A straight projection: the identity ladder runs inside
-            // `claim::claim`, so this layer must not re-derive it (DX-51) —
-            // the provenance word least of all, which is unrecoverable from
-            // the login it describes.
+            // Never re-derived here: the identity ladder runs in `claim::claim`, and the provenance
+            // word is unrecoverable from the login.
             author: outcome.author.map(OwnerEntry::from_resolved),
             author_identity_source: outcome.author_identity_source,
             owners: outcome.owners.into_iter().map(OwnerEntry::from_resolved).collect(),
             owner_identity_source: outcome.owner_identity_source,
-            // Derived from the package, so it is populated on every path,
-            // `--out` included — never blanked to `null` (R-27).
+            // Populated on every path, `--out` included; never `null`.
             branch: outcome.branch,
             pull_request_url: outcome.pull_request.as_ref().map(|request| request.html_url.clone()),
             pull_request_number: outcome.pull_request.as_ref().map(|request| request.number),
@@ -214,34 +166,18 @@ impl ClaimReport {
         }
     }
 
-    /// The plain table's headers and its single row's cells, as text.
-    ///
-    /// A seam, and the reason it exists is testability rather than reuse:
-    /// [`ocx_console::DataInterface::print_table`] writes to the real stdout
-    /// and neither [`Column`] nor [`Cell`] exposes its text, so a test that
-    /// calls [`Printable::print_plain`] can assert nothing at all — a green
-    /// indistinguishable from the check never having run
-    /// (`quality-core.md` § Unchecked Green). The live precedent in the sibling
-    /// announce report is exactly that shape and asserts nothing.
-    ///
-    /// [`Printable::print_plain`] below is a pure adapter over this function, so
-    /// the sequence asserted by `claim_report_plain_is_five_columns` is the one
-    /// an operator sees. Rendering the columns inline instead would leave this
-    /// function unused, and the test measuring nothing.
-    ///
-    /// Both halves are returned together because the contract is their
-    /// **pairing**: five headers and five cells, in one order.
+    /// The plain table's headers and single row as paired text: the seam tests assert on, since
+    /// `print_table` writes real stdout and neither [`Column`] nor [`Cell`] exposes its text.
     fn plain_table(&self) -> (Vec<&'static str>, Vec<String>) {
         (
             vec!["Package", "Status", "Transport", "Branch", "Pull Request"],
             vec![
                 self.package.clone(),
-                // The same `Display` the JSON renders through, so plain and
-                // JSON cannot spell one value two ways.
+                // The `Display` JSON uses, so the two never spell a value differently.
                 self.status.to_string(),
                 self.transport.to_string(),
                 self.branch.clone(),
-                // A dash, never an empty cell (DX-40.3's idiom).
+                // A dash, never an empty cell.
                 self.pull_request_url.clone().unwrap_or_else(|| "-".to_string()),
             ],
         )
@@ -250,9 +186,7 @@ impl ClaimReport {
 
 impl Printable for ClaimReport {
     fn print_plain(&self, data: &ocx_console::DataInterface) {
-        // One `print_table` call, never two (single-table rule). `print_table`
-        // reads its rows column-major — one `Vec<Cell>` per column — so a
-        // one-row table is one cell per column.
+        // `print_table` is column-major, so a one-row table is one cell per column.
         let (headers, cells) = self.plain_table();
         let columns: Vec<Column> = headers.into_iter().map(Column::from).collect();
         let rows: Vec<Vec<Cell>> = cells.into_iter().map(|cell| vec![Cell::from(cell)]).collect();

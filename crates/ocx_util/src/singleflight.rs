@@ -2,13 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Watch-based singleflight for async work deduplication.
-//!
-//! When multiple tasks need the same keyed result concurrently, the first
-//! caller gets a [`Handle`] (responsibility to produce the value) and
-//! subsequent callers block until the result is broadcast.
-//!
-//! Unlike closure-based singleflight crates, callers only construct the
-//! work after confirming they are responsible — waiters pay no setup cost.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,23 +11,12 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
 
-/// Clonable wrapper around an error source, preserving the full error chain.
-///
-/// Wraps the original error in an `Arc` so it can be cloned and broadcast
-/// to multiple singleflight waiters without erasing the source chain.
+/// Clonable `Arc` wrapper around an error, preserving its source chain.
 #[derive(Clone)]
 pub struct SharedError(Arc<dyn std::error::Error + Send + Sync>);
 
 impl SharedError {
-    /// Test-only constructor used by classification and chain-walk tests
-    /// that need to fabricate a `SharedError` without going through `Group`.
-    ///
-    /// Gated on `__testing` as well as `cfg(test)`: the waiter's exit code is
-    /// the inner error's, and the ladder that unwraps this value to find it
-    /// lives in the binary, so the tests pinning that delegation compile in
-    /// another crate. `ocx_cli` turns the feature on through a
-    /// **dev**-dependency, which `cargo build --release -p ocx` never builds,
-    /// so the seam stays out of the shipped binary.
+    /// Test-only constructor; `__testing` because the exit-code tests that need it live in `ocx_cli`.
     #[cfg(any(test, feature = "__testing"))]
     pub fn for_test<E: std::error::Error + Send + Sync + 'static>(error: E) -> Self {
         Self(Arc::new(error))
@@ -55,41 +37,22 @@ impl fmt::Display for SharedError {
 
 impl std::error::Error for SharedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // Expose the wrapped error itself as the chain successor so callers
-        // walking via `Error::source` (e.g. `cli::classify_error`) can
-        // downcast to the leader's typed error and recover its discriminant.
+        // The wrapped error itself, so exit-code classification can downcast to the leader's typed error.
         Some(&*self.0)
     }
 }
 
 /// Error from a singleflight wait.
-///
-/// Exit-code classification:
-/// - `Failed` → defers to the wrapped leader error's source chain; falls back
-///   to `ExitCode::Failure(1)` if the inner chain produces no specific code.
-/// - `Abandoned` → `ExitCode::Failure(1)`: the leader was dropped without
-///   completing; the operation cannot succeed without a retry.
-/// - `Timeout` and `CapacityExceeded` → `ExitCode::TempFail(75)`: transient;
-///   a retry once in-flight work completes should succeed.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
-    /// The leader task failed and broadcast its error.
-    ///
-    /// Display is transparent — the wrapped leader error is surfaced verbatim,
-    /// with no "singleflight leader failed" plumbing prefix, so a dedup that
-    /// happens to run behind a singleflight leader reports the same message a
-    /// direct call would. The variant is still distinct for `Debug` and
-    /// exit-code classification (which inspects the wrapped error's chain).
+    /// The leader failed; transparent, so a deduplicated call reports the message a direct call would.
     #[error(transparent)]
     Failed(SharedError),
-    /// The task responsible for producing the value was dropped without
-    /// calling [`Handle::complete`] or [`Handle::fail`].
+    /// The leader's [`Handle`] was dropped without completing.
     #[error("singleflight leader abandoned")]
     Abandoned,
-    /// Timed out waiting for the leader to produce a value.
     #[error("singleflight wait timed out")]
     Timeout,
-    /// The maximum number of in-flight keys has been reached.
     #[error("singleflight capacity exceeded (max {max})")]
     CapacityExceeded { max: usize },
 }
@@ -97,8 +60,7 @@ pub enum Error {
 /// Result of [`Group::try_acquire`].
 #[allow(clippy::large_enum_variant)]
 pub enum Acquisition<V> {
-    /// This task is responsible for producing the value.
-    /// Call [`Handle::complete`] when done.
+    /// This task produces the value and calls [`Handle::complete`].
     Leader(Handle<V>),
     /// Another task already produced the value — reuse it.
     Resolved(V),
@@ -113,9 +75,7 @@ impl<V: fmt::Debug> fmt::Debug for Acquisition<V> {
     }
 }
 
-/// Handle returned to the leader task. Broadcasts the result on
-/// [`complete`](Self::complete). If dropped without completing,
-/// broadcasts [`Error::Abandoned`] to all waiters.
+/// The leader's handle; dropping it without completing broadcasts [`Error::Abandoned`].
 pub struct Handle<V> {
     sender: Option<watch::Sender<Option<Result<V, Error>>>>,
 }
@@ -128,11 +88,7 @@ impl<V: Clone> Handle<V> {
         }
     }
 
-    /// Broadcast an error to all waiters.
-    ///
-    /// The error is wrapped in an `Arc` so it can be cloned to each waiter
-    /// while preserving the full source chain. Returns the [`SharedError`]
-    /// so the leader can reuse the same wrapped error in its own result.
+    /// Broadcast an error to all waiters, returning it for the leader's own result.
     pub fn fail<E: std::error::Error + Send + Sync + 'static>(mut self, error: E) -> SharedError {
         let shared = SharedError(Arc::new(error));
         if let Some(sender) = self.sender.take() {
@@ -152,31 +108,7 @@ impl<V> Drop for Handle<V> {
 
 type WatchValue<V> = Option<Result<V, Error>>;
 
-/// A keyed singleflight group.
-///
-/// Concurrent calls to [`try_acquire`](Self::try_acquire) with the same key
-/// are coalesced: the first caller becomes the leader, subsequent callers
-/// block on a `tokio::sync::watch` channel until the leader broadcasts.
-///
-/// A **successful** entry is retained for the group's lifetime so that later
-/// callers (e.g. diamond dependencies discovered deeper in the tree) get an
-/// instant cache hit instead of re-doing work. A failed or abandoned entry is
-/// **not** an answer: the next caller to ask for that key drops it and is
-/// handed fresh leadership, so the work is retried. Concurrent waiters already
-/// blocked on the leader still receive its error — one in-flight operation,
-/// one outcome.
-///
-/// # Synchronization
-///
-/// The `entries` mutex protects map structure only. Value synchronization
-/// is handled by the watch channel's internal `RwLock`:
-///
-/// - `watch::Sender::send()` takes a write-lock on the inner value.
-/// - `watch::Receiver::borrow()` takes a read-lock — it sees either the
-///   old or new value, never a torn read.
-/// - `watch::Receiver::wait_for()` checks the current value before
-///   subscribing, so a `complete()` between `borrow()→None` and
-///   `wait_for()` is always caught.
+/// A keyed singleflight group: a success is cached for the group's lifetime, a failure is retried by the next caller.
 pub struct Group<K, V> {
     entries: Arc<Mutex<HashMap<K, watch::Receiver<WatchValue<V>>>>>,
     max_entries: usize,
@@ -199,7 +131,6 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    /// Creates a group with the given capacity limit and timeout.
     pub fn new(max_entries: usize, timeout: Duration) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
@@ -208,40 +139,22 @@ where
         }
     }
 
-    /// Registers `key` as in-flight and hands back the leadership handle.
-    ///
-    /// Inserting over an existing entry is deliberate — see the failed-entry
-    /// arm of [`try_acquire`](Self::try_acquire): replacing in place leaves
-    /// `entries.len()` unchanged, so a failed key never holds a capacity slot.
+    /// Registers `key` as in-flight, replacing a failed entry in place so a retry takes no second capacity slot.
     fn lead(entries: &mut HashMap<K, watch::Receiver<WatchValue<V>>>, key: K) -> Acquisition<V> {
         let (tx, rx) = watch::channel(None);
         entries.insert(key, rx);
         Acquisition::Leader(Handle { sender: Some(tx) })
     }
 
-    /// Attempt to acquire leadership for the given key.
-    ///
-    /// Returns [`Acquisition::Leader`] if this task is responsible for
-    /// producing the value, or [`Acquisition::Resolved`] if another task
-    /// already produced it (or blocks until that task finishes).
+    /// Acquire leadership for `key`, or wait for the in-flight leader's value.
     pub async fn try_acquire(&self, key: K) -> Result<Acquisition<V>, Error> {
         let mut rx = {
             let mut entries = self.entries.lock().await;
-            // Read the entry's state out first so the map borrow ends before
-            // the failed-entry arm re-inserts under the same key.
             let existing = entries.get(&key).map(|rx| (rx.borrow().clone(), rx.clone()));
             match existing {
                 Some((Some(Ok(value)), _)) => return Ok(Acquisition::Resolved(value)),
-                // A resolved-to-error entry is not an answer, it is the absence
-                // of one: drop it and hand this caller fresh leadership so the
-                // work is retried. Only a success is memoized. Waiters already
-                // blocked on the OLD channel hold their own receiver clone and
-                // never re-consult the map, so they still receive the leader's
-                // `Failed`/`Abandoned` verbatim — one in-flight operation still
-                // yields one outcome, and only callers of a *later* operation
-                // stop inheriting it.
+                // Retry a failed entry; waiters on the old channel still get its error.
                 Some((Some(Err(_)), _)) => return Ok(Self::lead(&mut entries, key)),
-                // In flight: wait on the leader's channel.
                 Some((None, rx)) => rx,
                 None => {
                     if entries.len() >= self.max_entries {
@@ -252,7 +165,7 @@ where
             }
         };
 
-        // Wait path: entries mutex is dropped, safe to await.
+        // `wait_for` checks the current value first, so a `complete()` since the `borrow()` is not missed.
         let wait_result = tokio::time::timeout(self.timeout, rx.wait_for(|v| v.is_some())).await;
         match wait_result {
             Ok(Ok(ref_guard)) => match ref_guard.as_ref().expect("wait_for guarantees Some") {

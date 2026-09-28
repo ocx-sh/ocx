@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the project, activation and lock error family — the `ocx_project` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_project` error family.
 
 use ocx_exit::ExitCode;
 
@@ -19,11 +18,7 @@ use super::{ClassifyExitCode, downcast_arm};
 impl ClassifyExitCode for SessionError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // 78 for an absent lock, 65 for a stale one — the mapping lives
-            // with the wording it belongs to.
             Self::Lock(currency) => currency.classify(),
-            // Defer to the wrapped library error's own classification, which
-            // the chain walk reaches through `source()`.
             Self::Library(_) | Self::ListSeparator(_) => None,
         }
     }
@@ -45,9 +40,6 @@ impl ClassifyExitCode for ProjectError {
                 | ProjectErrorKind::ToolValueInvalid { .. }
                 | ProjectErrorKind::PackageKeyMissingRegistry { .. }
                 | ProjectErrorKind::PackageKeyInvalid { .. }
-                // Schema-shape faults in `[group.*]` / `[env]`: the file is
-                // valid TOML but not a valid ocx.toml. Same class as a
-                // reserved group name, and the same remedy — edit the file.
                 | ProjectErrorKind::GroupHoldsDirectBinding { .. }
                 | ProjectErrorKind::UnknownGroupSection { .. }
                 | ProjectErrorKind::EnvReservedKey { .. }
@@ -59,17 +51,8 @@ impl ClassifyExitCode for ProjectError {
                 | ProjectErrorKind::EnvInvalidSeparator { .. }
                 | ProjectErrorKind::EnvSeparatorEdgedValue { .. }
                 | ProjectErrorKind::LockRepositoryNotBare { .. }
-                // The file on disk is valid TOML by the serde parser's reckoning
-                // but not an editable document — same class, same remedy.
                 | ProjectErrorKind::ManifestEditParse(_) => ExitCode::ConfigError,
-                // 65, not the 78 its `[env]` siblings carry: the file is a valid
-                // ocx.toml and the entry's *shape* is legal — the value itself is
-                // the malformed datum, the same class the wire form already
-                // refuses at 65. A-10 names the code.
                 ProjectErrorKind::EnvPathSeparatorInValue { .. } => ExitCode::DataError,
-                // Not a config fault: the format-preserving writer could not
-                // express the staged mutation. Nothing the user can edit their
-                // way out of, so no sysexits code would tell the truth.
                 ProjectErrorKind::ManifestEditDiverged => ExitCode::Failure,
                 ProjectErrorKind::EmptyGroupFilter
                 | ProjectErrorKind::UnknownGroup { .. }
@@ -78,38 +61,19 @@ impl ClassifyExitCode for ProjectError {
                 ProjectErrorKind::Locked => ExitCode::TempFail,
                 ProjectErrorKind::TagNotFound { .. } => ExitCode::NotFound,
                 ProjectErrorKind::AuthFailure { .. } => ExitCode::AuthError,
-                // Exactly one cause may override the default, and it is the
-                // transient one: the announced contract for this variant is
-                // "75 when the resolver gives up on a transient fault".
-                // `project_err_from_client` boxes the `ClientError` verbatim
-                // for that downcast. Every other cause keeps 69 — deferring to
-                // a typed non-transient cause would let it re-code the
-                // lock-resolve interface (a `DigestMismatch` exhaustion
-                // reaching a caller as 65), and a cause that is not a
-                // `ClientError` at all has no classification to defer to.
+                // Defer only to a transient `ClientError`; any other typed cause would re-code this 69 (e.g. to 65).
                 ProjectErrorKind::RegistryUnreachable { source, .. } => source
                     .downcast_ref::<ocx_oci::client::error::ClientError>()
                     .filter(|client| {
+                        // Braces stay: `classify_baseline_7adaea62.json` pins this closure's tokens.
                         matches!(client, ocx_oci::client::error::ClientError::RegistryTransient(_))
                     })
                     .and_then(ClassifyExitCode::classify)
                     .unwrap_or(ExitCode::Unavailable),
-                // A per-tool deadline on a registry interaction: nothing was
-                // answered, so a rerun can genuinely succeed. Same rule the
-                // transport applies to a request timeout one layer down.
                 ProjectErrorKind::ResolveTimeout { .. } => ExitCode::TempFail,
                 ProjectErrorKind::LockMissing => ExitCode::ConfigError,
-                // The lock was written by an unsupported version — the user
-                // must regenerate it, same remedy shape as a config mismatch.
                 ProjectErrorKind::UnsupportedLockVersion { .. } => ExitCode::ConfigError,
-                // The locked version ships no leaf for the host platform —
-                // a pre-network config-state condition; the remedy is a
-                // whole-file re-resolve (`ocx update`).
                 ProjectErrorKind::NoHostLeaf { .. } => ExitCode::ConfigError,
-                // Two or more leaves tie at the host platform's maximum D1
-                // score — malformed/ambiguous *selection*, not a missing
-                // entry (`ocx update` cannot fix a tie): same classification
-                // as the fresh-resolve `SelectionAmbiguous` case (DataError).
                 ProjectErrorKind::AmbiguousHostLeaf { .. } => ExitCode::DataError,
                 ProjectErrorKind::ToolNotInConfig { .. } => ExitCode::NotFound,
                 ProjectErrorKind::BindingAlreadyExists { .. } => ExitCode::UsageError,
@@ -117,45 +81,13 @@ impl ClassifyExitCode for ProjectError {
                 ProjectErrorKind::ConfigAlreadyExists { .. } => ExitCode::UsageError,
                 ProjectErrorKind::InvalidGroupName { .. } => ExitCode::UsageError,
                 ProjectErrorKind::InvalidBindingName { .. } => ExitCode::UsageError,
-                // Stale predecessor on partial-resolve: the caller's lock
-                // snapshot is out of date with the live config. Same
-                // classification as the read-side staleness gate
-                // ([`LockCurrency::Stale`](ocx_project::LockCurrency) → DataError 65) so
-                // wrappers and scripts get a single signal regardless of
-                // which resolver path detected the mismatch.
+                // Must match `LockCurrency::Stale` (65), or scripts see two codes for one condition.
                 ProjectErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
-                // A dup-key collision is a structural integrity violation in
-                // the resolved leaf map — classify as malformed data (65).
                 ProjectErrorKind::DuplicatePlatformKey { .. } => ExitCode::DataError,
-                // A noncanonical platform-map key is malformed on-disk data —
-                // same classification as a dup-key collision.
                 ProjectErrorKind::NoncanonicalPlatformKey { .. } => ExitCode::DataError,
-                // Offline / frozen refused an unpinned-tag resolve during lock
-                // building — same category as the index-layer policy block.
                 ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked,
             },
-            // The four variants the project tier minted at WP-33, when it
-            // stopped borrowing `ocx_lib::Error` for failures it raises itself.
-            // Each reproduces what that borrowed variant classified to, so the
-            // narrowing moves no exit code (DEC-23):
-            //
-            //   ocx_lib::Error::OciClient(e)    => e.classify()
-            //   ocx_lib::Error::OciIndex(e)     => e.classify()
-            //   ocx_lib::Error::Config(e)       => e.classify()
-            //   ocx_lib::Error::InternalFile(..) => IoError  (now ocx_util::error::FileError)
-            //
-            // Delegation rather than a flat code for the first three on
-            // purpose: `ClientError` and the index error both distinguish
-            // transient from terminal, and flattening would collapse 69 and 74.
-            //
-            // An early `return` rather than restructuring the `match` to
-            // yield `Option`, so the `Self::Project` arm above keeps the exact
-            // token stream `classify_baseline_7adaea62.json` records — the
-            // baseline is token-exact by design and must never be rekeyed
-            // (DEC-46/64). `return` and not `?` because `STANDS_IN_FOR`'s
-            // `SameDelegation` normalises away a leading `return` and a binder
-            // and nothing else: `e.classify()?` is the same code but a
-            // different shape, and would read as a drift that is not one.
+            // Keep `return e.classify()`: `classify_baseline_7adaea62.json` pins these tokens exactly.
             Self::OciClient(e) => return e.classify(),
             Self::OciIndex(e) => return e.classify(),
             Self::Config(e) => return e.classify(),
@@ -168,9 +100,7 @@ impl ClassifyExitCode for LockCurrency {
     fn classify(&self) -> Option<ExitCode> {
         use ExitCode;
         match self {
-            // Project exists but is not locked — a configuration gap.
             Self::Missing { .. } => Some(ExitCode::ConfigError),
-            // Lock exists but disagrees with `ocx.toml` — stale on-disk data.
             Self::Stale { .. } => Some(ExitCode::DataError),
         }
     }

@@ -9,11 +9,6 @@ use ocx_project::lazy::LazyMode;
 use ocx_shell::{ci::CiFlavor, shell::Shell};
 
 /// Derives a `<stem>-<suffix>.json` sidecar path beside an archive file.
-///
-/// For example `/path/to/package.tar.gz` with suffix `metadata` yields
-/// `/path/to/package-metadata.json`. Shared by [`infer_metadata_file`] and
-/// [`infer_receipt_file`] so the two sidecars a build produces are always
-/// derived the same way and land next to each other.
 fn sidecar_path(content: &std::path::Path, suffix: &str) -> Result<std::path::PathBuf, MetadataResolutionError> {
     let content_parent = content
         .parent()
@@ -39,28 +34,21 @@ fn sidecar_path(content: &std::path::Path, suffix: &str) -> Result<std::path::Pa
     Ok(content_parent.join(format!("{content_name}-{suffix}.json")))
 }
 
-/// Infers a metadata file path based on the archive file path.
-/// For example, if the content path is `/path/to/package.tar.gz`, this function will return `/path/to/package-metadata.json`.
+/// Infers the metadata sidecar beside an archive (`package.tar.gz` -> `package-metadata.json`).
 pub fn infer_metadata_file(content: &std::path::Path) -> Result<std::path::PathBuf, MetadataResolutionError> {
     sidecar_path(content, "metadata")
 }
 
-/// Infers the build-receipt path beside the archive file — the metadata path's
-/// twin (`/path/to/package.tar.gz` -> `/path/to/package-receipt.json`).
-///
-/// Written by `ocx package create --metadata`, read by `ocx package push` and
-/// `ocx package test`.
+/// Infers the build-receipt sidecar beside an archive (`package.tar.gz` -> `package-receipt.json`).
 pub fn infer_receipt_file(content: &std::path::Path) -> Result<std::path::PathBuf, MetadataResolutionError> {
     sidecar_path(content, "receipt")
 }
 
-/// Resolves the metadata path used by `ocx package push` and `ocx package
-/// test`.
+/// Resolves the metadata path for `ocx package push` and `ocx package test`:
+/// `explicit`, else the file layers' one sidecar.
 ///
-/// When `explicit` is `Some`, it wins. Otherwise the helper walks the file
-/// layers, infers a candidate metadata path for each, and dedups: zero file
-/// layers → [`MetadataResolutionError::Required`], multiple distinct
-/// candidates → [`MetadataResolutionError::Ambiguous`].
+/// Zero file layers is [`MetadataResolutionError::Required`],
+/// several distinct candidates [`MetadataResolutionError::Ambiguous`].
 pub fn resolve_metadata_path(
     layers: &[LayerRef],
     explicit: Option<&std::path::Path>,
@@ -84,21 +72,13 @@ pub fn resolve_metadata_path(
     }
 }
 
-/// Resolves the build-receipt path `ocx package push` and `ocx package test`
-/// fall back to for whatever their flags did not supply.
+/// Resolves the build-receipt path from the file layers alone; `--metadata` never redirects it.
 ///
-/// Mirrors [`resolve_metadata_path`]'s layer walk, but the receipt anchors to
-/// the **bundle** alone — there is no `--receipt` flag and `--metadata` never
-/// redirects it, because the receipt describes how the layer was built rather
-/// than what the package declares. Zero file layers (a config-only push) or
-/// several disagreeing candidates yield `None` rather than an error: no
-/// receipt is a supported state that simply makes the flags required.
+/// `None` for zero or several candidates: no receipt is supported and only makes the flags required.
 pub fn resolve_receipt_path(layers: &[LayerRef]) -> Option<std::path::PathBuf> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     for layer in layers {
-        // Fail-closed on an underivable path: no receipt means `--platform`
-        // becomes required, which is the safe answer. The metadata sibling
-        // propagates instead because there the file is mandatory input.
+        // An underivable path fails closed: no receipt makes `--platform` required.
         if let LayerRef::File { path: file, .. } = layer
             && let Ok(candidate) = infer_receipt_file(file)
             && !candidates.contains(&candidate)
@@ -112,14 +92,7 @@ pub fn resolve_receipt_path(layers: &[LayerRef]) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Reads the published metadata sidecar `ocx package push` and `ocx package
-/// test` consume.
-///
-/// The file is the wire form `ocx package create --metadata` compiled — every
-/// dependency pinned to a manifest digest — so a parse failure most often
-/// means the sidecar was hand-authored or edited rather than compiled. The
-/// context line says so; the underlying serialization failure classifies to
-/// `DataError` (65).
+/// Reads the compiled metadata sidecar `ocx package push` and `ocx package test` consume; a parse failure exits 65.
 pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<ocx_package::metadata::Metadata> {
     use anyhow::Context as _;
     use ocx_util::prelude::*;
@@ -133,42 +106,18 @@ pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<o
     })
 }
 
-/// Resolves an explicit `--platform` value, falling back to the current host
-/// platform when the flag was omitted.
-///
-/// The single source of truth for "which platform does this command resolve
-/// against" — every resolution command (`ocx package install/pull/exec`,
-/// `ocx exec`, `ocx env`, ...) applies the same default.
+/// Resolves `--platform`, defaulting to the host platform for every resolution command.
 pub fn platform_or_default(platform: Option<ocx_oci::Platform>) -> ocx_oci::Platform {
     platform.unwrap_or_else(|| ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any))
 }
 
-/// Resolves the OCI-tier `lazy-mode` ladder for one invocation, applying
-/// `--self`'s eager override.
+/// Resolves the OCI-tier `lazy-mode` ladder; under `--self` it is always [`LazyMode::Never`].
 ///
-/// **Laziness has no meaning under `--self`.** A generated shim exists only to
-/// serve consumers — it is an INTERFACE launcher — so under the private view it
-/// is gated out along with `entrypoints/`, and a deferred package would land on
-/// `PATH` as nothing at all. The private view therefore resolves to
-/// [`LazyMode::Never`], logged at debug so the override is visible without
-/// being noise.
-///
-/// The refusal is on the **value**, not on the flags co-occurring.
-/// `--self --lazy-mode always` is two contradictory requests and is a usage
-/// error (exit 64). `--self --lazy-mode never` asks for eager twice and is
-/// accepted, as is `--self` with an `always` inherited from `OCX_LAZY_MODE` —
-/// a less-specific tier outranked by the user's own more-specific flag, which
-/// is the ladder working rather than a contradiction.
+/// An `always` inherited from `OCX_LAZY_MODE` downgrades silently under `--self`.
 ///
 /// # Errors
 ///
-/// [`UsageError`] when `self_view` is set and the CLI tier explicitly typed
-/// [`LazyMode::Always`].
-///
-/// Shared by the two OCI-tier composing commands (`ocx package env`,
-/// `ocx package exec`); the project tier resolves through
-/// `ocx_project::lazy_mode_for_tool` instead, which reads the `ocx.toml`
-/// tiers this one has none of.
+/// [`UsageError`] when `self_view` is set and the CLI tier explicitly typed [`LazyMode::Always`].
 pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<LazyMode, UsageError> {
     if self_view && cli == Some(LazyMode::Always) {
         return Err(UsageError::new(
@@ -185,37 +134,11 @@ pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<Lazy
     Ok(resolved)
 }
 
-/// Emit shell-sourceable export lines for a slice of env entries.
+/// Emit shell-sourceable export lines for env entries, noting on stderr each one the shell cannot express.
 ///
-/// This is the single shared emit helper consumed by:
-/// - `ocx env` (toolchain-tier, new Phase 2 command)
-/// - `ocx package env` (OCI-tier, delegates here for `--shell` output)
-/// - `ocx direnv export` (delegates here instead of inlining the loop)
-///
-/// Wraps [`Shell::export_path`] / [`Shell::export_constant`] /
-/// [`Shell::export_list`] and skips entries the shell cannot express — a key
-/// that fails POSIX validation, or a `list` entry under `cmd.exe`, which has no
-/// case-sensitive string replacement. Either way a `# ocx:` note goes to stderr
-/// naming the actual reason, so the caller is informed without aborting the
-/// full output.
-///
-/// **The reserved-`OCX_*` gate is deliberately not here.** This function's
-/// output is `eval`d, so a package-declared `OCX_CONSENT_NAMESPACES` reaching it
-/// is a consent bypass — but the refusal belongs at
-/// `PackageManager::resolve_env_with_attribution`, the one seam this function
-/// and `Env::apply_entries` both read from. A second copy of the check here
-/// would silently absorb a regression in that one, and would leave `ocx exec` —
-/// which never comes through here — exposed anyway. `is_valid_env_key` below is
-/// the *grammar* gate and is not a substitute for it.
-///
-/// `Shell::Bash` is the fixed shell for `direnv export` (direnv always evals
-/// `.envrc` in a bash sub-shell — no `--shell` flag on that command). For
-/// `ocx env` / `ocx package env` the caller passes the user-selected shell.
-///
-/// # Panics
-///
-/// This function is infallible — `None` from `export_path` / `export_constant`
-/// is handled by a stderr note.
+/// The reserved-`OCX_*` consent gate belongs at `PackageManager::resolve_env_with_attribution`, never here:
+/// a copy here masks a regression there and leaves `ocx exec` exposed.
+/// `is_valid_env_key` checks grammar only and is no consent gate.
 pub fn emit_lines(shell: Shell, entries: &[Entry]) {
     for entry in entries {
         match emit_line(shell, entry) {
@@ -225,17 +148,12 @@ pub fn emit_lines(shell: Shell, entries: &[Entry]) {
     }
 }
 
-/// The per-entry half of [`emit_lines`]: the statement to print on stdout, or
-/// the reason to note on stderr.
-///
-/// Split out so the admission rules are testable — `emit_lines` itself only
-/// decides which of the two streams the result goes to.
+/// The per-entry half of [`emit_lines`]: the statement to print on stdout, or the reason to note on stderr.
 fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
     use ocx_package::metadata::env::list::DEFAULT_SEPARATOR;
     use ocx_package::metadata::env::modifier::ModifierKind;
 
-    /// The `--shell=` value name (`cmd`-style), not the Rust variant name —
-    /// read from clap's own possible values so the two cannot drift.
+    /// The `--shell=` spelling the user typed, read from clap so the two cannot drift.
     fn shell_argument_name(shell: Shell) -> String {
         use clap::ValueEnum as _;
         shell
@@ -243,26 +161,20 @@ fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
             .map_or_else(|| shell.to_string(), |value| value.get_name().to_string())
     }
 
-    // One admission rule, shared with the reconciler's planner: an entry no arm
-    // can emit *or* revert must not be emitted here either. Without it a
-    // `type = "path"` value embedding the platform separator reached ksh, dash
-    // and pwsh, whose split-based folds see it as two segments, match neither,
-    // and prepend another copy on every re-source.
+    // The reconciler's admission rule: an entry it cannot revert makes ksh, dash and pwsh
+    // prepend a copy on every re-source.
     ocx_shell::shell::is_emittable(entry).map_err(|reason| format!("skipping env var {:?} — {reason}", entry.key))?;
 
     let line = match entry.kind {
         ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
         ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
-        // A surviving `None` separator has already been through compose-time
-        // reconciliation, so nothing established one for this key.
+        // A `None` surviving compose-time reconciliation means nothing established a separator for this key.
         ModifierKind::List => shell.export_list(
             &entry.key,
             &entry.value,
             entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR),
         ),
     };
-    // The `--shell=` spelling, not the Rust variant name: this is the word the
-    // reader typed and would type again.
     line.ok_or_else(|| {
         format!(
             "skipping list env var {:?} — {} has no case-sensitive unique append",
@@ -272,21 +184,7 @@ fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
     })
 }
 
-/// Resolve a `--shell` clap argument to an explicit [`Shell`], or `None`
-/// when the default-format (JSON / `--format plain`) path should be taken.
-///
-/// `--shell` is declared as `Option<Option<Shell>>` with
-/// `num_args=0..=1, require_equals=true` (clap 4.x produces `Some(None)` for
-/// a bare `--shell`, `Some(Some(s))` for `--shell=NAME`, `None` when absent —
-/// `require_equals` keeps a following positional from being swallowed):
-///
-/// - `None` (flag absent) → `Ok(None)`: caller uses the default-format path.
-/// - `Some(None)` (bare `--shell`) → autodetect from `$SHELL`/parent; a
-///   [`UsageError`] (exit 64) when undetectable.
-/// - `Some(Some(s))` (explicit `--shell=NAME`) → `Ok(Some(s))`.
-///
-/// Shared by `ocx env` and `ocx package env` so the bare-shell autodetect and
-/// its identical undetectable-shell `UsageError` exist exactly once.
+/// Resolve a `--shell` argument: absent is `None`, bare autodetects, with a [`UsageError`] when undetectable.
 pub fn resolve_shell_arg(shell: Option<Option<Shell>>) -> anyhow::Result<Option<Shell>> {
     match shell {
         None => Ok(None),
@@ -305,48 +203,22 @@ pub fn resolve_shell_arg(shell: Option<Option<Shell>>) -> anyhow::Result<Option<
     }
 }
 
-/// Resolve a `--ci` clap argument to an explicit [`CiFlavor`], or `None` when
-/// the flag is absent and the caller should take the non-CI path.
-///
-/// `--ci` is declared as `Option<Option<CiFlavor>>` with
-/// `num_args=0..=1, require_equals=true` (mirroring `--shell`):
-///
-/// - `None` (flag absent) → `Ok(None)`: caller uses the structured-report /
-///   `--shell` path.
-/// - `Some(None)` (bare `--ci`) → autodetect from CI env vars
-///   (`$GITHUB_ACTIONS`, `$GITLAB_CI`); a [`UsageError`] (exit 64) when no
-///   provider is detected.
-/// - `Some(Some(provider))` (explicit `--ci=NAME`) → `Ok(Some(provider))`.
-///
-/// Shared by `ocx env` and `ocx package env` so the bare-`--ci` autodetect and
-/// its identical undetectable-provider `UsageError` exist exactly once.
+/// Resolve a `--ci` argument: absent is `None`, bare autodetects, with a [`UsageError`] when no provider is detected.
 pub fn resolve_ci_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiFlavor>> {
     resolve_ci_flavor(ci, "--ci")
 }
 
-/// Resolve a `--ci-annotations` clap argument to an explicit [`CiFlavor`], or
-/// `None` when the flag is absent and the push should annotate nothing.
-///
-/// Same three states as [`resolve_ci_arg`], and the same autodetect — the two
-/// flags answer "which CI am I in" identically, and a second detector would be
-/// a second answer. Only the flag named in the usage error differs, which is
-/// the whole reason this is not just [`resolve_ci_arg`]: a user told to pass
-/// `--ci=gitlab` by `ocx package push` would be told to pass a flag push does
-/// not have.
+/// [`resolve_ci_arg`] for `--ci-annotations`; its usage error must name the flag `ocx package push` actually has.
 pub fn resolve_ci_annotations_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiFlavor>> {
     resolve_ci_flavor(ci, "--ci-annotations")
 }
 
-/// The shared body of the `--ci`-shaped resolvers; `flag` names the caller's
-/// spelling in the undetectable-provider [`UsageError`] (exit 64).
+/// The shared body of the `--ci`-shaped resolvers; `flag` is named in the usage error.
 fn resolve_ci_flavor(ci: Option<Option<CiFlavor>>, flag: &str) -> anyhow::Result<Option<CiFlavor>> {
     resolve_ci_flavor_with(ci, flag, CiFlavor::detect())
 }
 
-/// The body of [`resolve_ci_flavor`] with the detected provider injected, so a
-/// test can drive the bare-`--ci` autodetect-failure branch without depending
-/// on the ambient CI environment — which `CiFlavor::detect` reads, and which
-/// the gate itself may run inside.
+/// [`resolve_ci_flavor`] with the provider injected, so tests do not read the ambient CI the gate may run in.
 fn resolve_ci_flavor_with(
     ci: Option<Option<CiFlavor>>,
     flag: &str,
@@ -362,15 +234,9 @@ fn resolve_ci_flavor_with(
     }
 }
 
-/// The usage error (exit 64) a bare `--ci`-shaped flag raises when no provider
-/// can be autodetected. `flag` names the caller's spelling (`--ci` /
-/// `--ci-annotations`).
+/// The usage error a bare `--ci`-shaped flag raises when no provider is detected.
 ///
-/// The trailing clause is what a user who typed `--ci-annotations github`
-/// (space, no `=`) needs: `require_equals` means the space form leaves the flag
-/// bare and hands `github` to the positional parser, so the value silently did
-/// not attach and autodetect ran instead. Shared by `env --ci` and
-/// `push --ci-annotations`, so it stays correct for both spellings.
+/// The `=` clause is for a user who typed `--ci-annotations github`: the space form left the flag bare.
 fn undetectable_ci_provider(flag: &str) -> UsageError {
     UsageError::new(format!(
         "could not autodetect CI provider; {}",
@@ -378,15 +244,7 @@ fn undetectable_ci_provider(flag: &str) -> UsageError {
     ))
 }
 
-/// The `=`-requirement clause, in one spelling, listing `V`'s whole value
-/// vocabulary. Every refusal a `require_equals` flag can raise — the
-/// undetectable CI provider above and the spaced value below — states the same
-/// rule, and two phrasings of one rule is one phrasing too many.
-///
-/// Derived from `V::value_variants()` rather than written out per flag, so a
-/// new variant cannot leave a suggestion listing the old set. An alias
-/// (`github-actions`) is not offered: `get_name` gives the canonical spelling,
-/// which is the one to teach.
+/// The one `=`-requirement clause every `require_equals` refusal states, listing `V`'s canonical spellings.
 fn value_needs_equals<V: clap::ValueEnum>(flag: &str) -> String {
     let spellings: Vec<String> = V::value_variants()
         .iter()
@@ -396,69 +254,22 @@ fn value_needs_equals<V: clap::ValueEnum>(flag: &str) -> String {
     format!("pass {}; the value must be attached with `=`", spellings.join(" or "))
 }
 
-/// Refuses a `require_equals` flag whose value was written with a space instead
-/// of `=`, which the grammar silently reads as a bare flag plus a positional.
+/// Refuses a `require_equals` flag whose value was written with a space, which parses as a bare flag plus a positional.
 ///
-/// `require_equals` means `--ci-annotations gitlab` never attaches `gitlab` to
-/// the flag: the flag stays bare and `gitlab` falls through to the command's
-/// own positional parser. Outside CI that surfaces as
-/// [`undetectable_ci_provider`], which at least says something — but *inside*
-/// CI the bare flag autodetects successfully, and the value the user typed is
-/// consumed as a layer path with nothing said at all. `positionals` carries the
-/// command's positional arguments as argv saw them.
-///
-/// `flag_could_have_lost_its_value` is the caller's grammar test, because the
-/// two shipped grammars answer it differently and neither can be derived here:
-///
-/// - `Option<Option<V>>` (`--ci`, `--ci-annotations`): `Some(None)` *is* the
-///   bare flag. An absent flag had no value to lose; `--ci=gitlab` attached.
-/// - `Option<V>` **with `default_missing_value`** (`--build-timestamp`): the
-///   bare form is resolved to the default before anyone sees it, so bare and
-///   `=<default>` are indistinguishable. The test is therefore "did it resolve
-///   to the `default_missing_value` variant" — any *other* variant proves the
-///   `=` form was used and nothing can have been lost.
-///
-/// ponytail: a heuristic, deliberately. It fires on any positional that names a
-/// `V` **case-insensitively**, so a layer path literally named `github`,
-/// `gitlab` or `GitLab` is refused too. Such a path is implausible, and an
-/// operator who has one escapes it — `./gitlab` for a layer path, a qualified
-/// reference (`gitlab:latest`, `ocx.sh/gitlab`) for a package. Do not "fix" this
-/// by deleting the guard: the alternative is the silent misparse above, on a
-/// real runner, where nobody is reading stderr.
-///
-/// Case-insensitive even though `--ci=GitLab` is a clap parse error, so the
-/// guard refuses a spelling the `=` form would reject. That asymmetry is the
-/// point: the `=` form fails loudly on its own, while the space form absorbs
-/// the token in silence, and a mis-cased value is the likeliest way to mistype
-/// one.
-///
-/// ponytail: the discriminator for *whether a flag gets this guard at all* is
-/// **whether the positional's value space plausibly collides with the flag's
-/// value vocabulary** — not whether the grammar matches. Three flags qualify
-/// (`env --ci`, `push --ci-annotations`, `push --build-timestamp`), because no
-/// plausible layer path or package reference is named `github`, `gitlab`,
-/// `datetime`, `date` or `none`. `--shell` carries the identical grammar beside
-/// the same positional and is deliberately **left unguarded**, because `bash`,
-/// `zsh` and `fish` are all plausible *package* names: `ocx package env --shell
-/// bash` is a legitimate request for the `bash` package's environment. That is
-/// not hypothetical — this repository's own CI already passes shell packages to
-/// `package env` positionally (`.github/workflows/shell-activation-deep.yml`
-/// runs it against `nushell/nushell`, `elvish/elvish` and
-/// `powershell/powershell`). Those particular invocations would survive a guard
-/// twice over, by naming two segments and by attaching `--shell=bash` with `=`
-/// — but they are the shape a one-segment name would arrive in, and a guard
-/// would refuse it. Same grammar, opposite trade.
+/// `flag_could_have_lost_its_value` is per grammar: `Some(None)` for `Option<Option<V>>`, the default
+/// variant for `Option<V>` with `default_missing_value`.
 pub fn refuse_spaced_enum_value<V: clap::ValueEnum>(
     flag: &str,
     flag_could_have_lost_its_value: bool,
     positionals: impl IntoIterator<Item = String>,
 ) -> Result<(), UsageError> {
+    // ponytail: called only where positionals collide with the flag's vocabulary; `--shell` has no call
+    // because `bash`, `zsh` and `fish` are real package names CI passes positionally.
     if !flag_could_have_lost_its_value {
         return Ok(());
     }
-    // Case-insensitively (`ignore_case = true`): a mis-cased `GitLab` is the
-    // likeliest mistype, and here it is absorbed silently rather than refused
-    // by clap as the `=` form would be.
+    // ponytail: case-insensitive on purpose (escape: `./gitlab`); matched case-sensitively, `--ci GitLab`
+    // silently becomes a layer path on a real runner.
     let Some(token) = positionals.into_iter().find(|token| V::from_str(token, true).is_ok()) else {
         return Ok(());
     };
@@ -469,13 +280,9 @@ pub fn refuse_spaced_enum_value<V: clap::ValueEnum>(
     )))
 }
 
-/// Splits tag-list bytes on commas and newlines into trimmed, non-empty tag
-/// names, preserving order.
+/// Splits tag-list bytes on commas and newlines into trimmed, non-empty tag names, preserving order.
 ///
-/// Shared wire format for `ocx package announce --tags-file` (read) and
-/// `ocx package push --tags-file` (write) — parses whatever either side
-/// writes, and is byte-compatible with the file format the third-party
-/// `indexbot` tool reads via its own, unrelated `--tags-from-file` flag.
+/// The `--tags-file` wire format, which the third-party `indexbot` also reads via `--tags-from-file`.
 pub fn parse_tags_file(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .split(['\n', '\r', ','])
@@ -497,12 +304,7 @@ pub fn merge_tags_file(existing: &[String], tags: &[String]) -> String {
     merged.join(",")
 }
 
-/// Export resolved env entries into a CI system's persistence channel.
-///
-/// Shared by `ocx env` and `ocx package env`. Rejects `--export-file` for
-/// GitHub Actions (which infers its two-file sink from `$GITHUB_ENV` /
-/// `$GITHUB_PATH`); GitLab uses `export_file` as its output path, falling back
-/// to stdout when `None`.
+/// Export resolved env entries into a CI system's persistence channel; `--export-file` is refused for GitHub.
 pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, entries: &[Entry]) -> anyhow::Result<()> {
     if provider == CiFlavor::GitHubActions && export_file.is_some() {
         return Err(UsageError::new(
@@ -514,14 +316,7 @@ pub fn export_ci(provider: CiFlavor, export_file: Option<std::path::PathBuf>, en
     Ok(())
 }
 
-/// Project composed env entries into the inspect report's wire shape.
-///
-/// Shared by `ocx package inspect` (where the entries are the `--env`
-/// overrides alone) and `ocx inspect` (where they are `[env]`, the selected
-/// groups' `[group.<name>.env]`, then `--env`, already in application order).
-/// The report keeps entries in that order rather than merging them, so a
-/// consumer sees every contributing declaration instead of a collapsed result;
-/// `ocx env` is what answers "what is the final value".
+/// Project composed env entries into the inspect report's wire shape, unmerged and in application order.
 pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
     entries
         .iter()
@@ -530,21 +325,12 @@ pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
             value: entry.value.clone(),
             kind: entry.kind.clone(),
             separator: entry.separator.clone(),
-            // Patch provenance is an `ocx env` concern — the inspect report
-            // carries no package-composed entries to attribute.
             source: None,
         })
         .collect()
 }
 
-/// Exit code for an inspect run: 65 when the closure walk found a conflict.
-///
-/// Shared by both inspect commands. `DataError` is the code compose already
-/// returns for the identical condition (`DependencyError::Conflict`,
-/// `PackageErrorKind::EntrypointCollision`), so `ocx inspect --closure` exits
-/// exactly where `ocx exec` over the same set would. The conflict detail stays
-/// in the payload — the exit code is the machine-readable half, not a
-/// replacement for it.
+/// Exit code for an inspect run: 65 on a closure conflict, where `ocx exec` over the same set exits too.
 pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectReport) -> std::process::ExitCode {
     if report.has_conflicts() {
         ocx_exit::ExitCode::DataError.into()
@@ -553,19 +339,9 @@ pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectRepo
     }
 }
 
-/// Exit code for `ocx package cascade check`: 65 when any package reported a
-/// finding.
+/// Exit code for `ocx package cascade check`: 65 when any package reported a finding, index staleness included.
 ///
-/// `DataError` is the same code every other "the run succeeded, and what it
-/// found is not clean" verdict uses ([`inspect_exit_code`]), so a job that
-/// branches on 65 need not know which ocx command produced it. Index staleness
-/// counts: check's contract is whole-graph consistency, and the report carries
-/// the finding class a script needs to tell it from registry drift.
-///
-/// Returns the typed code rather than [`std::process::ExitCode`] (which
-/// [`inspect_exit_code`] above does): the process type is opaque and compares
-/// against nothing, so the verdict would only be assertable by running the
-/// binary. The caller converts.
+/// Typed, not [`std::process::ExitCode`], which compares against nothing and so could not be asserted.
 pub fn cascade_check_exit_code(
     report: &crate::api::data::package_cascade_check::PackageCascadeCheck,
 ) -> ocx_exit::ExitCode {
@@ -576,17 +352,10 @@ pub fn cascade_check_exit_code(
     }
 }
 
-/// Exit code for `ocx package cascade repair`: 65 when a finding survived the
-/// run.
+/// Exit code for `ocx package cascade repair`:
+/// 65 when work this run could have done remains, or `--dry-run` planned any.
 ///
-/// Deliberately not [`cascade_check_exit_code`]'s question. Index staleness is
-/// the expected residue of a repair — closing it is `ocx package announce`'s
-/// hop, and failing on it would make every healthy logical repair look broken.
-/// What counts is work this run could have done and did not: a write the
-/// registry rejected, an alias refused before it was attempted, and one the
-/// fold cannot rebuild without new content being published. A preview counts
-/// its whole plan, because a preview writes nothing — a `--dry-run` exiting 0
-/// while naming repairs would be useless as a gate.
+/// Index staleness does not count, or every healthy repair looks broken: `ocx package announce` closes it.
 pub fn cascade_repair_exit_code(
     report: &crate::api::data::package_cascade_repair::PackageCascadeRepair,
 ) -> ocx_exit::ExitCode {
@@ -605,14 +374,7 @@ pub fn cascade_repair_exit_code(
     }
 }
 
-/// Return the manager for an install/pull command, refining the shared
-/// auto-verify config's opt-out from this command's `--verify`/`--no-verify`
-/// flag (the flag wins over `OCX_NO_VERIFY`).
-///
-/// Auto-verify itself is attached once on the shared manager in
-/// [`Context::try_init`](crate::app::Context) so every install surface inherits
-/// it; this only overrides the opt-out for the two commands that carry the
-/// flag. A plain clone when no policy is configured (`auto_verify` is `None`).
+/// Return the manager with the auto-verify opt-out refined by `--verify`/`--no-verify`, which outranks `OCX_NO_VERIFY`.
 pub fn manager_with_verify_flag(
     context: &crate::app::Context,
     verify: &crate::options::SignatureVerify,
@@ -621,44 +383,14 @@ pub fn manager_with_verify_flag(
     let Some(auto_verify) = manager.auto_verify().cloned() else {
         return manager;
     };
-    // `OCX_NO_VERIFY` is resolved once in `Context::try_init` and read back from
-    // the config view here — the `--verify`/`--no-verify` flag wins over it.
     let opted_out = !verify.resolve(context.config_view().no_verify);
     manager.with_auto_verify(Some(auto_verify.with_user_opted_out(opted_out)))
 }
 
-/// The "default output is not eval-safe" advisory for a composed-env report, or
-/// `None` when this invocation must stay silent.
+/// The "not eval-safe" advisory for a non-JSON report on a non-terminal stdout, where `eval "$(ocx env)"` breaks.
 ///
-/// # Why this is a tty question and not a "did you ask for plain" one
-///
-/// The warning guards one real footgun: `eval "$(ocx env)"` silently breaks,
-/// because the aligned table is not sourceable. But a command substitution is
-/// exactly the case where stdout is NOT a terminal — and the invocation that
-/// pays for the warning today, a human typing `ocx env` to read the composed
-/// environment, is the case where it is. Firing on an interactive read warns
-/// the one person who was never going to `eval` it, on the single most common
-/// benign use of the command.
-///
-/// So the condition is "stdout is not a terminal": piped, captured, or command
-/// substituted. That makes the warning strictly more useful than deleting it
-/// would — it now fires in the case it exists for, and only there.
-///
-/// JSON stays silent as it always has: it is already a machine channel, nobody
-/// evals it, and its own structure says so.
-///
-/// # Why the caller passes the answer in
-///
-/// The same shape `package_sbom::refuse_tty_output` uses: the probe belongs to
-/// the call site (`std::io::stdout().is_terminal()`), so the decision stays a
-/// pure function both states of which a test can reach. A test process's stdout
-/// is never a terminal, so a predicate that probed for itself could only ever
-/// be observed in one state.
-///
-/// Deliberately NOT `ColorModeConfig::stdout`: that field is a *colour*
-/// decision, not a tty probe — `CLICOLOR_FORCE=1` makes it `true` with no
-/// terminal anywhere, which would suppress this warning in precisely the piped
-/// case it exists for, and `NO_COLOR` makes it `false` on a real terminal.
+/// Never probe via `ColorModeConfig::stdout`: `CLICOLOR_FORCE` and `NO_COLOR` would invert the answer.
+/// The tty probe is a parameter because a test's stdout is never a terminal.
 #[must_use]
 pub const fn not_eval_safe_advisory(is_json: bool, stdout_is_terminal: bool) -> Option<&'static str> {
     if is_json || stdout_is_terminal {

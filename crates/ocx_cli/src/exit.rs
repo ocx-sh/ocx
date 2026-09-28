@@ -1,28 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Error -> [`ExitCode`] classification for the `ocx` binary.
-//!
-//! Classification is a CLI concern: only a process that exits owns the mapping
-//! from an error to an exit code. The library crates define the error types;
-//! this module decides what each one costs the caller. Keeping the two apart is
-//! what `no_classification_in_libraries` enforces (C-030).
-//!
-//! The mapping is distributed across `ClassifyExitCode` impls, one per error
-//! type, grouped into one submodule per owning library crate
-//! (`exit::ocx_config`, `exit::ocx_oci`, ...). Each submodule exports a
-//! `try_downcast` that walks its own types; `try_classify` is the dispatch over
-//! those submodules. A wrapper variant carrying an inner classifiable error
-//! calls `inner.classify()` and either delegates or overrides based on its own
-//! context.
-//!
-//! [`classify_error`] walks a [`std::error::Error`] chain via `source()`.
-//! Binaries using anyhow call `classify_error(err.as_ref())` via
-//! `anyhow::Error`'s `AsRef<dyn std::error::Error + 'static>` impl.
-//!
-//! When no subtree matches, the classifier falls through to
-//! [`ExitCode::Failure`]. A locked-in fall-through test in `exit::classify`
-//! prevents silent drift.
+//! Error -> [`ExitCode`] classification for the `ocx` binary; the `no_classification_in_libraries` lint keeps it here.
 
 use ocx_exit::ExitCode;
 
@@ -46,20 +25,9 @@ mod ocx_util;
 
 pub(crate) use classify::{ClassifyErrorKind, ClassifyExitCode};
 
-/// Classify an error chain into an [`ExitCode`], CLI-local types first.
+/// Classify an error chain into an [`ExitCode`], CLI-local types first; the exit-code authority for `main.rs`.
 ///
-/// The single exit-code authority for `main.rs`; commands return typed errors
-/// rather than hand-mapping exit codes.
-///
-/// # Two passes, on purpose
-///
-/// The CLI-local types are swept over the **whole** chain before the library
-/// types are swept over the whole chain again. That ordering is observable: a
-/// CLI-local cause *anywhere* in the chain outranks a library cause *earlier*
-/// in it. Merging the two sweeps into one walk - which reads like the obvious
-/// simplification - silently inverts that precedence for every chain carrying
-/// both kinds, and an inverted precedence is a changed exit code. The two
-/// passes are the contract; leave them as two.
+/// Two passes on purpose: merged into one walk, an earlier library cause would outrank a CLI-local one.
 pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ExitCode {
     for cause in std::iter::successors(Some(err), |e| e.source()) {
         if let Some(pce) = cause.downcast_ref::<ProjectContextError>()
@@ -76,21 +44,10 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ExitCode {
     classify_library_error(err)
 }
 
-/// Classify a [`std::error::Error`] chain against the library ladder alone.
+/// Classify a [`std::error::Error`] chain against the library ladder alone, else [`ExitCode::Failure`].
 ///
-/// The second of [`classify_error`]'s two passes, kept callable on its own for
-/// the aggregating commands that fold a per-package library failure into one
-/// exit code: those chains carry no CLI-local cause, and reaching them through
-/// the full [`classify_error`] would put a precedence rung in front of them
-/// that they never had.
-///
-/// Walks the error chain via [`std::error::Error::source`] and downcasts each
-/// cause to each known classifiable type. The first cause with a non-`None`
-/// `ClassifyExitCode::classify` result wins; otherwise the function falls back
-/// to [`ExitCode::Failure`].
+/// For aggregating commands folding per-package library failures, whose chains carry no CLI-local cause.
 pub fn classify_library_error(err: &(dyn std::error::Error + 'static)) -> ExitCode {
-    // `successors` walks `err -> err.source() -> ...` without allocating, giving
-    // the same reach as `anyhow::Error::chain()` through the std boundary type.
     for cause in std::iter::successors(Some(err), |e| e.source()) {
         if let Some(code) = try_classify(cause) {
             return code;
@@ -99,17 +56,7 @@ pub fn classify_library_error(err: &(dyn std::error::Error + 'static)) -> ExitCo
     ExitCode::Failure
 }
 
-/// Downcast `cause` to every known classifiable type and return the first
-/// [`ExitCode`] produced by `ClassifyExitCode::classify`.
-///
-/// One line per owning library crate, plus `cli_input` for this crate's own
-/// input-validation errors — see that module for why they are answered in
-/// this pass rather than in [`classify_error`]'s CLI-local one. A new error
-/// type joins its crate's submodule ladder, not this list; a new *crate*
-/// adds a line here. Each
-/// downcast behind these calls is O(1) (`TypeId` check), and `TypeId` equality
-/// is exact, so at most one arm in the whole ladder can match a given cause -
-/// the order below is a reading aid, not a precedence rule.
+/// Downcast `cause` to every known classifiable type; each downcast is exact, so order is not precedence.
 fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     cli_input::try_downcast(cause)
         .or_else(|| ocx_package::try_downcast(cause))
@@ -124,16 +71,10 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
         .or_else(|| ocx_shell::try_downcast(cause))
         .or_else(|| ocx_setup::try_downcast(cause))
         .or_else(|| ocx_sign::try_downcast(cause))
-        // Last, as it was: the `std::io::Error` tail that cannot be an impl
-        // at all (orphan rule).
         .or_else(|| classify::try_downcast(cause))
 }
 
-/// One rung of an `exit/<crate>.rs` ladder.
-///
-/// Expands to the downcast-and-classify step the flat ladder used to spell out
-/// by hand: exact `TypeId` match, then the type's own `classify`, then fall
-/// through to the next rung.
+/// One rung of an `exit/<crate>.rs` ladder: exact downcast, then the type's `classify`, else fall through.
 macro_rules! downcast_arm {
     ($cause:expr, $ty:ty) => {
         if let Some(e) = $cause.downcast_ref::<$ty>()
@@ -523,6 +464,23 @@ mod tests {
         expr
     }
 
+    /// Drops a call's trailing argument comma, which rustfmt adds when it splits
+    /// the arguments over lines. Calls only: in a one-element tuple the comma is
+    /// the meaning.
+    struct TrailingCallComma;
+
+    impl syn::visit_mut::VisitMut for TrailingCallComma {
+        fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
+            syn::visit_mut::visit_expr_call_mut(self, call);
+            call.args.pop_punct();
+        }
+
+        fn visit_expr_method_call_mut(&mut self, call: &mut syn::ExprMethodCall) {
+            syn::visit_mut::visit_expr_method_call_mut(self, call);
+            call.args.pop_punct();
+        }
+    }
+
     /// How an arm's left-hand side is keyed: the pattern, and the guard that
     /// tells it apart from its siblings.
     ///
@@ -565,6 +523,7 @@ mod tests {
             syn::visit_mut::VisitMut::visit_expr_mut(&mut relocation, guard);
         }
         syn::visit_mut::VisitMut::visit_expr_mut(&mut relocation, &mut value);
+        syn::visit_mut::VisitMut::visit_expr_mut(&mut TrailingCallComma, &mut value);
         Ok((
             render_arm_pattern(&pat, guard.as_ref()),
             quote::ToTokens::to_token_stream(&unwrap_reflowed_block(*value)).to_string(),

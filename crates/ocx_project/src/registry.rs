@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Per-user GC ledger of projects whose `ocx.lock` pins packages on this
-//! machine, expressed as a flat symlink store.
-//!
-//! The ledger answers "which projects pin tools here" so that `ocx clean` can
-//! retain packages held by lockfiles in projects other than the active one.
-//!
-//! On disk this is a flat directory `$OCX_HOME/projects/`, one symlink per
-//! registered project:
+//! Per-user GC ledger of projects whose `ocx.lock` pins packages, so
+//! `ocx clean` keeps other projects' pins. One symlink per project:
 //!
 //! ```text
 //! $OCX_HOME/projects/
@@ -16,39 +10,9 @@
 //!   9b2c4e6a8d0f1357  ->  /home/alice/dev/proj-b
 //! ```
 //!
-//! - **Name** = first 16 hex of `SHA-256(canonical_abs_project_dir)` —
-//!   identical scheme to [`ocx_store::reference_manager::ReferenceManager::name_for_path`].
-//!   Single source of truth for the hash; this module does not reinvent it.
-//! - **Target** = the canonicalised absolute **project directory** (the
-//!   directory containing `ocx.lock`). Never the lock file, never the config
-//!   file. Browsable: `ls -l $OCX_HOME/projects/` resolves into projects.
-//!
-//! This collapses the project ledger into the same liveness model the rest of
-//! the store already uses (`refs/symlinks/`): a symlink whose
-//! existence-and-resolvability *is* the GC-root signal. There is no
-//! `projects.json`, no `.projects.lock` sentinel, no schema version, no
-//! whole-file rewrite. See [`adr_project_gc_symlink_ledger.md`] for the full
-//! rationale (supersedes `adr_clean_project_backlinks.md`).
-//!
-//! ## Sanctioned `symlink::create/update` exception
-//!
-//! The ledger symlink targets an absolute path **outside** `$OCX_HOME` (the
-//! project dir, Nix indirect-root shape). It therefore uses the low-level
-//! [`ocx_util::fs::symlink`] primitives directly and **must not** route through
-//! `symlink::validate_target` (whose containment policy is for `refs/`-internal
-//! links). `projects/` links are categorically not install back-refs, so the
-//! "never raw `symlink::create/update`, always `ReferenceManager`" rule does
-//! not apply here — this is a named, documented carve-out (ARCH-4b).
-//!
-//! ## Accepted collision blast-radius (ARCH-1a)
-//!
-//! Reusing the 16-hex (64-bit) `name_for_path` scheme is sound at realistic
-//! worktree counts (collision probability ≈10⁻¹³). The blast radius differs
-//! from the `refs/symlinks/` precedent though: a `refs/symlinks/` collision is
-//! a recoverable local mislink, whereas a `projects/` collision drops one of
-//! two live projects from the GC root set → silent collection of its pinned
-//! packages. Accepted at realistic scale; stated here so the reuse is a
-//! conscious decision, not precedent inertia.
+//! The name is `ReferenceManager::name_for_path` of the canonical project
+//! directory; liveness is the symlink's resolvability. Rationale:
+//! `adr_project_gc_symlink_ledger.md`.
 
 pub mod error;
 
@@ -56,23 +20,13 @@ use std::path::{Path, PathBuf};
 
 pub use error::{Error, ProjectRegistryError, ProjectRegistryErrorKind};
 
-/// Converts a [`crate::Error`] from the low-level `symlink` primitives into a
-/// registry [`ProjectRegistryErrorKind::Io`], preserving the structural inner
-/// [`std::io::Error`] (never `.to_string()`-erasing the source) when the
-/// variant carries one.
+/// Maps a `symlink` primitive's [`crate::Error`] to
+/// [`ProjectRegistryErrorKind::Io`], keeping the inner `io::Error`.
 fn into_io_kind(error: crate::Error) -> ProjectRegistryErrorKind {
     match error {
         crate::Error::InternalFile(_, io) => ProjectRegistryErrorKind::Io(io),
-        // Unreachable today: `into_io_kind` is only fed errors from
-        // `symlink::replace_atomic`, which emits exclusively
-        // `crate::Error::InternalFile`. This arm flattens any other variant
-        // into an opaque `io::Error::other`, **erasing the original
-        // classification** (a `ConfigError`/`AuthError`/etc. would silently
-        // become `IoError`). If `replace_atomic` ever grows a non-
-        // `InternalFile` failure path, fix the source classification here —
-        // do not let it reach this lossy flatten. The `debug_assert!` traps
-        // the regression in debug/test builds without changing release
-        // behaviour.
+        // Only `InternalFile` reaches here today; classify a new `replace_atomic`
+        // failure above, or it flattens to an opaque I/O error.
         other => {
             debug_assert!(
                 false,
@@ -83,43 +37,23 @@ fn into_io_kind(error: crate::Error) -> ProjectRegistryErrorKind {
     }
 }
 
-/// Three-state outcome of a single ledger-entry liveness probe.
-///
-/// The distinction between [`ProbeResult::Dead`] and [`ProbeResult::Unknown`]
-/// is the SEC-1 silent-data-loss guard: collapsing a transient probe `Err`
-/// (NFS/automount/permission-flip) into "dead" would prune a live project's
-/// ledger link and GC its pinned packages. `Dead` is acted on (pruned);
-/// `Unknown` is retained and warned about (see [`ProjectRegistry::live_projects`]).
+/// Ledger-entry liveness. `Unknown` stays apart from `Dead`: pruning a
+/// transiently unreadable link GCs a live project's packages.
 enum ProbeResult {
     /// The link resolves and `<target>/ocx.lock` exists — a live GC root.
     Live(PathBuf),
-    /// Definitively absent: not a link, OR an `Ok` probe proved the target /
-    /// `ocx.lock` is gone. Safe to prune.
+    /// Not a link, or an `Ok` probe proved the target or `ocx.lock` gone.
     Dead,
-    /// A transient I/O `Err` from `is_link`/`canonicalize`/`try_exists` — the
-    /// filesystem was momentarily unreachable. Liveness is indeterminate;
-    /// the link MUST be retained (never pruned, never collected as a root).
+    /// A transient probe `Err`: never pruned, never dropped as a root.
     Unknown,
 }
 
-/// Liveness probe for a single ledger entry.
-///
-/// Returns [`ProbeResult::Live`] when `entry_path` is a symlink whose target
-/// resolves to a directory containing an `ocx.lock` (a live GC root);
-/// [`ProbeResult::Dead`] when the entry is definitively not a live root (not
-/// a link, or an `Ok` probe proved the target / `ocx.lock` is absent);
-/// [`ProbeResult::Unknown`] when ANY probe step returned an `Err` (transient
-/// unreachable filesystem — must not be treated as dead). Used twice per
-/// non-`Live` entry to close the CODEX-BLOCK-1 TOCTOU window: a `Dead` is only
-/// acted on (pruned) if a re-probe immediately before removal also yields
-/// `Dead`.
+/// Probe one ledger entry; any `Err` is `Unknown`, never `Dead`.
 fn probe_live_target(entry_path: &Path) -> ProbeResult {
     if !ocx_util::fs::symlink::is_link(entry_path) {
         return ProbeResult::Dead;
     }
-    // Resolve the link target to an absolute, canonical directory. A broken
-    // link (target removed) fails canonicalize with NotFound → Dead; any
-    // other Err (EACCES, ESTALE, ETIMEDOUT, ...) is transient → Unknown.
+    // A broken link fails with NotFound (Dead); any other `Err` is transient.
     let target = match dunce::canonicalize(entry_path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ProbeResult::Dead,
@@ -132,22 +66,13 @@ fn probe_live_target(entry_path: &Path) -> ProbeResult {
     }
 }
 
-/// Resolves the GC-root directory for a [`ProbeResult::Unknown`] ledger
-/// entry, or escalates to a fatal registry error.
-///
-/// `probe_live_target` returns no canonical target on `Unknown` (the transient
-/// I/O error occurred *inside* `canonicalize`/`try_exists`), so the project
-/// directory is recovered best-effort from the ledger link's stored target via
-/// [`std::fs::read_link`]. [`ProjectRegistry::register`] always stores an
-/// absolute canonical project directory as the link target, so `read_link`
-/// alone (no `canonicalize`, no `ocx.lock` existence check) yields the root.
+/// The GC root of an `Unknown` entry, read from the link's stored target, which
+/// `register` always writes as the canonical absolute project directory.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Registry`] wrapping [`ProjectRegistryErrorKind::Io`] when
-/// `read_link` itself fails — the entry's root cannot be recovered at all, so
-/// per plan A1/A2 it fails closed (the caller aborts `ocx clean`) rather than
-/// silently dropping a possibly-live GC root.
+/// [`ProjectRegistryErrorKind::Io`] when `read_link` fails; fail-closed, so
+/// `ocx clean` aborts rather than drop a possibly-live root.
 fn unknown_root_or_escalate(entry_path: &Path) -> Result<PathBuf, Error> {
     std::fs::read_link(entry_path).map_err(|e| {
         Error::Registry(ProjectRegistryError::new(
@@ -157,48 +82,13 @@ fn unknown_root_or_escalate(entry_path: &Path) -> Result<PathBuf, Error> {
     })
 }
 
-/// Best-effort, **infallible** GC-ledger registration of the project that
-/// owns `config_path`, performed after an `ocx.lock` write/commit succeeds.
-///
-/// This is the single shared derivation for the two callers that must record
-/// a freshly-written lock in the per-user ledger so `ocx clean` retains the
-/// packages it pins ([`super::lock::ProjectLock::save`] and
-/// [`super::mutation::MutationGuard::commit`]). Both previously inlined the
-/// same ~22-line canonicalize→parent→`register`→WARN block; they differ only
-/// in their early-return *shape*, which is why this helper is **infallible**:
-/// every failure mode is the silent-data-loss class and is handled internally
-/// (WARN, then return) so the caller unconditionally continues its own
-/// success path without an early-return divergence.
-///
-/// Steps, all non-fatal:
-/// 1. Canonicalize the *config file* first (it exists on disk — the lock was
-///    just written next to it), then take its parent. Canonicalizing the file
-///    before taking the parent makes a bare relative `--project` basename
-///    (e.g. `workspace.toml`, whose [`Path::parent`] is `Some("")`, NOT
-///    `None`) resolve against the CWD instead of canonicalizing the empty
-///    path. It also collapses aliased lookups (relative segments, symlinks)
-///    to one ledger entry. The ledger keys on the project *directory*, never
-///    the lock+config pair — safe ONLY because of the invariant
-///    `lock_path_for(config) == <config.parent()>/ocx.lock` for every
-///    `--project` basename (pinned by
-///    `lock_path_for_always_produces_ocx_lock_in_config_dir`, ARCH-4d). If
-///    that test is ever weakened the custom-`--project` multi-project GC
-///    contract breaks.
-/// 2. Register the canonical project directory.
-///
-/// Any failure (canonicalize of *this project's own* path, a parentless
-/// canonical path, or `register`) is the silent-data-loss class: logged at
-/// `log::warn!` (NOT debug — `feedback_no_warn_on_common_benign` explicitly
-/// does not cover self-register failure, C1.1) and swallowed so the
-/// `ocx.toml`/`ocx.lock` mutation is never aborted. The next `ocx lock`
-/// re-registers.
+/// Best-effort, infallible GC-ledger registration of the project owning
+/// `config_path`, run after an `ocx.lock` write. Keying on the project
+/// directory holds only while `lock_path_for(config)` is `<config.parent()>/ocx.lock`.
+/// A failure leaves the pins without a GC root, so it warns (never debug).
 pub async fn register_project_dir_best_effort(config_path: &Path, ocx_home: &Path) {
-    // A-30 — one derivation, not two. `consent::canonical_project_dir` is the
-    // single owner of "config path -> canonical project directory"; the ledger
-    // key and the consent stamp are both downstream of it, so a second local
-    // copy here is a place for the two to drift apart. It is blocking (two
-    // filesystem resolutions), hence `spawn_blocking` rather than
-    // `tokio::fs::canonicalize`.
+    // Through `consent::canonical_project_dir`, so the ledger key and the
+    // consent stamp cannot drift.
     let owned_config_path = config_path.to_path_buf();
     let canonical_project_dir =
         match tokio::task::spawn_blocking(move || crate::consent::canonical_project_dir(&owned_config_path)).await {
@@ -229,108 +119,49 @@ pub async fn register_project_dir_best_effort(config_path: &Path, ocx_home: &Pat
     }
 }
 
-/// Per-user GC ledger backed by the flat symlink store `$OCX_HOME/projects/`.
-///
-/// Populated whenever an `ocx.lock` is saved (`ProjectLock::save` /
-/// `MutationGuard::commit` tails) and consulted by `ocx clean` to avoid
-/// collecting packages pinned by any registered project.
-///
-/// Construct via [`ProjectRegistry::new`]; all I/O is async.
+/// Per-user GC ledger at `$OCX_HOME/projects/`, written on every `ocx.lock`
+/// save and read by `ocx clean`.
 pub struct ProjectRegistry {
-    /// Absolute path to `$OCX_HOME/projects/` (the flat symlink store).
     projects_dir: PathBuf,
 }
 
 impl ProjectRegistry {
-    /// Constructs a [`ProjectRegistry`] rooted at `ocx_home`.
-    ///
-    /// Pure path arithmetic; performs no I/O. The store directory is
-    /// `ocx_home/projects/`. The directory is **not** created here — it is
-    /// created lazily by [`Self::register`], and its absence is a valid
-    /// "no projects registered" state for [`Self::live_projects`].
+    /// A registry rooted at `ocx_home`; no I/O. An absent store is an empty ledger.
     pub fn new(ocx_home: &Path) -> Self {
         Self {
             projects_dir: ocx_home.join("projects"),
         }
     }
 
-    /// Records the GC-root symlink for `project_dir` in the ledger.
-    ///
-    /// Idempotent. `project_dir` is canonicalised; the link name is
-    /// `ReferenceManager::name_for_path(canonical_project_dir)` (16-hex /
-    /// 64-bit SHA-256 — reused, not reinvented) and the link target is the
-    /// canonical project directory.
-    ///
-    /// # No self-link invariant (ARCH-1b — silent-data-loss class)
-    ///
-    /// **No-op** (returns `Ok(())`) when `project_dir` is the *same directory*
-    /// as `$OCX_HOME`. The identity test MUST be device+inode identity
-    /// ([`ocx_util::fs::same_dir`]: Unix `dev`/`ino`; Windows
-    /// canonicalized-handle equivalence), **not** canonical-path byte
-    /// equality. `tokio::fs::canonicalize` does not case-fold on
-    /// case-insensitive/normalizing filesystems (macOS APFS default, Windows —
-    /// both first-class platforms), so byte equality can return *false* when
-    /// the paths denote the same directory, letting the forbidden
-    /// `$OCX_HOME/projects/<hash> → $OCX_HOME` self-link slip through. The
-    /// global toolchain (`$OCX_HOME/ocx.toml`) is already a GC root via its
-    /// `current` install symlinks; the ledger never points at its own home.
-    ///
-    /// # Crash-safe atomic replace (CODEX-BLOCK-2)
-    ///
-    /// `symlink::update` is remove-then-create — NOT atomic; a crash or a
-    /// concurrent [`Self::live_projects`] between the remove and the create
-    /// transiently drops a live root. `register` instead stages the link at a
-    /// temp name in the **same** `projects/` directory (`.tmp-<pid>-<rand>`)
-    /// then `rename(2)`s it onto the final name (atomic same-dir rename on
-    /// POSIX; `ReplaceFile`/equivalent on Windows) via
-    /// [`ocx_util::fs::symlink::replace_atomic`]. [`Self::live_projects`] skips
-    /// `.tmp-*` names. Uses low-level [`ocx_util::fs::symlink`] directly — **not**
-    /// `validate_target` (target is an absolute external path by design).
-    ///
-    /// # Error handling (ARCH-3 — split by failure class)
-    ///
-    /// Failure to create/update **this** project's own link (store dir
-    /// unwritable, ENOSPC, perms; or canonicalize failure of this project's
-    /// own paths) is the silent-data-loss class — the user's just-pinned
-    /// packages will not be a GC root. The caller logs at **`log::warn!`**
-    /// (NOT debug; `feedback_no_warn_on_common_benign` explicitly does not
-    /// cover this) and the failure is **non-fatal**: it never propagates and
-    /// never blocks the `ocx.toml`/`ocx.lock` mutation. (Departed-*other*-
-    /// project pruning is the benign common case and is debug-only — but that
-    /// happens in [`Self::live_projects`], not here.)
+    /// Records the GC-root symlink for `project_dir`. Idempotent; a no-op for
+    /// `$OCX_HOME` itself, already a GC root.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Registry`] wrapping [`ProjectRegistryErrorKind::Io`]
-    /// on store-directory creation or atomic-replace failure. Callers treat
-    /// this as non-fatal and log at WARN (see above).
+    /// [`ProjectRegistryErrorKind::Io`] on store creation or atomic replace;
+    /// callers log it at WARN, since the project's pins lose their GC root.
     pub async fn register(&self, project_dir: &Path) -> Result<(), Error> {
         let projects_dir = self.projects_dir.clone();
         let project_dir = project_dir.to_path_buf();
 
-        // All work is synchronous filesystem I/O (canonicalize, stat for the
-        // dev/inode identity probe, symlink staging + rename). Run it on a
-        // blocking thread so it never stalls the async runtime — same
-        // convention as `ProjectLock::save`.
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let canonical_project_dir = dunce::canonicalize(&project_dir)
                 .map_err(|e| ProjectRegistryError::new(project_dir.clone(), ProjectRegistryErrorKind::Io(e)))?;
 
-            // `$OCX_HOME` is the parent of `projects/`. The no-self-link
-            // invariant (ARCH-1b) suppresses a `$OCX_HOME/projects/<hash> ->
-            // $OCX_HOME` link. Identity is device+inode, NOT canonical-path
-            // byte equality — byte equality is unsound on case-insensitive /
-            // normalizing filesystems where the same dir has differing path
-            // bytes. A failure to probe identity is treated as "not the same
-            // dir, proceed" (the link is then created normally).
+            // No `projects/<hash> -> $OCX_HOME` self-link. Compared by
+            // device+inode: canonical bytes miss case-insensitive filesystems.
             let ocx_home = projects_dir.parent().unwrap_or(&projects_dir);
             if ocx_util::fs::same_dir(&canonical_project_dir, ocx_home).unwrap_or(false) {
                 return Ok(());
             }
 
+            // 64-bit names: a collision (~1e-13) drops one live project from the GC roots.
             let name = ocx_store::reference_manager::ReferenceManager::name_for_path(&canonical_project_dir);
             let link_path = projects_dir.join(name);
 
+            // Staged rename, not `symlink::update`: remove-then-create drops a live
+            // root on a crash or a concurrent `live_projects`. Raw primitives, not
+            // `validate_target`: the target lies outside `$OCX_HOME` by design.
             ocx_util::fs::symlink::replace_atomic(&canonical_project_dir, &link_path)
                 .map_err(|e| ProjectRegistryError::new(link_path.clone(), into_io_kind(e.into())))?;
             Ok(())
@@ -344,93 +175,25 @@ impl ProjectRegistry {
         })?
     }
 
-    /// Returns the canonical project directories that are still live GC roots,
-    /// pruning departed-project links as a side effect.
-    ///
-    /// Readdir `projects/` (skipping `.tmp-*` staging names). The per-entry
-    /// liveness probe is **three-state** ([`ProbeResult`]): a transient probe
-    /// `Err` (momentarily-unreachable filesystem: NFS/automount/permission-
-    /// flip) yields [`ProbeResult::Unknown`] — NOT "dead". For each entry:
-    /// - [`ProbeResult::Live`] → collect the canonical `<target>`.
-    /// - non-`Live` → **re-probe the entry immediately before removing** and
-    ///   only `symlink::remove(entry)` if BOTH probes return
-    ///   [`ProbeResult::Dead`] (CODEX-BLOCK-1 TOCTOU guard: a concurrent
-    ///   [`Self::register`] re-pointing the same hash between the snapshot and
-    ///   the remove must not be deleted — if the re-check now resolves `Live`,
-    ///   treat it as live, do not remove, collect it). A prune logs at
-    ///   `log::debug!` (the common benign departed-*other*-project case —
-    ///   never WARN).
-    /// - either probe [`ProbeResult::Unknown`] → **retain the link AND return
-    ///   the project as a live GC root for this run** (SEC-1 silent-data-loss
-    ///   guard, fail-closed per plan A1: a transient EACCES/ESTALE on a *live*
-    ///   project must not let `ocx clean` collect its pinned packages this
-    ///   run). `probe_live_target` has no canonical target on `Unknown`
-    ///   (`canonicalize` failed), so the root is resolved best-effort from the
-    ///   ledger link's stored target via `std::fs::read_link` (absolute by
-    ///   [`Self::register`] construction). If `read_link` *also* fails, that
-    ///   single entry escalates to a fatal registry error (return `Err`,
-    ///   classified to `IoError`) rather than silently dropping a live root.
-    ///   The entry is `log::warn!`ed once either way (per ADR §Risks ARCH-3
-    ///   policy — WARN not debug). The next `ocx clean` re-probes.
-    ///
-    /// Returns the collected dirs **sorted by link name** (deterministic, per
-    /// `quality-rust.md` JoinSet/ordering rule).
-    ///
-    /// **Single fail-closed contract (plan A2″, Round-3 systemic).** The ONLY
-    /// way this function yields a missing/empty ledger is *definitive
-    /// absence* — a whole-`projects/` `read_dir` returning
-    /// `ErrorKind::NotFound`, which maps to `Ok([])` (no projects registered
-    /// is a valid state; the directory is **not** created as a side effect).
-    /// EVERY other I/O error anywhere in enumeration — a non-`NotFound`
-    /// directory-open failure, a per-entry `ReadDir` iterator `Err`, or any
-    /// future enumeration step — propagates [`Error::Registry`] so `ocx clean`
-    /// aborts (classified to `IoError`) rather than running destructive GC
-    /// with zero roots against a live multi-project store. `--force` bypasses
-    /// the registry entirely and is the sanctioned operator override. The
-    /// guarantee is enforced at the function contract (a single
-    /// `collect::<io::Result<_>>()?` over the directory iterator), not
-    /// arm-by-arm: point-fixing each fail-open site relocated this
-    /// silent-data-loss bug 3× (A2 `?`, A2′ dir-open, A2″ per-entry iter).
-    ///
-    /// Concurrency note: entries created mid-readdir by a concurrent
-    /// [`Self::register`] may or may not be observed (POSIX
-    /// implementation-defined). Acceptable — an already-installed package is
-    /// retained by its `current` install symlink, and a missed first-ever
-    /// registration is picked up at the next `ocx clean` (SOTA finding 1c).
+    /// Canonical project directories still live as GC roots, sorted by link
+    /// name; prunes departed links as a side effect.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Registry`] wrapping [`ProjectRegistryErrorKind::Io`]
-    /// for any non-`NotFound` enumeration I/O failure on `projects/` —
-    /// directory open *and* per-entry iterator `Err` (fail-closed, plan
-    /// A2″) — and when an `Unknown`-probed entry's root cannot even be
-    /// `read_link`-recovered (plan A1). Routine per-entry prune I/O on
-    /// *other* projects' broken links stays debug-only and never surfaces.
+    /// [`ProjectRegistryErrorKind::Io`] on a non-`NotFound` enumeration failure
+    /// or an unrecoverable `Unknown` root; fail-closed, never GC with zero roots.
     pub async fn live_projects(&self) -> Result<Vec<PathBuf>, Error> {
         let projects_dir = self.projects_dir.clone();
 
-        // Synchronous readdir + per-entry stat/readlink/prune. Off the runtime
-        // for the same reason as `register`.
         tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, Error> {
             let read_dir = match std::fs::read_dir(&projects_dir) {
                 Ok(rd) => rd,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // `projects/` absent → no projects registered. Not an
-                    // error, and the directory is NOT created as a side effect.
+                    // No projects registered; not created here.
                     return Ok(Vec::new());
                 }
                 Err(e) => {
-                    // Fail closed (plan A2′): a non-`NotFound` enumeration
-                    // failure is indistinguishable downstream from "no
-                    // projects registered". Returning `Ok(Vec::new())` here
-                    // would let `ocx clean` run with zero GC roots against a
-                    // live multi-project store and collect every live
-                    // project's pinned packages — the exact fail-open
-                    // silent-data-loss bug A2 exists to close, merely
-                    // relocated to directory enumeration. Propagate so the
-                    // caller aborts (classified to `IoError`); `--force`
-                    // bypasses the registry entirely as the sanctioned
-                    // operator override.
+                    // Fail closed: `Ok(vec![])` lets `ocx clean` collect every live project.
                     return Err(Error::Registry(ProjectRegistryError::new(
                         projects_dir.clone(),
                         ProjectRegistryErrorKind::Io(e),
@@ -438,27 +201,10 @@ impl ProjectRegistry {
                 }
             };
 
-            // Collect (link_name, canonical_target) so the result is
-            // deterministic (sorted by link name) per the ordering rule.
             let mut live: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
 
-            // Plan A2″ (Round-3, systemic fail-closed contract): the ONLY path
-            // to `Ok(Vec::new())` / a missing ledger entry is *definitive
-            // absence* — the whole-`projects/` `read_dir` `NotFound` carve-out
-            // above. EVERY other enumeration I/O error MUST propagate
-            // `Err(Error::Registry(.. Io ..))` so `ocx clean` aborts (IoError;
-            // `--force` is the sanctioned override) rather than running
-            // destructive GC with zero roots against a live multi-project
-            // store. Point-fixing each fail-open site relocated this
-            // silent-data-loss bug 3×; close it once at the function contract
-            // by materialising the directory iterator through
-            // `collect::<io::Result<_>>()?` — a per-entry iterator `Err` is an
-            // enumeration I/O failure (`readdir(3)` short read / EIO / ESTALE),
-            // categorically NOT a per-entry liveness signal, so it short-
-            // circuits to the same `Err` as the dir-open arm. `.tmp-*` skip +
-            // per-entry `probe_live_target` Dead/Unknown classification stay
-            // unchanged (those operate on a *successfully* enumerated entry and
-            // are not enumeration I/O).
+            // Collected up front so a per-entry `Err` aborts like the open
+            // arm, never reads as a liveness signal.
             let entries: Vec<std::fs::DirEntry> = read_dir.collect::<std::io::Result<Vec<_>>>().map_err(|e| {
                 Error::Registry(ProjectRegistryError::new(
                     projects_dir.clone(),
@@ -468,8 +214,7 @@ impl ProjectRegistry {
 
             for entry in entries {
                 let file_name = entry.file_name();
-                // Skip in-flight `.tmp-*` staging links from a concurrent
-                // `register` — they are not ledger entries.
+                // A concurrent `register`'s staging links.
                 if file_name.to_string_lossy().starts_with(".tmp-") {
                     continue;
                 }
@@ -478,15 +223,7 @@ impl ProjectRegistry {
                 match probe_live_target(&entry_path) {
                     ProbeResult::Live(target) => live.push((file_name, target)),
                     ProbeResult::Unknown => {
-                        // Transient probe failure (filesystem momentarily
-                        // unreachable). SEC-1 silent-data-loss guard: this
-                        // project may be perfectly live — pruning its link OR
-                        // dropping it from this run's root set would let
-                        // `ocx clean` GC its pinned packages (plan A1
-                        // fail-closed). Retain the link AND return the project
-                        // as a live root. `probe_live_target` carries no
-                        // canonical target on `Unknown`; resolve the root
-                        // best-effort from the link's stored absolute target.
+                        // May be live: keep link and root, from the stored target.
                         let root = unknown_root_or_escalate(&entry_path)?;
                         log::warn!(
                             "Project registry: liveness of '{}' is indeterminate (transient I/O); \
@@ -496,19 +233,11 @@ impl ProjectRegistry {
                         live.push((file_name, root));
                     }
                     ProbeResult::Dead => {
-                        // First check is Dead. Re-probe immediately before
-                        // removing: a concurrent `register` may have just
-                        // re-pointed this same hash to a now-live project
-                        // (CODEX-BLOCK-1 TOCTOU). Only prune if BOTH probes
-                        // are Dead; an Unknown re-probe (now unreachable) must
-                        // also retain the link (SEC-1).
+                        // Re-probe before pruning: a concurrent `register` may have
+                        // re-pointed this hash.
                         match probe_live_target(&entry_path) {
                             ProbeResult::Live(target) => live.push((file_name, target)),
                             ProbeResult::Unknown => {
-                                // Re-probe is now Unknown (filesystem became
-                                // unreachable between probes). Same A1
-                                // fail-closed contract as the first-probe arm:
-                                // retain the link AND the project as a root.
                                 let root = unknown_root_or_escalate(&entry_path)?;
                                 log::warn!(
                                     "Project registry: liveness of '{}' is indeterminate (transient I/O \
@@ -519,8 +248,7 @@ impl ProjectRegistry {
                                 live.push((file_name, root));
                             }
                             ProbeResult::Dead => {
-                                // Departed-other-project (the common benign
-                                // case) → debug only, never WARN (ARCH-3).
+                                // Another project departed, the benign case: debug, never WARN.
                                 log::debug!("Project registry: pruning departed link '{}'.", entry_path.display());
                                 if let Err(e) = ocx_util::fs::symlink::remove(&entry_path) {
                                     log::debug!(

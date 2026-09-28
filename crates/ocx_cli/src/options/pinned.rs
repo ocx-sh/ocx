@@ -2,27 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 /// The `--pinned` / `--no-pinned` tier of the `pinned` resolution ladder.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired flags. The
-/// two use POSIX last-wins semantics (`overrides_with`) — combining them is not
-/// an error (the git `--[no-]verify` idiom), the same shape as
-/// [`super::Pull`] and [`super::BinScan`]. Resolve through [`Pinned::pinned`] —
-/// never read either field at a call site.
-///
-/// # Why a pair, and why it still returns an `Option`
-///
-/// `pinned` is a **closed two-valued** setting, which is exactly the case
-/// [`super::LazyMode`]'s doc excludes itself from ("a paired toggle can only
-/// express a closed two- or three-valued set, and this mode is an open-ended
-/// strategy enum"). Without `--no-pinned`, a project declaring `pinned = true`
-/// in `ocx.toml` could never be overridden back to following the links from the
-/// command line.
-///
-/// The return stays `Option<bool>` because this is a **ladder tier**, not a
-/// setting: `None` means "neither flag was given", which is what lets `ocx.toml`
-/// and `OCX_TOOLCHAIN_PINNED` speak. Feed it to
-/// [`Ladder::cli`](ocx_project::ladder::Ladder) and call `resolve(PINNED_FLOOR)`;
-/// the floor lives there and nowhere else.
+// Feed `Pinned::pinned` to `Ladder::cli`; only `resolve(PINNED_FLOOR)` applies the floor.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Pinned {
     /// Compose digest paths instead of the toolchain links.
@@ -31,12 +11,9 @@ pub struct Pinned {
     /// and consults no `links/<group>/<entry>` link.
     ///
     /// When neither flag is given, the value is read from `ocx.toml` (the
-    /// `pinned` key), then from the `OCX_TOOLCHAIN_PINNED` environment
-    /// variable, and finally defaults to following the links. Passing either
-    /// flag overrides all of them.
-    ///
-    /// See https://ocx.sh/docs/reference/command-line#arg-pinned for the full
-    /// resolution order.
+    /// `pinned` key), then `OCX_TOOLCHAIN_PINNED`, else links are followed;
+    /// either flag overrides all of them. Resolution order in full:
+    /// https://ocx.sh/docs/reference/command-line#arg-pinned
     #[clap(long = "pinned", overrides_with = "no_pinned")]
     pinned: bool,
 
@@ -56,13 +33,8 @@ pub struct Pinned {
 impl Pinned {
     /// Resolves the paired flags to the CLI tier of the `pinned` ladder.
     ///
-    /// `None` means neither flag was given, so the tier is **inherited** from
-    /// the next-less-specific one — it never means `Some(false)`, which is what
-    /// `--no-pinned` is for. Collapsing absence into `false` here would make the
-    /// flags' absence silently outrank an `ocx.toml` that asked for pinning.
-    ///
-    /// POSIX last-wins with both flags — `overrides_with` guarantees at most one
-    /// of the two is `true` after parsing.
+    /// `None` (neither flag) inherits; collapsing it to `false` would outrank an
+    /// `ocx.toml` that asked for pinning.
     #[must_use]
     pub fn pinned(&self) -> Option<bool> {
         match (self.pinned, self.no_pinned) {

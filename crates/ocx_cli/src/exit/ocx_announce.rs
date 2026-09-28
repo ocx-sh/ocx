@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the announce / claim / forge error family — the `ocx_announce` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_announce` error family.
 
 use ocx_exit::ExitCode;
 
@@ -15,68 +14,26 @@ use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
 impl ClassifyExitCode for AnnounceError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Delegated explicitly — see the module doc for why the generic
-            // source-chain walker cannot reach any of these on its own.
+            // Delegated explicitly: `Observe`/`ObserveDesc`/`ListTags` box their source (never downcasts) and
+            // `Forge` is transparent; `Ssrf` delegates for uniformity.
             Self::Ssrf { source, .. } => source.classify(),
             Self::Forge(inner) => inner.classify(),
             Self::Observe { source, .. } => source.classify(),
             Self::ObserveDesc { source, .. } => source.classify(),
             Self::ListTags { source, .. } => source.classify(),
-            // The description tag resolved once (it is recorded in the
-            // committed root) and does not now. Nothing is malformed on the
-            // wire and nothing the publisher typed is at fault, but the two
-            // sides of the announce genuinely disagree — the malformed-input
-            // category, same as `TagIsNotAnImageIndex`, and discriminable from
-            // an unclassified crash.
             Self::DescDisappeared { .. } => Some(ExitCode::DataError),
-            // The identifier parses, the root exists and is well-formed: the
-            // two sides simply name different packages, and only a human can
-            // say which one is right. `DescDisappeared`'s category exactly, and
-            // deliberately not `UsageError` (64) — nothing about the command
-            // line is malformed, and 64 has to keep meaning "your flags are
-            // wrong" for the comments above it to stay true.
             Self::RootNameMismatch { .. } => Some(ExitCode::DataError),
-            // The two sides disagree and only a human can say which is right —
-            // the same category and the same precedent as `DescDisappeared`.
-            // Never `TempFail`: a rerun reproduces it exactly, so inviting a
-            // retry would loop a publisher on a defect that needs reporting.
+            // Never `TempFail`: a rerun reproduces it exactly, so a retrying publisher would loop.
             Self::CommittedTagsDropped { .. } => Some(ExitCode::DataError),
-            // A publisher typo — the tag genuinely does not exist on the
-            // physical registry. Same category as `ClientError::ManifestNotFound`.
             Self::UnresolvedTag { .. } => Some(ExitCode::NotFound),
-            // The index root genuinely does not exist yet — the same
-            // absent-resource shape as `UnresolvedTag`, and the likeliest
-            // first-run outcome for a new publisher. Left unclassified it
-            // exits 1, indistinguishable from a crash, so a release wrapper
-            // cannot tell "claim the package first" (a one-time human
-            // action, register R3) from an unclassified failure.
             Self::UnclaimedPackage { .. } => Some(ExitCode::NotFound),
-            // The tag resolved and the artifact exists — its *shape* is wrong.
-            // `NotFound` (79) would be a lie (nothing is absent) and leaving it
-            // unclassified exits 1, which a release wrapper cannot tell apart
-            // from a crash. `EX_DATAERR` is the malformed-input category.
+            // Not `NotFound`: the artifact exists, only its shape is wrong.
             Self::TagIsNotAnImageIndex { .. } => Some(ExitCode::DataError),
-            // The tag selection is operator input — a `--tags` list, a tags
-            // file, or a committed root the publisher curated. Nothing is
-            // absent and nothing is malformed on the wire: the invocation
-            // named no version. `EX_USAGE` is that category, and it keeps the
-            // all-reserved collapse discriminable from an unclassified crash.
             Self::NoCuratedTags { .. } => Some(ExitCode::UsageError),
-            // The branch was rebuilt onto the current base and the request
-            // still will not merge: nothing is malformed and nothing is absent,
-            // the two sides genuinely disagree and only a human clears it —
-            // `DescDisappeared`'s category exactly. `TempFail` (75) would invite
-            // a retry that can never succeed, and an unclassified 1 is the crash
-            // code, which is how #399 stayed invisible in the first place.
+            // Not `TempFail`: a retry can never succeed; only a human clears the conflict.
             Self::PullRequestUnmergeable { .. } => Some(ExitCode::DataError),
-            // Writing the `--out` tree failed: a full disk, an `ENOTDIR`, a
-            // read-only mount. `cli/classify.rs`'s bare-`io::Error` walker
-            // special-cases only `PermissionDenied`, so every other kind lands
-            // on `Failure` (1) — indistinguishable from a crash to a release
-            // wrapper. `EX_IOERR` is the category the rest of the tool uses for
-            // an operator/environment I/O failure.
+            // The generic `io::Error` walker maps only `PermissionDenied`; any other kind would exit 1.
             Self::OutputWrite { .. } => Some(ExitCode::IoError),
-            // Every other variant falls through to `ExitCode::Failure`.
             _ => None,
         }
     }
@@ -85,64 +42,18 @@ impl ClassifyExitCode for AnnounceError {
 impl ClassifyExitCode for ForgeError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // 401/403 — the bearer `OCX_ANNOUNCE_TOKEN` is missing, revoked,
-            // or lacks scope. The fix is a credential, not a config file or a
-            // retry (design register C13).
             Self::Status { status, .. } if *status == 401 || *status == 403 => Some(ExitCode::AuthError),
-            // Same class as the 403 above, reached by a probe instead of a
-            // rejected write: the fix is a credential with more permission.
             Self::PushAccessDenied { .. } => Some(ExitCode::AuthError),
-            // 429 — a secondary rate limit. The request was well-formed and the
-            // credential is fine; the same call succeeds after a backoff, so a
-            // CI wrapper must be able to tell it apart from bad input.
             Self::Status { status, .. } if *status == 429 => Some(ExitCode::TempFail),
-            // 5xx — a forge-side incident. The request completed, so it is not
-            // `Transport`, but the forge is just as unavailable and a retry is
-            // just as reasonable; without this it is indistinguishable from
-            // malformed input at exit 1.
             Self::Status { status, .. } if is_server_fault(*status) => Some(ExitCode::Unavailable),
-            // A request never completed (connect, TLS, timeout, DNS, or read
-            // failure) — the forge itself is unreachable.
             Self::Transport { .. } => Some(ExitCode::Unavailable),
-            // A persistent non-fast-forward (heavy branch contention the one
-            // in-announce retry did not clear) is a transient failure the
-            // caller may retry (design register C4). A stale lease is the git
-            // transport's spelling of the same race, and an unconfirmed merge
-            // request is a server that was simply slower than the poll — all
-            // three are answered by running the command again.
+            // All three are races a rerun clears.
             Self::NonFastForward { .. } | Self::StaleLease { .. } | Self::MergeRequestUnconfirmed { .. } => {
                 Some(ExitCode::TempFail)
             }
-            // `git` is missing or too old. Nothing about the invocation is
-            // wrong and no credential is involved: the host lacks a tool the
-            // run needs, which is exactly what `EX_UNAVAILABLE` means. Raised
-            // before any network call.
             Self::GitUnavailable { .. } => Some(ExitCode::Unavailable),
-            // A protected branch or a pre-receive hook said no. The credential
-            // authenticated fine and the request was well-formed; the caller
-            // simply may not write there — the same reading `EX_NOPERM` carries
-            // for a filesystem `EPERM`.
             Self::PushRefused { .. } => Some(ExitCode::PermissionDenied),
-            // A capability the transport needs is disabled on the project or
-            // absent from the instance. Deliberately not 80 (the credential is
-            // valid), not 81 (no local policy refused anything) and not 69 (the
-            // forge is up and answering): the remedy is an administrator
-            // changing a setting, which is a state a pipeline must be able to
-            // tell apart from all three.
             Self::WriteCapabilityUnavailable { .. } => Some(ExitCode::ForgeCapabilityUnavailable),
-            // A malformed invocation, not a failure of the run: the operator
-            // named a self-hosted host without saying which forge runs there,
-            // asked GitHub for a nested namespace it cannot express, or pointed
-            // `--fork` at the namespace that already owns the index. Each is
-            // fixed by editing the command line, which is what `EX_USAGE` means
-            // — and a CI wrapper must be able to tell "your flags are wrong"
-            // from "the forge said no".
-            //
-            // The three transport-shaped refusals join them for the same
-            // reason. `TransportUnsupported` and `TransportOperationUnsupported`
-            // are both fixed by changing `--transport` or dropping `--fork`, and
-            // `UsersApiUnavailable` is fixed by writing the owner as `LOGIN:ID`
-            // — none of them is a failure of the forge or of the credential.
             Self::ForgeKindUnknown { .. }
             | Self::NestedNamespaceUnsupported { .. }
             | Self::SelfForkRefused { .. }
@@ -151,32 +62,16 @@ impl ClassifyExitCode for ForgeError {
             | Self::TransportUnsupported { .. }
             | Self::TransportOperationUnsupported { .. }
             | Self::UsersApiUnavailable => Some(ExitCode::UsageError),
-            // Every other status code and every other variant is not yet
-            // classified beyond the sysexits default (`ExitCode::Failure`).
-            // `GitCommandFailed` and `GitPushFailed` land here **deliberately**:
-            // each is an unrecognised failure of a plumbing step, with no remedy
-            // a caller could branch on, so inventing a code for either would be
-            // worse than exit 1 with git's own message attached.
+            // `GitCommandFailed`/`GitPushFailed` stay exit 1: no remedy a caller could branch on.
             _ => None,
         }
     }
 }
 
 impl ClassifyExitCode for ClaimError {
-    /// The contracted mapping, **wildcard-free** so a later variant is an
-    /// `E0004` rather than a silent exit 1:
-    ///
-    /// | Variant | Code |
-    /// |---|---|
-    /// | `ForgeRequired`, `MissingBaseRef`, `MissingHeadRoot` | `None` — broken invariant, exit 1 |
-    /// | `MalformedRepository`, `NoActingIdentity`, `InvalidOwnerLogin`, `DuplicateOwner`, `OwnerIdMismatch`, `BotIdentity` | `UsageError` (64) |
-    /// | `RootNameMismatch`, `RepositoryMismatch` | `DataError` (65) |
-    /// | `OwnerUnknown` | `NotFound` (79) |
-    /// | `OutputWrite` | `IoError` (74) |
-    /// | `Description(inner)`, `Forge(inner)` | `inner.classify()` — explicit, see the module doc |
+    /// Wildcard-free, so a new variant is an `E0004` rather than a silent exit 1.
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // A broken invariant, not an operator error — exit 1, by decision.
             Self::ForgeRequired | Self::MissingBaseRef { .. } | Self::MissingHeadRoot { .. } => None,
             Self::MalformedRepository { .. }
             | Self::NoActingIdentity
@@ -184,18 +79,10 @@ impl ClassifyExitCode for ClaimError {
             | Self::DuplicateOwner { .. }
             | Self::OwnerIdMismatch { .. }
             | Self::BotIdentity { .. } => Some(ExitCode::UsageError),
-            // The committed root and the command line disagree about which
-            // package this is, or about where its bytes come from. Nothing is
-            // malformed and nothing is absent; a human decides which side
-            // moves — announce's `RootNameMismatch` category exactly.
             Self::RootNameMismatch { .. } | Self::RepositoryMismatch { .. } => Some(ExitCode::DataError),
             Self::OwnerUnknown { .. } => Some(ExitCode::NotFound),
             Self::OutputWrite { .. } => Some(ExitCode::IoError),
-            // Explicit, never inherited, for both: `#[error(transparent)]`
-            // forwards `source()` past the wrapped error, so the generic chain
-            // walker never sees either node. Delegating rather than minting a
-            // code keeps a claim's description failure exiting exactly as the
-            // same failure does under announce.
+            // `#[error(transparent)]` hides both nodes from the chain walker, so delegate explicitly.
             Self::Description(inner) => inner.classify(),
             Self::Forge(inner) => inner.classify(),
         }
@@ -203,17 +90,11 @@ impl ClassifyExitCode for ClaimError {
 }
 
 impl ClassifyErrorKind for ClaimError {
-    /// The one mapping, read through [`ClassifyExitCode`]; the three
-    /// unclassified variants surface as the generic exit 1 they already are.
     fn exit_code(&self) -> ExitCode {
         self.classify().unwrap_or(ExitCode::Failure)
     }
 
-    /// Frozen contract C-S1-1: the snake_case parallel of the variant name.
-    /// Exhaustive — adding a variant forces a new arm here. `Forge` is one
-    /// slug, not the wrapped error's: `#[error(transparent)]` hides the
-    /// `ForgeError` node from the envelope's chain walk, so nothing finer
-    /// is reachable there.
+    /// `Forge` is one slug: `#[error(transparent)]` hides the `ForgeError` node from the envelope's chain walk.
     fn kind_detail(&self) -> &'static str {
         match self {
             Self::ForgeRequired => "forge_required",
@@ -261,7 +142,7 @@ mod tests {
             },
         };
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
-        // ocx#455: the message names the exact config entry, so an operator
+        // ocx-sh/ocx#455: the message names the exact config entry, so an operator
         // who keyed the exemption on the physical host learns which key to use.
         assert!(
             error.to_string().contains("[registries.\"ocx.sh\"].trusted_hosts"),
@@ -279,11 +160,10 @@ mod tests {
         assert_eq!(error.classify(), Some(ExitCode::AuthError));
     }
 
-    /// Observed live on the publisher E2E (run 30133426034): announcing into a
-    /// package with no committed root is the likeliest first-run outcome for
-    /// a new publisher, and register R3 makes claiming it a one-time human
-    /// action. It must be discriminable from a generic failure so a release
-    /// wrapper can say so, rather than surfacing exit 1.
+    /// Announcing into a package with no committed root is the likeliest first-run
+    /// outcome for a new publisher, and claiming it is a one-time step. It must be
+    /// discriminable from a generic failure so a release wrapper can say so, rather
+    /// than surfacing exit 1.
     #[test]
     fn unclaimed_package_classifies_as_not_found() {
         let error = AnnounceError::UnclaimedPackage {
@@ -300,14 +180,11 @@ mod tests {
     /// from collapsing to exit 1, where a caller could not tell "the registry is
     /// unreachable" from a crash.
     ///
-    /// The fixture is the value the producer can actually raise, which it was
-    /// not before: `AnnounceError::ListTags` carried a `Box<ocx_lib::Error>`
-    /// until WP-35 and this test built an `OfflineMode`, a variant
-    /// `Publisher::list_tags` never returns. Now it is the two-hop shape —
-    /// a transport fault inside an index error inside the package tier's — so
-    /// the assertion covers the chain the extraction actually re-pointed, and
-    /// the expected code is the `ClientError`'s own rather than a literal
-    /// copied down from the arm.
+    /// The fixture is the value the producer can actually raise: a transport fault inside
+    /// an index error inside the package tier's own error, never the `OfflineMode` variant
+    /// `Publisher::list_tags` cannot return. The assertion follows that two-hop chain and
+    /// reads the expected code off the `ClientError` itself, never a literal copied down
+    /// from the arm.
     #[test]
     fn list_tags_variant_classifies_via_the_inner_error() {
         let transport =
@@ -332,8 +209,8 @@ mod tests {
         );
     }
 
-    /// The D4(a) refusal is a verdict a release wrapper must be able to act on.
-    /// Left unclassified it exits 1 — indistinguishable from a crash, the same
+    /// This refusal is a verdict a release wrapper must be able to act on. Left
+    /// unclassified it exits 1 — indistinguishable from a crash, the same
     /// defect the `UnclaimedPackage` comment above records.
     #[test]
     fn tag_is_not_an_image_index_classifies_as_data_error() {
@@ -350,7 +227,7 @@ mod tests {
         );
     }
 
-    /// The D7 filter routed a new failure class into this variant: a selection
+    /// A selection filter routes a new failure class into this variant: a selection
     /// made *entirely* of reserved tags. Left as it was, stderr claimed "no
     /// curated tags given" for an invocation that gave several, and the exit
     /// was an unclassified 1. Both halves are pinned here.
@@ -500,7 +377,7 @@ mod tests {
         assert!(message.contains("ocx.sh/acme/widget"), "got: {message}");
     }
 
-    /// D2's refusal is the one announce failure a rerun cannot clear, so a
+    /// This refusal is the one announce failure a rerun cannot clear, so a
     /// release wrapper must be able to tell it from a crash (exit 1) and from a
     /// transient (75). The message has to name the branch, because deleting it
     /// is one of the two actions that unstick the package.
@@ -532,7 +409,7 @@ mod tests {
         assert_eq!(AnnounceError::ForgeRequired.classify(), None);
     }
 
-    /// C-004/S-003 (#377): an `--out` write failure is an operator/environment
+    /// An `--out` write failure is an operator/environment
     /// I/O problem, exit 74. `StorageFull` is the case the generic walker
     /// cannot reach — it special-cases only `PermissionDenied`, so before this
     /// arm existed every other kind exited 1, the crash code.
@@ -557,7 +434,7 @@ mod tests {
 
     // ── moved from ocx_announce::claim::error with the impl ──
 
-    /// C-S1-1 — the `detail` slugs ship in JSON envelopes and SDKs dispatch
+    /// The `detail` slugs ship in JSON envelopes and SDKs dispatch
     /// on them, so each string is pinned here; the exhaustive match in
     /// `kind_detail` is what forces a slug for a variant added later, and the
     /// arity pin is what catches a row dropped from this table.
@@ -625,7 +502,7 @@ mod tests {
         }
     }
 
-    /// C-003 — a claim's description failure exits exactly as the same failure
+    /// A claim's description failure exits exactly as the same failure
     /// does under announce, because the arm delegates rather than minting a
     /// code.
     ///
@@ -659,7 +536,7 @@ mod tests {
         );
     }
 
-    /// C-052 — the three deliberately **unclassified** variants answer `None`,
+    /// The three deliberately **unclassified** variants answer `None`,
     /// asserted rather than omitted.
     ///
     /// The `GitCommandFailed` / `GitPushFailed` precedent: an unclassified variant
@@ -779,8 +656,8 @@ mod tests {
 
     #[test]
     fn status_other_is_unclassified() {
-        // A 404 in particular stays unclassified: the indeterminate-compare
-        // fall-through (C6 amendment) deliberately rides on it.
+        // A 404 in particular stays unclassified: an indeterminate compare deliberately
+        // falls through to it rather than guessing a code.
         for status in [404, 422] {
             let error = ForgeError::Status {
                 url: "https://api.github.com/repos/x/y/forks".to_string(),
@@ -905,9 +782,8 @@ mod tests {
     }
 
     // recovered from ocx_announce::forge::error
-    /// The eleven variants the git write transport adds — C-018's ten, plus
-    /// [`ForgeError::PushOptionRefused`] (DX-27) — each beside the exit code the
-    /// ADR's exit-code table names for it.
+    /// The eleven variants the git write transport adds, each beside the exit code
+    /// the ADR's exit-code table names for it.
     ///
     /// One fixture, read by two tests. The exit-code table and the message
     /// style guard must cover the same eleven variants, and a second
@@ -951,12 +827,10 @@ mod tests {
                 },
                 None,
             ),
-            // DX-27. Unclassified for the same reason as the two above, and
-            // asserted as `None` rather than omitted so that a later hand
-            // dropping it into the `UsageError` arm — the tempting wrong answer,
-            // because the message reads like bad input — reds here instead of
-            // shipping. The `reason` names the key and the codepoint and never
-            // the value; see the variant's own doc comment.
+            // Unclassified for the same reason as the two above, and asserted as `None`
+            // rather than omitted so that a later hand dropping it into the `UsageError`
+            // arm — tempting, because the message reads like bad input — reds here
+            // instead of shipping. `reason` names the key and codepoint, never the value.
             (
                 ForgeError::PushOptionRefused {
                     key: "merge_request.title",

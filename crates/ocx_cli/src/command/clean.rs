@@ -9,19 +9,14 @@ use crate::api;
 
 /// Remove unreferenced objects and stale temp directories.
 ///
-/// An object is unreferenced when its `refs/` directory is empty or absent —
-/// no candidate or current symlink points to it anymore.  This happens after
-/// `ocx uninstall` (without `--purge`) or when symlinks are removed manually.
+/// An object is unreferenced when its `refs/` directory is empty or absent, as
+/// after `ocx uninstall` without `--purge` or a manual symlink removal. A temp
+/// directory is stale when no running process holds its `install.lock`: a
+/// previous download was interrupted.
 ///
-/// A temp directory is stale when its `install.lock` is not held by any
-/// running process — this indicates a previous download was interrupted.
-///
-/// Use `--dry-run` to preview what would be removed without making any changes.
-///
-/// By default, packages held by any registered project's `ocx.lock` are
-/// retained even when running `clean` from a different project directory.
-/// Use `--force` to ignore the project registry and collect all otherwise-
-/// unreferenced packages.
+/// Packages any registered project's `ocx.lock` holds are retained, even from
+/// another project directory; `--force` ignores the project registry.
+/// `--dry-run` previews without changing anything.
 #[derive(Parser)]
 pub struct Clean {
     /// Show what would be removed without actually removing anything.
@@ -32,7 +27,7 @@ pub struct Clean {
     /// including those held by other projects' `ocx.lock` files.
     ///
     /// Without `--force`, `ocx clean` consults the per-user project registry
-    /// (`$OCX_HOME/projects.json`) and retains any package pinned by a
+    /// (`$OCX_HOME/projects/`) and retains any package pinned by a
     /// registered lock. With `--force`, that guard is bypassed entirely.
     /// Live install symlinks are always honoured regardless of this flag.
     #[clap(long = "force")]

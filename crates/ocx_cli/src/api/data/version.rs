@@ -8,29 +8,10 @@ use crate::app::build_info::Provenance;
 
 /// Version information reported by `ocx version`.
 ///
-/// # Plain format
-///
-/// Bare version string (e.g. `0.3.1`), preserving the
-/// pre-enrichment contract that scripts can `ocx version` and parse
-/// stdout as a single semver token.
-///
-/// Verbose rendering is handled by the `VerboseVersionData` wrapper:
-/// a multi-line summary (version, commit + dirty flag, build time,
-/// target, rustc, CI run URL). Suppressed lines for absent fields so a
-/// locally-built binary doesn't show empty `ci:` rows.
-///
-/// # JSON format
-///
-/// The `version` key is the always-present contract that the
-/// `query_installed_version` subprocess parser in
-/// `ocx_lib/src/package_manager/tasks/update_check.rs`
-/// reads when comparing the locally-installed version to the latest
-/// remote tag during `ocx self update`. Every other top-level key is
-/// optional and gated on whether the source data was available at build
-/// time, so a tarball-source / no-CI build emits only `version` and a
-/// dev-deploy CI build emits the full schema.
-///
-/// Concrete shape (every field except `version` is optional):
+/// `version` is always present. Every other key appears only when its source
+/// data was available at build time, so a tarball-source, no-CI build emits
+/// `version` alone. `cargo_pkg_version` appears only when it differs from
+/// `version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).
 ///
 /// ```json
 /// {
@@ -42,12 +23,9 @@ use crate::app::build_info::Provenance;
 ///   "ci":                 { ... }
 /// }
 /// ```
-///
-/// `cargo_pkg_version` is suppressed when it would be identical to
-/// `version` — only meaningful for dev-deploy builds where the embedded
-/// version is overridden via `__OCX_BUILD_VERSION`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct VersionData {
+    // Always present: `ocx self update` parses this key to compare against the latest tag.
     version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
@@ -57,13 +35,7 @@ pub struct VersionData {
 }
 
 impl VersionData {
-    /// Enriched payload: every available build-time provenance field is
-    /// populated. JSON output always includes the populated subset;
-    /// plain-text output is bare (a single version token on stdout).
-    ///
-    /// `cargo_pkg_version` is folded into the payload only when it
-    /// differs from the effective `version` — meaningful only for
-    /// dev-deploy / `__OCX_BUILD_VERSION` overrides.
+    /// Payload with every build-time provenance field that is available.
     pub fn enriched(version: impl Into<String>, cargo_pkg_version: impl Into<String>) -> Self {
         let version = version.into();
         let cargo_pkg = cargo_pkg_version.into();
@@ -78,23 +50,14 @@ impl VersionData {
 
 impl Printable for VersionData {
     fn print_plain(&self, _data: &ocx_console::DataInterface) {
+        // Bare version only: scripts parse this stdout as one semver token.
         println!("{}", self.version);
     }
 }
 
-/// Verbose rendering of [`VersionData`] — multi-line labelled-value
-/// summary showing build provenance alongside the version token.
+/// Verbose rendering of [`VersionData`]: build provenance beside the version.
 ///
-/// Plain format: `ocx <version>` header with optional cargo/channel
-/// qualifiers, followed by a `host:` row (os/arch + detected libc) and the
-/// commit, build, and CI rows for the fields that were baked into the binary
-/// at build time. The `host:` row is suppressed when the host OS/arch is not
-/// in OCX's supported set.
-///
-/// JSON format: delegates to the inner `VersionData` — identical wire
-/// shape whether verbose or not. The host row is plain-output only; it does
-/// NOT add a field to the `version` JSON wire shape (self-update parser
-/// contract).
+/// JSON is the inner `VersionData` unchanged.
 pub struct VerboseVersionData(pub VersionData);
 
 impl Printable for VerboseVersionData {
@@ -102,7 +65,6 @@ impl Printable for VerboseVersionData {
         let theme = data.theme();
         let inner = &self.0;
 
-        // ── Header: "ocx <version> (cargo: …, channel: …)" ──────────
         let mut header = format!("{} {}", theme.label("ocx"), theme.tag(&inner.version));
         let mut extras: Vec<String> = Vec::new();
         if let Some(cargo) = &inner.cargo_pkg_version {
@@ -116,14 +78,9 @@ impl Printable for VerboseVersionData {
         }
         println!("{header}");
 
-        // ── Host row: os/arch + detected libc families ──────────────
-        // Plain-output only — never added to the `version` JSON wire shape.
-        // Suppressed when the host OS/arch is not in OCX's supported set. A
-        // host may advertise multiple libc families (e.g. glibc + musl).
+        // Plain-only: never add the host to the JSON shape `ocx self update` parses.
         if let Some(platform) = ocx_oci::Platform::current() {
-            // Render the bare os/arch base (no `+os_features` suffix); the
-            // detected libc is shown separately in the parenthetical below, so
-            // `Display` here would duplicate it.
+            // Not `Display`: its `+features` suffix would duplicate the libc parenthetical.
             let base = platform.segments().join("/");
             let tags = ocx_oci::cached_libc_labels();
             let host = if tags.is_empty() {
@@ -135,7 +92,6 @@ impl Printable for VerboseVersionData {
             println!("{}    {host}", theme.label("host:"));
         }
 
-        // ── Commit row ──────────────────────────────────────────────
         if let Some(commit) = &inner.provenance.commit {
             let dirty_text = if commit.dirty { "dirty" } else { "clean" };
             let timestamp = commit
@@ -152,7 +108,6 @@ impl Printable for VerboseVersionData {
             );
         }
 
-        // ── Build block ─────────────────────────────────────────────
         if let Some(build) = &inner.provenance.build {
             println!(
                 "{}    {} {}",
@@ -164,7 +119,6 @@ impl Printable for VerboseVersionData {
             println!("{}    {}", theme.label("rustc:"), theme.tag(&build.rustc));
         }
 
-        // ── CI block ────────────────────────────────────────────────
         if let Some(ci) = &inner.provenance.ci {
             println!("{}       {}", theme.label("ci:"), theme.aside(ci.run_url.clone()));
         }
@@ -177,8 +131,6 @@ impl serde::Serialize for VerboseVersionData {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. Verbosity changes the plain rendering only.
 impl schemars::JsonSchema for VerboseVersionData {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "VerboseVersionData".into()

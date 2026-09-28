@@ -18,12 +18,6 @@ pub use bounded_read::{BoundedReadError, read_bounded, read_bounded_async};
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};
-// `FileLock` is the underlying primitive; consumers prefer the
-// `LockedFile` / `LockedJsonFile` / `LockedTomlFile` API for in-place
-// F2-safe I/O. `FileLock` itself is re-exported for the synchronous
-// acquisition path (`lock_exclusive_blocking_with_timeout`) needed by
-// `auth::store` inside a `spawn_blocking` body, and for `temp_store`
-// which acquires synchronously from `stale_entries`.
 pub use file_lock::FileLock;
 pub use locked_file::{LockedFile, LockedJsonFile, LockedTomlFile};
 pub use same_dir::same_dir;
@@ -35,15 +29,7 @@ pub(crate) use symlink_walk::refuse_if_symlink_in_path_sync;
 
 use crate::error::FileError;
 
-/// Returns whether `path` exists, swallowing any I/O error as `false`.
-///
-/// Wraps [`tokio::fs::try_exists`] and emits a `debug!` log whenever
-/// the probe fails (permission denied, transient I/O, etc.) so the
-/// swallow is still observable in diagnostic output. Use when the
-/// caller is tolerant of a missing path — either because a follow-up
-/// fallible operation will naturally surface the same error with
-/// better context, or because absence and I/O failure are handled
-/// identically at the call site.
+/// Returns whether `path` exists, logging any I/O error at debug and answering `false`.
 pub async fn path_exists_lossy(path: &std::path::Path) -> bool {
     match tokio::fs::try_exists(path).await {
         Ok(exists) => exists,
@@ -54,15 +40,7 @@ pub async fn path_exists_lossy(path: &std::path::Path) -> bool {
     }
 }
 
-/// Moves `src` directory to `dst` via same-filesystem rename.
-///
-/// Creates parent directories of `dst` if needed. If `dst` already exists
-/// (e.g., from a crashed previous attempt), it is removed first.
-///
-/// Renames via [`rename_with_windows_retry`] — `src` and `dst` must reside
-/// on the same filesystem (cross-device moves return an OS error), and on
-/// Windows a transiently locked tree is retried for up to ~1.6 s before the
-/// access-denied error surfaces.
+/// Moves directory `src` to `dst` by same-filesystem rename, creating `dst`'s parent and replacing an existing `dst`.
 pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), FileError> {
     if let Some(parent) = dst.parent() {
         tokio::fs::create_dir_all(parent)
@@ -80,9 +58,7 @@ pub async fn move_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
-/// Backoff schedule for a Windows transient sharing/access retry loop, shared by
-/// [`persist_temp_file`] and [`rename_with_windows_retry`] (rattler
-/// `rename_with_retry` precedent).
+/// Backoff schedule for Windows transient sharing/access retries.
 #[cfg(windows)]
 const WINDOWS_TRANSIENT_BACKOFF: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(100),
@@ -90,9 +66,7 @@ const WINDOWS_TRANSIENT_BACKOFF: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(800),
 ];
 
-/// Scales `backoff` by ±25% jitter so concurrent retriers do not re-collide on
-/// the same handle in lockstep. Derived from `SystemTime` subsecond nanos to
-/// keep the retry path free of a `rand` dependency.
+/// Scales `backoff` by ±25% jitter so concurrent retriers do not re-collide in lockstep.
 #[cfg(windows)]
 fn jittered_backoff(backoff: std::time::Duration) -> std::time::Duration {
     let nanos = std::time::SystemTime::now()
@@ -103,34 +77,15 @@ fn jittered_backoff(backoff: std::time::Duration) -> std::time::Duration {
     std::time::Duration::from_secs_f64(backoff.as_secs_f64() * jitter_scale)
 }
 
-/// Whether `error` is the Windows transient class worth retrying:
-/// `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) — another handle
-/// on the path, typically released within milliseconds.
+/// `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32): another handle, typically gone within milliseconds.
 #[cfg(windows)]
 fn is_transient_windows_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5) | Some(32))
 }
 
-/// Renames `src` to `dst`, retrying on Windows transient lock/access errors.
+/// Renames `src` to `dst`, retrying Windows transient errors (Defender opens freshly written files).
 ///
-/// The directory sibling of [`persist_temp_file`]. A Windows directory rename
-/// fails with `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) while
-/// **any** file anywhere inside the tree is still held open — and Windows
-/// Defender real-time scanning opens exactly the files that were just written,
-/// milliseconds after they land. A freshly populated temp directory renamed into
-/// its final store location therefore sits squarely in that hazard window; the
-/// motivating report is issue #285 (`ocx install` failing with
-/// "Access is denied. (os error 5)" on the temp-to-store rename).
-///
-/// The first attempt runs with no delay; up to three retries follow
-/// (100/400/800 ms ±25% jitter). Any other error returns immediately, and after
-/// retry exhaustion the last transient error is returned. On non-Windows this is
-/// a single [`tokio::fs::rename`].
-///
-/// Makes **no idempotency assumption** — an already-present `dst` is NOT treated
-/// as success. What an existing destination means is the caller's call: a
-/// content-addressed destination may read it as a concurrent winner, a mutable
-/// one as stale content that must not be silently kept.
+/// An already-present `dst` is not success; what it means is the caller's call.
 pub async fn rename_with_windows_retry(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -142,11 +97,7 @@ pub async fn rename_with_windows_retry(src: &std::path::Path, dst: &std::path::P
     }
 }
 
-/// Drives `attempt` through the Windows transient-retry schedule: first call
-/// with no delay, then up to three retries after the jittered backoff, retrying
-/// only the transient class. Parameterized over the operation so the test can
-/// count attempts and release its blocking handle deterministically between
-/// them — a wall-clock release cannot prove the retry path ran.
+/// Drives `attempt` through the transient-retry schedule, retrying only the transient class.
 #[cfg(windows)]
 async fn retry_windows_transient<Attempt, AttemptFuture>(mut attempt: Attempt) -> std::io::Result<()>
 where
@@ -169,55 +120,16 @@ where
     Err(last_error.unwrap_or_else(|| std::io::Error::other("rename retries exhausted")))
 }
 
-/// Atomically publish a written [`tempfile::NamedTempFile`] to `target` via
-/// `persist`, retrying on Windows transient lock/access errors.
+/// Atomically publish a written temp file to `target` via `persist`, retrying Windows transient errors. Blocking.
 ///
-/// The cross-platform atomic-publish primitive: callers write content into a
-/// `NamedTempFile` in the destination directory, then hand it here to rename it
-/// into place. Used by `BlobStore::write_blob`
-/// (content-addressed blobs) and `ocx self activate` (the version-stamped
-/// completion file). [`persist_temp_file_if_absent`] is the sibling for a
-/// destination whose file identity, not just its content, must survive a race.
-///
-/// On Windows, `persist` (a rename) over a just-written destination can fail
-/// with `ERROR_SHARING_VIOLATION` (32) or `ERROR_ACCESS_DENIED` (5) when
-/// Windows Defender real-time scanning or a non-sharing reader holds the target
-/// open (rattler `rename_with_retry` precedent). The first attempt runs with no
-/// delay; up to three retries follow (100/400/800 ms ±25% jitter). On
-/// non-Windows this is a single `persist`.
-///
-/// After retry exhaustion the last transient error is returned. This helper
-/// makes **no idempotency assumption** — an already-present `target` is NOT
-/// treated as success, because for a mutable destination it may hold stale or
-/// different content (a reader holding the old file open through every retry
-/// would leave the old version in place). A caller whose destination is
-/// content-addressed / immutable (e.g. `BlobStore::write_blob`)
-/// re-checks existence itself and treats a present target as success there.
-///
-/// Blocking — `NamedTempFile` is synchronous; call from `spawn_blocking` inside
-/// async code.
+/// An already-present `target` is not success: a mutable destination may hold stale content.
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
     persist_with_retry(tmp, |tmp| tmp.persist(target).map(|_| ()))
 }
 
-/// [`persist_temp_file`], except that an already-present `target` is left
-/// alone and its presence reported as an error.
+/// [`persist_temp_file`], except an existing `target` is left alone and reported as `AlreadyExists`. Blocking.
 ///
-/// For a destination whose file **identity** matters — not merely its bytes —
-/// `persist`'s replace semantics are the wrong primitive: it is a rename with
-/// `MOVEFILE_REPLACE_EXISTING` on Windows and a plain `rename(2)` elsewhere, so
-/// a losing racer silently swaps in a fresh file record and orphans the one the
-/// winner published. Anything already hardlinked from that record keeps pointing
-/// at the orphan. `ShimBinStore` is the
-/// motivating caller: every generated `<name>.exe` on Windows hardlinks the one
-/// published shim blob, so "same bytes" is not enough — they must be the same
-/// file.
-///
-/// The caller decides what an existing target means. A content-addressed
-/// destination reads the resulting error as "a concurrent writer won, and its
-/// file is byte-identical to mine" and converges on it.
-///
-/// Blocking, same as [`persist_temp_file`].
+/// For a destination whose file identity matters: a replacing racer orphans what hardlinks the winner's file.
 pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
     persist_with_retry(tmp, |tmp| tmp.persist_noclobber(target).map(|_| ()))
 }
@@ -226,64 +138,15 @@ pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::p
 #[derive(Debug)]
 #[must_use]
 pub enum PersistOutcome {
-    /// The temp file now lives at the target path.
     Published,
 
-    /// Something already occupies the target, which was left untouched. The temp
-    /// file comes back unconsumed so the caller can retry under a different name
-    /// without re-writing its content.
+    /// The target is occupied and untouched; the temp file comes back for a retry under another name.
     Occupied(tempfile::NamedTempFile),
 }
 
-/// Publish a written [`tempfile::NamedTempFile`] to `target` **without replacing**
-/// an existing file there, reporting an occupied target as a *value*.
+/// Publish a temp file to `target` without replacing anything there; an occupied target is a value. Blocking.
 ///
-/// The counterpart to [`persist_temp_file`] for append-only destinations — an
-/// audit trail, an execution-record sink — where the target name is *chosen*
-/// rather than content-addressed, so a replacing publish would let one write
-/// silently destroy another. `persist_temp_file` remains correct for a mutable
-/// destination whose whole point is to be overwritten.
-///
-/// An occupied target is [`PersistOutcome::Occupied`], not an error: the caller
-/// draws a fresh name and calls again, and gets its unconsumed temp file back to
-/// do it with. Only genuine I/O failures return `Err`. That is the whole
-/// difference from [`persist_temp_file_if_absent`], which reports the same
-/// collision as an `AlreadyExists` error for a caller that converges on the
-/// winner instead of renaming around it.
-///
-/// # The NFS lost-reply case
-///
-/// `persist_noclobber` publishes with `renameat2(RENAME_NOREPLACE)` where the
-/// kernel supports it and falls back to `link` + `unlink` on `ENOSYS`/`EINVAL`.
-/// The Linux NFS client rejects `renameat2` flags with `EINVAL`, so **NFS is
-/// exactly the hardlink path** — and there `link()` is atomic server-side but a
-/// lost reply plus a client retry reports `EEXIST` even though the first attempt
-/// succeeded. On `EEXIST` this therefore compares the *identity* of the file now
-/// at `target` with the temp file's: same device and inode means the occupant is
-/// our own link under that very name, so the result is
-/// [`PersistOutcome::Published`] and the temp file is *dropped*, taking the link
-/// count 2 → 1 and leaving only the published name. Keeping it would strand a
-/// `.tmp*` in the caller's directory on every spurious report.
-///
-/// Identity, not link count, is what makes [`PersistOutcome::Published`] name a
-/// path this call actually wrote — and on a shared sink the difference is a lost
-/// record, not a cosmetic one. A count says only that *some* second link to the
-/// temp file exists, which two ordinary situations produce without the target
-/// being ours: a caller retrying under fresh names after a stale attribute cache
-/// under-reported an earlier landing, and another same-UID process hardlinking
-/// our visible `.tmp` under a name of its own. Either way `nlink == 2` would
-/// report a publish over a foreign occupant, drop the temp path, and leave the
-/// caller believing a record landed that did not. A device+inode match cannot
-/// say that. On the `renameat2` path the check is inert, because a genuine
-/// `EEXIST` there leaves a foreign file at `target`. Windows has no comparable
-/// identity in `Metadata` and gets no such check.
-///
-/// The Windows transient-lock backoff of [`persist_temp_file`] applies here too:
-/// without it, a Defender lock would surface as a hard publish failure rather
-/// than the retry it is.
-///
-/// Blocking — `NamedTempFile` is synchronous; call from `spawn_blocking` inside
-/// async code.
+/// For append-only destinations whose names are chosen, where a replacing publish lets one write destroy another.
 pub fn persist_temp_file_noclobber(
     tmp: tempfile::NamedTempFile,
     target: &std::path::Path,
@@ -300,9 +163,7 @@ fn attempt_noclobber(
         Ok(_) => Ok(PersistOutcome::Published),
         Err(persist_err) if persist_err.error.kind() == std::io::ErrorKind::AlreadyExists => {
             if published_at(target, &persist_err.file) {
-                // Our own link landed under this name and only the reply was
-                // lost. Returning WITHOUT `keep()` drops the temp path here,
-                // leaving just the published name behind.
+                // Our link landed and only the NFS reply was lost; no `keep()`, or a `.tmp*` is stranded.
                 Ok(PersistOutcome::Published)
             } else {
                 Ok(PersistOutcome::Occupied(persist_err.file))
@@ -312,12 +173,10 @@ fn attempt_noclobber(
     }
 }
 
-/// Whether the file occupying `target` *is* the file `tmp` holds — the one
-/// answer that makes a `Published` outcome name a path this call wrote.
+/// Whether the file at `target` is the one `tmp` holds, which only the NFS `link` fallback can produce.
 ///
-/// Meaningful only on the `link` + `unlink` fallback, which is the NFS path; see
-/// [`persist_temp_file_noclobber`]. `symlink_metadata` deliberately does not
-/// follow: a symlink standing at `target` is never the hardlink we just made.
+/// Device and inode, never link count: `nlink == 2` can be a foreign hardlink, losing a record.
+/// `symlink_metadata`, so a symlink at `target` is never taken for our hardlink.
 #[cfg(unix)]
 fn published_at(target: &std::path::Path, tmp: &tempfile::NamedTempFile) -> bool {
     use std::os::unix::fs::MetadataExt as _;
@@ -328,21 +187,13 @@ fn published_at(target: &std::path::Path, tmp: &tempfile::NamedTempFile) -> bool
     std::fs::symlink_metadata(target).is_ok_and(|there| there.dev() == ours.dev() && there.ino() == ours.ino())
 }
 
-/// Windows `Metadata` exposes no device/inode pair, so an `AlreadyExists` there
-/// is always treated as a genuine collision.
+/// No device/inode pair here, so `AlreadyExists` is always a genuine collision.
 #[cfg(not(unix))]
 fn published_at(_target: &std::path::Path, _tmp: &tempfile::NamedTempFile) -> bool {
     false
 }
 
-/// The one publish implementation behind [`persist_temp_file`],
-/// [`persist_temp_file_if_absent`] and [`persist_temp_file_noclobber`], carrying
-/// the Windows transient-retry schedule all three share.
-///
-/// Generic over what an attempt yields, because the third caller needs its temp
-/// file back: `persist_temp_file_noclobber` reports an occupied target as a
-/// value rather than an error, and only `PersistError` hands the unconsumed file
-/// over. A retry therefore republishes the same content instead of re-writing it.
+/// The shared publish loop with the Windows retry schedule, generic so a caller can get its temp file back.
 fn persist_with_retry<Published>(
     tmp: tempfile::NamedTempFile,
     mut publish: impl FnMut(tempfile::NamedTempFile) -> Result<Published, tempfile::PersistError>,
@@ -351,7 +202,6 @@ fn persist_with_retry<Published>(
     {
         let mut tmp_opt = Some(tmp);
         let mut last_err: Option<std::io::Error> = None;
-        // First attempt with no backoff, then up to 3 retries with jitter.
         for backoff in std::iter::once(std::time::Duration::ZERO).chain(WINDOWS_TRANSIENT_BACKOFF) {
             if !backoff.is_zero() {
                 std::thread::sleep(jittered_backoff(backoff));
@@ -369,10 +219,7 @@ fn persist_with_retry<Published>(
                 }
             }
         }
-        // Retry exhausted. Return the last transient error — no idempotency
-        // re-check here (see the doc comment): an already-present target may
-        // hold stale content for a mutable destination. Content-addressed
-        // callers re-check existence themselves.
+        // No existence re-check: an already-present target may hold stale content.
         Err(last_err.unwrap_or_else(|| std::io::Error::other("persist retries exhausted")))
     }
     #[cfg(not(windows))]
@@ -381,33 +228,11 @@ fn persist_with_retry<Published>(
     }
 }
 
-/// Atomically write `bytes` to `target` as a private file (`0o600` on Unix).
-///
-/// Fills a [`tempfile::NamedTempFile`] created in `target`'s parent directory,
-/// then publishes it over `target` via [`persist_temp_file`] (replace-existing
-/// on every platform, with the Windows transient-lock retry). A concurrent
-/// reader therefore never observes a partially-written file, and a repeated
-/// write replaces the previous content atomically.
-///
-/// The temp file is created `0o600` — owner read/write only — making the
-/// private-file contract explicit at the call site (trust material, capability
-/// caches, managed-config state, shell-integration files). This matches the
-/// `tempfile` crate's Unix default, so routing an existing plain
-/// `NamedTempFile::new_in` write through this helper does not change the
-/// published file's mode. On non-Unix platforms the `tempfile` default applies.
-///
-/// The parent directory must already exist — this helper does not create it
-/// (callers needing it call `create_dir_all` first, so the single-responsibility
-/// "publish these bytes" contract stays sharp). `target` must have a parent
-/// component.
-///
-/// Blocking — `NamedTempFile` I/O and `persist` are synchronous; call from
-/// `spawn_blocking` inside async code.
+/// Atomically write `bytes` to `target` as a private file (`0o600` on Unix); `target`'s parent must exist. Blocking.
 ///
 /// # Errors
 ///
-/// Any I/O failure creating, writing, or publishing the temp file. Returns
-/// [`std::io::ErrorKind::InvalidInput`] when `target` has no parent component.
+/// Any I/O failure; `InvalidInput` when `target` has no parent.
 pub fn write_bytes_atomic(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 

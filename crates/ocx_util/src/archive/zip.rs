@@ -223,8 +223,7 @@ fn file_options_with_permissions(options: SimpleFileOptions, _file: &Path) -> Si
     options
 }
 
-/// What one zip entry costs against the decompressed-byte cap before its body
-/// is read — the size of a tar header, so the two backends share a ceiling.
+/// Per-entry charge against the decompression cap: a tar header's size, so both backends share one ceiling.
 const ENTRY_FLOOR_BYTES: u64 = 512;
 
 pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, decompressed_cap: u64) -> Result<()> {
@@ -236,8 +235,6 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
     })?;
     let mut zip = zip::ZipArchive::new(file).map_err(Error::Zip)?;
 
-    // The extraction root must exist before the canonical-root resolution and
-    // before any entry lands.
     std::fs::create_dir_all(output).map_err(|e| Error::Io {
         path: output.to_path_buf(),
         source: e,
@@ -248,27 +245,15 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
     })?;
 
     let mut count = 0u64;
-    // Running total of decompressed bytes written, capped against
-    // `decompressed_cap` (CWE-400) — the zip analog of the tar path's
-    // `Read::take` bomb guard.
     let mut total_written: u64 = 0;
     for i in 0..zip.len() {
-        // Every entry is charged a floor against the byte budget before it is
-        // read: a zero-length entry writes no bytes, but it still costs an
-        // inode, and a zip full of them exhausts the extraction filesystem well
-        // inside the byte cap. The tar path is bounded by construction — its
-        // cap is applied to the decompressed *stream*, where every entry
-        // carries a 512-byte header — so charging the same 512 here gives both
-        // backends one ceiling and one refusal, with no second constant to
-        // drift.
+        // Charged before the body: a zero-length entry writes no bytes but still costs an inode.
         total_written = total_written.saturating_add(ENTRY_FLOOR_BYTES);
         if total_written > decompressed_cap {
             return Err(Error::ExtractionCapExceeded { cap: decompressed_cap });
         }
         let mut entry = zip.by_index(i).map_err(Error::Zip)?;
-        // D7: an entry whose name is absolute or escapes the root has no
-        // enclosed name. Refuse the archive rather than skipping the entry, so a
-        // traversal attempt fails loudly exactly as the tar path does.
+        // No enclosed name means absolute or escaping: refuse the archive, never skip the entry.
         let Some(enclosed_name) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
             return Err(Error::EntryEscape(PathBuf::from(entry.name())));
         };
@@ -281,29 +266,19 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
         let out = crate::fs::path::join_under_root(&canonical_root, &stripped)
             .map_err(|_| Error::EntryEscape(enclosed_name.clone()))?;
 
-        // A `.` / `a/..` entry normalizing to the root itself names no new
-        // content; skip it rather than treating it as an escape (its parent is
-        // the root's parent, legitimately outside the root).
+        // A `.` entry is the root itself: skip it, its parent is legitimately outside.
         if out == canonical_root {
             continue;
         }
 
-        // Physical containment BEFORE creating anything (CWE-22): refuse if any
-        // existing ancestor of `out` below the root is a symlink an earlier entry
-        // planted — in this entry's parent chain, or one a symlink target reaches
-        // through — so `create_dir_all` / the file write cannot escape through it.
-        // The mkdir must be refused before it happens, not after (a check that ran
-        // post-`create_dir_all` has already let the directory escape). Every
-        // component created below is then a fresh directory, which cannot be a
-        // symlink, so `out` stays physically contained and is safe to act on by
-        // its own path. `Some(canonical_root)` trusts the root's own ancestry and
-        // scopes the walk to the untrusted portion strictly below it.
+        // Before creating anything (CWE-22): a planted symlink ancestor redirects `create_dir_all` and the write outside.
+        // `Some(canonical_root)` trusts the root's own ancestry.
         crate::fs::refuse_if_symlink_in_path_sync(&out, Some(&canonical_root)).map_err(|e| match e {
             crate::fs::SymlinkWalkError::Ancestor { .. } => Error::EntryEscape(enclosed_name.clone()),
-            // A component we could not even stat is an I/O fault (74), not a
-            // containment verdict (65).
+            // An unstat-able component is an I/O fault (74), not a containment verdict (65).
             crate::fs::SymlinkWalkError::Io { path, source } => Error::Io { path, source },
         })?;
+        // Components created below are fresh directories, so `out` is safe to act on by path.
         if let Some(parent) = out.parent() {
             crate::archive::create_dir_all_capped(&canonical_root, parent)?;
         }
@@ -312,9 +287,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
         if entry.is_dir() {
             crate::archive::create_dir_all_capped(&canonical_root, &dst)?;
         } else if entry.is_symlink() {
-            // Read the symlink body bounded by the remaining budget plus one
-            // probe byte, so a hostile entry declaring a huge body cannot be
-            // slurped whole into memory before the cap check fires (CWE-400).
+            // Bounded by the remaining budget plus a probe byte, or a huge body is read into memory first (CWE-400).
             let remaining = decompressed_cap.saturating_sub(total_written);
             let mut target = String::new();
             let read = entry
@@ -332,12 +305,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
             crate::fs::symlink::validate_target(&canonical_root, &dst, Path::new(&target))?;
             crate::fs::symlink::create(Path::new(&target), &dst)?;
         } else {
-            // Create the file with `create_new` so a symlink already at `dst`
-            // (planted by an earlier entry) is never followed; on EEXIST remove
-            // the occupant — the symlink itself, or a stale regular file — and
-            // create afresh, so the write always lands as a real regular file
-            // under the ancestor-guarded `dst` rather than through a link out of
-            // the root.
+            // `create_new` never follows a planted symlink at `dst`; an occupant is replaced, never written through.
             let mut outfile = match std::fs::OpenOptions::new().write(true).create_new(true).open(&dst) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -361,9 +329,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
                     });
                 }
             };
-            // Bound the per-entry copy at the remaining budget plus one probe
-            // byte, so a bomb cannot write unbounded bytes to disk before the
-            // check fires.
+            // Bounded by the remaining budget plus a probe byte, or a bomb writes unbounded bytes first.
             let remaining = decompressed_cap.saturating_sub(total_written);
             let mut limited = entry.by_ref().take(remaining.saturating_add(1));
             let written = std::io::copy(&mut limited, &mut outfile).map_err(|e| Error::Io {
@@ -379,13 +345,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = entry.unix_mode() {
-                    // A zip stores the archiving host's whole unix mode, so an
-                    // entry recorded as 0o4777 would land setuid + world-writable
-                    // and be published that way. Setuid/setgid/sticky (0o7000)
-                    // and group/other write (0o022) are masked off here, at the
-                    // single site that applies the archived mode; read and
-                    // execute bits — the ones an archive legitimately carries —
-                    // pass through untouched.
+                    // A zip stores the whole host mode: strip setuid/setgid/sticky and group/other write.
                     std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode & !(0o7000 | 0o022))).map_err(
                         |e| Error::Io {
                             path: dst.clone(),
@@ -404,8 +364,7 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
     }
     tracing::debug!("Extracted {count} entries total");
 
-    // Every hop exists now; re-judge each link against the finished tree (see
-    // `sweep_symlinks` for the reverse-order ladder this closes).
+    // Every hop exists now: re-judge each link against the finished tree.
     crate::archive::sweep_symlinks(&canonical_root)?;
 
     Ok(())

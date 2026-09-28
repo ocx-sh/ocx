@@ -8,8 +8,7 @@ use ocx_package::metadata::visibility::Visibility;
 
 use crate::api::Printable;
 
-/// `registry/repo[:tag]` with the tag coloured by the theme and the
-/// digest deliberately omitted (it has its own column / annotation).
+/// `registry/repo[:tag]` with the tag coloured; the digest has its own column.
 fn name_tag(id: &ocx_oci::PackageRef, theme: &Theme) -> String {
     let mut out = format!("{}/{}", id.registry(), id.repository());
     if let Some(tag) = id.tag() {
@@ -53,10 +52,7 @@ impl TreeItem for Dependency {
     }
 
     fn annotations(&self, theme: &Theme) -> Vec<Annotation> {
-        // Text is pre-inked by the theme; the annotation carries no style
-        // so the renderer emits it verbatim (same colour everywhere).
-        // Digest is full-length and goes last so the variable-width hash
-        // never pushes the short visibility / repeated tags out of eyeline.
+        // Digest last, or the full-length hash pushes the short tags out of eyeline.
         let mut out = Vec::new();
         if let Some(vis) = self.visibility {
             out.push(Annotation::new(
@@ -74,7 +70,6 @@ impl TreeItem for Dependency {
 }
 
 impl Printable for Dependencies {
-    // Tree output is inherently non-tabular, so we use printer.print_tree()
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         for root in &self.roots {
             printer.print_tree(root);
@@ -102,14 +97,10 @@ impl FlatDependencies {
 
 impl Printable for FlatDependencies {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        // Column-major. Every cell is pre-inked by the theme (same colours
-        // as the tree view); cells carry no per-cell style so the renderer
-        // emits the styled text verbatim and the colour-off path is
-        // byte-identical to the plain form.
+        // Cells are pre-inked and carry no style of their own, so colour-off output is byte-identical.
         let theme = printer.theme();
         let mut rows: [Vec<Cell>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
-            // Display identifier without digest — the digest has its own column.
             let id = &entry.identifier;
             rows[0].push(Cell::new(name_tag(id, &theme)));
             rows[1].push(Cell::new(theme.visibility(

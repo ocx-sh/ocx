@@ -5,157 +5,88 @@ use std::path::{Path, PathBuf};
 
 use crate::reference_manager::ReferenceManager;
 
-/// [`Result`](std::result::Result) over the one failure this store's file
-/// operations raise. `From<FileError>` for the crate-wide error yields exactly
-/// `InternalFile(path, cause)`, one conversion later than it used to be.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// What deriving a package root from a content path can fail with.
-///
-/// Two arms, because those are the two `package_dir_for_content` raises: the
-/// canonicalisation, and a canonical path ending in `content` that has no
-/// parent. The crate-wide error kept them apart at 74 and 1 respectively, and
-/// this keeps them apart for the same reason.
+/// Failure deriving a package root; the arms map to different exit codes (74 vs 1), so never fold them.
 #[derive(Debug, thiserror::Error)]
 pub enum PackageDirError {
-    /// The content path could not be canonicalised.
     #[error(transparent)]
     File(#[from] ocx_util::error::FileError),
-    /// A path has an unexpected structure. Same text as the crate-wide
-    /// variant it is converted into, because it is the same refusal.
     #[error("path '{}' has an unexpected structure", .0.display())]
     PathInvalid(PathBuf),
 }
 
-/// Represents a single content-addressed package directory within the package store.
-///
-/// A package directory has a fixed layout:
-/// - `content/`       -- the installed package files (directory tree)
-/// - `metadata.json`  -- package metadata
-/// - `manifest.json`  -- OCI manifest
-/// - `resolve.json`   -- resolved dependency graph
-/// - `install.json`   -- install status
-/// - `digest`         -- full digest string for recovery
-/// - `refs/symlinks/` -- back-reference symlinks for install tracking
-/// - `refs/deps/`     -- back-reference symlinks for dependency tracking
-/// - `refs/layers/`   -- back-reference symlinks for layer tracking
-/// - `refs/blobs/`    -- back-reference symlinks for blob tracking
-/// - `refs/origins/`  -- one marker file per logical repository this digest was fetched under
+/// One package directory: `content/`, `entrypoints/`, the JSON sidecars, `digest` and `refs/`.
 #[derive(Debug, Clone)]
 pub struct PackageDir {
-    /// The root directory of this package (parent of `content/`, `metadata.json`, etc.).
     pub dir: PathBuf,
 }
 
 impl PackageDir {
-    /// Construct a [`PackageDir`] rooted at an arbitrary `path`.
-    ///
-    /// Used by `pull_local` and `package test` to anchor the install pipeline
-    /// at a caller-supplied destination (e.g., a `tempfile::TempDir`) rather
-    /// than the content-addressed object store location.
+    /// A package directory outside the store, e.g. a staging or test destination.
     pub fn with_root(path: PathBuf) -> Self {
         Self { dir: path }
     }
 
-    /// Root directory of the package — parent of `content/`, `entrypoints/`,
-    /// `metadata.json`, `refs/`, and the other per-package files.
-    ///
-    /// CLI commands surfacing a package's location to users return this path
-    /// so consumers can traverse into either `content/` or `entrypoints/`.
     pub fn root(&self) -> &Path {
         &self.dir
     }
 
-    /// Path to the package content directory.
     pub fn content(&self) -> PathBuf {
         self.dir.join("content")
     }
 
-    /// Path to the package metadata file.
     pub fn metadata(&self) -> PathBuf {
         self.dir.join("metadata.json")
     }
 
-    /// Path to the OCI manifest file.
     pub fn manifest(&self) -> PathBuf {
         self.dir.join("manifest.json")
     }
 
-    /// Path to the resolved dependency graph file.
     pub fn resolve(&self) -> PathBuf {
         self.dir.join("resolve.json")
     }
 
-    /// Path to the install status file.
     pub fn install_status(&self) -> PathBuf {
         self.dir.join("install.json")
     }
 
-    /// Path to the digest marker file.
     pub fn digest_file(&self) -> PathBuf {
         self.dir.join(super::cas_path::DIGEST_FILENAME)
     }
 
-    /// Path to the symlink back-reference directory.
     pub fn refs_symlinks_dir(&self) -> PathBuf {
         self.dir.join("refs").join("symlinks")
     }
 
-    /// Path to the dependency back-reference directory.
     pub fn refs_deps_dir(&self) -> PathBuf {
         self.dir.join("refs").join("deps")
     }
 
-    /// Path to the layer back-reference directory.
     pub fn refs_layers_dir(&self) -> PathBuf {
         self.dir.join("refs").join("layers")
     }
 
-    /// Path to the blob back-reference directory.
     pub fn refs_blobs_dir(&self) -> PathBuf {
         self.dir.join("refs").join("blobs")
     }
 
-    /// Path to the pulling-origin marker directory.
-    ///
-    /// Holds one file per distinct **logical** repository this host resolved
-    /// and materialized digest-verified content for — see [`record_origin`]
-    /// for the write contract (including why the coordinate is the logical one)
-    /// and [`PackageDir::recorded_origins`] for the read side. Unlike its four
-    /// `refs/` siblings these are regular files rather than symlinks, and they
-    /// are not part of the GC reachability graph: they record provenance, not
-    /// liveness.
+    /// Provenance markers written by [`record_origin`]: regular files, outside the GC graph.
     pub fn refs_origins_dir(&self) -> PathBuf {
         self.dir.join("refs").join("origins")
     }
 
-    /// The logical repositories this host has recorded resolving and
-    /// materializing this package's digest under, as canonical
-    /// `<registry>/<repository-path>` strings.
+    /// Sorted `<registry>/<repo>` origins recorded for this digest; blocking.
     ///
-    /// Empty when nothing was recorded — an absent directory, an unreadable
-    /// one, and a package materialized before origins were tracked are all the
-    /// same answer, because none of them is evidence of a repository. Callers
-    /// that use this as authorization evidence must treat the empty answer as a
-    /// refusal, never as "unconstrained".
-    ///
-    /// A marker whose content does not hash back to its own file name is
-    /// discarded: the file name is [`ReferenceManager::name_for_path`] of the
-    /// content, so a torn or clobbered marker is detectable without a second
-    /// integrity file.
-    ///
-    /// Sorted and deduplicated, so the answer does not depend on directory
-    /// order. Blocking: one `read_dir` plus one small read per entry.
+    /// Empty means nothing recorded, which an authorization check must treat as a refusal, never as unconstrained.
     #[must_use]
     pub fn recorded_origins(&self) -> Vec<String> {
         let dir = self.refs_origins_dir();
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) => {
-                // Absence is the ordinary state for every package pulled before
-                // this marker existed, and for every off-store `PackageDir`, so
-                // even a genuine read failure stays at debug: the outcome is
-                // identical and a WARN here would fire on the common case.
+                // Debug, not WARN: absence is the ordinary state for older and off-store packages.
                 log::debug!("No recorded pull origins at '{}': {e}", dir.display());
                 return Vec::new();
             }
@@ -182,25 +113,13 @@ impl PackageDir {
         origins
     }
 
-    /// Path to the generated launchers directory.
-    ///
-    /// `entrypoints/` is a sibling of `content/` and `refs/` under the package root.
-    /// Launcher files are regular files generated at install time, not content-addressed.
     pub fn entrypoints(&self) -> PathBuf {
         self.dir.join("entrypoints")
     }
 }
 
-/// Manages the content-addressed package store on the local filesystem.
+/// Assembled packages at `{root}/{registry_slug}/{cas_shard_path}/`; no repository in the path, so repositories dedup.
 ///
-/// All packages are stored under a single `root` directory, sharded by
-/// registry and digest (via [`super::cas_path::cas_shard_path`]).
-///
-/// **Repository is NOT part of the path.** Only registry + digest determine
-/// the filesystem location. This enables content deduplication across
-/// repositories.
-///
-/// Layout:
 /// ```text
 /// {root}/
 ///   {registry_slug}/
@@ -229,131 +148,79 @@ impl PackageStore {
         Self { root: root.into() }
     }
 
-    /// The root directory of the package store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Returns the package directory path for the given identifier.
-    ///
-    /// **Only uses registry + digest from the identifier.** The repository
-    /// is intentionally ignored for content deduplication.
     pub fn path(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
             .join(super::cas_path::cas_shard_path(&identifier.digest()))
     }
 
-    /// Returns a [`PackageDir`] anchored at this identifier's package root.
-    ///
-    /// Equivalent to `PackageDir { dir: self.path(identifier) }` — prefer this
-    /// over hand-rolled construction so call sites stay grep-able.
     pub fn package_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> PackageDir {
         PackageDir {
             dir: self.path(identifier),
         }
     }
 
-    /// Returns the `content/` path for the given identifier.
     pub fn content(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("content")
     }
 
-    /// Returns the `metadata.json` path for the given identifier.
     pub fn metadata(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("metadata.json")
     }
 
-    /// Returns the `manifest.json` path for the given identifier.
     pub fn manifest(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("manifest.json")
     }
 
-    /// Returns the `resolve.json` path for the given identifier.
     pub fn resolve(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("resolve.json")
     }
 
-    /// Returns the `install.json` path for the given identifier.
     pub fn install_status(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("install.json")
     }
 
-    /// Returns the `digest` file path for the given identifier.
     pub fn digest_file(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join(super::cas_path::DIGEST_FILENAME)
     }
 
-    /// Returns the `metadata.json` path for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling file.
     pub fn metadata_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join("metadata.json"))
     }
 
-    /// Returns the `refs/symlinks/` directory for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling directory.
     pub fn refs_symlinks_dir_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join("refs").join("symlinks"))
     }
 
-    /// Returns the `refs/deps/` directory for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling directory.
     pub fn refs_deps_dir_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join("refs").join("deps"))
     }
 
-    /// Returns the `refs/layers/` directory for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling directory.
     pub fn refs_layers_dir_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join("refs").join("layers"))
     }
 
-    /// Returns the `refs/blobs/` directory for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling directory.
     pub fn refs_blobs_dir_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join("refs").join("blobs"))
     }
 
-    /// Returns the `resolve.json` path for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling file.
     pub fn resolve_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join("resolve.json"))
     }
 
-    /// Returns the `entrypoints/` path for the given identifier.
-    ///
-    /// `entrypoints/` is a sibling of `content/` and `refs/` inside the package root.
     pub fn entrypoints(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("entrypoints")
     }
 
-    /// Returns the `digest` file path for the package that owns `content_path`.
-    ///
-    /// `content_path` may be a real path or a symlink; symlinks are resolved
-    /// before navigating to the sibling file.
     pub fn digest_file_for_content(&self, content_path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
         Ok(package_dir_for_content(content_path)?.join(super::cas_path::DIGEST_FILENAME))
     }
 
-    /// Lists all package directories currently present in the store.
-    ///
-    /// A package directory is identified by the presence of a `content/` child
-    /// directory. Recursion stops at that point so that package-installed files
-    /// (which may themselves contain arbitrary subdirectories) are never traversed.
-    ///
-    /// Returns an empty vec if the store root does not exist yet.
+    /// Lists every package directory, never descending into `content/`; empty if the root does not exist.
     pub async fn list_all(&self) -> Result<Vec<PackageDir>> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -365,18 +232,7 @@ impl PackageStore {
     }
 }
 
-/// Resolves `path` (following any install symlinks) to the package root
-/// directory. Accepts either a `content/` child directory or the package root
-/// itself, so callers don't need to know which they hold.
-///
-/// - When `path` resolves to `packages/.../<digest>/content`, returns
-///   `packages/.../<digest>` (the parent — the package root).
-/// - When `path` resolves to `packages/.../<digest>` (the package root), returns
-///   it unchanged. This is the shape produced by the flattened install layout
-///   where `symlinks/{registry}/{repo}/current` and
-///   `symlinks/{registry}/{repo}/candidates/{tag}` target the package root
-///   directly and consumers traverse into `content/` or `entrypoints/` as
-///   needed.
+/// Canonicalizes `path` to its package root, accepting either the root or its `content/`.
 fn package_dir_for_content(path: &Path) -> std::result::Result<PathBuf, PackageDirError> {
     let canonical = dunce::canonicalize(path).map_err(|e| ocx_util::error::FileError::new(path, e))?;
     if canonical.file_name() == Some(std::ffi::OsStr::new("content")) {
@@ -389,13 +245,7 @@ fn package_dir_for_content(path: &Path) -> std::result::Result<PathBuf, PackageD
     }
 }
 
-/// The canonical origin string for `identifier`: `<registry>/<repository-path>`,
-/// host lowercased, port preserved, repository path verbatim.
-///
-/// This is the *full* coordinate, not the consent source: truncating to the
-/// org is the consent predicate's normalization
-/// ([`crate::project::consent::source_of`]), and a store that recorded only the
-/// truncated form could never answer a finer question later.
+/// `<registry>/<repository-path>`, host lowercased; never truncated to the consent source, or finer questions become unanswerable.
 #[must_use]
 fn origin_of(identifier: &ocx_oci::PackageRef) -> String {
     format!(
@@ -405,86 +255,19 @@ fn origin_of(identifier: &ocx_oci::PackageRef) -> String {
     )
 }
 
-/// The marker file name for `origin`.
-///
-/// [`ReferenceManager::name_for_path`] is this codebase's one "name a byte
-/// string by its hash" helper — the install back-refs and the project ledger
-/// both key on it — and `Path` is a zero-cost wrapper over the same bytes, so
-/// this hashes the origin string verbatim rather than introducing a second
-/// scheme.
-///
-/// The name is a 64-bit truncated SHA-256, so a collision is conceivable. It
-/// cannot forge an origin: the marker's *content* is the truth and is written
-/// only by [`record_origin`], so a collision can at worst suppress recording a
-/// second repository for a digest the first one already recorded — and those
-/// two repositories resolve to byte-identical content by construction.
+/// A name collision cannot forge an origin: the marker's content, not its name, is the record.
 fn origin_marker_name(origin: &str) -> String {
     ReferenceManager::name_for_path(Path::new(origin))
 }
 
-/// Record that this host resolved `identifier`'s **logical** repository and
-/// materialized digest-verified content for `pkg` under it.
+/// Records `identifier`'s logical repository (`adr_lock_records_physical_address.md`) as an origin of `pkg`; idempotent.
 ///
-/// # This is authorization evidence — call it only from a materializing pull
-///
-/// The package store is addressed by **(registry, digest) only**, so this
-/// directory is the sole place the store records *which repository* content
-/// arrived under. The shell-activation consent predicate quantifies clause 2
-/// over exactly this record
-/// (`crate::project::consent::verified_sources`), so what a marker attests
-/// bounds what that clause can grant.
-///
-/// State the bound at the strength the gate actually enforces. A marker is
-/// evidence that **this host** ran a fetching pull — anything but
-/// `pull_local` — which materialized digest-verified content and bound it to
-/// the logical repository the identifier spelled. It is **not** evidence that
-/// a registry vouched for that binding: the call site sits past two store-hit
-/// fast paths that are each conditional on install status, so an absent or
-/// not-OK package directory falls through into the fetching branch, and from
-/// there the layer cache can satisfy every layer with no client and no wire.
-/// A pull naming any logical repository, on a registry whose layers for that
-/// digest are already cached, therefore mints that repository's marker
-/// offline.
-///
-/// So clause 2's floor is *"some local actor pulled under this name"*, not
-/// *"a registry served under this name"*. That is still strictly stronger
-/// than the claim-based spelling it replaced — lock text is written by the
-/// clone's author, whereas a marker takes an act of pulling on this host —
-/// but the stronger wording belongs here only once the write gate observes
-/// wire contact. Tracked as
-/// <https://github.com/ocx-sh/ocx/issues/348>.
-///
-/// # Logical, not transport
-///
-/// `identifier` is the coordinate the caller resolved, **not** the address the
-/// bytes travelled over: an operator's `[mirrors]` entry or an index
-/// indirection can redirect the fetch to a different endpoint or repository,
-/// and the marker still records the logical one. That is deliberate and
-/// matches `crate::project::consent::source_of` — consent has one identity,
-/// and pinning it to routing is the failure `adr_lock_records_physical_address.md`
-/// was rejected for. Both redirects are operator-configured (`config.toml`
-/// tiers only; a project's `ocx.toml` reaches neither), and the content is
-/// digest-verified whichever endpoint serves it, so a redirect cannot
-/// substitute different bytes. What the marker consequently does not answer is
-/// *who published* them — that is `[[trust.policy]]` plus signature
-/// verification, the same residual consent carries generally.
-///
-/// It therefore MUST NOT be called from a local-store hit
-/// (`tasks::common::find_in_store`, `find_or_install`) or from `pull_local`
-/// (a local tarball, whose repository is author-supplied text no registry ever
-/// vouched for). Composing a namespace-granted project reaches those paths, so
-/// a marker written there would let a project author self-authorize by naming
-/// a repository and having the name recorded as if it had been served.
-///
-/// Idempotent and race-tolerant: one file per distinct origin, written only
-/// when absent, so concurrent pulls of different repositories at one digest do
-/// not contend. Call it against the staging [`PackageDir`] before the atomic
-/// temp→store move, so the marker is published by that same rename and a
-/// crash mid-write leaves a discarded temp tree rather than a torn marker.
+/// Call only from a materializing pull, never a store hit or `pull_local`, or a project author self-authorizes by naming a repository.
+/// Pass the staging [`PackageDir`], before the temp→store rename, or a crash can leave a torn marker in the store.
 ///
 /// # Errors
 ///
-/// Propagates the directory-creation or file-write failure.
+/// Creating the directory or writing the marker fails.
 pub async fn record_origin(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -> Result<()> {
     let origin = origin_of(identifier);
     let dir = pkg.refs_origins_dir();
@@ -492,6 +275,7 @@ pub async fn record_origin(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -
         .await
         .map_err(|e| ocx_util::error::FileError::new(dir.clone(), e))?;
 
+    // Attests a local pull, not registry vouching: a cached digest mints a marker with no wire contact (ocx-sh/ocx#348).
     let marker = dir.join(origin_marker_name(&origin));
     if tokio::fs::try_exists(&marker)
         .await
@@ -504,19 +288,10 @@ pub async fn record_origin(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -
         .map_err(|e| ocx_util::error::FileError::new(marker, e))
 }
 
-/// Registry directory + CAS shard depth (algorithm/prefix/suffix).
 const MAX_WALK_DEPTH: usize = 1 + super::cas_path::CAS_SHARD_DEPTH;
 
-/// Directory names that are part of the package layout and must not be
-/// recursed into during the store walk.
 const PACKAGE_SKIP_NAMES: &[&str] = &["content", "refs"];
 
-/// Classifies a directory for the generic walker.
-///
-/// - If a `content/` subdirectory exists and the path is valid CAS →
-///   [`WalkDecision::leaf`] with a [`PackageDir`].
-/// - If `content/` exists but the path is invalid → [`WalkDecision::skip`].
-/// - Otherwise → [`WalkDecision::descend_skip`], skipping `content`, `refs`.
 fn classify_package_dir(dir: &Path, _depth: usize) -> ocx_util::fs::WalkDecision<PackageDir> {
     if dir.join("content").is_dir() {
         if super::cas_path::is_valid_cas_path(dir) {

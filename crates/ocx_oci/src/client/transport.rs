@@ -24,43 +24,18 @@ pub fn no_progress() -> ProgressFn {
     Arc::new(|_| {})
 }
 
-/// Byte ceiling on a fallback referrers index body.
-///
-/// The fork applies the same 4 MiB bound to a native referrers response
-/// (`MAX_REFERRERS_INDEX_BYTES`, `external/rust-oci-client/src/client.rs`), but
-/// both fork constants are private and `pull_manifest_raw` — the only route to a
-/// tag-addressed document — carries no bound of its own. So this is declared
-/// here and checked **after** the read: it bounds what is parsed and
-/// re-published, not what is allocated. Pre-read bounding needs a `limit`
-/// threaded into the fork's `_pull_manifest_raw`, which every tag-addressed read
-/// in this crate would want too.
+/// Byte ceiling on a fallback referrers index body, checked after the read: it bounds what is parsed
+/// and re-published, not what is allocated.
 const MAX_FALLBACK_INDEX_BYTES: usize = 4 * 1024 * 1024;
 
-/// Descriptor-count ceiling on a fallback referrers index, mirroring the fork's
-/// private `MAX_REFERRERS_DESCRIPTORS`. The byte cap alone does not bound the
-/// work a caller does per entry: a compact descriptor is ~200 bytes, so 4 MiB of
-/// them is tens of thousands of signatures to fetch and verify for one subject.
+/// Descriptor-count ceiling on a fallback referrers index; the byte cap alone admits tens of thousands
+/// of signatures to verify.
 const MAX_FALLBACK_DESCRIPTORS: usize = 4096;
 
-/// Read-modify-write attempts before an append gives up.
-///
-/// Optimistic, with **no fairness guarantee**. Surviving your own PUT and
-/// surviving until your own read-back are different events, so a writer can be
-/// interposed on every attempt: with three writers, W3's PUT can land between
-/// W1's read-back and W1's re-read, leaving W1 to overwrite W3 from a stale
-/// base — nobody converges that round. Two writers is the case that *is*
-/// provable (the one whose PUT landed last reads its own descriptor back and
-/// stops), and it is the one `two_writers_racing_one_fallback_index_both_land`
-/// pins. Beyond it this converges with high probability at realistic fan-out
-/// and otherwise fails loudly and retryably — never with a silent drop. There
-/// is no backoff: the loser re-reads immediately.
+/// Read-modify-write attempts before an append fails retryably; convergence is guaranteed only for two writers.
 const MAX_FALLBACK_ATTEMPTS: usize = 5;
 
-/// A referrer listing plus how it was found.
-///
-/// `via` is what a caller reports as `signatures[].discovery_method`, and it is
-/// also the difference between a registry-computed answer and a mutable tag
-/// anyone with push access authored — worth surfacing rather than flattening.
+/// A referrer listing plus how it was found: registry-computed, or a mutable tag anyone with push access authored.
 #[derive(Debug, Clone)]
 pub struct ReferrersListing {
     /// The referrer descriptors, already filtered by artifact type.
@@ -97,16 +72,10 @@ fn decode_fallback_index(bytes: &[u8], tag: &str) -> Result<crate::ImageIndex> {
             bytes.len()
         )));
     }
-    // Parsed as the index shape directly rather than as `crate::Manifest`: the
-    // untagged manifest enum accepts an image manifest here, and spec step 2
-    // says a non-index at this tag is a failure to report, not a shape to
-    // interpret.
+    // Parsed as an index, not `crate::Manifest`, which would accept an image manifest spec step 2 says to refuse.
     let index: crate::ImageIndex = serde_json::from_slice(bytes).map_err(|_| ClientError::UnexpectedManifestType)?;
     crate::manifest::validate_image_index(&index)?;
     if index.manifests.len() > MAX_FALLBACK_DESCRIPTORS {
-        // `InvalidManifest` rather than `InvalidImageIndex`: the latter's inner
-        // type has a private field and no constructor, and both classify to
-        // `ExitCode::DataError` anyway.
         return Err(ClientError::InvalidManifest(format!(
             "referrers fallback index {tag} lists {} descriptors, above the {MAX_FALLBACK_DESCRIPTORS} limit",
             index.manifests.len()
@@ -120,16 +89,10 @@ fn index_carries(index: &crate::ImageIndex, digest: &str) -> bool {
     index.manifests.iter().any(|entry| entry.digest == digest)
 }
 
-/// Builds the index to push: a fresh header plus every surviving entry
-/// re-emitted field by field, with `descriptor` appended.
+/// Builds the index to push: a fresh header plus every entry re-emitted, with `descriptor` appended.
 ///
-/// Nothing is echoed. The bytes at the tag were authored by whoever can push to
-/// the repository, and this is the document the caller signs its own credentials
-/// against — so the header is reconstructed (no inherited index-level
-/// `annotations`, no `artifactType`), and each entry is re-emitted field by
-/// field rather than moved across whole. No field is dropped today; the
-/// property is that adding one to `crate::ImageIndexEntry` is a compile error
-/// here, which is where the decision to carry it belongs.
+/// Field by field, never echoed, so a new `ImageIndexEntry` field is a compile error here rather than
+/// repository-authored bytes carried into a document the caller signs against.
 fn rebuild_with(index: crate::ImageIndex, descriptor: &crate::Descriptor) -> crate::ImageIndex {
     let mut manifests: Vec<crate::ImageIndexEntry> = index
         .manifests
@@ -143,9 +106,7 @@ fn rebuild_with(index: crate::ImageIndex, descriptor: &crate::Descriptor) -> cra
             artifact_type: entry.artifact_type,
         })
         .collect();
-    // Spec step 5: `artifactType` MUST be set to the pushed manifest's, and all
-    // its annotations MUST be copied. cosign's own fallback write loses both
-    // (sigstore/cosign#4641); getting them right is the point of this method.
+    // Spec step 5: `artifactType` and every annotation MUST carry over (cosign drops both, sigstore/cosign#4641).
     manifests.push(crate::ImageIndexEntry {
         media_type: descriptor.media_type.clone(),
         digest: descriptor.digest.clone(),
@@ -160,13 +121,9 @@ fn rebuild_with(index: crate::ImageIndex, descriptor: &crate::Descriptor) -> cra
     }
 }
 
-/// Converts fallback-index entries to descriptors, applying the artifact-type
-/// filter the tag schema has no server-side equivalent for.
+/// Converts fallback-index entries to descriptors, filtering by artifact type client-side.
 ///
-/// `urls` is pinned to `None`: the field is a registry-dereferenced redirect, and
-/// nothing in this crate reads one. `ImageIndexEntry` does not model it, so
-/// today it cannot survive the round trip anyway — stated here so it stays a
-/// decision rather than an accident of an upstream struct.
+/// `urls` is pinned to `None`: nothing here follows a registry-dereferenced redirect.
 fn fallback_descriptors(index: crate::ImageIndex, artifact_type: Option<&str>) -> Vec<crate::Descriptor> {
     index
         .manifests
@@ -186,28 +143,17 @@ fn fallback_descriptors(index: crate::ImageIndex, artifact_type: Option<&str>) -
         .collect()
 }
 
-/// Extracts the `artifactType` and annotations a referrer descriptor must carry,
-/// from the manifest bytes that were pushed.
+/// The `artifactType` (else the config `mediaType`) and annotations a referrer descriptor must carry
+/// (tag-schema write step 5).
 ///
-/// OCI tag-schema write step 5, verbatim: *"The value of the `artifactType` MUST
-/// be set to the `artifactType` value in the pushed manifest, if present. If the
-/// `artifactType` is empty or missing in a pushed image manifest, the value of
-/// `artifactType` MUST be set to the config descriptor `mediaType` value. All
-/// annotations from the pushed manifest MUST be copied to this descriptor."*
-///
-/// Bytes that do not parse as an image manifest yield `(None, None)` rather than
-/// an error: this describes a push that already succeeded, so refusing here
-/// would fail an operation that landed. The descriptor is then merely less
-/// informative, which is the pre-existing behaviour.
+/// Unparseable bytes yield `(None, None)`, not an error: the push already landed.
 pub(super) fn referrer_descriptor_facets(
     manifest_bytes: &[u8],
 ) -> (Option<String>, Option<std::collections::BTreeMap<String, String>>) {
     let manifest = match serde_json::from_slice::<crate::ImageManifest>(manifest_bytes) {
         Ok(manifest) => manifest,
         Err(error) => {
-            // Silence here is the failure this whole path exists to prevent,
-            // arriving quietly: the descriptor loses exactly the facets spec
-            // step 5 requires, and the fallback index records the loss.
+            // Warned, not silent: the fallback index permanently records the lost facets.
             log::warn!("referrer manifest did not parse, descriptor loses its artifactType and annotations: {error}");
             return (None, None);
         }
@@ -219,38 +165,18 @@ pub(super) fn referrer_descriptor_facets(
     (artifact_type, manifest.annotations)
 }
 
-/// Decides whether a failed fallback-index PUT means the registry refused to
-/// hold the index.
+/// Maps a failed fallback-index PUT to `ReferrersUnsupported` only when the registry answered and declined.
 ///
-/// Exit 84 is "the Referrers API is absent **and** the fallback tag write was
-/// refused" — a capability verdict. A registry that answered and declined the
-/// document earns it; a credential problem or a transient fault does not, and
-/// keeps its own code so `case $?` still tells an operator which one happened.
-///
-/// `ClientError::Registry` is **not** enough on its own to earn it.
-/// `native_transport::registry_error` re-routes 401/403, 429 and 502/503/504,
-/// but its catch-all arm folds every remaining `ServerError` into
-/// `ClientError::Registry` — a plain 500 included. Reporting that as 84 would
-/// tell an operator the endpoint is not served and a rerun can never change
-/// that, about a fault where a rerun is exactly the right move. So the status
-/// is read back out: only 400, 405 or 422, or a structured OCI error envelope
-/// (the registry understood the document and named its objection), is a
-/// decline.
+/// Not on `ClientError::Registry` alone, which folds in a plain 500: exit 84 would claim no rerun can help.
 fn fallback_write_refused(error: ClientError, image: &crate::native::Reference) -> ClientError {
     let declined = match &error {
         ClientError::Registry(source) => registry_declined(source.as_ref()),
-        // A manifest PUT answered with something that is not a manifest response
-        // is an endpoint that does not serve this. `InvalidManifest` is
-        // deliberately absent: it says ocx built a bad document, and blaming the
-        // registry for that is the same mistake in the other direction.
+        // Not `InvalidManifest`: that is ocx's own bad document, not the registry declining.
         ClientError::UnexpectedManifestType | ClientError::NotAManifest(_) => true,
         _ => false,
     };
     if declined {
-        // The declining error is dropped here — `ReferrersUnsupported` carries
-        // only a registry — so the status the registry actually answered has
-        // nowhere else to go. Without this line an operator cannot tell a 400
-        // from a 422 from a non-manifest response.
+        // Logged, because `ReferrersUnsupported` drops the status the registry declined with.
         log::debug!("registry declined the referrers fallback index, reported as unsupported: {error}");
         return ClientError::ReferrersUnsupported {
             registry: image.resolve_registry().to_string(),
@@ -259,49 +185,24 @@ fn fallback_write_refused(error: ClientError, image: &crate::native::Reference) 
     error
 }
 
-/// The fallback index cannot hold this referrer, and no rerun changes that.
+/// The fallback index cannot hold this referrer; the call site logs which limit was hit.
 ///
-/// Exit 84, the same verdict a refused PUT earns. Not 75 — nothing here is
-/// transient. Not 65 either: 65 would say the *caller's* document is malformed,
-/// when what is full is the registry-side index. The honest reading of 84 for
-/// this case is "this registry cannot serve referrers for this subject", and
-/// the remedy 84 already tells an operator — use a registry with the Referrers
-/// API — is the correct one, since the API has no such ceiling.
-///
-/// The variant carries only a registry, so which limit was hit is logged at the
-/// call site rather than squeezed into the message.
+/// `ReferrersUnsupported` (84): 75 would promise a rerun helps, 65 would blame the caller's document.
 fn index_cannot_hold_it(image: &crate::native::Reference) -> ClientError {
     ClientError::ReferrersUnsupported {
         registry: image.resolve_registry().to_string(),
     }
 }
 
-/// Whether a boxed transport error is the registry *declining* the document
-/// rather than failing to handle it.
+/// Whether a boxed transport error is the registry declining the document.
 ///
-/// Anything that is not a recognisable `oci_client` answer is not a decline:
-/// the conservative direction here is to leave the error its own exit code,
-/// because 84 is the one that tells a script to stop retrying.
+/// Anything unrecognised is not a decline, since 84 tells a script to stop retrying.
 fn registry_declined(source: &(dyn std::error::Error + 'static)) -> bool {
     use oci_client::errors::OciDistributionError;
     match source.downcast_ref::<OciDistributionError>() {
-        // The statuses that mean *answered and declined* a manifest PUT. Not
-        // every 4xx: 401/403 never arrive here (`registry_error` routes them to
-        // `Authentication`), and a 404 on a PUT is a repository problem, not a
-        // verdict on the document.
+        // Only answered-and-declined statuses; a 404 on a PUT is a repository problem, not a verdict.
         Some(OciDistributionError::ServerError { code, .. }) => matches!(code, 400 | 405 | 422),
-        // An error envelope is the registry naming its objection in OCI's own
-        // vocabulary. The two envelope codes that are not objections —
-        // unauthorized/denied and too-many-requests — never reach here:
-        // `registry_error` maps them to `Authentication` and
-        // `RegistryTransient` before this sees them.
-        //
-        // **No PUT reaches this arm today.** The fork builds `RegistryError`
-        // only in `validate_registry_response`, and the manifest-PUT route
-        // (`push_manifest_raw` → `extract_location_header`) raises `ServerError`
-        // unconditionally instead. So the effective decline set is `400 | 405 |
-        // 422` alone; this arm is here for a future push path that does parse
-        // the envelope, and nothing tests it because nothing can produce it.
+        // Unreachable today (`registry_error` maps these envelopes first); kept for a push path that parses one.
         Some(OciDistributionError::RegistryError { .. }) => true,
         _ => false,
     }
@@ -310,46 +211,21 @@ fn registry_declined(source: &(dyn std::error::Error + 'static)) -> bool {
 /// Outcome of a cross-repository blob mount attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountOutcome {
-    /// The registry mounted the blob into the target repository; no upload
-    /// is needed.
+    /// The registry mounted the blob into the target repository.
     Mounted,
-    /// The registry declined the mount (spec-legal 202 miss, transport error,
-    /// or a transport that doesn't implement mounting); the caller must
-    /// upload the blob through the normal path.
+    /// The registry declined or the transport cannot mount; upload normally.
     UploadRequired,
 }
 
-/// Low-level OCI registry transport operations.
+/// Low-level OCI registry transport; every method calls [`ensure_auth`](Self::ensure_auth) itself.
 ///
-/// Abstracts the wire-level OCI distribution API calls, enabling the
-/// higher-level [`super::Client`] business logic to be tested without
-/// hitting a real registry.
-///
-/// Implementations are expected to handle authentication internally.
-/// Every method calls [`ensure_auth`](Self::ensure_auth) with the
-/// appropriate operation scope before performing any network I/O, so
-/// callers never need to worry about auth ordering.
-///
-/// # Sealed
-///
-/// The supertrait lives in a private module, so only `ocx_oci` can implement
-/// this. Several of the defaults below are load-bearing security behaviour —
-/// [`list_referrers_with_fallback`](Self::list_referrers_with_fallback)'s
-/// refusal to read a capability verdict out of a 401 or a 500, and
-/// [`append_referrer_fallback_index`](Self::append_referrer_fallback_index)'s
-/// read-back and its two ceilings — and an outside implementor could opt out
-/// of all of it while still satisfying `Client::with_transport`.
-/// Consumers that want a double take one from `crate::testing` (both are
-/// `__testing`-gated, so neither exists in a release build to link to).
+/// Sealed: defaults such as [`list_referrers_with_fallback`](Self::list_referrers_with_fallback)'s 401/500
+/// refusal are security an outside impl could skip.
 #[async_trait]
 pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
     // ── Authentication ───────────────────────────────────────────────
 
-    /// Pre-authenticate for the given operation scope.
-    ///
-    /// Ensures credentials are resolved and a token is cached for
-    /// `image`'s registry with the requested operation scope (Pull or Push).
-    /// Repeated calls for the same scope are no-ops (token cache hit).
+    /// Pre-authenticate `image`'s registry for `operation`; repeat calls for a cached scope are no-ops.
     async fn ensure_auth(&self, image: &crate::native::Reference, operation: crate::RegistryOperation) -> Result<()>;
 
     // ── Read operations ──────────────────────────────────────────────
@@ -380,10 +256,7 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         accepted_media_types: &[&str],
     ) -> Result<(Vec<u8>, String)>;
 
-    /// Pulls a blob into memory, returning the raw bytes.
-    ///
-    /// Suitable for small blobs (config, metadata) where writing to disk
-    /// and reading back would be wasteful.
+    /// Pulls a small blob (config, metadata) into memory.
     async fn pull_blob(&self, image: &crate::native::Reference, digest: &crate::Digest) -> Result<Vec<u8>>;
 
     /// Pulls a blob and writes it to the specified file path.
@@ -394,45 +267,24 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         path: &Path,
     ) -> Result<()>;
 
-    /// HEAD a blob to verify existence and retrieve its content length.
-    ///
-    /// Returns `Ok(size)` if the blob exists, `Err(ClientError::BlobNotFound)` if not.
+    /// HEAD a blob: `Ok(size)`, or `ClientError::BlobNotFound`.
     async fn head_blob(&self, image: &crate::native::Reference, digest: &crate::Digest) -> Result<u64>;
 
-    /// Streams the RAW (compressed) blob bytes from the registry.
+    /// Streams the raw (compressed) blob bytes exactly as served: no decompression, hashing or progress.
     ///
-    /// Returns an [`AsyncRead`] over the compressed bytes exactly as served by
-    /// the registry. No decompression, hashing, or progress reporting is
-    /// performed here — those concerns are assembled by the caller
-    /// (`Client::pull_layer`). This keeps the transport boundary wire-level
-    /// (SRP: decompression depends on `archive/` and `utility/` which must not
-    /// leak into the transport).
-    ///
-    /// # Default implementation
-    ///
-    /// The default implementation downloads the blob to a temporary file via
-    /// [`Self::pull_blob_to_file`] and then streams the file back, so an
-    /// implementor gets a working stream from `pull_blob_to_file` alone. It has
-    /// no `VerifyingStream` — `HashingAsyncReader` in `pull_layer` is the sole
-    /// verifier there. Overriding it is what gives an implementor control over
-    /// read boundaries (`NativeTransport` streams from the registry;
-    /// `StubTransport` (`__testing`-gated) replays a
-    /// per-digest chunk plan).
+    /// The default spools through a temp file with no `VerifyingStream`: `HashingAsyncReader` in `pull_layer` is
+    /// the sole verifier.
     ///
     /// # Errors (from the returned reader)
     ///
     /// - [`ClientError::BlobNotFound`] — blob absent at call time.
-    /// - `io::Error` with fork `DigestError` source at stream end when
-    ///   `NativeTransport` is used (caller maps to
-    ///   [`ClientError::DigestMismatch`]).
+    /// - `io::Error` with a fork `DigestError` source at stream end (`NativeTransport`), mapped by the caller to
+    ///   [`ClientError::DigestMismatch`].
     async fn pull_blob_streaming(
         &self,
         image: &crate::native::Reference,
         digest: &crate::Digest,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin + 'static>> {
-        // Default: download to a temp file, then open and stream it back.
-        // Real implementations (NativeTransport) override this to stream
-        // directly from the registry without touching disk.
         let temp_file = tempfile::NamedTempFile::new().map_err(|e| ClientError::Io {
             path: std::path::PathBuf::from("<tempfile>"),
             source: e,
@@ -443,13 +295,7 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
             path: temp_path.clone(),
             source: e,
         })?;
-        // Keep the NamedTempFile alive by leaking it into the reader via a
-        // combination of tokio::io::BufReader and a guard struct so the file
-        // is not deleted before the reader is done.
-        //
-        // Simple approach: convert the temp file into a regular file handle
-        // that outlives the path reference, then use a wrapper that holds
-        // both the `File` and the `NamedTempFile` for cleanup.
+        // `temp_file` rides in the reader, or its `Drop` deletes the path mid-read.
         let reader = TempFileReader {
             file,
             _guard: temp_file,
@@ -462,8 +308,7 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
     /// Pushes a typed OCI manifest and returns the resulting digest string.
     async fn push_manifest(&self, image: &crate::native::Reference, manifest: &crate::Manifest) -> Result<String>;
 
-    /// Pushes raw manifest bytes with the given media type string.
-    /// Returns the resulting digest string.
+    /// Pushes raw manifest bytes with the given media type, returning the digest.
     async fn push_manifest_raw(
         &self,
         image: &crate::native::Reference,
@@ -471,11 +316,7 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         media_type: &str,
     ) -> Result<String>;
 
-    /// Pushes in-memory blob data. Returns the resulting digest string.
-    ///
-    /// The implementation streams the blob to the registry, invoking
-    /// `on_progress` with the cumulative byte count as data reaches the wire.
-    /// Pass [`no_progress()`] when progress reporting is not needed.
+    /// Pushes in-memory blob data, reporting cumulative bytes on the wire to `on_progress`; returns the digest.
     async fn push_blob(
         &self,
         image: &crate::native::Reference,
@@ -484,25 +325,10 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         on_progress: ProgressFn,
     ) -> Result<String>;
 
-    /// Pushes a blob whose bytes live in a file, without holding them in RAM.
+    /// Pushes a blob from a file without holding it in RAM.
     ///
-    /// Exists for transfers where the blob never needed to be in memory in the
-    /// first place — a registry-to-registry copy spools the source blob to disk
-    /// and hands the path here, so a 200 MB layer costs a file handle rather
-    /// than a 200 MB allocation per concurrent layer.
-    ///
-    /// # No default
-    ///
-    /// Required, deliberately. The obvious default — read the file, delegate to
-    /// [`Self::push_blob`] — allocates the whole blob, which is the one thing
-    /// this method exists to avoid, so a future transport that never noticed the
-    /// method would compile and quietly reintroduce the allocation. A test
-    /// double that genuinely does not care writes one line:
-    /// `push_blob_buffered` (`__testing`-gated), where buffering is stated
-    /// rather than inherited.
-    ///
-    /// Contrast [`Self::mount_blob`], whose default *is* correct for a transport
-    /// with no mounting — that is what earns a default.
+    /// No default: the obvious one (read, then [`Self::push_blob`]) compiles and silently reintroduces the
+    /// whole-blob allocation.
     async fn push_blob_from_path(
         &self,
         image: &crate::native::Reference,
@@ -511,16 +337,9 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         on_progress: ProgressFn,
     ) -> Result<String>;
 
-    /// Attempts to mount `digest` from `source_repository` into `image`'s
-    /// repository, avoiding a redundant upload when the blob is already
-    /// present elsewhere in the registry.
+    /// Attempts to mount `digest` from `source_repository` into `image`'s repository, skipping an upload.
     ///
-    /// # Default implementation
-    ///
-    /// Always returns [`MountOutcome::UploadRequired`]. Mounting is a
-    /// registry-side optimization, not a correctness requirement — a
-    /// transport that doesn't implement it (or a test double) falls back
-    /// to the normal upload path unchanged.
+    /// Default: [`MountOutcome::UploadRequired`], since mounting is an optimization only.
     async fn mount_blob(
         &self,
         image: &crate::native::Reference,
@@ -533,12 +352,7 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
 
     // ── Referrer operations (OCI 1.1) ────────────────────────────────
 
-    /// Pushes a referrer manifest with a `subject` descriptor pointing at
-    /// `subject_digest`.
-    ///
-    /// The returned descriptor identifies the pushed referrer manifest
-    /// (digest + size + media type), suitable for embedding in subsequent
-    /// Referrers-API responses.
+    /// Pushes a referrer manifest whose `subject` is `subject_digest`, returning its descriptor.
     async fn push_referrer_manifest(
         &self,
         image: &crate::native::Reference,
@@ -547,18 +361,13 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         media_type: &str,
     ) -> Result<crate::Descriptor>;
 
-    /// Lists referrers of the given subject digest via the
-    /// `/v2/<name>/referrers/<digest>` endpoint, optionally filtered to a
-    /// single artifact type.
+    /// Lists referrers of `subject_digest` via the Referrers API, optionally filtered to `artifact_type`.
     ///
-    /// When `artifact_type` is `Some`, implementations SHOULD apply it as a
-    /// server-side query filter AND MUST also filter the returned
-    /// descriptors client-side — the OCI spec permits a server to ignore the
-    /// filter, so callers can only rely on the client-side pass.
+    /// Must also filter client-side: a server may ignore the filter.
     ///
-    /// Returns `ClientError::ReferrersUnsupported` when the registry returns
-    /// 404 on the referrers endpoint (distinguished from a subject with zero
-    /// referrers, which returns an empty list).
+    /// # Errors
+    ///
+    /// [`ClientError::ReferrersUnsupported`] on a referrers-endpoint 404, unlike an empty list for a subject with none.
     async fn list_referrers(
         &self,
         image: &crate::native::Reference,
@@ -566,28 +375,10 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         artifact_type: Option<&str>,
     ) -> Result<Vec<crate::Descriptor>>;
 
-    /// Lists referrers, falling back to the OCI referrers tag schema when the
-    /// registry has no Referrers API.
+    /// Lists referrers, falling back to the OCI referrers tag schema when the registry has no Referrers API.
     ///
-    /// The fallback-capable sibling of [`Self::list_referrers`], which stays
-    /// native-only. The split is not redundancy: the capability probe
-    /// (`ReferrersApiCapability::probe`) asks "is the API there?" and reads
-    /// [`ClientError::ReferrersUnsupported`] as its answer, so a reader that
-    /// swallows the 404 cannot serve it. Callers that want a *verdict* use
-    /// `list_referrers`; callers that want the *referrers* use this.
-    ///
-    /// **This method never returns [`ClientError::ReferrersUnsupported`].** No
-    /// Referrers API and no fallback tag is an empty listing tagged
-    /// [`DiscoveryMethod::FallbackTag`] — "no signatures found", not "cannot
-    /// look". Any other transport error propagates untouched: a 401 or a 500 on
-    /// the native endpoint is not a capability verdict, and must not silently
-    /// substitute a tag anyone with push access can author.
-    ///
-    /// # Default implementation
-    ///
-    /// Delegates to [`Self::list_referrers`] and, on the unsupported verdict, to
-    /// [`Self::pull_referrer_fallback_index`] — both already correct for every
-    /// implementor, so nothing overrides this.
+    /// Never returns [`ClientError::ReferrersUnsupported`] (no fallback tag is an empty listing); any other error
+    /// propagates, never substituted by a tag anyone with push access can author.
     async fn list_referrers_with_fallback(
         &self,
         image: &crate::native::Reference,
@@ -610,33 +401,15 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         }
     }
 
-    /// Reads the OCI referrers fallback index parked at
-    /// `<algorithm>-<encoded truncated to 64>` for `subject_digest`.
+    /// Reads the OCI referrers fallback index for `subject_digest`; an absent tag is an empty index (spec step 3).
     ///
-    /// Spec step 1 of the tag-schema write procedure, and the read half of the
-    /// fallback on its own. An absent tag is an **empty index**, per spec step 3
-    /// ("if the tag returns a 404, the client MUST begin with an empty image
-    /// index") — that is the only path here that yields one. Every other refusal
-    /// is an error, because the caller that appends must be able to tell "there
-    /// is nothing there" from "I could not read what is there": treating the
-    /// second as the first would republish an empty index over every sibling
-    /// referrer this client did not author.
+    /// Only a 404 yields empty, or an appender republishes an empty index over sibling referrers it cannot read.
     ///
     /// # Errors
     ///
-    /// - [`ClientError::InvalidManifest`] — the body exceeds
-    ///   `MAX_FALLBACK_INDEX_BYTES`.
-    /// - [`ClientError::UnexpectedManifestType`] — the tag holds something that
-    ///   is not an image index (spec step 2, "SHOULD report a failure").
-    /// - [`ClientError::InvalidImageIndex`] — it fails
-    ///   [`crate::manifest::validate_image_index`].
-    /// - [`ClientError::InvalidManifest`] — it lists more than
-    ///   `MAX_FALLBACK_DESCRIPTORS` descriptors.
-    ///
-    /// # Default implementation
-    ///
-    /// Built on [`Self::pull_manifest_raw`], so every implementor — including a
-    /// test double — gets a real one over whatever manifest store it has.
+    /// - [`ClientError::InvalidManifest`] — over `MAX_FALLBACK_INDEX_BYTES` or `MAX_FALLBACK_DESCRIPTORS`.
+    /// - [`ClientError::UnexpectedManifestType`] — the tag holds something other than an image index.
+    /// - [`ClientError::InvalidImageIndex`] — it fails [`crate::manifest::validate_image_index`].
     async fn pull_referrer_fallback_index(
         &self,
         image: &crate::native::Reference,
@@ -655,59 +428,20 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         decode_fallback_index(&bytes, &tag)
     }
 
-    /// Appends `descriptor` to the fallback referrers index for `subject_digest`,
-    /// preserving its `artifactType` and annotations.
+    /// Appends `descriptor` to the fallback referrers index for `subject_digest`, keeping its `artifactType` and
+    /// annotations.
     ///
-    /// Spec steps 4–6 of the tag-schema write procedure. There is **no
-    /// conditional manifest PUT anywhere in the OCI distribution spec**, so this
-    /// is optimistic rather than atomic: read, append, write, read back, retry.
-    /// Two writers converge provably: the one whose PUT landed last reads its
-    /// own descriptor back and stops. Three do not — W3's PUT can land between
-    /// W1's failed read-back and W1's re-read, leaving W1 to overwrite W3 from a
-    /// stale base — so there is no bound on one writer's failures below its own
-    /// attempt budget. See `MAX_FALLBACK_ATTEMPTS`. Exhaustion is loud and
-    /// retryable, never a silent drop, which is the property that makes the
-    /// missing guarantee tolerable.
-    ///
-    /// The read-back checks for **this call's own descriptor**, not for a
-    /// successful PUT. A PUT that a concurrent writer immediately clobbered
-    /// returns `Ok` and loses the descriptor; only re-reading catches it. That
-    /// distinction is the whole mechanism.
-    ///
-    /// The written document is **constructed, never echoed**: the index at the
-    /// tag is authored by anyone with push access to the repository, and this
-    /// call re-publishes it under the caller's own credentials. Its header is
-    /// rebuilt and its entries are re-serialised from values that passed
-    /// validation, so an unmodelled field cannot ride through.
-    ///
-    /// # The reference must be the write reference
-    ///
-    /// `image` is propagated verbatim by [`super::sibling_tag_reference`], which
-    /// only swaps the tag, so this PUTs to whatever host it is handed. It must
-    /// therefore come from `Client::transport_write_reference` — the canonical
-    /// registry — never from a mirrored read reference: a mirror is read-only,
-    /// and deciding from one host while writing to another is the CWE-345/367
-    /// class `client.rs` already names at its addressing seams.
+    /// Optimistic, as the spec has no conditional PUT: success is this descriptor seen on read-back, since a
+    /// clobbered PUT still returns `Ok`. `image` must be
+    /// [`Client::transport_write_reference`](super::Client), never a mirror.
     ///
     /// # Errors
     ///
-    /// - Whatever [`Self::pull_referrer_fallback_index`] refuses — a refused read
-    ///   aborts the append and leaves the tag untouched.
-    /// - [`ClientError::ReferrersUnsupported`] — appending would push the index
-    ///   past `MAX_FALLBACK_DESCRIPTORS` or `MAX_FALLBACK_INDEX_BYTES`, so
-    ///   the fallback cannot hold this referrer and a rerun cannot change that.
-    ///   Exit 84, and nothing is pushed. The limit itself goes to the log,
-    ///   because the error carries only the registry.
-    /// - [`ClientError::ReferrersUnsupported`] — the registry **declined** to hold
-    ///   the index (it answered, and said no). Exit 84.
-    /// - [`ClientError::RegistryTransient`] — the retries were exhausted by
-    ///   concurrent writers. Nothing was refused and a rerun converges, so this is
-    ///   exit 75, not 84. Never an `Ok` that drops the descriptor.
-    ///
-    /// # Default implementation
-    ///
-    /// Built on [`Self::pull_referrer_fallback_index`] and
-    /// [`Self::push_manifest_raw`], for the same reason as its sibling.
+    /// - Whatever [`Self::pull_referrer_fallback_index`] refuses; the tag is left untouched.
+    /// - [`ClientError::ReferrersUnsupported`] — the index cannot hold another entry (nothing is pushed), or the
+    ///   registry declined it.
+    /// - [`ClientError::RegistryTransient`] — concurrent writers exhausted the retries; never an `Ok` that drops
+    ///   the descriptor.
     async fn append_referrer_fallback_index(
         &self,
         image: &crate::native::Reference,
@@ -722,14 +456,7 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
                 return Ok(FallbackAppend::AlreadyPresent);
             }
             let next = rebuild_with(index, descriptor);
-            // The caps above are the read's, and until here nothing applied
-            // them to a write: an index already at the ceiling would be pushed
-            // one entry past it, the PUT would land, and every later read —
-            // this method's own read-back first — would refuse the document.
-            // That is a permanent denial of signature discovery for this
-            // subject, written under OCX's own credentials, with no path in
-            // OCX that can shrink it again. Refuse before the PUT, with the
-            // code the read side gives the same document.
+            // Refused before the PUT: an over-cap index would land and then fail every later read, for good.
             if next.manifests.len() > MAX_FALLBACK_DESCRIPTORS {
                 log::warn!(
                     "referrers fallback index {tag} already lists {} descriptors; appending would pass the \
@@ -750,16 +477,8 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
             self.push_manifest_raw(&target, bytes, crate::media_type::MEDIA_TYPE_OCI_IMAGE_INDEX)
                 .await
                 .map_err(|error| fallback_write_refused(error, image))?;
-            // The read-back is the only evidence the PUT survived: a concurrent
-            // writer that read the same base index and pushed after us produced
-            // an `Ok` above while dropping this descriptor.
-            //
-            // A read-back that *errors* aborts the append without telling the
-            // caller whether the PUT landed. That ambiguity is benign only
-            // because the append is idempotent: a rerun re-reads, finds the
-            // descriptor via `index_carries`, and returns `AlreadyPresent`
-            // without a second PUT. An edit that drops that check breaks this
-            // too.
+            // The read-back is the only evidence the PUT survived a concurrent writer; after a read-back error a
+            // rerun finds the descriptor via `index_carries` instead of pushing twice.
             let after = self.pull_referrer_fallback_index(image, subject_digest).await?;
             if index_carries(&after, &descriptor.digest) {
                 return Ok(FallbackAppend::Written);
@@ -782,15 +501,9 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
 
 // ── Default-impl helpers and tests ───────────────────────────────────────────
 
-/// Reads `path` into memory and pushes it through [`OciTransport::push_blob`].
+/// Reads `path` into memory and pushes it through [`OciTransport::push_blob`], for test doubles.
 ///
-/// The body a test double gives [`OciTransport::push_blob_from_path`] when it
-/// has no streaming to preserve — buffering stated at the call site instead of
-/// inherited from a default nobody read. A production transport must not use
-/// it: the point of the file-backed push is that a 200 MB layer costs a file
-/// handle rather than a 200 MB allocation, several times over concurrently —
-/// which is why it is gated: a release build physically lacks it, and
-/// production code therefore cannot reach it.
+/// `__testing`-gated so production cannot reach the allocation `push_blob_from_path` exists to avoid.
 #[cfg(any(test, feature = "__testing"))]
 pub async fn push_blob_buffered<T: OciTransport + ?Sized>(
     transport: &T,
@@ -806,16 +519,9 @@ pub async fn push_blob_buffered<T: OciTransport + ?Sized>(
     transport.push_blob(image, data, digest, on_progress).await
 }
 
-/// RAII wrapper that holds a temporary file open for reading while keeping the
-/// [`tempfile::NamedTempFile`] guard alive so the underlying path is not
-/// deleted until the reader is dropped.
-///
-/// Used by the default implementation of
-/// [`OciTransport::pull_blob_streaming`] to stream an already-downloaded blob
-/// back as `AsyncRead`.
+/// Streams a temp file, keeping its [`tempfile::NamedTempFile`] guard alive until dropped.
 struct TempFileReader {
     file: tokio::fs::File,
-    /// Keeps the temp file on disk until this reader is dropped.
     _guard: tempfile::NamedTempFile,
 }
 
@@ -1698,7 +1404,7 @@ mod tests {
     /// A registry that *has* a Referrers API and answered badly is not a
     /// registry without one.
     ///
-    /// C-004: only [`ClientError::ReferrersUnsupported`] opens the fallback. A
+    /// Only [`ClientError::ReferrersUnsupported`] opens the fallback. A
     /// 401 or a 500 propagates with its own exit code, and the fallback tag is
     /// never read — substituting a tag anyone with push access can author for a
     /// endpoint that merely refused the caller's credentials would answer a

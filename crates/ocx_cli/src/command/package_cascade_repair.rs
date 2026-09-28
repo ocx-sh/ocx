@@ -15,22 +15,18 @@ use crate::api::data::package_cascade_repair::RepairEntry;
 use crate::options;
 
 /// Re-point a package's rolling tags at the content its versions imply.
-///
-/// Rebuilds the whole index for every rolling tag `cascade check` reports as
-/// wrong and pushes it, using only content the registry already serves - a
-/// repair publishes nothing new, it re-points. The full plan is computed
-/// first and every manifest it references is checked to still exist, so a run
-/// that cannot be completed writes nothing at all.
-///
-/// Repairing the registry does not update the public index. Pass
-/// `--tags-file PATH` to record the tags this run moved, then hand that
-/// file to `ocx package announce --tags-file PATH`.
-///
-/// Exits 0 when every attempted write succeeded, 65 when a finding remains
-/// (including a tag that cannot be fixed without publishing new content), and
-/// 64 when a package names a digest or a tag that is not a version, or when
-/// `--tags-file` is given more than one package.
 #[derive(Parser)]
+#[command(long_about = "\
+    Re-point a package's rolling tags at the content its versions imply.\n\n\
+    Rebuilds the whole index for every rolling tag `cascade check` reports as wrong and pushes it, \
+    using only content the registry already serves - a repair publishes nothing new, it re-points. \
+    The full plan is computed first and every manifest it references is checked to still exist, so \
+    a run that cannot be completed writes nothing at all.\n\n\
+    Repairing the registry does not update the public index. Pass `--tags-file PATH` to record the \
+    tags this run moved, then hand that file to `ocx package announce --tags-file PATH`.\n\n\
+    Exits 0 when every attempted write succeeded, 65 when a finding remains (including a tag that \
+    cannot be fixed without publishing new content), and 64 when a package names a digest or a tag \
+    that is not a version, or when `--tags-file` is given more than one package.")]
 pub struct PackageCascadeRepair {
     /// Compute and print the same plan without writing anything.
     #[arg(long)]
@@ -54,10 +50,8 @@ impl PackageCascadeRepair {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let audits = super::package_cascade::audit_all(&context, &self.packages).await?;
 
-        // `announce --tags-file` takes one positional package, and the file it
-        // reads is a bare list of tag names. Two packages' tags in one file
-        // would be announced against whichever package the follow-up names,
-        // moving the other's index entries to digests it never published.
+        // The file names no package, so a second package's tags would be announced against the
+        // first, moving its index entries to digests it never published.
         if self.tags_file.is_some() && audits.len() > 1 {
             return Err(crate::error::UsageError::new(format!(
                 "--tags-file holds one package's tags per file, and this run covers {}; \
@@ -69,10 +63,6 @@ impl PackageCascadeRepair {
 
         let skipped = super::package_cascade::index_layer_skipped(&audits);
 
-        // The report starts as the run that attempted nothing - which is
-        // exactly what a clean graph and a preview both end as - and each
-        // entry then gains the plan its findings imply and, unless this is a
-        // preview, the outcomes of putting that plan on the wire.
         let (reports, graphs): (Vec<_>, Vec<_>) = audits
             .into_iter()
             .map(|audit| (audit.report, (audit.observation, audit.expected)))
@@ -100,16 +90,11 @@ impl PackageCascadeRepair {
             entry.planned = planned;
         }
 
-        // Reported before the file is written. A repair mutates a registry;
-        // the report is the only record of which aliases moved, and losing it
-        // to a failed local write would leave the user unable to tell what
-        // already landed (CWE-755).
+        // Reported before the file write, or a failed local write loses the only record of which aliases moved.
         context.api().report(&report)?;
 
         if let Some(path) = &self.tags_file {
-            // Written on every run, empty included: a workflow that chains
-            // into `announce --tags-file` unconditionally must find a
-            // file there whether or not this run had anything to move.
+            // Written on every run, empty included, or an unconditional `announce --tags-file` finds no file.
             tokio::fs::write(path, announce_tags_body(&report.entries))
                 .await
                 .map_err(|error| ocx_util::error::FileError::new(path, error))
@@ -119,34 +104,16 @@ impl PackageCascadeRepair {
         Ok(crate::conventions::cascade_repair_exit_code(&report).into())
     }
 
-    /// The writes this run will put on the wire: the whole plan, or nothing at
-    /// all when the run is a preview.
-    ///
-    /// A named function rather than an `if` around the apply call so "a
-    /// preview writes nothing" is assertable without a registry - this branch
-    /// is the only thing between `--dry-run` and a live PUT.
+    /// The writes this run puts on the wire: the whole plan, or nothing on a preview.
+    // A function, not an inline `if`, so the `--dry-run` gate stays unit-testable without a registry.
     fn writes_to_attempt<'a>(&self, planned: &'a [graph::PlannedWrite]) -> &'a [graph::PlannedWrite] {
         if self.dry_run { &[] } else { planned }
     }
 }
 
-/// The alias tags one package's run hands to `ocx package announce`.
-///
-/// The tags present in the registry as this run left them, and nothing else:
-/// the aliases whose write actually landed, plus every tag an index finding
-/// names. Announce re-observes each tag it is given and commits what the
-/// registry serves, so naming a tag whose write raced, failed, was refused -
-/// or was never attempted because the run was a preview - would publish a
-/// digest this run did not put there, leaving the index wrong in a new way
-/// instead of the old one.
-///
-/// That makes the definition mode-independent: a preview wrote nothing, so it
-/// contributes no outcomes and the file holds its index findings alone. The
-/// plan a preview computed is still fully available, as `planned` in the JSON
-/// report - which is where a machine-readable plan belongs.
-///
-/// Index findings are the one class of drift a repair cannot close itself,
-/// and the announce hop is what closes them.
+/// The alias tags a run hands to `ocx package announce`: writes that landed plus every tag an
+/// index finding names. Never a raced, failed, refused or unattempted write, since announce
+/// commits whatever the registry serves and would publish a digest this run never wrote.
 fn announce_tags(report: &graph::CascadeReport, outcomes: &[apply::RepairOutcome]) -> Vec<String> {
     outcomes
         .iter()
@@ -160,13 +127,7 @@ fn announce_tags(report: &graph::CascadeReport, outcomes: &[apply::RepairOutcome
         .collect()
 }
 
-/// The `--tags-file` file body for a whole run.
-///
-/// One tag per line, sorted and deduped. A run reaching here covers exactly
-/// one package - `--tags-file` rejects more, because the file names no
-/// package and `announce` publishes it against one - so the fold over
-/// `entries` is a fold over a single entry; it stays general because the sort
-/// and the dedup are what the format needs either way.
+/// The `--tags-file` body: one tag per line, sorted and deduped.
 fn announce_tags_body(entries: &[RepairEntry]) -> String {
     let tags: BTreeSet<&str> = entries
         .iter()

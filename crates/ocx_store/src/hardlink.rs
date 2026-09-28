@@ -1,34 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Low-level hardlink primitives (create, update).
+//! Hardlink primitives; safe only because package and layer content is never written after creation.
 //!
-//! Hardlinks share an inode between two paths — used for file-level dedup
-//! when assembling a package's `content/` directory from one or more layers.
-//! Immutable package/layer content makes hardlinks safe: there's no scenario
-//! where mutating through one path would surprise a reader of another.
-//!
-//! Cross-volume hardlinks fail with `io::ErrorKind::CrossesDevices`. OCX
-//! assumes that `blobs/`, `layers/`, `packages/`, and `temp/` all live on a
-//! single filesystem — a constraint already imposed by the `temp → packages/`
-//! atomic rename. Operators who split `$OCX_HOME` across volumes will see a
-//! clear error at install time rather than a silent dedup regression.
-//!
-//! This module mirrors [`ocx_util::fs::symlink`] for consistency.
+//! Cross-volume links fail with `CrossesDevices` rather than falling back to a copy, so a split `$OCX_HOME` fails loudly.
 
 use ocx_util::error::FileError;
 
-/// File-scoped alias: every fallible operation here is one `std::fs` call on a
-/// named path, so `FileError` is the whole failure surface. `From<FileError>`
-/// reconstructs the `InternalFile` variant this module used to build by hand.
 type Result<T> = std::result::Result<T, FileError>;
 
-/// Creates a new hardlink at `link` referencing the same inode as `source`.
+/// Hardlinks `link` to `source`, creating missing parents.
 ///
-/// Creates any missing parent directories. Fails if `link` already exists.
-/// Fails with `io::ErrorKind::CrossesDevices` (or the platform equivalent)
-/// if `source` and `link` are on different filesystems — callers must keep
-/// `$OCX_HOME` on a single volume to guarantee success.
+/// # Errors
+///
+/// Fails if `link` exists, or across filesystems (`CrossesDevices`).
 pub fn create(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::Path>) -> Result<()> {
     let source = source.as_ref();
     let link = link.as_ref();
@@ -36,19 +21,7 @@ pub fn create(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::P
     Ok(())
 }
 
-/// Creates a new hardlink at `link` assuming the parent directory already exists.
-///
-/// Skips the `create_dir_all` call that [`create`] performs. Callers MUST
-/// guarantee that `link.parent()` exists — the assembly walker pre-creates all
-/// destination directories before placing files, so this invariant always holds
-/// for that code path.
-///
-/// Using this instead of [`create`] eliminates the per-file no-op
-/// `create_dir_all` syscall that would otherwise be issued for every hardlinked
-/// entry in an already-assembled directory tree.
-///
-/// Fails if `link` already exists, or with `io::ErrorKind::CrossesDevices` for
-/// cross-volume links — same contract as [`create`].
+/// [`create`] without the `create_dir_all`; `link.parent()` must already exist.
 pub(crate) fn create_in_existing_parent(
     source: impl AsRef<std::path::Path>,
     link: impl AsRef<std::path::Path>,
@@ -59,11 +32,7 @@ pub(crate) fn create_in_existing_parent(
     Ok(())
 }
 
-/// Creates or replaces a hardlink at `link` referencing `source`.
-///
-/// If `link` already exists (file or link), it is removed first. Then the
-/// hardlink is created. Fails on cross-volume for the same reason as
-/// [`create`].
+/// Like [`create`], replacing whatever is at `link`.
 pub fn update(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::Path>) -> Result<()> {
     let source = source.as_ref();
     let link = link.as_ref();
@@ -74,14 +43,6 @@ pub fn update(source: impl AsRef<std::path::Path>, link: impl AsRef<std::path::P
     create(source, link)
 }
 
-// ── Platform-specific implementation ─────────────────────────────────────────
-
-/// Creates any missing parent directories of `link` and then hardlinks
-/// `source` to `link`. Returns the raw `io::Error` on failure.
-///
-/// The body is identical on Unix and Windows — `std::fs::hard_link` handles
-/// both NTFS and POSIX filesystems. This is THE ONE place in the codebase
-/// where direct `std::fs::hard_link` is allowed, because this IS the wrapper.
 fn hard_link_or_err(source: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
     if let Some(parent) = link.parent() {
         std::fs::create_dir_all(parent)?;

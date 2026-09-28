@@ -16,27 +16,17 @@ use ocx_setup::shell_config::{self, ShellKey, ShellValue};
 use ocx_setup::{ExtraCaCertsOutcome, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
 use ocx_util::boolean_string::BooleanString;
 
-// The `--managed-config` precedence seam (`resolve_managed_config_arg`) is
-// shared with `ocx config setup` and lives in `command/config_setup.rs`.
 use crate::api::data::self_setup::SelfSetupData;
 use crate::command::config_setup::resolve_managed_config_arg;
 use crate::options::{ModifyPath, Profiles};
 
 /// Arguments of `ocx self setup`.
 ///
-/// **Not the rendered help.** clap takes a subcommand's `about`/`long_about`
-/// from the *variant* that holds this struct — `SelfGroup::Setup` — so the
-/// user-facing description of what setup does lives there, and this comment is
-/// maintainer documentation only. Each field below still renders as its own
-/// argument help.
-///
-/// The managed profile block is fenced (`# >>> ocx v1 <hash> >>>`); an edited
-/// fence is reported dirty and left alone (exit 82) unless `--force` is passed.
-/// A `[shell]` toggle write sets exactly one key and leaves the rest of
-/// `config.toml` — comments included — untouched; it is not a managed block, so
-/// it is never reported dirty, and a tier above `$OCX_HOME` still wins. On
-/// Windows, a `Restricted` execution policy makes the profile block inert;
-/// setup prints how to relax it but never changes the policy itself.
+/// An edited managed profile fence (`# >>> ocx v1 <hash> >>>`) is reported dirty
+/// and left alone (exit 82) unless `--force`. A `[shell]` toggle writes one key and
+/// keeps the rest of `config.toml`, comments included; it is never reported dirty,
+/// and a tier above `$OCX_HOME` still wins. A Windows `Restricted` execution policy
+/// makes the profile block inert; setup says how to relax it, never changes it.
 ///
 /// # Exit codes
 ///
@@ -61,6 +51,7 @@ use crate::options::{ModifyPath, Profiles};
 /// is missing or belongs to another source. Once a matching snapshot exists,
 /// a failed refresh *fetch* keeps it and reports `refresh_unavailable` with
 /// exit 0; a failure writing the refreshed snapshot to disk still errors (74).
+// Rustdoc only: clap renders `ocx self setup --help` from the `SelfGroup::Setup` variant.
 #[derive(Parser)]
 pub struct SelfSetup {
     /// Turn the per-prompt shell hook on: writes `[shell] hook = true`.
@@ -85,23 +76,19 @@ pub struct SelfSetup {
 
     /// Record how a toolchain reaches PATH: writes `activate` to
     /// `$OCX_HOME/ocx.toml`.
-    ///
-    /// `env` composes the toolchain environment on every prompt. `bin` puts
-    /// the toolchain's `bin` directory on PATH and composes nothing else, so
-    /// each binary is resolved by its launcher when it runs. `none` composes
-    /// nothing and adds nothing.
-    ///
-    /// For the global toolchain this flag writes, `bin` and `none` leave the
-    /// same PATH: `$OCX_HOME/toolchain/active/bin` is a session directory `ocx
-    /// self setup` registers once and no prompt withdraws, so the global binaries stay
-    /// reachable through their trampolines under either. The two values part
-    /// company only for a project's own toolchain.
-    ///
-    /// Omit to leave `ocx.toml` untouched; the file is created carrying only
-    /// this key if it does not exist yet. Writes the global toolchain's
-    /// setting - a project's own `ocx.toml` still decides for that project,
-    /// and `OCX_TOOLCHAIN_ACTIVATE` is the weakest tier of all, consulted only
-    /// when no file sets the key.
+    #[arg(long_help = "\
+        Record how a toolchain reaches PATH: writes `activate` to `$OCX_HOME/ocx.toml`.\n\n\
+        `env` composes the toolchain environment on every prompt. `bin` puts the toolchain's `bin` \
+        directory on PATH and composes nothing else, so each binary is resolved by its launcher \
+        when it runs. `none` composes nothing and adds nothing.\n\n\
+        For the global toolchain this flag writes, `bin` and `none` leave the same PATH: \
+        `$OCX_HOME/toolchain/active/bin` is a session directory `ocx self setup` registers once and \
+        no prompt withdraws, so the global binaries stay reachable through their trampolines under \
+        either. The two values part company only for a project's own toolchain.\n\n\
+        Omit to leave `ocx.toml` untouched; the file is created carrying only this key if it does \
+        not exist yet. Writes the global toolchain's setting - a project's own `ocx.toml` still \
+        decides for that project, and `OCX_TOOLCHAIN_ACTIVATE` is the weakest tier of all, \
+        consulted only when no file sets the key.")]
     #[arg(long = "toolchain-activate", value_enum, value_name = "MODE")]
     toolchain_activate: Option<ActivateMode>,
 
@@ -114,21 +101,14 @@ pub struct SelfSetup {
     /// The literal `latest` resolves only if the registry publishes such a tag;
     /// omitting VERSION is the recommended way to request the latest release.
     ///
-    // NOTE: `require_equals` is NOT needed here — a single-value typed positional
-    // plus named repeatable `--profile` is unambiguous to clap without it.
     #[arg(value_name = "VERSION", value_parser = |s: &str| VersionSpec::from_str(s).map_err(|e| e.to_string()))]
     version: Option<VersionSpec>,
 
-    /// The `--no-modify-path` tier of the `modify_path` ladder (Task 1):
-    /// `--no-modify-path` -> `OCX_NO_MODIFY_PATH` -> `[shell] modify_path` ->
-    /// default (modify). Resolved by [`resolve_modify_path`], never read
-    /// directly.
+    // Read only through `resolve_modify_path`, or the env and config rungs are skipped.
     #[clap(flatten)]
     modify_path: ModifyPath,
 
-    /// The `--profile`/`--no-profile` tier of the profile-target ladder:
-    /// those two flags -> `[shell] profiles` -> auto-detect. Resolved via
-    /// [`Profiles::explicit`], never read directly.
+    // Read only through `Profiles::explicit`, above `[shell] profiles` and auto-detect.
     #[clap(flatten)]
     profiles: Profiles,
 
@@ -141,22 +121,17 @@ pub struct SelfSetup {
     force: bool,
 
     /// Adopt (or clear) the corporate managed-config tier.
-    ///
-    /// Resolves an OCI reference to a managed-config artifact, synchronously
-    /// fetches and persists a snapshot, and only then writes the `[managed]`
-    /// seed fence in `$OCX_HOME/config.toml` - a fetch failure leaves no
-    /// partial state. Pass an empty string
-    /// (`--managed-config ""`) to clear an existing seed and delete the
-    /// snapshot.
-    ///
-    /// Precedence when omitted: `OCX_MANAGED_CONFIG` env var, then the
-    /// existing seed. Omit entirely to leave the managed-config tier
-    /// untouched.
-    ///
-    /// Every run reconciles an already-adopted seed against the registry, so a
-    /// newer published config is picked up here too. If that refresh cannot
-    /// reach the registry, the existing snapshot is kept and setup still
-    /// succeeds.
+    #[arg(long_help = "\
+        Adopt (or clear) the corporate managed-config tier.\n\n\
+        Resolves an OCI reference to a managed-config artifact, synchronously fetches and persists \
+        a snapshot, and only then writes the `[managed]` seed fence in `$OCX_HOME/config.toml` - a \
+        fetch failure leaves no partial state. Pass an empty string (`--managed-config \"\"`) to \
+        clear an existing seed and delete the snapshot.\n\n\
+        Precedence when omitted: `OCX_MANAGED_CONFIG` env var, then the existing seed. Omit \
+        entirely to leave the managed-config tier untouched.\n\n\
+        Every run reconciles an already-adopted seed against the registry, so a newer published \
+        config is picked up here too. If that refresh cannot reach the registry, the existing \
+        snapshot is kept and setup still succeeds.")]
     #[arg(long, value_name = "REF")]
     managed_config: Option<String>,
 
@@ -164,18 +139,13 @@ pub struct SelfSetup {
     /// introduce none, and write no `config.toml` key.
     ///
     /// Hidden: it is machine surface, not something to type.
-    // The `hide = true` precedent is flag-level, as on `self activate
-    // --reconcile` (`command/self_group/activate.rs`).
     #[clap(long = "handoff", hide = true)]
     handoff: bool,
 }
 
 impl SelfSetup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Before the bootstrap, not after: the `[shell]` write is a local,
-        // deterministic edit that does not depend on the install succeeding,
-        // and running it first means a registry failure cannot silently drop
-        // the toggle the user asked for.
+        // Before the bootstrap, so a registry failure cannot drop the requested toggle.
         self.apply_shell_flags(&context).await?;
         self.apply_toolchain_activate(&context).await?;
 
@@ -200,25 +170,17 @@ impl SelfSetup {
 
         let outcome = setup::run(&options, context.config(), context.manager(), context.file_structure()).await?;
 
-        // Advisories go to stderr (human diagnostics), never the data stream.
         emit_advisories(&context, &outcome, self.dry_run);
 
-        // A dirty profile left untouched (no --force) is a non-error outcome;
-        // the exit code is decided here by inspecting the outcomes (contract 4).
-        // Dry-run never returns the dirty code — it only reports would-skip.
         let exit = exit_code_for(&outcome, self.force, self.dry_run);
 
         context.api().report(&SelfSetupData::from_outcome(&outcome))?;
         Ok(exit)
     }
 
-    /// Write the `[shell]` toggles this invocation asked for into the home tier
-    /// (C-040), and say which tier will still decide when a higher one already
-    /// sets the key (C-034).
+    /// Write the requested `[shell]` toggles into `$OCX_HOME/config.toml`, warning when a higher tier still decides.
     ///
-    /// The target is `$OCX_HOME/config.toml` — `--config` / `OCX_CONFIG` name a
-    /// **read** override and never redirect this write. The write is not
-    /// fenced, so a failure is 74 `IoError`, never 82 `DirtyRcBlock`.
+    /// `--config` and `OCX_CONFIG` never redirect this write; a failure is 74, never 82.
     async fn apply_shell_flags(&self, context: &crate::app::Context) -> anyhow::Result<()> {
         let writes = shell_writes(self);
         if writes.is_empty() {
@@ -247,13 +209,7 @@ impl SelfSetup {
                 .await?;
             }
 
-            // Above the dry-run guard on purpose: which tier decides is a
-            // property of the setting, not of the byte-write, and `--dry-run`
-            // is the mode a user runs specifically to find out whether the
-            // toggle will take effect. The context's config was merged before
-            // this write, so it still names whichever tier set the key going
-            // in — exactly the tier that keeps deciding once the home tier
-            // says otherwise.
+            // Outside the dry-run guard: which tier decides is exactly what `--dry-run` answers.
             if let Some(tier) = overriding_tier(context.config().shell.as_ref(), key) {
                 context.ui().warn(format!(
                     "[shell] {key} is also set by {tier}, which wins over {path} - the value {written} will not take effect",
@@ -266,19 +222,7 @@ impl SelfSetup {
         Ok(())
     }
 
-    /// Write the `activate` mode this invocation asked for into the **global**
-    /// `$OCX_HOME/ocx.toml`.
-    ///
-    /// The sibling of [`Self::apply_shell_flags`], and it keeps that method's
-    /// two rules: an omitted flag writes nothing at all, so a re-run leaves
-    /// the file byte-identical; and `--dry-run` reports the write it would
-    /// make rather than making it.
-    ///
-    /// The target is the ocx home's own `ocx.toml`, never the project in
-    /// effect — `--project` / `OCX_PROJECT` name a different toolchain and
-    /// this flag does not redirect onto it. The write itself belongs to
-    /// [`ocx_project::mutate`], which owns the file's lock and its
-    /// format-preserving edit.
+    /// Write the requested `activate` mode into the global `$OCX_HOME/ocx.toml`, never the project in effect.
     async fn apply_toolchain_activate(&self, context: &crate::app::Context) -> anyhow::Result<()> {
         let Some(mode) = self.toolchain_activate else {
             return Ok(());
@@ -297,10 +241,7 @@ impl SelfSetup {
     }
 }
 
-/// The value one [`ShellKey`] write carries, owned so a `Paths` write survives
-/// past [`shell_writes`]'s return — [`ShellValue::Paths`] only borrows a
-/// slice, and the `Vec<PathBuf>` [`Profiles::explicit`] hands back has nowhere
-/// else to live.
+/// The value one [`ShellKey`] write carries, owned because [`ShellValue::Paths`] only borrows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellWriteValue {
     Bool(bool),
@@ -325,19 +266,9 @@ fn describe_shell_write_value(value: &ShellWriteValue) -> String {
     }
 }
 
-/// The `[shell]` writes this invocation asked for, in
-/// `hook`-then-`completions`-then-`modify_path`-then-`profiles` order
-/// (C-040).
+/// The `[shell]` writes this invocation asked for; only a typed key writes, so a bare run changes nothing.
 ///
-/// **A key contributes nothing unless it was typed explicitly** — that is
-/// what makes `ocx self setup` with no new flag leave `config.toml`
-/// byte-identical.
-///
-/// **The hand-off guard lives here, not in [`SelfSetup::execute`].** A
-/// `--handoff` run must persist nothing at all: write computation stays in
-/// one place, and a future flag added to the parent cannot silently start
-/// persisting by skipping this function the way a guard in `execute` alone
-/// could be bypassed.
+/// The `--handoff` guard lives here, not in `execute`, so no future caller persists by skipping it.
 fn shell_writes(setup: &SelfSetup) -> Vec<(ShellKey, ShellWriteValue)> {
     if setup.handoff {
         return Vec::new();
@@ -360,12 +291,7 @@ fn shell_writes(setup: &SelfSetup) -> Vec<(ShellKey, ShellWriteValue)> {
     .collect()
 }
 
-/// Collapse one `--X` / `--no-X` pair into the value it requests, or `None`
-/// when neither flag was given.
-///
-/// `overrides_with` already makes clap last-wins, so both-set is unreachable
-/// from a command line; the off-wins tie-break is pinned anyway because the
-/// struct is constructible, and it matches `options::Hook`'s.
+/// Collapse one `--X` / `--no-X` pair into its requested value; off wins a tie, as in `options::Hook`.
 fn requested(on: bool, off: bool) -> Option<bool> {
     match (on, off) {
         (_, true) => Some(false),
@@ -374,15 +300,9 @@ fn requested(on: bool, off: bool) -> Option<bool> {
     }
 }
 
-/// Read `OCX_NO_MODIFY_PATH` as an explicit tri-state, in `modify_path`'s own
-/// positive sense: `Some(false)` when the variable is truthy (`1`/`y`/`yes`/
-/// `on`/`true`), `Some(true)` when it is falsy, `None` when absent or
-/// unrecognised (a WARN is logged for the latter).
+/// Read `OCX_NO_MODIFY_PATH` as a tri-state in `modify_path`'s positive sense; `None` when absent or unrecognised.
 ///
-/// **Not [`ocx_util::env::flag`]**: that helper folds "absent" and "unrecognised" into
-/// its own default and can never report `None` for a lower rung to answer
-/// instead — exactly the distinction this rung exists to preserve now that
-/// the env var no longer supplies clap's `default_value_t`.
+/// Not [`ocx_util::env::flag`]: it folds both into a default, so a lower rung could never answer.
 fn env_modify_path() -> Option<bool> {
     let raw = ocx_util::env::var(env::keys::OCX_NO_MODIFY_PATH)?;
     match BooleanString::try_from(raw.as_str()) {
@@ -397,24 +317,15 @@ fn env_modify_path() -> Option<bool> {
     }
 }
 
-/// Resolve the `modify_path` ladder (Task 1), most specific first:
-/// `--no-modify-path` -> `OCX_NO_MODIFY_PATH` -> `[shell] modify_path` ->
-/// default (modify).
+/// Resolve the `modify_path` ladder (flag, env, `[shell] modify_path`, default) and return its negation.
 ///
-/// `explicit` and `configured` are both already in `modify_path`'s positive
-/// sense (`true` = may modify) — `explicit` is [`ModifyPath::explicit`]'s
-/// answer, `configured` is `[shell] modify_path` off `context.config()`. The
-/// env var is read here rather than inside [`ModifyPath`] itself, because
-/// that type "answers only about the command line" by design (see its doc
-/// comment) — reading the environment there would make it outrank a config
-/// value nobody has looked up yet. Returns the negation, since
-/// [`SetupOptions::no_modify_path`] is spelled the other way around.
+/// The env is read here, not in [`ModifyPath`], where it would outrank the config rung.
 fn resolve_modify_path(explicit: Option<bool>, configured: Option<bool>) -> bool {
     !explicit.or_else(env_modify_path).or(configured).unwrap_or(true)
 }
 
 /// The tier that will still decide `key` after the home-tier write lands, or
-/// `None` when the write itself decides (C-034 / A-32).
+/// `None` when the write itself decides.
 fn overriding_tier(shell: Option<&ShellConfig>, key: ShellKey) -> Option<ConfigTier> {
     let shell = shell?;
     let tier = match key {
@@ -423,23 +334,13 @@ fn overriding_tier(shell: Option<&ShellConfig>, key: ShellKey) -> Option<ConfigT
         ShellKey::ModifyPath => shell.modify_path_tier,
         ShellKey::Profiles => shell.profiles_tier,
     }?;
-    // `ConfigTier` is ordered System < User < Home < Managed < Explicit, which
-    // is also the fold order, so "still decides after a home-tier write" is
-    // exactly "ranks above Home". The tier is reported by name (A-32) rather
-    // than assumed to be the managed one.
+    // `ConfigTier`'s order is the fold order, so ranking above Home means still deciding.
     (tier > ConfigTier::Home).then_some(tier)
 }
 
-/// Print the non-fatal advisories to stderr: the Windows exec-policy hint, the
-/// `--dry-run` session-PATH preview, a shadowing-`ocx` warning, a session-PATH
-/// store that could not be written, and one reload hint per PATH surface this
-/// run changed.
+/// Print the non-fatal advisories to stderr.
 ///
-/// `dry_run` is the flag this command already holds, not a new outcome variant:
-/// [`SessionPathOutcome`] answers "what is the state of this store", and a dry
-/// run's own distinguishing evidence is that not one byte moved. Without this
-/// preview the run summary reports a store as `written` on a run that wrote
-/// nothing, which reads as a completed write.
+/// Under `dry_run` the session-PATH writes are previewed, or a `written` row reads as a completed write.
 fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_run: bool) {
     if let Some(warning) = &outcome.exec_policy_warning {
         context.ui().warn(warning);
@@ -452,21 +353,14 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
             .filter(|(_, session_outcome)| *session_outcome == SessionPathOutcome::Written)
         {
             for directory in &directories {
-                // `{:?}`, not `Display`: a store path is derived from
-                // `$XDG_CONFIG_HOME`/`$HOME` and a directory from `$OCX_HOME`,
-                // none of them validated for line breaks, and a raw newline
-                // here would forge a second advisory line (CWE-117). The
-                // `SessionPathError` messages quote their paths for the same
-                // reason.
+                // `{:?}`, not `Display`: a raw newline in an unvalidated path would forge an advisory line (CWE-117).
                 context
                     .ui()
                     .status("Setup", format!("would register {directory:?} in {location:?}"));
             }
         }
     }
-    // C-036: a session-PATH write failure is an outcome, not an error — exit 0.
-    // The warning is what keeps it from being an outcome computed and
-    // discarded, and it names the re-run because that is the whole remedy.
+    // A session-PATH write failure exits 0, so this warning is its only trace.
     for (location, _) in outcome
         .session_path
         .iter()
@@ -483,10 +377,6 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
             path.display()
         ));
     }
-    // The `[shell]` C-034 warning's sibling (ocx#469): the system scope
-    // decides, so phase 0.5 wrote nothing — the report row says so, this
-    // says where the lock is and what to do about it. Same wording as the
-    // loader's warning for a lower-tier pair.
     if matches!(outcome.extra_ca_certs, ExtraCaCertsOutcome::SystemLocked) {
         context.ui().warn(format!(
             "OCX_EXTRA_CA_CERTS was not persisted: extra_ca_certs / extra_ca_certs_pem are locked by {}; edit the \
@@ -494,15 +384,7 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
             ocx_config::loader::ConfigLoader::system_path().display(),
         ));
     }
-    // One line per surface this run actually changed, because the remedy
-    // differs per surface and a single sentence has to be wrong for one of
-    // them. A shell profile is re-read by sourcing it; a session PATH is read
-    // once when the session starts (the systemd user manager for
-    // `environment.d`, `launchd` at login for the macOS agent, the desktop
-    // shell for the Windows registry value), so nothing short of a new login
-    // picks it up. `outcome.reload_hint` is the disjunction of the same three
-    // predicates and drives the JSON field; it is not re-tested here, which
-    // would only assert that a disjunct implies its own disjunction.
+    // One line per changed surface: a profile is re-sourced, a session PATH needs a new login.
     if !outcome.shims_written.is_empty() || setup::profiles_changed(&outcome.profiles) {
         context.ui().status(
             "Setup",
@@ -517,14 +399,8 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
     }
 }
 
-/// Decide the process exit code from the run outcome.
-///
-/// A profile left untouched because the user edited it (no `--force`) maps to
-/// [`OcxExitCode::DirtyRcBlock`] (82) so a script can detect it. `--force`
-/// rewrites the block (so no profile is `SkippedDirty`) and `dry_run` only
-/// reports would-skip — neither returns 82. The `[managed]` fence carries the
-/// same dirty-fence contract (criterion 5) via
-/// [`ocx_setup::ManagedConfigSetupOutcome::Dirty`].
+/// Decide the exit code: [`OcxExitCode::DirtyRcBlock`] (82) for a dirty profile or `[managed]` fence left
+/// untouched, never under `--force` or `--dry-run`.
 fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode {
     let profile_dirty = setup::profiles_dirty(&outcome.profiles);
     let managed_config_dirty = matches!(outcome.managed_config, ocx_setup::ManagedConfigSetupOutcome::Dirty);
@@ -582,8 +458,8 @@ mod tests {
         }
     }
 
-    /// C-040 / S-016 — the load-bearing negative: `ocx self setup` with neither
-    /// flag of a pair requests no write at all, so `config.toml` is left
+    /// The load-bearing negative: `ocx self setup` with neither flag of a
+    /// pair requests no write at all, so `config.toml` is left
     /// byte-identical.
     #[test]
     fn neither_flag_requests_no_write() {
@@ -594,7 +470,7 @@ mod tests {
         );
     }
 
-    /// C-040: each pair writes its own key, in both directions.
+    /// Each pair writes its own key, in both directions.
     #[test]
     fn each_pair_writes_its_own_key_in_both_directions() {
         for (args, expected) in [
@@ -620,7 +496,7 @@ mod tests {
         }
     }
 
-    /// C-040: the pairs are POSIX last-wins, so passing both is not an error —
+    /// The pairs are POSIX last-wins, so passing both is not an error —
     /// `overrides_with` clears the loser, and the survivor decides.
     #[test]
     fn a_repeated_pair_is_last_wins_not_an_error() {
@@ -642,7 +518,7 @@ mod tests {
         );
     }
 
-    /// C-040: the flags sit before the positional and are booleans, so VERSION
+    /// The flags sit before the positional and are booleans, so VERSION
     /// is never swallowed by one of them.
     #[test]
     fn the_positional_survives_a_preceding_flag() {
@@ -657,7 +533,7 @@ mod tests {
         );
     }
 
-    /// C-034 / S-016(b): a tier above home still decides after the write, and
+    /// A tier above home still decides after the write, and
     /// it is named by the tier that actually set the key — never a hard-coded
     /// "managed".
     #[test]
@@ -678,7 +554,7 @@ mod tests {
         }
     }
 
-    /// C-034: a tier at or below home loses to the home-tier write, so there is
+    /// A tier at or below home loses to the home-tier write, so there is
     /// nothing to report — and neither does a key no tier set.
     #[test]
     fn home_and_below_are_not_reported() {
@@ -696,7 +572,7 @@ mod tests {
         );
     }
 
-    /// C-034 drift guard / Task 3: `overriding_tier` answers **per key**, not
+    /// Drift guard: `overriding_tier` answers **per key**, not
     /// per shared `_tier` field. Four differently-set tiers on one
     /// `ShellConfig`, each reported only for its own key.
     ///
@@ -737,7 +613,7 @@ mod tests {
         );
     }
 
-    /// C-040 drift guard: the four long flags `self setup` declares are the
+    /// Drift guard: the four long flags `self setup` declares are the
     /// same four `options::Hook` / `options::Completion` declare.
     ///
     /// `self setup` re-declares them instead of flattening the shared types,
@@ -770,7 +646,7 @@ mod tests {
         );
     }
 
-    /// C-040 drift guard, second half: `requested`'s tie-break is a hand copy
+    /// Drift guard, second half: `requested`'s tie-break is a hand copy
     /// of the one `options::Hook` uses for rungs 1 and 2, so it is compared
     /// against the original rather than trusted to have stayed equal.
     #[test]
@@ -810,7 +686,7 @@ mod tests {
         }
     }
 
-    /// C-034: the provenance is per key — a managed `hook` says nothing about
+    /// The provenance is per key — a managed `hook` says nothing about
     /// who decides `completions`.
     #[test]
     fn the_report_is_per_key() {
@@ -971,9 +847,9 @@ mod tests {
         assert!(exit_code_equals(exit_code_for(&base, false, false), 0));
     }
 
-    // ── C-042 / C-043: `--toolchain-activate` and the PATH opt-out ───────
+    // ── `--toolchain-activate` and the PATH opt-out ─────────────────────
 
-    /// C-042 / E-C5 — the load-bearing negative, in the same shape as
+    /// The load-bearing negative, in the same shape as
     /// `neither_flag_requests_no_write`: an omitted `--toolchain-activate`
     /// writes nothing at all, so a run that does not ask for the key leaves
     /// `$OCX_HOME/ocx.toml` byte-identical — and, when absent, does not create
@@ -987,7 +863,7 @@ mod tests {
         );
     }
 
-    /// C-042 / C-012 / E-C8: the flag accepts exactly the three wire spellings
+    /// The flag accepts exactly the three wire spellings
     /// `ocx.toml` itself carries, so one vocabulary serves the file and the
     /// command line.
     #[test]
@@ -1005,7 +881,7 @@ mod tests {
         }
     }
 
-    /// C-042 / E-C7: an unknown mode is a clap usage error — exit 64 — rather
+    /// An unknown mode is a clap usage error — exit 64 — rather
     /// than a value that reaches the writer. Nothing is written and nothing is
     /// created, because the parse never completes.
     #[test]
@@ -1022,7 +898,7 @@ mod tests {
         }
     }
 
-    /// C-042: the flag takes a value, so the VERSION positional is never
+    /// The flag takes a value, so the VERSION positional is never
     /// swallowed by it — the same rule `the_positional_survives_a_preceding_flag`
     /// pins for the boolean pairs.
     #[test]
@@ -1035,7 +911,7 @@ mod tests {
         assert_eq!(parsed.toolchain_activate, Some(ActivateMode::Bin));
     }
 
-    /// D-3: the flag's help states a **promise about behaviour**, not just about
+    /// The flag's help states a **promise about behaviour**, not just about
     /// a file write, and the promise is now kept on both tiers — so the text is
     /// pinned and the next person to change the behaviour has to change the
     /// promise too.
@@ -1048,7 +924,7 @@ mod tests {
     /// (`ocx_package_manager::activation::activate_mode`). `quality-cli-help.md` rates an
     /// incorrect statement of behaviour in clap-rendered text Block-tier.
     ///
-    /// The second literal is C-059's consequence, pinned in the help closest to
+    /// The second literal is the bin/none PATH equivalence's consequence, pinned close to
     /// the flag rather than only in `command-line.md` / `configuration.md` /
     /// the user guide: `session_path_holds_both_global_directories` keeps
     /// `$OCX_HOME/toolchain/active/bin` desired in *every* mode, so at the one tier
@@ -1084,13 +960,13 @@ mod tests {
                  trampolines under either. The two values part company only for a project's own \
                  toolchain."
             ),
-            "C-059's equivalence must be stated in the help closest to the flag, not only in the \
+            "the bin/none PATH equivalence must be stated in the help closest to the flag, not only in the \
              website reference; `none` that claimed to compose nothing AND add nothing was false \
              for the one tier this flag writes:\n{rendered}"
         );
     }
 
-    /// C-043 / E-X1: the opt-out is **asymmetric by construction**, and this
+    /// The opt-out is **asymmetric by construction**, and this
     /// pins that as the answer rather than leaving the precedence question
     /// open.
     ///
@@ -1113,11 +989,11 @@ mod tests {
         );
         assert!(
             !longs.iter().any(|long| long == "modify-path"),
-            "adding `--modify-path` would change C-043's precedence answer: {longs:?}"
+            "adding `--modify-path` would change the precedence answer: {longs:?}"
         );
     }
 
-    /// C-043 + A-14: `--no-modify-path` now suppresses the **whole
+    /// `--no-modify-path` now suppresses the **whole
     /// session-PATH arm**, not only the profile blocks.
     ///
     /// `quality-cli-help.md` rates an incorrect statement of behaviour in
@@ -1140,7 +1016,7 @@ mod tests {
             .to_string();
         assert!(
             long_about.to_lowercase().contains("session"),
-            "C-043: the long help must say the opt-out also suppresses the session PATH:\n{long_about}"
+            "the long help must say the opt-out also suppresses the session PATH:\n{long_about}"
         );
 
         let flag_help = command
@@ -1150,13 +1026,13 @@ mod tests {
             .expect("the flag carries help text");
         assert!(
             flag_help.to_lowercase().contains("session"),
-            "C-043: the flag's own help must say the same:\n{flag_help}"
+            "the flag's own help must say the same:\n{flag_help}"
         );
     }
 
-    /// C-037 / C-036: the rendered exit-code table gains **one** row — an
+    /// The rendered exit-code table gains **one** row — an
     /// unencodable `$OCX_HOME` is 78 — and must **not** gain a row for a
-    /// session-PATH write failure, because C-036 makes that exit 0.
+    /// session-PATH write failure, because that outcome is already exit 0.
     ///
     /// A wrong row here is the same Block-tier defect as wrong help text: it is
     /// the surface a script author reads to decide what to branch on.
@@ -1190,11 +1066,11 @@ mod tests {
         );
     }
 
-    /// C-036: `exit_code_for` must **not** learn about session-PATH outcomes.
+    /// `exit_code_for` must **not** learn about session-PATH outcomes.
     ///
     /// A `Failed` is warned about and exits 0; a `SkippedUnsupported` is
     /// ordinary. The only session-PATH condition that changes the exit code is
-    /// C-037's refusal, and that travels the `Err` arm of `setup::run` through
+    /// the unencodable-`$OCX_HOME` refusal, which travels the `Err` arm of `setup::run` through
     /// `ClassifyExitCode`, never this function.
     ///
     /// A tripwire for the likely accident — the surrounding phases all feed
@@ -1212,7 +1088,7 @@ mod tests {
 
         assert!(
             !body.contains("session_path"),
-            "C-036: a session-PATH outcome never changes the exit code:\n{body}"
+            "a session-PATH outcome never changes the exit code:\n{body}"
         );
     }
 }

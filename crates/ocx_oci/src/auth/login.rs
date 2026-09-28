@@ -1,48 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Login / logout orchestration. Two top-level async functions, not methods on
-//! `CredentialStore` — keeps the trait minimal at three protocol verbs.
+//! Login / logout orchestration.
 
 use secrecy::ExposeSecret as _;
 
 use crate::auth::registry_url::canonicalize_registry;
 use crate::auth::{AuthError, Credential, CredentialStore};
 
-/// Abstraction over the registry probe (`GET /v2/`) so `login()` can validate
-/// credentials before calling `store.put`.
+/// The registry probe (`GET /v2/`) `login()` validates a credential with before storing it.
 ///
-/// The default impl wraps `crate::Client::ensure_auth`. The trait exists because
-/// `Client::ensure_auth` resolves credentials through the cached `auth::Auth`
-/// chain rather than accepting an explicit credential — for login we MUST
-/// validate the user-supplied credential exactly, not whatever the cache
-/// happens to hold.
+/// Not `Client::ensure_auth`: that resolves through the cached auth chain, so it would validate the cache,
+/// not the supplied credential.
 #[async_trait::async_trait]
 pub trait RegistryPing: Send + Sync {
-    /// Probe the registry with `cred` applied. Returns `Ok(())` on a
-    /// successful authenticated response (2xx).
+    /// Probe the registry with `cred` applied; `Ok(())` on a 2xx.
     ///
-    /// The two failure shapes are kept apart on purpose:
-    /// [`AuthError::LoginRejected`] means the registry judged the credential
-    /// and said no, [`AuthError::ProbeFailed`] means it was never judged
-    /// because the request did not complete. Collapsing them tells a CI
-    /// wrapper to rotate a credential that was never sent, and the retry with
-    /// a fresh one fails identically, forever.
+    /// # Errors
+    /// [`AuthError::LoginRejected`] when the registry refused the credential, [`AuthError::ProbeFailed`] when
+    /// it never judged it.
     async fn ping(&self, registry: &str, cred: &Credential) -> Result<(), AuthError>;
 }
 
-/// Adapter that talks to a real OCI registry via the patched `oci-client`
-/// crate. Constructs a fresh client per call so cached auth state does not
-/// pollute the probe.
+/// [`RegistryPing`] against a real registry, on a fresh client per call so cached auth cannot pollute the probe.
 ///
-/// Carries the caller's plain-HTTP host set rather than reading the
-/// environment itself: `ocx login` must reach the registry over exactly the
-/// scheme the rest of the binary would, and that answer is the union of
-/// `[registries.<name>].insecure` and `OCX_INSECURE_REGISTRIES`
-/// (`ocx_config::insecure::insecure_hosts`) — a set a library adapter cannot assemble on
-/// its own. The extra CA roots travel the same way (ocx#448, C-006): the
-/// first command an operator runs against a registry behind a corporate
-/// proxy is this one, and it must trust what every later command trusts.
+/// Takes the caller's insecure hosts and CA roots rather than reading the environment, or login trusts
+/// differently than every later command.
 pub struct OciClientPing {
     insecure_hosts: Vec<String>,
     extra_roots: ocx_util::tls::ExtraRoots,
@@ -58,11 +41,8 @@ impl OciClientPing {
         }
     }
 
-    /// The fork `ClientConfig` one probe of `registry` runs on: the shared
-    /// [`crate::ClientBuilder`] composition (timeouts, extra CA roots) with the
-    /// protocol pinned by [`Self::protocol_for`]. Composed through the builder
-    /// rather than `ClientConfig { .. }` so this probe cannot drift from the
-    /// transport every other command dials with.
+    // Built via `ClientBuilder`, not `ClientConfig { .. }`, or the probe drifts from the transport every
+    // other command dials with.
     fn config(&self, registry: &str) -> oci_client::client::ClientConfig {
         let mut config = crate::ClientBuilder::new()
             .extra_roots(self.extra_roots.clone())
@@ -71,36 +51,8 @@ impl OciClientPing {
         config
     }
 
-    /// The scheme this probe will use for `registry`.
-    ///
-    /// Membership is byte-exact, the same comparison
-    /// [`crate::insecure_hosts`] documents and the transport makes, so an
-    /// unlisted, differently-cased or differently-ported name falls to
-    /// [`ClientProtocol::Https`] — the probe fails closed.
-    ///
-    /// The subject is the *canonicalized* registry, because [`login`]
-    /// canonicalizes before calling [`RegistryPing::ping`]. For `host[:port]`
-    /// names canonicalization is the identity, so this agrees with every other
-    /// gate. Docker Hub is the exception and deliberately unreachable: it
-    /// canonicalizes to `https://index.docker.io/v1/`, which no allowance
-    /// spelling matches.
-    ///
-    /// # Never the blanket [`ClientProtocol::Http`]
-    ///
-    /// Returning `Http` for a listed host would pick the right scheme for the
-    /// probe and destroy the transport's auth-realm guard on the way. `Http`
-    /// ignores its argument (`ClientProtocol::scheme_for`), so *every* host
-    /// reads as plaintext-eligible — and `require_secure_realm` accepts a
-    /// plaintext realm on any host that is plaintext-eligible. A registry
-    /// declared insecure could then name
-    /// `realm="http://collector.example/token"` and this probe would send the
-    /// raw Basic password there in the clear (CWE-319/CWE-522). `ocx login` is
-    /// the one command in the binary holding a password, so it is the worst
-    /// place to widen that set.
-    ///
-    /// `HttpsExcept` picks the identical scheme for the probe — `"http"` for
-    /// exactly the declared hosts, `"https"` for everything else — while
-    /// leaving the realm guard scoped to the hosts the operator actually named.
+    // Never the blanket `ClientProtocol::Http`: it makes every realm host plaintext-eligible, so an insecure
+    // registry could redirect the raw Basic password to any host in the clear.
     fn protocol_for(&self, _registry: &str) -> oci_client::client::ClientProtocol {
         oci_client::client::ClientProtocol::HttpsExcept(self.insecure_hosts.clone())
     }
@@ -114,8 +66,7 @@ impl RegistryPing for OciClientPing {
 
         let raw = RawClient::new(self.config(registry));
         let auth = to_registry_auth(cred);
-        // Use a placeholder repository — the registry only ever responds to
-        // GET /v2/ at this stage, which is repository-agnostic.
+        // Placeholder repository: `GET /v2/` is repository-agnostic.
         let reference = Reference::with_tag(registry.to_string(), "library/_".into(), "latest".into());
         raw.auth(&reference, &auth, crate::RegistryOperation::Pull)
             .await
@@ -124,14 +75,8 @@ impl RegistryPing for OciClientPing {
     }
 }
 
-/// Splits a failed probe into "the registry said no" and "the registry never
-/// answered", reusing the transport's own taxonomy rather than a second one.
-///
-/// [`crate::client::native_transport::registry_error`] is the single place that
-/// classifies an `OciDistributionError`, and it is where the plain-HTTP
-/// remediation is attached to a failed HTTPS connect — so routing through it
-/// is what makes `ocx login` against a plaintext registry say what to do
-/// instead of blaming the password.
+// Routed through `registry_error`, or a plaintext registry's failed HTTPS connect loses its remediation and
+// blames the password.
 fn probe_error(registry: &str, source: oci_client::errors::OciDistributionError) -> AuthError {
     match crate::client::native_transport::registry_error(source) {
         crate::client::error::ClientError::Authentication(_) => AuthError::LoginRejected {
@@ -155,16 +100,10 @@ fn to_registry_auth(cred: &Credential) -> oci_client::secrets::RegistryAuth {
     RegistryAuth::Basic(cred.username.clone(), cred.password.expose_secret().to_string())
 }
 
-/// Validate credentials against the registry, then store them.
+/// Validate credentials against the canonicalized registry, then store them.
 ///
-/// 1. Canonicalize `registry` via `auth::registry_url::canonicalize_registry`.
-/// 2. `GET /v2/` with the credential applied — `Ping`.
-/// 3. On Ping success, `store.put(canonical, &cred)`.
-/// 4. On Ping failure, return the `Ping`'s error — `AuthError::LoginRejected`
-///    when the registry judged the credential, `AuthError::ProbeFailed` when it
-///    never did — WITHOUT calling `put`.
-///
-/// Bad credentials never reach the store. Single most load-bearing security invariant.
+/// # Errors
+/// The probe's error, without calling `put`: bad credentials never reach the store.
 pub async fn login(
     registry: &str,
     cred: &Credential,

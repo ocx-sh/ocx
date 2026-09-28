@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the file-structure and toolchain-store error family — the `ocx_store` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_store` error family.
 
 use ocx_exit::ExitCode;
 
@@ -24,13 +23,7 @@ impl ClassifyExitCode for FileStructureError {
 }
 
 impl ClassifyExitCode for ToolchainPathError {
-    /// Every refusal here is bad *configuration* data — a group or tool name
-    /// from `ocx.toml`, `ocx.lock` or `-g` — so it maps to the same exit 78
-    /// C-013/C-014 give the parse-time validator.
-    ///
-    /// Exhaustive with no wildcard arm on purpose: a variant added later must
-    /// compile-error here rather than inherit a code nobody chose (D-V15's
-    /// finding against `CommandResolutionError::classify`).
+    /// Exhaustive, not a blanket `Some`, so a new variant cannot ship unclassified.
     fn classify(&self) -> Option<ExitCode> {
         match self {
             Self::Empty { .. }

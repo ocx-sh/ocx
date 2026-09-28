@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Configuration discovery and loading.
-//!
-//! Discovery is deliberately separated from loading so that future tiers
-//! (e.g., the project-level `ocx.toml` walk in #33) can be added by
-//! extending [`ConfigLoader::discover_paths`] without rewriting any other
-//! function. CWD is passed in via [`ConfigInputs`] rather than read from
-//! the environment, keeping the loader testable without filesystem
-//! side effects.
+//! Configuration discovery and loading; the CWD comes in via [`ConfigInputs`], never from ambient
+//! state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,143 +12,75 @@ use tokio::io::AsyncReadExt;
 
 use crate::{Config, error::ConfigSource, error::Error, error::Result};
 
-/// Upper bound for a single config file. Config files are expected to be
-/// well under 1 KiB; 64 KiB is a generous safety cap that also rules out
-/// accidentally pointing `--config` at a multi-megabyte file.
+/// Upper bound for a single config file.
 pub const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 
-/// The project file's literal name, as the CWD walk looks for it and as an
-/// explicit `--project <directory>` resolves to (RUL-55).
-///
-/// One spelling for both: the directory branch of
-/// [`ConfigLoader::resolve_explicit_project_path`] and
-/// [`ConfigLoader::walk_for_project_file`] must agree on what a project file is
-/// called, or `--project .` and a bare CWD walk would answer differently for
-/// the same directory. `--project <file>` still accepts any name, which is the
-/// spelling that exists for the exception.
+/// The project file's name, shared by the CWD walk and `--project <directory>`, or `--project .`
+/// and a bare walk would answer differently for the same directory.
 const PROJECT_FILE_NAME: &str = "ocx.toml";
 
-/// Test-only seam redirecting [`ConfigLoader::system_path`] away from
-/// `/etc/ocx/config.toml`, so the SYSTEM-scope lock path is exercisable
-/// without root. Gated per the `__OCX_*` seam convention in
-/// `subsystem-tests.md` — absent from release builds, never forwarded to
-/// child processes, not user-facing configuration.
+/// Test-only seam redirecting [`ConfigLoader::system_path`], so the SYSTEM-scope lock is
+/// exercisable without root.
 #[cfg(any(test, feature = "__testing"))]
 pub const SYSTEM_CONFIG_OVERRIDE: &str = "__OCX_TESTING_SYSTEM_CONFIG";
 
-/// Inputs to config discovery — captures all caller-provided context so the
-/// loader never reads ambient state directly.
+/// Inputs to config discovery; the loader reads no ambient state beyond these.
 pub struct ConfigInputs<'a> {
     /// `--config FILE` CLI flag (highest priority among explicit paths).
     pub explicit_path: Option<&'a Path>,
     /// `--project <FILE>` CLI flag (highest priority among project-tier sources).
     pub explicit_project_path: Option<&'a Path>,
-    /// CWD for the project-tier walk (#33). Pass `None` to disable the walk.
+    /// CWD for the project-tier walk. Pass `None` to disable the walk.
     pub cwd: Option<&'a Path>,
 }
 
-/// Result of [`ConfigLoader::load_with_local_view`]: the fully merged config
-/// alongside the local-only merged config.
+/// Result of [`ConfigLoader::load_with_local_view`]: the fully merged config and its views.
 ///
-/// "Local-only" means every discovered/explicit tier that requires no
-/// network access (system, user, `$OCX_HOME`, `OCX_CONFIG`, `--config`). The
-/// managed-config tier (a network-fetched artifact, folded in by
-/// `ConfigLoader::fold_managed_tier`) is the one exception layered on top of
-/// `local_only` to produce `merged` — the seam exists so the managed-config
-/// fetch can build its client from `local_only`'s mirror map (its own payload
-/// must not be able to redirect the route used to fetch itself).
+/// The managed-config fetch builds its client from `local_only`, or its own payload could
+/// redirect the route that fetches it.
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
-    /// The fully merged config (every tier, including any future
-    /// network-fetched tier layered on top of `local_only`).
+    /// Every tier, the managed payload included.
     pub merged: Config,
-    /// The merged config from local-only tiers.
+    /// Every tier except the managed payload.
     pub local_only: Config,
-    /// The discovered tiers alone — compiled-in defaults plus system, user and
-    /// `$OCX_HOME`, WITHOUT the explicit `OCX_CONFIG` / `--config` overlay.
-    /// This is what the managed tier folds onto.
+    /// Compiled-in defaults plus system, user and `$OCX_HOME`, without the explicit overlay; the
+    /// managed tier folds onto this.
     pub base: Config,
-    /// The explicit `OCX_CONFIG` / `--config` overlay alone — the tier that
-    /// merges on top of the managed fold.
-    ///
-    /// `base` and `overlay` are exposed as the pair, not as the pre-merged
-    /// `local_only`, so a caller can reproduce the adoption fold order for a
-    /// payload of its own: `base` -> payload -> `overlay`. `ocx config test`
-    /// is that caller.
+    /// The explicit `OCX_CONFIG` / `--config` overlay, merged on top of the managed fold; kept apart
+    /// from `base` so `ocx config test` can fold its own payload as `base` -> payload -> `overlay`.
     pub overlay: Config,
-    /// The raw managed-config snapshot `ConfigLoader::fold_managed_tier`
-    /// read from disk, if any — BEFORE the identity gate (present even when
-    /// the snapshot's provenance does not match the effective source, so a
-    /// consumer's own identity check, e.g.
-    /// [`crate::resolve_managed_config`](crate::managed::resolve_managed_config)'s `required` enforcement, still sees
-    /// a mismatched snapshot rather than a silently-absent one). `None` when
-    /// no candidate exists (including `OCX_NO_CONFIG=1`, which prunes the
-    /// candidate entirely) or the on-disk file is absent/unreadable/malformed.
-    /// Exposed so callers (`Context::try_init`) reuse this read instead of
-    /// re-reading the same file from disk.
+    /// The managed snapshot read from disk, before the identity gate, so a consumer's own identity
+    /// check sees a mismatched snapshot rather than an absent one; `None` when absent or unreadable.
     pub managed_config_snapshot: Option<crate::managed::ManagedConfigSnapshot>,
-    /// The effective managed-config target `ConfigLoader::fold_managed_tier`
-    /// resolved (from the local-only view, so the payload cannot redirect the
-    /// tier that fetched it), or `None` when no source is configured OR the
-    /// resolution errored (the fold swallows resolution errors — the caller
-    /// re-resolves to surface a malformed seed). Threaded so `Context::try_init`
-    /// reuses this single resolution for the required gate and the snapshot
-    /// identity gate instead of resolving the same target two more times.
+    /// The managed target the fold resolved from the local-only view, or `None` when unconfigured
+    /// or unresolvable (the caller re-resolves to surface a malformed seed).
     pub resolved_managed_config: Option<crate::managed::ResolvedManagedConfig>,
-    /// What the managed-config snapshot actually contributed to `merged` —
-    /// the `required` gate's input, reported by the tier that did the folding
-    /// rather than re-derived by the caller. A snapshot whose identity matches
-    /// but whose payload does not parse is
-    /// [`PayloadUnusable`](crate::managed::ManagedSnapshotState::PayloadUnusable):
-    /// it is on disk, and none of it is in `merged`.
+    /// What the managed snapshot actually contributed to `merged`, the `required` gate's input.
     pub managed_snapshot_state: crate::managed::ManagedSnapshotState,
 
-    /// Every `config.toml` path this pass could have read, in fold order and
-    /// **including ones that do not exist** (A-13).
-    ///
-    /// A consent grant can be added to any of them, so the per-prompt watch set
-    /// stats this recorded list — presence, mtime and size — instead of
-    /// re-deriving it or, worse, re-parsing config every prompt. A tier file
-    /// that did not exist becoming present is a change, which is why absent
-    /// candidates are recorded too.
+    /// Every `config.toml` path this pass could have read, in fold order, absent ones included,
+    /// since a tier file appearing is a change the per-prompt watch set must see.
     pub config_tier_paths: Vec<PathBuf>,
 
-    /// The tier whose `extra_ca_certs` / `extra_ca_certs_pem` survived the
-    /// fold into `merged` (ocx#448, DX-16) — recorded as each tier folds in,
-    /// never inferred from the value afterwards, so the origin a refusal
-    /// names is the file that actually set it. `None` when no tier set either
-    /// key.
+    /// The tier whose `extra_ca_certs` / `extra_ca_certs_pem` survived into `merged`, recorded per
+    /// fold, never inferred from the value, so a refusal names the file that set it.
     pub extra_ca_certs_tier: Option<crate::ConfigTier>,
     /// The same record for `local_only` — identical to
     /// [`Self::extra_ca_certs_tier`] unless the managed payload set a key.
     pub extra_ca_certs_tier_local: Option<crate::ConfigTier>,
 }
 
-/// Configuration loader. Stateless namespace for the discovery and loading
-/// pipeline.
+/// Stateless namespace for the discovery and loading pipeline.
 pub struct ConfigLoader;
 
 impl ConfigLoader {
-    /// Top-level entry: build the ordered path list, load, and merge.
+    /// Top-level entry: discover, load, and merge.
     ///
-    /// Layering (lowest → highest precedence):
-    /// 1. compiled-in defaults (`Self::builtin_defaults`) — never pruned
-    /// 2. system / user / `$OCX_HOME` tiers — under `OCX_NO_CONFIG=1` the user
-    ///    and `$OCX_HOME` tiers are skipped and the system tier is reduced to
-    ///    its locked sections (see `Self::retain_system_locked_sections`)
-    /// 3. managed-config snapshot (identity-gated; also suppressed by
-    ///    `OCX_NO_CONFIG=1`)
-    /// 4. `OCX_CONFIG` — if set and non-empty
-    /// 5. `--config FILE` (via [`ConfigInputs::explicit_path`])
-    ///
-    /// Explicit paths (both env-var and CLI) always load if set; they layer
-    /// on top of the discovered chain (or on top of an operator lock, or on
-    /// top of nothing, if `OCX_NO_CONFIG=1` pruned it). Empty `OCX_CONFIG=""`
-    /// is treated as unset — an escape hatch so users can disable ambient
-    /// env-var config without unsetting it.
-    ///
-    /// All filesystem I/O uses [`tokio::fs`] so the loader can run inside
-    /// the async runtime without blocking a worker thread.
+    /// Precedence, lowest first: compiled-in defaults; system, user and `$OCX_HOME`; the
+    /// identity-gated managed snapshot; `OCX_CONFIG` if non-empty; [`ConfigInputs::explicit_path`].
+    /// `OCX_NO_CONFIG=1` skips the user, `$OCX_HOME` and managed tiers and cuts the system tier to
+    /// its locked sections.
     ///
     /// # Errors
     /// Returns an error on missing explicit files, I/O failure, or TOML
@@ -163,8 +89,7 @@ impl ConfigLoader {
         Ok(Self::load_with_local_view(inputs).await?.merged)
     }
 
-    /// Like [`Self::load`], but also returns the local-only merged view
-    /// alongside the fully merged config — see [`LoadedConfig`].
+    /// Like [`Self::load`], but returning every view in [`LoadedConfig`].
     ///
     /// # Errors
     /// Same as [`Self::load`].
@@ -176,16 +101,10 @@ impl ConfigLoader {
         }
         let env_config_file = raw_env_config_file.filter(|s| !s.is_empty());
 
-        // Resolve the project-tier path first so a missing `--project` or
-        // `OCX_PROJECT` surfaces as `FileNotFound` (exit 79) before we
-        // read anything else. Phase 1 only wires error propagation — the
-        // returned path itself is consumed in later phases once the
-        // project-config schema lands.
+        // First, so a missing `--project` or `OCX_PROJECT` fails before anything else is read.
         let _project_path = Self::project_path(inputs.cwd, inputs.explicit_project_path).await?;
 
-        // `OCX_NO_CONFIG=1` prunes ambient configuration, not operator policy:
-        // the system file still loads so its locked sections survive, and is
-        // filtered to exactly those sections below.
+        // `OCX_NO_CONFIG=1` prunes ambient config, not operator policy: the system file still loads.
         let discovered: Vec<PathBuf> = if no_config {
             Self::existing_candidates(vec![Self::system_path()]).await?
         } else {
@@ -199,29 +118,18 @@ impl ConfigLoader {
             explicit_paths.push(explicit.to_path_buf());
         }
 
-        // Precedence (ADR Decision A): the managed tier folds in AFTER the
-        // discovered chain (system → user → home) but BELOW `OCX_CONFIG` and
-        // `--config`, so the explicit tiers must merge on top of the managed
-        // fold — never underneath it. The explicit overlay is loaded once and
-        // applied to both views; merging is per-section last-wins, so folding
-        // the overlay as one pre-merged `Config` is equivalent to folding its
-        // files individually.
-        // The filter applies to the discovered file tiers only: the compiled-in
-        // tier is not ambient host state, so `OCX_NO_CONFIG` does not prune it
-        // (see `builtin_defaults`) — and its entry is unlocked, so folding it in
-        // first would hand it to the filter to drop.
-        // Under the flag `discovered` is the system file alone, so its recorded
-        // extra-CA tier is `System` exactly when the pair is locked — which is
-        // exactly when the filter keeps it (ocx#469). No reset needed.
+        // Under `OCX_NO_CONFIG` the recorded extra-CA tier is `System` exactly when the filter keeps
+        // the pair, so it needs no reset.
         let (mut discovered_config, discovered_extra_ca_tier) = Self::load_and_merge_recording(&discovered).await?;
         if no_config {
             Self::retain_system_locked_sections(&mut discovered_config);
         }
+        // After the `OCX_NO_CONFIG` filter, or the unlocked compiled-in entry is dropped.
         let mut base = Self::builtin_defaults();
         base.merge(discovered_config);
+        // The explicit overlay merges on top of the managed fold, never under it.
         let (overlay, overlay_extra_ca_tier) = Self::load_and_merge_recording(&explicit_paths).await?;
-        // The overlay folds from its own empty accumulator, so the lock is
-        // consulted here, against `base`, where the system tier already sits.
+        // The overlay folds from an empty accumulator, so the lock is checked here, against `base`.
         let overlay_extra_ca_tier = overlay_extra_ca_tier
             .filter(|_| !Self::system_lock_drops_extra_ca(&base, &overlay, crate::ConfigTier::Explicit));
         let extra_ca_certs_tier_local = overlay_extra_ca_tier.or(discovered_extra_ca_tier);
@@ -229,12 +137,7 @@ impl ConfigLoader {
         let mut local_only = base.clone();
         local_only.merge(overlay.clone());
 
-        // The fold resolves its effective source from `local_only` (base +
-        // overlay) so a `[managed].source` declared ONLY in `OCX_CONFIG`/
-        // `--config` still activates the payload merge — see
-        // `fold_managed_tier`'s doc comment. Merge order is unchanged: the
-        // payload folds onto `base`, and `overlay` is applied on top of that
-        // afterward, so explicit tiers still beat payload values.
+        // Resolved from `local_only`, so an overlay-only `[managed].source` still folds its payload.
         let (
             mut merged,
             managed_config_snapshot,
@@ -247,15 +150,7 @@ impl ConfigLoader {
             .or(managed_extra_ca_tier)
             .or(discovered_extra_ca_tier);
 
-        // A-13: the candidate list, not the surviving one — `discover_paths`
-        // filtered out every tier file that does not exist, and a grant added
-        // to one of those is exactly the change the watch set must notice.
-        //
-        // Under `OCX_NO_CONFIG=1` that list is the system tier alone, matching
-        // what the flag now actually reads: the user and `$OCX_HOME` tiers are
-        // pruned, but `/etc/ocx/config.toml` still loads for its locked
-        // sections, so an operator adding one there changes the resolved config
-        // and must expire a cached verdict like any other watched file.
+        // Candidates, not survivors: a grant added to a not-yet-existing tier file is a change.
         let mut config_tier_paths: Vec<PathBuf> = if no_config {
             vec![Self::system_path()]
         } else {
@@ -277,28 +172,9 @@ impl ConfigLoader {
         })
     }
 
-    /// The compiled-in base tier — the lowest-precedence layer, below every
-    /// file tier.
-    ///
-    /// Carries exactly one setting: `ocx.sh` resolves through
-    /// [`DEFAULT_INDEX_BASE_URL`](crate::index::DEFAULT_INDEX_BASE_URL).
-    /// Seeding the marker as config rather than special-casing the namespace
-    /// downstream keeps `adr_index_indirection.md` Decision H intact — a
-    /// `[registries."<ns>"] index` value stays the SOLE protocol-kind marker,
-    /// and every existing override path applies unchanged: a different index,
-    /// `index = ""` to revert `ocx.sh` to plain OCI, or a system-scope lock.
-    ///
-    /// Deliberately NOT gated on `OCX_NO_CONFIG`: that flag prunes ambient
-    /// host state (discovered files, the managed snapshot) so a run is
-    /// reproducible, and a constant compiled into the binary is exactly the
-    /// reproducible part.
-    ///
-    /// The entry is stamped `index_is_compiled_default` so a consumer can tell
-    /// this value apart from an identical one a config file wrote. The CLI's
-    /// `build_index_sources` uses that to let an explicit `[mirrors."ocx.sh"]`
-    /// entry suppress this default — the one policy question this tier cannot
-    /// answer itself, because `[mirrors]` is only fully resolved (config plus
-    /// the forwarded `OCX_MIRRORS` env) after the loader has run.
+    /// The compiled-in base tier: routes `ocx.sh` through
+    /// [`DEFAULT_INDEX_BASE_URL`](crate::index::DEFAULT_INDEX_BASE_URL) as config, not a downstream
+    /// special case, so every override applies. Not gated on `OCX_NO_CONFIG`.
     fn builtin_defaults() -> Config {
         Config {
             registries: Some(HashMap::from([(
@@ -313,19 +189,7 @@ impl ConfigLoader {
         }
     }
 
-    /// 4th discovery candidate (ADR Decision A): the managed-config snapshot,
-    /// folded in after the `home_path()` tier and below `OCX_CONFIG`/
-    /// `--config`. Zero network here — the snapshot is read from local state
-    /// only.
-    ///
-    /// `OCX_NO_CONFIG=1` suppresses this candidate entirely (hermetic means
-    /// hermetic).
-    ///
-    /// Path duplication is avoided via
-    /// [`ManagedConfigPaths`](crate::managed_config::ManagedConfigPaths),
-    /// which the persister reaches through the store's own accessor — one
-    /// derivation, so the loader's discovery candidate and the writer's target
-    /// can never drift apart, and the loader constructs no store to find it.
+    /// The managed snapshot's path, or `None` under `OCX_NO_CONFIG=1`.
     fn managed_snapshot_candidate() -> Option<PathBuf> {
         if ocx_util::env::flag("OCX_NO_CONFIG", false) {
             return None;
@@ -334,57 +198,8 @@ impl ConfigLoader {
         Some(crate::managed_config::ManagedConfigPaths::for_ocx_home(&ocx_home).snapshot_file())
     }
 
-    /// Identity-gated one-hop-strip merge of the managed-config snapshot onto
-    /// `accumulator` (ADR Decision A).
-    ///
-    /// Resolves the effective source locally (`OCX_MANAGED_CONFIG` env
-    /// override, else the `[managed].source` seed already folded into
-    /// `local_only` — base tiers PLUS the `OCX_CONFIG`/`--config` overlay;
-    /// amended post-Codex-gate 2026-07-05, see the ADR "Loader integration"
-    /// decision — resolving from the base tiers alone let an overlay-only
-    /// seed activate `Context::try_init`'s required-gate without ever folding
-    /// its payload here), then merges the snapshot ONLY when its embedded
-    /// provenance `source` equals that effective source under canonical
-    /// [`ocx_oci::PackageRef`] equality (tag and digest significant). The
-    /// snapshot's embedded TOML is parsed as a [`Config`], its `[managed]`
-    /// table is stripped before the merge (one hop — a payload can never
-    /// redirect the tier that fetched it; a present `[managed]` is WARNed,
-    /// Decision I). Merge order is unaffected: `accumulator` (base only) is
-    /// what the payload actually folds onto — the overlay is layered on top
-    /// by the caller afterward, so explicit tiers still beat payload values.
-    ///
-    /// Every absence path — no candidate, missing/unreadable snapshot,
-    /// identity mismatch — is a silent no-op (`accumulator` returned
-    /// unchanged, debug log only): a wrong-identity snapshot must never reach
-    /// [`Config`], and a benign absent state must not WARN. An
-    /// identity-matching snapshot whose payload does not parse is the one
-    /// non-benign case and WARNs. Zero network here, ever.
-    ///
-    /// The fourth tuple element reports which of those happened as a
-    /// [`ManagedSnapshotState`](crate::managed::ManagedSnapshotState),
-    /// so `Context::try_init`'s `required` gate can fail closed on a snapshot
-    /// that exists but contributed nothing — an identity check alone reports
-    /// such a tier satisfied.
-    ///
-    /// Also returns the RAW snapshot this call read from disk (before the
-    /// identity gate below), so [`Self::load_with_local_view`] can expose it
-    /// via [`LoadedConfig::managed_config_snapshot`] and callers avoid a
-    /// second read of the same file. The raw value is `Some` even on an
-    /// identity mismatch — only a missing candidate or an
-    /// absent/unreadable/malformed on-disk file yields `None`.
-    ///
-    /// The effective [`ResolvedManagedConfig`](crate::managed::ResolvedManagedConfig)
-    /// target is returned as the third tuple element so `Context::try_init`
-    /// reuses this single resolution instead of resolving the same target two
-    /// more times. It is `None` when no source is configured OR the resolution
-    /// errored (swallowed here — the fold is best-effort; the caller re-resolves
-    /// to surface a malformed seed as the authoritative error).
-    ///
-    /// The target is resolved FIRST so a non-managed user never pays the
-    /// `snapshot.json` stat: the file is read only once a source resolves.
-    ///
-    /// The fifth element is `Some(ConfigTier::Managed)` when the payload that
-    /// folded in set an extra-CA key (ocx#448, DX-16), else `None`.
+    /// Identity-gated, one-hop-stripped merge of the managed snapshot onto `accumulator`; zero
+    /// network. Every absence is a silent no-op; the tuple feeds the [`LoadedConfig`] fields.
     async fn fold_managed_tier(
         accumulator: Config,
         local_only: &Config,
@@ -397,26 +212,15 @@ impl ConfigLoader {
     )> {
         use crate::managed::ManagedSnapshotState;
 
-        // Resolve the effective source LOCALLY: env `OCX_MANAGED_CONFIG`
-        // (suppressed by `OCX_NO_CONFIG` — hermetic) over `local_only`'s
-        // already-folded `managed.source` (base tiers — system/user/home — PLUS
-        // the `OCX_CONFIG`/`--config` overlay).
-        //
-        // Uses `resolve_managed_target` — the SAME lock-aware resolution
-        // `resolve_managed_config`'s `required` gate uses — instead of a raw
-        // env-over-seed computation. Regression (Codex-flagged 2026-07-05): a
-        // raw resolution here disagreed with the lock-aware one once the
-        // system-lock env-override guard landed: a system-locked source A
-        // plus a mismatched `OCX_MANAGED_CONFIG=B` made this gate compare the
-        // snapshot against B (mismatch, fold skipped) while the required gate
-        // separately re-resolved back to A and found the SAME snapshot
-        // satisfying — required reported satisfied with the payload silently
-        // never folded. Sharing the resolution closes the drift permanently.
+        // From `local_only`, overlay included, or an overlay-only seed arms `required` while its
+        // payload never folds here.
         let env_override = if ocx_util::env::flag(crate::env::keys::OCX_NO_CONFIG, false) {
             None
         } else {
             ocx_util::env::var(crate::env::keys::OCX_MANAGED_CONFIG).filter(|value| !value.is_empty())
         };
+        // Shared with the `required` gate, or a locked source A plus `OCX_MANAGED_CONFIG=B` skips
+        // the fold here while `required` reports A satisfied.
         let Some(resolved) = crate::managed::resolve_managed_target(local_only, env_override.as_deref())
             .ok()
             .flatten()
@@ -424,22 +228,15 @@ impl ConfigLoader {
             return Ok((accumulator, None, None, ManagedSnapshotState::Unmatched, None));
         };
 
-        // A source resolved — read the snapshot from local state only now, so a
-        // non-managed user never pays the stat above.
+        // Only now, so a non-managed user never pays the stat.
         let Some(candidate) = Self::managed_snapshot_candidate() else {
             return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched, None));
         };
         let Some(snapshot) = crate::managed_config::read_managed_config_snapshot_at(&candidate).await else {
-            // Absent, unreadable, or malformed JSON — treated as absent
-            // (benign-state rule, no per-invocation WARN).
             return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched, None));
         };
 
-        // Canonical `ocx_oci::PackageRef` equality (tag/digest significant) —
-        // never applies a snapshot fetched under a different identity, even
-        // for `required = false` tiers (CI cache-poison defense). Uses the
-        // shared `snapshot_matches_source` predicate so this gate and
-        // `resolve_managed_config`'s `required` gate can never drift.
+        // Never apply a snapshot fetched under another identity, even when not `required`.
         let identity_matches = crate::managed::snapshot_matches_source(&snapshot, &resolved.source);
         if !identity_matches {
             log::debug!(
@@ -459,12 +256,7 @@ impl ConfigLoader {
         {
             Ok(parsed) => parsed,
             Err(source) => {
-                // NOT the benign-absent case: a snapshot for THIS source is on
-                // disk and none of it can be applied. Every unknown section and
-                // key is tolerated (see `Config`), and a refused `[shell.consent]`
-                // table is dropped on its own by the call above, so reaching here
-                // means the payload is genuinely broken — worth a WARN even when
-                // `required = false`, where nothing else would report it.
+                // Not benign: WARN even when not `required`, where nothing else would report it.
                 log::warn!(
                     "managed-config snapshot for '{}' is not a usable config and was not applied; re-sync with \
                      `ocx config update` ({source})",
@@ -479,8 +271,7 @@ impl ConfigLoader {
                 ));
             }
         };
-        // ADR Decision I (one-hop): a remote payload can never redirect or
-        // loosen the tier that fetched it.
+        // One-hop: a remote payload can never redirect or loosen the tier that fetched it.
         if parsed.managed.take().is_some() {
             log::warn!(
                 "managed-config payload for '{}' contained a [managed] section; stripped before merge (a remote \
@@ -507,48 +298,13 @@ impl ConfigLoader {
         ))
     }
 
-    /// Strips the `[trust]` values a remote payload is not entitled to set,
-    /// each for its own reason.
+    /// Strips the `[trust]` values a remote payload is not entitled to set.
     ///
-    /// A `[[trust.policy]]` signer naming its key by path (`key = "/srv/acme.pub"`)
-    /// is dropped unconditionally, for the reason `trusted_root` is: the path
-    /// names the **publisher's** disk, and on a fleet machine it either does not
-    /// exist or resolves to some unrelated local file — which the consumer would
-    /// then read, sight unseen, on every verification. `ocx config push` refuses
-    /// to publish that form at all; this is the consumer-side half, because the
-    /// publish-time check runs on the publisher and a payload can reach a
-    /// machine by other routes. `key_pem` travels with the payload and is left
-    /// alone: it is bounded by `MAX_MANAGED_CONFIG_BYTES` and names no file.
-    ///
-    /// `trusted_root` names a path on the **publisher's** disk. On a fleet
-    /// machine it either does not exist or — worse — resolves to some unrelated
-    /// local file. `ocx config push` inlines it as `trusted_root_json` at
-    /// publish time precisely so this case never has to be honoured.
-    ///
-    /// `trusted_root_json`, `fulcio_url` and `rekor_url` are honoured only
-    /// behind a **digest-pinned** `[managed] source`. Otherwise the trust
-    /// material arrives over the very channel it exists to verify, and a
-    /// registry able to move the tag can swap the CA. The circularity is
-    /// broken by a pinned seed, not by policy.
-    ///
-    /// The two endpoints obey that rule for the same reason the trust root
-    /// does, and one sharper: `fulcio_url` is where the OIDC identity token is
-    /// sent. `ocx package push --sbom` has no `--fulcio-url` flag to oppose a
-    /// config value, so an unpinned payload that could set it would name the
-    /// server a signing identity is handed to.
-    ///
-    /// **`extra_ca_certs` sibling (C-002).** The root-level `extra_ca_certs`
-    /// (path form) is a plain `Config` field, not nested under
-    /// `[trust.sigstore]`, but the same reasoning as `trusted_root` applies:
-    /// a path on the publisher's disk names nothing on a fleet machine.
-    /// `extra_ca_certs_pem`, by contrast, is honoured **regardless of
-    /// pinning** (D-7) — unlike `trusted_root_json`, admitting it bypasses no
-    /// signature verification (TLS roots are never consulted there) and its
-    /// worst case needs an on-path network attacker to matter at all. See the
-    /// `adr_managed_config_tier.md` amendment of 2026-09-13 (C-013). A later
-    /// reviewer tightening this arm to match the Sigstore-only pin rule would
-    /// silently regress every unpinned fleet's registry/index CA rollout.
+    /// A path form names the publisher's disk, on a fleet machine absent or an unrelated local file
+    /// read on every verification.
     fn guard_managed_sigstore_trust(parsed: &mut Config, source: &ocx_oci::OciIdentifier) {
+        // `extra_ca_certs_pem` is honoured even unpinned: it bypasses no signature verification
+        // (`adr_managed_config_tier.md`), and pinning it would break every unpinned fleet's CA rollout.
         if parsed.extra_ca_certs.take().is_some() {
             log::warn!(
                 "managed-config payload for '{source}' set extra_ca_certs to a local path; ignored (a remote payload \
@@ -559,11 +315,10 @@ impl ConfigLoader {
         let Some(trust) = parsed.trust.as_mut() else {
             return;
         };
+        // `key_pem` stays: it travels inline, bounded, and names no file.
         for policy in &mut trust.policy {
             for signer in &mut policy.signers {
-                // `dropped` is whether a path form was present at all;
-                // `unusable` is whether removing it left the entry with no key
-                // of any kind.
+                // `unusable`: removing the path left the entry with no key at all.
                 let (dropped, unusable) = match signer {
                     ocx_trust::SignerSpec::Key(matcher) => {
                         let dropped = matcher.key.take().is_some();
@@ -580,14 +335,8 @@ impl ConfigLoader {
                      as `key_pem`)"
                 );
                 if unusable {
-                    // Blanking the field alone leaves a `KeyMatcher` with
-                    // neither `key` nor `key_pem`, which `validate_signers`
-                    // refuses by name — taking the **whole** policy down,
-                    // sibling keyless signers included, over a diagnostic the
-                    // operator never wrote. `Unknown` is the arm that already
-                    // means "this build cannot use this signer": it compiles to
-                    // no backend, so it narrows, and a policy whose signers all
-                    // narrow away is refused as `NoUsableSigner` instead.
+                    // A keyless `KeyMatcher` fails `validate_signers` and takes the whole policy down;
+                    // `Unknown` narrows instead.
                     *signer = ocx_trust::SignerSpec::Unknown;
                 }
             }
@@ -600,6 +349,8 @@ impl ConfigLoader {
                 "managed-config payload for '{source}' set [trust.sigstore] trusted_root to a local path; ignored (a                  remote payload cannot name a path on this machine — publish with `ocx config push`, which inlines                  the file as trusted_root_json)"
             );
         }
+        // Unpinned, whoever can move the tag could swap the trust root or repoint `fulcio_url`, which
+        // receives the OIDC identity token.
         if source.digest().is_none() {
             if sigstore.trusted_root_json.take().is_some() {
                 log::warn!(
@@ -619,36 +370,10 @@ impl ConfigLoader {
         }
     }
 
-    /// Discover the ordered list of config files to load (lowest precedence
-    /// first).
+    /// Discover the existing system, user and home config files, lowest precedence first.
     ///
-    /// Returns `[system_path, user_path, home_path]` filtering out `None`
-    /// and nonexistent files. The project-tier path is resolved separately
-    /// by [`Self::project_path`] because it returns a single
-    /// `Option<PathBuf>` rather than joining the tier chain.
-    ///
-    /// Async because it calls [`tokio::fs::symlink_metadata`] per candidate
-    /// path. `NotFound` candidates are silently skipped. Symlinked candidates
-    /// are rejected with a warning — an attacker who can write to a
-    /// discovered-tier location (`/etc/ocx/config.toml`,
-    /// `~/.config/ocx/config.toml`, `$OCX_HOME/config.toml`) could otherwise
-    /// point the link at any readable file and surface its contents via a
-    /// parse-error message or provoke unexpected side effects on load.
-    /// Explicit paths (`--config`, `OCX_CONFIG`) are trusted caller
-    /// input and are not subject to this check. Other I/O errors (permission
-    /// denied, stale NFS handle, EIO) are logged as warnings and the
-    /// candidate is still skipped — discovery never fails the whole process,
-    /// but an unreadable `~/.ocx/config.toml` should at least be
-    /// *diagnosable*. A race between discovery and read surfaces later as
-    /// [`Error::Io`] during [`Self::load_and_merge`].
-    ///
-    /// **The SYSTEM candidate is the exception, and best-effort is exactly
-    /// wrong for it**: it carries operator policy (every section
-    /// `Self::apply_system_locks` clamps), so skipping the file skips the
-    /// policy with it — silently, on every invocation. A symlinked or otherwise
-    /// unreadable `/etc/ocx/config.toml` is therefore
-    /// [`Error::SystemConfig`] (exit 78) rather than a warning. Absence stays
-    /// silent there too: no system file is the ordinary case.
+    /// A symlinked or unreadable candidate is skipped with a warning, or a writable tier path could
+    /// link any readable file and leak it through a parse error.
     ///
     /// # Errors
     /// Returns [`Error::SystemConfig`] when the SYSTEM candidate exists but
@@ -657,9 +382,7 @@ impl ConfigLoader {
         Self::existing_candidates(Self::tier_candidates()).await
     }
 
-    /// The ordered discovered-tier candidate list (lowest precedence first),
-    /// before any filesystem check. Pure so the tier order is testable without
-    /// touching `/etc`.
+    /// The discovered-tier candidates, lowest precedence first, before any filesystem check.
     fn tier_candidates() -> Vec<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         candidates.push(Self::system_path());
@@ -672,32 +395,20 @@ impl ConfigLoader {
         candidates
     }
 
-    /// Filesystem half of [`Self::discover_paths`]: drop candidates that do
-    /// not exist, are symlinks, or are unreadable — except the SYSTEM one,
-    /// where everything but absence is fatal (see [`Self::discover_paths`]).
-    /// Split out so the `OCX_NO_CONFIG` path can run the same checks over the
-    /// system candidate alone — that path exists so a locked section survives
-    /// the flag, which it cannot do if the candidate is dropped first.
+    /// Filesystem half of [`Self::discover_paths`], shared with the `OCX_NO_CONFIG` path so the
+    /// system candidate gets the same checks there.
     ///
     /// # Errors
     /// Returns [`Error::SystemConfig`] when the SYSTEM candidate exists but
     /// cannot be consulted.
     async fn existing_candidates(candidates: Vec<PathBuf>) -> std::result::Result<Vec<PathBuf>, Error> {
-        // join_all preserves input order, so the precedence semantics of the
-        // candidate list (system → user → $OCX_HOME) are unchanged. Running
-        // the symlink_metadata calls concurrently shaves two sequential
-        // filesystem round-trips on startup. We use `symlink_metadata` rather
-        // than `try_exists` (which follows symlinks) so the symlink-rejection
-        // branch can observe the link itself without dereferencing it.
+        // `symlink_metadata`, not `try_exists`, or the symlink branch never sees the link.
         let system = Self::system_path();
         let checks = join_all(candidates.iter().map(tokio::fs::symlink_metadata)).await;
         let mut kept = Vec::with_capacity(candidates.len());
         for (path, result) in candidates.into_iter().zip(checks) {
-            // The SYSTEM candidate is the operator's, and skipping it skips
-            // every section `apply_system_locks` would have clamped — so for
-            // that one path, anything but plain absence is fatal. Compared the
-            // same way `load_and_merge` decides to apply the locks, so the two
-            // cannot disagree about which file that is.
+            // Anything but absence is fatal here: skipping it skips every lock `apply_system_locks`
+            // would clamp. Compared as `load_and_merge` does, so both agree which file it is.
             let is_system = path == system;
             match result {
                 Ok(meta) if meta.file_type().is_symlink() => {
@@ -716,8 +427,7 @@ impl ConfigLoader {
                     );
                 }
                 Ok(_) => kept.push(path),
-                // Absence stays silent on every tier: no `/etc/ocx/config.toml`
-                // is the ordinary case on nearly every host.
+                // Silent on every tier: no `/etc/ocx/config.toml` is the ordinary case.
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => {
                     if is_system {
@@ -730,44 +440,24 @@ impl ConfigLoader {
         Ok(kept)
     }
 
-    /// Resolve the project-tier `ocx.toml` path.
+    /// Resolve the project-tier `ocx.toml`: `--project` > `OCX_PROJECT` > CWD walk > `None`, with
+    /// no `$OCX_HOME/ocx.toml` fallback.
     ///
-    /// Precedence: `explicit` (from `--project`) > `OCX_PROJECT` env
-    /// var > CWD walk > **None**. There is no implicit `$OCX_HOME/ocx.toml`
-    /// fallback — the global toolchain is reachable only via the explicit
-    /// `--global`/`OCX_GLOBAL` selector handled by
-    /// `crate::project::ProjectConfig::resolve`
-    /// (see adr_global_toolchain_tier.md §Decision 1).
-    /// `OCX_NO_PROJECT=1` prunes the walk and the env var
-    /// but does NOT prune the explicit flag (trusted caller intent, per
-    /// ADR `adr_project_toolchain_config.md` Amendment G3). Empty
-    /// `OCX_PROJECT=""` is treated as unset (escape hatch, matches
-    /// `OCX_CONFIG=""`).
-    ///
-    /// The CWD walk stops at the first `ocx.toml`, any `.git/` boundary,
-    /// or `OCX_CEILING_PATH`. Discovered (walked) paths reject symlinks;
-    /// explicit paths (flag / env) follow symlinks (trusted caller).
+    /// `OCX_NO_PROJECT=1` prunes the env var and the walk, never the flag
+    /// (`adr_project_toolchain_config.md` § Amendment G).
     ///
     /// # Errors
-    /// Returns [`Error::FileNotFound`] when an explicit source (`--project`
-    /// or `OCX_PROJECT`) names a path that does not exist (exit 79).
-    /// CWD-walk misses return `Ok(None)` — the walk treats absence as a
-    /// non-event, unlike explicit caller intent.
+    /// [`Error::FileNotFound`] when an explicit source names a missing path; a walk miss is
+    /// `Ok(None)`.
     pub async fn project_path(
         cwd: Option<&Path>,
         explicit: Option<&Path>,
     ) -> std::result::Result<Option<PathBuf>, crate::error::Error> {
-        // Tiers 1–2: an explicit selection. Follows symlinks (trusted
-        // caller intent). Missing file → FileNotFound.
+        // Tiers 1–2: an explicit selection.
         if let Some(path) = Self::explicit_project(explicit) {
             return Self::resolve_explicit_project_path(&path).await;
         }
 
-        // `OCX_NO_PROJECT=1` prunes BOTH env-var and CWD-walk lookups
-        // (Amendment G3). This diverges from `OCX_NO_CONFIG` + explicit
-        // env-var tier-config behavior deliberately: the project file is
-        // a single, unique source, not a composed tier chain — so "turn
-        // project discovery off entirely" is the useful kill switch.
         if ocx_util::env::flag("OCX_NO_PROJECT", false) {
             return Ok(None);
         }
@@ -775,27 +465,7 @@ impl ConfigLoader {
         // Tier 3: CWD walk.
         let walk_result = match cwd {
             Some(start) => {
-                // Absolutized against `start` before the walk: `current` is
-                // absolute throughout (it comes from `current_dir()` and only
-                // ever moves to `.parent()`), and `Path` equality distinguishes
-                // an absolute path from a relative one by its root component,
-                // so a relative `OCX_CEILING_PATH` could never equal any level
-                // the walk produced — the ceiling silently never fired (#380).
-                //
-                // The join alone is not enough. A ceiling only ever fires at
-                // `start` or one of its ancestors, so every useful relative
-                // spelling is `..`-prefixed, and `..` is a component `Path`
-                // equality keeps rather than folds — `<cwd>/..` is not equal to
-                // `<cwd>`'s parent. `lexical_normalize` folds it without
-                // touching the disk, which is what keeps `current` (never
-                // canonicalized) comparable.
-                //
-                // `Path::join` with an absolute value replaces, and normalizing
-                // a path that carries no `.`/`..` is the identity, so an
-                // absolute ceiling behaves exactly as it did. Empty stays the
-                // ignored value it already was, matching the `OCX_PROJECT`
-                // escape hatch above; joining it would bound the walk at
-                // `start` instead.
+                // Normalized, or a relative ceiling (`<cwd>/..`) equals no walk level and never fires.
                 let ceiling = ocx_util::env::var("OCX_CEILING_PATH")
                     .filter(|value| !value.is_empty())
                     .map(|value| ocx_util::fs::path::lexical_normalize(&start.join(value)));
@@ -803,23 +473,13 @@ impl ConfigLoader {
             }
             None => None,
         };
-        // No implicit `$OCX_HOME/ocx.toml` fallback: the global toolchain
-        // is reachable only via the explicit `--global`/`OCX_GLOBAL`
-        // selector handled in `ProjectConfig::resolve`. CWD-walk miss is a
-        // hard `None` (see adr_global_toolchain_tier.md §Decision 1).
         Ok(walk_result)
     }
 
-    /// The explicit project selection in effect, if any: the `--project`
-    /// flag outranks `OCX_PROJECT`, and `OCX_NO_PROJECT=1` prunes the env var
-    /// but never the flag (Amendment G3). `OCX_PROJECT=""` is the escape hatch
-    /// (matches `OCX_CONFIG=""` in `load()`).
+    /// The explicit project selection in effect: `--project` outranks `OCX_PROJECT`, which
+    /// `OCX_NO_PROJECT=1` prunes and an empty value unsets.
     ///
-    /// Public so a caller that turned a `None` from [`Self::project_path`]
-    /// into "no project" can say *where* it looked: a selection that named a
-    /// directory holding no `ocx.toml` is answered with that directory, not
-    /// with the working directory of a walk that never ran
-    /// ([ocx-sh/ocx#457](https://github.com/ocx-sh/ocx/issues/457)).
+    /// Lets a caller given `None` by [`Self::project_path`] name the directory it looked in.
     #[must_use]
     pub fn explicit_project(flag: Option<&Path>) -> Option<PathBuf> {
         if let Some(path) = flag {
@@ -835,37 +495,17 @@ impl ConfigLoader {
         raw_env.filter(|s| !s.is_empty()).map(PathBuf::from)
     }
 
-    /// Resolve an explicit project-tier path (from `--project` or
-    /// `OCX_PROJECT`). Explicit paths follow symlinks.
+    /// Resolve an explicit project path, following symlinks: a file under any name, or a directory's
+    /// `ocx.toml`, where none is `Ok(None)` (no project), not `FileNotFound`.
     ///
-    /// # A directory names the project it governs (RUL-55)
-    ///
-    /// `<dir>` resolves to `<dir>/ocx.toml`. Requiring a regular file made the
-    /// most common spelling — `--project .`, and every rendered toolchain
-    /// trampoline, which re-enters as `ocx --project '<project root>' exec` —
-    /// fail with `Error::Io` (exit 74) before anything ran. It also put C-068's
-    /// contract out of reach: a *directory that holds no `ocx.toml`* is **no
-    /// project** (`Ok(None)` → exit 64), which is a different answer from *this
-    /// file is missing* (exit 79), and only the directory branch can tell the
-    /// two apart.
-    ///
-    /// Everything else keeps the regular-file requirement: any filename is
-    /// still accepted (Cargo `--manifest-path` semantics), a device or FIFO is
-    /// still `Error::Io`, and a path that does not exist at all is still
-    /// `Error::FileNotFound`.
+    /// Requiring a regular file would fail `--project .` and every toolchain trampoline.
     async fn resolve_explicit_project_path(path: &Path) -> std::result::Result<Option<PathBuf>, crate::error::Error> {
-        // `tokio::fs::metadata` follows symlinks (trusted caller intent, G5).
         match tokio::fs::metadata(path).await {
             Ok(meta) if meta.file_type().is_file() => Ok(Some(path.to_path_buf())),
             Ok(meta) if meta.is_dir() => {
-                // The literal name `ocx.toml`, matching the CWD walk — the
-                // `--project <file>` spelling is what accepts any other name.
                 let candidate = path.join(PROJECT_FILE_NAME);
                 match tokio::fs::metadata(&candidate).await {
                     Ok(meta) if meta.file_type().is_file() => Ok(Some(candidate)),
-                    // No `ocx.toml` under a directory the caller named: this is
-                    // "no project", not "file not found" — the caller turns it
-                    // into `NoProjectIn` (exit 64).
                     Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
                     Ok(_) => Err(Error::Io {
                         path: candidate,
@@ -880,11 +520,7 @@ impl ConfigLoader {
                 }
             }
             Ok(_) => {
-                // Path exists but is neither a regular file nor a directory
-                // (device, FIFO). Phase 1 discards the resolved path, so if we
-                // returned `Ok(Some(path))` here the defect would silently
-                // slip through discovery and surface only at parse time.
-                // Surface now as `Error::Io` (exit 74, ADR G9).
+                // A device or FIFO fails now, or the defect surfaces only at parse time.
                 Err(Error::Io {
                     path: path.to_path_buf(),
                     tier: ConfigSource::Project,
@@ -895,11 +531,7 @@ impl ConfigLoader {
                 path: path.to_path_buf(),
                 tier: ConfigSource::Project,
             }),
-            // Other I/O errors (permission denied, stale NFS handle, EIO).
-            // Phase 1 discards the resolved path, so if we returned
-            // `Ok(Some(path))` here the error would silently vanish. Surface
-            // as `Error::Io` (exit 74) so an explicit caller gets a
-            // diagnosable failure instead of a phantom success (ADR G9).
+            // Any other I/O error fails too, never a phantom success for an explicit caller.
             Err(source) => Err(Error::Io {
                 path: path.to_path_buf(),
                 tier: ConfigSource::Project,
@@ -908,68 +540,24 @@ impl ConfigLoader {
         }
     }
 
-    /// Walk up from `start`, looking for `ocx.toml`. Stops at the first hit,
-    /// any `.git/` boundary, or `ceiling` (if set). Returns `None` if the
-    /// walk exhausts the filesystem root without finding a project file.
+    /// Walk up from `start` for `ocx.toml`, stopping at the first hit, a `.git` boundary, or
+    /// `ceiling`; a symlinked candidate is skipped.
     ///
-    /// Symlinks discovered at the walk step are rejected (G5): the candidate
-    /// is skipped and the walk continues upward. `.git/` detection uses
-    /// `symlink_metadata` as well so a `.git` symlink does not silently
-    /// weaken the boundary check. A `.git` file (git worktree linkfile) also
-    /// counts as a boundary — we match git's own "any `.git` entry" rule.
-    ///
-    /// A candidate sitting at `$OCX_HOME` is skipped the same way: that file is
-    /// the **global toolchain manifest**, reachable only through the explicit
-    /// `--global`/`OCX_GLOBAL` selector, never by discovery
-    /// (`adr_global_toolchain_tier.md` §Decision 1). Skip-and-continue rather
-    /// than a boundary — `$OCX_HOME` nested inside a real project must still
-    /// let that project be found from a deeper working directory.
-    ///
-    /// A relative `$OCX_HOME` is resolved against `start`, the same way a
-    /// relative ceiling is: `current` is absolute at every level, so a relative
-    /// root could otherwise never match one.
-    ///
-    /// Known limitation, shared with `OCX_CEILING_PATH`: the comparison is
-    /// **lexical**, so a `$OCX_HOME` spelled through a symlink (`/tmp` →
-    /// `/private/tmp` on macOS) will not match a `current` that is spelled
-    /// canonically. `current` is never canonicalized — canonicalizing one side
-    /// alone would break the other comparison, and canonicalizing both would
-    /// put a `stat` per level on the walk.
+    /// `$OCX_HOME/ocx.toml` is skipped, not a boundary: it is the global manifest
+    /// (`adr_global_toolchain_tier.md`), and a project enclosing `$OCX_HOME` must stay findable.
     async fn walk_for_project_file(start: &Path, ceiling: Option<&Path>) -> Option<PathBuf> {
-        // Resolved once, outside the loop: `$OCX_HOME` cannot change mid-walk,
-        // and `default_ocx_root` is the one definition of it (`crate::home`).
-        //
-        // Absolutized against `start` and normalized, exactly as the ceiling is
-        // above, and for the same reason. `default_ocx_root` hands back the
-        // environment value verbatim, so a relative `OCX_HOME` would be unequal
-        // to every level the walk produces — `current` is absolute throughout —
-        // and the guard would be silently inert rather than wrong. The join
-        // alone is not enough either: a relative spelling that reaches an
-        // ancestor is `..`-prefixed, and `..` is a component `Path` equality
-        // keeps rather than folds. `Path::join` with an absolute value
-        // replaces, and normalizing a path carrying no `.`/`..` is the
-        // identity, so an absolute `OCX_HOME` — every real one — behaves
-        // exactly as it would without either step.
+        // Normalized, or a relative `OCX_HOME` equals no walk level and the skip never fires.
         let ocx_home =
             crate::home::default_ocx_root().map(|root| ocx_util::fs::path::lexical_normalize(&start.join(root)));
         let mut current = start;
         loop {
-            // Probe `.git/` and `ocx.toml` concurrently; `tokio::join!` just
-            // overlaps the two stat round-trips. Precedence at each level
-            // (Amendment F): a valid `ocx.toml` at the current level wins
-            // over the `.git/` boundary — the boundary only prevents walking
-            // UP past the repo root, not accepting a project file AT the
-            // repo root. The `.git/` gate therefore fires AFTER the
-            // candidate-hit check but before ascending.
+            // The candidate check precedes the `.git` gate: an `ocx.toml` at the repo root wins.
             let candidate = current.join(PROJECT_FILE_NAME);
             let (git_present, candidate_meta) =
                 tokio::join!(Self::has_git_dir(current), tokio::fs::symlink_metadata(&candidate),);
 
             match &candidate_meta {
-                // `$OCX_HOME/ocx.toml` is the global toolchain manifest, not a
-                // project — debug, not warn, because a working directory under
-                // `$OCX_HOME` is an ordinary state for a tool whose own store
-                // lives there (#485).
+                // Debug, not warn: a working directory under `$OCX_HOME` is ordinary.
                 Ok(meta) if meta.file_type().is_file() && ocx_home.as_deref() == Some(current) => {
                     log::debug!(
                         "skipping global toolchain manifest {} during the CWD walk (reachable only via --global/OCX_GLOBAL)",
@@ -986,9 +574,7 @@ impl ConfigLoader {
                     );
                 }
                 Ok(_) => {
-                    // Directory or other non-regular file named `ocx.toml` —
-                    // treat as absent. A weird mount point shouldn't derail
-                    // discovery or cause silent success.
+                    // A non-regular `ocx.toml` reads as absent.
                 }
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => {
@@ -999,16 +585,11 @@ impl ConfigLoader {
                 }
             }
 
-            // No valid hit at this level — respect the repo boundary before
-            // ascending so we don't walk into a parent repository.
             if git_present {
                 return None;
             }
 
-            // Ceiling check runs AFTER probing the current directory so a
-            // ceiling that points exactly at a workspace containing
-            // `ocx.toml` still discovers it. The ceiling bounds the walk
-            // from going ABOVE it, not from reading AT it.
+            // After probing: the ceiling bounds going above it, not reading at it.
             if let Some(ceiling) = ceiling
                 && current == ceiling
             {
@@ -1017,20 +598,14 @@ impl ConfigLoader {
 
             match current.parent() {
                 Some(parent) => current = parent,
-                // Reached the filesystem root without a hit.
                 None => return None,
             }
         }
     }
 
-    /// Returns `true` if `dir/.git` exists as any filesystem entry (directory,
-    /// file — the git worktree "linkfile" case — or symlink).
+    /// Whether `dir/.git` exists as any entry, file or symlink included, without following it.
     ///
-    /// Fail-closed on non-`NotFound` I/O errors: if the filesystem reports
-    /// `PermissionDenied` or `EIO` for `.git`, we cannot *disprove* the
-    /// presence of a repository boundary, and silently letting the walk
-    /// cross into the parent would weaken the boundary check. The safer
-    /// default is to assume the boundary exists.
+    /// Fail-closed: an I/O error other than `NotFound` counts as a boundary.
     async fn has_git_dir(dir: &Path) -> bool {
         match tokio::fs::symlink_metadata(dir.join(".git")).await {
             Ok(_) => true,
@@ -1045,12 +620,7 @@ impl ConfigLoader {
         }
     }
 
-    /// Load and merge an ordered list of config files (lowest precedence
-    /// first). Missing files at this stage are an error — discovery should
-    /// have filtered them. Async I/O via [`tokio::fs`] + parse + merge.
-    ///
-    /// Accepts any slice of `AsRef<Path>` so callers can pass `&[PathBuf]`,
-    /// `&[&Path]`, or a borrowed single path without forced allocation.
+    /// Load and merge config files, lowest precedence first.
     ///
     /// # Errors
     /// Returns an error if any file is missing, unreadable, exceeds
@@ -1059,20 +629,13 @@ impl ConfigLoader {
         Ok(Self::load_and_merge_recording(paths).await?.0)
     }
 
-    /// Whether `contribution` sets either extra-CA key — the pair
-    /// [`Config::merge`] replaces wholesale, so the tier that supplied it is
-    /// the merged value's true provenance (ocx#448, DX-16).
+    /// Whether `contribution` sets either extra-CA key, the pair [`Config::merge`] replaces whole.
     fn sets_extra_ca_certs(contribution: &Config) -> bool {
         contribution.extra_ca_certs.is_some() || contribution.extra_ca_certs_pem.is_some()
     }
 
-    /// Whether `accumulator`'s system lock (ocx#469) drops the extra-CA pair
-    /// `contribution` sets — warning once, by tier, when it does. Consulted at
-    /// every tier-record site, so a dropped pair is neither recorded as the
-    /// provenance nor silently lost: `Config::merge` enforces, this explains.
-    /// Names the tier, the system file that holds the lock and the remedy —
-    /// never a value (D-11): a pasted bundle is not for the log, and the two
-    /// files are what the operator needs to find.
+    /// Whether `accumulator`'s system lock drops the extra-CA pair `contribution` sets, warning once
+    /// when it does; the warning never names a value, since a pasted bundle is not for the log.
     fn system_lock_drops_extra_ca(accumulator: &Config, contribution: &Config, tier: crate::ConfigTier) -> bool {
         let dropped = accumulator.extra_ca_certs_system_locked && Self::sets_extra_ca_certs(contribution);
         if dropped {
@@ -1086,7 +649,7 @@ impl ConfigLoader {
     }
 
     /// [`Self::load_and_merge`], also recording the last tier in `paths` that
-    /// set `extra_ca_certs` / `extra_ca_certs_pem` (DX-16).
+    /// set `extra_ca_certs` / `extra_ca_certs_pem`.
     ///
     /// # Errors
     /// Same as [`Self::load_and_merge`].
@@ -1095,12 +658,7 @@ impl ConfigLoader {
         let mut extra_ca_certs_tier = None;
         for path in paths {
             let path = path.as_ref();
-            // Reject a non-regular path (e.g. a directory) with a consistent
-            // message on every platform *before* opening. On Windows,
-            // `File::open` on a directory fails with a generic "Access is
-            // denied" that never reaches the `is_file()` guard below; on Unix
-            // the open succeeds and the guard fires. Stat-first makes the
-            // rejection uniform across platforms.
+            // Stat first: on Windows, opening a directory fails "Access is denied" before `is_file()`.
             if let Ok(meta) = tokio::fs::metadata(path).await
                 && !meta.file_type().is_file()
             {
@@ -1145,10 +703,7 @@ impl ConfigLoader {
                     limit: MAX_CONFIG_SIZE,
                 });
             }
-            // Bounded read so synthetic files whose `metadata.len()` is 0 but whose read is
-            // unbounded (e.g. /proc/self/mem, /proc/self/maps on Linux) can't bypass the size
-            // cap and hang/exhaust memory. The `metadata.len()` pre-check above still fast-paths
-            // normal oversized files without reading any bytes.
+            // Bounded, or a zero-length synthetic file (`/proc/self/mem`) bypasses the cap.
             let mut contents = String::new();
             let mut taken = file.take(MAX_CONFIG_SIZE + 1);
             taken.read_to_string(&mut contents).await.map_err(|source| Error::Io {
@@ -1170,9 +725,7 @@ impl ConfigLoader {
                         source,
                     }
                 })?;
-            // C7 enforcement — see [`Self::apply_system_locks`] for the full
-            // per-section rationale. Only the system file is locked; it folds
-            // in first, so locked sections ignore all lower-tier overrides.
+            // Only the system file locks; it folds in first, so every lower tier sees its locks.
             if path == Self::system_path().as_path() {
                 Self::apply_system_locks(&mut parsed);
             }
@@ -1188,13 +741,8 @@ impl ConfigLoader {
         Ok((config, extra_ca_certs_tier))
     }
 
-    /// Refuse a single config file declaring both `extra_ca_certs` and
-    /// `extra_ca_certs_pem` (S-005) — same-file ambiguity, distinct from the
-    /// cross-tier XOR [`Config::merge`] applies (C-001, D-1). Runs per file,
-    /// before `Config::merge` folds the parsed tier into the accumulator —
-    /// the XOR merge then guarantees the merged `Config` never carries both
-    /// fields, so [`Error::AmbiguousExtraCaCerts`] is the permanent home for
-    /// this refusal, not a stand-in for a later resolve-time check.
+    /// Refuse one file declaring both `extra_ca_certs` and `extra_ca_certs_pem`; across tiers,
+    /// [`Config::merge`]'s XOR applies instead.
     ///
     /// # Errors
     /// Returns [`Error::AmbiguousExtraCaCerts`] when `parsed` sets both keys.
@@ -1207,40 +755,16 @@ impl ConfigLoader {
         Ok(())
     }
 
-    /// C7 enforcement: lock every lockable section of a system-scope config
-    /// (`/etc/ocx/config.toml`) as non-overridable BEFORE it merges into the
-    /// accumulator. The system tier folds in first, so a locked section then
-    /// ignores all lower-tier overrides (including an untrusted
-    /// managed-config payload).
-    ///
-    /// Covers all seven lockable sections: `[patches]` (lock is conditional
-    /// inside `PatchConfig::lock_as_system`), `[registry]` (unconditional),
-    /// each `[registries.<name>]` entry (unconditional, per name — closes
-    /// the indirection `resolved_default_registry` resolves through), each
-    /// `[mirrors."<host>"]` entry (per host, per role — `MirrorConfig::lock_as_system`
-    /// locks only the `registry`/`index` role(s) that entry actually declares,
-    /// `adr_index_indirection.md` F5b), `[managed]`
-    /// (required-gated inside `ManagedConfig::lock_as_system`, like
-    /// `[patches]` — a system-scope `required = true` seed must not be
-    /// loosenable/clearable by the home tier's fence; ADR Decision G,
-    /// criterion 13), `[trust]` (unconditional, per `[[trust.policy]]`
-    /// entry — a locked policy pins the specificity level for the scopes it
-    /// matches, so a lower tier may only join its ANY-of set at equal
-    /// specificity, never outbid it with a narrower scope), and `[records]`
-    /// (unconditional, and binary per block — a system-scope section clamps
-    /// `dir`, `name` and `required` together, which is what makes recording a
-    /// fleet property rather than a wrapper-script convention; a system file
-    /// with no `[records]` clamps nothing). Plus the root-level
-    /// `extra_ca_certs` / `extra_ca_certs_pem` pair (ocx#469, locked as one
-    /// unit iff the system file sets either key — absent locks nothing, so an
-    /// operator who never declared a root does not freeze every lower tier
-    /// and `OCX_EXTRA_CA_CERTS` out of adding one). Extracted so the section
-    /// coverage is unit-testable without writing to `/etc`.
+    /// Lock the system-scope config's lockable sections and extra-CA pair before it merges, so each
+    /// ignores every lower tier, the managed payload included.
     fn apply_system_locks(parsed: &mut Config) {
+        // Only if set here, or an operator declaring no root freezes lower tiers out of adding one.
         parsed.extra_ca_certs_system_locked = Self::sets_extra_ca_certs(parsed);
+        // Conditional, inside `PatchConfig::lock_as_system`.
         if let Some(patches) = parsed.patches.as_mut() {
             patches.lock_as_system();
         }
+        // `[registry]` and each `[registries.<name>]` entry lock unconditionally.
         if let Some(registry) = parsed.registry.as_mut() {
             registry.lock_as_system();
         }
@@ -1249,27 +773,28 @@ impl ConfigLoader {
                 entry.lock_as_system();
             }
         }
+        // Each mirror entry locks only the role(s) it declares (`adr_index_indirection.md`).
         if let Some(mirrors) = parsed.mirrors.as_mut() {
             for mirror in mirrors.values_mut() {
                 mirror.lock_as_system();
             }
         }
+        // Required-gated like `[patches]`, or the home tier's fence could loosen a required seed.
         if let Some(managed) = parsed.managed.as_mut() {
             managed.lock_as_system();
         }
+        // A locked policy pins its scopes' specificity: a lower tier may join its ANY-of set, never
+        // outbid it narrower.
         if let Some(trust) = parsed.trust.as_mut() {
             trust.lock_as_system();
         }
+        // Unconditional and per block: `dir`, `name` and `required` clamp together.
         if let Some(records) = parsed.records.as_mut() {
             records.lock_as_system();
         }
     }
 
-    /// Which tier `path` belongs to (C-032).
-    ///
-    /// The three discovered candidates are compared against the accessors that
-    /// produced them; anything else reached `load_and_merge` through
-    /// `explicit_paths`, which is the only other caller.
+    /// Which tier `path` belongs to; anything but a discovered candidate is explicit.
     fn tier_for_path(path: &Path) -> crate::ConfigTier {
         use crate::ConfigTier;
 
@@ -1285,14 +810,8 @@ impl ConfigLoader {
         ConfigTier::Explicit
     }
 
-    /// Record which tier set `[shell] hook` / `completions` before this file
-    /// merges into the accumulator (C-032).
-    ///
-    /// Runtime provenance, following the shipped `RegistryDefaults::system_locked`
-    /// precedent: `#[serde(skip)]` fields the loader sets after parsing, never
-    /// read from disk. Stamped only where the file actually set the scalar, so
-    /// `ShellConfig::merge` — which carries the tier alongside the value — never
-    /// attributes a decision to a tier that stayed silent.
+    /// Record which tier set `[shell] hook` / `completions`, only where this file set the scalar,
+    /// so `ShellConfig::merge` never credits a silent tier.
     fn stamp_shell_tier(parsed: &mut Config, tier: crate::ConfigTier) {
         let Some(shell) = parsed.shell.as_mut() else {
             return;
@@ -1305,58 +824,14 @@ impl ConfigLoader {
         }
     }
 
-    /// Parse one `config.toml` payload, dropping a **refused**
-    /// `[shell.consent]` table rather than failing the whole file with it.
-    ///
-    /// The two rules this reconciles both hold, and only together:
-    ///
-    /// - `arch-principles.md`'s fleet forward-compat row — a payload written
-    ///   for a newer ocx "must degrade to its known parts, never fail the whole
-    ///   file". One `config.toml` is fleet-wide state, so a refusal that takes
-    ///   the file down takes `[registries]`, `[mirrors]` and `[[trust.policy]]`
-    ///   with it. On a `required = false` managed tier that silently drops the
-    ///   operator's trust pins and falls back to the default registry — a
-    ///   commit whose subject is a *narrowing* would widen the effective
-    ///   posture on every host at once.
-    /// - That row's consent-bearing-table carve-out — dropping an unknown
-    ///   *narrowing* key widens trust, so `ShellConsent` refuses instead. The
-    ///   carve-out is about the direction of the change, not about which file
-    ///   dies: dropping the **whole grant** is the narrowest possible outcome
-    ///   **only for a table that grants and does not withdraw**. `exclude` is
-    ///   the one thing a `[shell.consent]` table says that TAKES a grant away,
-    ///   and it accumulates across tiers ([`ShellConsent::merge`]) against a
-    ///   predicate of `covered && !excluded` — so dropping it leaves another
-    ///   tier's `include` standing and **widens**, which is the one direction
-    ///   the carve-out forbids. A table carrying a non-empty
-    ///   `namespaces.exclude` therefore keeps the hard failure.
-    ///
-    /// [`ShellConsent::merge`]: crate::shell::ShellConsent::merge
-    ///
-    /// So the consent half is stripped structurally and the file survives,
-    /// exactly as [`Self::guard_managed_shell_consent`] does for an unpinned
-    /// source — same shape, same recorded reason, one tier wider. **Every**
-    /// tier, not just the managed one: a discovered tier's refusal is a hard
-    /// error on every `ocx` invocation on that host, which is the same
-    /// fail-the-file outcome with a smaller blast radius, and the carve-out's
-    /// reasoning is tier-independent. The signal is not lost — the reason is
-    /// logged AND recorded on the payload, where `ocx about` surfaces it and
-    /// the reconciler emits it through the eval'd script (A-21), and the
-    /// published JSON schema is where typo detection belongs (same row).
-    ///
-    /// Only the `[shell.consent]` table may be dropped, and only when removing
-    /// it is what makes the file parse, the table withdraws nothing, and the
-    /// table is one this ocx **refused** rather than one the operator
-    /// mistyped ([`Self::consent_table_shape_is_readable`]): anything else
-    /// keeps the original error, spans and all.
+    /// Parse one `config.toml` payload, dropping a refused `[shell.consent]` table rather than
+    /// failing the whole file, which would take `[registries]`, `[mirrors]` and `[[trust.policy]]`
+    /// down with it (`adr_shell_env_overhaul.md` § Rationale from code: ocx_config).
     ///
     /// # Errors
     ///
-    /// The original `toml` error when the payload is unparseable for any reason
-    /// other than a refused `[shell.consent]`; when the refused table carries a
-    /// non-empty `namespaces.exclude` — dropping a withdrawal widens, so that
-    /// file keeps failing; and when the table is merely ill-typed
-    /// (`namespaces = 123`), which is the operator's own typo and owes them the
-    /// error rather than a warning.
+    /// The original `toml` error for any other failure, for a refused table that withdraws a grant,
+    /// and for an ill-typed table, the operator's own typo.
     fn parse_config_stripping_refused_consent(
         text: &str,
         origin: impl std::fmt::Display,
@@ -1365,24 +840,15 @@ impl ConfigLoader {
             Ok(parsed) => return Ok(parsed),
             Err(refusal) => refusal,
         };
-        // Re-parse through `toml::Value` rather than editing the text: the
-        // table is the library's own model of the file, so removing one key
-        // cannot mangle a neighbouring section the way string surgery can.
+        // Edit the parsed table, never the text: string surgery can mangle a neighbouring section.
         let Ok(mut table) = toml::from_str::<toml::Table>(text) else {
             return Err(refusal);
         };
-        // Dropping a grant narrows; dropping a WITHDRAWAL widens. `exclude` is
-        // the only key that takes a grant away, and it accumulates across
-        // tiers, so stripping a table that carries one leaves whatever
-        // `include` another tier contributed standing unopposed. That is the
-        // one direction the carve-out forbids, so such a file keeps the hard
-        // failure it had before the strip existed.
+        // Dropping a withdrawal widens: another tier's `include` would stand unopposed.
         if Self::consent_table_withdraws(&table) {
             return Err(refusal);
         }
-        // A refusal is a judgement about consent; a type error is a typo. Only
-        // the first earns the strip, and "removing the table fixed the parse"
-        // cannot tell them apart — `namespaces = 123` passes that test too.
+        // Only a refusal earns the strip, never a typo; `namespaces = 123` also parses once removed.
         if !Self::consent_table_shape_is_readable(&table) {
             return Err(refusal);
         }
@@ -1409,25 +875,9 @@ impl ConfigLoader {
         Ok(parsed)
     }
 
-    /// Whether the raw `[shell.consent]` table in `table` **withdraws** a
-    /// grant — i.e. carries a non-empty `namespaces.exclude`.
+    /// Whether the raw `[shell.consent]` carries a non-empty `namespaces.exclude`.
     ///
-    /// Read off the raw [`toml::Table`] rather than a parsed [`ShellConsent`],
-    /// because the only tables this question is ever asked of are the ones
-    /// that failed to parse. One lookup covers every spelling the config
-    /// accepts: an inline `namespaces = { include = [...], exclude = [...] }`,
-    /// a `[shell.consent.namespaces]` section header, and the dotted-key form
-    /// all normalize to the same nested table. The string form
-    /// (`namespaces = "ocx.sh/acme"`) carries no `exclude` and is not a table,
-    /// so it answers `false` here.
-    ///
-    /// An `exclude = []` withdraws nothing and does not block the strip.
-    /// Anything else present under that key — a populated list, or a value
-    /// shape this ocx cannot read at all — counts as a withdrawal: the
-    /// unreadable case is precisely a narrowing written by a newer ocx, which
-    /// is what the carve-out exists for.
-    ///
-    /// [`ShellConsent`]: crate::shell::ShellConsent
+    /// An unreadable `exclude` counts as a withdrawal: it is exactly a newer ocx's narrowing.
     fn consent_table_withdraws(table: &toml::Table) -> bool {
         let Some(exclude) = table
             .get("shell")
@@ -1443,41 +893,10 @@ impl ConfigLoader {
         exclude.as_array().is_none_or(|patterns| !patterns.is_empty())
     }
 
-    /// Whether the raw `[shell.consent]` table in `table` has the TOML *shape*
-    /// [`ShellConsent`] expects — the test that separates a **refusal** from a
-    /// plain **type error**.
+    /// Whether the raw `[shell.consent]` has the TOML shape `ShellConsent` expects, separating a
+    /// refusal from the operator's typo, which owes them the error.
     ///
-    /// Without it the strip's only question is structural — "did removing this
-    /// table make the file parse?" — and `namespaces = 123` answers it exactly
-    /// as `namespaces = "ocx.sh/*"` does. The first is the operator's own typo
-    /// and owes them exit 78; the second is a judgement this ocx made about a
-    /// grant, and is what the carve-out exists to survive. Swallowing the typo
-    /// hides a `config.toml` mistake behind a warning on a stderr the shims
-    /// discard.
-    ///
-    /// **Shape, never policy.** This deliberately does not re-run
-    /// [`validate_consent_pattern`] or re-check `include`'s emptiness or an
-    /// unknown key: a second copy of the validator would drift from the real
-    /// one, and every one of those refusals is precisely what still *should*
-    /// strip. It asks only what serde would answer with `invalid type` — is
-    /// `consent` a table, `paths` a list of strings, `namespaces` a string or a
-    /// table, and its `include`/`exclude` lists of strings.
-    ///
-    /// The typed error is unreachable here: the deserializer hands every
-    /// refusal to `serde::de::Error::custom`, which erases
-    /// [`ConsentPatternError`] into an opaque [`toml::de::Error`] message, and
-    /// `ShellConsent`'s `deny_unknown_fields` refusal is serde's own text that
-    /// no marker could reach without hand-writing that derive. Reading the
-    /// `toml::Value` variants keeps the discriminator type-level anyway, and
-    /// out of the error's prose.
-    ///
-    /// A key added to `ShellConsent` later and not mirrored here reads as
-    /// "shape fine" and strips — the fail-closed direction, and the same
-    /// outcome `deny_unknown_fields` already gives it.
-    ///
-    /// [`ShellConsent`]: crate::shell::ShellConsent
-    /// [`ConsentPatternError`]: crate::shell::ConsentPatternError
-    /// [`validate_consent_pattern`]: crate::shell::validate_consent_pattern
+    /// Shape, never policy: re-validating patterns here would drift from the real validator.
     fn consent_table_shape_is_readable(table: &toml::Table) -> bool {
         let Some(consent) = table
             .get("shell")
@@ -1498,8 +917,6 @@ impl ConfigLoader {
         match consent.get("namespaces") {
             None => true,
             Some(toml::Value::String(_)) => true,
-            // The table form, in every spelling — inline, section header and
-            // dotted key all normalize to this one.
             Some(toml::Value::Table(spec)) => ["include", "exclude"]
                 .iter()
                 .all(|key| spec.get(*key).is_none_or(is_string_list)),
@@ -1507,46 +924,10 @@ impl ConfigLoader {
         }
     }
 
-    /// Strip `[shell.consent]` from a managed payload whose `[managed] source`
-    /// is not digest-pinned (C-034).
+    /// Strip the `[shell.consent]` grant from a managed payload whose source is not digest-pinned,
+    /// or whoever can move the tag can swap it (`adr_shell_env_overhaul.md`).
     ///
-    /// `[shell] hook` and `completions` are left alone deliberately: they merge
-    /// unconditionally in both directions, which is safe only because consent
-    /// still gates every project independently. `[shell.consent]` is the half
-    /// that grants, so it is honoured only behind a pin — otherwise the consent
-    /// material arrives over the very channel it exists to authorise, and
-    /// whoever can move the tag can swap it. Same rule, same reason, as
-    /// [`Self::guard_managed_sigstore_trust`]'s `trusted_root_json`.
-    ///
-    /// The reason is recorded on the payload as well as logged: `log::warn!`
-    /// goes to a stderr the shell shims discard, so the strip would otherwise
-    /// be invisible exactly where it matters. `ocx about` surfaces the recorded
-    /// reason, and the reconciler emits it through the eval'd script (A-21).
-    ///
-    /// The gate is managed-tier-only. A file named by `--config` / `OCX_CONFIG`
-    /// is a third consent-bearing channel of the same already-out-of-scope
-    /// threat class, and has no `[managed] source` for the pin question to be
-    /// asked of at all (A-33).
-    ///
-    /// **Only the grant is stripped.** `paths` and `namespaces.include` grant;
-    /// `namespaces.exclude` **withdraws**, and it accumulates across tiers
-    /// ([`ConsentScopeSpec::accumulate`]), so dropping one leaves whatever
-    /// `include` another tier — or `OCX_CONSENT_NAMESPACES` — contributed
-    /// standing unopposed. That is the one direction this gate exists to
-    /// forbid, so the carve-outs survive the strip: honouring them needs no
-    /// pin, because whoever moved the tag can only ever take a grant *away*
-    /// with them.
-    ///
-    /// [`Self::parse_config_stripping_refused_consent`] answers the same
-    /// asymmetry by refusing the file instead, and the two are not in conflict:
-    /// there the table failed to *parse*, so there are no trustworthy patterns
-    /// left to keep, and a local `config.toml` can fail closed (exit 78)
-    /// without consequence for anyone else. Failing this payload closed would
-    /// hand whoever can move the tag a fleet-wide denial of service — the
-    /// adversary C-034 models, holding every host's `ocx` hostage — which is
-    /// why the managed tier degrades instead of refusing.
-    ///
-    /// [`ConsentScopeSpec::accumulate`]: crate::shell::ConsentScopeSpec::accumulate
+    /// The reason is recorded on the payload too, since the shims discard stderr.
     fn guard_managed_shell_consent(parsed: &mut Config, source: &ocx_oci::OciIdentifier) {
         use crate::shell::{ConsentScopeSpec, ShellConsent};
         use ocx_trust::ScopeSpec;
@@ -1560,6 +941,8 @@ impl ConfigLoader {
         let Some(consent) = shell.consent.take() else {
             return;
         };
+        // `exclude` is kept unpinned: dropping it would leave another tier's `include` unopposed, and a
+        // tag mover can only take a grant away with it.
         let carve_outs = consent
             .namespaces
             .as_ref()
@@ -1572,14 +955,8 @@ impl ConfigLoader {
                 "; its namespaces exclude list ({}) was kept, since a withdrawal can only ever narrow",
                 carve_outs.join(", ")
             );
-            // `ScopeSpec::Set` reads an **empty** `include` as a catch-all, so
-            // an exclude-only spec would grant every source it does not carve
-            // out — a far wider hole than the one being closed. Seeding
-            // `include` with the carve-outs themselves makes the two lists
-            // identical, so `covered && !excluded` is false for every source
-            // whatever the patterns are, and the spec grants nothing on its
-            // own; `accumulate` only ever adds, so that stays true while the
-            // `exclude` still opposes another tier's `include`.
+            // `include` equals `exclude`, never empty: an empty `include` is a catch-all, while this
+            // grants nothing alone and its `exclude` still opposes other tiers.
             shell.consent = Some(ShellConsent {
                 paths: Vec::new(),
                 namespaces: Some(ConsentScopeSpec(ScopeSpec::Set {
@@ -1598,22 +975,11 @@ impl ConfigLoader {
         shell.consent_strip_reason = Some(reason);
     }
 
-    /// Fold a project-tier contribution into `accumulator`, without its
-    /// `[shell]` or `[records]` sections (C-033).
+    /// Fold a project-tier contribution into `accumulator` without its `[shell]` or `[records]`.
     ///
-    /// **The single entry point for any project-tier fold.** `[shell]` carries
-    /// consent, and consent read from a repository's own `ocx.toml` would let a
-    /// clone consent to itself — so the section is stripped here, structurally,
-    /// rather than relied upon to be unparseable one file over. `ProjectConfig`
-    /// refuses a `[shell]` block today only through its `deny_unknown_fields`,
-    /// whose own docstring calls it a typo detector; a security property must
-    /// not rest on a typo detector nobody records the coupling of.
-    ///
-    /// `[records]` is stripped for the mirrored reason: the sink is the
-    /// operator's, and a repository that could name it could redirect an audit
-    /// trail into a directory it also controls — or, by naming an unwritable
-    /// one under a `required` posture, refuse every launch inside the checkout.
-    /// A cloned repository is untrusted input; where records go is not its call.
+    /// Stripped here, not left to `ProjectConfig`'s `deny_unknown_fields`: `[shell]` consent from a
+    /// repository would let a clone consent to itself, and `[records]` would let it redirect the
+    /// operator's audit sink.
     pub fn fold_project_tier(accumulator: &mut Config, mut project_contribution: Config) {
         if project_contribution.shell.take().is_some() {
             log::warn!(
@@ -1630,33 +996,10 @@ impl ConfigLoader {
         accumulator.merge(project_contribution);
     }
 
-    /// Resolve every path a config file declares relative to *that file's*
-    /// directory, before it merges into the accumulator.
+    /// Resolve every relative path a config file declares against that file's directory, so a
+    /// daemon, a CI runner and a shell name the same file.
     ///
-    /// Runs per tier, so `/etc/ocx/config.toml` and `$OCX_HOME/config.toml`
-    /// each anchor their own values and the answer never depends on the
-    /// process working directory — a config read by a daemon, a CI runner and
-    /// an interactive shell must name the same file.
-    ///
-    /// Four keys participate today: `[trust.sigstore] trusted_root`, each
-    /// `[[trust.policy]]` signer's `file:`-form `key`, `[records] dir`, and
-    /// the root-level `extra_ca_certs` (C-001). Each names a location the
-    /// operator chose beside their own config, so all four anchor the same
-    /// way and through the same seam — a second anchoring site is how they
-    /// would drift into resolving differently. Every other path-valued key
-    /// in the tree is either already absolute by contract or resolved by its
-    /// own consumer.
-    ///
-    /// `--records-dir` and `OCX_RECORDS_DIR` stay **CWD-relative** and never
-    /// reach here: a flag and an env var are typed by whoever is standing in a
-    /// directory, and anchoring those at a config file's directory would resolve
-    /// them somewhere the caller cannot see.
-    ///
-    /// The **project `ocx.toml`** tier does not pass through here. Its trust
-    /// policies are read by `ocx_trust::policies_from_ocx_toml`, which takes the
-    /// project file's directory as a parameter and applies
-    /// [`TrustPolicy::anchor_relative_keys`] itself — same rule, one call site
-    /// each, neither able to skip it.
+    /// All four keys anchor in this one seam, or they drift.
     fn anchor_relative_paths(parsed: &mut Config, config_path: &Path) {
         let Some(dir) = config_path.parent() else {
             return;
@@ -1679,37 +1022,13 @@ impl ConfigLoader {
         }
     }
 
-    /// The `OCX_NO_CONFIG=1` counterpart to [`Self::apply_system_locks`]: keep
-    /// only the sections the lock pass actually clamped, drop the rest.
+    /// The `OCX_NO_CONFIG=1` counterpart to [`Self::apply_system_locks`]: keep only the sections the
+    /// lock pass clamped.
     ///
-    /// `OCX_NO_CONFIG=1` means "ignore ambient configuration", not "ignore
-    /// operator policy". Pruning the system tier wholesale made an operator
-    /// lock defeatable by one environment variable — a CI job setting the flag
-    /// for hermeticity dropped out of a SYSTEM-locked `[records]` sink with
-    /// exit 0 and no warning, and, since the flag is not forwarded to child
-    /// processes, the two frames of one launch chain could resolve two
-    /// different `[records]` policies. This is an integrity control, not a
-    /// containment one (ADR `adr_exec_resolution_record.md`, "the lock
-    /// protects against error, not malice") — whoever sets `OCX_NO_CONFIG`
-    /// could equally not run ocx at all. What it buys is that the accident
-    /// stops being silent.
-    ///
-    /// Everything the system file declares WITHOUT a lock is ordinary
-    /// configuration and is pruned along with the user and `$OCX_HOME` tiers,
-    /// so the flag keeps its hermetic intent. Explicit tiers (`OCX_CONFIG`,
-    /// `--config`) are unaffected: they load as before and merge on top, where
-    /// a locked section still ignores them.
-    ///
-    /// `[managed]` is dropped even when locked. `OCX_NO_CONFIG` suppresses the
-    /// snapshot read too ([`Self::managed_snapshot_candidate`]), so a retained
-    /// seed could never be satisfied: a `required` tier — the default — would
-    /// fail every hermetic invocation rather than enforce anything. The tier
-    /// stays fully suppressed, exactly as before this filter existed.
+    /// Pruning the system tier whole would let a CI job drop a locked `[records]` sink with exit 0
+    /// (`adr_exec_resolution_record.md`).
     fn retain_system_locked_sections(config: &mut Config) {
-        // Exhaustive destructure on purpose: a section added to `Config` cannot
-        // reach the SYSTEM tier without a decision here, the same coverage
-        // guarantee `apply_system_locks_covers_every_lockable_section` gives the
-        // lock pass — except enforced by the compiler rather than by a test.
+        // Exhaustive, so a section added to `Config` cannot reach here without a decision.
         let Config {
             registry,
             registries,
@@ -1728,25 +1047,14 @@ impl ConfigLoader {
         *patches = patches.take().filter(|patches| patches.system_locked);
         *registry = registry.take().filter(|registry| registry.system_locked);
         *records = records.take().filter(|records| records.system_locked);
+        // Dropped even when locked: the flag skips the snapshot read, so a `required` tier would fail
+        // every hermetic invocation.
         *managed = None;
-        // `[shell]` is the one section `apply_system_locks` clamps nothing in,
-        // so nothing in it survives: the hook/completions toggles and the
-        // activation consent whitelist are ambient host configuration, and the
-        // flag prunes them with the user and `$OCX_HOME` tiers.
+        // `[shell]` has no locks: all of it is ambient host configuration.
         *shell = None;
-        // `toolchain_dir` (C-016) is a bare root-level scalar with no lock of
-        // its own, so it is ambient configuration and prunes like `[shell]`.
-        // Continuity under the flag comes from the environment instead: a parent
-        // ocx forwards its resolved root as `OCX_TOOLCHAIN_DIR`, which
-        // `ToolchainRoot::resolve` reads as its weakest tier — so a hermetic
-        // child still lands its trees where its parent did, without reading an
-        // ambient file to find out.
+        // No lock either; a hermetic child still inherits its parent's root via `OCX_TOOLCHAIN_DIR`.
         *toolchain_dir = None;
-        // `extra_ca_certs` / `extra_ca_certs_pem` (C-001) lock as one unit
-        // (ocx#469): a system-declared root is operator policy — a CI job
-        // setting the flag for hermeticity must not drop out of the corporate
-        // CA with exit 69 — and an unlocked pair never reaches here (the flag
-        // prunes the tiers that could set one).
+        // A locked pair survives, or a hermetic CI job drops out of the corporate CA with exit 69.
         if !*extra_ca_certs_system_locked {
             *extra_ca_certs = None;
             *extra_ca_certs_pem = None;
@@ -1756,15 +1064,10 @@ impl ConfigLoader {
         }
         *registries = registries.take().filter(|entries| !entries.is_empty());
         if let Some(entries) = mirrors.as_mut() {
-            // Per-role lock: `MirrorConfig::lock_as_system` locks every role the
-            // entry declares, so an entry with neither role locked declares
-            // nothing that survives.
             entries.retain(|_, mirror| mirror.registry_system_locked || mirror.index_system_locked);
         }
         *mirrors = mirrors.take().filter(|entries| !entries.is_empty());
-        // `[trust]` locks per `[[trust.policy]]` entry rather than per section,
-        // because policies array-append across tiers and the section itself does
-        // not survive the fold; `[trust.sigstore]` locks as a whole table.
+        // Per policy entry, since policies array-append across tiers; `[trust.sigstore]` as a whole.
         if let Some(declared) = trust.as_mut() {
             declared.policy.retain(|policy| policy.system_locked);
             declared.sigstore = declared.sigstore.take().filter(|sigstore| sigstore.system_locked);
@@ -1774,11 +1077,8 @@ impl ConfigLoader {
             .filter(|declared| !declared.policy.is_empty() || declared.sigstore.is_some());
     }
 
-    /// System config: `/etc/ocx/config.toml`.
-    ///
-    /// Redirectable through `SYSTEM_CONFIG_OVERRIDE` in test builds only —
-    /// the SYSTEM tier is the one tier no test can write to, and every
-    /// system-lock behaviour would otherwise be unreachable end to end.
+    /// System config: `/etc/ocx/config.toml`, redirectable through `SYSTEM_CONFIG_OVERRIDE` in test
+    /// builds only.
     pub fn system_path() -> PathBuf {
         #[cfg(any(test, feature = "__testing"))]
         if let Some(path) = ocx_util::env::var(SYSTEM_CONFIG_OVERRIDE) {
@@ -1798,40 +1098,21 @@ impl ConfigLoader {
     }
 
     /// `$OCX_HOME/config.toml`, falling back to `~/.ocx/config.toml`.
-    ///
-    /// The directory comes from [`crate::home::default_ocx_root`],
-    /// the one definition of the `$OCX_HOME` default — this module used to
-    /// carry a second one that resolved the fallback home through a different
-    /// API and could name a different directory (#381).
-    ///
-    /// `None` when `OCX_HOME` is unset and no home directory resolves (e.g. a
-    /// service account with no `$HOME`).
-    ///
-    /// Callers compose well-known children through one of the named
-    /// `home_*_path()` accessors here so `$OCX_HOME` path math stays in this
-    /// module; code needing a new `$OCX_HOME`-rooted path should add one
-    /// rather than join onto the bare directory.
+    // Only through `default_ocx_root`, the one definition of the `$OCX_HOME` default.
     pub fn home_path() -> Option<PathBuf> {
         crate::home::default_ocx_root().map(|d| d.join("config.toml"))
     }
 
-    /// `$OCX_HOME/sigstore/trusted-root.json`, falling back to
-    /// `~/.ocx/sigstore/trusted-root.json`.
-    ///
-    /// The convention path in the trust-root ladder: drop the file there and
-    /// verification finds it with no flag, no env var and no config entry.
-    /// Deliberately NOT under `state/` — that subtree is TTL-bound runtime
-    /// state the tool writes and may discard, whereas this is a durable
-    /// operator-supplied asset nothing but the operator removes.
+    /// `$OCX_HOME/sigstore/trusted-root.json`, the trust root verification finds with no flag or
+    /// config.
+    // Not under `state/`, which the tool may discard: this is a durable operator asset.
     pub fn home_sigstore_trusted_root_path() -> Option<PathBuf> {
         crate::home::default_ocx_root().map(|d| d.join("sigstore").join("trusted-root.json"))
     }
 }
 
-/// [`dirs::config_dir`]'s answer, read from the hermetic override table
-/// instead of the process environment — `dirs` reads `HOME`/`XDG_CONFIG_HOME`
-/// itself, past `ocx_util::env`, so under the in-process CLI seam it would
-/// load the developer's own user tier.
+/// [`dirs::config_dir`]'s answer from the hermetic override table; `dirs` reads the process
+/// environment itself and would load the developer's own user tier.
 #[cfg(any(test, feature = "__testing"))]
 fn hermetic_config_dir() -> Option<PathBuf> {
     if cfg!(windows) {
@@ -2784,8 +2065,7 @@ mod tests {
 
     // ── project_path tests ──────────────────────────────────────────────────
     //
-    // Plan Phase 1 (plan_project_toolchain.md, lines 77–93) defines the
-    // resolver contract:
+    // The resolver contract:
     //
     //   Precedence: --project > OCX_PROJECT > CWD walk
     //   OCX_NO_PROJECT=1 prunes CWD walk + env var, NOT the explicit flag
@@ -3311,14 +2591,13 @@ mod tests {
     }
 
     /// Explicit `--project <dir>` resolves to the `ocx.toml` inside it, and a
-    /// directory that holds none is **no project** rather than an error
-    /// (RUL-55).
+    /// directory that holds none is **no project** rather than an error.
     ///
     /// This reverses `project_path_explicit_directory_rejected_as_io`, which
     /// asserted `Error::Io` (exit 74) for the same input. That contract made
     /// `--project .` — and every rendered toolchain trampoline, which re-enters
     /// as `ocx --project '<project root>' exec` — fail before anything ran, and
-    /// put C-068's `NoProjectIn` → exit 64 out of reach: only the directory branch
+    /// put the caller's `NoProjectIn` → exit 64 out of reach: only the directory branch
     /// can tell *this directory governs no project* from *this file is missing*.
     #[tokio::test]
     async fn project_path_explicit_directory_resolves_to_its_project_file() {
@@ -3340,7 +2619,7 @@ mod tests {
         );
     }
 
-    /// The other half of RUL-55: a named directory with no `ocx.toml` is `None`
+    /// The other half of that contract: a named directory with no `ocx.toml` is `None`
     /// — "no project" (the caller's exit 64), never `FileNotFound` (79) or
     /// `Error::Io` (74).
     #[tokio::test]
@@ -3363,7 +2642,7 @@ mod tests {
     /// A path that is neither a regular file nor a directory still surfaces as
     /// `Error::Io` (exit 74, ADR G9).
     ///
-    /// Kept as its own case because RUL-55 took the directory out of this arm,
+    /// Kept as its own case because a named directory no longer reaches this arm,
     /// and a character device is the remaining reachable input for it — without
     /// this, the arm has no coverage at all.
     #[cfg(unix)]
@@ -3438,8 +2717,8 @@ mod tests {
     /// requires the walk to continue past the common stopping conditions;
     /// this test guards against an infinite loop.
     ///
-    /// EC-FS-013 — this **is** the filesystem-root termination case, and A-11
-    /// closes the row by asserting it rather than adding code: with no boundary
+    /// EC-FS-013 — this **is** the filesystem-root termination case, closed by
+    /// asserting it rather than adding code: with no boundary
     /// and no ceiling the ascent runs out of ancestors, and
     /// [`ConfigLoader::walk_for_project_file`]'s `current.parent()` arm returns
     /// `None` on its own. The bounded timeout is the assertion that matters —
@@ -3475,8 +2754,8 @@ mod tests {
     ///
     /// The sibling test above reaches the same arm by ascending, but only on a
     /// host where no ancestor of `TMPDIR` carries a `.git` or an `ocx.toml`;
-    /// this one cannot be short-circuited by either. Together they pin A-11's
-    /// "the walk's termination at the filesystem root needs no special case —
+    /// this one cannot be short-circuited by either. Together they pin the
+    /// ruling "the walk's termination at the filesystem root needs no special case —
     /// assert it, do not add code".
     ///
     /// The ceiling is passed as `None` deliberately: a ceiling would end the
@@ -3535,7 +2814,7 @@ mod tests {
         );
     }
 
-    /// C-001/S-001 (#380): a **relative** `OCX_CEILING_PATH` bounds the walk
+    /// A **relative** `OCX_CEILING_PATH` bounds the walk
     /// exactly as the absolute one in
     /// [`project_path_walk_stops_at_ceiling`] does.
     ///
@@ -3571,7 +2850,7 @@ mod tests {
         );
     }
 
-    /// C-001 (#380): the empty value stays the ignored one it already was.
+    /// The empty value stays the ignored one it already was.
     ///
     /// Joining it would make the ceiling equal `start` and stop the walk at
     /// cwd — turning the escape hatch every other path-valued `OCX_*` variable
@@ -3637,11 +2916,11 @@ mod tests {
         );
     }
 
-    /// C-010 (#485) half one of two: a working directory under `$OCX_HOME`
+    /// Half one of two: a working directory under `$OCX_HOME`
     /// does not adopt the global toolchain manifest as its project.
     ///
     /// `$OCX_HOME/ocx.toml` is the `--global` tier
-    /// (`adr_global_toolchain_tier.md` §Decision 1) and the CWD walk used to
+    /// (item 1, `adr_global_toolchain_tier.md` § Decisions (binding)) and the CWD walk used to
     /// hand it back as an ordinary discovery hit, so every command run from
     /// inside the store — `$OCX_HOME/packages/<x>` — silently acquired the
     /// global toolchain as a project.
@@ -3666,7 +2945,7 @@ mod tests {
         );
     }
 
-    /// C-010 (#485) half two of two: the skip is scoped to the walk, so the
+    /// Half two of two: the skip is scoped to the walk, so the
     /// global manifest stays reachable through an explicit selection.
     ///
     /// The `--global` selector itself is `ProjectConfig::resolve`'s own branch
@@ -3697,7 +2976,7 @@ mod tests {
         );
     }
 
-    /// C-010 (#485): the guard is a skip, not a boundary — a real project
+    /// The guard is a skip, not a boundary — a real project
     /// **above** `$OCX_HOME` is still found from a working directory below it.
     ///
     /// The mutation this catches is "skip and stop": returning `None` at
@@ -3732,7 +3011,7 @@ mod tests {
         );
     }
 
-    /// C-010 (#485): `OCX_NO_PROJECT=1` stays a hard `None` — the guard adds a
+    /// `OCX_NO_PROJECT=1` stays a hard `None` — the guard adds a
     /// skip to the walk, it does not give the walk a new way to run.
     ///
     /// Asserted over the tree of
@@ -3761,13 +3040,13 @@ mod tests {
         assert_eq!(resolved, None, "OCX_NO_PROJECT=1 prunes the walk entirely");
     }
 
-    /// C-010 (#485): a **relative** `$OCX_HOME` still fires the guard.
+    /// A **relative** `$OCX_HOME` still fires the guard.
     ///
     /// `home::default_ocx_root` returns the environment value verbatim, and
     /// `current` is absolute at every level of the walk, so an unjoined
     /// relative root can never equal one — the guard would report as present
     /// and do nothing. Resolved against `start`, which is the same treatment
-    /// `OCX_CEILING_PATH` gets and for the same reason (#380).
+    /// `OCX_CEILING_PATH` gets and for the same reason.
     ///
     /// Mutation that reds it: drop the `start.join(..)` and normalize the raw
     /// root. Every other `$OCX_HOME` test stays green, because they all spell
@@ -3797,7 +3076,7 @@ mod tests {
     /// EC-FS-014 — a directory chain at the OS path limit degrades to
     /// "boundary reached", never a raw `ENAMETOOLONG` on the per-prompt path.
     ///
-    /// A-11 overrules the register's framing here: this is a test-and-document
+    /// The register's framing is overruled here: this is a test-and-document
     /// gap, not an implementation gap. [`ConfigLoader::has_git_dir`] already
     /// fails closed on any non-`NotFound` I/O error, and an over-limit
     /// `<dir>/.git` probe is exactly that — so the ascent stops at the level
@@ -4542,7 +3821,7 @@ mod tests {
         ))
         .unwrap();
         // A root-level scalar has to precede every table header, so it is
-        // spliced in rather than appended (ocx#469).
+        // spliced in rather than appended.
         config.extra_ca_certs_pem = Some("system".to_string());
 
         ConfigLoader::apply_system_locks(&mut config);
@@ -4817,7 +4096,7 @@ mod tests {
         ))
         .unwrap();
         // A root-level scalar has to precede every table header, so it is
-        // spliced in rather than appended (C-016).
+        // spliced in rather than appended.
         config.toolchain_dir = Some(PathBuf::from("/home/operator/tc"));
         config.extra_ca_certs_pem = Some("system".to_string());
 
@@ -4899,7 +4178,7 @@ mod tests {
         );
     }
 
-    /// The same "absent locks nothing" half for the extra-CA pair (ocx#469): a
+    /// The same "absent locks nothing" half for the extra-CA pair: a
     /// system file that declares neither key leaves every lower tier and
     /// `OCX_EXTRA_CA_CERTS` free to add a root.
     #[test]
@@ -5283,7 +4562,7 @@ mod tests {
         );
     }
 
-    // ── `extra_ca_certs` / `extra_ca_certs_pem` — C-001, C-002, S-004, S-005 ──
+    // ── `extra_ca_certs` / `extra_ca_certs_pem` ───────────────────────────────
 
     /// A real self-signed CA (the test stack's Fulcio root), so the inline form
     /// under test is material a fleet consumer could actually seed a client
@@ -5314,7 +4593,7 @@ mod tests {
 
     const UNPINNED_SOURCE: &str = "ghcr.io/acme/config:v1";
 
-    /// C-002, S-004: a managed payload's path-form `extra_ca_certs` names a
+    /// A managed payload's path-form `extra_ca_certs` names a
     /// file on the *publisher's* disk, so the consumer drops it — behind a
     /// digest pin or not, pinning is about provenance and this key is inert
     /// either way — and the rest of the payload applies unchanged. The
@@ -5340,13 +4619,13 @@ mod tests {
         }
     }
 
-    /// C-002, D-7: `extra_ca_certs_pem` is honoured from a managed payload
+    /// `extra_ca_certs_pem` is honoured from a managed payload
     /// WITHOUT a digest pin — the opposite of `trusted_root_json` a few tests
     /// up, and deliberately so: a CA root never bypasses signature
     /// verification and does nothing without network position, so the
     /// pin rule that guards the Sigstore material does not apply. (The
-    /// Sigstore client's own pin-gating of managed roots lives at C-005, not
-    /// in this guard.) Asserted unpinned, so a later "fix" that widens the
+    /// Sigstore client's own pin-gating of managed roots lives in
+    /// `tls::sigstore_extra_roots`, not in this guard.) Asserted unpinned, so a later "fix" that widens the
     /// pin rule to this key reds here.
     #[test]
     fn managed_tier_keeps_extra_ca_certs_pem_from_an_unpinned_source() {
@@ -5358,7 +4637,7 @@ mod tests {
         );
     }
 
-    /// C-001: a relative `extra_ca_certs` resolves against the directory of
+    /// A relative `extra_ca_certs` resolves against the directory of
     /// the file that declares it, never the process working directory — the
     /// same `FileReference::anchored_at` rule as `trusted_root`. The tempdir
     /// is deliberately NOT the CWD, or the test would pass either way.
@@ -5377,7 +4656,7 @@ mod tests {
         assert_eq!(anchored, dir.path().join("certs").join("corp-ca.pem"));
     }
 
-    /// C-001: anchoring must not rewrite what the operator fully specified.
+    /// Anchoring must not rewrite what the operator fully specified.
     #[tokio::test]
     async fn absolute_extra_ca_certs_survives_loading_unchanged() {
         let dir = TempDir::new().expect("tempdir");
@@ -5388,7 +4667,7 @@ mod tests {
         assert_eq!(config.extra_ca_certs.as_deref(), Some(absolute.as_path()));
     }
 
-    /// S-005, D-3: the path key is an ordinary replace across tiers — the
+    /// The path key is an ordinary replace across tiers — the
     /// highest tier that sets it wins, and a tier that sets neither key
     /// leaves the lower tier's value standing.
     #[tokio::test]
@@ -5409,7 +4688,7 @@ mod tests {
         assert_eq!(config.extra_ca_certs_pem, None);
     }
 
-    /// S-005, D-3: the inline key follows the same ordinary-replace rule.
+    /// The inline key follows the same ordinary-replace rule.
     #[tokio::test]
     async fn extra_ca_certs_pem_takes_the_highest_tier_that_sets_it() {
         let dir = TempDir::new().expect("tempdir");
@@ -5428,7 +4707,7 @@ mod tests {
         assert_eq!(config.extra_ca_certs, None);
     }
 
-    /// C-001, D-1 (XOR on merge): a higher tier setting `extra_ca_certs_pem`
+    /// XOR on merge: a higher tier setting `extra_ca_certs_pem`
     /// takes BOTH keys from that tier, so a lower tier's path does not survive
     /// beside it — the merged config never carries both spellings.
     #[tokio::test]
@@ -5464,7 +4743,7 @@ mod tests {
         );
     }
 
-    /// D-1, DX-3, DX-6: one file declaring both spellings is ambiguous and is
+    /// One file declaring both spellings is ambiguous and is
     /// refused at load — `Error::AmbiguousExtraCaCerts` naming the file, exit
     /// 78. Asserted through `classify()` and, separately, the message text
     /// that tells the operator which key means what.
@@ -5510,11 +4789,11 @@ mod tests {
         assert_eq!(config.extra_ca_certs_pem.as_deref(), Some(EXTRA_CA_CERTS_FIXTURE_PEM));
     }
 
-    /// S-005 through the shipped fold, not a hand-rolled merge: a managed
-    /// payload's `extra_ca_certs_pem` (unpinned — D-7) beats the home tier's
+    /// Through the shipped fold, not a hand-rolled merge: a managed
+    /// payload's `extra_ca_certs_pem` (unpinned) beats the home tier's
     /// own path, the explicit `OCX_CONFIG` overlay beats the managed tier, and
     /// the local-only view — what the managed-config fetch client is built
-    /// from (D-6) — never sees the managed payload's material.
+    /// from — never sees the managed payload's material.
     #[tokio::test]
     async fn a_managed_extra_ca_certs_pem_beats_the_home_tier_and_yields_to_the_explicit_tier() {
         let env = ocx_util::env::overrides::lock();
@@ -5583,7 +4862,7 @@ mod tests {
         );
     }
 
-    /// S-005, edge case: `OCX_NO_CONFIG=1` prunes an UNLOCKED pair — the home
+    /// Edge case: `OCX_NO_CONFIG=1` prunes an UNLOCKED pair — the home
     /// tier's — like any ambient configuration. The discriminator for the
     /// lock (`extra_ca_certs_system_lock_beats_every_lower_tier` pins the
     /// surviving half): without this, a loader that stopped honouring the
@@ -5629,9 +4908,9 @@ mod tests {
         assert_eq!(merged.extra_ca_certs_pem, None);
     }
 
-    // ── C-033 — the project tier can never contribute `[shell]` ─────────────
+    // ── the project tier can never contribute `[shell]` ─────────────────────
 
-    /// S-035(b), C-033, EC-CFG-002: a project-tier contribution carrying
+    /// EC-CFG-002 — a project-tier contribution carrying
     /// `[shell.consent]` contributes **nothing** — no project-sourced
     /// `shell` key. Deliberately not routed through `ProjectConfig`: this
     /// asserts the explicit strip, not the typo detector one file over.
@@ -5705,7 +4984,7 @@ mod tests {
         );
     }
 
-    // ── C-034 / A-32 / A-33 — the managed tier's `[shell]` ──────────────────
+    // ── the managed tier's `[shell]` ────────────────────────────────────────
 
     fn managed_shell_after_guard(payload: &str, source: &str) -> Option<crate::ShellConfig> {
         let mut parsed: Config = toml::from_str(payload).expect("payload parses");
@@ -5718,7 +4997,7 @@ mod tests {
     const PINNED_SOURCE: &str =
         "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    /// C-034, S-036, EC-CFG-003(a) — the red half: an unpinned `[managed]
+    /// EC-CFG-003(a) — the red half: an unpinned `[managed]
     /// source` cannot ship an activation grant. This is the only thing between
     /// an unpinned managed payload and a PATH-front activation on every host in
     /// a fleet.
@@ -5751,7 +5030,7 @@ mod tests {
         );
     }
 
-    /// C-034, S-036, EC-CFG-003(b) — the green half: a digest-pinned source
+    /// EC-CFG-003(b) — the green half: a digest-pinned source
     /// breaks the circularity, so the same payload is honoured — and nothing is
     /// reported as stripped.
     #[test]
@@ -5766,13 +5045,13 @@ mod tests {
         );
     }
 
-    /// C-034 + C-032 — the polarity the two tests above cannot see, because
+    /// The polarity the two tests above cannot see, because
     /// both carry a pure **grant**. `exclude` is the only key that takes a
     /// grant away and it accumulates across tiers, so stripping it leaves an
     /// `include` contributed by another tier (here `OCX_CONSENT_NAMESPACES`,
     /// via the same `ShellConsent::merge` `effective_consent` performs)
     /// standing unopposed — a **widening**, which is the one direction the
-    /// C-034 strip exists to forbid. The honest operator who wrote the
+    /// managed-tier strip exists to forbid. The honest operator who wrote the
     /// carve-out must get it.
     ///
     /// Red state, both halves: (a) `take()` the whole table in
@@ -5839,7 +5118,7 @@ mod tests {
         );
     }
 
-    // ── ocx-sh/ocx#344 — a refused consent table is dropped, not fatal ──────
+    // ── a refused consent table is dropped, not fatal ───────────────────────
 
     /// The payload every test below shares: a refused `[shell.consent]` grant
     /// sitting beside the three sections a fleet actually depends on.
@@ -5906,7 +5185,7 @@ mod tests {
         );
     }
 
-    /// ocx-sh/ocx#344, `arch-principles.md` fleet forward-compat: a refused
+    /// `arch-principles.md` fleet forward-compat: a refused
     /// `[shell.consent]` grant in a DISCOVERED tier drops the grant and nothing
     /// else. Before the strip this was `Error::Parse`, so every `ocx`
     /// invocation on the host exited on a file that is otherwise fine.
@@ -5978,7 +5257,7 @@ mod tests {
         ConfigLoader::load_and_merge(std::slice::from_ref(&path)).await
     }
 
-    /// ocx-sh/ocx#344, `arch-principles.md`'s consent carve-out: the strip
+    /// `arch-principles.md`'s consent carve-out: the strip
     /// drops a **grant**, never a **withdrawal**.
     ///
     /// `exclude` is the only thing a `[shell.consent]` table says that TAKES a
@@ -6096,7 +5375,7 @@ mod tests {
         );
     }
 
-    /// Arm 2, ocx-sh/ocx#344: an ordinary **type error** inside
+    /// Arm 2: an ordinary **type error** inside
     /// `[shell.consent]` is the operator's own typo and keeps exit 78. Removing
     /// the table makes this file parse exactly as it does for arm 1, so the
     /// structural test alone cannot tell the two apart and swallowed this one
@@ -6196,7 +5475,7 @@ mod tests {
         assert_consent_stripped_and_siblings_survive(&folded);
     }
 
-    /// A-33: the digest gate is managed-tier-only. An explicit `--config` /
+    /// The digest gate is managed-tier-only. An explicit `--config` /
     /// `OCX_CONFIG` file has no `[managed] source` for the pin question to be
     /// asked of, and is a third consent-bearing channel of the same
     /// already-out-of-scope threat class.
@@ -6222,7 +5501,7 @@ mod tests {
         );
     }
 
-    /// A-32, EC-CFG-006: `--config` / `OCX_CONFIG` outranks the managed tier —
+    /// EC-CFG-006 — `--config` / `OCX_CONFIG` outranks the managed tier —
     /// including a digest-pinned one — because the loader folds the managed
     /// tier first and the overlay on top of it.
     ///
@@ -6279,7 +5558,7 @@ mod tests {
         crate::shell::effective_consent(loaded.merged.shell.as_ref())
     }
 
-    /// C-034, EC-CFG-005: a managed `[shell] hook = true` beats the home tier's
+    /// EC-CFG-005 — a managed `[shell] hook = true` beats the home tier's
     /// own explicit `false` — asserted through the **shipped fold**, not a
     /// hand-rolled merge order. `hook` grants nothing, so it merges
     /// unconditionally in both directions; that is only safe because
@@ -6370,17 +5649,17 @@ mod tests {
         );
     }
 
-    /// DX-16 (review r1): `LoadedConfig::extra_ca_certs_tier` is the loader's
+    /// `LoadedConfig::extra_ca_certs_tier` is the loader's
     /// own record of which tier's key survived the fold, and
     /// `extra_ca_certs_tier_local` the same for the local-only view — TRUE
     /// provenance, never a guess from the value. One `$OCX_HOME`, four
     /// loads through the shipped fold: the home tier alone (the system tier
-    /// would lock, ocx#469 — `extra_ca_certs_system_lock_beats_every_lower_tier`
+    /// would lock — `extra_ca_certs_system_lock_beats_every_lower_tier`
     /// owns that) → `Home` in both views; a managed payload setting the key →
     /// `Managed` in the merged view while the local view still names the
     /// discovered tier; an `OCX_CONFIG` overlay on top → `Explicit` in both;
-    /// and (ocx#471) a system `_pem` under a managed payload whose only key
-    /// is the PATH form → `System`: C-002 drops the path before the record
+    /// and a system `_pem` under a managed payload whose only key
+    /// is the PATH form → `System`: that path is dropped before the record
     /// is taken, so a dropped key never stamps `Managed` over the tier whose
     /// root actually resolves.
     ///
@@ -6451,10 +5730,10 @@ mod tests {
         assert_eq!(loaded.extra_ca_certs_tier, Some(ConfigTier::Explicit));
         assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::Explicit));
 
-        // ocx#471: a managed payload whose only key is the path form sets
-        // nothing once C-002 drops it — the record stays with the system
+        // A managed payload whose only key is the path form sets
+        // nothing once that path is dropped — the record stays with the system
         // tier, whose `_pem` is what resolves. The home tier is silent so the
-        // ocx#469 lock is not what decides this load.
+        // system lock is not what decides this load.
         env.remove("OCX_CONFIG");
         let system = write_config(&dir, "system.toml", &extra_ca_certs_pem_line());
         env.set(SYSTEM_CONFIG_OVERRIDE, system.to_str().unwrap());
@@ -6481,7 +5760,7 @@ mod tests {
         assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::System));
     }
 
-    /// ocx#469: the system tier's pair is locked — it beats the home tier
+    /// The system tier's pair is locked — it beats the home tier
     /// (switching to the PATH form, so a merge that honoured it would clear
     /// the system `_pem` rather than only replace it), an unpinned managed
     /// payload and `OCX_CONFIG`, in both views, with the tier recorded as
@@ -6559,7 +5838,7 @@ mod tests {
         assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::System));
     }
 
-    /// A-33, EC-CFG-007: `OCX_CONFIG` is a third consent-bearing channel, and
+    /// EC-CFG-007 — `OCX_CONFIG` is a third consent-bearing channel, and
     /// the managed tier's digest gate never reaches it. One load proves both
     /// halves: the unpinned managed payload's grant is stripped, the
     /// `OCX_CONFIG` grant of the same shape is honoured.
@@ -6627,7 +5906,7 @@ mod tests {
         );
     }
 
-    /// A-33, EC-CFG-008: `OCX_NO_CONFIG=1` prunes every config-tier grant and
+    /// EC-CFG-008 — `OCX_NO_CONFIG=1` prunes every config-tier grant and
     /// leaves the `OCX_CONSENT_*` channel intact. The asymmetry is the point,
     /// so all three states are asserted — including the flag-off premise,
     /// without which "no grant" would be indistinguishable from a fixture that
@@ -6674,7 +5953,7 @@ mod tests {
         );
     }
 
-    /// C-032: the loader stamps the tier a file belongs to, and only where that
+    /// The loader stamps the tier a file belongs to, and only where that
     /// file set the scalar.
     #[tokio::test]
     async fn c032_the_loader_stamps_the_tier_that_set_each_scalar() {
@@ -6696,9 +5975,9 @@ mod tests {
         );
     }
 
-    // ── A-13 — the recorded config-tier paths ───────────────────────────────
+    // ── the recorded config-tier paths ──────────────────────────────────────
 
-    /// A-13: the watch set stats a list the loader recorded, and it must
+    /// The watch set stats a list the loader recorded, and it must
     /// include tier files that do NOT exist — a grant added by creating one is
     /// exactly the change an `inert` cache has to expire on.
     #[tokio::test]
@@ -6738,7 +6017,7 @@ mod tests {
         );
     }
 
-    /// A-13 under `OCX_NO_CONFIG=1`: the recorded list narrows to what the flag
+    /// Under `OCX_NO_CONFIG=1`: the recorded list narrows to what the flag
     /// still reads. The system tier stays — it loads for its locked sections, so
     /// an operator adding one changes the resolved config — while the user and
     /// `$OCX_HOME` tiers, which the flag genuinely prunes, drop out.
@@ -6879,11 +6158,11 @@ mod tests {
         );
     }
 
-    // ── WP-4 · `toolchain_dir` across the tiers (C-016, S-004, R-W2, E-43/E-44)
+    // ── `toolchain_dir` across the tiers ──────────────────────────────────────
     //
-    // Written from `plan_toolchain_activation.md` (C-016, S-004, R-W2) and
-    // RUL-3, not from an implementation. Two kinds of row: those that ask only
-    // what the loader *merged* (they pin the prune this work package added),
+    // Written from `adr_toolchain_activation.md` § `config.toml` placement key,
+    // not from an implementation. Two kinds of row: those that ask only
+    // what the loader *merged* (they pin the prune),
     // and those that hand the merged config to `ToolchainRoot::resolve` and
     // assert the root it admits or the refusal it reports.
 
@@ -6894,7 +6173,7 @@ mod tests {
     /// Through `crate::sandbox_or_skip`, never a bare `TempDir::new()`.
     /// On macOS `$TMPDIR` is under `/var/folders/…`, which canonicalises through
     /// the `/var` → `private/var` symlink to `/private/var/folders/…`, and
-    /// `/private` is a live C-018 prefix — so pass 2 refuses every root beneath
+    /// `/private` is a live system-location prefix — so pass 2 refuses every root beneath
     /// it with `SystemPrefix` and the `.expect("… is admitted")` calls below
     /// panic on `verify-deep.yml`'s `macos-latest` leg. That helper is at
     /// `crate` scope for exactly this reason: the reasoning was written
@@ -6910,7 +6189,7 @@ mod tests {
         Some(anchor)
     }
 
-    /// S-004 — a fleet operator's `[managed]` payload carries `toolchain_dir`
+    /// A fleet operator's `[managed]` payload carries `toolchain_dir`
     /// into the merged config like any other tier. `fold_managed_tier` parses
     /// the payload as a whole `Config`, so the key needs no separate
     /// allow-listing; this pins that it stays that way.
@@ -6956,7 +6235,7 @@ mod tests {
         );
     }
 
-    /// S-004 · R-W2 — the `[managed]` tier is not a bypass. A fleet-pushed
+    /// The `[managed]` tier is not a bypass. A fleet-pushed
     /// system location faces the identical refusal a hand-written
     /// `config.toml` would, and reports as the `config.toml` tier because that
     /// is what an operator edits to fix it.
@@ -6973,7 +6252,7 @@ mod tests {
         // This host's own system location, not a POSIX literal: `/usr` has no
         // drive prefix on Windows, so `Path::is_absolute` is false there and
         // the value would be refused as `Relative` — a real refusal, but not
-        // the C-018 one this row is about.
+        // the system-location one this row is about.
         let system_location = if cfg!(windows) {
             PathBuf::from(ocx_util::env::var("SystemRoot").unwrap_or_else(|| r"C:\Windows".to_string()))
         } else {

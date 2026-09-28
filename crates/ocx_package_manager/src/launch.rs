@@ -3,47 +3,8 @@
 
 //! The policy seam every tool launch goes through: probe, emit, spawn.
 //!
-//! Recording used to be three near-identical call sites, which meant a future
-//! exec-ish command could simply forget it — a hazard already realised twice,
-//! since five spawn sites exist today. Routing a launch through [`Launch`] turns
-//! forgetting into a compile error rather than a test finding: a launch cannot
-//! be constructed without deciding what it records.
-//!
-//! Three properties keep a new command *on* the seam, and all three are
-//! load-bearing:
-//!
-//! - [`Launch`]'s fields are private and it is built through constructors, so
-//!   there is no struct literal to slip a default into.
-//! - Recording state is not caller-chosen. It arrives as a
-//!   [`RecordingPolicy`](crate::record::RecordingPolicy), which only
-//!   `record::policy::resolve_records` can mint — a caller cannot fabricate
-//!   "recording off", only configuration can. The sanctioned exemptions are
-//!   bounded by the same value: [`exemption_allowed`] refuses one under a
-//!   fail-closed posture over a live sink, so a frame that *can* claim an
-//!   exemption still cannot take one the operator's policy contradicts.
-//! - The spawn primitives live in a **private** submodule of this one, so the
-//!   raw `execvp`/spawn calls are unreachable outside the seam. Without that a
-//!   new command could skip [`Launch`] entirely and still compile.
-//!
-//! A recording launch is also derived *from* its record rather than described
-//! beside it: the executable and arguments come out of
-//! [`RecordInputs`](crate::record::RecordInputs), so the record cannot name one
-//! binary while ocx runs another. Resolution stays at the call site, which
-//! resolves once and hands the result to both.
-//!
-//! Two escapes types cannot close each get a structural test:
-//! `no_process_spawn_outside_launch` catches a new command reaching a spawn
-//! primitive directly, and `every_launch_exemption_is_enumerated` catches one
-//! reusing an existing [`ExemptionReason`] — which adds no variant and would
-//! otherwise compile clean.
-//!
-//! Those two are **searches over source text**, not proofs. Privacy is what
-//! actually holds: `launch::child_process` is unreachable from outside this
-//! module, so no other file can call the primitives it wraps. What the searches
-//! add is catching a file that builds its *own* `std`/`tokio` `Command` — for
-//! the spellings `SPAWN_TOKENS` recognises. A spelling nobody anticipated would
-//! pass them, so read the claim as "the primitives are private and the common
-//! escapes are caught", never as "spawning outside the seam is impossible".
+//! The spawn primitives stay in a private submodule so no launch can skip deciding what it records
+//! (`adr_exec_resolution_record.md` § "Rationale from code: launch").
 
 mod child_process;
 
@@ -63,12 +24,8 @@ pub struct Launch<'a> {
     mode: Mode<'a>,
 }
 
-/// Whether this launch records, kept private so the choice cannot be made at a
-/// call site.
-// ponytail: one `Launch` exists per process, on the stack, and is consumed
-// immediately before the spawn. Boxing the recording variant to even out 255
-// bytes would trade a real allocation on the exec path for a size difference
-// nothing ever pays for.
+/// Whether this launch records, kept private so the choice cannot be made at a call site.
+// ponytail: unboxed large variant; one `Launch` per process, consumed at once, so boxing buys nothing.
 #[allow(clippy::large_enum_variant, reason = "one stack value per process, consumed at once")]
 enum Mode<'a> {
     Recording {
@@ -78,11 +35,7 @@ enum Mode<'a> {
     Exempt(ExemptionReason),
 }
 
-/// Why a launch does not record.
-///
-/// Closed by design: adding a sanctioned exclusion is a visible diff, and
-/// reusing a variant for an unrelated command is what
-/// `every_launch_exemption_is_enumerated` exists to catch.
+/// Why a launch does not record; each variant's call sites are pinned by `every_launch_exemption_is_enumerated`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExemptionReason {
     /// `ocx package test` — a maintainer preview over local artifacts.
@@ -92,7 +45,6 @@ pub enum ExemptionReason {
 }
 
 impl ExemptionReason {
-    /// The command a user typed, for a diagnostic that has to name it.
     fn command(self) -> &'static str {
         match self {
             Self::PackageTest => "ocx package test",
@@ -102,20 +54,12 @@ impl ExemptionReason {
 }
 
 impl<'a> Launch<'a> {
-    /// A recording launch.
-    ///
-    /// The executable and arguments are taken from `record` rather than passed
-    /// separately: `executable` is the one value the record actually publishes,
-    /// and `args` is derived from the same `argv` input, so a second parameter
-    /// for either would let the launched process disagree with what the record
-    /// says ran. `argv` itself is never published — see
-    /// [`RecordInputs::argv`](crate::record::RecordInputs::argv).
+    /// A recording launch, running the executable and arguments `record` names.
     ///
     /// # Errors
     ///
-    /// Returns [`LaunchError::IncompleteRecordInputs`] when the frame carries no
-    /// `argv` — an invariant `RecordInputs` cannot express in its types, so it is
-    /// checked here rather than left to the sink.
+    /// [`LaunchError::IncompleteRecordInputs`] when the frame carries no `argv`.
+    // No separate executable/args parameters: they would let the launched process disagree with the record.
     pub fn recording(env: Env, record: RecordInputs<'a>, policy: &'a RecordingPolicy) -> Result<Self, LaunchError> {
         let args = validate_record_inputs(&record)?;
         Ok(Self {
@@ -126,33 +70,11 @@ impl<'a> Launch<'a> {
         })
     }
 
-    /// A sanctioned non-recording launch, **bounded by the resolved posture**.
-    ///
-    /// Every call site is enumerated by `every_launch_exemption_is_enumerated`.
-    ///
-    /// The policy is a parameter rather than a call-site decision for the same
-    /// reason [`RecordingPolicy`] has no public constructor: an exemption a
-    /// frame could grant itself is an exemption anyone who can place a
-    /// directory can grant themselves. The launcher's exemption is inherited
-    /// from a caller-supplied pkg-root under `$OCX_HOME/temp/…`, which is
-    /// inside the invoking user's own home — forgeable by construction, and a
-    /// capability token cannot fix that, since parent and forger run as the
-    /// same uid. What the operator *can* decide is the posture, so that is what
-    /// bounds the exemption.
+    /// A sanctioned non-recording launch, bounded by the resolved policy.
     ///
     /// # Errors
     ///
-    /// Returns [`LaunchError::ExemptionRefused`] when the resolved policy both
-    /// requires recording **and** has somewhere to record: a fail-closed posture
-    /// over a live sink and an exemption are a contradiction, and the
-    /// contradiction is resolved in the operator's favour.
-    ///
-    /// `required` alone is not the test. A SYSTEM-locked `[records]` block that
-    /// names no `dir` resolves to `required = true` with recording off — the
-    /// operator locking recording *off* for the host — and
-    /// [`resolve_records`](crate::record::resolve_records) preserves that state
-    /// deliberately. Refusing on the posture alone would turn every preview on
-    /// such a host into exit 74 while nothing was ever going to be recorded.
+    /// [`LaunchError::ExemptionRefused`] when the policy is `required` and has a sink to record to.
     pub fn exempt(
         env: Env,
         executable: &'a Path,
@@ -170,49 +92,23 @@ impl<'a> Launch<'a> {
     }
 }
 
-/// Whether `reason`'s exemption survives the resolved policy.
-///
-/// Split out of [`Launch::exempt`] because two of the three exempt frames never
-/// reach a `Launch` at all: `ocx package test --script` and `ocx patch test
-/// --script` hand control to the Starlark host, whose `ocx.run` spawns children
-/// of its own (`script/ocx_module.rs`, allowlisted in
-/// `no_process_spawn_outside_launch`). Those frames call this directly, before
-/// the interpreter starts, so the bound holds for every preview and not merely
-/// for the ones that happen to end in a `Launch`.
+/// Whether `reason`'s exemption survives the resolved policy; `--script` frames call this before
+/// the Starlark host spawns children of its own.
 ///
 /// # Errors
 ///
-/// Returns [`LaunchError::ExemptionRefused`] when the policy requires recording
-/// and has a sink to record to. See [`Launch::exempt`] for why both halves are
-/// tested rather than the posture alone.
+/// [`LaunchError::ExemptionRefused`] when the policy is `required` and has a sink to record to.
 pub fn exemption_allowed(policy: &RecordingPolicy, reason: ExemptionReason) -> Result<(), LaunchError> {
+    // Not `required` alone: a SYSTEM lock with no `dir` records nothing, and refusing there turns every preview into exit 74.
     if policy.required() && policy.is_recording() {
         return Err(LaunchError::ExemptionRefused { reason });
     }
     Ok(())
 }
 
-/// Reject a recording frame that carries no `argv`, and return the arguments the
-/// child is launched with.
-///
-/// `RecordInputs` cannot express the invariant as a type, so it is checked at
-/// construction rather than deferred to the sink: `argv` must have its `argv[0]`
-/// for the remainder to be the child's arguments.
-///
-/// An **empty package set is not** a validation failure. `ocx exec` in a project
-/// whose selected scope declares no tools is a legitimate launch, and its record
-/// is the truthful statement that this invocation composed nothing and reached
-/// its executable from the ambient `PATH` — which is precisely the fact the
-/// `sh.ocx.provenance` field exists to surface. Refusing the launch over it would
-/// break a working command for a policy nobody set.
-///
-/// # Errors
-///
-/// Returns [`LaunchError::IncompleteRecordInputs`] naming the offending frame.
+/// Reject a recording frame that carries no `argv`, and return the child's arguments (its tail).
+// An empty package set must stay valid: `ocx exec` in a project with no tools is a working command.
 fn validate_record_inputs<'a>(record: &RecordInputs<'a>) -> Result<&'a [String], LaunchError> {
-    // `argv` is `argv[0]` plus the arguments as invoked, so the child's
-    // arguments are its tail — and an empty `argv` is a frame that resolved
-    // nothing to run.
     let (_argv0, args) = record
         .argv
         .split_first()
@@ -222,11 +118,7 @@ fn validate_record_inputs<'a>(record: &RecordInputs<'a>) -> Result<&'a [String],
     Ok(args)
 }
 
-/// Name the launching command for a diagnostic.
-///
-/// Mirrors `record::execution_record`'s frame derivation, which owns the wire
-/// spelling; this one is prose for an error message and deliberately reads as
-/// the command a user typed.
+/// Name the launching command as a user typed it, for a diagnostic.
 fn frame_name(scope: &Scope) -> &'static str {
     match scope {
         Scope::Project { .. } => "ocx exec",
@@ -236,11 +128,7 @@ fn frame_name(scope: &Scope) -> &'static str {
     }
 }
 
-/// Replace the current process with the launched tool.
-///
-/// Diverges on success: on Unix via `execvp`, on Windows by spawning, waiting,
-/// and exiting without running the drop chain. Only a start-up failure, or a
-/// record the policy required and could not write, returns.
+/// Replace the current process with the launched tool; returns only on a start-up or required-record failure.
 pub async fn exec(launch: Launch<'_>) -> LaunchError {
     let Launch {
         env,
@@ -250,10 +138,7 @@ pub async fn exec(launch: Launch<'_>) -> LaunchError {
     } = launch;
     match mode {
         Mode::Recording { record, policy } => {
-            // On Unix the record is written before `execvp`, so the write is its
-            // own gate and a probe would only duplicate it. Everywhere else the
-            // pid does not exist until the child does, and the probe is what
-            // keeps the fail-closed posture honest without it.
+            // Off Unix the record needs the child's pid, so only this probe gates the spawn under a fail-closed policy.
             #[cfg(not(unix))]
             if let Err(error) = probe_sink(policy).await {
                 return error;
@@ -267,14 +152,12 @@ pub async fn exec(launch: Launch<'_>) -> LaunchError {
     }
 }
 
-/// Spawn the launched tool and wait, so the caller can run cleanup (dropping a
-/// tempdir guard, say) before propagating the exit status.
+/// Spawn the launched tool and wait, so the caller can clean up before propagating the exit status.
 ///
 /// # Errors
 ///
-/// Returns [`LaunchError`] when the child cannot be started, or when recording
-/// fails under a `required` policy. A non-zero child exit is reported through
-/// the returned [`ExitStatus`], not as an error.
+/// [`LaunchError`] when the child cannot be started or a `required` record fails; a non-zero
+/// child exit is the returned [`ExitStatus`].
 pub async fn spawn_and_wait(launch: Launch<'_>) -> Result<ExitStatus, LaunchError> {
     let Launch {
         env,
@@ -284,9 +167,7 @@ pub async fn spawn_and_wait(launch: Launch<'_>) -> Result<ExitStatus, LaunchErro
     } = launch;
     match mode {
         Mode::Recording { record, policy } => {
-            // This path never replaces the ocx image, so the tool's pid is
-            // post-spawn on every platform and the probe is the only pre-spawn
-            // gate available.
+            // The pid exists only post-spawn here, so the probe is the only pre-spawn gate.
             probe_sink(policy).await?;
             child_process::spawn_and_wait(executable, args, env, |pid| write_record(&record, policy, pid)).await
         }
@@ -298,9 +179,6 @@ pub async fn spawn_and_wait(launch: Launch<'_>) -> Result<ExitStatus, LaunchErro
 }
 
 /// Refuse an unwritable sink before the child starts.
-///
-/// Costs one create/unlink and is skipped entirely when recording is configured
-/// off.
 async fn probe_sink(policy: &RecordingPolicy) -> Result<(), LaunchError> {
     let Some(dir) = policy.dir() else {
         return Ok(());
@@ -326,12 +204,7 @@ thread_local! {
 
 /// Build and publish this launch's record.
 async fn write_record(inputs: &RecordInputs<'_>, policy: &RecordingPolicy, pid: u32) -> Result<(), LaunchError> {
-    // The common case is no `[records] dir` anywhere in the config chain, and
-    // everything below it is work whose only consumer is a record nobody asked
-    // for: hostname, getcwd, getppid, the dependency-closure walk, purl
-    // construction, the annotation maps. `emit` refuses a configured-off policy
-    // too, but only after all of that has been paid for — twice per entrypoint
-    // invocation, on every `ocx exec`.
+    // `emit` refuses too, but only after building the record on every `ocx exec`.
     if !policy.is_recording() {
         return Ok(());
     }
@@ -346,23 +219,12 @@ async fn write_record(inputs: &RecordInputs<'_>, policy: &RecordingPolicy, pid: 
     }
 }
 
-/// Apply the policy's failure posture to a record that could not be written.
-///
-/// `required` aborts the launch with exit 74; otherwise the operator gets a
-/// warning and the tool still runs — a developer who fat-fingered
-/// `--records-dir` once should not have their build die for a policy nobody
-/// set.
-///
-/// The refusal names the policy rather than only the sink, because nobody may
-/// have written `required = true` anywhere: it is the SYSTEM clamp's default.
-/// Without the name, a dead build reads as an unexplained permission error.
+/// Apply the policy's failure posture to an unwritable record: `required` aborts, otherwise warn and run.
 fn apply_posture(error: RecordsError, policy: &RecordingPolicy) -> Result<(), LaunchError> {
     if policy.required() {
         return Err(LaunchError::Records(error));
     }
-    // The variant's own `Display` names the sink but not why it failed, and the
-    // cause ("permission denied") is the actionable half — so the whole chain is
-    // rendered rather than just its head.
+    // The whole chain: the head names only the sink, the cause says why.
     let chain = std::iter::successors(Some(&error as &dyn std::error::Error), |cause| cause.source())
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -375,9 +237,6 @@ fn apply_posture(error: RecordsError, policy: &RecordingPolicy) -> Result<(), La
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
     /// The tool could not be started.
-    ///
-    /// Replaces the identical `failed to run '{}'` context string the three exec
-    /// sites each carried.
     #[error("failed to run '{resolved}'", resolved = .resolved.display())]
     Spawn {
         /// The resolved executable that could not be started.
@@ -395,11 +254,6 @@ pub enum LaunchError {
     },
 
     /// A launch claimed a recording exemption under a fail-closed policy.
-    ///
-    /// Names the policy for the same reason [`Self::Records`] does — nobody may
-    /// have written `required = true` anywhere, since it is the SYSTEM clamp's
-    /// default — and names the command, because the only remediation is to run
-    /// a different one or change the policy.
     #[error(
         "launch refused by [records] required = true in the resolved config chain: {command} does not record, and a fail-closed policy grants no exemption",
         command = .reason.command()
@@ -410,10 +264,7 @@ pub enum LaunchError {
     },
 
     /// A record could not be written and the policy is `required`.
-    ///
-    /// Names the policy, because the wrapped error names only the sink — and
-    /// under the SYSTEM clamp `required` defaults to `true`, so the setting that
-    /// killed the build may appear in nobody's config file.
+    // The message names the policy: under the SYSTEM clamp `required` may appear in nobody's config.
     #[error("launch refused by [records] required = true in the resolved config chain")]
     Records(#[from] crate::record::RecordsError),
 }

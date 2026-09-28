@@ -8,15 +8,8 @@ use crate::options;
 pub mod data;
 pub mod junit;
 
-/// Implemented by API data types that know how to render themselves in either output format.
-///
-/// The `report` method on [`Api`] dispatches between JSON and plain text via
-/// this trait, so each data type owns its own formatting logic rather than
-/// delegating it to a giant match block in the API layer.
-///
-/// `print_json` has a default implementation that serializes `self` via
-/// [`DataInterface::print_json`] (with optional syntax highlighting). Override it
-/// only when the JSON representation needs special handling beyond `Serialize`.
+/// An API data type that renders itself as plain text or JSON; override `print_json` only
+/// when the JSON form needs more than `Serialize`.
 pub trait Printable: serde::Serialize {
     fn print_plain(&self, data: &DataInterface);
 
@@ -33,12 +26,8 @@ pub struct Api {
     format: options::FormatMode,
     data: DataInterface,
     quiet: bool,
-    /// Set once a report has actually been printed to stdout. Shared across
-    /// clones so the app-level error-envelope wrapper can tell "this failure
-    /// already produced the command's stdout document" (report-then-fail
-    /// commands like `package push --tags-file`) from "stdout is empty and
-    /// the envelope is the document" — stdout must carry exactly one JSON
-    /// document either way.
+    /// Set once a report reaches stdout, shared across clones: the error-envelope wrapper reads it,
+    /// or a report-then-fail command would put two JSON documents on stdout.
     reported: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -56,15 +45,12 @@ impl Api {
         &self.data
     }
 
-    /// Shared handle answering whether any report reached stdout — survives
-    /// the `Context` move into `Command::execute`.
+    /// Whether any report reached stdout; survives the `Context` move into `Command::execute`.
     pub fn reported_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.reported)
     }
 
-    /// Renders `item` to stdout in the configured format, unless quiet mode is
-    /// active — quiet suppresses every report type (and, at `Context::try_init`,
-    /// progress), leaving errors and warnings on stderr untouched.
+    /// Renders `item` to stdout in the configured format; quiet mode suppresses it.
     pub fn report(&self, item: &impl Printable) -> anyhow::Result<()> {
         if self.quiet {
             return Ok(());

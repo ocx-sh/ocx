@@ -9,9 +9,7 @@ use crate::media_type::{
 };
 use crate::{auth, layer_ref::LayerRef, manifest_builder::ManifestBuilder, tag::InternalTag};
 
-/// Every fallible operation on this tier answers with a [`ClientError`]; the
-/// alias is the same one `transport` uses, re-declared here rather than
-/// imported so the two halves of the client cannot drift apart.
+/// Result alias for this tier; re-declared rather than imported from `transport`.
 pub type Result<T> = std::result::Result<T, error::ClientError>;
 
 use std::collections::BTreeMap;
@@ -20,72 +18,50 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 
 use super::{Algorithm, Digest, OciIdentifier, native};
 
-/// Maximum number of layer push/verify operations to run concurrently.
-///
-/// Each `LayerRef::File` reads the full archive into memory before
-/// uploading, so unbounded fan-out would OOM on multi-GB layers.
+/// Concurrent layer push/verify bound: each `LayerRef::File` is read whole into
+/// memory, so unbounded fan-out OOMs on multi-GB layers.
 pub const LAYER_PUSH_CONCURRENCY: usize = 4;
 
-/// Maximum length of an OCI tag, per the distribution spec's tag grammar
-/// (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`).
-///
-/// `push_keep_tag` refuses to write past it rather than truncating the digest.
+/// Maximum OCI tag length per the distribution spec; `push_keep_tag` refuses past
+/// it rather than truncating the digest.
 pub const MAX_OCI_TAG_LEN: usize = 128;
 
-/// Hard cap on a manifest body accepted from a registry (CWE-400).
+/// Hard cap on a registry-served manifest body (CWE-400).
 ///
-/// Digest verification is not a size check: a hostile registry named by an
-/// index root's `repository` pointer can answer with a multi-gigabyte body
-/// whose digest matches perfectly. `announce` commits exactly those bytes into
-/// a public git repository, so the ceiling belongs on the one function every
-/// raw-bytes caller routes through.
-///
-/// This is also the ceiling the index-role HTTP transport applies to root,
-/// dispatch, config and catalog documents — `oci/index/ocx_index.rs` imports
-/// this constant rather than declaring its own, so the two halves of one store
-/// cannot drift apart. The OCI distribution spec suggests 4 MiB,
-/// but a verbatim image index carrying many platforms plus attestation
-/// descriptors is legitimately larger, and matching the other half of the same
-/// store is what makes the store coherent.
+/// A digest match is not a size check: a hostile `repository` pointer can serve a
+/// multi-gigabyte body that verifies, which `announce` then commits into a public
+/// git repository. The index transport shares this ceiling so the two cannot drift.
 pub const MAX_INDEX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 
-/// Per-layer outcome recorded by `push_multi_layer_manifest`, aggregated by
-/// the caller into a [`LayerCounts`].
+/// Per-layer outcome of `push_multi_layer_manifest`, aggregated into [`LayerCounts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerPushOutcome {
-    /// Uploaded via `push_blob` — which may itself have HEAD-skipped an
-    /// already-present blob (`NativeTransport::do_push_blob`'s
-    /// blob-exists short-circuit); this variant only means "no mount was
-    /// used," not "bytes definitely crossed the wire."
+    /// Sent through `push_blob`, which may HEAD-skip an already-present blob, so
+    /// this means "no mount", not "bytes crossed the wire".
     Uploaded,
     /// A cross-repository blob mount succeeded; no upload was performed.
     Mounted,
-    /// A `LayerRef::Digest` layer verified present via `head_blob` — no
-    /// mount was attempted, or a mount attempt fell back.
+    /// A `LayerRef::Digest` layer confirmed present by `head_blob`.
     Verified,
 }
 
 /// Aggregate counts of layer-push outcomes for a single package push.
 ///
 /// Only layer blobs are counted — the config blob and the manifest itself
-/// are not layers and are excluded. An `uploaded` count may still have
-/// HEAD-skipped an already-present blob inside `push_blob` (see
-/// [`LayerPushOutcome::Uploaded`]); this struct distinguishes mount vs.
-/// explicit-upload vs. verify-by-digest at the `push_multi_layer_manifest`
-/// call site, not whether bytes actually crossed the wire.
-///
-/// `Serialize` derives directly on this type (rather than a CLI-side
-/// wrapper) so `ocx_cli`'s `PushReport` can embed it verbatim as the
-/// `layers` field of the push JSON report.
+/// are not layers and are excluded. The counts distinguish mount vs. explicit
+/// upload vs. verify-by-digest, not whether bytes actually crossed the wire:
+/// an `uploaded` layer may still have been skipped as already present.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct LayerCounts {
     /// Layers a cross-repository blob mount placed in the target repository
     /// without any upload.
     pub mounted: usize,
-    /// Layers sent through `push_blob` — see [`LayerPushOutcome::Uploaded`]
-    /// for why this does not strictly mean "bytes crossed the wire".
+    /// Layers uploaded rather than mounted or verified.
+    ///
+    /// A layer the registry already held may still count here, so this does
+    /// not strictly mean "bytes crossed the wire".
     pub uploaded: usize,
-    /// `LayerRef::Digest` layers confirmed present by `head_blob`.
+    /// Layers referenced by digest and confirmed already present in the registry.
     pub verified: usize,
 }
 
@@ -99,9 +75,7 @@ impl LayerCounts {
     }
 }
 
-/// Sums the per-platform counts of a multi-platform push fan-out (the
-/// publishing facade pushes one package per target platform, each with its own
-/// layer set).
+/// Sums the per-platform counts of a multi-platform push fan-out.
 impl std::ops::AddAssign for LayerCounts {
     fn add_assign(&mut self, other: Self) {
         self.mounted += other.mounted;
@@ -120,16 +94,13 @@ pub(super) mod progress_reader;
 pub mod test_transport;
 mod transport;
 
-/// Refuses every registry transport a [`Client`] would build, for the
-/// in-process CLI seam's no-network guarantee.
+/// Refuses every registry transport a [`Client`] would build, for the in-process
+/// CLI seam's no-network guarantee.
 ///
-/// Process-global on purpose: the seam cannot reach the clients a command
-/// builds, only the one lazy point every request passes through
-/// ([`Client::transport`]). A refused build yields an empty in-memory stub —
-/// nothing leaves the process — and the caller learns of it from [`disarm`],
-/// not from an error at the request site, so a command that swallows a
-/// registry failure cannot hide the attempt. Callers serialise arm/disarm
-/// themselves (the seam holds `ocx_util`'s `EnvLock` across both).
+/// Process-global because [`Client::transport`] is the one point every request
+/// passes through. A refused build yields an in-memory stub and is reported by
+/// [`disarm`], not at the request site, so a command that swallows a registry
+/// error cannot hide the attempt. Callers serialise arm/disarm themselves.
 #[cfg(any(test, feature = "__testing"))]
 pub mod network_refusal {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -159,11 +130,9 @@ pub mod network_refusal {
     }
 }
 
-/// Whether a request about to leave through a transport this crate does not
-/// build — the index fetch — must be refused, recording the attempt for
-/// `network_refusal::disarm`. Always `false` without the testing gate, so a
-/// caller needs no `cfg` of its own: the answer follows this crate's features,
-/// which are the ones the seam arming it was built with.
+/// Whether a request through a transport this crate does not build (the index
+/// fetch) must be refused, recording the attempt for `network_refusal::disarm`.
+/// Always `false` without the testing gate, so callers need no `cfg` of their own.
 pub fn network_refused() -> bool {
     #[cfg(any(test, feature = "__testing"))]
     let refused = network_refusal::refuse();
@@ -173,22 +142,13 @@ pub fn network_refused() -> bool {
 }
 
 pub use builder::ClientBuilder;
-/// Re-exported so `auth::login`'s one-off ping client shares the single
-/// definition instead of picking its own idle bound.
-///
-/// `pub` rather than `pub(crate)` since the extraction: the index store's tag
-/// singleflight derives its own timeout from this one so the two cannot drift,
-/// and it now sits in another crate.
-///
-/// `PUSH_CHUNK_SIZE` and `REGISTRY_CONNECT_TIMEOUT` join it for `ocx-mirror`,
-/// which builds its own `native::ClientConfig`: a hand-built config inherits
-/// `None` for every timeout, so importing the values keeps its bounds from
-/// drifting away from ours.
+/// Shared so every hand-built client (the login ping, the index singleflight,
+/// `ocx-mirror`'s own `ClientConfig`, which defaults every timeout to `None`)
+/// keeps the same bounds.
 pub use builder::{PUSH_CHUNK_SIZE, REGISTRY_CONNECT_TIMEOUT, REGISTRY_READ_TIMEOUT};
 pub use mirror_map::MirrorMap;
-/// The buffering body a test double gives `OciTransport::push_blob_from_path`.
-/// Test-only by construction — the trait deliberately has no default, so a
-/// production transport must stream (see the method's own docs).
+/// The buffering body a test double gives `OciTransport::push_blob_from_path`;
+/// the trait has no default so a production transport must stream.
 #[cfg(any(test, feature = "__testing"))]
 pub use transport::push_blob_buffered;
 pub use transport::{MountOutcome, OciTransport, ProgressFn, ReferrersListing, no_progress};
@@ -197,33 +157,10 @@ use error::ClientError;
 
 /// Builds an [`OciTransport`] over an already-configured fork client.
 ///
-/// The one public constructor for a transport. `ocx-mirror` owns its own
-/// registry-client construction policy (`adr_registry_mirror_sync.md`, Open
-/// question 1, amended 2026-08-14) and needs the referrer vocabulary this
-/// trait already exposes publicly: the capability probe, the referrer
-/// manifest PUT, and the tag-schema fallback merge. Without a way to *name* a
-/// transport from outside this crate, those public methods are unreachable.
-///
-/// This is a deliberate, scoped exception to the "registry operations go
-/// through the CLI surface" doctrine in `arch-principles.md` (Core vs Plugin
-/// Boundary): the fallback merge has no CLI spelling, and `ocx package copy`
-/// refuses the referrers-less target by ratified decision
-/// ([ocx#392](https://github.com/ocx-sh/ocx/issues/392)). `oci/copy.rs` is
-/// untouched by this seam and keeps its own exit-84 contract.
-///
-/// `auth` is consulted per registry, exactly as [`Client`] consults it.
-///
-/// The exception is as wide as the trait, deliberately: the ratified
-/// signature returns [`OciTransport`] whole, so the caller also gets
-/// [`push_manifest_raw`](OciTransport::push_manifest_raw),
-/// [`push_blob`](OciTransport::push_blob),
-/// [`push_blob_from_path`](OciTransport::push_blob_from_path) and
-/// [`mount_blob`](OciTransport::mount_blob) — every write this crate can make
-/// to a registry, not only the referrer vocabulary the exception was argued
-/// for. The caller likewise inherits whatever TLS-root and plain-HTTP policy
-/// `client` was built with: this function configures neither and cannot
-/// re-check either, so a fork client built to accept plain HTTP hands back a
-/// transport that speaks plain HTTP.
+/// The one public transport constructor, a scoped exception to
+/// `arch-principles.md § Core vs Plugin Boundary` for `ocx-mirror` (ocx-sh/ocx#392).
+/// It inherits `client`'s TLS-root and plain-HTTP policy unchecked: a fork client
+/// that accepts plain HTTP yields a transport that speaks it.
 pub fn native_transport(client: crate::native::Client, auth: auth::Auth) -> Box<dyn OciTransport> {
     Box::new(native_transport::NativeTransport::new(client, auth))
 }
@@ -244,15 +181,9 @@ pub struct SingleLayerArtifact {
 
 /// Derives the reference for a sibling tag in the same repository as `image`.
 ///
-/// Lives here because the direct `Reference` constructors are gated to this file
-/// by `native_reference_direct_construction_restricted_to_seams`, whose scan is
-/// over source text — so this doc comment must not spell the gated form either.
-/// This is the one shape the gate does not need to catch: the registry and
-/// repository come from a reference a seam already resolved, so no host is
-/// minted and no mirror decision is bypassed — only the tag changes.
-///
-/// Used by the referrers fallback tag, which is a second tag on the very
-/// repository the subject manifest lives in.
+/// Lives here because direct `Reference` construction is gated to this file by
+/// `native_reference_direct_construction_restricted_to_seams`, a source-text scan,
+/// so this doc must not spell the gated form. Used by the referrers fallback tag.
 pub fn sibling_tag_reference(image: &native::Reference, tag: String) -> native::Reference {
     native::Reference::with_tag(
         image.resolve_registry().to_string(),
@@ -263,47 +194,30 @@ pub fn sibling_tag_reference(image: &native::Reference, tag: String) -> native::
 
 /// Which host a read addresses.
 ///
-/// Canonical is the default, and the asymmetry is why: a mirrored answer is
-/// wrong exactly when it decides a write, and a canonical answer is never
-/// wrong, only slower. Writes always go to the canonical registry (mirrors are
-/// read-only, ADR Q5), so a decision taken from a mirror and applied to the
-/// canonical host is a decision about a repository nobody read (CWE-345/367) —
-/// and nothing in a call site's shape reveals that it is about to back a write.
-/// So the safe host is what a plain `client.list_tags(..)` gets, and reaching a
-/// mirror is something a caller asks for by name through the `*_addressed`
-/// variants. A read that only feeds a pull, a listing or a cache should ask.
+/// Canonical is the default because writes always go canonical: a decision read
+/// from a mirror and applied to the canonical host is about a repository nobody
+/// read (CWE-345/367). A mirror is reached only by name, via the `*_addressed` variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadAddressing {
-    /// A configured mirror serves the read. Named explicitly, never implied —
-    /// only for a read whose answer cannot decide, gate, or verify a write.
+    /// A configured mirror serves the read; only for an answer that cannot decide,
+    /// gate or verify a write.
     Mirrored,
     /// The default: the canonical registry, mirrors bypassed.
     Canonical,
 }
 
 pub struct Client {
-    /// The transport, built on first use from [`Self::recipe`].
-    ///
-    /// Shared by every clone rather than rebuilt per clone: the fork's
-    /// `native::Client` holds all of its mutable state (`auth_store`, `tokens`,
-    /// `challenges`, `token_flights`, the `reqwest::Client` pools) behind
-    /// `Arc`s, and so does [`auth::Auth`] — so the `box_clone` this replaced was
-    /// already handing every clone the same state. What changes is only *when*
-    /// the trust store is parsed, and how many times: once per process, on the
-    /// first request, instead of once per `Client` construction whether or not a
-    /// request follows. See [`builder::TransportRecipe`] for the cost.
+    /// The transport, built once on first use from [`Self::recipe`] and shared by
+    /// every clone (all of its mutable state is behind `Arc`s already).
     transport_cell: std::sync::Arc<std::sync::OnceLock<Box<dyn OciTransport>>>,
     /// How to build [`Self::transport`]. Cheap to hold and to clone.
     recipe: builder::TransportRecipe,
     pub(super) lock_timeout: std::time::Duration,
     pub(super) tag_chunk_size: usize,
     pub(super) repository_chunk_size: usize,
-    /// Shared progress manager for download/upload bars. Cheap to clone
-    /// (an `Arc` handle or a disabled no-op).
+    /// Shared progress manager for transfer bars.
     progress: ocx_console::progress::ProgressManager,
-    /// Per-upstream-host mirror map. Applied on the read path only, via
-    /// [`Client::transport_reference`] / [`Client::transport_registry`].
-    /// Empty = identity (no host mirrored). Cheap to clone.
+    /// Per-upstream-host mirror map, applied on the read path only; empty is identity.
     pub(super) mirrors: MirrorMap,
 }
 
@@ -326,58 +240,23 @@ impl Client {
         self.lock_timeout
     }
 
-    /// Replaces the progress manager the transfer bars render on.
-    ///
-    /// The builder sets one for the process; this is for a caller that
-    /// decides the channel later than construction — a shim's `lazy-report`
-    /// is resolved at materialization time, after the client exists, and the
-    /// download bar has to follow that decision rather than the ambient one.
+    /// Replaces the progress manager, for a caller that picks the channel after
+    /// construction (a shim's `lazy-report` is resolved at materialization time).
     pub fn with_progress(mut self, progress: ocx_console::progress::ProgressManager) -> Self {
         self.progress = progress;
         self
     }
 
-    /// How many operator-supplied extra CA roots this client's transport is
-    /// built with (ocx#448, C-006) — the observable that tells the merged
-    /// trust view apart from the local-only one a caller was handed (S-006).
+    /// Number of operator-supplied extra CA roots the transport is built with.
     #[must_use]
     pub fn extra_root_count(&self) -> usize {
         self.recipe.extra_roots().len()
     }
 
-    /// Returns a reference to the inner transport.
+    /// Returns the transport, building it on first use.
     ///
-    /// Crate-internal: the sign/verify pipelines take a `&Client` and derive
-    /// the transport through here for their transport-level calls (capability
-    /// probes, referrer manifest reads). [`Client`] itself never hands a
-    /// caller a transport — its pipelines are driven through the
-    /// `PackageManager` facade (`sign_one` / `verify_one`).
-    ///
-    /// That is a statement about `Client`, not about the crate:
-    /// [`native_transport`](fn@native_transport) is the one public constructor of a
-    /// `Box<dyn OciTransport>` (OCX-C-1), and it deliberately bypasses this
-    /// type entirely rather than widening it.
-    ///
-    /// **This is where the transport is built.** Every path that reaches the
-    /// network goes through here, so deferring construction to this call is what
-    /// keeps a `Client` free to construct — see `Self::transport_cell`'s field
-    /// doc.
-    ///
-    /// Two consequences, both worth stating rather than discovering:
-    ///
-    /// - **Where a misconfiguration surfaces moved** from `Client` construction
-    ///   to the first request. Nothing actually moved *today*:
-    ///   `crate::native::Client::new` is infallible (the fork falls back to a
-    ///   seeded default client rather than erroring), and every refusal that
-    ///   could reject a config — the plain-HTTP gate, the index base-URL parse,
-    ///   the SSRF `GuardedResolver` construction — still runs eagerly where it
-    ///   did. A future config that *can* fail would move with it.
-    /// - **`get_or_init` blocks the caller** while another thread is building,
-    ///   and this is called from `async` code. It is not new blocking work: the
-    ///   same ~28 ms of trust-store parsing ran inline on a runtime thread in
-    ///   `Context::try_init` before, unconditionally. Now it runs once per
-    ///   process, only when a request is actually made, and only for whoever
-    ///   makes the first one.
+    /// Every network path goes through here, so a build that becomes fallible moves
+    /// its failure from construction to the first request.
     pub fn transport(&self) -> &dyn OciTransport {
         &**self.transport_cell.get_or_init(|| {
             #[cfg(any(test, feature = "__testing"))]
@@ -393,8 +272,6 @@ impl Client {
     #[cfg(any(test, feature = "__testing"))]
     pub fn with_transport(transport: Box<dyn OciTransport>) -> Self {
         Client {
-            // Pre-filled, so `recipe` is never consulted — a test double is
-            // exactly the case that has no recipe.
             transport_cell: std::sync::Arc::new(std::sync::OnceLock::from(transport)),
             recipe: builder::TransportRecipe::default(),
             lock_timeout: std::time::Duration::from_secs(5),
@@ -405,16 +282,8 @@ impl Client {
         }
     }
 
-    /// Points reads at `host` for everything published under `upstream`.
-    ///
-    /// The `mirrors` field is module-private, so a caller outside `oci` cannot
-    /// build a mirrored client — which is exactly what a test asserting that
-    /// some subsystem's reads are *not* mirrored needs.
-    /// Replace the whole mirror map, for a test that builds one by hand.
-    ///
-    /// The field itself stays private: a consumer assigning it directly would
-    /// be writing through the struct rather than through the one seam that can
-    /// be gated out of a release build.
+    /// Replaces a built client's whole mirror map; outside the crate only this seam,
+    /// gated out of a release build, can redirect its reads.
     #[cfg(any(test, feature = "__testing"))]
     pub fn set_mirrors(&mut self, mirrors: MirrorMap) {
         self.mirrors = mirrors;
@@ -435,35 +304,20 @@ impl Client {
 
     // ── Mirror transform (single read-path rewrite seam) ───────────
 
-    /// Builds the transport reference for a **read-path** operation, applying
-    /// the mirror map.
+    /// Builds the transport reference for a **read-path** operation: with a mirror
+    /// for `identifier.registry()`, host and repository are rewritten (tag/digest
+    /// verbatim); otherwise canonical. Transport-only, never stored.
     ///
-    /// When `self.mirrors` has an entry for `identifier.registry()`, the
-    /// returned reference targets the mirror host with the repository rewritten
-    /// to `<path-prefix>/<repository>` (tag and digest copied verbatim). When
-    /// no mirror is configured, the result is identical to the canonical
-    /// reference. The returned reference is transport-only and is never
-    /// converted back into a storage key.
-    ///
-    /// This is one of the two read seams — every read site builds references
-    /// through here (or `Self::transport_registry`). There
-    /// is no `From<&OciIdentifier> for native::Reference` impl, so no read site
-    /// reaches for a canonical conversion by accident. Read paths must still
-    /// route through these seams rather than
-    /// [`OciIdentifier::canonical_reference`] (the push seam) — that
-    /// discipline is enforced by the structural test plus the behavioural
-    /// backstop, not by the compiler.
+    /// Read sites must route through this or `transport_registry`, never
+    /// [`OciIdentifier::canonical_reference`] (the push seam); a structural test
+    /// enforces it, not the compiler.
     pub fn transport_reference(&self, identifier: &OciIdentifier) -> native::Reference {
         let Some((host, repository)) = self
             .mirrors
             .rewrite_repository(identifier.registry(), identifier.repository())
         else {
-            // No mirror for this host: identical to the canonical reference.
             return identifier.canonical_reference();
         };
-        // Tag and digest are copied verbatim from the canonical identifier; only
-        // the host and repository are rewritten. The returned reference is
-        // transport-only and never round-trips into storage.
         match (identifier.tag(), identifier.digest()) {
             (Some(tag), Some(digest)) => {
                 native::Reference::with_tag_and_digest(host, repository, tag.to_string(), digest.to_string())
@@ -474,23 +328,11 @@ impl Client {
         }
     }
 
-    /// Builds the transport reference for a registry-scoped read operation
-    /// (the catalog `list_repositories` call), applying the mirror map to the
-    /// registry host.
-    ///
-    /// Sibling of [`transport_reference`](Self::transport_reference) for the
-    /// case where there is no full identifier — only a registry string and a
-    /// placeholder repository.
+    /// Registry-scoped counterpart of [`transport_reference`](Self::transport_reference)
+    /// for the catalog call, which has no full identifier.
     pub(crate) fn transport_registry(&self, registry: &str) -> native::Reference {
-        // The catalog **URL** is built from `registry()` alone (`/v2/_catalog`),
-        // so the repository never reaches the path. The catalog **auth scope**,
-        // however, is `repository:<repository>:pull` (oci-client `_auth`), so the
-        // repository value still has to be well-formed. An empty repository (no
-        // mirror) keeps the host verbatim and the repository empty; when a mirror
-        // exists, the host is rewritten and the placeholder repository becomes the
-        // mirror's path prefix verbatim — `rewrite_repository` returns the prefix
-        // with no trailing slash for the empty-repository case, so the auth scope
-        // is `repository:<prefix>:pull`, not the malformed `repository:<prefix>/:pull`.
+        // The auth scope is `repository:<repository>:pull`, so the repository must stay
+        // well-formed: an empty one, or the mirror prefix without a trailing slash.
         let (host, repository) = self
             .mirrors
             .rewrite_repository(registry, "")
@@ -500,23 +342,10 @@ impl Client {
 
     /// Annotates `error` with the mirror routing that produced it.
     ///
-    /// A mirrored read fails against a host the caller never typed: the
-    /// identifier says `ghcr.io`, the request went to the mirror, and every
-    /// error in between names exactly one of the two.
-    ///
-    /// The question is whether *this* fetch was rewritten, which is why the
-    /// logical identifier is a parameter rather than something recovered from
-    /// the physical host. A host configured as one upstream's mirror is still
-    /// an ordinary registry anyone may pull from directly, so asking "who
-    /// mirrors this host" answers for the wrong request and names a config
-    /// entry that had nothing to do with the failure. Asking "was the host
-    /// this identifier resolves to swapped for a mirror" cannot: a
-    /// canonical-addressed read leaves the two equal and goes unannotated.
-    ///
-    /// Only failures where the routing is the missing context are wrapped.
-    /// The not-found sentinels are control flow: callers match on them to
-    /// produce `Ok(None)`, so burying one behind [`ClientError::Mirrored`]
-    /// would turn a missing tag into a hard failure.
+    /// `logical` is a parameter because a mirror host can also be pulled from
+    /// directly, so deriving it from `physical` would misname the request. Not-found
+    /// sentinels are never wrapped: callers read them as `Ok(None)`, so wrapping one
+    /// turns a missing tag into a hard failure.
     fn via_mirror(&self, logical: &OciIdentifier, physical: &native::Reference, error: ClientError) -> ClientError {
         if !matches!(
             error,
@@ -547,67 +376,35 @@ impl Client {
         }
     }
 
-    /// Builds the reference for a read that has been told which host to
-    /// address.
-    ///
-    /// The mirrored arm is [`transport_reference`](Self::transport_reference)
-    /// verbatim — this is a routing switch, not a second seam.
+    /// Builds the reference for a read told which host to address; the mirrored arm
+    /// is [`transport_reference`](Self::transport_reference) verbatim.
     pub fn read_reference(&self, identifier: &OciIdentifier, addressing: ReadAddressing) -> native::Reference {
         match addressing {
             ReadAddressing::Mirrored => self.transport_reference(identifier),
-            // Push stays canonical (remote/proxy mirrors are read-only), so a
-            // read that decides a write has to name the same host.
             ReadAddressing::Canonical => identifier.canonical_reference(),
         }
     }
 
-    /// Builds the transport reference for a **write-path** operation — always
-    /// the canonical host, never a mirror.
+    /// Builds the transport reference for a **write-path** operation: always the
+    /// canonical host.
     ///
-    /// Write counterpart to [`transport_reference`](Self::transport_reference).
-    /// Remote/proxy mirrors are read-only (ADR Q5): a push routed through the
-    /// read seam is rejected outright, or — against a writable mirror — lands
-    /// the artifact somewhere the canonical verifier never looks, which for a
-    /// signature is silent non-coverage rather than a visible failure.
-    /// [`ensure_auth`](Self::ensure_auth) already splits `Push` off this way;
-    /// this exposes the same decision to the referrer write paths
-    /// (`oci/sign/pipeline.rs`), which build their own references.
-    ///
-    /// The read-side peer is [`read_reference`](Self::read_reference) with
-    /// [`ReadAddressing::Canonical`] — a read that decides a write must name
-    /// this same host.
-    ///
-    /// Lives here rather than at the call sites because
-    /// [`OciIdentifier::canonical_reference`] is allow-listed to this file
-    /// (`canonical_reference_only_used_in_allowed_files`) and direct
-    /// construction is gated by T-arch-G1.
+    /// A push through the read seam is rejected by a read-only mirror, or lands on a
+    /// writable one where the canonical verifier never looks. Lives here because
+    /// [`OciIdentifier::canonical_reference`] is allow-listed to this file.
     pub fn transport_write_reference(&self, identifier: &OciIdentifier) -> native::Reference {
         identifier.canonical_reference()
     }
 
     // ── Authentication ─────────────────────────────────────────────
 
-    /// Pre-authenticate against the registry for `identifier` with the
-    /// given operation scope.
+    /// Pre-authenticates for `identifier` with the given scope, to fail fast on
+    /// credential issues before real work starts.
     ///
-    /// Call at the start of a command or task to fail fast on credential
-    /// issues (expired tokens, GPG agent prompts, missing env vars)
-    /// before beginning any real work.
-    ///
-    /// `ensure_auth` is shared by the read path and the push path. A `Push`
-    /// scope authenticates against the **canonical** host (remote/proxy mirrors
-    /// are read-only, ADR Q5), so it builds the reference via
-    /// [`OciIdentifier::canonical_reference`]; every other scope is a read and
-    /// keys auth off the mirror host via
-    /// [`transport_reference`](Self::transport_reference).
+    /// `Push` authenticates against the canonical host; every other scope is a read
+    /// keyed off the mirror host via [`transport_reference`](Self::transport_reference).
     pub async fn ensure_auth(&self, identifier: &OciIdentifier, operation: crate::RegistryOperation) -> Result<()> {
-        // Exhaustive over `RegistryOperation` so a future upstream variant is a
-        // compile error here, forcing an explicit routing decision rather than
-        // silently inheriting the read (mirror-aware) path. `Push` authenticates
-        // against the canonical host (remote/proxy mirrors are read-only, ADR Q5);
-        // `Pull` is a read and routes through the mirror-aware
-        // `transport_reference`. Coupled to the upstream enum in
-        // `external/rust-oci-client/src/token_cache.rs`.
+        // Exhaustive so a new `RegistryOperation` variant forces a routing decision
+        // instead of silently inheriting the mirror-aware read path.
         let image = match operation {
             crate::RegistryOperation::Push => identifier.canonical_reference(),
             crate::RegistryOperation::Pull => self.transport_reference(identifier),
@@ -618,19 +415,14 @@ impl Client {
 
     // ── Index operations ─────────────────────────────────────────────
 
-    /// Lists the tags for the given image reference, from the canonical registry.
-    /// There is no validation that the tags correspond to valid package versions.
-    ///
-    /// A listing served by a mirror is [`list_tags_addressed`](Self::list_tags_addressed)
-    /// with [`ReadAddressing::Mirrored`], asked for by name.
+    /// Lists the tags for the given image reference, from the canonical registry;
+    /// tags are not validated as package versions.
     pub async fn list_tags(&self, identifier: OciIdentifier) -> Result<Vec<String>> {
         self.list_tags_addressed(identifier, ReadAddressing::Canonical).await
     }
 
-    /// [`list_tags`](Self::list_tags) against a caller-chosen host.
-    ///
-    /// `ReadAddressing::Mirrored` is for a listing no write is planned from —
-    /// see [`ReadAddressing`].
+    /// [`list_tags`](Self::list_tags) against a caller-chosen host; `Mirrored` only
+    /// for a listing no write is planned from.
     pub async fn list_tags_addressed(
         &self,
         identifier: OciIdentifier,
@@ -646,14 +438,10 @@ impl Client {
         Ok(tags)
     }
 
-    /// [`list_tags`](Self::list_tags), with an absent repository answered as
-    /// the empty list it is.
+    /// [`list_tags`](Self::list_tags), answering an absent repository with an empty list.
     ///
-    /// For a cascade prelude only: "which rolling tags may move" has an
-    /// authoritative answer for a repository that has never been published to,
-    /// and it is "none of them are taken". Narrow on purpose — every other
-    /// failure still propagates, so a transient 5xx can never be mistaken for
-    /// an empty tag list and cascade against a listing nobody read (#157).
+    /// For a cascade prelude only. Every other failure still propagates, so a
+    /// transient 5xx is never mistaken for an empty list and cascaded against.
     pub async fn list_tags_or_empty_addressed(
         &self,
         identifier: OciIdentifier,
@@ -677,17 +465,11 @@ impl Client {
         Ok(repositories)
     }
 
-    /// Fetches the digest of a manifest from the remote, trying to avoid pulling the entire manifest if possible.
+    /// Fetches a manifest's digest without pulling the whole manifest.
     ///
-    /// Turning a mutable tag into a digest is the highest-value read there is to
-    /// take from the canonical host, so this one has no short,
-    /// canonical-by-default form: the host is named at every call site. Its only
-    /// caller today is `ocx_lib::oci::index::oci_index::OciIndex` (still in
-    /// `ocx_lib`) deriving an index from a
-    /// registry's tags API, which genuinely wants [`ReadAddressing::Mirrored`] —
-    /// but a later caller deciding a write from this answer must pass
-    /// [`ReadAddressing::Canonical`] (Invariant #5), and a short form would let
-    /// it inherit the index's mirror without saying so. Do not add one.
+    /// Deliberately has no canonical-by-default short form; do not add one: a caller
+    /// deciding a write must pass [`ReadAddressing::Canonical`], and a short form would
+    /// let it inherit a mirror silently.
     pub async fn fetch_manifest_digest_addressed(
         &self,
         identifier: &OciIdentifier,
@@ -707,21 +489,14 @@ impl Client {
         Ok(digest.try_into()?)
     }
 
-    /// Fetches the manifest for the given image reference from the canonical
-    /// registry, returning both the manifest and its digest.
-    ///
-    /// A manifest served by a mirror is
-    /// [`fetch_manifest_addressed`](Self::fetch_manifest_addressed) with
-    /// [`ReadAddressing::Mirrored`], asked for by name.
+    /// Fetches the manifest and its digest from the canonical registry.
     pub async fn fetch_manifest(&self, identifier: &OciIdentifier) -> Result<(Digest, crate::Manifest)> {
         self.fetch_manifest_addressed(identifier, ReadAddressing::Canonical)
             .await
     }
 
-    /// [`fetch_manifest`](Self::fetch_manifest) against a caller-chosen host.
-    ///
-    /// `ReadAddressing::Mirrored` is for a manifest no write is decided from —
-    /// see [`ReadAddressing`].
+    /// [`fetch_manifest`](Self::fetch_manifest) against a caller-chosen host; `Mirrored`
+    /// only for a manifest no write is decided from.
     pub async fn fetch_manifest_addressed(
         &self,
         identifier: &OciIdentifier,
@@ -742,21 +517,12 @@ impl Client {
 
     // ── Platform-aware cascade merge ─────────────────────────────────
 
-    /// Fetches (or creates) the image index at `target_tag`, removes any existing
-    /// entry for `platform`, inserts the new manifest entry, and pushes the
-    /// updated index.
+    /// Fetches (or creates) the image index at `target_tag`, replaces `platform`'s
+    /// entry with the new manifest and pushes it back, leaving other platforms intact.
     ///
-    /// Used by `package push --cascade` to merge a single-platform manifest into
-    /// each rolling tag without destroying entries for other platforms.
-    ///
-    /// `annotations` are the publisher-stated index-level annotations (`ocx
-    /// package push --annotation`). They are merged into whatever the index
-    /// already carries — an empty map leaves the index's `annotations` field
-    /// exactly as found, so a push without the flag produces byte-identical
-    /// bytes to before the flag existed and never clears a link an earlier
-    /// push established.
-    ///
-    /// Returns the digest and data of the pushed index.
+    /// `annotations` merge into the existing index annotations; an empty map leaves
+    /// them untouched, so a push without `--annotation` is byte-identical and never
+    /// clears an earlier link. Returns the digest and data of the pushed index.
     pub async fn merge_platform_into_index(
         &self,
         source_identifier: &OciIdentifier,
@@ -767,7 +533,7 @@ impl Client {
         annotations: &BTreeMap<String, String>,
     ) -> Result<(Digest, crate::ImageIndex)> {
         let target_identifier = source_identifier.clone_with_tag(target_tag);
-        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        // Canonical: mirrors are read-only, and this read decides the write.
         let ref_ = target_identifier.canonical_reference();
         self.transport()
             .ensure_auth(&ref_, crate::RegistryOperation::Push)
@@ -781,9 +547,7 @@ impl Client {
             .await
         {
             Ok((blob, digest_str)) => {
-                // The existing index is about to be mutated and pushed back, so
-                // it must be a valid one — otherwise a cascade would launder a
-                // malformed publisher document into a freshly written tag.
+                // Validated before mutation, or a cascade launders a malformed document into a new tag.
                 let existing = parse_registry_manifest(&blob)?;
                 match existing {
                     crate::Manifest::Image(_) => {
@@ -825,10 +589,8 @@ impl Client {
             Err(e) => return Err(e),
         };
 
-        // An index ocx has just mutated and re-serialized describes itself as
-        // an ocx package index. A pre-existing foreign type is left alone —
-        // filling an absent field states what we wrote; overwriting a declared
-        // one relabels someone else's artifact.
+        // Fill an absent artifact type only; overwriting a declared one relabels someone
+        // else's artifact.
         index
             .artifact_type
             .get_or_insert_with(|| MEDIA_TYPE_PACKAGE_V1.to_string());
@@ -860,23 +622,15 @@ impl Client {
         Ok((index_digest, index))
     }
 
-    /// Pushes `index` whole at `identifier`, returning the digest of the bytes
-    /// that were written.
+    /// Pushes `index` whole at `identifier`, returning the digest of the bytes written.
     ///
-    /// The write primitive `ocx package cascade repair` needs: it recomputes an
-    /// alias index in full and replaces it, where
-    /// [`merge_platform_into_index`](Self::merge_platform_into_index) reads what
-    /// the registry currently serves and edits one platform entry into it. The
-    /// returned digest is computed from the bytes this call put on the wire, so
-    /// a caller reading the tag back afterwards is comparing against what it
-    /// wrote rather than against whatever the registry chose to echo.
-    ///
+    /// The digest is computed locally, so a caller reading the tag back compares
+    /// against what it wrote, not what the registry echoes.
     /// # Errors
     ///
-    /// Push authentication failure, index serialization failure, or a registry
-    /// that rejects the manifest.
+    /// Push authentication, index serialization, or the registry rejecting the manifest.
     pub async fn push_index(&self, identifier: &OciIdentifier, index: &crate::ImageIndex) -> Result<Digest> {
-        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        // Canonical: mirrors are read-only.
         let ref_ = identifier.canonical_reference();
         self.transport()
             .ensure_auth(&ref_, crate::RegistryOperation::Push)
@@ -894,37 +648,12 @@ impl Client {
 
     // ── Keep tag (registry-side deletion safety net) ──────────────────
 
-    /// Pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag pointing
-    /// directly at `platform`'s entry in `merged_manifest`.
+    /// Pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag at `platform`'s entry,
+    /// a registry-side deletion safety net (`adr_index_indirection.md` § Decision E).
     ///
-    /// `merged_manifest` is the just-returned merge result for
-    /// `(source_identifier, platform)` from `push_package` /
-    /// `push_manifest_and_merge_tags` — `platform`'s entry is expected to be
-    /// present by construction. A missing entry is a no-op rather than a
-    /// hard failure: keep tagging is a safety net layered on top of an
-    /// already-committed push, never load-bearing for the push itself.
-    ///
-    /// Returns the tag it wrote (`Some("__ocx.keep.<algorithm>-<hex>")`), or
-    /// `None` on that no-op. The caller cannot derive either: the tag is named
-    /// after the *platform manifest* digest, which the caller does not hold,
-    /// and the no-op is otherwise invisible to it.
-    ///
-    /// Registry-side deletion safety net (`adr_index_indirection.md`
-    /// Decision E): a stray delete of a rolling/cascade tag can never orphan
-    /// a digest a lock still pins, because the keep tag names it directly.
-    /// Uses a `-` separator inside the reserved `__ocx.keep.` namespace —
-    /// OCI tags forbid `:`, and the bare `<algorithm>-<hex>` form is the
-    /// dist-spec referrers fallback tag, so the namespace prefix is what keeps
-    /// the two apart. The local snapshot and lock never read or write keep
-    /// tags; this is a pure registry-side write.
-    ///
-    /// # Long digests
-    ///
-    /// An OCI tag caps at 128 characters, which `__ocx.keep.sha512-<128 hex>`
-    /// exceeds at 146. Such a digest yields `Ok(None)` — nothing written.
-    /// Truncating the hex to 64 the way the referrers tag schema does would let
-    /// two distinct digests collide on one tag and silently drop a manifest's
-    /// GC protection, which is strictly worse than no tag at all.
+    /// Returns the tag written, or `None` when the entry is missing or the tag would
+    /// exceed [`MAX_OCI_TAG_LEN`]: a `sha512` digest is skipped, never truncated,
+    /// since truncation collides two digests onto one tag and drops GC protection.
     pub async fn push_keep_tag(
         &self,
         source_identifier: &OciIdentifier,
@@ -945,19 +674,14 @@ impl Client {
             return Ok(None);
         }
 
-        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        // Canonical: mirrors are read-only.
         let repo_ref = source_identifier.canonical_reference();
         self.transport()
             .ensure_auth(&repo_ref, crate::RegistryOperation::Push)
             .await?;
 
-        // `without_tag()` matters: `push_multi_layer_manifest` pushes the
-        // platform manifest to a bare digest reference (registry/repo@digest,
-        // no tag) — `native::Reference::clone_with_digest` drops the tag by
-        // construction (`oci_spec::distribution::Reference`). Preserving
-        // `source_identifier`'s tag here would build a `tag@digest` reference
-        // that never round-trips to the same key the manifest was pushed
-        // under, so the pull below would spuriously 404.
+        // Bare digest reference: the manifest was pushed tagless, so a `tag@digest` ref
+        // never round-trips to its key and the pull 404s.
         let digest_ref = source_identifier
             .without_tag()
             .clone_with_digest(manifest_digest.clone())
@@ -977,15 +701,7 @@ impl Client {
 
     // ── Blob introspection ────────────────────────────────────────────
 
-    /// HEAD a blob to verify its existence and retrieve its content length.
-    ///
-    /// Returns `Ok(size_bytes)` when the blob exists in the registry.
-    /// Returns `Err(ClientError::BlobNotFound)` when the blob is absent.
-    ///
-    /// Used by `pull_local` to capture the real byte count for a
-    /// `LayerRef::Digest` layer before pulling it, so the synthesized
-    /// OCI descriptor has the same size as the manifest produced by
-    /// `package push`.
+    /// HEADs a blob, returning its size, or [`ClientError::BlobNotFound`] when absent.
     pub async fn head_blob(&self, identifier: &OciIdentifier, digest: &Digest) -> Result<u64> {
         let image = self.transport_reference(identifier);
         self.transport()
@@ -996,20 +712,9 @@ impl Client {
     }
 
     // ── Package pull ─────────────────────────────────────────────────
-    //
-    // Composable methods for fetching a package from a registry:
-    //
-    //   pull_manifest  → ImageManifest   (validate digest, media types, layers)
-    //   pull_blob      → Vec<u8>         (raw OCI blob fetch by digest)
-    //   pull_layer     → extracted dir   (download one layer blob, extract, codesign)
-    //
-    // Higher-level metadata fetch (with local-CAS caching) lives in
-    // `package_manager::tasks::common::fetch_or_get_blob`.
 
-    /// Fetches and validates the OCI manifest for a pinned package.
-    ///
-    /// Verifies the manifest digest matches the identifier.
-    /// Returns the [`ImageManifest`](crate::ImageManifest) without asserting media types.
+    /// Fetches the image manifest for a pinned package, verifying its digest; media
+    /// types are not asserted.
     pub async fn pull_manifest(
         &self,
         identifier: &crate::PinnedOciIdentifier,
@@ -1044,12 +749,7 @@ impl Client {
         Ok(manifest)
     }
 
-    /// Fetches a single blob from the registry.
-    ///
-    /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
-    /// the blob's own digest for content addressing. Generic OCI blob fetch
-    /// — no media-type validation, no parsing. Caller is responsible for
-    /// content interpretation.
+    /// Fetches a single blob by digest, with no media-type validation or parsing.
     pub async fn pull_blob(&self, blob_ref: &crate::PinnedOciIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(blob_ref);
         self.transport()
@@ -1062,51 +762,20 @@ impl Client {
             .map_err(|e| self.via_mirror(blob_ref, &image, e))
     }
 
-    /// Downloads and extracts a single OCI layer to the specified directory.
+    /// Downloads and extracts one layer into `{output_dir}/content/`, with no blob
+    /// file on disk (caps and check order: `subsystem-oci.md § Pull Path`).
     ///
-    /// Creates `{output_dir}/content/` with the extracted files. No
-    /// intermediate blob file is written to disk — the compressed stream is
-    /// piped directly through hashing, decompression, and tar extraction in a
-    /// single pass.
-    ///
-    /// **Extraction only — no code signing.** `{output_dir}/content/` comes
-    /// back unsigned, and every caller signs it with
-    /// `codesign::sign_extracted_content` immediately on return, before
-    /// anything else reads the directory. Signing is a store concern, and the
-    /// registry client does not own one.
-    ///
-    /// # Pipeline
-    ///
-    /// ```text
-    /// transport.pull_blob_streaming()           // raw compressed bytes (AsyncRead)
-    ///   → HashingAsyncReader(algorithm)          // tees compressed bytes into digester (sha256/sha384/sha512)
-    ///   → ProgressReader                        // on_progress(cumulative bytes_read)
-    ///   → XzDecoder / GzDecoder                 // media-type dispatch
-    ///   → SyncIoBridge                          // AsyncRead → sync Read
-    ///   → tar::Archive::unpack()                // sync extraction (in spawn_blocking)
-    /// ```
-    ///
-    /// The tar extractor stops at the end-of-archive marker rather than at
-    /// stream end, so `spawn_blocking` drains the compressed remainder before
-    /// finalising — otherwise the digest would cover only the prefix tar asked
-    /// for. Two checks then run, in this order: fewer bytes than the descriptor
-    /// declares returns [`ClientError::ShortBlobRead`] (an incomplete delivery),
-    /// and a full-length blob whose hash differs returns
-    /// [`ClientError::DigestMismatch`] (the registry served wrong content).
-    ///
-    /// Callers are responsible for creating `output_dir` and writing the
-    /// digest marker file.
+    /// The content comes back unsigned; every caller must sign it with
+    /// `codesign::sign_extracted_content` before anything reads it. Callers create
+    /// `output_dir` and write the digest marker.
     pub async fn pull_layer(
         &self,
         identifier: &crate::PinnedOciIdentifier,
         layer: &crate::Descriptor,
         output_dir: &std::path::Path,
     ) -> std::result::Result<(), ClientError> {
-        // A descriptor `size` that is non-positive (zero or negative) or does not
-        // fit in `u64` is a malformed manifest, not a zero-byte layer: it would
-        // collapse the compressed-side `.take()` cap to zero and the decompressed
-        // cap to its floor. Reject it as InvalidManifest rather than silently
-        // pulling nothing.
+        // A non-positive or over-`u64` size is a malformed manifest: it would collapse
+        // the compressed cap to zero and the decompressed cap to its floor.
         let blob_total_size = match u64::try_from(layer.size) {
             Ok(size) if size > 0 => size,
             _ => {
@@ -1117,14 +786,8 @@ impl Client {
             }
         };
 
-        // Decompressed-side cap (CWE-400): prevents a crafted compressed stream with a
-        // high expansion ratio from exhausting disk/memory before the digest check fires.
-        //
-        // The multiplier 100× covers all realistic XZ compression ratios for tool
-        // binaries (2–10×) with generous headroom. The 256 MiB floor keeps the cap
-        // from being unreasonably tight for a very small declared layer size while
-        // still bounding the damage a tiny-but-bomb layer can do. Exceeding the cap
-        // yields [`ClientError::DecompressionCapExceeded`].
+        // Decompressed-side cap (CWE-400), so a high-ratio stream cannot exhaust disk
+        // before the digest check fires: 100x covers realistic xz ratios, 256 MiB floors small layers.
         const DECOMPRESSED_CAP_MULTIPLIER: u64 = 100;
         const DECOMPRESSED_CAP_MINIMUM: u64 = 256 << 20; // 256 MiB
         let decompressed_cap =
@@ -1135,14 +798,8 @@ impl Client {
             .map_err(|e| self.via_mirror(identifier, &self.transport_reference(identifier), e))
     }
 
-    /// Pipeline body for [`pull_layer`] with the decompressed-side cap passed in.
-    ///
-    /// `pull_layer` computes `decompressed_cap` from the descriptor size and
-    /// delegates here. The cap is a parameter (rather than computed inline) so
-    /// tests can inject a small ceiling and exercise the
-    /// [`ClientError::DecompressionCapExceeded`] path without fabricating a
-    /// gigabyte-scale archive. `blob_total_size` is the validated, positive
-    /// compressed byte count used for the compressed-side `.take()` cap.
+    /// [`pull_layer`] with the decompressed cap injected, so tests can reach
+    /// [`ClientError::DecompressionCapExceeded`] without a gigabyte archive.
     async fn pull_layer_with_caps(
         &self,
         identifier: &crate::PinnedOciIdentifier,
@@ -1176,149 +833,42 @@ impl Client {
             output_dir.display()
         );
 
-        // Start the progress bar before opening the stream so the user sees
-        // feedback immediately.
         let bar = self
             .progress
             .bytes(format!("Downloading '{identifier}'"), blob_total_size);
         let on_progress = bar.callback();
 
-        // Obtain the raw compressed byte stream from the transport.
-        // NativeTransport: wraps fork's pull_blob_stream (VerifyingStream
-        // included — secondary verifier). Default impl: temp file fallback.
         let raw_stream = self.transport().pull_blob_streaming(&image, &layer_digest).await?;
 
-        // ── Pipeline assembly ─────────────────────────────────────────
-        //
-        // Layering (innermost to outermost):
-        //
-        //   raw_stream
-        //     → take(layer.size)             (CWE-400: compressed-side cap)
-        //     → HashingAsyncReader           (hashes compressed wire bytes = blob digest)
-        //     → ProgressReader               (progress on compressed bytes = download bytes)
-        //     → XzDecoder/GzDecoder          (async-compression; takes a BufReader)
-        //     → take(DECOMPRESSED_CAP)       (CWE-400: decompressed-side cap, applied to sync Read inside spawn_blocking)
-        //
-        // The HashingAsyncReader and ProgressReader sit on the COMPRESSED side
-        // because:
-        //  - The blob digest is computed over the compressed bytes (per OCI spec).
-        //  - Progress reflects download throughput, not decoded size.
-        //
-        // Two-sided bounding prevents decompression bombs (CWE-400):
-        //  - Compressed cap: raw stream read cannot exceed layer.size (descriptor-declared,
-        //    manifest-verified). A registry serving more bytes than declared is stopped here.
-        //    Reading stops at layer.size; the digest check detects mismatch from over-length streams.
-        //  - Decompressed cap: tar extraction is capped at DECOMPRESSED_SIZE_CAP bytes of
-        //    output so a crafted stream with a high expansion ratio cannot exhaust disk.
-
-        // Compressed-side cap: layer.size is from the OCI manifest (digest-verified), so it
-        // is a trusted upper bound on how many compressed bytes we should read from this layer.
+        // Both caps and the pipeline order: `subsystem-oci.md § Pull Path`. Hashing and
+        // progress sit on the compressed side: the digest is over compressed bytes.
         use tokio::io::AsyncReadExt as _;
         let capped_stream = raw_stream.take(blob_total_size);
 
         let hashing_reader = HashingAsyncReader::new(capped_stream, layer_digest.algorithm());
         let progress_reader = ProgressReader::new(hashing_reader, on_progress);
 
-        // Layer blobs extract verbatim (strip = 0) into the shared
-        // content-addressed layer store; per-layer strip + output prefix are
-        // applied once, later, at assemble time (see
-        // `assemble_from_layers_with_layouts`). Baking strip in here would
-        // corrupt the shared store when two packages reuse one blob digest with
-        // different strip.
+        // Extract verbatim (strip = 0): strip and prefix apply at assemble time, since
+        // baking them in corrupts the shared layer store for packages reusing the blob.
         let content_path_clone = content_path.clone();
         let identifier_label = identifier.to_string();
 
-        // ── spawn_blocking boundary ───────────────────────────────────
-        //
-        // The sync tar extractor drives the entire pipeline. SyncIoBridge
-        // is created inside the spawn_blocking closure for clarity: it
-        // captures Handle::current() and drives reads via Handle::block_on
-        // (tokio-util 0.7.18 sync_bridge.rs:293) — NOT block_in_place.
-        // spawn_blocking threads have the handle via thread-local, so
-        // creating SyncIoBridge here is correct; moving it in from outside
-        // would also be valid per tokio-util docs, but keeping construction
-        // inside the closure makes the sync-side boundary explicit.
-        //
-        // Scale assumption: this spawn_blocking thread is held for the full
-        // download+extract duration of the layer (e.g. ~160 s at 10 Mbps ×
-        // 200 MB). Tokio's blocking pool cap is 512. Realistic install
-        // parallelism is ≤ a few dozen concurrent layers, well within budget.
-        // If install parallelism ever grows unbounded, add a semaphore at
-        // this boundary (deferred).
-        //
-        // After extraction, the pipeline is unwound via into_inner() to recover
-        // the HashingAsyncReader so its accumulated digest can be finalized.
-        // Chain (innermost → outermost at SyncIoBridge boundary):
-        //   SyncIoBridge<Decoder<BufReader<ProgressReader<HashingAsyncReader<_>>>>>
-        // archive::extract_tar_from_reader returns (result, reader) so we can
-        // recover the reader after extraction and chain .into_inner() calls:
-        //   reader              → SyncIoBridge<Decoder<...>>
-        //   .into_inner()       → Decoder<BufReader<ProgressReader<HashingAsyncReader<_>>>>
-        //   .into_inner()       → BufReader<ProgressReader<HashingAsyncReader<_>>>
-        //   drain_compressed_remainder(..)   ← must run here, see its doc comment
-        //   .into_inner()       → ProgressReader<HashingAsyncReader<_>>
-        //   .into_inner()       → HashingAsyncReader<_>
-        //   .finalize()         → (Digest, u64)
-
-        // Type alias to keep the match arms readable.
-        // The extraction result is `archive::Result` (= std::result::Result<(),
-        // archive::Error>): the archive tier raises its own error now (E1), and
-        // `ClientError::internal` below boxes whatever it is handed either way.
-        // `cap_exceeded` reports whether the decompressed stream tripped the
-        // CWE-400 ceiling (see below).
+        // Occupancy budget of this blocking section: `subsystem-oci.md § Pull Path`.
         type PipelineResult = (archive::Result<()>, (crate::Digest, u64), bool);
 
-        // 256 KiB BufReader sits between the progress reader and the decoder.
-        // async-compression decoders call poll_read on each decode step; without
-        // buffering this crosses the SyncIoBridge Handle::block_on boundary ~32×
-        // more often than needed (default 8 KiB ÷ 256 KiB). A larger buffer
-        // amortises the cross-boundary cost over fewer, larger reads from the
-        // network stream. 256 KiB is chosen to match typical HTTP/2 receive
-        // window segments and XZ block sizes.
+        // Buffers decoder reads so each poll does not cross SyncIoBridge's `block_on`;
+        // the 8 KiB default crosses it ~32x more often.
         const BUF_READER_CAPACITY: usize = 256 * 1024;
 
-        // Decompressed-side cap (CWE-400): `decompressed_cap` is computed by the
-        // public `pull_layer` (256 MiB floor, 100× declared compressed size) or
-        // injected by a test. We wrap the bridge in `take(cap + 1)`: if the
-        // decompressed stream produces `cap + 1` bytes, the extra "probe" byte
-        // means the real output would have exceeded the cap, so `Take::limit()`
-        // reaches 0 and we surface `DecompressionCapExceeded`. A well-formed
-        // layer never reaches `cap + 1` (it would have to be a bomb), so the
-        // extra byte is harmless for the happy path. Detecting the hit
-        // explicitly stops a truncated-at-cap archive from being misattributed
-        // as a digest mismatch or internal tar error.
+        // `take(cap + 1)`: reaching the probe byte means the output exceeds the cap, surfaced
+        // as `DecompressionCapExceeded`, never misread as a digest mismatch or tar error.
         let cap_with_probe = decompressed_cap.saturating_add(1);
 
-        /// Reads whatever compressed bytes the tar extractor left behind, so the
-        /// digest covers the whole blob instead of the prefix tar happened to want.
-        ///
-        /// `tar`'s entry iterator stops at the end-of-archive marker and hands the
-        /// reader back undrained, so the codec trailer (gzip's CRC+ISIZE footer,
-        /// xz's index + footer) and any post-terminator padding are usually still
-        /// unread. Those bytes never reach `HashingAsyncReader` unless they are
-        /// pulled deliberately — and whether they happened to ride the last buffer
-        /// fill depends on how the network segmented the response, which is what
-        /// made the resulting `DigestMismatch` non-deterministic.
-        ///
-        /// Drains the BUFFERED-COMPRESSED level, below the decoder: a decoder can
-        /// report decoded-EOF without having consumed its own trailing bytes, so
-        /// draining the decoded side would not reach them. Bounded by the outer
-        /// `take(blob_total_size)`, so a well-formed layer costs a few bytes and a
-        /// truncated one hits EOF immediately.
-        ///
-        /// Runs on the extraction-ERROR path too — that is load-bearing: wrong
-        /// bytes from a registry fail extraction with a format error, and the
-        /// digest is what attributes that to the registry (CWE-345) rather than
-        /// to a local archive problem. Skipped only on `cap_exceeded`, where the
-        /// caller returns `DecompressionCapExceeded` without ever consulting the
-        /// digest, so draining would just pull the rest of a known decompression
-        /// bomb's declared bytes into a sink.
-        ///
-        /// Swallows its own error on purpose: the caller decides the outcome from
-        /// `(bytes_read, digest)` — short delivery is `ShortBlobRead`, wrong
-        /// content is `DigestMismatch`. Propagating from here would let the fork's
-        /// `VerifyingStream` (which surfaces its digest error as an `io::Error` at
-        /// stream end, i.e. exactly during this drain) pre-empt the canonical check.
+        /// Drains the compressed bytes tar left unread, so the digest covers the whole
+        /// blob (`subsystem-oci.md § Pull Path`, "Drain before finalize"); runs on the
+        /// extraction-error path too. Skipped on `cap_exceeded`, where it would only pull a
+        /// known bomb. Swallows its own error, or the fork's `VerifyingStream` pre-empts
+        /// the canonical digest check.
         fn drain_compressed_remainder<R: tokio::io::AsyncRead + Unpin>(reader: R, cap_exceeded: bool) -> R {
             if cap_exceeded {
                 return reader;
@@ -1335,18 +885,9 @@ impl Client {
                 let decoder = XzDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
                 tokio::task::spawn_blocking(move || -> PipelineResult {
                     use std::io::Read as _;
-                    // SyncIoBridge is created inside spawn_blocking for clarity —
-                    // it makes the sync-side boundary explicit at construction.
-                    // Wrap with std::io::Read::take for the decompressed-side cap.
                     let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
                     let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
-                    // limit() == 0 means all `cap + 1` bytes were consumed → the
-                    // decompressed output exceeded `decompressed_cap`.
                     let cap_exceeded = bridge.limit() == 0;
-                    // Unwind the pipeline to recover the HashingAsyncReader:
-                    //   bridge (Take<SyncIoBridge>) → into_inner() → SyncIoBridge
-                    //     → into_inner() → Decoder → into_inner() → BufReader
-                    //     → into_inner() → ProgressReader → into_inner() → HashingAsyncReader
                     let buffered = bridge.into_inner().into_inner().into_inner();
                     let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
                         .into_inner()
@@ -1373,8 +914,6 @@ impl Client {
                 .map_err(ClientError::internal)?
             }
             compression::CompressionAlgorithm::Zstd => {
-                // zstd decoding is single-threaded, mirroring the xz/gzip decode path.
-                // The pipeline shape and unwind depth are identical to the other arms.
                 let decoder = ZstdDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
                 tokio::task::spawn_blocking(move || -> PipelineResult {
                     use std::io::Read as _;
@@ -1390,12 +929,8 @@ impl Client {
                 .await
                 .map_err(ClientError::internal)?
             }
-            // Unreachable today: `media_type::compression_for` (which produced
-            // `blob_compression` above) has no bzip2 arm, because no layer media
-            // type spells bzip2. bzip2 is an accepted *input* format for `ocx
-            // package create --extract`, not a layer format — adding one would be
-            // a wire-format change. Refused like `None` so the day a manifest
-            // claims it, the refusal names it.
+            // Unreachable while no layer media type spells bzip2 (adding one is a wire-format
+            // change); refused like `None` so the refusal names it.
             compression::CompressionAlgorithm::Bzip2 => {
                 return Err(ClientError::InvalidManifest(format!(
                     "bzip2 layers are not supported (media type: {})",
@@ -1410,28 +945,16 @@ impl Client {
             }
         };
 
-        // ── Decompression-bomb cap (CWE-400) ─────────────────────────
-        //
-        // Checked BEFORE the digest comparison: a stream that overruns the cap
-        // is a decompression bomb regardless of whether its compressed bytes
-        // happen to hash correctly. Surfacing DecompressionCapExceeded here is
-        // what stops the hit from being misattributed as DigestMismatch (the
-        // hash is computed over a truncated prefix) or as an internal tar error.
+        // Cap first: an overrun is a bomb whatever the hash, and the hash of a truncated
+        // prefix would misreport it as a digest mismatch.
         if cap_exceeded {
             return Err(ClientError::DecompressionCapExceeded { cap: decompressed_cap });
         }
 
         let (computed_digest, bytes_read) = digest_result;
 
-        // ── Delivery completeness ────────────────────────────────────
-        //
-        // Checked BEFORE the digest comparison, or the mismatch masks it: a
-        // prefix cannot hash to the whole, so an incomplete delivery is
-        // *guaranteed* to fail the digest check and would be reported as if the
-        // registry had served wrong content. `blob_total_size` is the
-        // manifest-verified declared size, and the drain above pulled every byte
-        // the transport was willing to hand over, so `bytes_read` short of it
-        // means the blob never arrived in full.
+        // Completeness before digest: a prefix cannot hash to the whole, so a short
+        // delivery would misreport as wrong content.
         if bytes_read != blob_total_size {
             return Err(ClientError::ShortBlobRead {
                 expected: blob_total_size,
@@ -1439,19 +962,8 @@ impl Client {
             });
         }
 
-        // ── Digest verification (canonical check) ────────────────────
-        //
-        // Perform the digest check BEFORE inspecting the extraction result.
-        //
-        // Rationale: if the registry sent wrong bytes (CWE-345), the extraction
-        // might fail due to format errors (e.g. "Invalid gzip header") because
-        // the bytes are the wrong format, not the declared one. In that case
-        // the DigestMismatch error is more informative and security-relevant than
-        // the extraction error. Reporting DigestMismatch first correctly attributes
-        // the failure to the registry serving wrong content.
-        //
-        // Reaching here means the whole declared blob was hashed, so a mismatch
-        // is about the bytes themselves — this variant means what its docs say.
+        // Digest before the extraction result: wrong bytes (CWE-345) can fail extraction
+        // with a format error, and the mismatch must win the attribution.
         if computed_digest != layer_digest {
             return Err(ClientError::DigestMismatch {
                 expected: layer_digest.to_string(),
@@ -1459,22 +971,9 @@ impl Client {
             });
         }
 
-        // ── Extraction result ─────────────────────────────────────────
-        //
-        // Bytes verified correct — now check for extraction errors (e.g.
-        // corrupt archive structure despite correct hash, malformed tar entries).
-        // On any error, the partially-written output_dir is left for the
-        // caller's TempStore to remove (RAII DropFile / TempStore semantics).
-        //
-        // Also check for fork VerifyingStream DigestError: the fork fires at stream
-        // end (inside spawn_blocking) as: archive::Error::Tar(io::Error).
-        // This path is a secondary check (spec §D2); we still convert it to DigestMismatch
-        // for taxonomy consistency even though the canonical check above would have
-        // caught it first if bytes genuinely differ.
+        // Bytes verified, so an extraction error is a corrupt archive; `output_dir` is
+        // left for the caller's TempStore. A fork `DigestError` still maps to DigestMismatch.
         if let Err(archive_err) = extract_result {
-            // Walk the source chain looking for a fork DigestError embedded in
-            // an io::Error node. check_fork_io_error handles the downcast; we
-            // walk the error chain to find each io::Error node.
             let mut current: Option<&dyn std::error::Error> = Some(&archive_err);
             while let Some(err) = current {
                 if let Some(io_err) = err.downcast_ref::<std::io::Error>()
@@ -1498,26 +997,12 @@ impl Client {
 
     // ── Package push ─────────────────────────────────────────────────
 
-    /// Pushes the package manifest and merges the resulting platform entry
-    /// into the primary tag's image index plus each tag in `extra_tags`.
+    /// Pushes the package manifest once and merges its platform entry into the
+    /// primary tag's index and each of `extra_tags` (the cascade set).
     ///
-    /// The manifest is pushed once and its digest reused across every
-    /// `merge_platform_into_index` call, so a cascade or multi-tag push
-    /// never re-serializes or re-uploads the manifest. `extra_tags` is
-    /// the rolling/cascade tag set (e.g. `["3.28", "3", "latest"]`);
-    /// pass `&[]` for a plain single-tag push.
-    ///
-    /// `annotations` are written onto every index this call touches — the
-    /// primary tag and each of `extra_tags` — so a cascade never leaves a
-    /// rolling tag with weaker provenance than the version tag it mirrors.
-    ///
-    /// `manifest` carries everything about the artifact that is not a layer —
-    /// its `artifactType` and its config blob. The caller assembles it (the
-    /// package path from `ocx_package::info::Info::manifest_builder`,
-    /// still in `ocx_lib`); the layer descriptors this call resolves are appended here.
-    ///
-    /// Returns the digest + data of the primary tag's image index, plus the
-    /// layer-push counts for the one manifest push.
+    /// `annotations` land on every index touched, so a rolling tag never carries
+    /// weaker provenance than the version tag. Returns the primary index digest and
+    /// data, plus layer-push counts.
     pub async fn push_manifest_and_merge_tags(
         &self,
         identifier: &OciIdentifier,
@@ -1529,7 +1014,7 @@ impl Client {
     ) -> Result<(Digest, crate::ImageIndex, LayerCounts)> {
         log::debug!("Pushing package {} with {} layer(s)", identifier, layers.len());
 
-        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        // Canonical: mirrors are read-only.
         let image = identifier.canonical_reference();
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Push)
@@ -1569,53 +1054,28 @@ impl Client {
         Ok((index_digest, index, layer_counts))
     }
 
-    /// Pushes config blob + N layer blobs + image manifest.
+    /// Pushes the config blob, the layer blobs and the image manifest, with layer
+    /// descriptors in caller order.
     ///
-    /// For `LayerRef::File` layers: reads file, computes digest, uploads blob.
-    /// For `LayerRef::Digest` layers: HEADs the blob to verify existence
-    /// and learn its size, and uses the caller-supplied `media_type`
-    /// for the manifest descriptor. The OCI spec does not expose a
-    /// layer's media type via blob HEAD, so the caller is responsible
-    /// for declaring it at the CLI (see `LayerRef::FromStr`).
-    ///
-    /// A layer carrying `mount_from` first attempts a cross-repository blob
-    /// mount from that source repository. Mounting is a pure optimization —
-    /// a mount failure (spec-legal 202 miss, or any transport error) is never
-    /// itself fatal; the layer falls back to its normal upload/verify path.
-    /// For a [`LayerRef::File`] that fallback always succeeds (it has local
-    /// bytes to upload); for a [`LayerRef::Digest`] it is a HEAD against the
-    /// target repository, which fails when the declined mount was the only
-    /// route by which the blob could have arrived. See
-    /// [`Self::try_mount_layer`].
-    ///
-    /// `manifest` is the artifact's non-layer half — `artifactType` and config
-    /// blob — assembled by the caller; the resolved layer descriptors are
-    /// appended to it here, in the caller-supplied order.
-    ///
-    /// Returns the manifest, its serialized bytes, its SHA-256 digest string,
-    /// and the aggregate [`LayerCounts`] for the layers pushed.
+    /// A `mount_from` layer tries a cross-repository mount first; on a miss a `File`
+    /// layer uploads, but a `Digest` layer's HEAD can fail when the declined mount was
+    /// its only route in (see [`Self::try_mount_layer`]).
     pub async fn push_multi_layer_manifest(
         &self,
         identifier: &OciIdentifier,
         layers: &[LayerRef],
         manifest: ManifestBuilder,
     ) -> std::result::Result<(crate::ImageManifest, Vec<u8>, String, LayerCounts), ClientError> {
-        // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
+        // Canonical: mirrors are read-only.
         let image = identifier.canonical_reference();
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Push)
             .await?;
 
         let total_layers = layers.len();
-        // Upload file layers and verify digest layers concurrently, preserving
-        // input order so manifest descriptors match the caller-supplied order.
-        // Bounded by `LAYER_PUSH_CONCURRENCY` to cap in-memory archive buffers.
+        // Order preserved so descriptors match the caller's order.
         let layer_results: Vec<(crate::Descriptor, LayerPushOutcome)> = stream::iter(layers.iter().enumerate())
             .map(|(index, layer)| {
-                // `async move` owns its captures, so each concurrent future needs
-                // its own copy of the image reference; clones are cheap
-                // (a few short strings) and are outweighed by avoiding a
-                // lifetime gymnastics around the stream combinator.
                 let image = image.clone();
                 async move {
                     let progress_label = format!("{}/{}", index + 1, total_layers);
@@ -1630,15 +1090,8 @@ impl Client {
                                     ClientError::InvalidManifest(format!("unsupported archive: {}", path.display()))
                                 })?;
 
-                            // BOUNDED: LAYER_PUSH_CONCURRENCY caps simultaneous
-                            // in-memory archives at 4 × (layer size). Do not raise
-                            // the constant without either switching to a streaming
-                            // push path or auditing the RSS budget for the largest
-                            // layers callers ship.
-                            //
-                            // Single disk pass: read and hash are interleaved in
-                            // 64 KiB chunks, so the SHA-256 finalization happens
-                            // without a second traversal of the buffer.
+                            // Bounded by LAYER_PUSH_CONCURRENCY: each file is buffered whole, so raising it
+                            // needs a streaming push path or an RSS audit of the largest layers.
                             let (package_data, digest) =
                                 Algorithm::Sha256
                                     .hash_file_read(path)
@@ -1685,8 +1138,7 @@ impl Client {
                                     size,
                                     urls: None,
                                     artifact_type: None,
-                                    // BC2: default (empty) layout → `None`, so the
-                                    // manifest stays byte-identical to today.
+                                    // An empty layout yields `None`, keeping the manifest byte-identical.
                                     annotations: layout.to_annotations(),
                                 },
                                 outcome,
@@ -1698,21 +1150,14 @@ impl Client {
                             layout,
                             mount_from,
                         } => {
-                            // The caller supplies `media_type` because the OCI
-                            // distribution spec does not expose a layer's media
-                            // type via blob HEAD — only the blob bytes and
-                            // Content-Length. See `LayerRef::FromStr` for the
-                            // `sha256:<hex>.<ext>` CLI syntax that carries this
-                            // information from the user to here.
+                            // `media_type` comes from the caller: a blob HEAD never exposes one.
                             let mounted = self
                                 .try_mount_layer(&image, mount_from.as_deref(), digest, &progress_label)
                                 .await;
 
                             log::info!("Reusing layer {progress_label} {digest} ({media_type})");
-                            // HEAD is always required: even after a successful
-                            // mount, the (adapted) mount path doesn't return the
-                            // blob's size, and it doubles as existence
-                            // verification for the non-mounted path.
+                            // HEAD even after a mount: the mount returns no size, and HEAD is the existence
+                            // check otherwise.
                             let size = self.transport().head_blob(&image, digest).await?;
 
                             log::trace!(
@@ -1755,13 +1200,10 @@ impl Client {
             })
             .collect();
 
-        // Assemble the manifest from the resolved descriptors (pure, no I/O).
-        // The caller's builder is shared with `pull_local` so the two paths
-        // produce byte-identical manifests.
+        // Shared builder with `pull_local`, so both produce byte-identical manifests.
         let parts = manifest.layers(layer_descriptors).build()?;
         log::trace!("Config digest: {}", parts.config_digest);
 
-        // Push config blob — tiny, no progress needed.
         self.transport()
             .push_blob(
                 &image,
@@ -1787,27 +1229,12 @@ impl Client {
         Ok((parts.manifest, parts.manifest_bytes, manifest_sha256, layer_counts))
     }
 
-    /// Attempts a cross-repository blob mount for a layer carrying
-    /// `mount_from`, returning `true` on success.
+    /// Tries a cross-repository mount for a layer carrying `mount_from`, returning
+    /// `true` on success; any miss or error is `false`, never fatal here.
     ///
-    /// A `None` source (no `from=` tail on the layer ref) short-circuits to
-    /// `false` without a transport call. Any non-`Mounted` transport
-    /// response — a spec-legal miss, or a transport error — is treated as
-    /// `false`: mounting is purely an upload-avoidance optimization and never
-    /// itself fails the push.
-    ///
-    /// "Never fails the push" is a statement about *this* function, not about
-    /// what the fallback then finds. A [`LayerRef::File`] falls back to
-    /// uploading its local bytes and always succeeds; a [`LayerRef::Digest`]
-    /// has no local bytes, so its fallback is a HEAD against the **target**
-    /// repository, which legitimately fails when the declined mount was the
-    /// only way the blob could have got there.
-    ///
-    /// A decline is the expected answer from any registry whose auth token is
-    /// scoped to the target repository alone: the OCI spec lets a registry
-    /// refuse a mount for any reason, and cross-repository mount normally
-    /// requires pull scope on the source that the push-scoped token does not
-    /// carry.
+    /// A `Digest` layer then falls back to a HEAD on the target, which fails if the
+    /// mount was the blob's only route in; expected from a target-scoped token, which
+    /// lacks the source pull scope a mount needs.
     pub async fn try_mount_layer(
         &self,
         image: &native::Reference,
@@ -1821,11 +1248,8 @@ impl Client {
         match self.transport().mount_blob(image, source_repository, digest).await {
             Ok(MountOutcome::Mounted) => true,
             Ok(MountOutcome::UploadRequired) => {
-                // Debug, not warn: a decline is the spec-legal common case on
-                // any registry whose token is scoped to the target repository,
-                // so warning would fire once per layer on an ordinary push.
-                // It is logged at all because it is the one observable that
-                // explains a `LayerRef::Digest` fallback failing the push.
+                // Debug, not warn: a decline is the common spec-legal case on target-scoped
+                // tokens; logged because it explains a later `Digest` fallback failure.
                 log::debug!(
                     "Mount of layer {progress_label} {digest} from {source_repository} into {image} \
                      declined by the registry, falling back"
@@ -1843,19 +1267,11 @@ impl Client {
     }
 
     // ── Artifact primitives ───────────────────────────────────────────
-    //
-    // The vocabulary an artifact push/pull is assembled from, with no
-    // knowledge of what the artifact carries. The payload-shaped operations
-    // that used to live here (description, patch descriptor) are built from
-    // these by the module that owns the payload.
 
-    /// Uploads one blob into `identifier`'s repository on the **canonical**
-    /// host (remote/proxy mirrors are read-only, ADR Q5).
+    /// Uploads one blob to `identifier`'s repository on the canonical host.
     ///
-    /// Authenticates nothing of its own: an artifact push authenticates once,
-    /// for the whole sequence, before its first blob — see
-    /// [`ensure_auth`](Self::ensure_auth). A per-blob pre-flight here would
-    /// change that sequence.
+    /// Authenticates nothing: an artifact push authenticates once, before its first
+    /// blob, via [`ensure_auth`](Self::ensure_auth).
     pub async fn push_blob(
         &self,
         identifier: &OciIdentifier,
@@ -1869,11 +1285,9 @@ impl Client {
         Ok(())
     }
 
-    /// Uploads raw manifest bytes to the **canonical** host, addressed exactly
-    /// as `identifier` spells it — a tag reference therefore creates the tag.
-    ///
-    /// Returns the digest the registry reports for the stored manifest.
-    /// Authentication is the caller's, as for [`push_blob`](Self::push_blob).
+    /// Uploads raw manifest bytes to the canonical host exactly as `identifier`
+    /// spells it (a tag reference creates the tag), returning the registry's digest.
+    /// Authentication is the caller's.
     pub async fn push_manifest_raw(
         &self,
         identifier: &OciIdentifier,
@@ -1884,14 +1298,11 @@ impl Client {
         self.transport().push_manifest_raw(&image, data, media_type).await
     }
 
-    /// Fetches and parses the manifest at `identifier` from the host
-    /// `addressing` names, authenticating for `Pull` against that same host
-    /// first.
+    /// Fetches and parses the manifest at `identifier` from the host `addressing`
+    /// names, authenticating for `Pull` first.
     ///
-    /// Distinct from [`fetch_manifest_addressed`](Self::fetch_manifest_addressed):
-    /// this one raises [`ClientError`] verbatim, so a caller can read
-    /// [`ClientError::ManifestNotFound`] as "the tag does not exist" rather
-    /// than as a failure.
+    /// Raises [`ClientError`] verbatim, so a caller can read
+    /// [`ClientError::ManifestNotFound`] as an absent tag.
     pub async fn fetch_artifact_manifest(
         &self,
         identifier: &OciIdentifier,
@@ -1904,8 +1315,8 @@ impl Client {
         self.fetch_manifest_raw(&image).await
     }
 
-    /// Downloads one blob of `identifier`'s repository to `path`, from the host
-    /// `addressing` names. Authentication is the caller's, once per artifact.
+    /// Downloads one blob of `identifier`'s repository to `path` from the host
+    /// `addressing` names. Authentication is the caller's.
     pub async fn pull_blob_to_file(
         &self,
         identifier: &OciIdentifier,
@@ -1919,49 +1330,19 @@ impl Client {
 
     // ── Single-layer artifact fetch ───────────────────────────────────────
 
-    /// Fetches a single-layer OCI artifact for `identifier`: an image
-    /// manifest carrying a declared `artifactType`, exactly one layer of a
-    /// declared media type, and a declared layer size within `max_bytes`.
+    /// Fetches a single-layer OCI artifact, returning `Ok(None)` on an absent tag.
     ///
-    /// This is the shared shape behind the OCX single-layer artifact pattern
-    /// (image manifest + empty config + one layer, no index, no subject): the
-    /// patch descriptor (`__ocx.patch`) fetch is the caller.
-    ///
-    /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound` —
-    /// "looked, absent", not an error). The read goes through the mirror-aware
-    /// [`Self::transport_reference`] seam. That is the minority default on
-    /// `Client` — `fetch_manifest`, `fetch_manifest_raw_bytes`,
-    /// `pull_description` and `list_tags` all address the canonical registry —
-    /// and it is right here for one specific reason: nothing is written back
-    /// from this fetch, so Invariant #5 does not bite. A write-backing artifact
-    /// fetch added later must not copy the choice.
-    ///
-    /// # Steps
-    ///
-    /// 1. Authenticate against the registry (mirror-aware reference).
-    /// 2. Fetch the raw manifest bytes; `Ok(None)` if the tag does not exist.
-    /// 3. Validate the manifest is a single-image manifest, not an image index.
-    /// 4. Validate the manifest's `artifactType` matches `artifact_type`.
-    /// 5. Validate the manifest has exactly one layer.
-    /// 6. Validate the layer's `mediaType` matches `layer_media_type`.
-    /// 7. Validate the declared layer size against `max_bytes` (CWE-400
-    ///    pre-check — reject an oversized declared size before fetching).
-    /// 8. Fetch the layer blob bytes with a stream-level byte cap of
-    ///    `max_bytes`: a malicious registry that ignores its own declared
-    ///    size cannot stream more than `max_bytes` bytes into memory (closes
-    ///    the gap the declared-size pre-check alone leaves open).
+    /// Checks shape, `artifactType`, layer count, media type and declared size, then
+    /// fetches under a stream cap of `max_bytes` too, for a registry that ignores its
+    /// own declared size. Reads through the mirror only because nothing here backs a
+    /// write; a write-backing fetch must not copy that choice.
     ///
     /// # Errors
     ///
-    /// - [`ClientError::UnexpectedManifestType`] — manifest was an image index.
-    /// - [`ClientError::UnexpectedArtifactType`] — `artifactType` did not match.
-    /// - [`ClientError::WrongLayerCount`] — manifest had zero or more than one layer.
-    /// - [`ClientError::UnexpectedLayerMediaType`] — layer media type did not match.
-    /// - [`ClientError::LayerSizeExceeded`] — declared layer size exceeds `max_bytes`.
-    /// - [`ClientError::InvalidManifest`] — the layer digest is malformed.
-    /// - [`ClientError::DecompressionCapExceeded`] — the registry streamed
-    ///   more bytes than `max_bytes` regardless of its declared size.
-    /// - Any network/auth error from the underlying manifest or blob fetch.
+    /// Shape, artifact type, layer count or media type mismatch; a declared size over
+    /// `max_bytes` ([`ClientError::LayerSizeExceeded`]) or a streamed one
+    /// ([`ClientError::DecompressionCapExceeded`]); a malformed layer digest; or any
+    /// network/auth error.
     pub async fn fetch_single_layer_artifact(
         &self,
         identifier: &OciIdentifier,
@@ -2006,9 +1387,7 @@ impl Client {
             });
         }
 
-        // Size cap (CWE-400). Reject manifests that declare a layer larger
-        // than max_bytes before issuing the blob fetch. A negative or zero
-        // declared size is also rejected as a malformed manifest.
+        // Refused before the blob fetch (CWE-400); a non-positive size is malformed.
         let declared_size = layer_descriptor.size;
         match u64::try_from(declared_size) {
             Ok(size) if size <= max_bytes => {}
@@ -2041,34 +1420,15 @@ impl Client {
         }))
     }
 
-    /// Probes only the manifest digest for `identifier` WITHOUT downloading
-    /// the manifest body or any layer blob.
+    /// Probes only the manifest digest (HEAD), returning `Ok(None)` when absent.
     ///
-    /// Implemented over the transport's HEAD-based digest fetch, so it works
-    /// for image indexes and single-image manifests alike and never transfers
-    /// the manifest body. The registry's `Docker-Content-Digest` for a tag is
-    /// the digest of the top-level (index) manifest — the same value
-    /// `fetch_manifest`/`fetch_manifest_raw_bytes` compute — so a drift check
-    /// against a persisted snapshot digest never mismatches on digest source.
-    /// Returns `Ok(None)` when the reference does not exist.
-    ///
-    /// Used by the managed-config background-refresh probe (`notify`/`manual`)
-    /// and `ocx config update --check`, which only need to detect drift and
-    /// must not pull the (up to 64 KiB) config layer on every command.
-    ///
-    /// Unlike its siblings this one has no short, canonical-by-default form,
-    /// and the reason is that its callers genuinely split: the three in
-    /// `package/cascade/apply.rs` are write-deciding reads and ask for
-    /// [`ReadAddressing::Canonical`] (Invariant #5 — `apply.rs:350` is one
-    /// statement from the PUT it guards), while `announce/pipeline.rs` and
-    /// `managed_config/persistence.rs` are drift checks and ask for
-    /// [`ReadAddressing::Mirrored`]. With no majority to encode, a default
-    /// would be wrong for two callers either way, so the host is always named
-    /// at the call site. Do not add a short form to "match the siblings".
+    /// No canonical-by-default short form, and never add one: write-deciding callers
+    /// need [`ReadAddressing::Canonical`], drift checks [`ReadAddressing::Mirrored`],
+    /// so the host is always named at the call site.
     ///
     /// # Errors
     ///
-    /// Any network/auth error from the underlying digest fetch.
+    /// Any network or auth error from the digest fetch.
     pub async fn probe_manifest_digest_addressed(
         &self,
         identifier: &OciIdentifier,
@@ -2088,39 +1448,13 @@ impl Client {
         }
     }
 
-    /// Fetches the raw manifest bytes and the parsed [`crate::Manifest`] for
-    /// `identifier`.
+    /// Fetches the raw manifest bytes, their digest and the parsed manifest from the
+    /// canonical host, returning `Ok(None)` on an absent tag.
     ///
-    /// `identifier` may be tag- or digest-addressed — this is the generalized
-    /// raw-bytes fetch: any tag-resolve caller that needs verbatim bytes
-    /// alongside the parsed manifest (not just pinned-digest callers) can use
-    /// it as-is.
-    ///
-    /// Returns `Ok(None)` when the tag does not exist (`ManifestNotFound`).
-    /// Unlike [`Self::fetch_manifest`], this method also returns the raw
-    /// manifest bytes so callers can persist them to the CAS blob store
-    /// without re-serialisation — the round-trip bytes must be byte-identical
-    /// to what the registry served to ensure the stored digest is consistent.
-    ///
-    /// The returned digest is never trusted blindly: `sha256(raw_bytes)` is
-    /// recomputed and compared against the registry-claimed digest before
-    /// this method returns (see `verify_raw_bytes_digest`) — the trust
-    /// anchor for any snapshot store that persists these bytes verbatim
-    /// (`adr_index_indirection.md` A3).
-    ///
-    /// The body is capped at [`MAX_INDEX_DOCUMENT_BYTES`]; an over-cap
-    /// response is refused before it is parsed or handed to any caller.
-    ///
-    /// The cap is an **admission** check, not a memory bound. It runs on an
-    /// already-materialised body: [`OciTransport::pull_manifest_raw`] returns a
-    /// `Vec`, so a hostile registry can still force a transient allocation of
-    /// whatever it chooses to send before the refusal fires. What the cap
-    /// guarantees is that no over-cap body is ever parsed, digested, or carried
-    /// into the index — the property the dispatch-object store depends on.
-    /// Bounding the allocation too needs a capped read on the transport itself
-    /// (the `index.ocx.sh` fetch in `crate::index::ocx_index` owns its `reqwest`
-    /// call and does exactly that: `Content-Length` precheck, then an
-    /// incremental per-chunk cap). Tracked as FU-3.
+    /// The bytes are served verbatim and their digest recomputed, the trust anchor
+    /// for any store persisting them (`adr_index_indirection.md` A3). The
+    /// [`MAX_INDEX_DOCUMENT_BYTES`] cap is an admission check on an already-read `Vec`,
+    /// not a memory bound.
     pub async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &OciIdentifier,
@@ -2130,10 +1464,7 @@ impl Client {
     }
 
     /// [`fetch_manifest_raw_bytes`](Self::fetch_manifest_raw_bytes) against a
-    /// caller-chosen host.
-    ///
-    /// `ReadAddressing::Mirrored` is for a body no write is planned from — see
-    /// [`ReadAddressing`].
+    /// caller-chosen host; `Mirrored` only for a body no write is planned from.
     pub async fn fetch_manifest_raw_bytes_addressed(
         &self,
         identifier: &OciIdentifier,
@@ -2143,9 +1474,7 @@ impl Client {
             .await
     }
 
-    /// [`Self::fetch_manifest_raw_bytes`] with an injectable ceiling, so tests
-    /// can exercise the cap boundary without fabricating a 32 MiB body. Same
-    /// seam as [`Self::pull_layer`] / `pull_layer_with_caps`.
+    /// [`Self::fetch_manifest_raw_bytes`] with an injectable ceiling for tests.
     async fn fetch_manifest_raw_bytes_capped(
         &self,
         identifier: &OciIdentifier,
@@ -2168,9 +1497,7 @@ impl Client {
             Err(e) => return Err(self.via_mirror(identifier, &image, e)),
         };
 
-        // Fail closed before parsing or returning: an over-cap body is refused
-        // outright, never truncated (truncation would silently break the
-        // digest the caller persists these bytes under).
+        // Refused, never truncated: truncation breaks the digest the bytes are stored under.
         if raw_bytes.len() > max_bytes {
             return Err(ClientError::InvalidManifest(format!(
                 "manifest body is {} bytes, exceeding the {max_bytes}-byte cap",
@@ -2181,13 +1508,8 @@ impl Client {
         let manifest = parse_registry_manifest(&raw_bytes).map_err(|e| self.via_mirror(identifier, &image, e))?;
         let digest: Digest =
             Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
-        // Identity before self-consistency. `verify_raw_bytes_digest` only
-        // proves the body hashes to the digest the *registry* announced in
-        // `Docker-Content-Digest` — a registry answering `GET /manifests/A`
-        // with B's bytes and B's header passes it every time. When the caller
-        // pinned a digest, that pin is the identity the answer has to match
-        // (CWE-345); otherwise a pinned read silently resolves to whatever the
-        // registry felt like serving.
+        // A caller-pinned digest is checked first (CWE-345): the self-consistency check
+        // below passes a registry serving B's bytes and header for a request to A.
         if let Some(requested) = identifier.digest()
             && requested != digest
         {
@@ -2204,25 +1526,11 @@ impl Client {
         Ok(Some((raw_bytes, digest, manifest)))
     }
 
-    /// Fetches the raw bytes of a single blob for a single-layer artifact.
+    /// Fetches one layer blob under a hard `max_bytes` ceiling (CWE-400).
     ///
-    /// The blob is identified by `(identifier_for_auth, layer_digest)`. Auth is
-    /// established against the registry of `identifier_for_auth` before the
-    /// pull.
-    ///
-    /// # Size cap (CWE-400)
-    ///
-    /// `max_bytes` is a hard ceiling on the number of bytes that will be
-    /// buffered in memory. The stream is capped at `max_bytes + 1` via
-    /// [`tokio::io::AsyncReadExt::take`]; if the registry delivers more than `max_bytes`
-    /// bytes (ignoring its own declared-size field), the function returns
-    /// [`ClientError::DecompressionCapExceeded`] (repurposed for stream-level
-    /// oversized blobs) and no allocation beyond `max_bytes + 1` occurs.
-    ///
-    /// The caller in [`Self::fetch_single_layer_artifact`] already rejects
-    /// manifests whose *declared* layer size exceeds the ceiling; this cap
-    /// closes the gap where a malicious registry ignores its own declaration
-    /// and streams more bytes than it declared.
+    /// The stream is capped at `max_bytes + 1`, so a registry streaming past its own
+    /// declared size gets [`ClientError::DecompressionCapExceeded`] with no larger
+    /// allocation.
     pub async fn fetch_layer_blob_capped(
         &self,
         identifier_for_auth: &OciIdentifier,
@@ -2230,19 +1538,13 @@ impl Client {
         max_bytes: u64,
     ) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(identifier_for_auth);
-        // Auth was already established by the caller in fetch_manifest_raw_bytes,
-        // but call ensure_auth again for robustness (it is a no-op on cache hit).
+        // Re-authenticates for direct callers; a no-op on cache hit.
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Pull)
             .await?;
 
-        // Stream the blob with a hard byte cap so a malicious registry that
-        // sends more bytes than its declared layer size cannot OOM the process.
-        // We read up to (max_bytes + 1) to detect overflow: if we fill the
-        // buffer to that length, the registry sent too many bytes.
         use tokio::io::AsyncReadExt as _;
         let stream = self.transport().pull_blob_streaming(&image, layer_digest).await?;
-        // Cap sentinel: read one byte beyond the allowed ceiling to detect overflow.
         let cap_sentinel = max_bytes.saturating_add(1);
         let mut buf = Vec::with_capacity(max_bytes as usize);
         stream
@@ -2254,7 +1556,6 @@ impl Client {
                 source: e,
             })?;
         if buf.len() as u64 > max_bytes {
-            // Registry streamed more bytes than the declared + cap ceiling.
             return Err(ClientError::DecompressionCapExceeded { cap: max_bytes });
         }
         Ok(buf)
@@ -2277,22 +1578,16 @@ impl Client {
     }
 }
 
-/// Parses registry-served manifest bytes, refusing an image index that is not a
-/// valid one.
+/// Parses registry-served manifest bytes, refusing an invalid image index.
 ///
-/// The one place `crate::Manifest` is decoded from registry bytes. Deserialisation
-/// proves shape only — `OciImageIndex::schema_version` is an unconstrained `u8`,
-/// so `{"schemaVersion":1,"manifests":[]}` parses happily — and the resulting
-/// index is then carried into the local index, merged into on a cascade push, or
-/// committed verbatim into a public git repository by `announce`. Admission is
-/// checked here rather than at each of those sites so no future caller can
-/// acquire an unvalidated one.
+/// The one place a [`crate::Manifest`] is decoded from registry bytes, so no caller
+/// gets an unvalidated one: deserialisation proves shape only, and the result is
+/// merged on a cascade push or committed verbatim into public git by `announce`.
 ///
 /// # Errors
 ///
-/// [`ClientError::Serialization`] when the bytes are not a manifest at all;
-/// [`ClientError::InvalidImageIndex`] when they are an image index that violates
-/// [`crate::manifest::validate_image_index`].
+/// [`ClientError::Serialization`] for non-manifest bytes, [`ClientError::InvalidImageIndex`]
+/// for an index failing [`crate::manifest::validate_image_index`].
 fn parse_registry_manifest(bytes: &[u8]) -> std::result::Result<crate::Manifest, ClientError> {
     let manifest: crate::Manifest = serde_json::from_slice(bytes).map_err(ClientError::Serialization)?;
     if let crate::Manifest::ImageIndex(index) = &manifest {
@@ -2301,15 +1596,10 @@ fn parse_registry_manifest(bytes: &[u8]) -> std::result::Result<crate::Manifest,
     Ok(manifest)
 }
 
-/// Recomputes the digest of `raw_bytes` (using the algorithm `claimed`
-/// carries) and errors if it does not match.
+/// Errors unless `raw_bytes` hash to `claimed` under its own algorithm.
 ///
-/// This is the write-path trust anchor for [`Client::fetch_manifest_raw_bytes`]
-/// (ADR `adr_index_indirection.md` A3, "keep raw bytes, recompute + verify
-/// digest"): a registry-claimed digest string is untrusted input until the
-/// bytes actually received hash to it. A mismatch is a hard error, never a
-/// warning — the caller is about to persist `raw_bytes` verbatim under a
-/// filename derived from `claimed`.
+/// Hard error, never a warning: the caller persists the bytes under a filename
+/// derived from `claimed` (`adr_index_indirection.md` A3).
 fn verify_raw_bytes_digest(raw_bytes: &[u8], claimed: &Digest) -> std::result::Result<(), ClientError> {
     let recomputed = claimed.algorithm().hash(raw_bytes);
     if &recomputed != claimed {
@@ -2323,11 +1613,10 @@ fn verify_raw_bytes_digest(raw_bytes: &[u8], claimed: &Digest) -> std::result::R
 
 // ── Pagination ───────────────────────────────────────────────────────
 
-/// Generic paginated fetch: calls `fetch` repeatedly until the returned page
-/// is smaller than `chunk_size`, concatenating all results.
+/// Fetches pages until one is shorter than `chunk_size`, concatenating them.
 ///
-/// The first call uses `Some("")` as the `last` cursor (not `None`)
-/// because some registries return invalid responses when `n` is set without `last`.
+/// The first cursor is `Some("")`, not `None`: some registries answer invalidly
+/// when `n` is set without `last`.
 async fn paginate<F, Fut>(chunk_size: usize, fetch: F) -> std::result::Result<Vec<String>, ClientError>
 where
     F: Fn(usize, Option<String>) -> Fut,
@@ -7179,7 +6468,7 @@ mod tests {
     /// above was `CARGO_MANIFEST_DIR/src` — 46 of the workspace's ~697 files,
     /// all in one crate — and an empty-check is satisfied by that regression
     /// exactly as it is by a correct scan, so the guard reports clean over a
-    /// corpus it no longer walks (DEC-63). Measured, not argued: re-rooting the
+    /// corpus it no longer walks. Measured, not argued: re-rooting the
     /// G1 gate at `src` left it green.
     ///
     /// The oracle is the workspace's own member list rather than a count. Every
@@ -7251,12 +6540,12 @@ mod tests {
     /// These are *suffix* matches, so an entry whose file left the tree exempts
     /// nothing and cannot be caught by an offender: it stops describing the tree
     /// while still reading as the gate's scope, and the file that later inherits
-    /// the old path is exempt by a line nobody re-read. WP-30 re-homed four of
-    /// A1's six entries, which is how this half was earned.
+    /// the old path is exempt by a line nobody re-read. A prior re-homing of four
+    /// of A1's six entries is how this half was earned.
     ///
     /// Shared rather than copied, because copying is exactly how it was lost:
     /// the G1 gate was written from A1's walk and arrived without this check, so
-    /// a stale entry there went unnoticed until WP-32 measured it.
+    /// a stale entry there went unnoticed until this check measured it.
     fn assert_allow_list_is_live(gate: &str, allowed: &[&str], rs_files: &[std::path::PathBuf]) {
         let mut stale: Vec<&str> = allowed
             .iter()
@@ -7685,7 +6974,7 @@ mod tests {
             }
         }
 
-        /// C-001. The first `ensure_auth` pays the probe and the exchange; the
+        /// The first `ensure_auth` pays the probe and the exchange; the
         /// second pays nothing at all.
         ///
         /// This is the whole regression guard for the fork's cache-first
@@ -7722,7 +7011,7 @@ mod tests {
             );
         }
 
-        /// C-001 edge (b). A registry answering `200` with no `WWW-Authenticate`
+        /// Edge case: a registry answering `200` with no `WWW-Authenticate`
         /// inserts nothing into the token cache, so the second call reaches zero
         /// only if the *challenge probe* is what was cached.
         #[tokio::test]
@@ -7750,7 +7039,7 @@ mod tests {
             );
         }
 
-        /// C-001 edges (c) and (d). The cache key is the full scope — another
+        /// Edge case: the cache key is the full scope — another
         /// repository, or another verb set, is a different token. Serving one
         /// for the other is buildkit's `insufficient_scope` class.
         #[tokio::test]
@@ -7778,7 +7067,7 @@ mod tests {
             );
         }
 
-        /// C-003, from ocx's side. `store_auth_if_needed` is the side effect the
+        /// From ocx's side: `store_auth_if_needed` is the side effect the
         /// cache-first shortcut must not skip: it is the record the header-attach
         /// path reads to decide a request is authenticated at all. A warm
         /// `ensure_auth` followed by a real request proves the credentials
@@ -7811,7 +7100,7 @@ mod tests {
             );
         }
 
-        /// C-023. Eight concurrent *cold* `ensure_auth` calls for one identifier
+        /// Eight concurrent *cold* `ensure_auth` calls for one identifier
         /// produce one token exchange — the shape `ocx index sync` actually
         /// makes, which neither a sequential test nor a fork-level unit test
         /// covers.
@@ -7854,7 +7143,7 @@ mod tests {
             );
         }
 
-        /// C-025. The `GET /v2/` probe is issued once per host, not once per
+        /// The `GET /v2/` probe is issued once per host, not once per
         /// repository. Asserted as `== 1`, never `<= N`: before the change the
         /// count equalled the repository count, so an inequality would pass
         /// against the bug.

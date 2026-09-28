@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Preview leg for the managed-config tier — `ocx config test`.
+//! Preview leg for the managed-config tier — `ocx config test`; writes nothing.
 //!
-//! Answers the operator's pre-rollout question — *if I published this file as
-//! the managed-config payload, does it parse, and what would a machine's
-//! configuration look like afterwards?* — without publishing, adopting, or
-//! writing anything.
-//!
-//! Validation is [`validate_managed_config_payload`] verbatim (the same
-//! function `ocx config push` runs), so the preview can never accept a payload
-//! the publish leg would reject, or vice versa.
+//! Validation must stay [`validate_managed_config_payload`] itself, or preview and
+//! `ocx config push` disagree on which payloads they accept.
 
 use ocx_config::Config;
 
@@ -19,38 +13,21 @@ use super::publish::{ManagedConfigPublishError, validate_managed_config_payload}
 /// What [`preview_managed_config`] found.
 #[derive(Debug)]
 pub struct ManagedConfigPreview {
-    /// What the machine would resolve once this payload is adopted — the
-    /// candidate folded into the caller's tiers in the real adoption order.
+    /// What the machine would resolve once this payload is adopted.
     pub effective: Config,
-    /// Dotted paths of keys the config schema ignored, e.g. `registry.defalt`
-    /// or a typo'd top-level section. Sorted and deduplicated.
+    /// Sorted, deduplicated dotted paths of keys the schema ignored, e.g. `registry.defalt`.
     ///
-    /// Advisory, never a failure: an ignored key is equally a typo and a
-    /// setting a newer ocx understands, and this binary cannot tell them
-    /// apart. Coverage is what the derived schema sees — the
-    /// `[mirrors."<host>"]` table is parsed value-first from a raw
-    /// [`toml::Value`] (see [`ocx_config::mirror`]), so keys inside a
-    /// mirror entry are not reported.
+    /// Advisory only: an ignored key may be a setting a newer ocx understands. Keys
+    /// inside a `[mirrors."<host>"]` entry are not reported (parsed from a raw value).
     pub unknown_keys: Vec<String>,
 }
 
 /// Validates a candidate managed-config payload and previews the configuration
-/// adopting it would produce.
-///
-/// The candidate takes the managed tier's place in the caller's own fold order:
-/// `base` (compiled-in defaults, system, user, `$OCX_HOME`), then the
-/// candidate, then `overlay` (`OCX_CONFIG` / `--config`). That is byte-for-byte
-/// what [`ConfigLoader::load_with_local_view`](ocx_config::loader::ConfigLoader::load_with_local_view)
-/// does to a real snapshot, so an explicit overlay outranks the candidate here
-/// exactly as it would after adoption.
-///
-/// The candidate can never carry a `[managed]` section of its own: validation
-/// rejects one outright, exactly as `ocx config push` does.
+/// adopting it would produce: `base`, then the candidate, then `overlay` (`OCX_CONFIG` / `--config`).
 ///
 /// # Errors
 ///
-/// Every [`ManagedConfigPublishError`] variant
-/// [`validate_managed_config_payload`] raises — oversize payload, invalid
+/// Whatever [`validate_managed_config_payload`] raises: oversize payload, invalid
 /// TOML/UTF-8, or a `[managed]` section.
 pub fn preview_managed_config(
     bytes: &[u8],
@@ -59,9 +36,6 @@ pub fn preview_managed_config(
 ) -> Result<ManagedConfigPreview, ManagedConfigPublishError> {
     let text = validate_managed_config_payload(bytes)?;
 
-    // Second parse, this time through the ignored-field reporter. Validation
-    // already proved the text parses, so the only reachable error here is one
-    // it would have raised itself.
     let mut unknown_keys: Vec<String> = Vec::new();
     let deserializer =
         toml::Deserializer::parse(text).map_err(|source| ManagedConfigPublishError::InvalidToml { source })?;
@@ -70,10 +44,7 @@ pub fn preview_managed_config(
     unknown_keys.sort_unstable();
     unknown_keys.dedup();
 
-    // The adoption fold order, reproduced: base -> payload -> explicit overlay.
-    // ponytail: a plain merge, not the loader's strip-then-merge fold — the
-    // `[managed]` strip that fold performs is unreachable here because
-    // validation already refused a payload carrying one.
+    // ponytail: plain merge, not the loader's `[managed]`-stripping fold; validation already refused `[managed]`.
     let mut effective = base;
     effective.merge(candidate);
     effective.merge(overlay.clone());
@@ -84,14 +55,8 @@ pub fn preview_managed_config(
     })
 }
 
-/// Renders an ignored field's path the way an operator writes it in TOML:
-/// `registry.defalt`, not `serde_ignored`'s `Display`, which spells the
-/// `Option` every [`Config`] section is wrapped in as a `?` segment
-/// (`registry.?.defalt`).
-///
-/// Recursion depth is bounded by the config schema's nesting, not by the
-/// payload: an unrecognized table is reported once, at the level the schema
-/// stopped understanding it, and its contents are never walked.
+/// Renders an ignored path as TOML spells it (`registry.defalt`), not `serde_ignored`'s
+/// `Display`, which adds a `?` segment per `Option` wrapper (`registry.?.defalt`).
 fn dotted_path(path: &serde_ignored::Path<'_>) -> String {
     fn collect(path: &serde_ignored::Path<'_>, segments: &mut Vec<String>) {
         match path {
@@ -104,7 +69,6 @@ fn dotted_path(path: &serde_ignored::Path<'_>) -> String {
                 collect(parent, segments);
                 segments.push(key.clone());
             }
-            // Wrapper hops carry no name an operator ever typed.
             serde_ignored::Path::Some { parent }
             | serde_ignored::Path::NewtypeStruct { parent }
             | serde_ignored::Path::NewtypeVariant { parent } => collect(parent, segments),

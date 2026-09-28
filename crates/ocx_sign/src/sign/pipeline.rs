@@ -1,24 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Sign pipeline — the push-side state machine.
-//!
-//! Per
-//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md):
-//! resolve the per-platform target manifest → check Referrers-API capability →
-//! acquire an OIDC token → produce a Sigstore bundle (delegated to a
-//! [`Signer`]) → push the bundle blob → push the referrer manifest whose
-//! `subject` points at the target.
-//!
-//! The pipeline is a thin orchestrator: the cryptographic signing is delegated
-//! to a [`Signer`] trait object and the registry writes go through the injected
-//! [`OciTransport`].
-//!
-//! Two things ADR S1-F forbade now happen here, both by later decision. A
-//! registry with no Referrers API gets the OCI tag-schema fallback index rather
-//! than a refusal (Amendment 10), and `--signature-format simplesigning|both`
-//! writes the cosign `sha256-<hex>.sig` sidecar — a second, independent
-//! signature over a different payload, not a re-packaging of the bundle.
+//! Sign pipeline — the push-side state machine: bundle referrer and/or cosign `.sig` sidecar
+//! (`adr_oci_referrers_signing_v1.md` § Amendment 10).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -53,20 +37,9 @@ const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
     "application/vnd.docker.distribution.manifest.v2+json",
 ];
 
-/// A caller-supplied resolution, shared by the sign and attest pipelines.
+/// A caller-supplied subject resolution, shared by the sign and attest pipelines.
 ///
-/// Boxed and dynamic because its body is an index fetch neither pipeline may
-/// see (ADR 1.9): `ocx_sign` sits below `ocx_index` in the crate map. The error
-/// type is [`SignErrorKind`] rather than [`ResolveTargetError`] because every
-/// refusal the body can raise — the reference resolving to nothing, the sha256
-/// floor, a chain fault — already belongs to the sign taxonomy and has to keep
-/// its exit code.
-///
-/// Invoked exactly where `resolve_platform_target` was invoked (plan DEC-17),
-/// so a pre-resolution argument refusal still precedes any network call. The
-/// `--tags` sweep optimisation moves with it: a sweep that already asked the
-/// chain what a tag names closes over that answer instead of paying for a
-/// second fetch (#373).
+/// Its error type is [`SignErrorKind`], so every refusal keeps its sign exit code.
 pub type SubjectResolver<'a> = dyn Fn(
         &'a PackageRef,
         Option<&'a Platform>,
@@ -79,83 +52,50 @@ pub type SubjectResolver<'a> = dyn Fn(
 pub struct SignContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
     pub identifier: &'a PackageRef,
-    /// Narrowing selector, when one was requested.
-    ///
-    /// `None` acts on whatever the reference resolved to — an index is then
-    /// the subject itself. `Some` narrows into an index and acts on that
-    /// child, and is an error when the resolution was not an index. The rule
-    /// itself lives in [`resolve_sign_target`](ocx_oci::resolve_target::resolve_sign_target), shared with attest and verify.
+    /// Narrowing selector; `None` acts on whatever the reference resolved to.
+    /// The rule is [`resolve_sign_target`](ocx_oci::resolve_target::resolve_sign_target)'s.
     pub platform: Option<&'a Platform>,
     /// Signer producing the cryptographic bundle.
     pub signer: &'a dyn Signer,
-    /// OIDC token provider (override → ambient → browser dispatch).
     pub token_provider: &'a dyn TokenProvider,
     /// When true, bypass the referrers-capability cache.
     pub no_cache: bool,
-    /// The dial-site SSRF floor, resolved for this run's logical registry.
-    ///
-    /// Two of the three things this pipeline used to hold an `&Index` for: the
-    /// `trusted_hosts` escape hatch the Sigstore endpoint guard reads, and the
-    /// routing the physical-target guard judges (ADR 1.9).
+    /// The dial-site SSRF floor for this run's logical registry.
     pub dial: DialPolicy<'a>,
-    /// Resolve `identifier` under the `--platform` optionality rule and follow
-    /// the index-indirection pointer — the third.
+    /// Resolves `identifier` and follows the index-indirection pointer.
     ///
-    /// See [`SubjectResolver`] for why it is the caller's and where it is
-    /// invoked. Boxed rather than borrowed because `'a` sits in its argument
-    /// position, which makes `SignContext<'a>` invariant: a caller could not
-    /// lend a local closure for a lifetime forced to outlive the whole call.
+    /// Boxed, not borrowed: `'a` in argument position makes `SignContext<'a>` invariant.
     pub resolve: Box<SubjectResolver<'a>>,
     /// Fulcio URL (validated at the CLI boundary).
     pub fulcio_url: &'a Url,
     /// Rekor URL (validated at the CLI boundary).
     pub rekor_url: &'a Url,
-    /// The signing tier of the state-root layout, owning the
-    /// referrers-capability cache.
-    ///
-    /// Owned for the same reason [`SignContext::resolve`] is boxed.
+    /// Owns the referrers-capability cache.
     pub state: SigningStatePaths,
-    /// Which wire shape(s) to write (spec D8). `Bundle` is the default; each
-    /// selected format is an **independent** signature with its own Fulcio
-    /// certificate and its own Rekor entry.
+    /// Which wire shape(s) to write; each is an independent signature with its own certificate and Rekor entry.
     pub format: SignatureFormat,
 }
 
 /// Result emitted by a sign pipeline run.
 ///
-/// "Successful" is per **leg**: `--signature-format both` writes two
-/// independent signatures, and the run is best-effort per leg rather than
-/// atomic (spec D8). A leg that failed is reported alongside one that
-/// succeeded; the caller decides the exit code from [`Self::first_failure`].
+/// Best-effort per leg, not atomic: the caller takes the exit code from [`Self::first_failure`].
 pub struct SignResult {
-    /// Digest of the target manifest the signature(s) were attached to.
     pub subject_digest: Digest,
     /// Per-format outcome, in write order. Never empty.
     pub legs: Vec<SignatureLeg>,
-    /// Cert SAN (identity) that signed the target — the OIDC subject.
-    ///
-    /// From the first leg that succeeded. Every leg redeems the *same* OIDC
-    /// token, so their certificates carry the same SAN by construction; the
-    /// field would only differ if two legs somehow used two identities, which
-    /// no code path allows.
+    /// Cert SAN (the OIDC subject), from the first leg that succeeded.
     pub certificate_identity: String,
-    /// Cert issuer (`--certificate-oidc-issuer` comparand) — the OIDC issuer.
     pub certificate_oidc_issuer: String,
     /// Which key model produced the signature(s).
     pub key_backend: ocx_trust::key_ref::KeyBackendKind,
     /// The signing key's cosign hint, in key mode only.
     pub public_key_hint: Option<String>,
-    /// The Rekor log index of the first successful leg, when one was created.
-    ///
-    /// Reported rather than inferred: under a key `--rekor-upload` is opt-in,
-    /// so its absence is a legal outcome the operator must be able to see.
+    /// The Rekor log index of the first successful leg; `None` is legal under a key.
     pub transparency_log_index: Option<u64>,
 }
 
 impl SignResult {
     /// The first leg that failed, if any — the run's exit-code source.
-    ///
-    /// `None` means every selected format was written.
     #[must_use]
     pub fn first_failure(&self) -> Option<&SignErrorKind> {
         self.legs.iter().find_map(|leg| leg.outcome.as_ref().err())
@@ -164,29 +104,20 @@ impl SignResult {
 
 /// One wire shape's outcome.
 pub struct SignatureLeg {
-    /// The shape this leg wrote.
     pub format: SignatureFormat,
-    /// What it produced, or why it did not.
     pub outcome: Result<LegDigests, SignErrorKind>,
 }
 
 /// The two addresses a written signature occupies.
 #[derive(Debug)]
 pub struct LegDigests {
-    /// The signed payload's blob digest: the Sigstore bundle under `bundle`,
-    /// the simplesigning claim under `simplesigning` — and, on the attest side,
-    /// the bare DSSE envelope the `.att` sidecar carries.
+    /// The payload blob: the Sigstore bundle, the simplesigning claim, or the `.att` DSSE envelope.
     pub payload_digest: Digest,
-    /// The manifest the payload hangs from: the OCI referrer under `bundle`,
-    /// the `sha256-<hex>.sig` (or, attesting, `.att`) sidecar under
-    /// `simplesigning`.
+    /// The manifest the payload hangs from: the referrer, or the `.sig`/`.att` sidecar.
     pub manifest_digest: Digest,
 }
 
-/// The identity facts a report reads, whichever leg produced them.
-///
-/// Cloned into [`SignResult`] from the first leg that succeeded. Every leg
-/// redeems the same OIDC token, so under keyless they agree by construction.
+/// The identity facts a report reads, from the first leg that succeeded.
 #[derive(Clone)]
 struct SignedIdentity {
     certificate_identity: String,
@@ -197,11 +128,7 @@ struct SignedIdentity {
 }
 
 impl Default for SignedIdentity {
-    /// Hand-written because `KeyBackendKind` is a frozen G1 type with no
-    /// `Default`, and giving one a default key model there would let an
-    /// unpopulated report claim `keyless`. Here the value is only ever reached
-    /// when no leg succeeded, which the caller has already turned into an
-    /// error.
+    /// By hand: a `Default` on `KeyBackendKind` would let an unpopulated report claim `keyless`.
     fn default() -> Self {
         Self {
             certificate_identity: String::new(),
@@ -213,28 +140,21 @@ impl Default for SignedIdentity {
     }
 }
 
-/// The SAN of a PEM leaf certificate, using the verify side's own extractor so
-/// the two commands cannot drift into disagreeing about one certificate.
+/// The SAN of a PEM leaf, via the verify side's extractor so sign and verify cannot disagree.
 fn identity_from_pem(pem: &str) -> Option<String> {
     parse_leaf(pem).and_then(|leaf| crate::verify::identity::subject_identity(&leaf))
 }
 
-/// The Fulcio issuer extension of a PEM leaf certificate.
 fn issuer_from_pem(pem: &str) -> Option<String> {
     parse_leaf(pem).and_then(|leaf| crate::verify::identity::oidc_issuer(&leaf))
 }
 
-/// Decode a PEM leaf into the X.509 type the extractors take.
 fn parse_leaf(pem: &str) -> Option<x509_cert::Certificate> {
     use x509_cert::der::DecodePem as _;
     x509_cert::Certificate::from_pem(pem.as_bytes()).ok()
 }
 
-/// Apply the SSRF floor/// Apply the SSRF floor to exactly the Sigstore endpoints `signer` will dial.
-///
-/// Shared with the attest pipeline: both reach the same two services under the
-/// same rule, and a second copy would be a second place for "which endpoint is
-/// live in which key model" to drift.
+/// Apply the SSRF floor to exactly the Sigstore endpoints `signer` will dial; shared with attest.
 pub(crate) async fn guard_dialed_endpoints(
     trusted: &[String],
     signer: &dyn Signer,
@@ -259,34 +179,12 @@ pub(crate) async fn guard_dialed_endpoints(
     Ok(())
 }
 
-/// Decide what a sign or attest run acts on, given a resolution outcome.
-///
-/// The deciding half of what `resolve_platform_target` used to be: the
-/// `--platform` optionality rule, then the sha256 floor, in that order. The
-/// *fetching* half is the caller's closure now ([`SubjectResolver`]) because
-/// `ocx_sign` may not name the index, but the order between the two is
-/// unchanged — the floor still runs before the index-indirection lookup, so a
-/// non-sha256 subject is refused as [`SignErrorKind::SubjectDigestUnsupported`]
-/// and never as whatever that lookup would have raised.
-///
-/// Shared with the attest pipeline, which faces the identical question against
-/// the identical taxonomy; verify wires the same decision into its own error
-/// kinds. The rule itself is [`SignTarget::from_resolved`]'s and lives nowhere
-/// else, so the three verbs cannot answer a reference differently.
-///
-/// `resolved` must be what
-/// `Index::fetch_manifest(identifier, IndexOperation::Resolve)` answered for
-/// this identifier — anything else silently redefines what the reference names
-/// — or `None`, which is the reference resolving to nothing.
+/// Decide what a sign or attest run acts on, given `Index::fetch_manifest(.., Resolve)`'s answer.
 ///
 /// # Errors
 ///
-/// [`SignErrorKind::TargetNotFound`] when the reference resolves to nothing, or
-/// to an index with no single compatible child;
-/// [`SignErrorKind::TargetNotAnIndex`] when a platform was requested and the
-/// resolution is a bare manifest;
-/// [`SignErrorKind::SubjectDigestUnsupported`] when the resolved subject is not
-/// addressed by sha256.
+/// [`SignErrorKind::TargetNotFound`], [`SignErrorKind::TargetNotAnIndex`], or
+/// [`SignErrorKind::SubjectDigestUnsupported`] for a non-sha256 subject.
 pub fn sign_target_from_resolution(
     resolved: Option<&(Digest, ocx_oci::Manifest)>,
     platform: Option<&Platform>,
@@ -297,16 +195,7 @@ pub fn sign_target_from_resolution(
         });
     };
     let target = SignTarget::from_resolved(resolved_digest, manifest, platform).map_err(map_resolve_target_error)?;
-    // The sha256 floor, applied at the one seam both `sign` and `attest` pass
-    // through and before either has written anything. Not in
-    // `resolve_sign_target`: that module is the `--platform` rule and verify
-    // shares it, and verify must keep *reading* whatever a registry holds.
-    //
-    // Both artifacts OCX writes are sha256-only, and both fail later and worse
-    // than a refusal here — see `SubjectDigestUnsupported`. `--platform` is
-    // what makes this reachable without a hand-written digest: the child
-    // descriptor's algorithm is the index author's choice, and nothing between
-    // here and the write narrows it.
+    // The sha256 floor lives here, not in `resolve_sign_target`: verify shares that and must read any algorithm.
     let algorithm = target.subject_digest.algorithm();
     if algorithm != ocx_oci::Algorithm::Sha256 {
         return Err(SignErrorKind::SubjectDigestUnsupported {
@@ -316,21 +205,12 @@ pub fn sign_target_from_resolution(
     Ok(target)
 }
 
-/// How a `--platform` request reads in a message when none was made.
-///
-/// The flag is optional, so "no manifest for platform " with nothing after it
-/// is reachable; `any` is what the absence means — act on whatever resolved.
-/// Same spelling verify uses for the same absence.
+/// `any` when no `--platform` was given, as verify spells it.
 pub(crate) fn platform_label(platform: Option<&Platform>) -> String {
     platform.map_or_else(|| "any".to_string(), Platform::to_string)
 }
 
 /// Map the shared `--platform` decision's refusals into the sign taxonomy.
-///
-/// `PlatformNotFound` and `AmbiguousPlatform` land on
-/// [`SignErrorKind::TargetNotFound`], which is where the required-`--platform`
-/// `Index::select` refusals landed too — message and exit code unchanged for
-/// them.
 pub(crate) fn map_resolve_target_error(error: ResolveTargetError) -> SignErrorKind {
     match error {
         ResolveTargetError::NotAnIndex { platform } => SignErrorKind::TargetNotAnIndex { platform },
@@ -345,9 +225,6 @@ pub struct SignPipeline;
 
 impl SignPipeline {
     /// Run the push-side sign state machine.
-    ///
-    /// The registry transport is derived from `client` internally, so the
-    /// public API never exposes `&dyn OciTransport` (ADR Amendment 1, Option 3).
     pub async fn run(client: &Client, ctx: SignContext<'_>) -> Result<SignResult, SignError> {
         let identifier = ctx.identifier.clone();
         Self::run_inner(client, ctx)
@@ -356,75 +233,34 @@ impl SignPipeline {
     }
 
     async fn run_inner(client: &Client, ctx: SignContext<'_>) -> Result<SignResult, SignErrorKind> {
-        // 0. SSRF floor for the trust services (CWE-918). The CLI boundary
-        //    validated these URLs as *strings*; this is where we find out where
-        //    they actually resolve, before anything dials them.
-        //
-        //    Guarded per endpoint the run will actually dial, which the signer
-        //    answers for. Guarding an endpoint that is never contacted is not
-        //    caution but a false dependency: a key-mode sign in an air-gapped
-        //    org reaches no Fulcio and, by default, no Rekor, and resolving
-        //    either would fail the signature on DNS for a host it never opens a
-        //    socket to.
+        // Only dialed endpoints: guarding one never contacted fails an air-gapped key-mode sign on DNS.
         guard_dialed_endpoints(ctx.dial.trusted_hosts, ctx.signer, ctx.fulcio_url, ctx.rekor_url).await?;
 
         let transport = client.transport();
-        // 1. Resolve the target manifest under the `--platform` optionality
-        //    rule. `enclosing_index` is verify's to read (the membership test);
-        //    signing acts on the subject and nothing else.
-        //
-        //    The caller performs the resolution (plan DEC-17) and follows the
-        //    index-indirection pointer with it: a logical name
-        //    (`ocx.sh/<ns>/<pkg>`) may point at a different physical registry,
-        //    so every transport-facing call below — subject fetch, capability
-        //    probe, blob + referrer push — targets the physical address. The
-        //    SSRF floor on the returned host is enforced upstream in the shared
-        //    index choke point (`ChainedIndex::guard_local_physical`), never
-        //    re-checked here. This call sits exactly where
-        //    `resolve_platform_target` sat, so an argument error still precedes
-        //    a network one.
+        // Every transport call below targets `physical`, not the logical name.
         let ResolvedSubject {
             target: SignTarget { subject_digest, .. },
             physical,
             ..
         } = (ctx.resolve)(ctx.identifier, ctx.platform).await?;
         let resolved = ctx.identifier.clone_with_digest(subject_digest.clone());
-        // The pre-flight above had to tolerate a DNS lookup failure -- it runs on
-        // every resolve, including ones that never fetch, so it cannot fail on a
-        // missing resolver. Its own contract says the tolerance is safe only
-        // because the dial site re-validates fail-closed, which is here: a
-        // request is now imminent, and the shared client carries no SSRF
-        // resolver of its own. Without this the sign/verify paths held only the
-        // tolerant half of that split (CWE-918). Same call the pull path makes.
+        // Fail-closed dial guard: the upstream floor tolerates DNS failure and the shared client has no SSRF resolver (CWE-918).
         ocx_oci::ssrf::guard_physical_dial(&ctx.dial, &resolved, &physical)
             .await
             .map_err(|error| SignErrorKind::ForbiddenRegistryTarget {
                 reason: error.to_string(),
             })?;
-        // Two seams, because signing both reads and writes. The subject fetch is
-        // a read and may be served by a `[mirrors]` entry; the referrer push is
-        // a write and must reach the canonical host — remote/proxy mirrors are
-        // read-only (ADR Q5), so a signature pushed at a mirror is rejected, or
-        // against a writable mirror lands where the canonical verifier never
-        // looks. Same Pull/Push split `Client::ensure_auth` makes.
+        // Reads may hit a mirror; the push must reach the canonical host, as mirrors are read-only.
         let read_image = client.transport_reference(&physical);
         let write_image = client.transport_write_reference(&physical);
 
-        // Fetch the target manifest bytes for the subject descriptor's size.
-        // `clone_with_digest` drops the tag, so this stays digest-only — a
-        // `repo:tag@digest` reference keys a different registry path and 404s.
+        // Digest-only: a `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, served_digest) = transport
             .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
-        // `subject_bytes.len()` becomes the subject descriptor's `size` pushed
-        // to the CANONICAL host, but the bytes came from the READ host, which
-        // under a `[mirrors]` entry is a different machine. Bind them to the
-        // digest already resolved before trusting their length — a wrong size
-        // yields a signature strict verifiers reject. Fail closed, reusing the
-        // transport's own wrong-content error so the exit code matches a
-        // registry-served mismatch anywhere else.
+        // Bind the mirror-served bytes to the resolved digest, or a wrong `size` yields a signature strict verifiers reject.
         if Digest::try_from(served_digest.as_str()).ok().as_ref() != Some(&subject_digest) {
             return Err(map_client_error(ClientError::DigestMismatch {
                 expected: subject_digest.to_string(),
@@ -432,34 +268,16 @@ impl SignPipeline {
             }));
         }
 
-        // 2. Referrers-API capability (cache-first) of the host we will PUSH
-        //    to. A mirror's referrers support says nothing about the upstream's,
-        //    and the upstream is where the referrer manifest has to land.
-        //
-        // The verdict is still read, because it decides whether the tag-schema
-        // fallback index is written alongside the manifest; what changed is that
-        // it no longer decides whether signing may happen at all.
+        // Probe the PUSH host: a mirror's referrers support says nothing about the upstream's.
         let referrers_support =
             referrers_capability(transport, &write_image, &subject_digest, &ctx.state, ctx.no_cache).await?;
 
-        // 3. Acquire the OIDC token — keyless only. A key-mode signature has no
-        //    identity to prove, so asking for one would fail a signature that
-        //    needs none.
         let token = match ctx.signer.requires_identity_token() {
             true => Some(ctx.token_provider.acquire("sigstore").await?),
             false => None,
         };
 
-        // 4. Write each selected shape. `--signature-format both` emits two
-        //    INDEPENDENT signatures, each with its own Fulcio certificate and
-        //    its own Rekor entry — a simplesigning signature covers a different
-        //    payload, so it cannot be re-packaged from the bundle.
-        //
-        //    Best-effort per leg, never atomic (spec D8): one shape landing and
-        //    the other failing is a real outcome, and hiding the successful one
-        //    behind the failure would leave the operator re-signing what is
-        //    already published. The caller reads `first_failure` for the exit
-        //    code.
+        // Best-effort per leg: hiding a landed leg behind the other's failure leaves the operator re-signing it.
         let subject_descriptor = Descriptor {
             media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
             digest: subject_digest.to_string(),
@@ -510,9 +328,6 @@ impl SignPipeline {
             });
         }
 
-        // Every selected leg failed: there is nothing to report, so the run
-        // fails outright with the first cause rather than emitting a success
-        // envelope listing only failures.
         if legs.iter().all(|leg| leg.outcome.is_err()) {
             let first = legs
                 .into_iter()
@@ -533,11 +348,7 @@ impl SignPipeline {
         })
     }
 
-    /// The `bundle` leg: a cosign-shaped DSSE image signature published as an
-    /// OCI referrer.
-    ///
-    /// Returns the leg's digests alongside the identity facts the report reads,
-    /// so a caller that runs two legs takes them from whichever succeeded first.
+    /// The `bundle` leg: a cosign-shaped DSSE image signature published as an OCI referrer.
     #[allow(clippy::too_many_arguments)]
     async fn write_bundle_leg(
         transport: &dyn OciTransport,
@@ -549,12 +360,7 @@ impl SignPipeline {
         token: Option<&crate::sign::OidcToken>,
         referrers_support: ocx_oci::referrer::capability::ReferrersSupport,
     ) -> Result<(LegDigests, SignedIdentity), SignErrorKind> {
-        // cosign v3 signs an image by wrapping the digest in a DSSE in-toto
-        // Statement whose `predicateType` is
-        // `https://sigstore.dev/cosign/sign/v1` and whose predicate is empty —
-        // NOT by putting the digest in a `messageSignature`. The subject digest
-        // is what binds; the name is informational. Same statement shape as an
-        // attestation, so the same `sign_dsse` machinery produces it.
+        // cosign v3 wraps the digest in a DSSE Statement (empty predicate), not a `messageSignature`.
         let statement = statement::build_image_signature(physical.repository(), subject_digest);
         let statement_bytes = serde_json::to_vec(&statement).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         let bundle = ctx
@@ -562,12 +368,7 @@ impl SignPipeline {
             .sign_dsse(&statement_bytes, token, ctx.fulcio_url, ctx.rekor_url)
             .await?;
 
-        // Push the referrer's blobs: the OCI empty-config blob (the manifest's
-        // `config` descriptor points at it) and the Sigstore bundle blob (the
-        // `layers[0]` payload). A spec-strict registry (zot) rejects the
-        // manifest with MANIFEST_INVALID if either referenced blob is absent,
-        // so both must land before the manifest PUT. `push_blob` HEADs first,
-        // so re-pushing the shared empty-config blob is a no-op after the first.
+        // Both blobs before the manifest: a spec-strict registry (zot) rejects it with MANIFEST_INVALID otherwise.
         let no_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> = std::sync::Arc::new(|_| ());
         let empty_config_digest =
             Digest::try_from(EMPTY_CONFIG_DIGEST).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
@@ -591,12 +392,7 @@ impl SignPipeline {
             size: bundle.bytes.len() as i64,
             ..Descriptor::default()
         };
-        // cosign parity: the referrer annotations name the bundle's content
-        // oneof and, since the signature is now a DSSE Statement, its
-        // predicateType — the pair that lets a listing tell an image signature
-        // from an attestation without fetching the blob. Byte-for-byte what
-        // cosign v3.1.1 wrote in
-        // `test/tests/fixtures/golden/keyless_referrer_manifest.json`.
+        // Byte-for-byte cosign v3.1.1's annotations (`test/tests/fixtures/golden/keyless_referrer_manifest.json`).
         let annotations = bundle_annotations(
             &bundle_created(bundle_now()),
             BUNDLE_CONTENT_DSSE,
@@ -611,10 +407,7 @@ impl SignPipeline {
         let manifest_bytes = manifest
             .to_canonical_json()
             .map_err(|error| SignErrorKind::Internal(Box::new(error)))?;
-        // `write_image` is `transport_write_reference`'s, never the mirrored read
-        // reference: the fallback append PUTs a tag through whatever host it is
-        // handed, and a signature written to a mirror is one the canonical
-        // verifier never looks at (CWE-345/367, `oci/client.rs:164-181`).
+        // `write_image` must be the canonical host: a signature written to a mirror is never seen by verifiers.
         let (manifest_digest, _descriptor) = attach_referrer(
             transport,
             write_image,
@@ -639,10 +432,7 @@ impl SignPipeline {
         ))
     }
 
-    /// The `simplesigning` leg: a cosign `sha256-<hex>.sig` sidecar.
-    ///
-    /// The claim bytes are what gets signed, so this is a second signature over
-    /// a different payload rather than a repackaging of the bundle.
+    /// The `simplesigning` leg: a second signature, over the claim bytes, in a `.sig` sidecar.
     async fn write_simplesigning_leg(
         transport: &dyn OciTransport,
         ctx: &SignContext<'_>,
@@ -651,13 +441,9 @@ impl SignPipeline {
         subject_digest: &Digest,
         token: Option<&crate::sign::OidcToken>,
     ) -> Result<(LegDigests, SignedIdentity), SignErrorKind> {
-        // The reference cosign records in the claim: registry + repository, no
-        // tag and no digest. The digest is carried separately, in the field a
-        // verifier actually binds on.
         let docker_reference = format!("{}/{}", physical.registry(), physical.repository());
         let claim = SimpleSigningClaim::new(docker_reference, subject_digest);
-        // Signed as served, never re-serialized: `to_signing_bytes` is the one
-        // producer of these bytes, and the layer's SHA-256 is their address.
+        // The one producer of the signed bytes; the layer's SHA-256 is their address.
         let payload = claim
             .to_signing_bytes()
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
@@ -676,9 +462,6 @@ impl SignPipeline {
                 manifest_digest,
             },
             SignedIdentity {
-                // A simplesigning signature carries its certificate in an
-                // annotation rather than a bundle, so the identity is read back
-                // out of the same PEM the layer holds.
                 certificate_identity: signed
                     .certificate_pem
                     .as_deref()
@@ -695,18 +478,6 @@ impl SignPipeline {
             },
         ))
     }
-
-    // The Unsupported verdict no longer refuses the operation: the OCI referrers
-    // tag-schema fallback (`list_referrers_with_fallback` /
-    // `append_referrer_fallback_index`) serves a registry without the Referrers
-    // API. See `adr_oci_referrers_signing_v1.md`, Amendment 10 — the fallback
-    // index is a mutable tag anyone with push access authors, and the residual
-    // attack surface that reverses S1-F is recorded there.
-    //
-    // `ensure_referrers_supported` stood here and raised
-    // `SignErrorKind::ReferrersUnsupported` (exit 84) on that verdict. Its
-    // cache-first probe survives as `sign::referrers::referrers_capability`,
-    // which returns the verdict rather than refusing on it.
 }
 
 #[cfg(test)]

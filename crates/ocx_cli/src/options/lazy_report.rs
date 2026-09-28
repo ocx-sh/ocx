@@ -4,60 +4,27 @@
 use ocx_project::lazy;
 
 /// The `--lazy-report` tier of the lazy-loading resolution ladder.
-///
-/// **Its one consumer is `ocx launcher shim`** — the hidden verb a generated
-/// shim execs on first invocation. Do **not** flatten it into `ocx env`,
-/// `run`, `pull`, `package env`, `package exec` or `package which`: those
-/// compose, and the download this setting describes happens later, in a
-/// *different process*. The shim body is a byte-exact golden carrying no
-/// report token, and `OCX_LAZY_REPORT` is deliberately not forwarded as
-/// child config, so a compose-time value has no route to the process that
-/// would render the progress. It was briefly on all six and could not have
-/// worked on any of them.
-///
-/// The sibling of [`super::LazyMode`], and a second concrete struct for the
-/// same reason `lazy::LazyReportLadder` is: two unrelated vocabularies over
-/// one shape is incidental similarity, not shared logic. Resolve through
-/// [`LazyReport::mode`] — never read the field at a call site.
-///
-/// What [`LazyReport::mode`] returns is the ladder's **top tier**, not the
-/// answer: `None` means "the flag was absent". Feed it to
-/// [`lazy::LazyReportLadder::cli`] and call `resolve()`; the floor lives
-/// there and nowhere else.
+// `ocx launcher shim` only: flattened into a composing verb it is dead, as no compose-time value reaches the shim.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct LazyReport {
     /// Show progress while a deferred package downloads on first use.
     ///
-    /// `silent` opens no progress channel at all. `progress` renders progress
-    /// on the controlling terminal; where no terminal is reachable - a
-    /// container build, a CI runner, anything detached - it degrades to
-    /// silent rather than failing. Errors go to stderr either way.
-    ///
-    /// Only affects a package composed with `--lazy-mode always`; an eagerly
-    /// composed package has nothing to defer.
-    ///
-    /// When omitted, the value is read from `ocx.toml` (the package entry
-    /// first, then the top-level `lazy-report` key), then from the
-    /// `OCX_LAZY_REPORT` environment variable, and finally defaults to
-    /// `silent`. Passing the flag overrides all of them. There is no
-    /// per-group setting: unlike `lazy-mode`, this one is resolved when the
-    /// download happens rather than when the package is composed, and no group
-    /// is in scope by then.
-    ///
-    /// See https://ocx.sh/docs/reference/command-line#arg-lazy-report for the
-    /// full resolution order.
+    /// `silent` opens no progress channel. `progress` renders on the controlling
+    /// terminal and degrades to silent, not failing, where none is reachable (a
+    /// container build, a CI runner). Errors go to stderr either way. Only affects a
+    /// package composed with `--lazy-mode always`. When omitted, read from
+    /// `ocx.toml` (the package entry, then the top-level `lazy-report` key),
+    /// then `OCX_LAZY_REPORT`, else `silent`; the flag overrides all of them. No
+    /// per-group setting: it resolves when the download happens, when no group
+    /// is in scope. https://ocx.sh/docs/reference/command-line#arg-lazy-report
     #[clap(long = "lazy-report", value_enum, value_name = "MODE")]
     lazy_report: Option<lazy::LazyReport>,
 }
 
 impl LazyReport {
-    /// Resolves `--lazy-report` to the CLI tier of
-    /// [`lazy::LazyReportLadder`].
+    /// Resolves `--lazy-report` to the CLI tier of [`lazy::LazyReportLadder`].
     ///
-    /// `None` means the flag was absent, so the tier is **inherited** from
-    /// the next-less-specific one — it never means
-    /// [`lazy::LazyReport::Silent`]. Same rationale as
-    /// [`super::LazyMode::mode`].
+    /// `None` inherits the next tier, never [`lazy::LazyReport::Silent`] (see [`super::LazyMode::mode`]).
     pub fn mode(&self) -> Option<lazy::LazyReport> {
         self.lazy_report
     }

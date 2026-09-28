@@ -2,143 +2,36 @@
 // Copyright 2026 The OCX Authors
 
 //! Drift repair for a local index source's `c/index.json`
-//! (`adr_servable_index_snapshot.md` Decision C, C-007/C-008).
-//!
-//! One drift is unrecoverable by every other path: a catalog entry naming a
-//! package whose root document is gone. [`CatalogTransaction::write_root`]
-//! only upserts and [`IndexStore::read_root`]'s self-heal only adds, so that
-//! entry is permanent and the catalog lies about the tree's contents from then
-//! on. [`regenerate_catalog`] re-derives the whole map from the `p/` walk,
-//! which is the only operation that clears it.
+//! (`adr_servable_index_snapshot.md#decision-c`): the only operation that clears
+//! a catalog entry whose root document is gone.
 
 use super::error::Result;
 use crate::CatalogIndex;
 use crate::IndexStore;
 
-/// Re-derives `source`'s `c/index.json` from the root documents on disk.
+/// Re-derives `source`'s `c/index.json` from the root documents on disk, replacing
+/// the map read under the lock.
 ///
-/// The tree is the source of truth; the catalog is derived data. Every root the
-/// `p/` walk finds contributes `<repository> -> sha256(root bytes on disk)`, and
-/// the derivation **replaces** the map read under the lock — an entry naming a
-/// root that is not on disk is dropped (C-008).
-///
-/// # Three invariants
-///
-/// 1. **It never writes `config.json`.** `name_segments` is an operator
-///    declaration OCX cannot derive from a tree, and fabricating one for a
-///    foreign tree under repair would be wrong. Creation is C-023's job alone,
-///    in `LocalIndex::commit_published_root` — deliberately **not** in
-///    [`CatalogTransaction::commit`], which is a shared primitive that this
-///    function and the `read_root` catalog self-heal
-///    (`IndexStore::persist_recovered_catalog_entry`) both call. A hook there
-///    would make `regenerate` inject metadata into a tree OCX does not own, and
-///    would make a plain resolve create a wire document as a side effect.
-///    Asserted by S-019.
-/// 2. **It removes no root document and no `o/` object, ever.** Wholesale
-///    replacement of a *derived* document is derivation, not deletion, which is
-///    why this does not violate the merge-only-never-delete rule
-///    (`subsystem-oci.md`) — that rule governs roots and objects, the things
-///    that carry pins. `c/index.json` is the only path it *writes*, but not the
-///    only path it touches: it inherits two side effects from the primitives it
-///    drives. [`CatalogTransaction::commit`] unconditionally `remove_file`s
-///    `c/index.json.etag` *before* its `catalog == original` early return
-///    (`index_store.rs:1019-1023`, failure ignored on purpose), so against a
-///    served-tree checkout that tracks such a file `regenerate` **deletes a
-///    version-controlled file** and cannot fail on it; and
-///    [`IndexStore::lock_source`] `create_dir_all`s the source directory — which
-///    is why the Preconditions below have to be checked before the transaction
-///    opens rather than inside it.
-/// 3. **Nothing symlinked under `p/` is enumerated — neither a root document
-///    nor a directory.** [`IndexStore::list_wire_repositories`] walks with
-///    `tokio::fs::DirEntry::file_type()`, which reports the link's own type,
-///    and branches `is_dir()` then `!is_file()` (`index_store.rs:772-782`): a
-///    symlink is **neither**, so a symlinked `p/**.json` is skipped, and a
-///    symlinked *directory* is never queued — taking **every root beneath it**
-///    in one step. Because this contract replaces the catalog wholesale, that
-///    is not one missing entry but silent **bulk removal** from `c/index.json`.
-///    `regenerate` is specified for trees whose roots *and intermediate
-///    directories* are real — which is every tree OCX produces. An operator
-///    running it against a symlink-deduplicated layout must know this; the
-///    limit is stated, not worked around (C-016's scope note).
-///
-/// # Preconditions
-///
-/// `source` is contained and **its subtree already exists**. No assumption that
-/// the tree was OCX-authored: no prior `c/index.json`, no `config.json`, roots
-/// possibly written by another implementation.
-///
-/// Existence is checked *before* [`IndexStore::begin_catalog_transaction`],
-/// because `lock_source` `create_dir_all`s the source directory
-/// (`index_store.rs:341`): without the pre-flight a mistyped source **creates**
-/// the tree, walks nothing, reports `roots: 0` and exits **0** —
-/// indistinguishable from a clean tree — and under the C-026 addressing below
-/// drops a stray empty directory beside a served checkout. A repair verb
-/// pointed at nothing is a user error, not a no-op.
-///
-/// A served tree whose root **is** the source directory (`config.json` / `c/` /
-/// `p/` at a repo checkout root) needs no new API: root the store at the
-/// checkout's *parent* and pass the checkout's own directory name as `source`,
-/// because `wire_source_dir` is `root.join(slugify(source))` (C-026). That
-/// carries two caller obligations this signature cannot enforce:
-///
-/// 1. **The checkout directory name must be slug-identical to itself**, or the
-///    store addresses a sibling directory that does not exist rather than the
-///    checkout. `to_relaxed_slug` preserves `[a-zA-Z0-9._-]`, so any ordinary
-///    name is.
-/// 2. **`locks_root` must be redirected** off its `root/locks` default
-///    (`IndexStore::with_locks_root`), which would otherwise create a `locks/`
-///    directory beside the checkout — inside the served tree. A CI checkout is
-///    exclusive, so a scratch dir is fine.
-///
-/// # Network
-///
-/// Zero. No `IndexTransport`, no `ocx_oci::Client`; no source is constructible from
-/// this signature. `--frozen` and `--offline` therefore both permit it (C-021):
-/// it consults no source, moves no `tags[].content`, and touches no root's
-/// `repository`.
-///
-/// # Idempotence
-///
-/// A second call returns three empty vectors and leaves the tree byte- and
-/// mtime-identical — exact from the *second* run onward. A **first** run against
-/// a tree written by an older ocx also drops the stray `c/index.json.etag`
-/// (invariant 2), so a byte-identity test must seed none.
+/// Writes no `config.json` and removes no root or `o/` object. A root or directory
+/// reached through a symlink under `p/` is not seen, so it drops out of the catalog.
 ///
 /// # Errors
 ///
-/// - [`Error::MalformedRootDocument`] (exit 65) — a root under `p/` does not
-///   parse.
-/// - `file_error` (exit 74) — `source`'s subtree does not exist (Preconditions);
-///   the `p/` walk found no root at all while the catalog on disk names packages
-///   (C-008 — `list_wire_repositories` answers `Ok(vec![])` for a missing `p/`
-///   exactly as it does for a tree genuinely holding zero packages, and
-///   wholesale replacement must never be reachable from "I could not find the
-///   tree"); or the source directory cannot be locked (lock timeout).
+/// - [`Error::MalformedRootDocument`] (exit 65) — a root under `p/` does not parse.
+/// - `file_error` (exit 74) — `source`'s subtree does not exist, the `p/` walk found
+///   no root while the catalog names packages, or the source cannot be locked.
 ///
-/// [`CatalogTransaction`]: crate::CatalogTransaction
-/// [`CatalogTransaction::commit`]: crate::CatalogTransaction::commit
-/// [`CatalogTransaction::write_root`]: crate::CatalogTransaction::write_root
 /// [`Error::MalformedRootDocument`]: ocx_store::file_structure::error::Error::MalformedRootDocument
 pub async fn regenerate_catalog(store: &IndexStore, source: &str) -> Result<RegenerateOutcome> {
-    // Containment first, because the pre-flight below builds its path through
-    // `source_config_path` — a pure builder with NO guard, unlike the nine
-    // `IndexStore` entry points that call this check themselves. `slugify`
-    // preserves `.`, so a `source` of `".."` survives it verbatim and the
-    // pre-flight would stat the index home's parent. Nothing escapes today
-    // (`begin_catalog_transaction` guards on the next line, and `ocx index
-    // regenerate` refuses a source that is not a configured namespace) — but
-    // this function is `ocx_lib`'s, and the CLI is not its only future caller.
+    // First: the unguarded `source_config_path` below would stat the index home's parent for `source = ".."`.
     IndexStore::ensure_source_contained(source)?;
 
-    // The source directory, derived from the one public path accessor that
-    // exposes it — `source_config_path` is `<source dir>/config.json`.
     let config_path = store.source_config_path(source);
     let source_dir = config_path
         .parent()
         .ok_or_else(|| super::error::Error::PathInvalid(config_path.clone()))?;
 
-    // C-007 Preconditions: before the transaction, because `lock_source`
-    // creates what it locks — inside it this check can never fail.
+    // Before the transaction, whose lock `create_dir_all`s, or a mistyped source exits 0 on a new empty tree.
     if !ocx_util::fs::path_exists_lossy(source_dir).await {
         return Err(super::error::file_error(
             source_dir,
@@ -150,19 +43,9 @@ pub async fn regenerate_catalog(store: &IndexStore, source: &str) -> Result<Rege
 
     let mut derived = CatalogIndex::new();
     for repository in store.list_wire_repositories(source).await? {
-        // C-007 step 2: the `repository_check` is `|_| Ok(())` and must stay
-        // that way. Its failure is a HARD error through `read_root_inner`, and
-        // the neighbouring call site's `oci://`-scheme validator
-        // (`local_index.rs`) would reject exactly the foreign trees the
-        // Preconditions promise to accept. `regenerate` never reads
-        // `repository` — that is also what makes it `--frozen`-safe (C-021).
+        // No `repository` check: the `oci://` validator would hard-fail the foreign trees this must accept.
         let Some(read) = store.read_root_uncatalogued(source, &repository, |_| Ok(())).await? else {
-            // Not on disk now, which is the only thing the derivation asks —
-            // but because the derivation *replaces* the map, a skip here is a
-            // silent removal from `c/index.json` that `removed` never names.
-            // One cause: a deletion racing the walk. The other — a non-UTF-8
-            // name decoded lossily into a path that cannot be found — is a hard
-            // error at the walk since C-028, so it no longer arrives here.
+            // A skip is a removal `removed` never names; the only cause left is a deletion racing the walk.
             log::debug!(
                 "regenerate: skipping repository '{repository}' of source '{source}' — \
                  the p/ walk listed it but no root document is readable at that path"
@@ -173,12 +56,7 @@ pub async fn regenerate_catalog(store: &IndexStore, source: &str) -> Result<Rege
     }
 
     let roots = derived.len();
-    // C-008: wholesale replacement must never be reachable from "I could not
-    // find the tree". `list_wire_repositories` answers `Ok(vec![])` for a
-    // missing `p/` and for a tree genuinely holding zero packages alike, so a
-    // sparse checkout, a CI job running before `p/` is materialized, or a store
-    // rooted one level off would otherwise write an empty catalog over a live
-    // one and exit 0 — loud in `removed`, silent in the exit code.
+    // A missing `p/` walks as empty, so without this refusal a mis-rooted store wipes a live catalog and exits 0.
     if roots == 0 && !transaction.catalog().is_empty() {
         return Err(super::error::file_error(
             source_dir.join("p"),
@@ -193,10 +71,7 @@ pub async fn regenerate_catalog(store: &IndexStore, source: &str) -> Result<Rege
         ));
     }
 
-    // Wholesale replacement, not a merge: dropping an entry whose root is gone
-    // is the one drift no other path can repair (C-008). The post-lock map comes
-    // back out as the diff basis — both maps are sorted, so all three report
-    // lists come out in repository order for free.
+    // Replace, never merge: a merge keeps the entry whose root is gone.
     let previous = std::mem::replace(transaction.catalog(), derived);
     let derived = transaction.catalog();
     let mut added = Vec::new();
@@ -214,6 +89,7 @@ pub async fn regenerate_catalog(store: &IndexStore, source: &str) -> Result<Rege
         .cloned()
         .collect();
 
+    // Never teach the shared `commit` to create `config.json`: regenerate would inject it into trees OCX does not own.
     transaction.commit().await?;
 
     Ok(RegenerateOutcome {
@@ -225,10 +101,8 @@ pub async fn regenerate_catalog(store: &IndexStore, source: &str) -> Result<Rege
     })
 }
 
-/// What one [`regenerate_catalog`] run changed, as the CLI reports it (C-010).
-///
-/// The three lists are `<ns>/<pkg>` repository paths. All three empty means the
-/// catalog already matched the tree and nothing was written.
+/// What one [`regenerate_catalog`] run changed, as `<ns>/<pkg>` repository paths;
+/// all three lists empty means nothing was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegenerateOutcome {
     /// The index source the catalog was re-derived for.
@@ -239,65 +113,17 @@ pub struct RegenerateOutcome {
     pub added: Vec<String>,
     /// Entry digest disagreed with the root on disk.
     pub corrected: Vec<String>,
-    /// Catalog named a package with no root on disk. The one drift nothing
-    /// else can repair.
+    /// Catalog named a package with no root on disk.
     pub removed: Vec<String>,
 }
 
-/// Removes the dispatch objects a refresh's pin movement abandoned: every
-/// `o/<algo>/<hex>.json` the package's root pinned **before** the refresh and
-/// does not pin **after** it (`design_index_cluster.md` § 5 Decision B, D-7 —
-/// the local index auto-cleans).
-///
-/// `previously_pinned` is `tags[].content` of the root as committed going in
-/// (empty on a first refresh, which can therefore abandon nothing);
-/// `now_pinned` is the same of the root that just committed. The removal set is
-/// `previously_pinned \ now_pinned` and nothing else. Removed objects come back
-/// as source-relative wire paths (`p/<ns>/<pkg>/o/<algo>/<hex>.json`), sorted —
-/// a report a caller can diff must not depend on map order.
-///
-/// # A diff, never a walk
-///
-/// The obvious implementation — list `o/` and remove whatever the new root does
-/// not name — is unsafe, and the refresh fan-out is what makes it unsafe.
-/// `ocx index update pkg:1.0 pkg:2.0` refreshes its identifiers concurrently
-/// with no per-repository grouping, and **both** refresh paths write their
-/// dispatch objects before taking any lock. A walk therefore sees a sibling
-/// task's freshly written object as unreferenced and removes it; that task then
-/// commits a pin to a file that is gone. Online the next
-/// `ocx index update` repairs it (`refresh_published` gates on
-/// [`IndexStore::read_dispatch_object`] and re-fetches on a miss, D-006);
-/// offline nothing does, and offline resolution is what the local copy exists
-/// for. A diff cannot reach that object at all: no previous root ever pinned
-/// it, so it is never a candidate, whatever else is on disk. The race closes
-/// in-process and cross-process alike — which is why this function takes no
-/// lock, reads no root, and enumerates no directory.
-///
-/// # What it therefore does not collect
-///
-/// **Objects orphaned before this shipped.** A diff only ever sees the pins of
-/// the refresh it belongs to, so the backlog earlier versions accumulated stays
-/// on disk. Accepted deliberately: they are small JSON documents, and
-/// collecting them needs exactly the walk this contract rejects. An explicit
-/// verb that takes the source lock and can establish that no refresh is in
-/// flight could do it later; [`regenerate_catalog`] will not, because its
-/// "removes no root document and no `o/` object" invariant is what makes it
-/// safe to point at a served tree an operator owns.
-///
-/// **Description blobs.** `o/<algo>/<hex>.{md,png,svg}` from a full site mirror
-/// are outside the removal set by construction, not by a filter: every path
-/// removed here is built from a digest through
-/// [`IndexStore::dispatch_object_path`], which always ends `.json`.
+/// Removes every `o/<algo>/<hex>.json` in `previously_pinned` but not `now_pinned`,
+/// returning the removed source-relative wire paths, sorted.
 ///
 /// # Errors
 ///
-/// Only the two containment guards — CWE-22 defense in depth, because
-/// `dispatch_object_path` is a pure builder with no guard of its own and this
-/// function unlinks what it builds. A removal that fails is logged at `debug!`
-/// and skipped: one unremovable object must not hide the orphans behind it, and
-/// must not turn a refresh that has already committed into a failure. An object
-/// that is already absent is not a failure at all — a single-platform tag never
-/// had one (A3), and an earlier sweep or an operator may have taken it.
+/// Only the two containment guards; a failed removal is logged and skipped, since
+/// the refresh has already committed.
 pub(crate) async fn sweep_orphan_objects(
     store: &IndexStore,
     source: &str,
@@ -305,9 +131,12 @@ pub(crate) async fn sweep_orphan_objects(
     previously_pinned: &[ocx_oci::Digest],
     now_pinned: &[ocx_oci::Digest],
 ) -> Result<Vec<String>> {
+    // CWE-22: `dispatch_object_path` is unguarded, and this function unlinks what it builds.
     IndexStore::ensure_source_contained(source)?;
     IndexStore::ensure_repository_contained(repository)?;
 
+    // Diff pin sets, never list `o/`: a concurrent sibling refresh writes its object before any lock, and a
+    // listing would delete it before its pin commits.
     let retained: std::collections::HashSet<&ocx_oci::Digest> = now_pinned.iter().collect();
     let mut removed = Vec::new();
     for digest in previously_pinned.iter().filter(|digest| !retained.contains(*digest)) {
@@ -318,8 +147,7 @@ pub(crate) async fn sweep_orphan_objects(
                 digest.algorithm().prefix(),
                 digest.hex()
             )),
-            // Already gone. Two tags can alias one digest, so this loop can
-            // meet the same object twice; a single-platform tag never had one.
+            // Two tags can alias one digest, and a single-platform tag never had an object.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => log::debug!(
                 "Could not remove the abandoned dispatch object '{}' ({e}) — no tag pins it any \
@@ -333,17 +161,14 @@ pub(crate) async fn sweep_orphan_objects(
 }
 
 /// Specification tests for [`regenerate_catalog`], written from
-/// `design_spec_servable_index_snapshot.md`'s **C-007**, **C-008** and
-/// **C-026** rather than from the implementation — each one names the clause it
-/// pins, and a test that stops failing when its clause is violated is a bug in
-/// the test.
+/// `design_spec_servable_index_snapshot.md`'s regenerate, derivation and served-tree clauses rather than from
+/// the implementation — each assertion message names the clause it pins, and a test that stops failing when
+/// its clause is violated is a bug in the test.
 ///
-/// Trees are built on a `tempfile::TempDir` through the store's own public API
-/// ([`IndexStore::write_root_document`] for a catalogue-free root,
-/// [`IndexStore::begin_catalog_transaction`] for a root plus its entry, or for
-/// forcing an entry into a chosen state). `locks_root` is redirected off-tree
-/// the way both production construction sites do, so no `locks/` directory can
-/// ever appear inside a snapshotted subtree.
+/// Trees are built on a `tempfile::TempDir` through the store's own public API ([`IndexStore::write_root_document`]
+/// for a catalogue-free root, [`IndexStore::begin_catalog_transaction`] for a root plus its entry, or to force an
+/// entry into a chosen state). `locks_root` is redirected off-tree the way both production construction sites do,
+/// so no `locks/` directory can ever appear inside a snapshotted subtree.
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

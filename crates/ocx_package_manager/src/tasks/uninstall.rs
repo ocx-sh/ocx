@@ -14,17 +14,14 @@ use super::super::PackageManager;
 pub struct UninstallResult {
     /// The candidate symlink path that was removed.
     pub candidate: PathBuf,
-    /// The object directory that was purged, if purging was requested and the
-    /// object had no remaining references.  `None` when purge was not requested
-    /// or the object still has references.
+    /// The purged object directory; `None` when purge was not requested or the object is still referenced.
     pub purged: Option<PathBuf>,
 }
 
 /// Intermediate result from symlink removal (before purge).
 struct SymlinkRemoval {
     candidate: Option<PathBuf>,
-    /// Read-link target of the candidate symlink — the package root after the
-    /// post-flatten layout change.
+    /// Read-link target of the candidate symlink (the package root).
     pkg_root: Option<PathBuf>,
 }
 
@@ -46,9 +43,6 @@ impl PackageManager {
         };
 
         let mut purged = None;
-        // `pkg_root` is the candidate symlink's read-link target, which the
-        // post-flatten layout points at the package root directly (no further
-        // `.parent()` needed).
         if purge && let Some(ref obj_dir) = pkg_root {
             let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default())
                 .await
@@ -67,18 +61,13 @@ impl PackageManager {
 
     /// Uninstalls multiple packages, optionally purging unreferenced objects.
     ///
-    /// Unlike a simple loop over [`PackageManager::uninstall`], this method
-    /// builds the [`GarbageCollector`] reachability graph **once** for all
-    /// packages. The graph walks the entire object store (`O(all objects)`),
-    /// so batching avoids redundant filesystem scans when purging multiple
-    /// packages.
+    /// Builds the [`GarbageCollector`] graph once for the batch, since each build walks the whole object store.
     pub async fn uninstall_all(
         &self,
         packages: &[ocx_oci::PackageRef],
         deselect: bool,
         purge: bool,
     ) -> Result<Vec<Option<UninstallResult>>, crate::error::Error> {
-        // Phase 1: Remove symlinks for all packages, collecting content paths.
         let mut removals: Vec<SymlinkRemoval> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
@@ -100,7 +89,6 @@ impl PackageManager {
             return Err(crate::error::Error::UninstallFailed(errors));
         }
 
-        // Phase 2: Batch purge — collect all object dirs, purge once.
         let purge_seeds: Vec<PathBuf> = if purge {
             removals.iter().filter_map(|r| r.pkg_root.clone()).collect()
         } else {
@@ -130,7 +118,6 @@ impl PackageManager {
             std::collections::HashSet::new()
         };
 
-        // Phase 3: Build results.
         let results = removals
             .into_iter()
             .map(|r| {
@@ -171,10 +158,7 @@ async fn uninstall_symlinks(
             .map_err(|error| PackageErrorKind::Internal(error.into()))?;
         path
     } else {
-        // Debug, not warn: `ocx add` materialises through `pull_all` and never
-        // creates a candidate symlink, so `ocx remove`'s best-effort teardown
-        // hits this on every ordinary binding. The CLI already reports the
-        // no-op as `RemovedStatus::Absent` where a user asked for it directly.
+        // Debug, not warn: `ocx remove` hits this for every `ocx add` binding, which never creates a candidate.
         log::debug!(
             "Package '{}' has no installed candidate at '{}' — nothing to uninstall.",
             package,
@@ -184,8 +168,7 @@ async fn uninstall_symlinks(
     };
 
     if deselect {
-        // Hold the per-repo .select.lock for the entire teardown.
-        // Symmetric with tasks/deselect.rs.
+        // Held for the whole teardown, as in tasks/deselect.rs, or a concurrent select races the unlink.
         let _locks = super::common::acquire_selection_locks(fs, package).await?;
 
         let current_path = fs.symlinks.current(package);

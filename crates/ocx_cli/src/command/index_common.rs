@@ -1,47 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shared machinery for the `ocx index` verbs: the per-package refresh fan-out,
-//! the failure-reporting funnel, and the batch aggregation rule.
+//! Shared machinery for the `ocx index` verbs: the refresh fan-out, failure logging, aggregation.
 //!
-//! `update` and `sync` end in the same work — a list of identifiers, each
-//! refreshed against whichever source answers for it. `update` gets its list
-//! from argv, `sync` from one or more registries' own catalogs. C-024 caps that
-//! work at a stated ceiling of in-flight requests, and a ceiling stated in two
-//! places is a ceiling that drifts, so the loop lives here once and no verb
-//! owns a fan-out. `regenerate` shares only the aggregation rule.
-//!
-//! Named `index_common` rather than for a verb: `<command>_<subcommand>.rs` is a
-//! leaf in this crate (`subsystem-cli.md`), and `patch_common.rs` is the
-//! precedent for the shared-helper slot. A file named for a verb that does not
-//! exist reads as a leaf and pre-books the name of the next one.
+//! An in-flight ceiling stated in two places drifts, so the bounded loop lives here once and no
+//! verb owns its own fan-out.
 
 use futures::StreamExt;
 
 use crate::api::data::{sanitize_error_chain, sanitize_for_terminal};
 
-/// Bounded concurrency for the per-package refresh fan-out
-/// (`adr_servable_index_snapshot.md` C-024).
-///
-/// Nested inside [`ocx_index::TAG_REFRESH_CONCURRENCY`], giving a
-/// stated ceiling of **≤ 512 in-flight requests** however large the work set is
-/// — an argv list, one catalog, or every catalog a single `ocx index sync`
-/// names, since the fan-out is over the flattened set rather than per registry.
+/// Bounded concurrency for the per-package refresh fan-out. Nested inside
+/// [`ocx_index::TAG_REFRESH_CONCURRENCY`], it caps a run at 512 in-flight requests, since the
+/// fan-out is over the flattened set, not per registry.
 pub(super) const INDEX_REFRESH_CONCURRENCY: usize = 8;
 
-/// The one place in the `index` verbs that renders a failure to the operator.
-///
-/// A funnel rather than a rule: both halves are neutralized here, so a caller
-/// cannot get it wrong, and the verbs' own guards assert they emit no log of
-/// their own. The count-form guard this replaced was satisfiable by two
-/// sanitizer calls in one macro paying for a second macro with none — a
-/// reviewer wrote the evasion out in full.
-///
-/// `subject` is sanitized even when the caller believes it is argv: under
-/// `ocx index sync` an identifier is built from a foreign catalog key, and the
-/// distinction is exactly the kind that stops being true after a refactor.
-/// `sanitize_error_chain`, not `{error:#}`: a `thiserror`-generated Display
-/// ignores the alternate flag and would drop the cause.
+/// The one place the `index` verbs render a failure; both arguments are sanitized here, `subject`
+/// even when it looks like argv. `sanitize_error_chain`, never `{error:#}`: a `thiserror` `Display`
+/// ignores the alternate flag and drops the cause.
 pub(super) fn log_failure(action: &str, subject: &str, error: &anyhow::Error) {
     log::error!(
         "{action} '{}': {}",
@@ -50,15 +26,7 @@ pub(super) fn log_failure(action: &str, subject: &str, error: &anyhow::Error) {
     );
 }
 
-/// The `--frozen` refusal `ocx index sync` and `ocx index update` share.
-///
-/// Was `ocx_lib::Error::PolicyBlocked { operation, policy }` until WP-37
-/// dissolved that enum. It had no tier successor and needs none: the message
-/// renders a CLI verb and a CLI flag, so it is a command-layer refusal that
-/// happened to live in the monolith. The text is byte-identical to the
-/// variant's `#[error]` and `CommandError` carries `ExitCode::PolicyBlocked`,
-/// so the exit code is preserved by construction rather than re-derived
-/// (DEC-23).
+/// The `--frozen` refusal `ocx index sync` and `ocx index update` share (exit 81).
 pub(crate) fn policy_blocked(operation: &str, policy: &str) -> crate::app::CommandError {
     crate::app::CommandError::new(
         format!("{operation} discovers new digests and cannot run in {policy} mode; re-run it without --{policy}"),
@@ -66,17 +34,8 @@ pub(crate) fn policy_blocked(operation: &str, policy: &str) -> crate::app::Comma
     )
 }
 
-/// Says so when a source answers with an empty package set.
-///
-/// Not a failure: C-013 draws its line at *absent* versus *empty*, and a source
-/// that served an empty catalog has answered the question. But the refresh path
-/// emits no stdout payload, so without this line "the mirror is empty" and "the
-/// snapshot worked" are the same observation — exit 0 and silence. Five
-/// instances of silent empty success have been found on this plan; this is the
-/// door that was still open.
-///
-/// A warning rather than an error because the run continues and the exit stays
-/// 0, and `warn` is the lowest level an operator sees by default.
+/// Says so when a source lists no packages: the refresh emits no stdout, so otherwise "the mirror
+/// is empty" and "the snapshot worked" look the same. A warning, as the run continues at exit 0.
 pub(super) fn log_empty_enumeration(registry: &str) {
     log::warn!(
         "'{}' listed no packages; nothing was refreshed for it.",
@@ -84,24 +43,10 @@ pub(super) fn log_empty_enumeration(registry: &str) {
     );
 }
 
-/// Records which provenance a registry's enumeration took.
+/// Records which provenance a registry's enumeration took: published-versus-derived is decided by
+/// string equality, and a mismatch silently takes the other branch.
 ///
-/// The whole ADR turns on published-versus-derived, and the choice is made by
-/// matching a registry name with string equality against the configured
-/// namespaces. A case difference or a stray character silently takes the other
-/// branch — a registry's repository listing instead of the curated catalog, a
-/// different package set, and exit 0 — so the branch says which one it took.
-///
-/// Debug rather than info: the common case is one correct line per registry per
-/// run. Two functions rather than one taking a bool, because a bare `true` at
-/// the call site names nothing.
-///
-/// Here rather than in `index_sync`, and that placement is the point. These were
-/// the last two log macros outside this file, and a guard that let them stay had
-/// to be a rule about *how* they interpolate — which a reviewer defeated with one
-/// sanitized argument paying for a raw one in the same macro, the same evasion
-/// [`log_failure`] already exists to retire. With them here, the verbs' guard is
-/// a zero count over an empty vocabulary, which has nothing to pay with.
+/// Lives here, not in `index_sync`, so the verbs' "no log of their own" guard stays a zero count.
 pub(super) fn log_published_enumeration(registry: &str) {
     log::debug!(
         "'{}' is served by a published index; enumerating its catalog",
@@ -117,39 +62,20 @@ pub(super) fn log_derived_enumeration(registry: &str) {
     );
 }
 
-/// Refreshes every identifier in `packages`, bounded at
-/// [`INDEX_REFRESH_CONCURRENCY`], and returns the **lowest-index** failure.
-///
-/// Every failure is logged here through [`log_failure`]; only the returned one
-/// reaches `main.rs`'s boundary, so this is the sole reporter for all the
-/// others. The lowest-index rule makes the process exit deterministic whatever
-/// order the refreshes completed in — the same rule `ocx index regenerate`
-/// states for its own loop, which is why [`first_failure`] lives here too.
-///
-/// Returning the error rather than a partial report is deliberate: an action
-/// command with a nonzero exit emits no SUCCESS-shaped payload on stdout.
-///
-/// Takes the local index rather than the whole `Context`: the only capability
-/// this needs is `refresh_tags`, and a narrower parameter is one fewer thing a
-/// future edit here can reach for.
+/// Refreshes every identifier in `packages`, bounded at [`INDEX_REFRESH_CONCURRENCY`]; logs every
+/// failure and returns the lowest-index one, never a partial report, so a nonzero exit carries no
+/// SUCCESS-shaped stdout.
 pub(super) async fn refresh_packages(
     local_index: &ocx_index::LocalIndex,
     index_sources: &[ocx_index::OcxIndex],
     oci_index: &ocx_index::Index,
     packages: &[ocx_oci::PackageRef],
 ) -> Option<anyhow::Error> {
-    // The stream combinator does not spawn, so a panic in a refresh unwinds this
-    // caller directly and the borrow of `local_index` and `packages` is fine
-    // without a clone per task. Results arrive out of order, hence the sort below.
+    // No spawn, so the borrows need no per-task clone; results arrive out of order.
     let results: Vec<(usize, anyhow::Result<()>)> = futures::stream::iter(packages.iter().enumerate())
         .map(|(input_index, identifier)| async move {
-            // Route to the index source that will answer for this package, if
-            // any; otherwise refresh against the registry. Asking `jurisdiction`
-            // rather than comparing namespaces keeps this from being a second,
-            // independent guess about who owns a name — the chain routes a
-            // resolve by exactly the same verdict. It is a registry comparison
-            // with no I/O, so its placement inside the bounded region costs
-            // nothing.
+            // `jurisdiction`, not a namespace comparison, so routing cannot disagree with the chain's
+            // own resolve verdict.
             let mut selected = None;
             for source in index_sources {
                 if source.jurisdiction(identifier) != ocx_index::Jurisdiction::Outside {
@@ -181,34 +107,18 @@ pub(super) async fn refresh_packages(
     first_failure(failures)
 }
 
-/// The lowest-index failure, or `None`.
-///
-/// A function rather than "take the first, results are in order": the fan-out
-/// completes out of order, and making the rule a property of the code rather
-/// than of the loop's shape is what keeps the exit deterministic. Shared with
-/// `index_regenerate`, whose C-010 states the identical rule — two copies of a
-/// contract are two copies to drift.
+/// The lowest-index failure, or `None`; a sort, since the fan-out completes out of order. Shared
+/// with `index_regenerate`.
 pub(super) fn first_failure(mut failures: Vec<(usize, anyhow::Error)>) -> Option<anyhow::Error> {
     failures.sort_by_key(|(input_index, _)| *input_index);
     failures.into_iter().next().map(|(_, error)| error)
 }
 
-/// Refreshes site-patch descriptors for the installed bases, when the patch tier
-/// is active.
+/// Refreshes site-patch descriptors for the installed bases; best-effort, a failure only warns.
 ///
-/// Best-effort: a failure (offline, registry unreachable, required-companion
-/// error) is logged as a warning and never fails the calling command — the tag
-/// refresh is the primary job. Keeps descriptor metadata fresh after every index
-/// refresh without requiring a separate `ocx patch sync`.
-///
-/// Only runs when a `[patches]` section is configured and the manager is online;
-/// `sync_patches` checks the latter itself, but skipping the call entirely
-/// avoids the `OfflineMode` error allocation. `--frozen` needs no condition:
-/// both callers refuse the whole command ahead of any refresh, so a frozen
-/// invocation never reaches this.
-///
-/// Takes the manager rather than the whole `Context` for the same reason
-/// [`refresh_packages`] takes the local index.
+/// No `--frozen` check here: callers must refuse the whole command under `--frozen` before calling.
+/// Skipped offline, though `sync_patches` checks too: its `OfflineMode` error would warn on every
+/// offline refresh.
 pub(super) async fn sync_patch_descriptors(manager: &ocx_package_manager::PackageManager) {
     if manager.patches().is_none() || manager.is_offline() {
         return;
@@ -217,9 +127,7 @@ pub(super) async fn sync_patch_descriptors(manager: &ocx_package_manager::Packag
     match manager.sync_patches(&[host]).await {
         Ok(_report) => log::debug!("index refresh: patch descriptor sync completed"),
         Err(error) => {
-            // Non-fatal, so it never reaches `main.rs`'s boundary, and
-            // `sync_patches` contacts registries — the same grounds the other
-            // remote-derived sites are admitted on.
+            // Non-fatal, so it never reaches `main.rs`; remote-derived, so sanitized.
             log::warn!(
                 "index refresh: patch descriptor sync failed (non-fatal): {}",
                 sanitize_error_chain(&error)
@@ -231,18 +139,18 @@ pub(super) async fn sync_patch_descriptors(manager: &ocx_package_manager::Packag
 #[cfg(test)]
 mod tests {
     //! Structural specification tests for the shared machinery, written from
-    //! `design_spec_servable_index_snapshot.md` C-024 and from the CWE-150
-    //! finding two review panels routed to this work package.
+    //! `design_spec_servable_index_snapshot.md` and from a CWE-150 finding
+    //! two review panels routed to this work package.
     //!
     //! The fan-out's behaviour — peak in-flight requests over a large catalog —
-    //! is measured in the acceptance suite (S-004), which can run a counting
+    //! is measured in the acceptance suite, which can run a counting
     //! stub source. What is pinned here is that there is exactly one fan-out in
     //! the `index` verb family, that it is sized by the constant, and that no
     //! verb renders a failure except through the funnel.
 
     use super::*;
 
-    // ── C-024 — one bounded loop ─────────────────────────────────────────────
+    // ── one bounded loop ─────────────────────────────────────────────────────
 
     #[test]
     fn the_stated_ceiling_is_the_product_of_the_two_real_constants() {
@@ -259,7 +167,7 @@ mod tests {
 
     #[test]
     fn there_is_exactly_one_fan_out_and_no_join_set() {
-        // C-024 allows one bounded fan-out for every caller. A second one beside
+        // The ceiling allows one bounded fan-out for every caller. A second one beside
         // it — the obvious way to add a per-registry loop to `index sync` —
         // would multiply the ceiling by the number of registries.
         let body = module_code();
@@ -293,7 +201,7 @@ mod tests {
         // This guard is a name denylist over an open vocabulary and therefore
         // cannot be complete: a reviewer defeated it with `tokio::join!` over a
         // one-line helper, 1024 in flight and every needle green. The claim it
-        // actually holds is measured instead, over two registries, in S-004.
+        // actually holds is measured instead, over two registries, in the acceptance suite.
         // What this still buys is a fast, local failure for the obvious spellings.
         //
         // Scoped to the `index` family — a file named `index*`, or any file in a
@@ -301,10 +209,10 @@ mod tests {
         // `remove.rs` and the package verbs own legitimate fan-outs, and an
         // exemption list naming all of them would be a list of everything that
         // uses concurrency, which pins nothing. The residual hole is a helper
-        // under a NON-`index` name; the measurement in S-004 is what covers
+        // under a NON-`index` name; the measurement in the acceptance suite is what covers
         // that, and covers this guard's whole failure mode besides.
         //
-        // Two exemptions, both fan-outs C-024 does not govern: `index_catalog.rs`
+        // Two exemptions, both fan-outs the ceiling does not govern: `index_catalog.rs`
         // lists tags per repository (`JoinSet`), `index_list.rs` reads local
         // roots (`join_all`). Neither refreshes, so neither multiplies the
         // per-package ceiling — read-only is the whole reason, and it is not
@@ -384,7 +292,7 @@ mod tests {
         );
     }
 
-    // ── C-012 / C-010 — the aggregation rule ────────────────────────────────
+    // ── the aggregation rule ─────────────────────────────────────────────────
 
     /// A distinguishable error that needs no I/O to build.
     fn failure(operation: &'static str) -> anyhow::Error {
@@ -393,8 +301,8 @@ mod tests {
 
     #[test]
     fn the_lowest_input_index_failure_becomes_the_process_error() {
-        // C-012's Aggregation row, and C-010's identical rule for
-        // `index_regenerate`. The fan-out completes out of order, so the vector
+        // The aggregation rule, and the identical rule `index_regenerate`
+        // states for its own loop. The fan-out completes out of order, so the vector
         // arrives out of order — this is what makes the exit code the same
         // across repeated runs of the same broken input.
         let chosen = first_failure(vec![

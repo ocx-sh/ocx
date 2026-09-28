@@ -17,49 +17,26 @@ use ocx_package::{
 
 use super::super::PackageManager;
 
-/// Provenance for a single companion overlay entry.
-///
-/// Attached per overlay entry so every patched env var can be traced back to
-/// (i) the descriptor rule glob that admitted the companion for the base,
-/// (ii) the companion identifier whose interface projection produced the entry,
-/// and (iii) the digest that identifier actually resolved to. Surfaced by
-/// `--show-patches`, `ocx patch test`, `ocx patch why`, and the execution
-/// record's `sh.ocx.role: companion` entries.
-///
-/// Descriptive only — it does NOT gate composition. The C7 per-package opt-out
-/// and the system-required enforcement decide overlay membership upstream; this
-/// type merely records why an admitted entry is present.
+/// Provenance for one companion overlay entry: the admitting rule glob, the companion,
+/// and the digest it resolved to. Descriptive only: overlay membership is decided
+/// upstream (`adr_infrastructure_patches.md § The site tier`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchProvenance {
     /// The descriptor rule `match` glob that admitted the companion for the base.
     pub rule_match: String,
     /// The companion identifier whose interface projection produced this entry.
     pub companion: ocx_oci::PackageRef,
-    /// The install the companion identifier resolved to, digest-complete.
-    ///
-    /// Separate from [`Self::companion`] because the two answer different
-    /// questions and routinely disagree: the descriptor names a tag, and which
-    /// digest that tag reaches depends on the active `PatchSnapshot` and on what
-    /// the last `ocx patch sync` recorded. An audit trail that carried only the
-    /// tag could not say which companion bytes were composed.
+    /// The digest-complete install the companion resolved to. Kept beside the tag because
+    /// the snapshot and last sync decide which digest a tag reaches; without it an audit
+    /// cannot say which companion bytes composed.
     pub pinned: ocx_oci::PinnedPackageRef,
 }
 
-/// The companion-overlay region of a composed entry vector, and the only way to
-/// ask "what produced `entries[i]`?".
+/// The companion-overlay region of a composed entry vector: `patch_start` for
+/// `provenance.len()` entries, with the caller's `[env]` and `--env` appended after.
 ///
-/// The overlay is the MIDDLE region of the vector — it runs from `patch_start`
-/// for `provenance.len()` entries, with the caller's project / group `[env]` and
-/// `--env` appended after it. `index >= patch_start` therefore does NOT imply
-/// the entry is a companion contribution, and indexing
-/// `provenance[index - patch_start]` on that assumption panics the moment a
-/// caller passes any `--env`. Every consumer goes through
-/// [`Self::provenance_for`] so that subtraction and its bound check exist
-/// exactly once.
-///
-/// Borrowing view, constructed at the annotation site — the resolve pipeline
-/// keeps returning the boundary and the vector separately so callers that never
-/// annotate pay nothing.
+/// `index >= patch_start` does not imply membership: `provenance[index - patch_start]`
+/// panics once a caller passes any `--env`, so ask [`Self::provenance_for`].
 #[derive(Debug, Clone, Copy)]
 pub struct PatchOverlay<'a> {
     patch_start: usize,
@@ -67,8 +44,7 @@ pub struct PatchOverlay<'a> {
 }
 
 impl<'a> PatchOverlay<'a> {
-    /// Views the overlay region described by a `resolve_env_with_patch_boundary`
-    /// (or `..._with_attribution`) result.
+    /// Views the overlay region of a `resolve_env_with_patch_boundary` (or `..._with_attribution`) result.
     pub fn new(patch_start: usize, provenance: &'a [PatchProvenance]) -> Self {
         Self {
             patch_start,
@@ -76,12 +52,8 @@ impl<'a> PatchOverlay<'a> {
         }
     }
 
-    /// The [`PatchProvenance`] for the composed entry at `index`, or `None` when
-    /// that entry is not a companion contribution.
-    ///
-    /// `None` covers both entries before the overlay (the package-composed set)
-    /// and entries after it (project / group `[env]`, `--env`). Both must render
-    /// unattributed — never mislabelled as some companion's doing.
+    /// The [`PatchProvenance`] for the composed entry at `index`, or `None` for entries
+    /// before or after the overlay, which must render unattributed.
     pub fn provenance_for(&self, index: usize) -> Option<&'a PatchProvenance> {
         index
             .checked_sub(self.patch_start)
@@ -145,137 +117,67 @@ mod patch_overlay_tests {
     }
 }
 
-/// What a companion contributes under one admitted base: its INTERFACE env
-/// entries, each paired to the [`PatchProvenance`] that admitted it, plus its
-/// declared `integrations`.
-///
-/// Both carriers ride together deliberately: `integrations` is not a special
-/// case of the patch tier. A companion is a package loaded into the
-/// environment, so it contributes every carrier a package contributes
-/// (`adr_package_integrations.md` C-017).
+/// What a companion contributes under one admitted base: provenance-paired INTERFACE env
+/// entries plus its `integrations` (`adr_package_integrations.md § Patch companions`).
 pub struct CompanionOverlay {
     pub entries: Vec<(Entry, PatchProvenance)>,
     pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
 }
 
-/// What a companion's one-time projection produced, cached per companion
-/// identifier for the remaining admitted bases.
+/// Whether a companion's one-time projection was emitted, cached per companion identifier.
 ///
-/// Not the contribution itself: a projection is emitted into the overlay of the
-/// FIRST matching admitted base at the moment it is computed, so every later
-/// base needs only to know whether that happened. A rule matching N admitted
-/// bases must not land the same companion N times (N duplicate JSON entries, N
-/// shell exports, N PATH prepends).
+/// The projection lands in the FIRST matching base's overlay; a rule matching N bases
+/// would otherwise land the companion N times (duplicate JSON entries, exports, PATH prepends).
 enum CompanionOutcome {
-    /// Projected, and emitted under the first matching base. Either half of the
-    /// contribution may have been empty — a private-only companion emits no
-    /// entries, and declaring no integrations is the common case — which is
-    /// still distinct from [`Missing`](Self::Missing).
+    /// Emitted under the first matching base; possibly empty (private-only, no
+    /// integrations), which is still not [`Missing`](Self::Missing).
     Projected,
-    /// Genuinely missing: not installed locally, lookup failed, or composition
-    /// failed. The required-companion fail-closed check re-fires on every cache
-    /// hit for this outcome, so the cache can never bypass it.
+    /// Not installed, lookup failed, or composition failed. The required-companion check
+    /// re-fires on every cache hit for this outcome, so the cache never bypasses it.
     Missing,
 }
 
-/// Map from an admitted identifier to the companion contributions emitted
-/// under it.
-///
-/// A companion matching multiple admitted bases is emitted under the FIRST
-/// matching base only; a base whose companions were all emitted under an
-/// earlier base has no entry in this map at all.
-///
-/// Built offline from local `PatchTagMap` + `BlobStore` state (no network).
-/// Applied globally last in [`PackageManager::resolve_env`] (invariant C1).
+/// Admitted identifier → the companion contributions emitted under it; a companion
+/// matching several bases appears only under the first. Built offline from local state.
 pub type SitePatchSet = HashMap<ocx_oci::PinnedPackageRef, CompanionOverlay>;
 
-/// Which CLI tier a caller resolves env for, and what that caller contributes
-/// on top of the package-composed set. Forced at every env-resolution site.
+/// Which CLI tier a caller resolves env for, and what it adds on top of the package-composed
+/// set (`.claude/artifacts/adr_patch_env_resolution_uniformity.md`).
 ///
-/// Two things ride on this type, both un-derivable from `PackageManager` state:
-///
-/// 1. The companion overlay gates on the per-package `no-patches` opt-out,
-///    which lives on `ProjectConfig::no_patches_repositories()` — so the
-///    command layer holding a `ProjectConfig` must thread it in. See
-///    `.claude/artifacts/adr_patch_env_resolution_uniformity.md`.
-/// 2. The caller's own entries: the project and group `[env]` tables on the
-///    project tier, and on either tier the `--env` per-invocation overrides.
-///
-/// Both variants are struct variants, never tuples: every field must be named
-/// at each call site, so a new caller cannot silently omit a contribution the
-/// way an added tuple element or a `Default` shortcut would allow. That is the
-/// whole point of routing these through one type rather than adding required
-/// parameters beside it.
-///
-/// Internal enum — no `#[non_exhaustive]` so matches stay total across the
-/// workspace (arch-principles: closed internal enum).
+/// Struct variants only, so every field is named at each call site and a new caller
+/// cannot silently omit a contribution.
 pub enum EnvScope {
-    /// A project (or global) `ocx.toml` is in scope — `ocx exec`, `ocx env`,
-    /// `ocx direnv export`, and the launcher re-entry replaying a forwarded
-    /// payload.
+    /// A project (or global) `ocx.toml` is in scope.
     Project {
-        /// The `no-patches` opt-out repositories (canonical
-        /// `registry/repository`, tag/digest excluded). An opted-out base
-        /// gets NO companion overlay UNLESS the tier is system-required
-        /// (enforcement wins).
+        /// `no-patches` opt-out repositories (canonical `registry/repository`); an opted-out
+        /// base gets no companion overlay unless the tier is system-required.
         no_patches: std::collections::BTreeSet<String>,
-        /// Entries this caller contributes on top of the package-composed
-        /// set, already in application order: the project `[env]`, then each
-        /// selected group's `[env]` in `-g` order so a later group wins, then
-        /// any `--env` override last. Appended after the package-composed
-        /// entries and the patch overlay, so constants replace and path
-        /// entries land ahead of package paths.
+        /// Caller entries in application order (project `[env]`, groups in `-g` order, then
+        /// `--env`), appended last so constants replace and paths land ahead of package paths.
         env: Vec<Entry>,
-        /// The toolchain tree this invocation may compose through (C-065,
-        /// C-070), or `None` when there is none to follow.
+        /// The toolchain tree to compose through, or `None` for the digest lane. Its selected
+        /// groups are what `ComposePaths::resolve` heals before any link path is emitted; never
+        /// narrow them to the default group or re-derive them downstream.
         ///
-        /// `Some` carries the resolved `pinned` value, the home, and **the
-        /// groups this invocation selected** — the set
-        /// [`ComposePaths::resolve`](super::super::composer::ComposePaths::resolve)
-        /// heals before any link path is emitted. A caller narrowing it to the
-        /// default group is C-070's exact defect, which is why the field is the
-        /// selected set rather than something re-derived downstream.
-        ///
-        /// `None` is the digest lane and never an error: `ocx launcher exec`
-        /// passes it because its baked `pkg_root` is pinned by construction,
-        /// and so does any project composition with no rendered tree.
-        ///
-        /// Boxed because it carries a whole [`ProjectLock`](ocx_project::ProjectLock):
-        /// inline it makes `Project` an order of magnitude larger than `Package`
-        /// and every `EnvScope` move pays for the lock (`clippy::large_enum_variant`).
+        /// Boxed: an inline lock makes `Project` dwarf `Package` (`clippy::large_enum_variant`).
         toolchain: Option<Box<crate::composer::ToolchainLinks>>,
     },
-    /// No project toolchain is in scope — OCI-tier commands, isolated scratch
-    /// managers, the self-update version probe. Empty opt-out: every admitted
-    /// base keeps its (non-enforced) companion overlay.
-    ///
-    /// The OCI tier reads no `ocx.toml`, so `env` here can only ever be
-    /// `--env` overrides. That is a per-invocation CLI argument, not project
-    /// configuration — carrying it does not cross the tier boundary.
+    /// No project toolchain in scope (OCI tier, scratch managers, self-update probe): empty
+    /// opt-out, and `env` holds only `--env` overrides since the OCI tier reads no `ocx.toml`.
     Package {
-        /// The `--env` overrides this caller was given, in argument order.
-        /// [`EnvScope::package_tier`] is the shorthand for "none".
+        /// The `--env` overrides, in argument order.
         env: Vec<Entry>,
     },
 }
 
 impl EnvScope {
-    /// The OCI tier with no `--env` overrides.
-    ///
-    /// Shorthand for the internal probes and tests that compose an env but
-    /// take no CLI arguments at all. A named constructor rather than a
-    /// `Default`: a caller still has to say which tier it is in, and the
-    /// failure mode this type guards — forgetting the *project* env — cannot
-    /// occur on this arm, because there is no project to forget.
+    /// The OCI tier with no `--env` overrides; a named constructor, not `Default`, so the
+    /// caller still states its tier.
     pub fn package_tier() -> Self {
         EnvScope::Package { env: Vec::new() }
     }
 
-    /// The opt-out set this scope contributes to the companion overlay.
-    ///
-    /// `Project` yields its set; `Package` yields an empty one. Converted
-    /// exactly once inside `resolve_env_with_patch_boundary` so the overlay
-    /// logic keeps consuming a plain `&BTreeSet` reference.
+    /// The opt-out set: `Project`'s own, empty for `Package`.
     fn opt_out(&self) -> &std::collections::BTreeSet<String> {
         static EMPTY: std::sync::LazyLock<std::collections::BTreeSet<String>> =
             std::sync::LazyLock::new(std::collections::BTreeSet::new);
@@ -286,22 +188,13 @@ impl EnvScope {
     }
 
     /// The entries this scope contributes, already in application order.
-    ///
-    /// Both variants carry them, so the resolver appends one slice without
-    /// caring which tier produced it — only the *sources* differ (a `Project`
-    /// mixes file-declared tables with overrides; a `Package` can only hold
-    /// overrides).
     fn contributed_env(&self) -> &[Entry] {
         match self {
             EnvScope::Project { env, .. } | EnvScope::Package { env } => env,
         }
     }
 
-    /// The toolchain tree this scope may compose through, if any.
-    ///
-    /// `Package` yields `None` structurally: the OCI tier reads no `ocx.toml`,
-    /// has no lock and no rendered tree, so "which groups did this invocation
-    /// select" has no answer there rather than an empty one.
+    /// The toolchain tree to compose through; always `None` for `Package` (no lock, no tree).
     fn toolchain_links(&self) -> Option<&crate::composer::ToolchainLinks> {
         match self {
             EnvScope::Project { toolchain, .. } => toolchain.as_deref(),
@@ -310,36 +203,17 @@ impl EnvScope {
     }
 }
 
-/// Emit one `debug` line per project-declared constant that shadows a
-/// package-declared constant of the same key.
+/// Whether `entry` names a reserved `OCX_*` / `__OCX_*` key and must be dropped,
+/// warning once per distinct key.
 ///
-/// `debug`, never `warn`: shadowing is the *declared intent* of project `[env]`
-/// — the composition order exists precisely so a project can override what a
-/// package ships. Warning on the happy path would be noise on every `ocx exec`
-/// of a project that uses the feature as designed.
-///
-/// Path entries are excluded because they prepend rather than replace: nothing
-/// is shadowed, both values survive.
-/// Reports whether `entry` must be dropped for naming a key in the reserved
-/// `OCX_*` / `__OCX_*` namespace, warning once per distinct key.
-///
-/// Contract C-036. The gate is unconditional and it is a **skip, never an
-/// error**: an already-published package carrying such a key must keep
-/// resolving. `ocx package create` refuses to mint a new one (C-037), so this
-/// path exists for artifacts published before that gate did.
-///
-/// The threat is a consent bypass, not a wrong diff. The env channel is
-/// deliberately additive, so a publisher inside one already-consented namespace
-/// could ship `OCX_CONSENT_NAMESPACES = "*/*"` — or `OCX_NO_HOOK=1`, or a forged
-/// `__OCX_ENV_STATE` — have it composed into the user's shell at the next
-/// prompt, and inherited by every child process from there.
+/// A skip, never an error, so an already-published package keeps resolving. Without it a
+/// publisher could ship `OCX_CONSENT_NAMESPACES = "*/*"` or a forged `__OCX_ENV_STATE`
+/// into the user's shell at the next prompt.
 fn reserved_key_dropped(entry: &Entry, warned: &mut HashSet<String>) -> bool {
     if !ocx_util::env::is_reserved_ocx_key(&entry.key) {
         return false;
     }
-    // Warn once per key per compose, not once per contributor: two packages
-    // declaring the same reserved key is one publisher mistake to report, and
-    // the reconciler recomposes on every prompt.
+    // Once per key, not per contributor: the reconciler recomposes on every prompt.
     if warned.insert(entry.key.clone()) {
         log::warn!(
             "env var '{}' is in the reserved OCX_*/__OCX_* namespace and was skipped; \
@@ -350,6 +224,10 @@ fn reserved_key_dropped(entry: &Entry, warned: &mut HashSet<String>) -> bool {
     true
 }
 
+/// Emit one `debug` line per project constant that shadows a package constant.
+///
+/// Never `warn`: shadowing is what project `[env]` is for, so a warning would fire on every
+/// `ocx exec` using it. Path entries prepend, so they never shadow.
 fn log_project_env_shadowing(composed: &[Entry], project_env: &[Entry]) {
     use ocx_package::metadata::env::modifier::ModifierKind;
 
@@ -369,64 +247,36 @@ fn log_project_env_shadowing(composed: &[Entry], project_env: &[Entry]) {
     }
 }
 
-/// GC roots derived from the site-patch tier.
-///
-/// Carries the set of companion package identifiers and descriptor blob digests
-/// that must survive garbage collection, regardless of whether they are
-/// reachable through the normal install-symlink graph.  Seeded into
-/// [`crate::tasks::garbage_collection::GarbageCollector`]
-/// alongside project-registry roots so that patch companions and their
-/// descriptor blobs are never prematurely collected.
-///
-/// Built offline (no network) by [`PackageManager::resolve_site_patch_roots`].
+/// GC roots from the site-patch tier: companions and descriptor blobs that must survive
+/// collection even when no install symlink reaches them. Built offline by
+/// [`PackageManager::resolve_site_patch_roots`].
 #[derive(Debug, Clone, Default)]
 pub struct SitePatchRoots {
     /// Pinned identifiers for every companion package that should be retained.
     pub companions: Vec<ocx_oci::PinnedPackageRef>,
-    /// Registry + blob digest pairs for every patch descriptor blob that should
-    /// be retained.  The registry is required so the GC can call
-    /// `BlobStore::path(registry, digest)` without a linear shard-suffix scan.
-    ///
-    /// GC-oriented: this is the flat list of ALL descriptor blobs (manifest +
-    /// layer digests across every resolved source) that must survive GC.
+    /// Every descriptor blob (manifest + layers, all sources) to retain; the registry lets
+    /// GC call `BlobStore::path(registry, digest)` without a shard-suffix scan.
     pub descriptors: Vec<(String, ocx_oci::Digest)>,
-    /// Per-source descriptor MANIFEST pins, keyed by the descriptor source's
-    /// canonical `registry/repository` (the same key
-    /// [`PackageManager::build_site_patch_set`] derives from
-    /// `global_descriptor_id` / `patch_descriptor_id`).  Value = the manifest
-    /// digest of the descriptor at resolve time.
-    ///
-    /// Freeze-oriented: `ocx patch freeze` writes these into
-    /// [`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors)
-    /// so compose under an active snapshot selects descriptors by FROZEN digest
-    /// (whole-tier determinism, C8) rather than re-reading the live tag store —
-    /// a post-freeze `ocx patch sync` that advances a descriptor must not change
-    /// which companions a frozen build composes.
+    /// Per-source descriptor manifest pins, keyed by canonical `registry/repository` (the key
+    /// [`PackageManager::build_site_patch_set`] derives). `ocx patch freeze` writes them into
+    /// [`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors), so a
+    /// post-freeze `ocx patch sync` cannot change which companions a frozen build composes.
     pub descriptor_pins: Vec<(String, ocx_oci::Digest)>,
 }
 
-/// Which patch-tier pins a [`SitePatchRoots`] resolution reads.
-///
-/// The patch tier has two bindings for the same companion or descriptor: the
-/// live record under `state/patch-*/`, and — when a freeze is active — the
-/// [`PatchSnapshot`](crate::patch::PatchSnapshot) pin. They diverge the moment
-/// an `ocx patch sync` advances the record past a snapshot, and the two callers
-/// of [`PackageManager::resolve_site_patch_roots`] want opposite things then.
+/// Which patch-tier pins a [`SitePatchRoots`] resolution reads: the live record under
+/// `state/patch-*/`, or that plus an active [`PatchSnapshot`](crate::patch::PatchSnapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchRootScope {
-    /// The live record only — what `ocx patch freeze` must snapshot. Reading
-    /// through an active snapshot would let a freeze re-freeze its own output
-    /// instead of recording live state.
+    /// The live record only, for `ocx patch freeze`: reading through a snapshot would
+    /// re-freeze its own output instead of live state.
     Recorded,
-    /// The live record UNION the active snapshot's pins — what garbage
-    /// collection must retain. Compose resolves snapshot ▸ record, so a root
-    /// set seeded from the record alone collects the very companion (and
-    /// descriptor blob) a frozen build still composes.
+    /// Record ∪ active snapshot, for GC: compose reads snapshot-first, so record-only roots
+    /// collect the companion and descriptor blob a frozen build still composes.
     RecordedAndSnapshot,
 }
 
-/// What a [`ChainBlob`] is in OCI terms — disambiguates the otherwise
-/// opaque digest list so `inspect` can label each entry.
+/// What a [`ChainBlob`] is in OCI terms, so `inspect` can label it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainRole {
     /// The multi-platform image index (only present for multi-platform tags).
@@ -448,12 +298,7 @@ impl std::fmt::Display for ChainRole {
     }
 }
 
-/// One blob in the resolution chain, carrying enough descriptor context
-/// (role, media type, byte size) for callers to render it the same way
-/// layers are rendered. `size` is `-1` only when it could not be
-/// determined (a manifest blob whose on-disk file is unexpectedly absent
-/// despite the on-disk invariant); descriptor-backed entries always have a
-/// real size.
+/// One blob in the resolution chain, with the descriptor context to render it like a layer.
 #[derive(Debug, Clone)]
 pub struct ChainBlob {
     /// The blob pinned by its own digest.
@@ -469,55 +314,33 @@ pub struct ChainBlob {
 
 /// The full resolution output for a single identifier.
 ///
-/// `chain` lists every blob the resolved package depends on as a raw
-/// blob in `blobs/`: manifest entries (image-index where present,
-/// image-manifest) followed by the trailing OCX metadata config blob.
-/// Manifest entries land on disk via `ChainedIndex` write-through during
-/// `resolve`; the trailing config-blob entry is **not** guaranteed on
-/// disk by `resolve` alone — `pull::setup_owned` materializes it via
-/// `common::fetch_or_get_blob` before `ReferenceManager::link_blobs`
-/// runs. `link_blobs` tolerates dangling targets (eventual consistency;
-/// GC collects). `final_manifest` is the platform-selected image
-/// manifest (never an image index).
+/// `chain` is walk order: index (if any), manifest, config. Manifest entries are on disk
+/// after `resolve`; the config blob is not until `pull::setup_owned` fetches it.
 #[derive(Debug, Clone)]
 pub struct ResolvedChain {
-    /// The platform-selected pinned identifier — same value the old
-    /// `resolve` method returned. Keys every storage path (logical identity,
-    /// Decision C2).
+    /// The platform-selected pinned identifier; keys every storage path (logical identity).
     pub pinned: ocx_oci::PinnedPackageRef,
-    /// The **physical** transport identifier for content downloads. Equal to
-    /// [`Self::pinned`] for registry-backed packages; for an `index.ocx.sh`
-    /// source it is the registry the root's `repository` pointer names, so
-    /// layer blobs are pulled from there rather than the logical `ocx.sh` host.
-    /// Transport-only (Decision C2) — never persisted or locked.
-    ///
-    /// [`NoTransport`] when there is no location to read from; it says why,
-    /// and so what a layer missing from the store is refused with. Never a
-    /// dial of the name as typed (ocx#504).
+    /// The physical identifier for content downloads: [`Self::pinned`] for a registry source,
+    /// the routed registry for an `index.ocx.sh` source; transport-only, never persisted or
+    /// locked. [`NoTransport`] says why there is no location and what a missing layer is
+    /// refused with; the name as typed is never dialled.
     pub transport_pinned: Result<ocx_oci::PinnedOciIdentifier, NoTransport>,
-    /// Walk-order chain blobs the resolver touched, backed by on-disk blob
-    /// files (config blob materialized later by the pull pipeline).
+    /// Walk-order chain blobs (the config blob is materialized later by the pull pipeline).
     pub chain: Vec<ChainBlob>,
-    /// The platform-selected image manifest used by the pull pipeline for
-    /// layer extraction. Never an image index.
+    /// The platform-selected image manifest the pull pipeline extracts; never an index.
     pub final_manifest: ocx_oci::ImageManifest,
-    /// The platform the resolution selected. `Platform::any()` for a flat
-    /// (single-image) manifest; the matched image-index entry's platform for a
-    /// multi-platform tag. Threaded into `InstallInfo` so the candidate-symlink
-    /// gate can suppress foreign-platform installs (issue #179).
+    /// The selected platform (`any` for a flat manifest); the candidate-symlink gate uses it
+    /// to suppress foreign-platform installs.
     pub platform: ocx_oci::Platform,
 }
 
 /// Why a [`ResolvedChain`] has no location to read layers from.
 #[derive(Debug, Clone)]
 pub enum NoTransport {
-    /// A local materialization (`pull_local`): nothing was resolved through
-    /// an index, and every layer was staged before the chain was built.
+    /// A local materialization (`pull_local`): every layer was staged before the chain.
     LocalMaterialization,
-    /// A no-resolve policy (`--offline`) found a name in a registry an index
-    /// owns with no locally recorded root, so nothing can say where its
-    /// content lives. Deferred from routing to the layer that would need the
-    /// dial: a chain the store already holds materializes without one.
+    /// A no-resolve policy (`--offline`) found a name in an index-owned registry with no
+    /// recorded root. Deferred to the layer that needs the dial: a stored chain needs none.
     UnrecordedLocation { identifier: String, policy: &'static str },
 }
 
@@ -540,21 +363,15 @@ impl NoTransport {
 }
 
 impl ResolvedChain {
-    /// Walk-order pinned identifiers for every chain blob — the input
-    /// `ReferenceManager::link_blobs` consumes to populate `refs/blobs/`.
+    /// Walk-order pinned identifiers of every chain blob, for `ReferenceManager::link_blobs`.
     pub fn blobs(&self) -> impl Iterator<Item = &ocx_oci::PinnedPackageRef> {
         self.chain.iter().map(|blob| &blob.identifier)
     }
 }
 
-/// Admitted-set claim attribution for `ocx env` / `ocx package env`'s
-/// `binaries` / `entrypoints` / `integrations` JSON arrays.
-///
-/// A straight passthrough of `ComposeOutput::admitted_binaries` /
-/// `admitted_entrypoints` / `admitted_integrations` — each pair names a
-/// declared claim together with the admitted [`ocx_oci::PinnedPackageRef`] that
-/// contributed it. See `adr_declared_binaries_metadata.md` §4 Decision A and
-/// `adr_package_integrations.md` C-013.
+/// Admitted-set claim attribution for the `binaries` / `entrypoints` / `integrations`
+/// arrays of `ocx env` / `ocx package env` (`adr_declared_binaries_metadata.md` §4
+/// Decision A, `adr_package_integrations.md` § `AdmittedBinaries` → `AdmittedClaims`).
 #[derive(Debug, Clone, Default)]
 pub struct AdmittedClaims {
     pub binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)>,
@@ -562,27 +379,13 @@ pub struct AdmittedClaims {
     pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
 }
 
-/// Resolves the physical transport identifier for a logical pinned reference.
+/// The physical transport identifier for `pinned`: the index's registry when a source
+/// rewrites it, else `pinned`'s own.
 ///
-/// Returns the registry the index points at (`index.ocx.sh`'s `repository`
-/// pointer, with the logical tag and leaf digest carried over) when a source
-/// rewrites it, else `pinned`'s own coordinates (registry-backed packages).
-/// Transport-only (C2).
-///
-/// This is the one resolve that exists in order to *materialize*, so it is
-/// also where the routing pointer gets recorded locally (#424): a
-/// digest-addressed resolve grows no root, so without the record a machine
-/// running only `pull`/`exec` against a committed lock re-asks the index site
-/// for the same pointer on every invocation, forever. Deliberately not done
-/// inside [`ocx_index::Index::route`] — the readers that call it (`cascade check`,
-/// `verify`, `sign`, `attest`) must leave no trace, and gating the write by
-/// where it is called from is stronger than gating it by a policy each caller
-/// has to set — hence [`ocx_index::Index::route_to_materialize`], not [`ocx_index::Index::route`].
-///
-/// An offline refusal for an unrecorded location is carried as
-/// [`NoTransport::UnrecordedLocation`] rather than raised: a chain whose
-/// layers are all in the store needs no location, and one that is missing a
-/// layer raises the same refusal there.
+/// Must go through [`ocx_index::Index::route_to_materialize`], which records the routing
+/// pointer, or a lock-pinned `pull`/`exec` re-asks the index site forever; never put that
+/// write in [`ocx_index::Index::route`], whose readers must leave no trace. An offline
+/// unrecorded location is returned as [`NoTransport::UnrecordedLocation`], not raised.
 async fn resolve_transport_pinned(
     index: &ocx_index::Index,
     pinned: &ocx_oci::PinnedPackageRef,
@@ -599,36 +402,24 @@ async fn resolve_transport_pinned(
 }
 
 impl PackageManager {
-    /// Resolves an identifier through the index (tag → digest, platform
-    /// matching), returning the pinned identifier plus the full chain of
-    /// blobs that backed the resolution.
+    /// Resolves an identifier through the index (tag → digest, platform matching) to its
+    /// pinned identifier and the blob chain behind it.
     pub async fn resolve(
         &self,
         package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<ResolvedChain, PackageErrorKind> {
-        // Walk the manifest chain through ChainedIndex. Each `fetch_manifest`
-        // returns cache-first with write-through persistence, so every digest
-        // the walk touches is backed by an on-disk blob by the time it lands
-        // in `chain` — that is the `ResolvedChain` invariant.
-        //
-        // The tag/digest top-id derivation + not-found-vs-offline split is
-        // shared with `inspect` via `common::resolve_top_manifest`; this
-        // method keeps the divergent chain-building below.
+        // `fetch_manifest` writes through, so every digest in `chain` is backed by an on-disk blob.
         let (top_pinned, top_manifest) =
             super::common::resolve_top_manifest(self.index(), package, IndexOperation::Resolve).await?;
-        // Reconstruct the tag-form top identifier the divergent chain-building
-        // below operates on (digest dropped — `clone_with_tag`/`select` derive
-        // their own digests, and `select` must see the unpinned index ref).
+        // Tag-form top id with the digest dropped: `select` must see the unpinned index ref.
         let top_id = if package.digest().is_some() {
             package.clone()
         } else {
             package.clone_with_tag(package.tag_or_latest())
         };
         match top_manifest {
-            // Flat image manifest: the chain is a single entry and the
-            // top-level digest IS the pinned identifier. Platform filtering
-            // does not apply here — a single-platform package always matches.
+            // Flat image manifest: the top digest is the pinned identifier; no platform filtering.
             ocx_oci::Manifest::Image(img) => {
                 let top_size = blob_data_size(self.file_structure(), &top_pinned).await;
                 let top_media = img
@@ -658,14 +449,10 @@ impl PackageManager {
                     transport_pinned,
                     chain,
                     final_manifest: img,
-                    // A flat image manifest carries no platform metadata; it is
-                    // treated as platform-agnostic (matches `from_image_manifest`).
+                    // A flat manifest carries no platform metadata (matches `from_image_manifest`).
                     platform: ocx_oci::Platform::any(),
                 })
             }
-            // Image index: defer platform selection to `Index::select`, then
-            // fetch the selected child to append it to the chain and return
-            // its manifest as `final_manifest`.
             ocx_oci::Manifest::ImageIndex(index) => {
                 let top_size = blob_data_size(self.file_structure(), &top_pinned).await;
                 let top_media = index
@@ -706,9 +493,7 @@ impl PackageManager {
                 {
                     Some(result) => result,
                     None => {
-                        // Child manifest blob missing but the parent was
-                        // located via an image-index entry — treat as the
-                        // offline-missing case so the user knows to re-pull.
+                        // Parent found via an image-index entry: report offline-missing so the user re-pulls.
                         return Err(PackageErrorKind::OfflineManifestMissing(Box::new(
                             crate::error::OfflineManifestMissing {
                                 identifier: child_id,
@@ -728,9 +513,7 @@ impl PackageManager {
                 };
                 let child_pinned = ocx_oci::PinnedPackageRef::try_from(child_id.clone_with_digest(child_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
-                // The image-index entry that selected this child carries its
-                // authoritative descriptor (media type + size) — no extra
-                // blob stat needed.
+                // The selecting image-index entry carries the authoritative media type and size.
                 let child_descriptor = index
                     .manifests
                     .iter()
@@ -742,10 +525,7 @@ impl PackageManager {
                         blob_data_size(self.file_structure(), &child_pinned).await,
                     ),
                 };
-                // The selected image-index entry's platform — the authoritative
-                // record of which platform this resolution landed on. A missing
-                // or unconvertible platform falls back to `any` (never suppress
-                // the candidate on an undeterminable platform).
+                // A missing or unconvertible platform falls back to `any`, never suppressing the candidate.
                 let selected_platform = match child_descriptor {
                     Some(entry) => ocx_oci::Platform::try_from(entry.platform.clone()).unwrap_or_else(|error| {
                         log::warn!(
@@ -815,31 +595,9 @@ impl PackageManager {
         super::common::drain_package_tasks(packages, tasks, crate::error::Error::ResolveFailed).await
     }
 
-    /// Resolve the composed env for the given roots.
-    ///
-    /// `self_view = true` selects the private surface (matches `--self`);
-    /// `self_view = false` selects the interface surface (default exec).
-    ///
-    /// Delegates to [`composer::compose`] which iterates each root's
-    /// pre-built TC flatly with cross-root dedup and per-surface gating.
-    ///
-    /// When a `[patches]` section is configured (`self.patches` is `Some`),
-    /// the companion-interface overlay is appended **after** all of compose's
-    /// entries (global-last invariant, C1).  Each admitted identifier's
-    /// companion entries are appended in the order compose visited them, so
-    /// a patch on a transitive dep can override a `Constant` or `Path` var
-    /// declared by the root itself.
-    ///
-    /// With `self.patches = None` the output is byte-identical to the
-    /// pre-Phase-4 behaviour (no-config no-op guarantee).
-    ///
-    /// `scope` is the compile-forced patch-boundary decision — see
-    /// [`EnvScope`]. This wrapper forwards it unchanged to
-    /// [`Self::resolve_env_with_patch_boundary`] and drops the overlay index
-    /// and per-entry provenance.
-    ///
-    /// `platform` selects the companion leaf on a multi-platform companion —
-    /// see [`Self::resolve_env_with_attribution`].
+    /// Resolve the composed env for the given roots; `self_view` selects the private
+    /// (`--self`) surface. A `[patches]` overlay follows compose's entries in admitted-visit
+    /// order, so a patch on a transitive dep overrides a var the root declares.
     pub async fn resolve_env(
         &self,
         packages: &[Arc<InstallInfo>],
@@ -853,43 +611,12 @@ impl PackageManager {
         Ok(entries)
     }
 
-    /// Like [`resolve_env`] but also returns the overlay boundary index and the
-    /// per-overlay-entry [`PatchProvenance`].
+    /// Like [`resolve_env`] plus the overlay start index and per-overlay-entry [`PatchProvenance`].
     ///
-    /// The returned entry vector has three consecutive regions:
-    ///
-    /// | Range | Origin |
-    /// |---|---|
-    /// | `[0 .. patch_start)` | `composer::compose` (package-composed env) |
-    /// | `[patch_start .. patch_start + provenance.len())` | patch companion projections |
-    /// | the remainder | `scope`'s project / group `[env]` (+ `ocx exec --env`) |
-    ///
-    /// A companion admitted for more than one base contributes its projection
-    /// **exactly once** to the middle region — the first matching admitted
-    /// identifier wins and its rule glob is the one recorded in the provenance.
-    ///
-    /// The returned `Vec<PatchProvenance>` is aligned one-to-one with the middle
+    /// Regions: compose output `[0..patch_start)`, the companion overlay, then `scope`'s `[env]`
+    /// and `--env`. `provenance` is aligned with the middle
     /// region, so `provenance[i]` names the rule glob + companion for
-    /// `entries[patch_start + i]`. Native and project entries have no provenance by
-    /// construction — a consumer annotating by index must bound-check
-    /// `i - patch_start` against `provenance.len()` rather than assuming the overlay
-    /// runs to the end of the vector.
-    ///
-    /// When `self.patches = None` (no patch tier), `provenance` is empty and
-    /// `patch_start` equals the compose count — byte-identical to the pre-Phase-4
-    /// output for a scope that carries no project env.
-    ///
-    /// The CLI `--show-patches` flag uses this boundary + provenance to annotate each
-    /// overlay entry's origin.
-    ///
-    /// `scope` carries the caller's patch-boundary decision — see [`EnvScope`].
-    /// `EnvScope::Project { no_patches, .. }` supplies the opt-out (canonical
-    /// `"registry/repository"` keys, tag/digest excluded); `Package`
-    /// supplies an empty opt-out by construction. An opted-out base gets NO
-    /// companion overlay UNLESS the tier is system-required (enforcement wins).
-    ///
-    /// Delegates to [`Self::resolve_env_with_attribution`] and drops the
-    /// admitted-claim attribution.
+    /// `entries[patch_start + i]`; bound-check against `provenance.len()`, never assume the overlay runs to the end.
     pub async fn resolve_env_with_patch_boundary(
         &self,
         packages: &[Arc<InstallInfo>],
@@ -903,22 +630,12 @@ impl PackageManager {
         Ok((entries, compose_count, provenance))
     }
 
-    /// Like [`Self::resolve_env_with_patch_boundary`], additionally surfacing
-    /// the admitted-set `binaries` / `entrypoints` claim attribution.
+    /// Like [`Self::resolve_env_with_patch_boundary`] plus the admitted-set claim attribution
+    /// for `ocx env` / `ocx package env` (`adr_declared_binaries_metadata.md` §4 Decision A).
     ///
-    /// Consumers: `ocx env`, `ocx package env` (the `binaries` / `entrypoints`
-    /// JSON arrays, ADR `adr_declared_binaries_metadata.md` §4 Decision A).
-    /// Every other caller of `resolve_env` / `resolve_env_with_patch_boundary`
-    /// is unaffected — those signatures are unchanged and this is a new,
-    /// additive accessor, not a replacement.
-    ///
-    /// `platform` is the platform the companion overlay is composed FOR: it
-    /// selects the leaf of a multi-platform companion's image index. It is the
-    /// host platform on every ambient path, and the `-p` value on a command
-    /// that composes for a named platform (`ocx patch test`, `ocx patch why`,
-    /// `ocx package test`, `ocx package exec`). Passing the host where the base
-    /// was materialized for another platform composes zero companions, or fails
-    /// closed on a required one.
+    /// `platform` is what the companion overlay composes FOR (host, or `-p`); passing the host
+    /// for a base materialized for another platform composes zero companions, or fails closed
+    /// on a required one.
     pub async fn resolve_env_with_attribution(
         &self,
         packages: &[Arc<InstallInfo>],
@@ -926,15 +643,8 @@ impl PackageManager {
         scope: EnvScope,
         platform: &ocx_oci::Platform,
     ) -> crate::Result<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)> {
-        // Convert the scope to its opt-out set exactly once; the overlay logic
-        // below (and `build_site_patch_set`) keeps consuming a plain reference.
         let no_patches = scope.opt_out();
-        // C-065's one code path, built once per composition: `ocx env`,
-        // `ocx exec`, `ocx direnv export` and the `env`-mode hook all reach the
-        // composer through this call, so none of them can disagree about
-        // whether a `<group>/<entry>` link is followed, nor about which groups
-        // were healed first (C-070). `None` — the OCI tier, and the launcher's
-        // baked `pkg_root` — is the digest lane (C-066).
+        // Every env caller composes here, so none can disagree on link-following or group-heal order.
         let paths = match scope.toolchain_links() {
             Some(links) => composer::ComposePaths::resolve(links, self.file_structure(), platform).await?,
             None => composer::ComposePaths::digest_only(),
@@ -945,84 +655,40 @@ impl PackageManager {
             entrypoints: out.admitted_entrypoints,
             integrations: out.admitted_integrations,
         };
-        // C-036: the gate is here rather than in `Env::apply_entries`, because
-        // `conventions::emit_lines` never routes through that function — it
-        // dispatches `Entry` straight to `Shell::export_*` for `ocx env
-        // --shell`, `ocx direnv export` and `ocx package env`, all three of
-        // which the caller `eval`s. This seam is the one both consumers share.
-        //
-        // Filtered per region rather than once over the finished vector: the
-        // caller reads `compose_count` and the overlay's aligned `provenance`
-        // as index ranges into it, and a whole-vector `retain` would silently
-        // shift both.
+        // Reserved keys are gated here, not in `Env::apply_entries`, which `emit_lines` bypasses.
+        // Per region: a whole-vector `retain` would shift the `compose_count`/`provenance` indices.
         let mut reserved_warned: HashSet<String> = HashSet::new();
         let mut entries = out.entries;
         entries.retain(|entry| !reserved_key_dropped(entry, &mut reserved_warned));
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
 
-        // Phase 4 overlay: append companion-interface entries for each
-        // admitted identifier, in admitted-set visit order. Each overlay entry
-        // carries its `PatchProvenance` (rule glob + companion) pushed onto the
-        // aligned `provenance` vec.
-        //
-        // When `self.patches` is `None` this block is a no-op and
-        // `entries` is byte-identical to the pre-Phase-4 output.
-        //
-        // A companion's `integrations` join the base packages' on the SAME
-        // `AdmittedClaims` array, behind the same `integrations_cross` gate. The
-        // gate is a property of the carrier — interface-surface-only, at every
-        // depth — not of who declared it, so computing it once here covers base and
-        // companion alike and `ocx env --self` carries no integrations from any
-        // contributor. A companion-specific branch would be exactly the exceptional
-        // rule C-017 exists to refuse.
-        //
-        // It is threaded INTO `build_site_patch_set` rather than re-checked on the
-        // way out: a discarded payload must never be resolved, because resolution
-        // asserts each `${deps.*}` content directory exists and would fail a
-        // required companion over a value this surface does not carry.
+        // Gate before projecting companions: resolution asserts every `${deps.*}` dir exists, so
+        // gating after fails a required companion over a value this surface never carries
+        // (`adr_package_integrations.md § Patch companions`).
         let collect_integrations = composer::integrations_cross(self_view);
         if let Some(mut patch_set) = self
             .build_site_patch_set(&out.admitted, no_patches, platform, collect_integrations)
             .await?
         {
-            // D2/C-012: one row per (package, namespace) across the WHOLE
-            // composition. The base roots and each companion are composed by
-            // SEPARATE `compose` calls, and each dedups only within itself — so a
-            // dependency reachable from both a base root and a companion, or from
-            // two companions, arrives here twice. Seeded from the base's rows so
-            // they win, and the skip never reorders what survives: base rows first,
-            // then companion rows in admitted-set visit order.
-            // Keyed on the STRIPPED identifier, because `compose` strips advisory
-            // tags at every one of its own dedup sites (`composer.rs`, and the
-            // admitted set records stripped identifiers). The pairs themselves do
-            // not: a root contributes `root.identifier().clone()`, tag included. So
-            // a package reachable from a base under one advisory tag and from a
-            // companion under another produces two keys that differ only by a tag
-            // `compose` already considers irrelevant — and the row a consumer must
-            // see once arrives twice, with two different `package` strings. Only
-            // the KEY is stripped; the emitted attribution keeps the identifier the
-            // contributor named.
+            // One row per (identifier minus advisory tag, namespace) across the whole composition,
+            // or a dep shared by base and companion lands twice; base rows seed first and win.
             let mut seen_integrations: HashSet<(ocx_oci::PinnedPackageRef, String)> = attribution
                 .integrations
                 .iter()
                 .map(|(identifier, entry)| (identifier.strip_advisory(), entry.namespace.clone()))
                 .collect();
             for admitted_id in &out.admitted {
-                // `remove` instead of `get`: patch_set is consumed here and not used
-                // afterwards, so moving entries out eliminates the per-entry String clone.
                 if let Some(overlay) = patch_set.remove(admitted_id) {
                     for (entry, entry_provenance) in overlay.entries {
-                        // Dropping the entry without its aligned provenance row
-                        // would mis-attribute every later `--show-patches` line.
+                        // Skip entry and provenance together, or later `--show-patches` lines mis-attribute.
                         if reserved_key_dropped(&entry, &mut reserved_warned) {
                             continue;
                         }
                         entries.push(entry);
                         provenance.push(entry_provenance);
                     }
-                    // Empty by construction when the gate is off — nothing was
-                    // collected upstream — so no second gate is needed here.
+                    // Empty when the gate is off; nothing was collected upstream.
                     for (identifier, entry) in overlay.integrations {
                         if seen_integrations.insert((identifier.strip_advisory(), entry.namespace.clone())) {
                             attribution.integrations.push((identifier, entry));
@@ -1032,28 +698,12 @@ impl PackageManager {
             }
         }
 
-        // Project / group `[env]` (plus any `ocx exec --env`) as ordinary
-        // entries, appended last: stages 4-6 of the composition order. Vector
-        // position IS the precedence — `Env::apply_entries` replays the vector,
-        // so a constant here replaces a package-declared one and a path entry
-        // lands ahead of package paths. This is the whole reason project env is
-        // materialized as `Entry` rather than carried on a parallel channel:
-        // every consumer (`Env::apply_entries`, `conventions::emit_lines`,
-        // `conventions::export_ci`) already takes exactly one `&[Entry]`.
-        //
-        // Deliberately OUTSIDE the `ConstantTracker`: it is consulted only by
-        // the two CI flavor writers, never on any process-env path, so a
-        // project override cannot surface there as a package-vs-package
-        // collision warning.
+        // Vector position is the precedence `Env::apply_entries` replays. Kept outside the
+        // `ConstantTracker`, or an override misfires as a package-vs-package collision warning.
         let contributed = scope.contributed_env();
         if !contributed.is_empty() {
             log_project_env_shadowing(&entries, contributed);
-            // The project `[env]` and `ocx exec --env` surfaces each refuse a
-            // reserved key at parse time, and do it as a hard error rather than
-            // a skip. Re-filtering here is not that gate a second time: it is
-            // what makes the resolver's own statement unconditional, so a
-            // future contributed source cannot reopen the hole by arriving
-            // without one.
+            // Refiltered despite the parse-time refusal, so a new contributed source cannot reopen the hole.
             entries.extend(
                 contributed
                     .iter()
@@ -1065,42 +715,11 @@ impl PackageManager {
         Ok((entries, compose_count, provenance, attribution))
     }
 
-    /// Build the [`SitePatchSet`] for the given admitted identifiers.
+    /// The [`SitePatchSet`] for `admitted` from local state only, or `None` with no `[patches]`.
     ///
-    /// Returns `None` when no `[patches]` section is configured
-    /// (`self.patches` is `None`), leaving `resolve_env` output unchanged
-    /// (no-config no-op).
-    ///
-    /// When patches are configured, loads the global and per-package
-    /// descriptors from local state only (no network — `PatchTagMap::read` +
-    /// `BlobStore::read_blob`), collects companions, projects each
-    /// companion's **interface** surface via `composer::compose`, and
-    /// returns a map from admitted identifier to its companion env entries.
-    ///
-    /// A companion matched for several admitted identifiers is projected once and
-    /// **emitted once**: it appears under the first matching admitted identifier
-    /// only, so the flattened overlay carries no duplicates. Dedup is keyed by the
-    /// full companion identifier (`registry/repository:tag`) — the same repository
-    /// at two different tags stays two companions.
-    ///
-    /// ## Scope note (Phase 5)
-    ///
-    /// Phase 3 discovery persists descriptors for the user-requested base and
-    /// the global root.  A transitive dep's package-specific descriptor is
-    /// only present if that dep was itself discovered (its own install or a
-    /// future `ocx patch sync`).  Global-descriptor companions still cover
-    /// every admitted identifier including transitive deps, because rules
-    /// match by identifier string.  Full transitive package-specific
-    /// discovery is a Phase 5 `ocx patch sync` concern.
-    ///
-    /// `collect_integrations` is the CALLER's surface gate
-    /// ([`composer::integrations_cross`]), forwarded to each companion
-    /// projection. The projection itself is always composed at `self_view =
-    /// false` (no private leak), so it cannot derive the gate — and resolving a
-    /// payload the caller will discard is not free: resolution asserts every
-    /// `${deps.*}` content directory exists, so a companion naming an
-    /// uninstalled dependency would fail a composition whose surface carries no
-    /// integrations at all.
+    /// `collect_integrations` is forwarded because projection runs at `self_view = false` and
+    /// cannot derive it; without it a companion naming an uninstalled dependency would fail a
+    /// composition whose surface carries no integrations.
     async fn build_site_patch_set(
         &self,
         admitted: &[ocx_oci::PinnedPackageRef],
@@ -1108,7 +727,6 @@ impl PackageManager {
         platform: &ocx_oci::Platform,
         collect_integrations: bool,
     ) -> crate::Result<Option<SitePatchSet>> {
-        // No patch tier configured → no overlay; output is byte-identical to pre-Phase-4.
         let Some(patches) = self.patches() else {
             return Ok(None);
         };
@@ -1117,26 +735,14 @@ impl PackageManager {
         let blob_store = &file_structure.blobs;
         let package_store = &file_structure.packages;
 
-        // ── Step 1: Load global descriptor from persisted local state (offline-only). ──
-        //
-        // The global descriptor lives at the reserved `global` repository in the patch registry.
-        // Its discovery state was recorded by `discover_and_install_patches` in Phase 3.
-        // SECURITY: Phase 5 gap — `load_descriptor_for_id` reads the tag-store path
-        // derived from `patches.registry` (operator-controlled via `[patches]` config).
-        // Untrusted path injection is bounded here: `global_descriptor_id` only uses
-        // the registry hostname to namespace the CAS path, and all blob content is
-        // content-addressed (SHA-256). Phase 5 (`ocx patch sync`) will add signature
-        // verification before trusting descriptor contents.
-        // Under an active freeze snapshot (`OCX_PATCH_SNAPSHOT`) the descriptor is
-        // selected by its pinned manifest digest (frozen — C8 whole-tier
-        // determinism); otherwise it floats to the live tag-store record.
+        // SECURITY: the CAS path is namespaced only by the operator-controlled registry host and
+        // SHA-256 addressed, bounding path injection; descriptors carry no signature check.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
         let global_tags_path = file_structure.patch_descriptor_path(&global_id);
         let global_descriptor_result = load_descriptor_frozen_or_live(
             blob_store,
-            // Blob CAS namespace: the descriptor id's bare-host registry — the same
-            // key `fetch_and_persist_descriptor` persists under. Must NOT be the
-            // path-prefixed `patches.registry`, which would look under the wrong dir.
+            // The descriptor id's bare-host registry, where `fetch_and_persist_descriptor` persists;
+            // the path-prefixed `patches.registry` would look in the wrong directory.
             global_id.registry(),
             &global_id,
             &global_tags_path,
@@ -1144,9 +750,7 @@ impl PackageManager {
         )
         .await?;
 
-        // C7 fail-closed: a corrupt global descriptor (tag-store says "has descriptor"
-        // but CAS blob is missing or unreadable) is a tamper / corruption event, not a
-        // "no patch" case.  Fail closed when the tier is required=true.
+        // A corrupt global descriptor is tampering, never "no patch": fail closed when required.
         let global_descriptor = match global_descriptor_result {
             DescriptorLoadResult::NotPresent => None,
             DescriptorLoadResult::Loaded(_manifest_digest, descriptor) => Some(descriptor),
@@ -1159,60 +763,14 @@ impl PackageManager {
             }
         };
 
-        // ── Step 2: Companion projection cache ────────────────────────────────────
-        //
-        // A global descriptor with a catch-all rule (e.g., "match": "*") returns
-        // the same companion for every admitted identifier.  Without a cache,
-        // `find_companion_local` + `compose` would be called N times for the same
-        // companion (N = admitted set size).  The cache below keys by companion
-        // `PackageRef` so each (companion, required) pair is projected exactly once.
-        //
-        // It dedups the *emission* by the same stroke, and carries no payload for
-        // that: a projection lands in the overlay of the admitted base that
-        // computed it — the first one the rule matched — so every later base has
-        // nothing to re-read, only [`CompanionOutcome`] to consult.
-        //
-        // Keyed by the full identifier (registry/repo:tag), so the same repository
-        // at two different tags stays two companions.
-        //
-        // Deliberately does NOT gate the fail-closed paths: a required companion
-        // that is missing must still fail on every base, whether or not an earlier
-        // base already failed on it.
+        // Keyed by full `registry/repo:tag`: a catch-all companion is projected and emitted once,
+        // under the first matching base. Fail-closed checks still run on every base.
         let mut companion_projection_cache: HashMap<ocx_oci::PackageRef, CompanionOutcome> = HashMap::new();
-
-        // ── Step 3: Iterate admitted identifiers, collect companions per identifier. ──
-        //
-        // For each admitted identifier:
-        //   a) Load the package-specific descriptor (if any).
-        //   b) Merge global + pkg-specific (global first, pkg-specific overrides on
-        //      same companion identifier — last-wins for the `required` flag).
-        //   c) For each companion, look up the projection cache; on miss, project
-        //      via `find_companion_local` + `compose([companion], store, false)`.
 
         let mut patch_set: SitePatchSet = SitePatchSet::new();
 
-        // ── Step 3a: parallel-load each admitted id's package-specific descriptor. ──
-        //
-        // Each load is an independent local read (tag-store JSON + CAS blob).
-        // Running them concurrently (bounded by core count, mirroring the
-        // `install.rs` pull fan-out) removes the per-id serialization of the
-        // sequential await below. The C7 per-package opt-out is evaluated here so
-        // an opted-out base costs no load; its slot stays `None` and the
-        // sequential pass skips it. Results are collected by admitted index, so
-        // overlay emission order, error determinism, and the shared projection
-        // cache in Step 3b are all unchanged.
-        //
-        // Per-package opt-out (C7 exception): a project may decline the companion
-        // overlay for a base via `[package."<id>"] no-patches`. Match is by
-        // canonical `registry/repository` (tag/digest excluded — the opt-out is
-        // version-independent) OR by content digest. The digest leg exists for the
-        // launcher re-entry (AF1): a generated launcher resolves its base via
-        // `install_info_from_package_root`, which mints a synthetic
-        // `file-url-mode/<content-digest>` identifier with no real
-        // `registry/repository` — so `ocx exec`'s forwarded opt-out (`toolchain_exec.rs`)
-        // additionally carries the opted-out bases' content digests, and this leg
-        // is what matches them. A system-required tier still applies regardless of
-        // which leg matched: enforcement beats opt-out.
+        // Loads run concurrently (core-bounded) into slots by admitted index, so emission order,
+        // error determinism and the projection cache never depend on completion order.
         let snapshot: Arc<Option<crate::patch::PatchSnapshot>> = Arc::new(self.patch_snapshot().cloned());
         let system_required = patches.system_required;
         let load_semaphore = crate::concurrency::Concurrency::cores().semaphore();
@@ -1221,15 +779,14 @@ impl PackageManager {
             let base_id = admitted_id.as_identifier();
             let repo_key = format!("{}/{}", base_id.registry(), base_id.repository());
             let digest_key = admitted_id.digest().to_string();
+            // Opt-out matches `registry/repository` or the digest: a generated launcher's
+            // `file-url-mode/<digest>` identifier has no real repository. System-required wins.
             if (no_patches.contains(&repo_key) || no_patches.contains(&digest_key)) && !system_required {
                 continue;
             }
-            // Frozen by manifest digest under an active snapshot, else floats to
-            // the live tag store.
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
             let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
-            // Blob CAS namespace: the descriptor id's bare-host registry — the same
-            // key `fetch_and_persist_descriptor` persists under (see the global leg).
+            // Bare-host registry, as for the global descriptor.
             let registry = pkg_specific_id.registry().to_string();
             let blob_store = blob_store.clone();
             let snapshot = snapshot.clone();
@@ -1259,10 +816,8 @@ impl PackageManager {
             preloaded_descriptors[index] = Some(result);
         }
 
-        // ── Step 3b: iterate admitted identifiers in order, using preloaded descriptors. ──
         for (index, admitted_id) in admitted.iter().enumerate() {
-            // A `None` slot means the base was opted out in Step 3a — skip it,
-            // exactly as the pre-parallel per-package opt-out `continue` did.
+            // `None`: opted out above.
             let Some(pkg_descriptor_result) = preloaded_descriptors[index].take() else {
                 continue;
             };
@@ -1270,7 +825,6 @@ impl PackageManager {
             // Propagate a load error in admitted order (deterministic failure).
             let pkg_descriptor_result = pkg_descriptor_result?;
 
-            // C7 fail-closed for per-identifier corrupt descriptor.
             let pkg_descriptor = match pkg_descriptor_result {
                 DescriptorLoadResult::NotPresent => None,
                 DescriptorLoadResult::Loaded(_manifest_digest, descriptor) => Some(descriptor),
@@ -1286,14 +840,10 @@ impl PackageManager {
                 }
             };
 
-            // Skip identifiers with neither global nor pkg-specific descriptor.
             if global_descriptor.is_none() && pkg_descriptor.is_none() {
                 continue;
             }
 
-            // Merge companions: global first (lower precedence), pkg-specific second
-            // (overrides via last-wins on same companion identifier — matches Phase 3
-            // merge algorithm in `discover_and_install_patches`).
             let companions = merge_companions(
                 base_id,
                 patches.required,
@@ -1305,14 +855,8 @@ impl PackageManager {
                 continue;
             }
 
-            // Defense-in-depth: cap total companions per admitted id to the same
-            // limit enforced by Phase 3 discovery. A compromised patch registry
-            // could accumulate entries across both global and pkg-specific
-            // descriptors that exceed the limit.
-            //
-            // Fail-closed posture (consistent with Phase 3):
-            //   - required tier OR any over-cap companion is required → Err
-            //   - non-required tier AND no over-cap companion is required → warn + truncate
+            // Re-cap at the install-time limit: a compromised patch registry could accumulate
+            // over-cap entries across both descriptors. Required fails closed; optional truncates.
             let companions = if companions.len() > super::patch_discovery::MAX_TOTAL_COMPANIONS {
                 let any_required = companions
                     .iter()
@@ -1344,39 +888,22 @@ impl PackageManager {
                 companions
             };
 
-            // Project each companion's INTERFACE env (self_view=false — no private leak).
-            // Projection results are cached by companion identifier so a global catch-all
-            // companion is projected once, not once per admitted identifier.
-            //
-            // Each projected entry is paired with its `PatchProvenance` (the rule glob
-            // that admitted this companion for this base + the companion id). The rule
-            // glob is per (base, companion) — read from `companion_entry.rule_match` —
-            // while the projection itself is companion-only, so provenance is attached
-            // as the projection lands in this base's overlay.
+            // Projection is cached per companion, but the rule glob is per (base, companion), so
+            // provenance attaches only when a projection lands in this base's overlay.
             let mut companion_overlay = CompanionOverlay {
                 entries: Vec::new(),
                 integrations: Vec::new(),
             };
             for companion_entry in &companions {
                 let companion_id = &companion_entry.identifier;
-                // Provenance factory for every entry this companion contributes to the
-                // current base's overlay. The pin is a parameter rather than captured:
-                // it is only in hand once the companion has been resolved, which is the
-                // same moment the entries it produced are.
                 let make_provenance = |pinned: &ocx_oci::PinnedPackageRef| PatchProvenance {
                     rule_match: companion_entry.rule_match.clone(),
                     companion: companion_id.clone(),
                     pinned: pinned.clone(),
                 };
 
-                // Cache hit: an earlier admitted base already resolved this
-                // companion, and emitted it there if it was present.
-                //
-                // A required companion that was missing on that lookup must STILL
-                // fail closed here — a cached `Missing` means "genuinely not
-                // installed", not "safe to skip". Without this re-check a required
-                // companion that is absent would silently bypass the fail-closed gate
-                // on every admitted identifier after the first.
+                // A cached `Missing` for a REQUIRED companion still fails closed, or a required but
+                // absent companion bypasses the gate on every base after the first.
                 if let Some(outcome) = companion_projection_cache.get(companion_id) {
                     match outcome {
                         CompanionOutcome::Missing => {
@@ -1390,31 +917,20 @@ impl PackageManager {
                             }
                             // Optional and missing — skip (already logged on first encounter).
                         }
-                        // Already emitted under the FIRST admitted base that matched
-                        // it; a second emission here is the cross-base duplicate.
+                        // Already emitted under the first matching base; emitting again duplicates it.
                         CompanionOutcome::Projected => {}
                     }
                     continue;
                 }
 
-                // Cache miss: resolve and project the companion.
-                //
-                // The companion composes at its patch-tier pin — the active
-                // `PatchSnapshot` when one is loaded (opt-in determinism, ADR C8),
-                // else the digest discovery/sync recorded. A pin is policy, not
-                // truth: if the package at that digest is not installed the lookup
-                // returns None and the required-fail-closed gate fires as normal.
+                // Composes at the patch-tier pin (snapshot, else recorded); a pin with no installed
+                // package yields `None` and the required gate fires as normal.
                 let companion_install_info = match self.find_companion_local(companion_id, platform).await {
                     Ok(Some(info)) => info,
                     Ok(None) => {
-                        // Cache `Missing` = genuinely missing, so the required-fail-closed
-                        // check fires again on every cache hit (not bypassed by the cache).
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                         if companion_entry.required {
-                            // C7: required companion not installed locally → fail closed.
-                            // The companion was supposed to be installed by Phase 3 discovery.
-                            // Running without it would violate the invariant that required
-                            // companions always contribute to the overlay env.
+                            // Install-time discovery should have installed it: fail closed.
                             return Err(crate::Error::from(
                                 crate::error::PackageErrorKind::RequiredCompanionFailed {
                                     companion: companion_id.clone(),
@@ -1430,11 +946,8 @@ impl PackageManager {
                         continue;
                     }
                     Err(error) => {
-                        // C7 fail-closed: a lookup error for a required companion must not
-                        // silently skip. An index I/O error, deserialization error, or
-                        // corrupt root document is not equivalent to "companion not installed" —
-                        // it is an unexpected failure that could mask a missing required
-                        // companion.  Only optional companions may warn-and-skip here.
+                        // A lookup error is not "not installed" and could mask a missing required
+                        // companion: only optional ones warn and skip.
                         if companion_entry.required {
                             return Err(crate::Error::from(
                                 crate::error::PackageErrorKind::RequiredCompanionFailed {
@@ -1448,43 +961,17 @@ impl PackageManager {
                             companion_id,
                             admitted_id
                         );
-                        // Cache `Missing` (missing/failed) so subsequent admitted IDs skip
-                        // the lookup — the required-fail-closed check will still fire on
-                        // cache hits because `Missing` means "genuinely missing".
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                         continue;
                     }
                 };
 
-                // Project interface surface only (self_view=false — invariant: no private leak).
-                //
-                // C-017: `out.entries` AND `out.admitted_integrations` are both
-                // read here. A companion is a package loaded into the environment,
-                // so it contributes every carrier a package contributes and gets no
-                // exceptional rules. Attribution rides the pair's own
-                // `PinnedPackageRef` — the companion's, never the base's — so a
-                // consumer can always tell site policy from what it asked for.
-                //
-                // `admitted_binaries` / `admitted_entrypoints` stay discarded, and
-                // that is not an inconsistency: both are PATH-shaped claims about
-                // executables the overlay never puts on PATH, so admitting them
-                // would advertise binaries no consumer can reach.
-                //
-                // `collect_integrations` is the OUTER composition's gate, not
-                // this projection's: the projection is pinned to the interface
-                // surface, so deriving the gate here would resolve payloads on
-                // every env resolution only to discard them under `--self`.
+                // Interface surface, attributed to the companion. Binaries and entrypoints stay dropped:
+                // never on PATH here, so admitting them would advertise unreachable binaries.
                 let companion_arc = std::sync::Arc::new(companion_install_info);
                 match composer::compose_companion(&companion_arc, package_store, collect_integrations).await {
                     Ok(out) => {
-                        // This IS the first admitted base that matched the companion —
-                        // reaching a cache miss proves no earlier base emitted it — so
-                        // the contribution is moved straight into this base's overlay
-                        // and the cache records only that it happened.
-                        //
-                        // Either half may be empty (private-only companions produce no
-                        // entries, and declaring no integrations is the common case);
-                        // empty is still `Projected`, never `Missing`.
+                        // A cache miss proves no earlier base emitted it; empty output is still `Projected`.
                         let pinned = companion_arc.identifier().clone();
                         companion_overlay
                             .entries
@@ -1494,8 +981,7 @@ impl PackageManager {
                     }
                     Err(error) => {
                         if companion_entry.required {
-                            // C7: required companion present locally but env-composition
-                            // failed → fail closed. Do not silently emit a partial overlay.
+                            // Present but composition failed: fail closed, never a partial overlay.
                             return Err(crate::Error::from(
                                 crate::error::PackageErrorKind::RequiredCompanionFailed {
                                     companion: companion_id.clone(),
@@ -1508,40 +994,25 @@ impl PackageManager {
                             companion_id,
                             admitted_id
                         );
-                        // Cache `Missing` (composition failed) — if this companion is
-                        // required for another admitted identifier, the cache-hit path
-                        // will fail closed.
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                     }
                 }
             }
 
-            // Both halves are checked: a companion that declares integrations but
-            // no interface env var still has something to contribute under this base.
+            // A companion with integrations but no interface env still contributes.
             if !companion_overlay.entries.is_empty() || !companion_overlay.integrations.is_empty() {
                 patch_set.insert(admitted_id.clone(), companion_overlay);
             }
         }
 
-        // If the patch tier is active but no companions were found for any admitted
-        // identifier, return `Some(empty_map)` rather than `None` — the caller
-        // distinguishes "no patch tier" (None) from "patch tier active but no companions"
-        // (Some(empty)).  The overlay loop in `resolve_env` iterates `admitted` and
-        // looks up each in the map, so an empty map produces no extra entries.
         Ok(Some(patch_set))
     }
 
-    /// The digest a companion composes at: the active
-    /// [`PatchSnapshot`](crate::patch::PatchSnapshot) pin when one is loaded,
-    /// else the patch tier's own recorded pin.
+    /// The digest a companion composes at: the active [`PatchSnapshot`](crate::patch::PatchSnapshot)
+    /// pin, else the recorded pin; `Ok(None)` = unpinned, which callers treat as not installed.
     ///
-    /// The snapshot wins because it is the explicit freeze
-    /// (`ocx patch freeze` / `OCX_PATCH_SNAPSHOT`). Its key is built by
-    /// [`crate::patch::snapshot::companion_key`] — the same helper the freeze
-    /// writes with — so it pins a repository AT A TAG, matching the record's
-    /// own per-tag granularity. `Ok(None)` = this companion has no pin, which
-    /// callers treat as "not installed" (the required-fail-closed gate then
-    /// fires as normal).
+    /// The snapshot key ([`crate::patch::snapshot::companion_key`], shared with the freeze writer)
+    /// pins a repository at a tag, matching the record's per-tag granularity.
     pub(super) async fn companion_pin(
         &self,
         companion_id: &ocx_oci::PackageRef,
@@ -1556,12 +1027,8 @@ impl PackageManager {
         self.companion_pin_recorded(companion_id).await
     }
 
-    /// The patch tier's RECORDED companion pin, ignoring any active snapshot.
-    ///
-    /// `ocx patch freeze` must snapshot live state, so the roots it reads have
-    /// to come from the record — reading through
-    /// [`companion_pin`](Self::companion_pin) would let a freeze re-freeze its
-    /// own snapshot.
+    /// The recorded companion pin, ignoring any snapshot: `ocx patch freeze` must snapshot live
+    /// state, and reading through [`companion_pin`](Self::companion_pin) re-freezes its own output.
     pub(super) async fn companion_pin_recorded(
         &self,
         companion_id: &ocx_oci::PackageRef,
@@ -1574,8 +1041,7 @@ impl PackageManager {
         match ocx_oci::Digest::try_from(recorded.as_str()) {
             Ok(digest) => Ok(Some(digest)),
             Err(error) => {
-                // A malformed record is not a resolution answer — treat the
-                // companion as unpinned so a required one still fails closed.
+                // A malformed record is unpinned, so a required companion still fails closed.
                 log::warn!(
                     "site-patch-set: companion pin for '{}' has an invalid digest '{}': {error}; ignoring",
                     companion_id,
@@ -1586,37 +1052,11 @@ impl PackageManager {
         }
     }
 
-    /// Look up a companion's installed `InstallInfo` from the patch-tier pin and
-    /// the package store, without contacting the network.
+    /// A companion's installed `InstallInfo` from its patch-tier pin and the package store,
+    /// network-free; `Ok(None)` when unpinned or not installed locally.
     ///
-    /// ## Resolution algorithm
-    ///
-    /// A companion pin records the TOP manifest digest (image index for a
-    /// multi-platform companion, image manifest otherwise); the package,
-    /// however, is stored at the PLATFORM MANIFEST digest. So:
-    ///
-    /// 1. Read the pin ([`companion_pin`](Self::companion_pin) — snapshot ▸
-    ///    record). No pin → the companion was never discovered here; report it
-    ///    as not installed. The local index is deliberately NOT consulted: a
-    ///    companion is never pinned there, so a package-tier tag pointer that
-    ///    happens to exist for the same repository is somebody else's answer.
-    /// 2. If the manifest blob at that digest is locally cached, read it and perform
-    ///    platform selection:
-    ///    - `Manifest::ImageIndex` → select the child manifest matching `platform`,
-    ///      returning its digest as the pinned identifier.
-    ///    - `Manifest::Image` → the pinned digest already IS the platform digest;
-    ///      use it directly.
-    /// 3. If the manifest blob is absent from the local cache, fall back to using
-    ///    the pinned digest directly and call `find_in_store`. This covers a
-    ///    single-platform companion and a locally materialized one
-    ///    (`ocx patch test --companion-archive`), whose pin already names the
-    ///    platform manifest.
-    ///
-    /// Returns `Ok(None)` when the companion is not pinned or not installed locally.
-    ///
-    /// `platform` is the platform being composed FOR — the caller's `-p`, not
-    /// the host. It is consumed only in step 2's image-index selection; a pin
-    /// that already names a platform manifest leaves nothing to select from.
+    /// Never asks the local index for a pin: a same-repository package-tier tag pointer is
+    /// somebody else's answer. `platform` is the one composed FOR (the caller's `-p`).
     async fn find_companion_local(
         &self,
         companion_id: &ocx_oci::PackageRef,
@@ -1624,20 +1064,13 @@ impl PackageManager {
     ) -> crate::Result<Option<InstallInfo>> {
         use super::common::find_in_store;
 
-        // Step 1: the patch tier's own pin — the only binding that decides
-        // which companion version composes. `Ok(None)` = not discovered here.
         let Some(top_digest) = self.companion_pin(companion_id).await? else {
             return Ok(None);
         };
 
-        // Steps 2/3 read the manifest the pin names, digest-addressed and
-        // network-free — see `companion_manifest_index`.
         let local_index = companion_manifest_index(self);
 
-        // Step 2: attempt to read the top-level manifest blob and perform platform
-        // selection for image-index companions. If the blob is not cached (returns
-        // None — the companion was never pulled on this machine), fall through
-        // to Step 3 which uses the tag-store digest directly.
+        // Cached top manifest: platform-select an image index; uncached falls through below.
         let top_id = companion_id.clone_with_digest(top_digest.clone());
         if let Some(top_manifest) = local_index.fetch_manifest(&top_id, IndexOperation::Query).await? {
             let pinned_id = match top_manifest {
@@ -1648,11 +1081,8 @@ impl PackageManager {
                         Err(_) => return Ok(None),
                     }
                 }
-                // Multi-platform image index: select the child manifest for the
-                // platform being composed FOR — the caller's `-p`, not the host, or
-                // a companion that ships no host leaf resolves as absent and a
-                // required one fails closed.  The image index blob was cached by
-                // Phase 3 `pull`, so `select` reads it locally.
+                // Select for the composed-FOR platform, not the host, or a companion with no host
+                // leaf resolves absent and a required one fails closed.
                 (_, ocx_oci::Manifest::ImageIndex(_)) => {
                     let selected_id = match local_index.select(&top_id, platform, IndexOperation::Query).await? {
                         SelectResult::Found(id) => id,
@@ -1672,51 +1102,22 @@ impl PackageManager {
             return Ok(result);
         }
 
-        // Step 3 (fallback): manifest blob absent from local cache.
-        //
-        // The pinned digest may already BE the platform manifest digest — the
-        // single-platform case, and the locally materialized one where
-        // `ocx patch test --companion-archive` pinned what `pull_local`
-        // produced. Try `find_in_store` with it: present → that was the case;
-        // absent → the companion is genuinely not installed locally and
-        // `find_in_store` returns `None` → caller treats as missing.
+        // Uncached manifest: the pin may already be the platform digest (single-platform, or
+        // `ocx patch test --companion-archive`); `find_in_store` decides, absent = `None`.
         let pinned_id = match ocx_oci::PinnedPackageRef::try_from(companion_id.clone_with_digest(top_digest)) {
             Ok(id) => id,
             Err(_) => return Ok(None),
         };
-        // `find_in_store` only ever returns `PackageErrorKind::Internal(inner)` or
-        // `Ok(None)` — it never emits other variants. The `From<PackageErrorKind>`
-        // impl already extracts the inner error for the `Internal` arm and wraps
-        // others structurally (no `.to_string()` erasure).
         let result = find_in_store(&self.file_structure().packages, &pinned_id)
             .await
             .map_err(crate::Error::from)?;
         Ok(result)
     }
 
-    /// Resolve GC roots from the site-patch tier (strictly offline, no network).
+    /// GC roots from the site-patch tier, strictly offline; empty with no `[patches]`.
     ///
-    /// Returns a [`SitePatchRoots`] containing the pinned identifiers of all
-    /// companion packages and the blob digests of all descriptor blobs that
-    /// must survive garbage collection.  These roots are seeded into
-    /// [`crate::tasks::garbage_collection::GarbageCollector`]
-    /// alongside project-registry roots.
-    ///
-    /// When no `[patches]` section is configured (`self.patches()` is `None`),
-    /// returns an empty `SitePatchRoots`.  This method never contacts the
-    /// network in any `ChainMode`.
-    ///
-    /// # Parameters
-    ///
-    /// - `platform` — selects the child manifest of a multi-platform companion's
-    ///   image index, so the pinned identifier matches the path the package was
-    ///   actually installed at. Both callers (GC root derivation, `ocx patch
-    ///   freeze`) pass the host platform.
-    /// - `scope` — which patch-tier pins to read; see [`PatchRootScope`].
-    ///   `ocx patch freeze` passes [`PatchRootScope::Recorded`] so it snapshots
-    ///   live state; garbage collection passes
-    ///   [`PatchRootScope::RecordedAndSnapshot`] so it retains everything an
-    ///   active freeze still composes.
+    /// `platform` picks a multi-platform companion's child so the pin matches its install path
+    /// (callers pass the host); `scope` picks which pins count ([`PatchRootScope`]).
     ///
     /// # Errors
     ///
@@ -1726,7 +1127,6 @@ impl PackageManager {
         platform: &ocx_oci::Platform,
         scope: PatchRootScope,
     ) -> crate::Result<SitePatchRoots> {
-        // Short-circuit: no patch tier configured → empty roots.
         let Some(patches) = self.patches() else {
             return Ok(SitePatchRoots::default());
         };
@@ -1735,51 +1135,24 @@ impl PackageManager {
         let blob_store = &file_structure.blobs;
         let symlink_root = file_structure.symlinks.root().to_path_buf();
 
-        // Same reader `find_companion_local` composes through, so a GC root and
-        // the thing compose resolves are derived from one answer.
+        // Same reader as `find_companion_local`, so GC roots and compose derive from one answer.
         let local_index = companion_manifest_index(self);
 
-        // ── Step 1: Collect installed base identifiers via the shared enumerator. ──
-        //
-        // `enumerate_installed_bases` walks the symlink store and recovers real
-        // registry hostnames. Shared with `sync_patches` (patch_sync.rs) so there
-        // is exactly ONE symlink-store walk implementation (DRY).
         let installed_base_ids = super::patch_sync::enumerate_installed_bases(self.file_structure()).await?;
-        // `symlink_root` is no longer needed after the step above; drop the binding.
         let _ = symlink_root;
-
-        // ── Step 2: For each installed base + the global root, load descriptors. ──
-        //
-        // Descriptor sources:
-        //   (a) Global root — covers every base via rule matching.
-        //   (b) Per-base descriptor — specific to each installed base.
-        //
-        // We collect descriptor digests (manifest + layer) and companion entries.
 
         let mut companion_set: Vec<ocx_oci::PackageRef> = Vec::new();
         let mut descriptor_digests: Vec<(String, ocx_oci::Digest)> = Vec::new();
-        // Per-source manifest pins (source key "registry/repository" → manifest
-        // digest) used by `ocx patch freeze` to make compose select descriptors
-        // by frozen digest under an active snapshot (C8 whole-tier determinism).
         let mut descriptor_pins: Vec<(String, ocx_oci::Digest)> = Vec::new();
 
-        // Global descriptor (covers all bases via rule matching).
-        //
-        // Load the global descriptor blob digests once (they are the same
-        // regardless of which base we match against), and for each installed
-        // base derive companions via the global descriptor's rules.
-        // Using an empty identifier for the "global" case would only work for
-        // catch-all rules; iterating installed bases correctly handles both
-        // catch-all ("match: *") and scoped rules.
+        // Load the global descriptor once, then match its rules per installed base; an empty
+        // base identifier would match only catch-all rules, never scoped ones.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
         let global_tags_path = file_structure.patch_descriptor_path(&global_id);
 
-        // Load global descriptor once (blob digests and descriptor value).
         let (global_descriptor_opt, global_manifest_digest) = collect_descriptor_digests(
             blob_store,
-            // Blob CAS namespace: the descriptor id's bare-host registry (see the
-            // matching note in `build_site_patch_set`) — NOT the path-prefixed
-            // `patches.registry`.
+            // Bare-host registry, as in `build_site_patch_set`.
             global_id.registry(),
             &global_tags_path,
             &mut descriptor_digests,
@@ -1798,18 +1171,14 @@ impl PackageManager {
             descriptor_pins.push((descriptor_source_key(&global_id), manifest_digest));
         }
 
-        // Collect global companions for each installed base.
         if let Some(ref global_descriptor) = global_descriptor_opt {
             for base_id in &installed_base_ids {
                 for companion_entry in global_descriptor.collect_companions(base_id, patches.required) {
                     companion_set.push(companion_entry.identifier);
                 }
             }
-            // When no bases are installed, still seed the global descriptor
-            // digests (already done above via collect_descriptor_digests).
         }
 
-        // Per-base descriptors for each installed base.
         for base_id in &installed_base_ids {
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
             let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
@@ -1841,37 +1210,14 @@ impl PackageManager {
             }
         }
 
-        // ── Step 3: Resolve companion pins → platform-manifest pinned identifiers (local-only). ──
-        //
-        // The patch tier pins the TOP manifest digest (image index, or image
-        // manifest for a single-platform companion). The package store, however,
-        // keys by PLATFORM MANIFEST digest. Resolution mirrors `find_companion_local`:
-        //
-        //   a) Read the RECORDED pin (`companion_pin_recorded`) — deliberately not
-        //      `companion_pin`: `ocx patch freeze` builds its snapshot from these
-        //      roots, so reading through an active snapshot would let a freeze
-        //      re-freeze its own output instead of recording live state. Under
-        //      `PatchRootScope::RecordedAndSnapshot` the snapshot's own pin is
-        //      resolved AS WELL (never instead), because compose resolves
-        //      snapshot-first and GC must retain what compose will read.
-        //   b) If the manifest blob at that digest is locally cached, read it and
-        //      perform platform selection for image-index companions (multi-platform case).
-        //      For single-platform companions (`Manifest::Image`), the pinned digest
-        //      already IS the platform manifest digest.
-        //   c) If the blob is absent, fall back to the pinned digest directly
-        //      (correct for single-platform and locally materialized companions).
-        //
-        // This is required for both GC root correctness and `patch freeze` snapshot
-        // accuracy: the pinned identifier must match the path at which the package was
-        // actually installed.
+        // The patch tier pins the TOP manifest digest; the package store keys by the PLATFORM digest.
         let mut companions: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
-        // Dedup companion identifiers before resolution (same companion may appear
-        // in multiple descriptor sources).
         companion_set.sort_by_key(|id| id.to_string());
         companion_set.dedup_by_key(|id| id.to_string());
 
         for companion_id in &companion_set {
-            // Step a: read the recorded patch-tier pin.
+            // The RECORDED pin: freeze builds its snapshot from these roots, so reading through a
+            // snapshot re-freezes its own output. Snapshot pins are added below, never instead.
             let top_digest = match self.companion_pin_recorded(companion_id).await {
                 Ok(Some(digest)) => digest,
                 Ok(None) => {
@@ -1890,36 +1236,26 @@ impl PackageManager {
                 }
             };
 
-            // Steps b/c: pin → platform manifest.
             if let Some(pinned) = resolve_companion_pinned(&local_index, companion_id, &top_digest, platform).await {
                 companions.push(pinned);
             }
         }
 
-        // Step 4 (GC only): every companion an active freeze pins is a root as
-        // well. Taken from the snapshot's own companion map rather than by
-        // re-reading pins for `companion_set`, because BOTH bindings can have
-        // moved since the freeze: the recorded digest (a sync advanced it) and
-        // the descriptor that names the companion at all (a sync advanced that
-        // too, possibly dropping the rule). Compose under a freeze reads the
-        // snapshot for both, so the root set has to as well.
+        // GC only: every snapshot-pinned companion is a root, read from the snapshot's own map,
+        // since a sync may have advanced both the recorded digest and the rule naming it.
         for (companion_id, top_digest) in snapshot_companion_roots(self, scope) {
             if let Some(pinned) = resolve_companion_pinned(&local_index, &companion_id, &top_digest, platform).await {
                 companions.push(pinned);
             }
         }
 
-        // Dedup and sort both vecs for deterministic output.
         companions.sort_by_key(|pinned| pinned.to_string());
         companions.dedup_by_key(|pinned| pinned.to_string());
 
         descriptor_digests.sort_by_key(|(registry, digest)| format!("{registry}/{digest}"));
         descriptor_digests.dedup_by_key(|(registry, digest)| format!("{registry}/{digest}"));
 
-        // Dedup descriptor pins by source key — multiple installed version tags
-        // of the same repository resolve to the same package-specific descriptor
-        // source (same key, same manifest digest), so one entry per source
-        // suffices. Sort for deterministic snapshot output.
+        // One pin per source: installed tags of one repository share a descriptor source.
         descriptor_pins.sort_by(|(left, _), (right, _)| left.cmp(right));
         descriptor_pins.dedup_by(|(left, _), (right, _)| left == right);
 
@@ -1931,16 +1267,10 @@ impl PackageManager {
     }
 }
 
-/// Size of a chain blob's on-disk `data` file, or `-1` when it cannot be
-/// stat'd. Manifest entries are guaranteed on disk by the `ResolvedChain`
-/// invariant (`ChainedIndex` write-through), so this only meaningfully
-/// returns `-1` for the trailing config blob — which the callers above
-/// never pass here (config size comes from its descriptor).
+/// Size of a chain blob's on-disk `data` file, or `-1` when it cannot be stat'd.
 ///
-/// A bare `metadata()` (not a `BlobGuard`-locked read) is deliberate: the
-/// value is cosmetic (inspect display only, never correctness-bearing) and
-/// the store is content-addressed, so a concurrent rewrite of the same
-/// digest writes byte-identical content — a race cannot yield a wrong size.
+/// An unlocked `metadata()` suffices: the value is display-only and the store is
+/// content-addressed, so a concurrent rewrite cannot change the size.
 async fn blob_data_size(
     file_structure: &ocx_store::file_structure::FileStructure,
     pinned: &ocx_oci::PinnedPackageRef,
@@ -1955,52 +1285,20 @@ async fn blob_data_size(
     }
 }
 
-// ── Phase 4 helpers ───────────────────────────────────────────────────────────
-
 /// Outcome of a descriptor load from the tag store + CAS.
-///
-/// Distinguishes three meaningful states so callers can apply correct
-/// fail-closed logic:
-///
-/// - `NotPresent` — tag-store says "never looked" or "looked, no patch":
-///   skip silently (not an error).
-/// - `Loaded(digest, descriptor)` — descriptor read and parsed successfully.
-///   `digest` is the manifest digest parsed from the tag-store JSON.
-/// - `Corrupt(error, manifest_digest)` — tag-store records
-///   `LookedHasDescriptor` but the CAS blob is missing or unreadable.
-///   This is **not** a "no patch" case — the descriptor existed at discovery
-///   time but is now corrupt or tampered.  Callers that enforce `required =
-///   true` should fail closed here (C7).  `manifest_digest` is `Some` when
-///   the stored digest string was parseable (CAS blob corrupt or absent) and
-///   `None` when the digest string itself was malformed.
 #[derive(Debug)]
 enum DescriptorLoadResult {
+    /// Never looked, or looked and found none: skip silently.
     NotPresent,
-    /// Descriptor loaded successfully.  The `manifest_digest` is the OCI manifest
-    /// digest read from the tag-store JSON (same value as
-    /// `PatchDiscoveryState::LookedHasDescriptor::manifest_digest` after parsing).
-    /// Carrying it here avoids a second tag-store read in callers that need the
-    /// digest (e.g. `collect_descriptor_digests`).
+    /// Read and parsed; carries the tag-store manifest digest so callers skip a second read.
     Loaded(ocx_oci::Digest, PatchDescriptor),
-    /// Descriptor could not be loaded.  `manifest_digest` is `Some` when the
-    /// tag-store JSON contained a parseable manifest digest but the CAS blob was
-    /// corrupt or missing; `None` when the stored digest string itself was
-    /// malformed.  GC callers push the `Some` digest as a root so the manifest
-    /// blob survives even when the descriptor layer is damaged.
+    /// The tag store says a descriptor exists but the CAS blob is missing or unreadable:
+    /// tampering, never "no patch", so a required caller fails closed. The digest is `None`
+    /// when the stored string is malformed; GC roots a `Some` digest.
     Corrupt(crate::Error, Option<ocx_oci::Digest>),
 }
 
-/// Load a [`PatchDescriptor`] for the given tag-store path (offline, local only).
-///
-/// Reads the `PatchDiscoveryState` from the tag-store JSON at `tags_path`.
-///
-/// - `NeverLooked` / `LookedNoDescriptor` → [`DescriptorLoadResult::NotPresent`].
-/// - `LookedHasDescriptor` + readable CAS blob → [`DescriptorLoadResult::Loaded`].
-/// - `LookedHasDescriptor` + corrupt / missing CAS blob →
-///   [`DescriptorLoadResult::Corrupt`].  The caller decides whether to fail
-///   closed or warn + skip based on `required`.  A tag-store record saying
-///   "descriptor exists" is **not** the same as "no patch for this package" —
-///   it is a corruption / tamper event (C7 gap closure).
+/// Load the [`PatchDescriptor`] recorded at `tags_path`, offline.
 async fn load_descriptor_for_id(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
@@ -2017,10 +1315,7 @@ async fn load_descriptor_for_id(
             let digest = match ocx_oci::Digest::try_from(manifest_digest.as_str()) {
                 Ok(d) => d,
                 Err(_) => {
-                    // The stored manifest digest string is itself malformed —
-                    // treat as corruption (not "no patch").  No parseable digest
-                    // is available, so the `None` variant tells GC callers there
-                    // is no manifest blob to protect.
+                    // A malformed stored digest is corruption too; `None` = no manifest blob to protect.
                     let corrupt_err =
                         crate::Error::Digest(ocx_oci::digest::error::DigestError::Invalid(manifest_digest.clone()));
                     return Ok(DescriptorLoadResult::Corrupt(corrupt_err, None));
@@ -2028,9 +1323,7 @@ async fn load_descriptor_for_id(
             };
             match load_descriptor_from_cas(blob_store, registry, &digest).await {
                 Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(digest, descriptor)),
-                // The manifest digest parsed fine but the CAS blob is corrupt or
-                // missing.  Carry the digest so GC callers can protect the
-                // manifest blob even when the descriptor layer is unreadable.
+                // Carry the digest so GC still protects the manifest blob.
                 Err(error) => Ok(DescriptorLoadResult::Corrupt(error, Some(digest))),
             }
         }
@@ -2046,18 +1339,10 @@ fn host_platform() -> ocx_oci::Platform {
     ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any)
 }
 
-/// Load a descriptor honouring an active freeze snapshot (C8 whole-tier
-/// determinism).
-///
-/// When `snapshot` is `Some`, descriptor SELECTION is frozen: the manifest
-/// digest comes from the snapshot's per-source pin
-/// ([`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors),
-/// keyed by [`descriptor_source_key`]) and is loaded directly from the CAS,
-/// BYPASSING the live tag store. A source absent from the snapshot is treated as
-/// `NotPresent` — the frozen tier did not include it, so a later `ocx patch
-/// sync` that publishes a new descriptor cannot change which companions a frozen
-/// build composes. When `snapshot` is `None`, the live tag-store load applies
-/// (the tier floats), via [`load_descriptor_for_id`].
+/// Load a descriptor, frozen under an active snapshot: its manifest digest comes from the
+/// snapshot's per-source pin ([`descriptor_source_key`]) and loads from the CAS, bypassing the
+/// live tag store. A source absent from the snapshot is `NotPresent`, so a post-freeze
+/// `ocx patch sync` cannot change what a frozen build composes. No snapshot: the tier floats.
 async fn load_descriptor_frozen_or_live(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
@@ -2068,31 +1353,21 @@ async fn load_descriptor_frozen_or_live(
     use super::patch_discovery::load_descriptor_from_cas;
 
     let Some(snapshot) = snapshot else {
-        // No snapshot active → float: select the descriptor from the live tag store.
         return load_descriptor_for_id(blob_store, registry, tags_path).await;
     };
 
-    // Snapshot active → freeze descriptor selection by the pinned manifest digest.
     match snapshot.descriptors.get(&descriptor_source_key(descriptor_id)) {
         Some(manifest_digest) => match load_descriptor_from_cas(blob_store, registry, manifest_digest).await {
             Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(manifest_digest.clone(), descriptor)),
-            // The pinned blob is missing/corrupt in the local CAS. Carry the
-            // digest so the C7 fail-closed check in the caller fires for a
-            // required tier rather than silently dropping the overlay.
+            // Carry the digest so a required tier fails closed instead of dropping the overlay.
             Err(error) => Ok(DescriptorLoadResult::Corrupt(error, Some(manifest_digest.clone()))),
         },
-        // Source not in the frozen tier → it did not exist at freeze time, so a
-        // frozen build must not compose it.
         None => Ok(DescriptorLoadResult::NotPresent),
     }
 }
 
-/// Merge companions from global and package-specific descriptors for `base_id`.
-///
-/// Global companions are collected first (lower precedence). Package-specific
-/// companions are collected second; when the same companion identifier appears
-/// in both descriptors, the package-specific entry overrides the global one
-/// (last-wins semantics matching the Phase 3 install algorithm).
+/// Merge global then package-specific companions for `base_id`; on the same companion
+/// identifier the package-specific entry wins, as in install-time discovery.
 fn merge_companions(
     base_id: &ocx_oci::PackageRef,
     tier_required_default: bool,
@@ -2104,13 +1379,11 @@ fn merge_companions(
     let mut companion_order: Vec<ocx_oci::PackageRef> = Vec::new();
     let mut companion_map: HashMap<ocx_oci::PackageRef, crate::patch::CompanionEntry> = HashMap::new();
 
-    // Collect from global first, then package-specific.
     for descriptor in [global_descriptor, pkg_descriptor].into_iter().flatten() {
         for entry in descriptor.collect_companions(base_id, tier_required_default) {
             if !companion_map.contains_key(&entry.identifier) {
                 companion_order.push(entry.identifier.clone());
             }
-            // Overwrite: later (package-specific) entry wins for `required` flag.
             companion_map.insert(entry.identifier.clone(), entry);
         }
     }
@@ -2121,48 +1394,17 @@ fn merge_companions(
         .collect()
 }
 
-// ── Phase 5A helpers ─────────────────────────────────────────────────────────
-
 /// Restore an installed base's real registry hostname from its root document.
 ///
-/// The symlink store names registry directories by the *slug* of the registry
-/// (`to_relaxed_slug`), which is lossy for port-containing or otherwise
-/// non-slug-safe hostnames (`localhost:5000` -> `localhost_5000`). The local
-/// index's wire-grammar root document (`adr_index_indirection.md` A2),
-/// written at refresh/resolve time, records the canonical physical location
-/// in its `repository` field as an `oci://<registry>/<repository>` pointer;
-/// reading it back and stripping the C3 `oci://` scheme
-/// (`OciIdentifier::parse_repository_pointer`) recovers the exact hostname so descriptor
-/// rule matching globs against the real identifier string.
-///
-/// The recovered host is accepted only when its store slug
-/// ([`ocx_store::file_structure::slugify`], the function the directory names
-/// are made with) equals the directory's registry slug. An index-routed name
-/// (`ocx.sh/cmake`) has a root whose `repository` names the physical location
-/// on another registry (`oci://ghcr.io/ocx-contrib/cmake`); that host is not
-/// this name's registry, so the logical base is kept.
-///
-/// ponytail: a logical port-host (`localhost:5000`) that an index routes to a
-/// different physical host stays in slug form (`localhost_5000`), so a
-/// `localhost:5000/...` descriptor rule does not match it. Upgrade path:
-/// recover the logical host from the configured index sources instead of the
-/// root document.
-///
-/// Falls back to the slug-form identifier unchanged on any read/parse miss (a
-/// missing root document, malformed JSON, or a `repository` value that fails
-/// the `oci://` scheme parse) — the slug form still matches catch-all rules
-/// and standard dotted registries, so this only refines the port-registry
-/// edge and never regresses the common path.
-///
-/// `pub(super)` so [`super::patch_sync::enumerate_installed_bases`] can share
-/// this helper without duplicating the slug-recovery logic.
+/// Store slugs are lossy for port hosts (`localhost:5000` -> `localhost_5000`); the index root
+/// keeps the canonical `oci://` pointer (`adr_index_indirection.md` § A2, § C3). Any read or
+/// parse miss returns the slug form, which still matches catch-all rules.
+/// ponytail: a port host an index routes elsewhere stays in slug form, so a
+/// `localhost:5000/...` rule misses it; upgrade by reading the index sources.
 pub(super) async fn recover_base_with_real_registry(
     snapshot: &ocx_index::IndexStore,
     slug_base_id: &ocx_oci::PackageRef,
 ) -> ocx_oci::PackageRef {
-    // The wire-grammar root document carries a `"repository"` field
-    // (`oci://<registry>/<repo>`, A2), so the slug-recovery parse below reads
-    // it and strips the C3 `oci://` scheme via `OciIdentifier::parse_repository_pointer`.
     let real_registry = match snapshot
         .read_root_document_bytes(slug_base_id.registry(), slug_base_id.repository())
         .await
@@ -2174,9 +1416,8 @@ pub(super) async fn recover_base_with_real_registry(
             .map(|location| location.registry().to_string()),
         Ok(None) | Err(_) => None,
     };
-    // Only accept a host that un-slugs this directory name. An index-routed
-    // name's root points at its physical location on another registry, and
-    // physical data must never become package identity.
+    // Accept only a host that un-slugs this directory: an index-routed root names a physical
+    // location elsewhere, which must never become package identity.
     match real_registry {
         Some(registry)
             if registry != slug_base_id.registry()
@@ -2190,28 +1431,15 @@ pub(super) async fn recover_base_with_real_registry(
     }
 }
 
-/// Walk one directory level looking for `candidates/` subdirectories.
-///
-/// The symlink store layout is:
+/// Recursively collect one `PackageRef` per `candidates/{tag}` under `dir`, with the
+/// registry slug as registry:
 /// ```text
 /// {symlink_root}/{registry_slug}/{repo_component_1}/.../candidates/{tag}
 /// ```
 ///
-/// This function is called recursively: when the current directory is
-/// `candidates`, each child entry is a tag, and an `PackageRef` is
-/// constructed from `(registry_slug, repo_components, tag)`.  Otherwise the
-/// function descends into each child directory, appending it to
-/// `repo_components`.
-///
-/// Uses `tokio::fs::read_dir` — must be called from an async context.
-///
-/// `pub(super)` so [`super::patch_sync::enumerate_installed_bases`] can share
-/// the single symlink-store walk implementation.
-///
 /// # Errors
 ///
-/// Returns an error only on unexpected filesystem I/O failures (not on
-/// `NotFound`, which is handled by the caller).
+/// Only on unexpected filesystem I/O failures; a `NotFound` directory yields `Ok`.
 pub(super) async fn collect_candidates_from_dir(
     dir: &std::path::Path,
     registry_slug: &str,
@@ -2224,7 +1452,6 @@ pub(super) async fn collect_candidates_from_dir(
     };
 
     if dir_name == "candidates" {
-        // Each child of a `candidates/` dir is a tag → candidate symlink.
         let mut entries = match tokio::fs::read_dir(dir).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2240,16 +1467,13 @@ pub(super) async fn collect_candidates_from_dir(
             if tag.is_empty() {
                 continue;
             }
-            // Build an PackageRef using the registry slug as the registry
-            // (the slug is used by tag_store.patch_descriptor_path() via the same slugify
-            // function, so tag lookups use the same path).
+            // Slug as registry: `patch_descriptor_path` slugifies the same way, so lookups match.
             let base_id = ocx_oci::PackageRef::new_registry(&repo, registry_slug).clone_with_tag(&tag);
             out.push(base_id);
         }
         return Ok(());
     }
 
-    // Descend into child directories, extending the repo path.
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2262,22 +1486,16 @@ pub(super) async fn collect_candidates_from_dir(
     {
         let child_path = entry.path();
         let child_name = entry.file_name().to_string_lossy().to_string();
-        // Skip non-directory entries (e.g. `current` symlinks).
         match entry.file_type().await {
             Ok(file_type) if file_type.is_dir() => {}
             Ok(file_type) if file_type.is_symlink() => {
-                // Symlinks at the top level (e.g. `current`) — skip.
-                // Directories under a repo path that are symlinks would be
-                // unusual; skip them to avoid following unexpected links.
+                // Never follow symlinks (e.g. `current`).
                 continue;
             }
             _ => continue,
         }
-        // Do NOT push the "candidates" component into repo_components — it is
-        // a structural marker, not part of the repository name.  If we did push
-        // it, the repo string would become "myrepo/candidates" instead of
-        // "myrepo", producing a wrong base identifier (e.g.
-        // `"cmake/candidates:3.28"`) that fails scoped descriptor rule matching.
+        // Never push `candidates` into `repo_components`, or the base becomes
+        // `cmake/candidates:3.28` and fails scoped descriptor rule matching.
         if child_name == "candidates" {
             Box::pin(collect_candidates_from_dir(
                 &child_path,
@@ -2301,68 +1519,30 @@ pub(super) async fn collect_candidates_from_dir(
     Ok(())
 }
 
-/// Canonical `registry/repository` key identifying a patch descriptor source.
-///
-/// Both `ocx patch freeze` (which records the key in
-/// [`PatchSnapshot::descriptors`](crate::patch::PatchSnapshot::descriptors)) and
-/// [`PackageManager::build_site_patch_set`] (which looks the key up under an
-/// active snapshot) derive it from the SAME `global_descriptor_id` /
-/// `patch_descriptor_id` identifiers, so the freeze side and the compose side
-/// always agree on the key for a given source.
+/// Canonical `registry/repository` key of a patch descriptor source. `ocx patch freeze` and
+/// [`PackageManager::build_site_patch_set`] must derive it from the same descriptor ids, or a
+/// frozen build looks up keys the freeze never wrote.
 fn descriptor_source_key(descriptor_id: &ocx_oci::PackageRef) -> String {
     format!("{}/{}", descriptor_id.registry(), descriptor_id.repository())
 }
 
-/// Load a descriptor from the tag store + CAS, record its blob digests
-/// (manifest digest + layer digests from the manifest), and return the
-/// parsed [`PatchDescriptor`] when present.
+/// Load a descriptor, append its blob digests to `descriptor_digests`, and return it with its
+/// manifest digest; both `None` unless cleanly loaded, since freeze cannot pin unreadable bytes.
 ///
-/// Reuses [`load_descriptor_for_id`] for the tag-map read and CAS load, then
-/// extracts layer digests from the manifest blob on disk.
-///
-/// - `NotPresent` → returns `Ok(None)`.
-/// - `Corrupt` (best-effort skip) → pushes the manifest digest as a GC root
-///   when the stored digest was parseable (`Some`), then returns `Ok(None)`.
-///   This keeps the manifest blob alive even when the descriptor layer is
-///   corrupt, allowing the next `ocx clean` to retry after the corruption is
-///   resolved rather than over-collecting the manifest.
-/// - `Loaded` → appends manifest digest + all layer digests to
-///   `descriptor_digests` and returns `Ok(Some(descriptor))`.
-///
-/// Unlike the exec-overlay path, GC root derivation is best-effort:
-/// a corrupt descriptor is a debug log + skip rather than a fail-closed
-/// error.  Over-collection (dropping a still-needed companion) would be
-/// harmful; under-retention (keeping an orphan) is safe and will be
-/// corrected on the next `ocx clean` after the corruption is fixed.
-///
-/// The manifest digest is carried directly from [`DescriptorLoadResult`] —
-/// no second tag-store read is needed.
+/// A corrupt descriptor is debug-logged and skipped, not fail-closed, with its parseable manifest
+/// digest still rooted: over-collecting a needed companion is harmful, an orphan is safe.
 async fn collect_descriptor_digests(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
     tags_path: &std::path::Path,
     descriptor_digests: &mut Vec<(String, ocx_oci::Digest)>,
 ) -> crate::Result<(Option<PatchDescriptor>, Option<ocx_oci::Digest>)> {
-    // Delegate tag-map reading + CAS load to the existing helper so there is
-    // a single code path for the PatchDiscoveryState → DescriptorLoadResult
-    // transition.  This avoids duplicating the tag-map format and state
-    // matching logic (DRY).  The helper now returns the parsed manifest digest
-    // in both Loaded and Corrupt(_, Some(_)) so we never need a second read.
-    //
-    // Returns `(descriptor, manifest_digest)`. The manifest digest is `Some`
-    // ONLY for a cleanly-loaded descriptor — a corrupt descriptor is not pinned
-    // by `ocx patch freeze` (you cannot reproducibly select a descriptor whose
-    // bytes are unreadable), though its manifest blob is still seeded as a GC
-    // root so a later `ocx clean` does not over-collect.
     let load_result = load_descriptor_for_id(blob_store, registry, tags_path).await?;
 
     let (manifest_digest, descriptor) = match load_result {
         DescriptorLoadResult::NotPresent => return Ok((None, None)),
         DescriptorLoadResult::Corrupt(error, manifest_digest_opt) => {
             log::debug!("resolve-site-patch-roots: descriptor corrupt (best-effort GC root): {error}");
-            // Push the manifest blob as a GC root if the stored digest was
-            // parseable — the manifest at least survives even when the layer
-            // is missing.
             if let Some(manifest_digest) = manifest_digest_opt {
                 descriptor_digests.push((registry.to_string(), manifest_digest));
             }
@@ -2376,18 +1556,12 @@ async fn collect_descriptor_digests(
     Ok((Some(descriptor), Some(manifest_digest)))
 }
 
-/// Every companion an active freeze pins, as `(identifier, top digest)` pairs.
+/// Every companion an active freeze pins, as `(identifier, top digest)`; empty under
+/// [`PatchRootScope::Recorded`] or with no snapshot.
 ///
-/// Empty under [`PatchRootScope::Recorded`] and when no snapshot is loaded.
-/// The snapshot's own companion map is the authority here — not the
-/// descriptor-derived companion set — so a companion whose rule the live
-/// descriptor has since dropped is still retained for the frozen build that
-/// composes it. Keys are decoded by
-/// [`crate::patch::snapshot::companion_key_identifier`], the inverse of the
-/// helper the freeze wrote them with; a key in any other grammar is skipped.
-/// The tag it carries is advisory here — the digest is the whole binding, and
-/// the package store keys on registry + digest — but keeping it means one
-/// repository frozen at two tags seeds both of its digests.
+/// Read from the snapshot's own map, not the descriptor-derived set, so a companion the live
+/// descriptor has since dropped stays rooted. The advisory tag is kept so one repository
+/// frozen at two tags seeds both digests.
 fn snapshot_companion_roots(
     manager: &PackageManager,
     scope: PatchRootScope,
@@ -2405,13 +1579,8 @@ fn snapshot_companion_roots(
         .collect()
 }
 
-/// Seed the blob digests of a snapshot-pinned descriptor as GC roots.
-///
-/// Sibling of [`snapshot_companion_roots`] on the descriptor axis: under an
-/// active freeze compose loads each descriptor by its SNAPSHOT manifest digest
-/// from the CAS, so a root set built from the recorded pointer alone collects
-/// the descriptor blobs a frozen build still reads once a sync has advanced the
-/// record. No-op when the snapshot pins the digest already recorded.
+/// Root the blob digests of a snapshot-pinned descriptor: compose loads it by the SNAPSHOT
+/// digest, so record-only roots collect it once a sync advances the record.
 async fn seed_snapshot_descriptor_digests(
     manager: &PackageManager,
     scope: PatchRootScope,
@@ -2435,31 +1604,11 @@ async fn seed_snapshot_descriptor_digests(
     push_descriptor_blob_digests(blob_store, descriptor_id.registry(), pinned, descriptor_digests).await;
 }
 
-/// The reader both companion consumers — compose (`find_companion_local`) and
-/// the GC / freeze root set (`resolve_site_patch_roots`) — resolve a recorded
-/// pin through: strictly local, network-free in every `ChainMode`, and
-/// incapable of writing the local index.
+/// The local-only, network-free reader compose (`find_companion_local`) and GC/freeze
+/// (`resolve_site_patch_roots`) resolve a recorded pin through.
 ///
-/// The answer comes from the machine-global blob store, not the index. A
-/// companion install writes nothing under `index/` — not the root tag, not the
-/// dispatch object — so a digest-addressed `Op::Query` reports
-/// `AbsentDispatch` and recovers the image index from `$OCX_HOME/blobs`, where
-/// the pull staged and ref-linked it (`stage_and_link_chain_blobs`,
-/// `ChainRole::Index`). The read is digest-verified there, so nothing is
-/// weakened by the relocation.
-///
-/// Two properties are load-bearing rather than incidental:
-///
-/// - **`read_only_view`.** The blob-store recovery normally self-heals the
-///   image index back into `o/`; on a companion that would re-create the exact
-///   package-tier directory the pin move exists to keep empty, on the first
-///   compose after an install. `LocalWritePolicy::ReadOnly` suppresses it.
-/// - **No sources + `ChainMode::Offline`.** Compose and GC must never reach a
-///   registry, whatever the ambient mode. The local index home is still the
-///   effective (`--index` / `OCX_INDEX`) one: the lookup is digest-addressed
-///   and therefore immutable content, so a dispatch object that happens to be
-///   there — the same image index reached as a package the user DID name — is
-///   a correct, cheaper hit rather than a second source of truth.
+/// `read_only_view` stops blob-store recovery self-healing into `o/`, which would re-create
+/// the directory the pin move emptied.
 fn companion_manifest_index(manager: &PackageManager) -> ocx_index::Index {
     ocx_index::Index::from_chained_with_content_store(
         ocx_index::LocalIndex::new(ocx_index::LocalConfig {
@@ -2472,22 +1621,11 @@ fn companion_manifest_index(manager: &PackageManager) -> ocx_index::Index {
     .read_only_view()
 }
 
-/// Resolve one companion top digest to the pinned identifier the package store
-/// keys by, or `None` when it cannot be resolved locally.
+/// Resolve a companion top digest to the pinned identifier the package store keys by, as
+/// `find_companion_local` does; `None` if unresolvable locally.
 ///
-/// The patch tier pins the TOP manifest digest (image index, or image manifest
-/// for a single-platform companion); the package store keys by PLATFORM
-/// manifest digest. Mirrors `find_companion_local`:
-///
-/// - `Manifest::Image` → the top digest already IS the platform digest.
-/// - `Manifest::ImageIndex` → select the host-platform child manifest.
-/// - manifest blob absent → fall back to the top digest (correct for a
-///   single-platform or locally materialized companion).
-///
-/// The result keeps `companion_id`'s advisory tag. Package-store lookup ignores
-/// it (`PackageStore::path` keys on registry + digest), but `ocx patch freeze`
-/// reads this same set and keys its snapshot per tag — one repository named at
-/// two tags is two companions, and a tagless pin would collapse them.
+/// Keeps `companion_id`'s advisory tag: freeze keys its snapshot per tag, so a tagless pin
+/// collapses a repository frozen at two tags into one companion.
 async fn resolve_companion_pinned(
     local_index: &ocx_index::Index,
     companion_id: &ocx_oci::PackageRef,
@@ -2561,9 +1699,7 @@ async fn resolve_companion_pinned(
             )
         }
         Ok(None) => {
-            // Manifest blob absent — use the pinned top digest directly.
-            // Correct for single-platform companions; for multi-platform ones
-            // without a locally cached image index this is best-effort.
+            // Absent manifest blob: the top digest is exact for single-platform, best-effort otherwise.
             log::debug!(
                 "resolve-site-patch-roots: manifest blob absent for '{}'; using tag-store digest as fallback",
                 companion_id
@@ -2585,14 +1721,8 @@ async fn resolve_companion_pinned(
     }
 }
 
-/// Push one descriptor manifest digest and every layer digest it names onto the
-/// GC-root list.
-///
-/// Shared by the recorded-descriptor walk and the snapshot-pinned one, so both
-/// retain the same blob set. The manifest blob is re-read purely to parse its
-/// layer list — `load_descriptor_from_cas` already content-verified it on the
-/// recorded path, and on the snapshot path an unreadable blob is a root that
-/// simply matches nothing.
+/// Push a descriptor manifest digest and every layer digest it names onto the GC roots,
+/// shared by the recorded and snapshot walks so both retain the same blob set.
 async fn push_descriptor_blob_digests(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
@@ -2624,11 +1754,7 @@ async fn push_descriptor_blob_digests(
     }
 }
 
-// ── Specification tests — plan_resolution_chain_refs.md (revised) ────────
-//
-// These tests replace the deleted `chain_walk` module's tests 33-38. They
-// exercise `PackageManager::resolve` — now returning `ResolvedChain` — and
-// the chain-accumulation invariants promised by the design record.
+// Specification tests for `PackageManager::resolve` and its chain-accumulation invariants.
 #[cfg(test)]
 mod spec_tests {
     use tempfile::TempDir;
@@ -2844,16 +1970,9 @@ mod spec_tests {
     }
 }
 
-// ── Phase 4 specification tests — SitePatchSet + overlay (C-requirements) ──
-//
-// Traceability:
-//   C1 — global-last: overlay appended after compose → patch wins over root var
-//   C3 — surface gating: private dep absent under self_view=false, present under true
-//   C5 — self_view=true admits full TC so private deps' patches load
-//   Interface-only / no private leak — companion private env never surfaces
-//   No-config no-op — patches=None → output byte-identical to compose
-//   Admitted-set correctness — ComposeOutput.admitted visit order + dedup
-//   Offline/local — SitePatchSet built only from local state
+// Site-overlay invariants: a patch beats a root var; a private dep and its patches appear
+// only at self_view=true; a companion's private env never surfaces; no `[patches]` leaves
+// compose output unchanged; admitted visit order, dedup and the offline build hold.
 
 #[cfg(test)]
 mod phase4_spec_tests {
@@ -6023,7 +5142,7 @@ mod phase4_spec_tests {
         );
     }
 
-    // ── C-012 / D2: one integrations row per (package, namespace) ───────────
+    // ── One integrations row per (package, namespace) ───────────────────────
     //
     // The base roots and every companion are composed by SEPARATE `compose`
     // calls, and each dedups only within itself. A package reachable from two
@@ -6151,8 +5270,8 @@ mod phase4_spec_tests {
     /// The base compose admits the dep and emits its row; the companion's own
     /// projection admits the very same dep and emits it again. Neither compose
     /// can see the other's `seen` set, so without dedup at the merge the
-    /// consumer receives the identical (package, namespace) row twice — a D2 /
-    /// C-012 violation that reads as two independent declarations.
+    /// consumer receives the identical (package, namespace) row twice, which
+    /// reads as two independent declarations.
     ///
     /// The two legs reach the dep under DIFFERENT advisory tags, which is the
     /// axis the merge-site key turns on: rows carry the tag-bearing identifier,
@@ -6243,7 +5362,7 @@ mod phase4_spec_tests {
         );
     }
 
-    // ── C-017 / H-1: the --self surface never resolves a discarded payload ────
+    // ── The --self surface never resolves a discarded payload ─────────────────
 
     /// Under `--self` the composition carries zero integrations, so a
     /// companion's payload must never be resolved — not resolved and then
@@ -6417,17 +5536,9 @@ mod phase4_spec_tests {
     }
 }
 
-// ── Phase 5A specification tests — resolve_site_patch_roots (GC root derivation) ──
-//
-// Traceability:
-//   Spec test 1 — seeded installed base + global descriptor + installed companion
-//                 → companion PinnedPackageRef in .companions; descriptor manifest+layer
-//                 digests in .descriptors.
-//   Spec test 2 — ChainMode::Remote manager with companion installed locally
-//                 → still returns companion (proves network-free, local-only).
-//   Spec test 3 — patches=None → empty SitePatchRoots.
-//
-// These tests MUST compile and FAIL with unimplemented!() against the Phase 5A stub.
+// resolve_site_patch_roots derives GC roots from local state only, even under
+// ChainMode::Remote, and none with no `[patches]`; breaking this collects an in-use
+// companion or makes resolution depend on the network.
 #[cfg(test)]
 mod phase5a_spec_tests {
     use tempfile::TempDir;
@@ -7191,16 +6302,11 @@ mod phase5a_spec_tests {
     }
 }
 
-// ── Phase 5B specification tests — snapshot compose preference + offline_view carry ──
-//
-// Traceability:
-//   Test 4 — compose preference: snapshot digest wins over live tag lookup for a companion.
-//   Test 5 — with_patch_snapshot + offline_view carry the snapshot through.
-//
-// These tests MUST compile and FAIL against the Phase 5B stubs:
-//   - `build_site_patch_set` does not yet consult `self.patch_snapshot()`.
-//
-// After Phase 5B implementation all five tests must pass.
+// Phase 5B snapshot-preference invariants: once a patch snapshot is set, compose
+// must prefer its recorded companion digest over a live tag lookup, and
+// with_patch_snapshot plus offline_view must carry that snapshot through
+// unchanged. Breaking either lets compose silently re-resolve a companion against
+// the live registry instead of the pinned snapshot.
 
 #[cfg(test)]
 mod phase5b_spec_tests {
@@ -8011,7 +7117,7 @@ mod project_config_isolation_gate {
     }
 }
 
-/// C-036 / S-038(b) — the reserved-key gate lives at the `resolve_env*` seam.
+/// The reserved-key gate lives at the `resolve_env*` seam.
 ///
 /// Every assertion here reads the **observable product**: the entry vector the
 /// resolver hands out, and the shell text `conventions::emit_lines` builds from
@@ -8036,7 +7142,7 @@ mod c036_reserved_key_gate {
     const REGISTRY: &str = "example.com";
     const PATCH_REGISTRY: &str = "patches.example.com";
 
-    /// The three keys S-038 names, each a live consent-bypass primitive: the
+    /// The three reserved keys, each a live consent-bypass primitive: the
     /// whitelist itself, the private ledger carrier, and the denial switch.
     const RESERVED_KEYS: &[&str] = &["OCX_CONSENT_NAMESPACES", "__OCX_ENV_STATE", "OCX_NO_HOOK"];
 
@@ -8108,7 +7214,7 @@ mod c036_reserved_key_gate {
             .join("\n")
     }
 
-    /// S-038(b) — read-path compatibility. A package published before the write
+    /// Read-path compatibility. A package published before the write
     /// gate existed still resolves; only the reserved key is dropped.
     #[tokio::test(flavor = "multi_thread")]
     async fn published_package_with_a_reserved_key_still_resolves_without_that_key() {
@@ -8132,7 +7238,7 @@ mod c036_reserved_key_gate {
         }
     }
 
-    /// C-036 — the security assertion. A package-declared reserved key must not
+    /// The security assertion. A package-declared reserved key must not
     /// appear in the stream `ocx env --shell=bash`, `ocx direnv export` and
     /// `ocx package env` hand to `eval`.
     ///
@@ -8162,7 +7268,7 @@ mod c036_reserved_key_gate {
         }
     }
 
-    /// C-036 — the gate covers the patch-companion overlay too. A companion is
+    /// The gate covers the patch-companion overlay too. A companion is
     /// metadata from a *different* publisher, admitted by a site rule, so it is
     /// the same bypass with one more hop.
     #[tokio::test(flavor = "multi_thread")]
@@ -8219,7 +7325,7 @@ mod c036_reserved_key_gate {
         );
     }
 
-    /// C-036 — nothing leaves the resolver carrying a reserved key, including
+    /// Nothing leaves the resolver carrying a reserved key, including
     /// the caller-contributed tail. The project `[env]` and `ocx exec --env`
     /// surfaces each refuse these keys at parse time (a hard error); this is the
     /// resolver's own unconditional statement, so a future contributed source
@@ -8252,7 +7358,7 @@ mod c036_reserved_key_gate {
         );
     }
 
-    /// C-036 — the skip is narrow. `is_reserved_ocx_key` is prefix-anchored, and
+    /// The skip is narrow. `is_reserved_ocx_key` is prefix-anchored, and
     /// a key merely *containing* `OCX_` is an ordinary package variable.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_key_that_only_mentions_ocx_is_not_dropped() {

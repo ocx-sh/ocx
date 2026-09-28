@@ -12,12 +12,11 @@ use super::AuthoringError;
 
 /// A dependency in authoring (sidecar) form.
 ///
-/// Unlike the published [`Dependency`], the identifier's digest is optional:
+/// Unlike the published dependency, the identifier's digest is optional:
 /// a tag-only identifier declares "resolve me at `ocx package create` time".
 /// `create` resolves it against the selected index for its `--platform` and
-/// attaches the winning platform manifest's digest to the identifier itself,
-/// so the projection to the published form
-/// ([`AuthoringDependency::to_published`]) is a straight pass-through.
+/// attaches the winning platform manifest's digest to the identifier itself.
+// The digest rides on the identifier so `AuthoringDependency::to_published` stays a straight pass-through.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[expect(
     clippy::manual_non_exhaustive,
@@ -41,7 +40,7 @@ pub struct AuthoringDependency {
     pub name: Option<DependencyName>,
 
     /// Rejection sentinel for the retired per-platform `platforms` pin map.
-    /// Never carries a value — see [`reject_retired_platforms`].
+    /// Never carries a value — see `reject_retired_platforms`.
     #[serde(
         rename = "platforms",
         default,
@@ -53,12 +52,8 @@ pub struct AuthoringDependency {
     retired_platforms: (),
 }
 
-/// Refuses a dependency still carrying the retired `platforms` pin map.
-///
-/// The silent-drift case this exists for: serde would ignore the map, the
-/// dependency would read as tag-only, and `ocx package create` would re-resolve
-/// the mutable tag — swapping out the digest the publisher had locked without
-/// saying a word. Rejected by name; unknown *future* keys stay tolerated.
+/// Refuses the retired `platforms` pin map by name; ignored, it would read as
+/// tag-only and `create` would silently re-resolve the publisher's locked digest.
 fn reject_retired_platforms<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
     serde::de::IgnoredAny::deserialize(deserializer)?;
     Err(serde::de::Error::custom(
@@ -69,12 +64,7 @@ fn reject_retired_platforms<'de, D: serde::Deserializer<'de>>(deserializer: D) -
 }
 
 impl AuthoringDependency {
-    /// Returns the interpolation name for this dependency (explicit `name`
-    /// or a slugified form of the repository basename). Mirrors
-    /// [`Dependency::name`] — OCI repository grammar permits characters
-    /// (notably `.`, e.g. a repository named `open.jdk`) the slug grammar
-    /// does not, so the basename is sanitized via
-    /// [`default_dependency_name`] rather than asserted. Never panics.
+    /// The interpolation name: explicit `name`, else the slugified repository basename.
     pub fn name(&self) -> DependencyName {
         if let Some(name) = &self.name {
             return name.clone();
@@ -82,13 +72,10 @@ impl AuthoringDependency {
         default_dependency_name(self.identifier.name())
     }
 
-    /// `true` when this dependency carries a digest — i.e. `ocx package
-    /// create` has already resolved it, or the publisher pinned it by hand.
     pub fn is_pinned(&self) -> bool {
         self.identifier.digest().is_some()
     }
 
-    /// Returns the digest pin, when present.
     pub fn pinned(&self) -> Option<ocx_oci::PinnedPackageRef> {
         self.identifier.digest().is_some().then(|| {
             ocx_oci::PinnedPackageRef::try_from(self.identifier.clone()).expect("digest presence checked above")
@@ -99,8 +86,7 @@ impl AuthoringDependency {
     ///
     /// # Errors
     ///
-    /// [`AuthoringError::UnpinnedDependency`] when the dependency carries no
-    /// digest — the published form has no digest-less shape to project into.
+    /// [`AuthoringError::UnpinnedDependency`] when the dependency carries no digest.
     pub fn to_published(&self) -> Result<Dependency, AuthoringError> {
         Ok(Dependency {
             identifier: self.pinned().ok_or_else(|| AuthoringError::UnpinnedDependency {
@@ -112,13 +98,8 @@ impl AuthoringDependency {
     }
 }
 
-/// Ordered list of authoring-form dependencies.
-///
-/// Serializes as a JSON array; array position defines the canonical
-/// environment import order. Construction and deserialization enforce the
-/// same invariants as the published [`Dependencies`](crate::metadata::dependency::Dependencies):
-/// explicit registry per identifier (via [`ocx_oci::PackageRef`]'s deserializer),
-/// unique `(registry, repository)` pairs, unique explicit names.
+/// Ordered authoring-form dependencies, holding the same invariants as the
+/// published [`Dependencies`](crate::metadata::dependency::Dependencies).
 #[derive(Debug, Clone, Default)]
 pub struct AuthoringDependencies {
     entries: Vec<AuthoringDependency>,
@@ -126,9 +107,6 @@ pub struct AuthoringDependencies {
 
 impl AuthoringDependencies {
     pub fn new(entries: Vec<AuthoringDependency>) -> Result<Self, DependencyError> {
-        // The cap belongs to the published collection — that is the form the
-        // pre-push SSRF/DoS gate reads. Applying it here too reports an
-        // over-long list at authoring time instead of only on projection.
         if entries.len() > Dependencies::MAX_DEPENDENCIES {
             return Err(DependencyError::TooManyDependencies {
                 count: entries.len(),

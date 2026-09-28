@@ -1,20 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! How a signature was found. Populated by the client layer (referrer
-//! listing) and consumed by the verify pipeline, which reports it on each
-//! entry of `signatures[]`.
-//!
-//! # Carried constraint from G0 — read before touching verification time
-//!
-//! G0's keyless golden fixture carries a Fulcio certificate that expired
-//! about ten minutes after capture. **Certificate validity is anchored to the
-//! signing-time proof — the Rekor entry / SET — never to wall-clock "is this
-//! valid now".** A wall-clock check makes every keyless fixture rot within
-//! the hour and would be a real trust bug besides: a short-lived certificate
-//! is *designed* to be expired by the time anyone verifies it, and the
-//! transparency-log timestamp is the only evidence that the signature
-//! happened while the certificate was live.
+//! How a signature referrer was found.
 
 use serde::{Deserialize, Serialize};
 

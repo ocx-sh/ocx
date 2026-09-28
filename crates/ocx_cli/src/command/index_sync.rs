@@ -9,19 +9,8 @@ use ocx_index;
 use crate::api::data::index::{CatalogPreview, CatalogPreviewEntry};
 use crate::command::index_common;
 
-/// The whole-registry half of the one command family that moves a pin.
-///
-/// `ocx index update` refreshes the packages you name; this refreshes every
-/// package one or more registries' own catalogs name, which is how a whole
-/// mirror is snapshotted. It was first shipped as `index update --from-catalog`
-/// and promoted to a verb because the two shapes never combine: a flag that must
-/// exclude its own command's positionals is two commands wearing one name, and a
-/// registry list has nowhere to sit under a verb whose positionals are packages.
-///
-/// It shares `update`'s refresh loop ([`index_common`]) rather than owning one,
-/// so the bounded ceiling is stated once and covers a run over any number of
-/// registries. The user-facing help lives on the `Index::Sync` variant, which is
-/// what clap renders.
+/// Refreshes every package one or more registries' own catalogs name, through `update`'s refresh
+/// loop, so one bounded ceiling covers a run over any number of registries.
 #[derive(Parser)]
 pub struct IndexSync {
     #[clap(required = true, num_args = 1.., value_name = "REGISTRY")]
@@ -37,92 +26,49 @@ pub struct IndexSync {
 
 impl IndexSync {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Offline is checked first — the accessor IS the offline gate and
-        // constructs nothing — so `--offline --frozen` keeps reporting the
-        // stricter posture. `--dry-run` does not change that: enumerating a
-        // remote catalog is source contact.
+        // Offline first (the accessor is the offline gate), so `--offline --frozen` reports the stricter
+        // posture; `--dry-run` still contacts the source.
         let remote_index = context.oci_index()?;
 
-        // `--frozen` refuses the package tier's discovery verb. Recording a new
-        // tag → digest binding is exactly what a freeze exists to stop, and this
-        // verb does it in bulk. Placed before any index-source or refresh work
-        // so nothing is fetched and no pin can move.
-        //
-        // This is the ONLY frozen gate in this command, which is what
-        // `exactly_one_frozen_gate` exists to refuse a second of.
+        // Before any fetch: bulk tag → digest binding is what a freeze stops. The only frozen gate here;
+        // `exactly_one_frozen_gate` fails a second one.
         if context.config_view().frozen {
             return Err(index_common::policy_blocked("`ocx index sync`", "frozen").into());
         }
 
         let oci_index = ocx_index::Index::from_remote(remote_index.clone());
-        // Per-namespace static-file index sources, when online. A package in an
-        // index-bearing namespace refreshes through the two-hop index path
-        // rather than the registry (`adr_index_indirection.md` F5a — kind per
-        // NAMESPACE); every other package refreshes against the registry.
+        // Index-bearing namespaces refresh through their index source, the rest against the registry
+        // (`adr_index_indirection.md`).
         let index_sources = context.index_sources();
 
-        // Every registry is enumerated before any of them is refused: one
-        // unreachable source in a five-registry run must not cost the other four
-        // their snapshot. Each failure is recorded with its position in the
-        // deduplicated list and reported here — the aggregation below decides
-        // which one becomes the process error.
-        // Repeats dropped before anything is fetched, argument order preserved.
-        // `ocx index sync a a` is a plausible typo and a plausible shell loop's
-        // output; left alone it costs a second enumeration round trip, prints
-        // the registry twice under `--dry-run`, and refreshes every one of its
-        // packages twice — the second refresh blocking on the first's
-        // per-repository lock to learn nothing. Deduplicating here rather than
-        // on the flattened package set is what keeps the preview and the wet
-        // path agreeing about the set the command would touch.
+        // Deduplicated before any fetch, or a repeat refreshes twice and blocks on the first's lock; the
+        // registry list, not the packages, so the dry-run preview and the wet path agree.
         let mut seen = std::collections::HashSet::new();
         let registries: Vec<&String> = self.registries.iter().filter(|r| seen.insert(*r)).collect();
 
+        // All enumerated before any is refused, so one unreachable source does not cost the others.
         let mut enumerated = Vec::with_capacity(registries.len());
         let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         for (input_index, registry) in registries.iter().enumerate() {
             match enumerate_catalog(index_sources, &oci_index, registry).await {
                 Ok(packages) => {
-                    // A source that answered with nothing is not a failure —
-                    // C-013 draws the line at *absent* versus *empty*, and an
-                    // empty answer is an answer. But the wet path emits no
-                    // stdout payload, so an operator who asked to snapshot a
-                    // whole mirror and got a clean exit 0 and total silence
-                    // cannot tell that from a mirror that worked. That is this
-                    // plan's recurring defect reached through the one door still
-                    // open, and it is likelier than it looks: a pull token
-                    // without catalog scope commonly answers `200
-                    // {"repositories":[]}` rather than 401.
+                    // Logged: a pull token without catalog scope often answers an empty listing, not 401.
                     if packages.is_empty() {
                         index_common::log_empty_enumeration(registry);
                     }
                     enumerated.push(CatalogPreviewEntry::new((*registry).clone(), packages));
                 }
                 Err(error) => {
-                    // Reported here as well as at `main.rs`'s boundary, and the
-                    // redundancy is only apparent: one failure alone becomes the
-                    // process error, so in a multi-registry run every OTHER
-                    // failure is printed on this line and never reaches the
-                    // boundary. Through the shared funnel, which neutralizes
-                    // both halves — the chain quotes keys and names read off a
-                    // foreign tree, and `registry` is argv only until someone
-                    // adds an alias table.
+                    // Every failure but the returned one is reported only here.
                     index_common::log_failure("Failed to enumerate the catalog for", registry, &error);
                     failures.push((input_index, error));
                 }
             }
         }
 
-        // C-027: return BEFORE the refresh loop AND before the patch-descriptor
-        // piggyback. The piggyback runs after aggregation, does its own network
-        // I/O and writes OUTSIDE the index home, so leaving it reachable would
-        // make `--dry-run` write files that an "index home untouched" assertion
-        // would never see. No `CatalogTransaction` is begun on this path either,
-        // so C-023's `config.json` creation does not fire.
-        //
-        // A failed enumeration still fails the dry run: printing a partial set
-        // as if it were the answer is the empty-set success C-013 forbids, one
-        // registry at a time.
+        // Before the refresh and the patch piggyback, which write outside the index home.
         if self.dry_run {
+            // Fails rather than print a partial set that reads as success.
             if let Some(error) = index_common::first_failure(failures) {
                 return Err(error);
             }
@@ -130,16 +76,7 @@ impl IndexSync {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // C-014: a BARE identifier per enumerated repository, so
-        // `refresh_published` selects `RootScope::Package` — adopt every tag the
-        // source lists plus the package-level fields, and keep any tag only the
-        // local copy holds. A union of snapshots, not a replica.
-        //
-        // Flattened across registries, so the one bounded fan-out below caps the
-        // whole run rather than each registry separately.
-        // No second dedup here: the registry list was deduplicated above, and
-        // two DIFFERENT registries serving the same repository name are two
-        // packages, correctly — the registry is part of the identity.
+        // Flattened across registries so one bounded fan-out caps the whole run.
         let packages: Vec<ocx_oci::PackageRef> = enumerated
             .iter()
             .flat_map(|entry| {
@@ -153,14 +90,7 @@ impl IndexSync {
         let refresh_failure =
             index_common::refresh_packages(context.local_index(), index_sources, &oci_index, &packages).await;
 
-        // An enumeration failure outranks a refresh failure whatever their
-        // argument positions: it is the more fundamental fault — that registry
-        // contributed no work at all, while a refresh failure means the set was
-        // read and one member of it could not be fetched. Within each kind the
-        // lowest input index wins, so the exit is deterministic however the
-        // fan-out completed. No partial report either way: an action command
-        // with a nonzero exit emits no SUCCESS-shaped payload, and every failure
-        // is already on stderr.
+        // Enumeration failure outranks refresh failure: that registry contributed no work at all.
         if let Some(error) = index_common::first_failure(failures).or(refresh_failure) {
             return Err(error);
         }
@@ -171,39 +101,22 @@ impl IndexSync {
     }
 }
 
-/// Enumerates one registry's package set, live from the source (C-013).
-///
-/// Never from the local copy: the local `c/index.json` is the set this machine
-/// already snapshotted, so reading it would make the command a no-op against the
-/// very drift it exists to close.
-///
-/// Source selection reuses the existing routing rather than re-deciding it.
-/// [`OcxIndex::serves_registry`] is `jurisdiction`'s own first arm — the one that
-/// answers `Outside` with no I/O — asked at the granularity this question has,
-/// since there is no package yet to ask about.
+/// Enumerates one registry's package set, live from the source; never the local copy, which would
+/// make the command a no-op against the drift it exists to close.
 ///
 /// # Errors
 ///
-/// A listing endpoint that refuses surfaces that source's error verbatim, under
-/// the authoritative-stop rule: no fall-through to the registry, and never an
-/// empty-set success, which would silently snapshot nothing.
-///
-/// [`OcxIndex::serves_registry`]: ocx_index::OcxIndex::serves_registry
+/// A refusing listing endpoint surfaces its error: no fall-through to the registry, and never an
+/// empty-set success.
 async fn enumerate_catalog(
     index_sources: &[ocx_index::OcxIndex],
     oci_index: &ocx_index::Index,
     registry: &str,
 ) -> anyhow::Result<Vec<String>> {
     let mut packages = match index_sources.iter().find(|source| source.serves_registry(registry)) {
-        // Published: the site's own `c/index.json`, read live and persisted
-        // nowhere. `_strict` because an ABSENT catalog document is not an empty
-        // one — the tolerant reading exits 0 having refreshed nothing, which is
-        // C-013's authoritative stop inverted. A served catalog listing zero
-        // packages still succeeds.
+        // `_strict`: an absent catalog is not an empty one, and the tolerant read would exit 0 having
+        // refreshed nothing.
         Some(source) => {
-            // Which branch was taken is worth recording — see
-            // `index_common::log_published_enumeration`, which also explains why
-            // the macro lives there and not here.
             index_common::log_published_enumeration(registry);
             source
                 .fetch_catalog_strict()
@@ -217,21 +130,11 @@ async fn enumerate_catalog(
             oci_index.list_repositories(registry).await?
         }
     };
-    // Every key is foreign-authored, and above they become identifiers via
-    // `PackageRef::new_registry`, which does no validation — so the grammar
-    // every argv identifier passes is applied here instead. Without it a key of
-    // `../../..` survives into the request URL, where RFC 3986 normalization
-    // resolves it outside the index's declared base path. Checked before the
-    // refresh fan-out so a poisoned key costs no per-package I/O.
-    //
-    // `validate_repository`, not "parse it and drop the result": parsing splits
-    // the tag and digest off BEFORE the character-class, uppercase and length
-    // guards run, so `ns/pkg:<anything>` parses cleanly as the repository
-    // `ns/pkg` — and it is the whole key, not that repository, that
-    // `new_registry` then adopts. A key of `ns/pkg:\u{202e}gnp.exe` passed the
-    // parse-and-discard form and reached both a log line and a request URL
-    // intact.
+    // Foreign keys, and `new_registry` validates nothing: unchecked, `../../..` resolves outside the
+    // index base path in the request URL.
     for key in &packages {
+        // `validate_repository`, not parse-then-discard: parsing splits the tag off first, so
+        // `ns/pkg:<anything>` passes while `new_registry` adopts the whole key.
         ocx_oci::PackageRef::validate_repository(key).map_err(|error| {
             ocx_index::error::Error::MalformedCatalogKey {
                 index_source: registry.to_string(),
@@ -240,13 +143,8 @@ async fn enumerate_catalog(
             }
         })?;
     }
-    // C-012's "the lowest input index wins" is only deterministic if the input
-    // order is. Neither branch supplies one: the published branch drains a map's
-    // keys, so the order varies between runs of the same unchanged catalog, and
-    // a registry's `_catalog` listing is ordered by nothing this end controls.
-    // Sorted here rather than in `CatalogPreviewEntry::new` so BOTH paths
-    // inherit it — the preview sorts for its own reasons (C-027's Report row),
-    // and the refresh flattens off these vectors, not off the preview.
+    // Neither branch is ordered; sorted here so the preview and the refresh both inherit the order a
+    // deterministic exit needs.
     packages.sort();
     Ok(packages)
 }
@@ -254,13 +152,12 @@ async fn enumerate_catalog(
 #[cfg(test)]
 mod tests {
     //! Specification tests for `ocx index sync`'s CLI contract, written from
-    //! `design_spec_servable_index_snapshot.md` C-012, C-013, C-014 and C-027.
-    //! Each names the contract row it pins.
+    //! `design_spec_servable_index_snapshot.md`.
     //!
     //! The refresh itself needs a stub index source and a temp index home, which
-    //! is acceptance-tier work (S-004, S-012, S-018); what is pinned here is the
-    //! grammar, the identifier shape the loop is fed, and the structural claims
-    //! the contracts make about code that must *not* exist.
+    //! is acceptance-tier work covered by the acceptance suite; what is pinned
+    //! here is the grammar, the identifier shape the loop is fed, and the
+    //! structural claims the contracts make about code that must *not* exist.
 
     use super::*;
     use clap::{CommandFactory, FromArgMatches};
@@ -272,7 +169,7 @@ mod tests {
         IndexSync::command().try_get_matches_from(argv)
     }
 
-    // ── C-012 — grammar ──────────────────────────────────────────────────────
+    // ── grammar ──────────────────────────────────────────────────────────────
 
     #[test]
     fn a_registry_is_required() {
@@ -305,14 +202,14 @@ mod tests {
         assert_eq!(parsed.registries, ["ocx.sh"]);
     }
 
-    // ── C-014 — scope per enumerated package ────────────────────────────────
+    // ── scope per enumerated package ────────────────────────────────────────
 
     #[test]
     fn an_enumerated_repository_becomes_a_bare_identifier() {
         // `refresh_published` reads the scope off the identifier's shape:
-        // `Some(tag) => RootScope::Tag`, `None => RootScope::Package`. C-014
-        // wants `Package`, so what this command builds per catalog key must
-        // carry no tag — the whole contract turns on this one `None`.
+        // `Some(tag) => RootScope::Tag`, `None => RootScope::Package`. The
+        // contract wants `Package`, so what this command builds per catalog key
+        // must carry no tag — the whole contract turns on this one `None`.
         let identifier = ocx_oci::PackageRef::new_registry("kitware/cmake", "ocx.sh");
         assert!(
             identifier.tag().is_none(),
@@ -323,12 +220,13 @@ mod tests {
 
         // And that THIS command builds them that way. The assertions above are
         // properties of the constructor: the flatten could switch to
-        // `clone_with_tag` and every one of them would still pass while C-014's
+        // `clone_with_tag` and every one of them would still pass while the
         // package-scoped merge silently became a per-tag one.
         let body = module_code();
         assert!(
             body.contains("ocx_oci::PackageRef::new_registry(repository, &entry.registry)"),
-            "the flatten must build the bare form; the behavioural half is S-004"
+            "the flatten must build the bare form; the behavioural half is covered by the \
+             acceptance suite"
         );
         for narrowing in ["clone_with_tag", "tag_or_latest", "clone_with_digest"] {
             assert!(
@@ -338,7 +236,7 @@ mod tests {
         }
     }
 
-    // ── C-012 — exactly one `--frozen` gate ─────────────────────────────────
+    // ── exactly one `--frozen` gate ──────────────────────────────────────────
 
     #[test]
     fn exactly_one_frozen_gate() {
@@ -357,7 +255,7 @@ mod tests {
         );
     }
 
-    // ── C-024 — this command owns no fan-out of its own ─────────────────────
+    // ── this command owns no fan-out of its own ──────────────────────────────
 
     #[test]
     fn the_refresh_loop_is_the_shared_one() {
@@ -403,15 +301,15 @@ mod tests {
         );
     }
 
-    // ── C-027 — the dry-run return precedes both the refresh and the piggyback ─
+    // ── the dry-run return precedes both the refresh and the piggyback ───────
 
     #[test]
     fn the_piggyback_runs_last_of_all_and_only_on_success() {
-        // Two contracts, one ordering. C-027: the piggyback does network I/O and
-        // writes OUTSIDE the index home, so S-018's "index home untouched"
-        // assertion cannot catch it under `--dry-run`. C-012's Patch-descriptors
-        // row: it runs only when the whole command succeeded, so a
-        // nine-of-ten-registry run leaves descriptors untouched.
+        // Two contracts, one ordering: the piggyback does network I/O and
+        // writes OUTSIDE the index home, so the acceptance suite's "index home
+        // untouched" assertion cannot catch it under `--dry-run`. The
+        // patch-descriptors contract: it runs only when the whole command
+        // succeeded, so a nine-of-ten-registry run leaves descriptors untouched.
         //
         // The earlier form compared only `dry_run_return < piggyback`, which a
         // reviewer satisfied by moving the piggyback ABOVE the aggregation gate
@@ -444,16 +342,16 @@ mod tests {
         // And the gate must actually return, or ordering buys nothing.
         let gate = &body[aggregation..piggyback];
         assert!(
-            // `.into()` until WP-37: the failures were `ocx_lib::Error` and the
-            // signature is `anyhow::Result`. They are `anyhow::Error` now, so
-            // the conversion is gone and clippy refuses it — keeping it in the
+            // No `.into()`: the failures were once `ocx_lib::Error` against an
+            // `anyhow::Result` signature. They are `anyhow::Error` now, so the
+            // conversion is gone and clippy refuses it — keeping it in the
             // needle would red on the only spelling that compiles.
             gate.contains("return Err(error);"),
             "the aggregation gate must return, not merely compute"
         );
     }
 
-    // ── C-013 — authoritative stop on an enumeration failure ────────────────
+    // ── authoritative stop on an enumeration failure ─────────────────────────
 
     #[test]
     fn enumeration_failures_propagate_rather_than_yielding_an_empty_set() {
@@ -463,7 +361,7 @@ mod tests {
         // packages and exit 0 is this plan's recurring failure shape, and it is
         // one `.unwrap_or_default()` away.
         //
-        // The behavioural test lives in the acceptance suite (S-012); this is
+        // The behavioural test lives in the acceptance suite; this is
         // the structural guard beside it. Scoped to `enumerate_catalog`, whose
         // whole body is the enumeration.
         let enumeration = enumerate_catalog_body();
@@ -482,8 +380,9 @@ mod tests {
             squeezed.matches("fetch_catalog_strict().await?").count(),
             1,
             "the published branch must use the STRICT fetch AND propagate: the tolerant fetch maps \
-             an absent catalog document to an empty catalog, which is the empty-set success C-013 \
-             forbids, and it happens one call BELOW this function where the scan cannot see it"
+             an absent catalog document to an empty catalog, which is the empty-set success the \
+             authoritative-stop rule forbids, and it happens one call BELOW this function where \
+             the scan cannot see it"
         );
         assert!(
             !enumeration.contains("fetch_catalog()"),
@@ -519,7 +418,7 @@ mod tests {
 
     #[test]
     fn the_enumerated_set_is_sorted_before_either_path_sees_it() {
-        // C-012's Aggregation row: "the lowest input index wins" is only
+        // The aggregation rule: "the lowest input index wins" is only
         // deterministic if the input order is, and neither branch supplies one
         // — the published branch drains a map's keys. The sort lives here rather
         // than in `CatalogPreviewEntry::new` so the WET path inherits it; the
@@ -684,11 +583,11 @@ mod tests {
         }
     }
 
-    // ── C-012 — aggregation precedence ──────────────────────────────────────
+    // ── aggregation precedence ────────────────────────────────────────────────
 
     #[test]
     fn an_enumeration_failure_outranks_a_refresh_failure() {
-        // C-012's Aggregation row shipped with nothing pinning it. The rule is
+        // The aggregation rule shipped with nothing pinning it. The rule is
         // the whole of this one expression: `.or()` evaluates the enumeration
         // side first, so a registry that contributed no work at all outranks a
         // package that could not be fetched, whatever their argument positions.
@@ -696,7 +595,7 @@ mod tests {
         // silently inverts the contract.
         //
         // The lowest-index rule WITHIN each kind is `first_failure`'s, tested in
-        // `index_common`; the end-to-end exit code is S-020's.
+        // `index_common`; the acceptance suite checks the end-to-end exit code.
         let body = module_code();
         assert!(
             body.contains("index_common::first_failure(failures).or(refresh_failure)"),
@@ -714,7 +613,7 @@ mod tests {
         //
         // `filter` over a `HashSet::insert` keeps first-seen order; collecting
         // into a `HashSet` would not, and every argument-order claim in this
-        // command rides on it. The behavioural half is S-020.
+        // command rides on it. The acceptance suite covers the behavioural half.
         let body = module_code();
         assert!(
             body.contains("self.registries.iter().filter(|r| seen.insert(*r))"),

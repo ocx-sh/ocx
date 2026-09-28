@@ -8,15 +8,6 @@
 pub enum PatchError {
     /// The descriptor JSON was not valid UTF-8, could not be parsed, or failed
     /// structural validation (e.g. extra fields, wrong field types).
-    ///
-    /// # Version rejection
-    ///
-    /// Unknown `version` discriminants that were not caught by the explicit
-    /// pre-parse step surface here via `serde_repr`'s deserialization rejection.
-    /// The explicit check in [`crate::patch::descriptor::PatchDescriptor::from_json_bytes`]
-    /// tries to return [`PatchError::UnsupportedVersion`] for unknown numeric
-    /// version values before the full serde parse; any remaining shape mismatches
-    /// fall back to this variant.
     #[error("invalid patch descriptor JSON")]
     InvalidDescriptorJson {
         /// The underlying JSON parse failure.
@@ -24,13 +15,8 @@ pub enum PatchError {
         source: serde_json::Error,
     },
 
-    /// The `version` field in the descriptor carries a numeric value this OCX
-    /// version does not understand. Callers should treat this as a
-    /// forward-compatibility signal: a newer OCX version published the descriptor.
-    ///
-    /// Returned by [`crate::patch::descriptor::PatchDescriptor::from_json_bytes`]
-    /// when the raw `version` integer cannot be matched to a known
-    /// [`crate::patch::descriptor::PatchDescriptorVersion`] discriminant.
+    /// The descriptor's numeric `version` is unknown to this OCX — a newer OCX
+    /// published it.
     #[error("unsupported patch descriptor version {version}")]
     UnsupportedVersion {
         /// The numeric version discriminant read from the descriptor.
@@ -39,12 +25,6 @@ pub enum PatchError {
 
     /// The `patches.snapshot.json` on disk carries a format version this OCX
     /// does not read.
-    ///
-    /// Raised by [`PatchSnapshot::read`](crate::patch::PatchSnapshot::read).
-    /// There is deliberately no reader for an older generation: a snapshot is
-    /// derived from local state that `ocx patch freeze` re-resolves offline in
-    /// seconds, so rewriting it is cheaper and less ambiguous than carrying a
-    /// second parse path whose output could disagree with a fresh freeze.
     #[error("patch snapshot '{path}' has format version {found}, expected {expected}; re-run `ocx patch freeze`")]
     UnsupportedSnapshotVersion {
         /// The snapshot file that could not be read.
@@ -56,10 +36,7 @@ pub enum PatchError {
     },
 
     /// A network fetch of the `__ocx.patch` manifest or layer blob failed.
-    ///
-    /// Preserves the full [`ocx_oci::client::ClientError`] source chain so
-    /// callers can downcast for exit-code classification (auth failure, network
-    /// unavailable, not-found, etc.).
+    // Keep the `ClientError` as `#[source]`: exit-code classification downcasts through it.
     #[error("failed to fetch patch descriptor from registry")]
     FetchFailed {
         /// The underlying OCI client error.
@@ -101,9 +78,7 @@ pub enum PatchError {
         actual: String,
     },
 
-    /// The declared size of the descriptor layer blob exceeded the enforced
-    /// ceiling. A conforming patch descriptor is a small JSON document; a
-    /// large declared size signals a misconfigured or malicious manifest.
+    /// The declared size of the descriptor layer blob exceeded the enforced ceiling.
     #[error("patch descriptor layer size {declared} exceeds the maximum allowed {maximum} bytes")]
     LayerSizeExceeded {
         /// The size declared in the manifest layer descriptor.
@@ -112,8 +87,7 @@ pub enum PatchError {
         maximum: u64,
     },
 
-    /// The SHA-256 digest of the layer bytes does not match the digest
-    /// declared in the manifest. This indicates corruption or a tampered blob.
+    /// The SHA-256 digest of the layer bytes does not match the manifest's.
     #[error("patch descriptor layer digest mismatch: declared '{declared}', computed '{computed}'")]
     LayerDigestMismatch {
         /// The digest declared in the manifest descriptor.
@@ -123,8 +97,7 @@ pub enum PatchError {
     },
 
     /// The SHA-256 digest of the manifest bytes does not match the digest the
-    /// caller declared for them. Distinct from [`Self::LayerDigestMismatch`] so
-    /// callers (and logs) can tell which blob failed verification.
+    /// caller declared for them.
     #[error("patch descriptor manifest digest mismatch: declared '{declared}', computed '{computed}'")]
     ManifestDigestMismatch {
         /// The digest the caller declared for the manifest bytes.
@@ -134,8 +107,7 @@ pub enum PatchError {
     },
 
     /// The descriptor's rules count or packages-per-rule count exceeded the
-    /// enforced maximum. This guards against quadratic dedup scan cost from a
-    /// malformed or malicious descriptor.
+    /// enforced maximum.
     #[error("patch descriptor exceeds structural limits: {detail}")]
     DescriptorTooLarge {
         /// Human-readable detail about which limit was exceeded.
@@ -152,17 +124,8 @@ pub enum PatchError {
     },
 
     /// A companion carries no recorded patch-tier pin and `--offline` forbids
-    /// resolving its tag to discover one.
-    ///
-    /// Raised by
-    /// [`install_companion`](crate::PackageManager::install_companion):
-    /// pulling an already-pinned digest stays allowed, but learning a NEW
-    /// tag→digest binding needs the network. `--frozen` is deliberately NOT a
-    /// cause — it scopes to the package tier, and a companion resolves live
-    /// under it.
-    ///
-    /// The remedy names `ocx patch sync` because it is the ONLY command that
-    /// writes a companion pin — the package-tier `ocx index update` never does.
+    /// resolving its tag to discover one. `--frozen` is not a cause: a
+    /// companion resolves live under it.
     #[error(
         "offline mode refused to resolve unpinned companion '{identifier}'; run `ocx patch sync` without --offline"
     )]

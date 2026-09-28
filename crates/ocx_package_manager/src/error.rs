@@ -5,25 +5,9 @@ use ocx_package::metadata::entrypoint::EntrypointName;
 use ocx_package::metadata::{BinaryError, BinaryName};
 use ocx_store::file_structure;
 
-/// Task-level error for package manager operations.
+/// Task-level error: one variant per command, one [`PackageError`] per failed package.
 ///
-/// Each variant corresponds to a specific command and contains one
-/// [`PackageError`] per failed package, preserving the individual cause.
-///
-/// This type does **not** wrap [`crate::Error`] directly — library errors are
-/// always attached to a specific package via [`PackageErrorKind::Internal`].
-///
-/// # Exit code classification
-///
-/// Batch classification uses **first error wins**: when a batch variant
-/// carries multiple [`PackageError`]s, the process exit code is derived from
-/// the first element's [`PackageError::kind`]. This makes the exit code for
-/// multi-package operations input-order-dependent — running
-/// `ocx install a b c` where `a` fails with `NotFound` and `b` fails with
-/// `SelectionAmbiguous` exits with `NotFound`'s code, regardless of how many
-/// `SelectionAmbiguous` entries follow. This is the v1 contract; a future
-/// priority function (e.g. "worst code wins") may upgrade the policy without
-/// touching variant data.
+/// A batch's exit code comes from its first element's [`PackageError::kind`], so it depends on input order.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A find operation failed for one or more packages.
@@ -47,25 +31,12 @@ pub enum Error {
     /// A select operation failed for one or more packages.
     #[error("{}", format_batch("select", _0))]
     SelectFailed(Vec<PackageError>),
-    /// The self-update check operation failed.
-    ///
-    /// Distinct from [`InstallFailed`]: a check failure does not imply an
-    /// install was attempted.  Carries the [`PackageError`] that caused the
-    /// check to abort, boxed to break the recursive-type cycle
-    /// (`crate::Error` → `crate::Error` → `PackageError` →
-    /// `PackageErrorKind::Internal` → `crate::Error`).
+    /// The self-update check failed before any install was attempted (boxed: the type is recursive).
     #[error("self-update check failed: {}", render_entry(_0))]
     SelfCheckFailed(Box<PackageError>),
 
-    // ── The tier's own root error (E1, DEC-27) ──────────────────────────────
-    //
-    // Copied verbatim from `ocx_lib::Error` at WP-34, so the exit code each
-    // one classifies to is the code its predecessor classified to (DEC-23).
-    // `ocx_lib::Error` keeps every one of them: this is additive, and its
-    // hand-written `From<ocx_package_manager::Error>` reconstructs them on the
-    // way back up. `PackageManager` is deliberately absent — on `ocx_lib` it
-    // wraps THIS enum, so a copy here would be self-referential; its four call
-    // sites construct the tier error directly instead.
+    // ── The tier's own root error ───────────────────────────────────────────
+    // Each variant maps to an exit code in the binary's classifier; merging or splitting one moves that code.
     /// A network operation was attempted while in offline mode.
     #[error("network operation attempted in offline mode")]
     OfflineMode,
@@ -74,11 +45,7 @@ pub enum Error {
     #[error("JSON serialization error")]
     SerializationFailure(#[from] serde_json::Error),
     /// An OCI index operation failed.
-    ///
-    /// No `#[from]`: three of the index tier's variants stand in for variants
-    /// of *this* enum and must be reconstructed as those rather than nested
-    /// under this one, or the exit code moves. See the hand-written
-    /// [`From<ocx_index::error::Error>`](Self::from) below.
+    // No `#[from]`: the hand-written `From` flattens three variants onto this enum's, or their exit code moves.
     #[error(transparent)]
     OciIndex(ocx_index::error::Error),
 
@@ -92,47 +59,18 @@ pub enum Error {
     #[error(transparent)]
     Archive(#[from] ocx_util::archive::Error),
 
-    /// A string baked into an install-time launcher contains a character that
-    /// cannot be safely embedded in the Unix `.sh` template or the Windows
-    /// `.shim` sidecar (single-quote, percent, double-quote, NUL, CR, LF).
-    /// The unsafe set is owned by `crate::launcher`.
+    /// A string baked into a generated launcher contains a launcher-unsafe character.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     LauncherUnsafeCharacter { value: String, character: char },
 
-    /// A path baked verbatim into a generated launcher body or a one-line
-    /// sidecar is not valid UTF-8.
-    ///
-    /// Refused at render rather than converted: a lossy conversion substitutes
-    /// U+FFFD for every invalid byte, which passes the launcher-unsafe
-    /// character set and bakes a path that **does not exist**. The failure then
-    /// surfaces as a bare `ENOENT` from `/bin/sh`, naming a path the operator
-    /// never wrote and with nothing pointing at the encoding as the cause.
-    ///
-    /// `path` is the lossy rendering — the only printable form of a value that
-    /// is by definition not a `str`. The message says the path is not UTF-8, so
-    /// it never claims the bytes it shows are the bytes on disk.
+    /// A path baked verbatim into a generated launcher or sidecar is not valid UTF-8; `path` is its lossy rendering.
     #[error("path baked into a generated launcher is not valid UTF-8: {path:?}")]
     LauncherPathNotUtf8 { path: String },
 
-    /// A toolchain **home** baked into a rendered trampoline or its `.exec`
-    /// sidecar is not an absolute path.
-    ///
-    /// Refused at render, never written: a relative value resolves against the
-    /// *invoking process's* working directory, so the same trampoline would
-    /// select two different homes from two directories. A relative
-    /// `.exec` sidecar is additionally refused by the shim at runtime as E2
-    /// (exit 78) — refusing here turns that confusing runtime failure into one
-    /// that names the path and the writer.
-    ///
-    /// The literal `global` is the one non-path value a `.exec` sidecar may
-    /// carry, and it is produced from [`crate`]'s own global
-    /// target rather than from a project root — so a project root spelled
-    /// `global` is refused here and can never be read back as the global home.
+    /// A toolchain home baked into a rendered trampoline or its `.exec` sidecar is not absolute.
     #[error("toolchain home is not an absolute path: {value:?}")]
     ToolchainHomeNotAbsolute { value: String },
     /// An OCI signature verification failed.
-    ///
-    /// Boxed for the same reason as [`Self::Sign`].
     #[error(transparent)]
     Verify(#[from] Box<ocx_sign::verify::VerifyError>),
     /// A digest string could not be parsed.
@@ -144,36 +82,20 @@ pub enum Error {
 
     /// A file I/O error with path context.
     ///
-    /// The io cause is interpolated into the message and deliberately **not**
-    /// exposed as `#[source]` — the one exception to the "every wrapping
-    /// variant carries `#[source]`" rule, and exactly one of the two, never
-    /// both. Both together printed it twice in a `{err:#}` chain (#286);
-    /// `#[source]` alone left every `to_string()` producer — a warn line, a
-    /// machine-readable `reason` — naming the path and nothing else (#433).
-    /// Nothing is lost by the omission: `ClassifyExitCode` (in the binary,
-    /// `ocx::exit`) answers at this
-    /// variant and never descends to the io error, and no other consumer
-    /// downcasts through it.
+    /// The cause is interpolated, not `#[source]`: both prints it twice under `{err:#}`, and
+    /// `#[source]` alone leaves every `to_string()` naming only the path.
     #[error("internal file error for '{path}': {cause}", path = .0.display(), cause = .1)]
     InternalFile(std::path::PathBuf, std::io::Error),
 
-    /// An OCI signing operation failed.
-    ///
-    /// Boxed because [`ocx_sign::sign::SignError`] carries a full
-    /// [`ocx_oci::PackageRef`] plus a kind enum — materializing it
-    /// unboxed bloats every `Result<T, Error>` in the workspace past the
-    /// `clippy::result_large_err` threshold.
+    /// An OCI signing operation failed (boxed for `clippy::result_large_err`).
     #[error(transparent)]
     Sign(#[from] Box<ocx_sign::sign::SignError>),
 
-    /// A singleflight coordination error (leader failure, abandonment, timeout,
-    /// or capacity exceeded).
+    /// A singleflight coordination error.
     #[error("singleflight coordination failed")]
     Singleflight(#[from] ocx_util::singleflight::Error),
-    /// A local materialization (`pull_local`) found a layer absent from the
-    /// layer store. It has no transport by design — the package was never
-    /// resolved through an index, so there is no location it may be read
-    /// from, and dialling the name as typed is what ocx#504 forbids.
+    /// A local materialization (`pull_local`) found a layer absent from the layer store.
+    // Never fetched as a fallback: dialling the name as typed would bypass index routing.
     #[error(
         "layer {digest} of '{identifier}' is not staged locally, and a local materialization has no registry to fetch it from"
     )]
@@ -182,16 +104,8 @@ pub enum Error {
     #[error(transparent)]
     OciClient(#[from] ocx_oci::client::error::ClientError),
 
-    /// A per-layer layout annotation read from a manifest layer descriptor could
-    /// not be resolved into a placement.
-    ///
-    /// Carries the [`LayerLayoutError`](ocx_oci::LayerLayoutError) cause via
-    /// `#[source]` so exit-code classification descends the chain and reaches it
-    /// (→ `DataError` 65 for a malformed/hostile manifest annotation), instead
-    /// of the generic `IoError` (74) that wrapping in [`Self::InternalFile`]
-    /// would force. `io::Error::source` skips a boxed inner error, so the layout
-    /// cause must be carried as a first-class `#[source]` field here, not
-    /// smuggled through `io::Error::other`.
+    /// A per-layer layout annotation could not be resolved into a placement.
+    // A `#[source]` field, never `io::Error::other`: that hides the cause and exits 74 instead of 65.
     #[error("layer layout resolution failed")]
     LayerLayout(#[source] ocx_oci::layer_layout::LayerLayoutError),
 
@@ -199,20 +113,12 @@ pub enum Error {
     #[error("unsupported media type '{media_type}', expected media types are: {supported}", media_type = .0, supported = .1.join(", "))]
     UnsupportedMediaType(String, &'static [&'static str]),
 
-    /// A metadata config blob exceeded the size cap enforced by
-    /// `crate::tasks::common::load_config_metadata`, either by its
-    /// declared descriptor size (checked before any blob fetch) or its
-    /// actual fetched byte length (checked after fetch, defending against a
-    /// registry that declares a small size but serves a larger body). See
-    /// `adr_inspect_metadata_closure.md` D5.
+    /// A metadata config blob exceeded the size cap, by declared or fetched length
+    /// (`adr_inspect_metadata_closure.md` § "Config-blob size cap").
     #[error("metadata blob size {size} bytes exceeds the {max}-byte cap")]
     MetadataBlobTooLarge { size: i64, max: usize },
 
-    // Three more with no direct constructor in this tier, present so the two
-    // flattening conversions below have an exact destination for every variant
-    // they map. Without them `Platform`, `PinnedIdentifier` and `PathInvalid`
-    // would fall through to a wrapper, and each fall-through becomes a
-    // separate "is the code still the same?" question at review time.
+    // Destinations for the flattening `From`s below; removing one nests it under a wrapper and can move its exit code.
     /// A platform parsing or validation error.
     #[error(transparent)]
     Platform(#[from] ocx_oci::platform::error::PlatformError),
@@ -223,22 +129,14 @@ pub enum Error {
     #[error("path '{}' has an unexpected structure", .0.display())]
     InternalPathInvalid(std::path::PathBuf),
 
-    // Two more the tier reaches through `?` rather than by name: `ocx_project`
-    // is the tier below, and `patch` is one of the three subtrees that came
-    // with this crate.
     /// A project-tier configuration or lock operation failed.
     #[error(transparent)]
     Project(#[from] ocx_project::error::Error),
-    /// A patch-domain operation failed outside the per-package discovery path
-    /// (which carries its own `PatchError` through `PackageErrorKind`).
-    ///
-    /// Boxed because `PatchError::BlobWriteFailed` carries a `crate::Error`
-    /// back, and the two enums would otherwise be mutually infinite. Same
-    /// shape as [`Self::Package`], including the hand-written `From`.
+    /// A patch-domain operation failed outside per-package discovery (boxed: the enums are mutually recursive).
     #[error(transparent)]
     Patch(Box<crate::patch::PatchError>),
 
-    /// A symlink walk failed. Destination for `AssembleError::SymlinkWalk`.
+    /// A symlink walk failed.
     #[error(transparent)]
     SymlinkWalk(ocx_util::fs::SymlinkWalkError),
 
@@ -247,16 +145,7 @@ pub enum Error {
 }
 
 /// An error tied to a specific package.
-///
-/// `kind` deliberately omits `#[source]` — a deviation from the three-layer
-/// error pattern in `quality-rust-errors.md`. Exit-code classification for
-/// package errors does **not** walk the `source()` chain; it dispatches
-/// directly through the `ClassifyExitCode` impls the binary carries
-/// (`ocx::exit`) on both `PackageError`
-/// and `PackageErrorKind` (see the bottom of this file and
-/// `classify_error` in `ocx_cli`'s `exit::classify`). Adding `#[source]` would
-/// duplicate the kind into both the `Display` chain and the `source()`
-/// chain without improving diagnosability.
+// `kind` has no `#[source]`: classification never walks `source()`, and it would print the kind twice.
 #[derive(Debug, thiserror::Error)]
 #[error("{}{kind}", identifier_prefix(identifier))]
 #[non_exhaustive]
@@ -271,10 +160,8 @@ impl PackageError {
     }
 }
 
-/// The `"<identifier> — "` lead-in of a [`PackageError`] message, empty for the
-/// empty identifier [`crate::Error::from`] fabricates when a
-/// [`PackageErrorKind`] arrives with no package in scope. Rendering that one
-/// would print a bare `/` — a package name the user never supplied.
+/// The `"<identifier> — "` lead-in of a [`PackageError`] message; empty for the placeholder
+/// identifier [`crate::Error::from`] fabricates, which would render as a bare `/`.
 fn identifier_prefix(identifier: &ocx_oci::PackageRef) -> String {
     if identifier.registry().is_empty() && identifier.repository().is_empty() {
         String::new()
@@ -283,28 +170,16 @@ fn identifier_prefix(identifier: &ocx_oci::PackageRef) -> String {
     }
 }
 
-/// Payload for [`PackageErrorKind::OfflineManifestMissing`]. Boxed in the
-/// enum variant to keep `PackageErrorKind` small (avoids the
-/// `clippy::result_large_err` lint).
+/// Payload for [`PackageErrorKind::OfflineManifestMissing`].
 #[derive(Debug)]
 pub struct OfflineManifestMissing {
     pub identifier: ocx_oci::PackageRef,
     pub digest: ocx_oci::Digest,
 }
 
-/// Payload for the shim refusals that name a package **and** one of its claimed
-/// interface names ([`ShimNameNotClaimed`](PackageErrorKind::ShimNameNotClaimed),
-/// [`ShimClaimUnfulfilled`](PackageErrorKind::ShimClaimUnfulfilled)).
+/// Payload for the shim refusals naming a package and one of its claimed names.
 ///
-/// A size device, not a semantic union: the two refusals are unrelated
-/// situations that happen to carry the same pair, and inlining it makes the
-/// variant 128 bytes — over the `clippy::result_large_err` ceiling every
-/// `Result<_, PackageErrorKind>` in the crate would then trip. Boxed for the
-/// same reason [`OfflineManifestMissing`] is.
-///
-/// The package is carried explicitly rather than read off
-/// [`PackageError::identifier`], because the offending node may be a dependency
-/// deep in the closure while the identifier is the tool the user asked for.
+/// `package` may be a dependency deep in the closure, not [`PackageError::identifier`].
 #[derive(Debug)]
 pub struct ShimClaim {
     pub package: ocx_oci::PinnedPackageRef,
@@ -317,20 +192,14 @@ pub enum PackageErrorKind {
     /// The package was not found in the index or object store.
     #[error("package not found")]
     NotFound,
-    /// Offline mode: the tag pointer is cached locally but the manifest
-    /// blob is missing from `blobs/`. The caller needs to re-run the
-    /// command online to populate the blob cache.
+    /// Offline mode: the tag pointer is cached locally but the manifest blob is not.
     #[error(
         "manifest {} is not in the local cache; run `ocx install {}` online to populate it",
         _0.digest,
         _0.identifier
     )]
     OfflineManifestMissing(Box<OfflineManifestMissing>),
-    /// A referenced blob (layer digest) was not present in the registry.
-    ///
-    /// The identifier is `registry/repository[:tag]@<blob-digest>` — see
-    /// [`ocx_oci::client::error::ClientError::BlobNotFound`] for the
-    /// canonical construction contract.
+    /// A referenced blob was not present in the registry; the identifier carries the blob digest.
     #[error("blob not found: {0}")]
     BlobNotFound(Box<ocx_oci::PinnedOciIdentifier>),
     /// Multiple candidates matched the platform selection.
@@ -351,11 +220,7 @@ pub enum PackageErrorKind {
     /// The identifier has no digest after resolution.
     #[error("identifier has no digest after resolution")]
     DigestMissing,
-    /// An entrypoint name collision was detected in the interface surface of the
-    /// transitive closure. Raised at install time when N≥2 packages in the
-    /// interface projection declare the same entrypoint `name`. Reports all
-    /// owners so the user can deselect the right one. Supersedes the
-    /// 2-owner `EntrypointNameCollision` variant (see `adr_two_env_composition.md`).
+    /// Two or more packages in the closure's interface surface declare the same entrypoint name.
     #[error(
         "entrypoint name collision: '{name}' declared by {} packages: {}; deselect one before selecting another",
         owners.len(),
@@ -366,13 +231,7 @@ pub enum PackageErrorKind {
         owners: Vec<ocx_oci::PinnedPackageRef>,
     },
 
-    /// A required companion package install failed during patch discovery.
-    ///
-    /// The base install succeeded, but a companion marked `required = true`
-    /// could not be fetched or installed. Fail-closed: the install as a whole
-    /// is considered failed so the caller does not run with an incomplete
-    /// environment overlay. Optional companions (required = false) are logged
-    /// as warnings and do not produce this variant.
+    /// A `required = true` companion failed to install, failing the whole install.
     #[error("required companion install failed for '{companion}'")]
     RequiredCompanionFailed {
         /// Identifier of the companion package that failed to install.
@@ -382,31 +241,11 @@ pub enum PackageErrorKind {
         source: Box<PackageErrorKind>,
     },
 
-    /// Patch discovery failed due to a domain-level patch error (fetch, parse,
-    /// persist, or structural validation of a `__ocx.patch` descriptor).
-    ///
-    /// Carries the full [`crate::patch::PatchError`] chain via `#[source]` so
-    /// the error chain is preserved for exit-code classification and diagnostics.
-    /// This replaces the former `Internal(io::Error::other(patch_error.to_string()))`
-    /// workaround that erased the structured source chain.
+    /// Patch discovery failed with a domain-level patch error.
     #[error("patch discovery error")]
     PatchDiscovery(#[source] crate::patch::PatchError),
 
-    /// No index entry satisfies the host's detected `os.features` requirements.
-    ///
-    /// Raised by `Index::select` when the host declares a non-empty
-    /// `os.features` set (e.g. `libc.glibc`) but every candidate platform in
-    /// the index sharing the host's os+arch declares an `os_features` set that
-    /// is not a subset of the host's features. This is a general
-    /// `os.features` mismatch — libc is the first such feature, but the
-    /// matcher is not libc-specific.
-    ///
-    /// The user can override by passing `--platform` with an explicit
-    /// `os/arch[+feature...]` matching one of the available entries — the
-    /// available platforms are rendered with their `+feature` suffixes so the
-    /// value is copy-pasteable.
-    ///
-    /// Error string follows API Guidelines: lowercase, no period.
+    /// No candidate sharing the host's os+arch has `os.features` the host provides.
     #[error(
         "feature mismatch: host provides {}; available platforms: {}; pass --platform <os/arch[+features]> to override",
         host_features.join(", "),
@@ -415,53 +254,25 @@ pub enum PackageErrorKind {
     FeatureMismatch {
         /// The `os.features` values the host reported (e.g. `["libc.glibc"]`).
         host_features: Vec<String>,
-        /// The candidate [`ocx_oci::Platform`] values sharing the host os+arch, so
-        /// the user can see which `--platform <os/arch[+features]>` value to
-        /// pass.
+        /// The candidates sharing the host os+arch.
         available: Vec<ocx_oci::Platform>,
     },
 
-    /// The closure's interface name set is not enumerable, so no shim can be
-    /// generated for it: some node declares neither `binaries` nor entry
-    /// points, and a shim store is built by name (plan contract C-009).
-    ///
-    /// Names the offending node rather than relying on
-    /// [`PackageError::identifier`] — the node may be a dependency deep in the
-    /// closure while the identifier is the tool the user asked for.
+    /// A closure node declares neither `binaries` nor entry points, so no shim can be generated.
     #[error(
         "cannot defer '{package}': it claims no binaries and no entry points, so its interface names are not enumerable"
     )]
     ShimNamesNotEnumerable { package: ocx_oci::PinnedPackageRef },
 
-    /// A shim name is not a valid [`BinaryName`] (plan contract C-009 / C-011).
-    ///
-    /// Raised from **both** ends of the shim path, which is why the message
-    /// names neither an invocation nor a package: `ocx launcher shim` invoked
-    /// under a bad `argv0` (C-011, first leg), and `prepare_lazy` handed a
-    /// declared entry point name that does not survive the conversion (C-009 —
-    /// every Windows-reserved device name is a valid entry point name and none
-    /// is a valid binary name). The offending name and the reason come from the
-    /// wrapped [`BinaryError`]; the declaring package does not, so a producer
-    /// -side refusal deep in a closure is attributed only by the envelope's own
-    /// identifier.
-    ///
-    /// The grammar forbids `/`, `\` and the Windows-reserved device names at
-    /// construction, so this is also what stops a wire value containing a path
-    /// separator from bypassing `PATH` resolution entirely.
+    /// A shim name is not a valid [`BinaryName`]; raised by both `ocx launcher shim` and `prepare_lazy`.
     #[error("invalid shim name")]
     ShimNameInvalid(#[source] BinaryError),
 
-    /// `ocx launcher shim` was invoked under a well-formed name that is not a
-    /// member of the composed name set (plan contract C-011, second leg).
+    /// `ocx launcher shim` was invoked under a name outside the composed name set.
     #[error("'{}' is not an interface name declared by '{}'", _0.name, _0.package)]
     ShimNameNotClaimed(Box<ShimClaim>),
 
-    /// The package materialized, but the name its metadata claimed is not
-    /// present on the composed `PATH` (plan contract C-011).
-    ///
-    /// Reported instead of the bare `ENOENT` an exec would otherwise produce,
-    /// so a wrong `binaries` claim is attributed to the publisher rather than
-    /// read as a missing package.
+    /// The package materialized, but a name its metadata claimed is not on the composed `PATH`.
     #[error(
         "'{}' claims the name '{}', but no such executable is present after materialization",
         _0.package,
@@ -469,25 +280,11 @@ pub enum PackageErrorKind {
     )]
     ShimClaimUnfulfilled(Box<ShimClaim>),
 
-    /// A group or entry name cannot become a path component of a rendered
-    /// toolchain tree (RUL-21, D-V14).
-    ///
-    /// Lives here rather than on [`crate::Error`] because its only producers
-    /// are `package_manager` tasks — `render_toolchain` and `heal_links`,
-    /// which `?`-propagate
-    /// [`ToolchainHome::entry`](ocx_store::file_structure::ToolchainHome::entry)
-    /// and its store-side twin. A top-level variant would mint crate-wide
-    /// vocabulary for a leaf with a natural home one layer down, and this
-    /// enum is already an entry in `cli/classify.rs`'s downcast ladder, so
-    /// exit 78 is reachable from `argv` through it.
-    ///
-    /// `transparent` because the wrapped error already names the component
-    /// (`group` or `entry`), the refused value and the reason — there is no
-    /// prefix worth adding.
+    /// A group or entry name cannot become a path component of a rendered toolchain tree.
     #[error(transparent)]
     ToolchainPath(#[from] file_structure::ToolchainPathError),
 
-    /// An underlying internal error (I/O, OCI, network, etc.).
+    /// An underlying internal error.
     #[error(transparent)]
     Internal(#[from] crate::Error),
 }
@@ -500,10 +297,6 @@ impl From<ocx_oci::client::error::ClientError> for PackageErrorKind {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Batch formatter — used by `#[error(...)]` attributes on `Error` variants.
-// ---------------------------------------------------------------------------
 
 fn format_batch(verb: &str, errors: &[PackageError]) -> String {
     use std::fmt::Write as _;
@@ -520,13 +313,8 @@ fn format_batch(verb: &str, errors: &[PackageError]) -> String {
 
 /// Render one batch entry with its cause chain appended, `": {source}"` per link.
 ///
-/// A batch carries N failures, so it can expose none of them as a single
-/// `source()`; the chain walk that `{err:#}` performs at the CLI boundary stops
-/// at the batch. Without this, every cause below a `PackageErrorKind` — the io
-/// error under `Internal`, the `PatchError` under `PatchDiscovery` — is dropped
-/// from the only message the user sees. Walks `kind.source()`, not
-/// `entry.source()`: `PackageError` deliberately omits `#[source]` on `kind`
-/// (see the type's doc comment), so the entry itself reports no source.
+/// A batch exposes no single `source()`, so without this every cause below a kind is dropped
+/// from the message; it walks `kind.source()` because the entry itself reports none.
 fn render_entry(entry: &PackageError) -> String {
     use std::error::Error as _;
 
@@ -538,19 +326,13 @@ fn render_entry(entry: &PackageError) -> String {
 /// Errors from dependency resolution operations.
 #[derive(Debug, thiserror::Error)]
 pub enum DependencyError {
-    /// Two or more packages on the active surface resolve the same repository to
-    /// different digests. A single environment cannot expose multiple versions
-    /// of one package, so composition fails. The identifiers name the conflicting
-    /// versions (tag and digest) so the user can tell which were involved.
+    /// Two or more packages on the active surface resolve the same repository to different digests.
     #[error("conflicting versions for {repository}: {}", identifiers.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "))]
     Conflict {
         repository: ocx_oci::Repository,
         identifiers: Vec<ocx_oci::PinnedPackageRef>,
     },
-    /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
-    ///
-    /// The singleflight cause is carried by `#[from]` (which implies
-    /// `#[source]`); interpolating it here too would print it twice.
+    /// Dependency setup coordination failed.
     #[error("dependency setup failed")]
     SetupFailed(#[from] ocx_util::singleflight::Error),
 }
@@ -694,27 +476,15 @@ mod tests {
     }
 }
 
-/// `Result` for the whole tier, as `ocx_lib::Result` was before the split.
+/// `Result` for the whole tier.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The `InternalFile` constructor the moved tree calls 57 times.
-///
-/// Spelled exactly as `ocx_lib::error::file_error` was, so every call site
-/// moved unchanged — the module path `crate::error` now resolves here because
-/// `package_manager/error.rs` flattened to the crate root.
 pub fn file_error(path: impl AsRef<std::path::Path>, error: std::io::Error) -> Error {
     Error::InternalFile(path.as_ref().to_path_buf(), error)
 }
 
 /// Flatten the index tier's errors onto this tier's own variants.
-///
-/// **Hand-written, and a derived `#[from]` here is a defect.** WP-33 shipped
-/// exactly that mistake one tier over: the derive wraps where this flattens,
-/// and because both wrappers are `#[error(transparent)]` a `source()` walk
-/// delegates past the inner `ClientError` without ever yielding it. Retries
-/// then stop being spent and the exit code moves from 75 to 69, with nothing
-/// failing at the conversion itself. Mirrors `ocx_lib`'s impl one-for-one;
-/// `error.rs`'s shape assertions in `ocx_lib` and the ones below hold it.
+// Never a derived `#[from]`: wrapping hides the inner `ClientError` from `source()`, so retries stop and exit 75 becomes 69 (`flattening_shape`).
 impl From<ocx_index::error::Error> for Error {
     fn from(error: ocx_index::error::Error) -> Self {
         use ocx_index::error::Error as IndexError;
@@ -731,12 +501,7 @@ impl From<ocx_index::error::Error> for Error {
     }
 }
 
-/// Flatten the package tier's errors onto this tier's own variants.
-///
-/// `PackageError::Index(error) => error.into()` re-enters the conversion
-/// above, so a `ClientError` arriving inside a `PackageError::Index` has to
-/// flatten across BOTH impls to land as `Error::OciClient`. That two-hop path
-/// is the one no single-impl test can observe, and it is asserted below.
+/// Flatten the package tier's errors onto this tier's own variants; `Index` re-enters the impl above.
 impl From<ocx_package::error::Error> for Error {
     fn from(e: ocx_package::error::Error) -> Self {
         use ocx_package::error::Error as PackageError;
@@ -754,14 +519,9 @@ impl From<ocx_package::error::Error> for Error {
 }
 
 impl Error {
-    /// Lift a [`PackageErrorKind`] into the tier error, preserving the
-    /// identifier when the caller has one. Ported verbatim from
-    /// `ocx_lib::Error::package`; the only change is that the batch error IS
-    /// this type now, so there is no wrapper variant to put it in.
+    /// Lift a [`PackageErrorKind`] into the tier error under `identifier`.
     pub fn package(identifier: ocx_oci::PackageRef, kind: PackageErrorKind) -> Self {
         match kind {
-            // An internal kind already carries a full `Error`; re-wrapping it
-            // in a batch would only nest this type inside itself.
             PackageErrorKind::Internal(e) => e,
             other => Self::ResolveFailed(vec![PackageError::new(identifier, other)]),
         }
@@ -770,8 +530,6 @@ impl Error {
 
 impl From<PackageErrorKind> for Error {
     fn from(kind: PackageErrorKind) -> Self {
-        // No identifier in scope: the empty one is rendered as no prefix at all
-        // by `PackageError::Display`.
         Error::package(ocx_oci::PackageRef::new_registry("", ""), kind)
     }
 }
@@ -788,8 +546,6 @@ impl From<ocx_util::error::SerializationError> for Error {
     }
 }
 
-/// Flattening, like the two above it: each arm lands on the variant its
-/// predecessor landed on rather than nesting under a wrapper.
 impl From<ocx_util::error::Error> for Error {
     fn from(error: ocx_util::error::Error) -> Self {
         match error {
@@ -844,8 +600,6 @@ impl From<crate::patch::PatchError> for Error {
     }
 }
 
-/// Flattening, mirroring `ocx_lib`: `File` lands on `InternalFile` and
-/// `Digest` on `Digest`, rather than both nesting under a store wrapper.
 impl From<ocx_store::file_structure::DigestFileError> for Error {
     fn from(error: ocx_store::file_structure::DigestFileError) -> Self {
         use ocx_store::file_structure::DigestFileError;
@@ -861,8 +615,8 @@ mod flattening_shape {
     //! The tier's flattening `From` impls, asserted as a SHAPE, and the two
     //! `source()` walks that read the fields those impls feed.
     //!
-    //! Mirrors `ocx_lib::error::flattening_shape`, which exists because WP-33
-    //! shipped a derive where a flattening conversion belonged: the wrappers
+    //! Mirrors the pre-split crate's `flattening_shape` guard, which exists because an
+    //! earlier split shipped a derive where a flattening conversion belonged: the wrappers
     //! are `#[error(transparent)]`, so `source()` steps over the inner error
     //! without yielding it, retries stop being spent and an exit code moves
     //! with nothing failing at the conversion.
@@ -870,7 +624,7 @@ mod flattening_shape {
     //! The chain assertions at the bottom are the other half, and they are
     //! about a change of *meaning* rather than of code. `SessionError::Library`
     //! and `PackageErrorKind::Internal` both spell their field `crate::Error`,
-    //! which meant `ocx_lib::Error` before WP-34 and means this tier's error
+    //! which meant `ocx_lib::Error` before the crate split and means this tier's error
     //! after it. `Internal` announced the change — six `LibError::` patterns in
     //! the sign commands stopped compiling. The others changed silently, so
     //! their readers are asserted instead of argued: `launch.rs`'s
@@ -954,7 +708,7 @@ mod flattening_shape {
             .collect()
     }
 
-    /// `SessionError::Library` re-targeted silently at WP-34 — same spelling,
+    /// `SessionError::Library` re-targeted silently in the crate split — same spelling,
     /// different type. Its reader is `launch.rs`'s `successors` walk, so the
     /// walk is what gets asserted: the wrapped error must still be reachable
     /// as a link rather than collapsed into the head.

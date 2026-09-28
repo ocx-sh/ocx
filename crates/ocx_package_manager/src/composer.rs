@@ -1,22 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! two-env composition: flat iteration over each root's pre-built transitive
-//! closure (TC) with cross-root dedup, emitting entries gated per surface.
-//!
-//! The TC is built inductively at install time via
-//! `Visibility::through_edge` + `Visibility::merge` in
-//! `ResolvedPackage::with_dependencies`. At exec time the composer reads each
-//! root's `resolve.json` (one read per root), iterates flatly, and gates
-//! emission via `tc_entry.visibility.has_interface()` (default exec) or
-//! `has_private()` (`--self`). No recursive walk at compose time.
-//!
-//! See `adr_two_env_composition.md` for the full design rationale.
-//!
-//! `ComposeOutput` also carries `admitted_binaries` / `admitted_entrypoints`
-//! — the admitted set's declared-name claim attribution consumed by `ocx
-//! env` / `ocx package env`'s `binaries` / `entrypoints` JSON arrays. See
-//! `adr_declared_binaries_metadata.md` §4.
+//! Two-env composition: flat iteration over each root's pre-built transitive closure with
+//! cross-root dedup, gated per surface (`adr_two_env_composition.md`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -50,108 +36,37 @@ use super::{
     concurrency::{Concurrency, acquire_permit},
 };
 
-/// Result type for a single dep-load task spawned during parallel preload.
-///
-/// The `usize` is the task index for stable topological re-ordering after join.
+/// One dep-load task's result; the `usize` is its index, for re-ordering after join.
 type DepLoadResult = (
     usize,
     crate::Result<(metadata::Metadata, ResolvedPackage, ocx_oci::PinnedPackageRef)>,
 );
 
 /// The return value of [`compose`].
-///
-/// Carries the emitted env entries together with the **admitted set** — the
-/// ordered, deduped set of `PinnedPackageRef`s whose surface contributions
-/// were actually emitted.  The admitted set is used by `SitePatchResolver` in
-/// `resolve_env` to gate the companion overlay: only identifiers that compose
-/// actually visited get a patch overlay applied.
-///
-/// `compose` itself is **patch-agnostic** — it does not read patch config or
-/// know about companions.  The admitted set is a pure by-product of the
-/// surface-gating and dedup logic already performed during composition.
 pub struct ComposeOutput {
     /// The composed env entries in emit order.
     pub entries: Vec<Entry>,
 
-    /// Deduped, visit-order identifiers admitted by the surface gate.
-    ///
-    /// Contains the stripped identifiers (advisory tag dropped) of every
-    /// TC dep **and** every explicit root that was actually emitted during
-    /// this compose call.  Deps appear before their root (topological); roots
-    /// are appended at the end in the same order as `roots`.  Cross-root
-    /// dedup is applied: a shared dep appears only once, at its first-seen
-    /// position across all roots.
+    /// Deduped, tag-stripped identifiers admitted by the surface gate, deps before their root;
+    /// the patch overlay applies only to these.
     pub admitted: Vec<ocx_oci::PinnedPackageRef>,
 
-    /// Declared `binaries` claims contributed by each admitted identifier.
-    ///
-    /// One entry per (identifier, claimed name) pair, restricted to packages
-    /// that passed the same surface gate as `admitted` (root packages
-    /// unconditionally; deps iff `has_interface()`/`has_private()`). Consumed
-    /// by `ocx env` / `ocx package env`'s `binaries` JSON array. See
-    /// `adr_declared_binaries_metadata.md` §4 Decision A.
+    /// Declared `binaries` claims of each admitted identifier that cross the surface
+    /// (`adr_declared_binaries_metadata.md` §4 Decision A).
     pub admitted_binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)>,
 
-    /// Declared `entrypoints` claims contributed by each admitted identifier.
-    ///
-    /// Same shape and admission rule as `admitted_binaries`, sourced from
-    /// `Metadata::entrypoints()`. Consumed by `ocx env` / `ocx package
-    /// env`'s `entrypoints` JSON array.
+    /// Declared `entrypoints` claims, admitted like `admitted_binaries`.
     pub admitted_entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)>,
 
-    /// Declared `integrations` contributed by each admitted identifier.
-    ///
-    /// Interface surface only — always empty when `self_view == true`
-    /// ([`integrations_cross`]), and likewise empty whenever the caller
-    /// suppressed collection ([`compose_companion`]). Payloads are interpolated
-    /// with the DECLARING package's own `${installPath}`. Ordered: each root's
-    /// admitted deps in topological order, then the root; cross-root dedup
-    /// applies, so a shared dep contributes once **within this compose call** —
-    /// a caller merging two calls' outputs owns the dedup across them. Within
-    /// one package, lexicographic by namespace. See
-    /// `adr_package_integrations.md` C-012.
+    /// Declared `integrations` of each admitted identifier, interface surface only
+    /// (`adr_package_integrations.md`); deduped within this call only, never across calls.
     pub admitted_integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
 }
 
-// ── Surface algebra: the single source of truth ─────────────────────────────
-//
-// A surface is defined recursively over the two-axis `Visibility` algebra
-// (`metadata::visibility`) — never by structural special cases:
-//
-//     surface(P, axis) = { carrier c of P       : vis(c).has(axis) }
-//                      ∪ ⋃ { interface_surface(D) : edge P→D has(axis) }
-//
-// Carriers are a package's own contributions, each with a visibility:
-// declared env vars carry their publisher-declared one; entry points carry
-// `Entrypoints::IMPLICIT_VISIBILITY` (INTERFACE — launchers are
-// consumer-facing, the package's own runtime bypasses them); binaries claims
-// carry `Binaries::IMPLICIT_VISIBILITY` (PUBLIC — raw executables serve
-// consumers and the package's own shims alike). Below the root the recursion
-// always takes the dep's INTERFACE surface — "only the interface side of a
-// dep crosses edges" (ADR Algorithm v3 step 5) — with edge composition
-// precomputed by the `through_edge`/`merge` effective-visibility fold
-// (`ResolvedPackage::with_dependencies`).
-//
-// `compose` runs this recursion flattened over the precomputed TC:
-// `dep_admitted` is the edge-union term; `carrier_crosses` is the carrier
-// term, where `is_root` marks recursion depth 0 — the only level where the
-// requested axis, not INTERFACE, gates the package's own carriers.
-// `self_view` selects WHICH of the root's two surfaces is emitted; it never
-// decides membership on its own.
-//
-// These predicates are the ONE implementation shared by `compose` (the
-// runtime env behind `ocx env` / `ocx env --self`) and
-// `crate::tasks::inspect::project_surface` (the static summary
-// behind `ocx package inspect --closure`). Inspect MUST route every
-// admission / crossing decision through them — never re-derive — so the two
-// views can never disagree about a surface.
+// ── Surface algebra ──────────────────────────────────────────────────────────
+// `inspect::project_surface` must call these too, never re-derive them, or `ocx env` and inspect disagree.
 
-/// Whether a transitive-dependency entry is admitted to a surface.
-///
-/// A dep enters the interface (consumer) surface iff its effective visibility
-/// `has_interface()`, and the private (self) surface iff `has_private()`.
-/// Root packages have no edge visibility and are ALWAYS admitted — that is the
-/// caller's structural rule, applied around this predicate, not part of it.
+/// Whether a transitive dependency is admitted to a surface; roots are always admitted by the caller.
 pub(crate) fn dep_admitted(effective: metadata::visibility::Visibility, self_view: bool) -> bool {
     if self_view {
         effective.has_private()
@@ -160,24 +75,8 @@ pub(crate) fn dep_admitted(effective: metadata::visibility::Visibility, self_vie
     }
 }
 
-/// Whether one carrier crosses onto a surface, given its visibility.
-///
-/// The flattened carrier term of the surface algebra (module comment above).
-/// At the ROOT (recursion depth 0) a carrier crosses on the surface's own
-/// axis — `has_interface()` on the interface surface, `has_private()` on the
-/// private (self) surface. On a DEPENDENCY only the carrier's interface side
-/// crosses, on EITHER surface: the recursion below the root always takes a
-/// dep's *interface* surface (ADR Algorithm v3 step 5), so a dep's
-/// private-only carrier never crosses the edge into the parent — even on the
-/// parent's self surface. This asymmetry is exactly why a single
-/// `crosses(vis)` predicate is wrong; the caller must state whether the
-/// owning node is the root.
-///
-/// Applies uniformly to every carrier kind: declared env vars pass their
-/// declared visibility, entry points pass `Entrypoints::IMPLICIT_VISIBILITY`
-/// (both the `admitted_entrypoints` claim and the synth-`entrypoints/` PATH
-/// push route through here, so a claim can never contradict PATH), binaries
-/// claims pass `Binaries::IMPLICIT_VISIBILITY`.
+/// Whether one carrier crosses onto a surface: a root's on the surface's axis, a dependency's only
+/// on its interface side, on either surface.
 pub(crate) fn carrier_crosses(carrier: metadata::visibility::Visibility, is_root: bool, self_view: bool) -> bool {
     if is_root {
         if self_view {
@@ -190,51 +89,19 @@ pub(crate) fn carrier_crosses(carrier: metadata::visibility::Visibility, is_root
     }
 }
 
-/// Whether the integrations carrier crosses onto the requested surface.
-///
-/// Interface surface only, at EVERY depth: `--self` composes zero
-/// integrations. This is a SURFACE-LEVEL rule, not a visibility one — no
-/// `Visibility` value produces it under [`carrier_crosses`] (proof: ADR
-/// `adr_package_integrations.md` §4.1, the four-cell truth table). Homed
-/// here, beside the algebra it deviates from, so `compose` and
-/// `inspect::project_surface` share the one implementation the surface
-/// contract requires.
-///
-/// Takes no `is_root`: the answer is the same at every depth, and a parameter
-/// the body ignores is a lie about the rule. The EDGE term is unchanged and
-/// stays algebraic — a dependency contributes integrations iff
-/// `dep_admitted(effective, /* self_view = */ false)`.
+/// Whether the integrations carrier crosses: interface surface only, at every depth
+/// (`adr_package_integrations.md` §4.1).
 pub(crate) fn integrations_cross(self_view: bool) -> bool {
     !self_view
 }
 
-/// Compose the runtime env from one or more root packages.
-///
-/// Reads each root's pre-built TC from `resolve.json` (single read per root),
-/// iterates flatly with cross-root dedup, emits per-surface gated entries.
-/// No recursion at compose time.
-///
-/// `self_view = false` selects the interface surface (default exec — consumer
-/// view); `self_view = true` selects the private surface (`--self` — emits
-/// the package's full runtime env including private entries).
-///
-/// Returns a [`ComposeOutput`] that carries both the composed entries and the
-/// admitted set (deduped, visit-order identifiers that contributed to the
-/// output).  The admitted set is consumed by `SitePatchResolver` to gate the
-/// companion overlay; `compose` itself is patch-agnostic.
+/// Compose the runtime env from one or more root packages; `self_view` selects the private
+/// (`--self`) surface over the interface one.
 ///
 /// # Errors
 ///
-/// Returns `Err` if any required package metadata cannot be loaded from the
-/// store during composition, if two or more roots' interface projections
-/// collide on an entrypoint name (multi-root collision gate — see
-/// [`check_entrypoints`]), or if the active surface resolves a single
-/// repository to two or more distinct digests (version conflict — see
-/// [`check_repo_digest_conflicts`]).
-///
-/// `paths` is the install-path producer (C-065): [`ComposePaths::digest_only`]
-/// for a composition with no toolchain tree in scope, otherwise the probed
-/// answer [`ComposePaths::resolve`] returned.
+/// A metadata load failure, an entrypoint collision across roots ([`check_entrypoints`]), or one
+/// repository at two digests on the surface ([`check_repo_digest_conflicts`]).
 pub(crate) async fn compose(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
@@ -244,27 +111,8 @@ pub(crate) async fn compose(
     compose_gated(roots, store, self_view, integrations_cross(self_view), paths).await
 }
 
-/// Compose ONE package as a standalone root whose output is overlaid onto a
-/// different composition — the patch tier's companion projection.
-///
-/// Two inputs differ from [`compose`], and neither is derivable from the other:
-///
-/// - `self_view` is pinned to `false`. The overlay must never leak the
-///   companion's private surface, even when the composition it lands in is the
-///   `--self` one. Pinned by
-///   `no_private_leak_companion_private_var_absent_even_under_self_view`.
-/// - `collect_integrations` is the OUTER composition's gate, supplied by the
-///   caller. Deriving it from the pinned `self_view` would make it
-///   unconditionally true, so payloads would be resolved on every env
-///   resolution and then discarded — and a payload naming a dependency whose
-///   content directory is absent would fail the whole projection (hard-erroring
-///   a required companion, warn-skipping an optional one along with its env
-///   entries) on a surface contractually required to carry zero integrations.
-///
-/// A named wrapper rather than a fourth parameter on [`compose`]: it keeps two
-/// adjacent booleans off every call site, and states the `self_view = false`
-/// invariant once here instead of at each caller. This suppresses COMPUTE only
-/// — with the gate on, the surface is byte-identical to [`compose`]'s.
+/// Compose one patch companion as a standalone root, always on the interface surface;
+/// `collect_integrations` is the outer composition's gate.
 ///
 /// # Errors
 ///
@@ -274,33 +122,21 @@ pub(crate) async fn compose_companion(
     store: &PackageStore,
     collect_integrations: bool,
 ) -> crate::Result<ComposeOutput> {
-    // The digest lane, unconditionally, and not for want of an input: a
-    // companion is not a lock entry, so no `<group>/<entry>` link names it and
-    // no trust test can be asked of it — [`PathLane::Digest`]'s rule (RUL-78)
-    // applied to the overlay's single root.
+    // Digest lane: a companion is not a lock entry, so no link names it.
     compose_gated(
         std::slice::from_ref(companion),
         store,
         /* self_view = */ false,
+        // Never derived from the pinned `self_view`: an absent dep dir would fail a surface that carries no integrations.
         collect_integrations,
         &crate::composer::ComposePaths::digest_only(),
     )
     .await
 }
 
-/// The composition itself, with the integrations carrier gated by an explicit
-/// input rather than re-derived from `self_view`.
+/// The composition itself, with the integrations carrier gated by an explicit input.
 ///
-/// Private: every caller goes through [`compose`] (gate derived from the
-/// surface, the normal case) or [`compose_companion`] (gate supplied by the
-/// outer composition).
-///
-/// `paths` is the install-path producer both of them share (C-065, RUL-82).
-/// Every emitted package path in this function — a root's content directory,
-/// a root's synthetic `entrypoints/` entry, a dependency's, and every
-/// `${deps.NAME.installPath}` — is routed through
-/// [`ComposePaths::install_path_for`], so "digest or link" is answered in one
-/// place for all four composing emitters.
+/// Every emitted package path goes through `paths`, so "digest or link" is answered in one place.
 async fn compose_gated(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
@@ -308,80 +144,35 @@ async fn compose_gated(
     collect_integrations: bool,
     paths: &ComposePaths,
 ) -> crate::Result<ComposeOutput> {
-    // Multi-root collision gate. Single-root case is already covered at
-    // install time by `check_entrypoints`; cross-root collisions can only
-    // surface here, when the user composes two or more independent roots.
-    // Run before the dep walk so we fail fast on conflicting roots.
-    // Guard: single-root is already gated at install time (pull.rs:425).
+    // A single root was already gated at install time.
     if roots.len() > 1 {
         check_entrypoints(roots, store).await?;
     }
 
-    // Fail on conflicting versions of the same `registry/repo` across the
-    // surface-projected union TC (and roots themselves). A single environment
-    // cannot expose two versions of one package — PATH resolves only one — so
-    // a surface-visible collision is a hard error, not a best-effort pick.
-    // Two tags that resolve to the same digest are not a conflict.
-    // Sealed/private-edge TC entries that do not enter the active surface are
-    // excluded — they cannot collide at runtime
-    // (`test_sealed_conflicting_deps_coexist`). The diagnostic `deps` command
-    // keeps a non-fatal warning so the conflicting tree stays inspectable.
     check_repo_digest_conflicts(roots, self_view)?;
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
-    // The admitted set records every stripped identifier emitted during this
-    // compose call, in visit order.  Built in parallel with `seen` so the
-    // patch overlay can iterate admitted identifiers in the same topological
-    // order without a second walk.
     let mut admitted: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
-    // Declared `binaries`/`entrypoints` claims for every admitted identifier
-    // (root or dep), collected alongside `admitted` under the identical
-    // surface gate. See `adr_declared_binaries_metadata.md` §4 Decision A.
     let mut admitted_binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)> = Vec::new();
     let mut admitted_entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)> = Vec::new();
-    // Interface-surface-only carrier, gated by `integrations_cross` rather
-    // than the visibility algebra (ADR §4.1) — collected at the same two sites
-    // as the claims above.
     let mut admitted_integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)> = Vec::new();
 
-    // Pre-compute root keys (stripped identifiers) so a TC entry that is
-    // also an explicit root is deferred to the root-emission pass instead
-    // of being silently absorbed during the dep walk (Option B in the
-    // composer "root-as-dep" dedup discussion). Explicit roots emit
-    // unconditionally; transitive deps dedup against each other AND
-    // against the explicit-root set.
     let root_keys: HashSet<ocx_oci::PinnedPackageRef> = roots.iter().map(|r| r.identifier().strip_advisory()).collect();
 
     for root in roots {
-        // A deferred root's whole block — its own carriers and its closure's —
-        // resolves against package directories that do not exist yet, so the
-        // `required` path probe has nothing true to say about any of them
-        // (C-013).
+        // A deferred root's package directories do not exist yet, so the `required` path probe must not run.
         let content_state = if root.deferred().is_some() {
             ContentState::Deferred
         } else {
             ContentState::Materialized
         };
-        // Each root's TC is already flat. Iterate in topological order
-        // (deps before dependents). Dep contributions emit before root's own
-        // contributions per ADR Algorithm v3.
-        //
-        // Batch-preload all surface-visible, non-root TC entries for this root
-        // in parallel via JoinSet. This eliminates serial I/O round-trips when
-        // a root has many deps — each `load_object_data` call reads two JSON
-        // files from disk. Results are indexed so the topological emission
-        // order is preserved after join (per quality-rust.md JoinSet pattern).
-        //
-        // Step 1: collect the surface-visible, deduplicated entries for this root.
+        // Step 1: collect the surface-visible, deduplicated non-root entries, indexed to keep topological order.
         let mut visible_entries: Vec<(usize, ocx_oci::PinnedPackageRef)> = Vec::new();
         for tc_entry in &root.resolved().dependencies {
             let key = tc_entry.identifier.strip_advisory();
 
-            // Defer to the root-emission pass when a TC entry happens to be
-            // an explicit root. Otherwise a private-edge TC entry (gated out
-            // here) would consume the `seen` slot and silently skip the
-            // explicit-root pass for the same package.
+            // Or a gated-out private edge takes the `seen` slot and the explicit root never emits.
             if root_keys.contains(&key) {
                 continue;
             }
@@ -390,29 +181,18 @@ async fn compose_gated(
                 continue;
             }
 
-            // Cross-root dedup via stripped identifier (advisory tag ignored).
-            // Insert AFTER the surface gate so a sealed/private TC entry that
-            // gates out doesn't permanently mask a later visit of the same
-            // package via a different root or path.
+            // After the surface gate, or a gated-out entry masks a later admitted visit of the same package.
             if !seen.insert(key) {
                 continue;
             }
 
-            // Record in admitted set (visit order, deduped — used by
-            // SitePatchResolver to gate the companion overlay). Push the
-            // TAG-BEARING identifier: dedup already happened on the
-            // advisory-stripped `key`, but the patch overlay matches descriptor
-            // globs against this identifier and a tag-anchored rule (ADR `*:21`)
-            // needs the tag preserved — otherwise a required overlay that
-            // matched at install time is silently dropped at compose time (C7).
+            // Tag-bearing, or a tag-anchored patch rule (`*:21`) silently drops a required overlay.
             admitted.push(tc_entry.identifier.clone());
 
             visible_entries.push((visible_entries.len(), tc_entry.identifier.clone()));
         }
 
-        // Step 2: parallel-load metadata for all visible entries. Every read
-        // goes through `tc_entry_object_data`, so a deferred root's entries
-        // come from its closure and never from a package directory (C-020).
+        // Step 2: parallel-load metadata for all visible entries.
         let mut tasks: JoinSet<DepLoadResult> = JoinSet::new();
         for (idx, dep_id) in &visible_entries {
             let dep_id = dep_id.clone();
@@ -428,7 +208,6 @@ async fn compose_gated(
             });
         }
 
-        // Collect results preserving index for topological re-ordering.
         let mut loaded: Vec<Option<(metadata::Metadata, ResolvedPackage, ocx_oci::PinnedPackageRef)>> =
             vec![None; visible_entries.len()];
         while let Some(join_result) = tasks.join_next().await {
@@ -442,17 +221,10 @@ async fn compose_gated(
 
         // Step 3: emit in topological order using pre-loaded metadata.
         for (meta, dep_resolved, dep_id) in loaded.into_iter().flatten() {
-            // [`PathLane::Digest`]: a dependency is not a lock entry, so no
-            // `<group>/<entry>` link names it (RUL-78). Routed through the seam
-            // anyway so the digest spelling has one producer too (RUL-82).
+            // Digest lane: a dependency is not a lock entry, so no link names it.
             let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), PathLane::Digest);
             let dep_content = dep_pkg.content();
 
-            // This dep already passed the surface gate (`dep_admitted`) to
-            // reach `visible_entries`; each carrier kind additionally crosses
-            // under its implicit visibility. Both are interface-side on a dep,
-            // so both cross wherever the node is admitted. `None` binaries
-            // means undeclared (contributes nothing).
             if carrier_crosses(Binaries::IMPLICIT_VISIBILITY, false, self_view)
                 && let Some(binaries) = meta.binaries()
             {
@@ -464,27 +236,11 @@ async fn compose_gated(
                 admitted_entrypoints.extend(entrypoints.names().map(|name| (dep_id.clone(), name.clone())));
             }
 
-            // Build the dep's own direct-dep context map for
-            // `${deps.NAME.installPath}` interpolation. Scoped to the dep's
-            // own declared deps, not the root's — each package resolves its
-            // own dep paths independently.
+            // The dep's own direct deps, never the root's.
             let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store, paths);
 
-            // The edge term stays algebraic (ADR §4.4): a dep contributes
-            // integrations iff `dep_admitted(effective, /* self_view = */
-            // false)`. Reaching this loop already required
-            // `dep_admitted(effective, self_view)`, and the gate is false
-            // whenever `self_view` is true — so the surviving case is exactly
-            // the interface edge, with no second gate to drift from the first.
-            // Interpolation uses the DECLARING package's own `${installPath}`
-            // and its own dep contexts, both already in hand: zero extra I/O.
             if collect_integrations {
-                // `INTEGRATION_TOKENS`, not the resolver's `Usage::Environment`
-                // default: this is the gate for the class, and the publish-time
-                // check shares the constant. A hostile registry never runs that
-                // check, so a `${self.env.*}` in a published payload meets only
-                // this one — and its `private` value must not reach an
-                // interface-surface JSON payload.
+                // `INTEGRATION_TOKENS`, not the default: a hostile registry skips the publish check, and `${self.env.*}` would leak a private value.
                 let resolver = metadata::template::TemplateResolver::new(&dep_content, &dep_dep_contexts)
                     .usage(INTEGRATION_TOKENS);
                 admitted_integrations.extend(
@@ -506,25 +262,12 @@ async fn compose_gated(
             )?;
         }
 
-        // Root's own contributions, partitioned by `self_view`. Emit AFTER
-        // the TC so root's PATH prepends win lookup over dep contributions
-        // (per `add_path` prepend semantics). Root emission is unconditional
-        // (no surface gate, no `seen` check against TC dedup) — explicit
-        // roots are user input and always contribute. We still dedup roots
-        // against each other so passing the same root twice does not
-        // double-emit.
+        // Roots emit after their TC, so the root's `PATH` prepends win lookup over its deps.
         let root_key = root.identifier().strip_advisory();
         if seen.insert(root_key) {
-            // Record root in admitted set (appended after its TC deps, per visit
-            // order — SitePatchResolver relies on this ordering). Push the
-            // TAG-BEARING root identifier (dedup already used the stripped key) so
-            // the patch overlay can match tag-anchored descriptor rules.
+            // Tag-bearing, as for deps.
             admitted.push(root.identifier().clone());
 
-            // The root's own carriers cross on the surface's axis under their
-            // implicit visibilities: binaries (PUBLIC) on both surfaces — the
-            // root's own executables serve its own shims too — while entry
-            // points (INTERFACE) reach the interface surface only.
             if carrier_crosses(Binaries::IMPLICIT_VISIBILITY, true, self_view)
                 && let Some(binaries) = root.metadata().binaries()
             {
@@ -540,29 +283,13 @@ async fn compose_gated(
                 );
             }
 
-            // Build root's direct-dep context map for `${deps.NAME.installPath}`
-            // interpolation in root's own env vars.
             let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths);
 
-            // [`PathLane::Following`]: an explicit root of a project
-            // composition *is* a lock entry, so the rendered tree may hold a
-            // `<group>/<entry>` link for it. `install_path_for` yields that
-            // link when the probe trusted it and the digest root otherwise, per
-            // entry (C-065 / C-067). Everything downstream — the content
-            // directory the root's own vars resolve against, its integrations
-            // payloads, and its synthetic `entrypoints/` PATH entry — derives
-            // from this one answer.
+            // Following lane: an explicit root is a lock entry, so a trusted link may name it.
             let root_pkg = paths.install_path_for(root.dir(), PathLane::Following);
             let root_content = root_pkg.content();
 
-            // Structural, not algebraic: no `Visibility` constant reproduces
-            // "interface surface at every depth" (ADR §4.1), so the root's
-            // integrations are gated by `integrations_cross` alone — the
-            // one predicate `inspect::project_surface` shares, applied by
-            // whichever entry point supplied `collect_integrations`.
             if collect_integrations {
-                // Same capability set as the dependency site above — one rule,
-                // applied wherever a payload is resolved.
                 let resolver = metadata::template::TemplateResolver::new(&root_content, &root_dep_contexts)
                     .usage(INTEGRATION_TOKENS);
                 admitted_integrations.extend(
@@ -574,9 +301,7 @@ async fn compose_gated(
                 );
             }
 
-            // The shim slot goes in FIRST, so it resolves LAST — consumers
-            // prepend, so `entrypoints/` > `bin/` > `shims/` (C-012). A no-op
-            // for a materialized root and under `--self`.
+            // First, so it resolves last (consumers prepend): `entrypoints/` > `bin/` > `shims/`.
             emit_shim_slot(root, self_view, &mut entries);
 
             emit_root_path_block(
@@ -600,45 +325,18 @@ async fn compose_gated(
     })
 }
 
-/// Uniqueness check on entrypoint names across the interface projection of
-/// one or more roots.
-///
-/// Used at two boundaries:
-///
-/// - **Install gate** (single-root): `pull.rs` invokes this with the freshly
-///   resolved root before persisting `resolve.json`, so closure-scoped
-///   duplicate launcher names never reach disk.
-/// - **Compose gate** (multi-root): [`compose`] invokes this when more than
-///   one root participates, so cross-root interface collisions surface
-///   before any env entries are emitted.
-///
-/// Scope: interface projection only. For each root, the helper records the
-/// root's own bundle entrypoints, then walks `resolved().dependencies` and
-/// records every TC entry whose effective visibility has the interface axis
-/// (`has_interface()`). Cross-root dedup via stripped identifier ensures a
-/// shared dep is counted once. Private-surface duplicates are deliberately
-/// tolerated and resolved at runtime by topological PATH order.
-///
-/// Root entrypoints are recorded before the TC walk so the root identifier
-/// appears first in the owners list when colliding with a dep entry — keeps
-/// error output legible.
+/// Uniqueness check on entrypoint names across the interface projection of one or more roots;
+/// private-surface duplicates are tolerated.
 ///
 /// # Errors
 ///
-/// Returns `Err(PackageErrorKind::EntrypointCollision { name, owners })`
-/// listing all N owners on the first collision found (deterministic via
-/// `BTreeMap` iteration). Returns `Err(PackageErrorKind::Internal)` if a
-/// referenced package's metadata cannot be read through
-/// [`tc_entry_object_data`] — from `store` for a materialized root, from the
-/// ref-linked closure for a deferred one.
+/// [`PackageErrorKind::EntrypointCollision`] listing every owner of the first (sorted) colliding
+/// name, or [`PackageErrorKind::Internal`] when a package's metadata cannot be read.
 pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore) -> Result<(), PackageErrorKind> {
     let mut owners: BTreeMap<EntrypointName, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
     let mut seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
 
     for root in roots {
-        // Each root's own entrypoints are unconditionally on the interface
-        // surface from the root-emission perspective. Recorded first so the
-        // root identifier wins ordering in the owners list on collision.
         if seen.insert(root.identifier().strip_advisory())
             && let Some(eps) = root.metadata().entrypoints()
         {
@@ -647,9 +345,6 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
             }
         }
 
-        // Walk the root's TC interface projection and collect entrypoints
-        // contributed by every interface-visible dep. Dedup by stripped
-        // identifier so a shared dep across roots only counts once.
         for tc_entry in &root.resolved().dependencies {
             if !tc_entry.visibility.has_interface() {
                 continue;
@@ -658,10 +353,7 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
             if !seen.insert(key) {
                 continue;
             }
-            // Through the shared accessor, never `store.content` directly: a
-            // deferred root's TC entries have no package directory, and this
-            // gate runs on every compose of two or more roots (C-020's defect
-            // clause).
+            // Never `store.content`: a deferred root's entries have no package directory.
             let (dep_metadata, _dep_resolved) = tc_entry_object_data(root, store, &tc_entry.identifier)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
@@ -676,8 +368,6 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
         }
     }
 
-    // Report the first collision found. Iteration over `BTreeMap` is sorted,
-    // so the choice is deterministic across runs.
     for (name, list) in owners {
         if list.len() > 1 {
             return Err(PackageErrorKind::EntrypointCollision { name, owners: list });
@@ -687,27 +377,8 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
     Ok(())
 }
 
-/// Build the `${deps.NAME.installPath}` interpolation context map for a package.
-///
-/// Maps each of `metadata`'s declared dependencies by [`DependencyName`] to a
-/// [`DependencyContext`] whose install path is resolved from `resolved`'s
-/// pinned identifiers. When a dep identifier appears in the resolved TC, the
-/// pinned (digest-bearing) identifier is used; otherwise the declaration
-/// identifier is the fallback.
-///
-/// This is a pure function: no I/O, no async. Called for both TC dep entries
-/// and root packages, replacing two formerly duplicate inline blocks.
-///
-/// # `${deps.*}` stays on digest paths (RUL-78)
-///
-/// The install path is routed through [`ComposePaths::install_path_for`] on
-/// [`PathLane::Digest`] — through the seam, so the digest spelling has one
-/// producer (RUL-82), but never onto the link lane. C-065 says "every
-/// dereference value", and a dependency is the one dereference value it cannot
-/// reach: a dependency is not a lock entry, so no `<group>/<entry>` link exists
-/// for it and no trust test can be asked. This is not a scope cut — there is no
-/// link to emit — and inventing one through a lock lookup would mint a second
-/// producer of the platform selection RUL-31 keeps single.
+/// Build a package's `${deps.NAME.installPath}` context map, preferring `resolved`'s pinned identifiers.
+// Digest lane only: a dependency has no link, and a lock lookup would duplicate platform selection.
 fn build_dep_context_map(
     metadata: &metadata::Metadata,
     resolved: &ResolvedPackage,
@@ -734,52 +405,13 @@ fn build_dep_context_map(
         .collect()
 }
 
-/// Resolve one package's whole declared env into a **private per-package
-/// accumulator**, then gate by visibility and push the crossing entries into
-/// `entries`.
+/// Resolve one package's declared env into a private per-package scope, then push the crossing entries.
 ///
-/// # Resolve, then gate (D8)
-///
-/// The order is the decision, not an implementation detail. `${self.env.KEY}`
-/// is surface-**independent**: an `interface` var may reference a `private` one,
-/// and the resolved bytes are identical under `ocx env`, `ocx env --self` and
-/// the launcher's `self_view=true` composition. A gate-then-resolve loop cannot
-/// serve that — the referenced var would never have been resolved on the
-/// surface the referencing var crosses.
-///
-/// The accumulator is private to this package and is what `${self.env.KEY}`
-/// scans. It is deliberately **not** `entries`: that vec is global across
-/// packages and already surface-gated, so reading self-env out of it would
-/// violate D6.1 (it holds other packages' vars) and D8 (it holds only crossing
-/// ones) at once.
-///
-/// Push order into `entries` is unchanged, so the PATH ordering invariant
-/// documented on [`emit_dep_path_block`] is untouched.
-///
-/// # The assertion split
-///
-/// *Value resolution always; every filesystem and shape assertion on emit only.*
-/// A crossing var resolves through `EnvResolver::resolve`; a non-crossing one
-/// through `EnvResolver::resolve_without_emit_assertions`, so a `required` path
-/// that is absent (C-026) or a declared-but-uninstalled dep (C-027) cannot fail
-/// a composition over a value nobody emits.
-///
-/// The accepted consequence: a template *fault* in a non-crossing var now
-/// surfaces where it previously never ran. A package whose own metadata cannot
-/// resolve is broken regardless of who is looking.
-///
-/// `content_state` is the second, orthogonal suppressor: a
-/// [`ContentState::Deferred`] package has no content tree by construction, so
-/// its `required` path probe is suppressed on the crossing path too (C-013) —
-/// otherwise the composed env would depend on content-cache state.
-///
-/// `is_root` selects the carrier axis exactly as [`carrier_crosses`] defines it
-/// — at the root a carrier crosses on the surface's own axis; on a dependency
-/// only its interface side crosses, on either surface.
+/// Every var resolves before gating, or `${self.env.KEY}` misses a private var that never crosses.
 ///
 /// # Errors
 ///
-/// Propagates the first resolution failure in declaration order.
+/// The first resolution failure in declaration order.
 fn emit_package_vars(
     metadata: &metadata::Metadata,
     content: &Path,
@@ -794,25 +426,12 @@ fn emit_package_vars(
     };
     let resolver = EnvResolver::new(content, dep_contexts).with_content_state(content_state);
 
-    // The private accumulator: every var resolved so far, crossing or not, in
-    // declaration order. This is the scope `${self.env.KEY}` scans.
-    //
-    // A var whose `Var::value()` is `None` — a `Modifier::Unknown`, the
-    // forward-compat read fallback — produces no `Entry` and so is absent from
-    // it. A `KEY` declared twice earlier with one of the two unreadable would
-    // therefore count once and resolve, where D7 wants `AmbiguousSelfEnvRef`.
-    // Unreachable today: every load path into the composer routes through
-    // `ValidMetadata::try_from`, which D14 keeps `validate_env_modifier_types`
-    // on, and that refuses `Modifier::Unknown` unconditionally. A change that
-    // moves that check off the ingress path opens this hole.
+    // Relies on `validate_env_modifier_types` refusing unknown modifiers, or a duplicate `KEY` escapes `AmbiguousSelfEnvRef`.
     let mut declared_before: SelfEnvScope<Entry> = SelfEnvScope::new();
 
     for var in env {
-        // Routed through the shared predicate — the single source of truth
-        // inspect also uses. At the root a carrier crosses on the surface's own
-        // axis; on a dependency only its interface side crosses, on either
-        // surface (ADR Algorithm v3 step 5).
         let crosses = carrier_crosses(var.visibility, is_root, self_view);
+        // A non-crossing var skips emit assertions, so a value nobody emits cannot fail the composition.
         let resolved = if crosses {
             resolver.resolve(var, &declared_before)?
         } else {
@@ -830,29 +449,8 @@ fn emit_package_vars(
     Ok(())
 }
 
-/// Emit the dep's interface-tagged env vars followed by the dep's
-/// synth-entrypoints PATH entry.
-///
-/// # Ordering invariant
-///
-/// PATH is searched left-to-right (first match wins). OCX consumers apply
-/// entries by **prepending**, so the **last** entry pushed into `entries`
-/// ends up **first** in the resolved PATH. The required global emit order
-/// is `Deps > Env > Entrypoints`, where entrypoints land last so that
-/// `entrypoints/` shadows the declared `bin/` PATH entry. This means:
-///
-/// 1. Call [`emit_package_vars`] *first* — its `bin/` PATH entry is pushed
-///    before the synth-PATH.
-/// 2. Push `entrypoints/` synth-PATH *second* — pushed after, so it is
-///    prepended on top and wins lookup priority at runtime.
-///
-/// Entrypoint launchers are the canonical way to invoke a package's tools:
-/// each launcher re-enters via `ocx launcher exec` and execs the resolved
-/// target by absolute path, so PATH lookup inside the child does not feed
-/// back into the launcher for normal binaries.
-///
-/// Regression test:
-/// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_after_declared_bin`
+/// Emit the dep's env vars, then its `entrypoints/` PATH entry, pushed last so it shadows `bin/`
+/// (`test_synthetic_entrypoints_path_emitted_after_declared_bin`).
 fn emit_dep_path_block(
     dep_metadata: &metadata::Metadata,
     dep_pkg: &PackageDir,
@@ -862,9 +460,6 @@ fn emit_dep_path_block(
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
-    // Step 1: interface-tagged env vars (includes declared bin/ PATH entry).
-    // Only the interface side of a dep crosses edges into the consumer's
-    // surface (ADR Algorithm v3 step 5) — `is_root = false`.
     emit_package_vars(
         dep_metadata,
         dep_content,
@@ -875,9 +470,7 @@ fn emit_dep_path_block(
         entries,
     )?;
 
-    // Step 2: synth-PATH last so entrypoints/ ends up at the front of PATH
-    // and shadows bin/ from step 1. Same carrier gate as the claim list —
-    // interface-side on a dep, so it crosses on either surface.
+    // The same gate as the claim list, so a claim never contradicts `PATH`.
     if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, false, self_view)
         && let Some(eps) = dep_metadata.entrypoints()
         && !eps.is_empty()
@@ -888,22 +481,8 @@ fn emit_dep_path_block(
     Ok(())
 }
 
-/// Emit the root's own env vars followed by the root's synth-entrypoints
-/// PATH entry, partitioned by `self_view`.
-///
-/// # Ordering invariant
-///
-/// Same as [`emit_dep_path_block`]: synth-PATH must be pushed **after**
-/// the declared env vars so that the synthetic `entrypoints/` entry (pushed
-/// last) ends up earlier in the resolved PATH and shadows declared `bin/`.
-///
-/// The synth-PATH push crosses under `Entrypoints::IMPLICIT_VISIBILITY`
-/// (INTERFACE) on the root's own axis: absent under `--self`, because the
-/// package's private runtime view bypasses its launchers and uses `bin/`
-/// directly (ADR Algorithm v3 §"Root's own contributions").
-///
-/// Regression test:
-/// `test/tests/test_entrypoints.py::test_synthetic_entrypoints_path_emitted_after_declared_bin`
+/// Emit the root's env vars, then its `entrypoints/` PATH entry (absent under `--self`), ordered as
+/// [`emit_dep_path_block`].
 fn emit_root_path_block(
     root_metadata: &metadata::Metadata,
     root_dir: &PackageDir,
@@ -913,8 +492,6 @@ fn emit_root_path_block(
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
-    // Step 1: env vars (includes declared bin/ PATH entry when present). The
-    // root's own carriers cross on the surface's own axis — `is_root = true`.
     emit_package_vars(
         root_metadata,
         root_content,
@@ -925,8 +502,7 @@ fn emit_root_path_block(
         entries,
     )?;
 
-    // Step 2: synth-PATH last (no launchers on the --self surface). Same
-    // carrier gate as the root's `admitted_entrypoints` claim in `compose`.
+    // The same gate as the root's `admitted_entrypoints` claim.
     if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view)
         && let Some(eps) = root_metadata.entrypoints()
         && !eps.is_empty()
@@ -937,29 +513,12 @@ fn emit_root_path_block(
     Ok(())
 }
 
-/// Returns `Err(DependencyError::Conflict)` for the first `registry/repo` that
-/// appears with two or more distinct digests across the **surface-projected**
-/// union TC of the supplied roots (including the roots themselves).
-///
-/// This is the fatal gate used by [`compose`]: a single environment cannot
-/// expose two versions of one package — PATH resolves only one — so a
-/// surface-visible version collision aborts composition. The error names the
-/// conflicting identifiers (tag and digest) so the user can tell which
-/// versions collided.
-///
-/// `self_view` selects the surface that gates TC entries: `false` (default
-/// exec) keeps only entries whose effective visibility has the interface
-/// axis (`has_interface()`); `true` (`--self`) keeps only those with the
-/// private axis (`has_private()`). Roots themselves always participate.
-/// Sealed/private-edge TC entries that do not enter the active surface cannot
-/// collide at runtime — they are excluded from the scan
-/// (`test_sealed_conflicting_deps_coexist`). Two tags that resolve to the same
-/// digest are not a conflict.
+/// Refuse a composition whose surface-projected union closure holds one `registry/repo` at two or
+/// more digests; two tags on one digest are fine.
 ///
 /// # Errors
 ///
-/// Returns `Err(DependencyError::Conflict { repository, identifiers })` when a
-/// surface-visible repository carries two or more distinct digests.
+/// [`DependencyError::Conflict`] for the first conflicting repository.
 pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) -> Result<(), DependencyError> {
     if let Some(conflict) = collect_repo_digest_conflicts(roots, self_view).into_iter().next() {
         return Err(DependencyError::Conflict {
@@ -970,16 +529,7 @@ pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) 
     Ok(())
 }
 
-/// Emits `tracing::warn!` for every `registry/repo` that appears with two or
-/// more distinct digests across the **surface-projected** union TC.
-///
-/// Non-fatal counterpart to [`check_repo_digest_conflicts`], used only by the
-/// diagnostic `deps` command: listing a conflicting tree must stay possible
-/// precisely so the user can inspect the collision that blocks `env`/`exec`.
-/// Same surface-gating and same-digest tolerance as the fatal gate. The token
-/// `"conflicting"` is part of the stable acceptance-test contract — see
-/// `test_deps_flat_conflicting_digests_reports_error`,
-/// `test_deep_conflict_at_depth_two`.
+/// Warn for every conflict [`check_repo_digest_conflicts`] would refuse; `deps` uses it so the tree stays inspectable.
 pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) {
     for conflict in collect_repo_digest_conflicts(roots, self_view) {
         tracing::warn!(
@@ -995,39 +545,19 @@ pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) {
     }
 }
 
-/// A single `registry/repo` version conflict: the repository resolved to two or
-/// more distinct digests on the active surface.
-///
-/// Pure-data return shape so unit tests can assert conflict detection without a
-/// `tracing` subscriber. `identifiers` holds the distinct-digest identifiers in
-/// first-seen order (always length >= 2).
+/// One repository resolved to two or more distinct digests on the active surface, in first-seen order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DigestConflict {
     pub repository: ocx_oci::Repository,
     pub identifiers: Vec<ocx_oci::PinnedPackageRef>,
 }
 
-/// Collects version conflicts across the surface-projected union TC.
-///
-/// Pure function: no logging, no I/O. Used by [`check_repo_digest_conflicts`],
-/// [`warn_repo_digest_conflicts`], and unit tests. A repository is reported
-/// only when it carries two or more distinct digests on the active surface;
-/// the per-repo identifier list preserves first-seen order. Iteration over the
-/// `BTreeMap` makes the returned order deterministic by repository.
+/// Collects version conflicts across the surface-projected union closure, sorted by repository.
 pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) -> Vec<DigestConflict> {
-    // Per repository, the distinct-digest identifiers observed on the active
-    // surface, in first-seen order. A repository with two or more entries is a
-    // version conflict.
     let mut by_repository: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
     for root in roots {
-        // Roots themselves always participate — explicit roots emit
-        // unconditionally during compose, so a collision between roots (or
-        // between a root and any surface-visible TC entry) is real at runtime.
         record_repo_identifier(root.identifier(), &mut by_repository);
         for dep in &root.resolved().dependencies {
-            // Surface gate: a TC entry that does not contribute to the active
-            // surface cannot collide at runtime under that surface. Mirrors the
-            // gate applied in `compose` itself.
             let on_surface = if self_view {
                 dep.visibility.has_private()
             } else {
@@ -1055,9 +585,6 @@ fn record_repo_identifier(
 ) {
     let repository = ocx_oci::Repository::from(&**id);
     let seen = by_repository.entry(repository).or_default();
-    // Dedup by digest: the same version reached via two paths — or a tagged and
-    // a bare reference to the same digest, or two tags that resolve to the same
-    // digest — is not a conflict.
     if seen.iter().any(|existing| existing.digest() == id.digest()) {
         return;
     }
@@ -1065,10 +592,6 @@ fn record_repo_identifier(
 }
 
 /// Construct the synthetic `PATH ⊳ <pkg_root>/entrypoints` entry for `pkg`.
-///
-/// The entry kind is `Path` so consumers prepend it to PATH. Pushed *after*
-/// a package's declared `bin/` PATH entry so the synthetic `entrypoints/`
-/// directory ends up at the front of PATH and the launchers shadow `bin/`.
 fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
     Entry {
         key: "PATH".to_string(),
@@ -1078,210 +601,69 @@ fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
     }
 }
 
-// ── Following-lane install paths (C-065 / C-066 / C-067 / C-070) ────────────
-//
-// Two spellings name one directory: the digest root
-// `<packages>/<registry>/<shard>/<digest>`, and the rendered link
-// `<home>/toolchain/links/<group>/<entry>` that points at it. The digest root
-// **pins** — an `ocx update` that repoints the link leaves an already-composed
-// digest path running the previous package. The link **follows**.
-//
-// Which of the two a composition emits is `pinned` (C-007): `true` pins to
-// digest roots (C-066), `false` follows the links (C-065). It is a property of
-// every composing emitter — `ocx env`, `ocx exec`, `ocx direnv export` and the
-// `env`-mode hook — never of a mode, which is why it is answered once here
-// rather than four times at the emitters.
-//
-// What is **not** in this lane, and must stay digest (RUL-82):
-//
-//   - `synth_shim_path_for` — a shim store, not a package. No lock entry names
-//     it and no link points at it.
-//   - `tc_entry_object_data` and `PackageManager::compose_roots`' own
-//     `store.package_dir` — **read** paths for `metadata.json` / `resolve.json`,
-//     answered before any composition exists.
-//   - `${deps.NAME.installPath}` — RUL-78, restated on [`PathLane::Digest`].
-//   - Every persisted artifact: `packages/**/*.json`, `refs/**`, generated
-//     launcher bodies, the render stamp, the execution record. A link path
-//     baked into a file outlives the tree it was probed against.
+// ── Following-lane install paths (`adr_project_toolchain_links.md` § Rationale from code: ocx_package_manager composer) ──
+// Shim slots, `${deps.*}` and persisted files stay digest: a baked link outlives its tree.
 
 /// Which producer answers for one package's install path.
-///
-/// Both arms go through [`ComposePaths::install_path_for`], so the *digest*
-/// spelling has one producer too (RUL-82). Before this seam the digest path had
-/// six spellings emitted from two producers — [`InstallInfo::dir`] for a root
-/// and [`PackageStore::package_dir`] for a dependency — and C-065's "one code
-/// path in `composer.rs` serves all four consumers" was not true of the code it
-/// described.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathLane {
-    /// Follow the rendered `<group>/<entry>` link when this package has one and
-    /// it was trustworthy at probe time; degrade to the digest root **per
-    /// entry** otherwise (C-067).
-    ///
-    /// The lane of an explicit **root**: a root of a project composition is a
-    /// lock entry, and a lock entry is exactly what the rendered tree contains.
+    /// Follow the rendered link when trustworthy at probe time, else the digest root; for explicit roots.
     Following,
 
-    /// The digest root, always; no link is consulted.
-    ///
-    /// The lane of a **dependency** (RUL-78). A dependency is not a lock entry,
-    /// so no `<group>/<entry>` link exists for it and no trust test can be
-    /// asked — inventing one would need a lock lookup keyed on the dependency's
-    /// platform, which is a second producer of the selection RUL-31 exists to
-    /// keep single. Also the lane of every composition with no toolchain tree
-    /// in scope, and of every composition under `pinned = true` (C-066), both
-    /// of which reach it through an empty [`ComposePaths`] instead.
+    /// The digest root, always; for dependencies, which are not lock entries.
     Digest,
 }
 
-/// The composition's install-path producer — the single code path C-065 names
-/// (RUL-82).
-///
-/// Carries the **already-probed** answer: one entry per `<group>/<entry>` link
-/// that was trustworthy at compose time, keyed by the digest root it names.
-///
-/// Empty means "digest paths for everything", and four states share that one
-/// answer with no branch between them: `pinned = true` (C-066), the OCI tier
-/// (`ocx package env` / `ocx package exec`, which have no toolchain tree),
-/// a project that has never been pulled, and a render C-050 skipped.
+/// The composition's single install-path producer, carrying the already-probed trusted links;
+/// empty means digest paths for everything.
 pub(crate) struct ComposePaths {
-    /// Digest root → the `<home>/toolchain/links/<group>/<entry>` link naming it.
-    ///
-    /// Keyed by the digest root because that is what the composer holds: an
-    /// [`InstallInfo`] carries a pinned identifier, never a group and a name.
-    ///
-    /// **Two lock entries may share one digest** — the same tool listed in two
-    /// selected groups resolves to one `packages/` directory and therefore to
-    /// one key. The map keeps the entry from the **first** selected group in
-    /// `groups` order, then the first `lock.tools` order within it, so a
-    /// two-group invocation composes deterministically rather than by hash
-    /// order. Both links point at the same directory, so the choice is
-    /// observable only in the emitted spelling.
+    /// Digest root → the link naming it; of two sharing a digest, the first in `groups`, then `lock.tools`, order.
     trusted: HashMap<PathBuf, PathBuf>,
 }
 
-/// The toolchain tree one composing invocation may follow, as the emitter
-/// resolved it (C-007, C-070).
-///
-/// Owned rather than borrowed because it travels on `EnvScope::Project`, which
-/// four commands construct and hand to `resolve_env_with_attribution` — the one
-/// place a `ComposePaths` is built, so no emitter can disagree with another
-/// about which groups were healed.
-///
-/// `None` on that scope, rather than a variant here, is "no toolchain tree in
-/// scope" — the OCI tier and the launcher's baked `pkg_root`.
+/// The toolchain tree one composing invocation may follow, as the emitter resolved it.
 #[derive(Debug, Clone)]
 pub struct ToolchainLinks {
-    /// The resolved `pinned` value (C-007), from [`pinned_for_project`].
-    ///
-    /// `true` short-circuits the entire lane before any I/O: no heal, no probe,
-    /// no link consulted, and the answer is [`ComposePaths::digest_only`]
-    /// (C-066).
+    /// The resolved `pinned` value; `true` means digest paths, with no I/O.
     pub pinned: bool,
 
-    /// The resolved toolchain home whose `<group>/<entry>` tree is probed,
-    /// from [`PackageManager::toolchain_home`](super::PackageManager::toolchain_home)
-    /// — never a hand-joined path.
+    /// The resolved toolchain home whose link tree is probed.
     pub home: ToolchainHome,
 
-    /// The security input, not an arithmetic one (RUL-47): what lets the heal
-    /// run `refuse_symlinked_project_path`, which a [`ToolchainHome`] alone
-    /// cannot answer.
+    /// Lets the heal refuse a symlinked project path, which `home` alone cannot answer.
     pub scope: RenderStampScope,
 
-    /// The lock the links are compared against. Pure lock arithmetic — the
-    /// probe never reads metadata and never touches the network.
+    /// The lock the links are compared against.
     pub lock: ProjectLock,
 
-    /// The groups **this invocation selected** (`-g`, else `DEFAULT_GROUP`) —
-    /// the groups about to be emitted, never the default group alone. C-062's
-    /// default-group narrowing belongs to the non-composing `bin`-mode prompt
-    /// path and must not leak here (C-070).
+    /// The groups this invocation selected and emits, never the default group alone.
     pub groups: Vec<String>,
 }
 
 impl ComposePaths {
-    /// Digest paths for everything; no link is consulted and no filesystem is
-    /// touched.
-    ///
-    /// The correct composition for `pinned = true` (C-066) and for every
-    /// composition with no toolchain tree in scope.
+    /// Digest paths for everything, touching no filesystem.
     pub(crate) fn digest_only() -> Self {
         Self {
             trusted: HashMap::new(),
         }
     }
 
-    /// Heal the selected groups, then probe each of their entries, and keep the
-    /// ones this composition may follow (C-067 / C-070).
-    ///
-    /// # Heal first, and here rather than at each emitter
-    ///
-    /// C-070 requires every composing emitter to heal **the groups it is about
-    /// to emit**. Four emitters healing independently is four chances to pass
-    /// the wrong group set, which is C-070's exact failure mode; healing inside
-    /// the one code path C-065 already makes them share means the group set is
-    /// supplied once, as [`ToolchainLinks::groups`], and no emitter can
-    /// disagree with another about it.
-    ///
-    /// # The heal's return value is not the trust answer (RUL-81)
-    ///
-    /// [`heal_links`](super::tasks::render_toolchain::heal_links)'
-    /// [`HealOutcome::Healed`] carries a count of *repairs*, not of trustworthy
-    /// entries, and it calls `ensure_home_root`, which **creates** the root —
-    /// so neither that count nor `home.root().exists()` can answer "is there a
-    /// rendered tree". Its [`HealOutcome::Refused`] *is* consulted, and it is
-    /// the one thing about the tree the heal does answer: not "these links are
-    /// good" but "I never entered this tree", which ends the composition at
-    /// digest paths before a single entry is probed.
-    /// The question is asked once per entry, after the heal, by
-    /// [`link_is_trustworthy`], and an entry that cannot answer "a link naming
-    /// the lock-derived digest root" is simply absent from the map: C-067's
-    /// per-entry degrade is a map miss, never a branch.
-    ///
-    /// A mismatch is treated as **absent, never as usable** — this is the belt
-    /// behind the heal, so a link the heal could not repair degrades to a
-    /// correct digest path instead of silently resolving the wrong package.
+    /// Heal the selected groups, probe their entries, and keep the ones this composition may follow;
+    /// an untrustworthy link degrades to the digest path, never the wrong package.
     ///
     /// # Errors
     ///
-    /// [`PackageErrorKind::ToolchainPath`], and nothing else — a group key from
-    /// `ocx.lock` or a selected group name that cannot become a path component
-    /// (exit 78), raised by this function's own
-    /// [`ToolchainHome::entry`](ocx_store::file_structure::ToolchainHome::entry)
-    /// call. Every I/O condition degrades: a missing tree, an unreadable entry,
-    /// a repair that could not land, and a home or group directory the symlink
-    /// guards refuse all leave entries out of the map rather than failing an
-    /// emission (C-067).
-    ///
-    /// `file_structure` supplies both the `packages/` root the digest path is
-    /// built from and the `locks/` root the heal's `lock_scoped` requires;
-    /// `platform` selects which of a [`LockedTool`](ocx_project::LockedTool)'s
-    /// per-platform leaf digests the link must name (RUL-31). Three arguments of
-    /// three distinct types rather than a parameters struct: none of them can be
-    /// transposed without a type error.
+    /// Only [`PackageErrorKind::ToolchainPath`] (exit 78); every I/O condition degrades an entry instead.
     pub(crate) async fn resolve(
         links: &ToolchainLinks,
         file_structure: &FileStructure,
         platform: &ocx_oci::Platform,
     ) -> Result<Self, PackageErrorKind> {
-        // C-066, before any I/O: `pinned` is answered without touching the tree,
-        // so a pinned composition cannot be slowed — or failed — by a home it
-        // was never going to read.
         if links.pinned {
             return Ok(Self::digest_only());
         }
 
-        // C-070 — heal **the groups this invocation selected**, before a single
-        // link is probed. `ocx exec -g ci` repairs `ci`, not `default`.
-        //
-        // A refusal ends the composition here, at digest paths. The heal's
-        // gates are the *read* path's gates too: a tree the heal would not
-        // enter is a tree this function must not probe, because probing it is
-        // what puts an attacker's link on `PATH` and in `${installPath}`. The
-        // repair count is deliberately not consulted — RUL-81 — since a count
-        // of repairs is not a count of trustworthy entries; only the refusal
-        // is a verdict on the tree.
+        // A refused heal ends at digest paths: probing a tree it would not enter puts an attacker's link on `PATH`.
         if let HealOutcome::Refused { reason } = super::tasks::render_toolchain::heal_links(
             file_structure,
             &links.home,
@@ -1299,10 +681,7 @@ impl ComposePaths {
             return Ok(Self::digest_only());
         }
 
-        // Pure arithmetic, in `groups` order and then `lock.tools` order, so the
-        // tie-break RUL-98 names is a property of this walk rather than of a
-        // hash iteration. An entry with no compatible leaf has no link to name
-        // (RUL-31) and is simply left out — never a target invented for it.
+        // Walk order is the tie-break: `groups`, then `lock.tools`.
         let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
         for group in &links.groups {
             for tool in links.lock.tools.iter().filter(|tool| &tool.group == group) {
@@ -1313,21 +692,10 @@ impl ComposePaths {
             }
         }
 
-        // One blocking unit for the whole probe pass: `read_link` and
-        // `symlink_metadata` run on every composing emitter's per-prompt path.
         let guarded_home = links.home.clone();
         let guarded_scope = links.scope.clone();
         let trusted = tokio::task::spawn_blocking(move || {
-            // The heal's two guards, taken again on the READ path — the
-            // second, independent guard, kept now that `heal_links` reports a
-            // `Refused` the caller above acts on. Two reasons it stays. The
-            // refusal above is computed *before* this probe pass is scheduled,
-            // so this is the check that sees the tree as the probe finds it
-            // rather than as the heal left it; and a guard that lives only at
-            // a call site is the arrangement that produced the original
-            // defect, one caller at a time. A refusal degrades the whole
-            // composition to digest paths, exactly as an unrendered tree does
-            // (C-067).
+            // Rechecked on the read path: the heal's verdict predates this pass.
             if let Err(error) = super::tasks::render_toolchain::refuse_symlinked_home(&guarded_scope, &guarded_home) {
                 log::debug!(
                     "Toolchain links under '{}' were not followed: {error}",
@@ -1338,20 +706,11 @@ impl ComposePaths {
 
             let mut trusted: HashMap<PathBuf, PathBuf> = HashMap::new();
             for (target, entry) in candidates {
-                // RUL-98 — the first *trustworthy* candidate keeps the slot. Two
-                // lock entries sharing one digest name the same directory, so
-                // the loser differs only in spelling; a refused first candidate
-                // is not a candidate at all and must not shadow its sibling.
+                // Checked before trust, so only a trusted candidate can shadow its sibling.
                 if trusted.contains_key(&target) {
                     continue;
                 }
-                // The one component between the guarded root and the probed
-                // leaf. A symlinked `<home>/<group>` whose entry happens to read
-                // back the correct target never reaches `repoint_link`'s
-                // refusal — the heal has nothing to repair — so the write path
-                // never sees it and only this check stands between it and
-                // `PATH`. `is_link`, not `Path::is_symlink`: an NTFS junction
-                // (RUL-80).
+                // Only this keeps a symlinked `<home>/<group>` off `PATH`; `is_link`, as `is_symlink` misses a junction.
                 if entry.parent().is_some_and(ocx_util::fs::symlink::is_link) {
                     continue;
                 }
@@ -1362,9 +721,6 @@ impl ComposePaths {
             trusted
         })
         .await
-        // A join failure resolves to "nothing is trustworthy" — the same answer
-        // every unreadable entry gives, and the one C-067 prescribes: the whole
-        // composition degrades to digest paths rather than failing an emission.
         .unwrap_or_else(|error| {
             log::debug!("The toolchain link probe did not complete: {error}");
             HashMap::new()
@@ -1373,17 +729,7 @@ impl ComposePaths {
         Ok(Self { trusted })
     }
 
-    /// The install path one package composes to.
-    ///
-    /// The whole of C-065 and C-067 at one call: a [`PathLane::Following`]
-    /// package with a trustworthy link composes through it, and everything
-    /// else — a dependency, a package with no link, a link the probe refused,
-    /// and every entry under `pinned = true` — composes through its digest
-    /// root.
-    ///
-    /// Returns a [`PackageDir`] rather than a path so `content/` and
-    /// `entrypoints/` keep their single spelling: a caller joining `"content"`
-    /// onto the answer would be a second producer of a store path.
+    /// The install path one package composes to: its trusted link on the following lane, else its digest root.
     pub(crate) fn install_path_for(&self, package: &PackageDir, lane: PathLane) -> PackageDir {
         match lane {
             PathLane::Digest => package.clone(),
@@ -1395,51 +741,15 @@ impl ComposePaths {
     }
 }
 
-/// Whether the link at `entry` is one this composition may follow — the
-/// per-entry trust test C-067 names (RUL-80).
-///
-/// `target` is the lock-derived digest root, from
-/// [`link_target`](super::tasks::render_toolchain::link_target) — the same
-/// arithmetic the render and the heal use, so the three cannot disagree about a
-/// compatible-but-non-identical platform key (RUL-31).
-///
-/// Three properties, each load-bearing:
-///
-/// - **Compared un-canonicalised.** The heal compares raw `read_link` targets;
-///   a composer that canonicalised would disagree with the repairer, and would
-///   follow *through* a hostile target the heal refused to touch.
-/// - **Link-ness probed with [`ocx_util::fs::symlink::is_link`]**, never
-///   `Path::is_symlink`: a Windows link here is an NTFS junction, which
-///   `Path::is_symlink` does not report.
-/// - **Never errors.** Every unreadable, absent, mismatched or wrong-shaped
-///   entry is `false`, and `false` degrades that one entry to a digest path.
-///   A missing or stale link is a path that is not stable yet, not a failure.
-///
-/// Blocking: `read_link` and `symlink_metadata` run on the composing emitter's
-/// per-prompt path, so the caller owns putting this on `spawn_blocking`.
+/// Whether the link at `entry` still names `target`; blocking, and any bad entry is `false`.
 fn link_is_trustworthy(entry: &Path, target: &Path) -> bool {
-    // Both halves are load-bearing and neither implies the other: `is_link`
-    // refuses the regular file or directory the heal has no authority to
-    // remove, and the raw `read_link` compare — the heal's own test, verbatim —
-    // refuses the stale target a branch switch leaves behind.
+    // Un-canonicalised, as the heal compares: canonicalising follows through a hostile target the heal refused.
     ocx_util::fs::symlink::is_link(entry) && std::fs::read_link(entry).is_ok_and(|current| current == target)
 }
 
-/// Fill the project-tier `pinned` ladder (C-007), unresolved.
-///
-/// Three tiers: `--pinned` / `--no-pinned` ▸ `ocx.toml`'s `pinned` key ▸
-/// `OCX_TOOLCHAIN_PINNED`. **The environment tier is the weakest**, below the
-/// file tier — an exported `OCX_TOOLCHAIN_PINNED` loses to a project that
-/// states a value and decides only for one that states none.
-///
-/// Split from [`pinned_for_project`] for the reason
-/// [`lazy_mode_ladder_for_package`] is split from [`lazy_mode_for_package`]:
-/// the tier order is worth asserting without also asserting the floor.
-///
-/// `cli` is `ocx_cli`'s `options::Pinned::pinned` — an `Option<bool>` whose
-/// `None` means "neither flag was given", never `false`. Collapsing the two
-/// would delete `--no-pinned`, whose entire job is overriding an `ocx.toml` or
-/// an `OCX_TOOLCHAIN_PINNED` that asked to pin.
+/// Fill the project-tier `pinned` ladder, unresolved: `--pinned`/`--no-pinned` ▸ `ocx.toml` ▸
+/// `OCX_TOOLCHAIN_PINNED`, the environment weakest.
+// `cli` is `None` when neither flag was given, never `false`, or `--no-pinned` loses its override.
 pub fn pinned_ladder_for_project(cli: Option<bool>, config: &ProjectConfig) -> Ladder<bool> {
     Ladder {
         cli,
@@ -1448,41 +758,16 @@ pub fn pinned_ladder_for_project(cli: Option<bool>, config: &ProjectConfig) -> L
     }
 }
 
-/// Resolve the `pinned` ladder for one project — the form every composing
-/// emitter uses (C-007, C-066).
-///
-/// The floor is [`ocx_project::activate::PINNED_FLOOR`] (`false`, the following
-/// lane), passed as [`Ladder::resolve`]'s parameter and never re-spelled as a
-/// literal: the floor of a setting is defined once, at
-/// [`ocx_project::activate`](ocx_project::activate), where a reader looking for it will be.
-///
-/// Feeds [`ToolchainLinks::pinned`].
+/// Resolve the `pinned` ladder for one project, down to [`ocx_project::activate::PINNED_FLOOR`].
 pub fn pinned_for_project(cli: Option<bool>, config: &ProjectConfig) -> bool {
     pinned_ladder_for_project(cli, config).resolve(ocx_project::activate::PINNED_FLOOR)
 }
 
 // ── Lazy package loading: the shim slot ─────────────────────────────────────
-//
-// A *deferred* tool composes exactly like a materialized one, with two
-// differences and no third:
-//
-//   1. One extra PATH entry — the shim directory's `bin/` — pushed **first**
-//      in that root's block (C-012).
-//   2. Its carriers are read from ref-linked config blobs instead of package
-//      directories, because it has none (C-020).
-//
-// Everything else — the surface algebra, the dep-before-root order, the
-// cross-root dedup, the collision and version-conflict gates — is the code
-// above, unchanged. That is the point: a tool that is later materialized
-// composes byte-identically to one that never deferred, so the only thing
-// deferral may change is which of the two carrier sources is read (C-013).
+// A deferred tool differs from a materialized one in its shim slot and carrier source only, or it stops composing byte-identically once materialized.
 
-/// Construct the synthetic `PATH ⊳ <shim-root>/bin` entry for a deferred tool
-/// (plan contracts C-003 / C-012).
-///
-/// The `bin/` subdirectory, never the shim root: a legal `binaries` claim of
-/// `["digest", "refs"]` would otherwise put a generated launcher on top of the
-/// CAS marker and the forward-ref directory.
+/// Construct the synthetic `PATH ⊳ <shim-root>/bin` entry for a deferred tool.
+// `bin/`, never the shim root, where a `digest` or `refs` claim would shadow the store's own entries.
 fn synth_shim_path_for(shim: &ShimDir) -> Entry {
     Entry {
         key: "PATH".to_string(),
@@ -1492,29 +777,9 @@ fn synth_shim_path_for(shim: &ShimDir) -> Entry {
     }
 }
 
-/// Push a deferred root's shim slot — the **first** entry of its block, and
-/// therefore the lowest-precedence one (plan contract C-012).
+/// Push a deferred root's shim slot, the lowest-precedence entry of its block; absent under `--self`.
 ///
-/// # Ordering invariant
-///
-/// Consumers apply entries by **prepending** (see [`emit_dep_path_block`]), so
-/// the *last* entry pushed is *first* in the resolved PATH. Pushing the shim
-/// slot before the root's declared vars and before its synthetic
-/// `entrypoints/` therefore resolves to `entrypoints/` > `bin/` > `shims/`:
-/// once the first invocation has materialized the package, the two directories
-/// that were empty paths at compose time become real and shadow the shim, so
-/// the *same* exported environment stops routing through it (S-004). A reader
-/// who assumes push order equals PATH order will invert this and make the shim
-/// shadow the real binaries — the bug this ordering exists to prevent.
-///
-/// Cross-node order is unchanged: dep blocks emit before the root's own, so the
-/// root still beats every dep.
-///
-/// The slot carries [`Entrypoints::IMPLICIT_VISIBILITY`] (INTERFACE) and
-/// crosses through the shared [`carrier_crosses`] predicate at the root
-/// (`is_root = true`), so it is **absent under `self_view = true`** — a
-/// package's own private view bypasses launchers, and a shim is nothing but a
-/// launcher. A no-op for a root that is not deferred.
+/// Pushed first because consumers prepend: once materialized, the real `bin/` then shadows the shim.
 fn emit_shim_slot(root: &InstallInfo, self_view: bool, entries: &mut Vec<Entry>) {
     if !carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view) {
         return;
@@ -1524,28 +789,12 @@ fn emit_shim_slot(root: &InstallInfo, self_view: bool, entries: &mut Vec<Entry>)
     }
 }
 
-/// One transitive-closure entry's `(metadata, resolved)` pair, from whichever
-/// carrier source the root has (plan contract C-020).
-///
-/// - Materialized root → [`common::load_object_data`] over the dep's package
-///   directory, exactly as before.
-/// - Deferred root → the pre-loaded closure member the root carries, whose
-///   metadata was read from the ref-linked config blob. **No package directory
-///   is touched**, and no completeness probe is performed beyond the shim
-///   directory's existence, which `prepare_lazy` already guarantees.
-///
-/// The single source both [`compose`] and [`check_entrypoints`] read, so
-/// neither can independently regrow the "every composed tool has a package
-/// directory" assumption C-020 names as a defect.
+/// One closure entry's `(metadata, resolved)` pair: from the package store for a materialized
+/// root, from the deferred closure (no package directory) otherwise.
 ///
 /// # Errors
 ///
-/// Propagates the load failure for a materialized root. For a deferred root,
-/// returns `Error::package(dep_id, `[`PackageErrorKind::NotFound`]`)` — the
-/// three-layer envelope this subsystem already uses — when the closure does not
-/// carry `dep_id`: that is a shim tree whose ref-linked blobs and whose composed
-/// TC disagree, and falling back to the package store would silently compose a
-/// tool from a directory that does not exist.
+/// The load failure, or [`PackageErrorKind::NotFound`] when a deferred closure lacks `dep_id`.
 async fn tc_entry_object_data(
     root: &InstallInfo,
     store: &PackageStore,
@@ -1554,9 +803,7 @@ async fn tc_entry_object_data(
     let Some(deferred) = root.deferred() else {
         return common::load_object_data(store, &store.content(dep_id)).await;
     };
-    // No `else` branch onto the store: a closure miss is the C-020 defect
-    // condition, and answering it from a package directory that may or may not
-    // exist is precisely the fallback this accessor exists to make impossible.
+    // Never fall back to the store: a closure miss would compose from a directory that may not exist.
     let member = deferred
         .member(dep_id)
         .ok_or_else(|| crate::Error::package(dep_id.as_identifier().clone(), PackageErrorKind::NotFound))?;
@@ -1565,58 +812,33 @@ async fn tc_entry_object_data(
 
 // ── Lazy package loading: resolving the ladder and building the roots ────────
 
-/// One tool to compose, with the `lazy-mode` its five-tier ladder resolved to
-/// (plan contract C-006).
-///
-/// The mode is resolved by the caller that holds the parsed options — the CLI
-/// tier is a command-line flag and no library type can see it — via
-/// [`lazy_mode_for_tool`] (project tier) or [`lazy_mode_for_package`] (OCI
-/// tier). Carrying the *resolved* mode rather than the ladder keeps
-/// [`PackageManager::compose_roots`] free of any notion of `ocx.toml`.
+/// One tool to compose, with its resolved `lazy-mode` ([`lazy_mode_for_tool`] or [`lazy_mode_for_package`]).
 #[derive(Debug, Clone)]
 pub struct ComposeRequest {
     /// The identifier to compose, as the caller's tier resolved it.
     pub identifier: ocx_oci::PackageRef,
-    /// The resolved `lazy-mode`: [`LazyMode::Always`] defers, [`LazyMode::Never`]
-    /// materializes.
+    /// The resolved `lazy-mode`.
     pub mode: LazyMode,
 }
 
 /// How a request whose resolved mode is [`LazyMode::Never`] reaches the store.
-///
-/// One variant per materialization policy the composing commands already had,
-/// so folding the lazy split into one library entry point does not quietly
-/// change what any of them does on the eager path.
 #[derive(Debug, Clone)]
 pub enum Materialization {
-    /// Resolve locally, install on a miss — the default for every composing
-    /// command (`find_or_install_all`).
+    /// Resolve locally, install on a miss.
     Install,
-    /// Probe the local store only, never the registry; a miss is warned about
-    /// and omitted rather than failing (`ocx env --no-pull`).
+    /// Probe the local store only; a miss is omitted, not an error (`ocx env --no-pull`).
     LocalOnly,
     /// Resolve through the stable install-symlink namespace
     /// (`ocx package env --candidate` / `--current`).
     Symlink(SymlinkKind),
 }
 
-/// A request the composing caller dropped rather than failed on (scenario
-/// S-009).
-///
-/// Warn-and-omit is a decision only the composing caller can make:
-/// `prepare_lazy` can report that a closure's metadata is not reachable, but
-/// only the caller knows whether this invocation promised to reach the network.
+/// A request the composing caller dropped rather than failed on.
 #[derive(Debug)]
 pub struct ComposeOmission {
     /// The request that was dropped, as the caller named it.
     pub identifier: ocx_oci::PackageRef,
-    /// Why it was dropped, verbatim from the probe that dropped it — the
-    /// vocabulary [`unavailable_locally`] admits, which is wider than
-    /// [`PackageErrorKind::NotFound`]: a tag no cached index answers under
-    /// `--offline` or `--frozen` is a policy block, not a not-found.
-    ///
-    /// No exit-code classification is driven off this field; a caller that ever
-    /// wants one has to fix the vocabulary first.
+    /// Why it was dropped, verbatim from the probe; wider than not-found, so no exit code may be derived from it.
     pub reason: PackageErrorKind,
 }
 
@@ -1624,74 +846,27 @@ pub struct ComposeOmission {
 /// things only the composing caller can report.
 #[derive(Debug)]
 pub struct ComposeRoots {
-    /// One root per surviving request, **in request order** — the order every
-    /// composing command's output depends on.
+    /// One root per surviving request, in request order.
     pub roots: Vec<Arc<InstallInfo>>,
 
-    /// Advisories raised by the deferred tools' declared metadata (plan
-    /// contract C-015 (d)).
-    ///
-    /// Classified for a **deferred** tool only: an eagerly-materialized request
-    /// never reaches `prepare_lazy`, which is the fact that makes the
-    /// "deferred only" clause testable. Returned rather than logged so the
-    /// caller can serialize them under `--format json` — an advisory channel
-    /// that only reaches a log is the "settable and unreadable" defect this
-    /// plan has already caught three times.
+    /// Advisories raised by the deferred tools' declared metadata, returned for `--format json`.
     pub advisories: Vec<LazyAdvisory>,
 
-    /// Requests dropped under [`Materialization::LocalOnly`] (S-009). Empty
-    /// under every other policy, where a miss is a hard error.
+    /// Requests dropped under [`Materialization::LocalOnly`].
     pub omitted: Vec<ComposeOmission>,
 
-    /// Requests this invocation materialized on the spot, in request order —
-    /// the drift signal an execution record publishes as
-    /// `resolution.autoInstalled`.
-    ///
-    /// Populated by the [`Materialization::Install`] arm only, and empty under
-    /// every other policy because none of them can pull: `Symlink` resolves
-    /// existing installs, `LocalOnly` probes and warn-and-omits on a miss, and
-    /// the deferred half generates a shim tree without downloading content.
-    ///
-    /// A plain list rather than an outcome aligned with [`Self::roots`]: the
-    /// only consumer asks "which of these did this invocation fetch", and an
-    /// aligned vector would carry a `Cached` entry per root that nobody reads.
+    /// Requests this invocation pulled, in request order (`resolution.autoInstalled`).
     pub pulled: Vec<ocx_oci::PackageRef>,
 }
 
 impl PackageManager {
-    /// Turn composition requests into compose roots, deferring the ones whose
-    /// `lazy-mode` resolved to [`LazyMode::Always`] (plan contracts C-012 /
-    /// C-013 / C-020, scenario S-009).
-    ///
-    /// Per request, in request order:
-    ///
-    /// - [`LazyMode::Never`] → materialized per `materialization`, exactly as
-    ///   the command did before this feature existed.
-    /// - [`LazyMode::Always`] → [`prepare_lazy`](Self::prepare_lazy) generates
-    ///   (or converges on) the shim tree, the closure's carriers are read back
-    ///   from its ref-linked config blobs, and the root is returned carrying a
-    ///   [`DeferredComposition`](ocx_package::install_info::DeferredComposition).
-    ///   No content is downloaded and no package directory is created.
-    ///
-    /// **The result does not depend on content-cache state** (C-013): a
-    /// deferred request composes the same root whether or not `content/` is
-    /// already present, and a shim directory removed by `ocx clean` is
-    /// regenerated here. The env is a function of the lock, the resolved mode,
-    /// and metadata availability — nothing else.
-    ///
-    /// Under [`Materialization::LocalOnly`] a request whose content (eager) or
-    /// metadata (deferred) is not available locally is reported in
-    /// [`ComposeRoots::omitted`] instead of failing, and the caller warns
-    /// (S-009). Under every other policy it is an error.
+    /// Turn composition requests into compose roots: eager ones materialize per `materialization`,
+    /// deferred ones get a shim tree. The result never depends on content-cache state.
     ///
     /// # Errors
     ///
-    /// - [`Error::FindFailed`](super::error::Error::FindFailed) — an eager
-    ///   request could not be resolved or installed.
-    /// - [`Error::ResolveFailed`](super::error::Error::ResolveFailed) — a
-    ///   deferred request's shim tree could not be generated: its names are not
-    ///   enumerable, a claimed name is `ocx`'s own or is not a valid binary
-    ///   name (C-009), or staging/publication failed.
+    /// [`Error::FindFailed`](super::error::Error::FindFailed) for an eager request, or
+    /// [`Error::ResolveFailed`](super::error::Error::ResolveFailed) when a shim tree cannot be generated.
     pub async fn compose_roots(
         &self,
         requests: &[ComposeRequest],
@@ -1699,9 +874,6 @@ impl PackageManager {
         materialization: Materialization,
         concurrency: Concurrency,
     ) -> Result<ComposeRoots, super::error::Error> {
-        // Slot-indexed so both halves can run in whatever order suits them and
-        // the result still comes back in request order — the order every
-        // composing command's output depends on.
         let mut slots: Vec<Option<Arc<InstallInfo>>> = (0..requests.len()).map(|_| None).collect();
         let mut advisories: Vec<LazyAdvisory> = Vec::new();
         let mut omitted: Vec<ComposeOmission> = Vec::new();
@@ -1714,8 +886,6 @@ impl PackageManager {
             .map(|(index, request)| (index, request.identifier.clone()))
             .collect();
 
-        // The eager half runs the calling command's own policy, batched exactly
-        // as that command batched it before the lazy split existed.
         let identifiers: Vec<ocx_oci::PackageRef> = eager.iter().map(|(_, id)| id.clone()).collect();
         match &materialization {
             Materialization::Install => {
@@ -1736,20 +906,8 @@ impl PackageManager {
                 }
             }
             Materialization::LocalOnly => {
-                // Every shell prompt takes this branch, and one `local_root` is
-                // three `stat`s plus two JSON reads — serialized, that is the
-                // whole root set's worth of round trips on the prompt's
-                // critical path. Concurrent, under the same `concurrency` cap
-                // the `Install` branch honours: `semaphore()` + `acquire_permit`
-                // is the mechanism `find_or_install_all` already uses, so
-                // `--jobs` means one thing across both.
-                //
-                // `join_all` rather than `buffer_unordered`: it yields in
-                // **input order** by construction, which is what keeps
-                // `slots[*index]` and the `omitted` order — both observable —
-                // identical to the sequential loop without an index-keyed
-                // re-sort to get them back.
                 let semaphore = concurrency.semaphore();
+                // `join_all`, not `buffer_unordered`: the `omitted` order is observable and must stay request order.
                 let probed = join_all(eager.iter().map(|(_, identifier)| {
                     let semaphore = semaphore.clone();
                     async move {
@@ -1759,12 +917,7 @@ impl PackageManager {
                 }))
                 .await;
 
-                // Every probe has already run, so a hard failure no longer
-                // short-circuits the ones after it. Consuming in request order
-                // keeps *which* error surfaces the lowest-index one — the
-                // sequential loop's precedence — and the extra probes are
-                // unobservable: their only side effect is `find`'s idempotent
-                // `link_blobs` upsert, on a call that returns `Err` regardless.
+                // In request order, so the lowest-index error is the one that surfaces.
                 for ((index, identifier), result) in eager.iter().zip(probed) {
                     match result {
                         Ok(info) => slots[*index] = Some(Arc::new(info)),
@@ -1783,10 +936,7 @@ impl PackageManager {
             }
         }
 
-        // The deferred half. Sequential: `prepare_lazy` is itself a bounded
-        // parallel closure walk, and one deferred tool's tree is published by a
-        // single rename, so a second fan-out here would multiply the frontier
-        // without shortening the critical path.
+        // Sequential: `prepare_lazy` is already a bounded parallel walk.
         for (index, request) in requests.iter().enumerate() {
             if request.mode != LazyMode::Always {
                 continue;
@@ -1796,9 +946,6 @@ impl PackageManager {
                     slots[index] = Some(root);
                     advisories.append(&mut raised);
                 }
-                // Same warn-and-omit leg the eager half takes, for the same
-                // reason: under `--no-pull` a tool whose *metadata* is not local
-                // is absent, not a failure (S-009).
                 Err(kind) if matches!(materialization, Materialization::LocalOnly) && unavailable_locally(&kind) => {
                     omitted.push(ComposeOmission {
                         identifier: request.identifier.clone(),
@@ -1821,47 +968,30 @@ impl PackageManager {
         })
     }
 
-    /// Probe the local package store for one eager request, returning `None`
-    /// when it is simply not materialized.
-    ///
-    /// A digest-bearing identifier — every lock-pinned tool — is looked up
-    /// directly, with no index round-trip at all: the package directory is pure
-    /// path arithmetic over the digest, so resolution has nothing to add and an
-    /// absent cached leaf manifest must not turn an installed tool into a miss.
-    /// A tag-only identifier still has to resolve before it can be located.
+    /// Probe the local package store for one eager request.
     ///
     /// # Errors
     ///
-    /// [`PackageErrorKind::NotFound`] when the package is simply not
-    /// materialized, whatever the resolve surfaced otherwise. The caller sorts
-    /// omission from failure through [`unavailable_locally`].
+    /// [`PackageErrorKind::NotFound`] when it is not materialized, else whatever the resolve surfaced.
     async fn local_root(
         &self,
         identifier: &ocx_oci::PackageRef,
         platform: &ocx_oci::Platform,
     ) -> Result<InstallInfo, PackageErrorKind> {
+        // A digest skips the index: an absent cached leaf manifest must not turn an installed tool into a miss.
         match ocx_oci::PinnedPackageRef::try_from(identifier.clone()) {
             Ok(pinned) => self.find_plain(&pinned).await?.ok_or(PackageErrorKind::NotFound),
             Err(_) => self.find(identifier, platform.clone()).await,
         }
     }
 
-    /// Build one deferred tool's compose root: generate the shim tree, then
-    /// read its closure's carriers back from the ref-linked config blobs
-    /// (plan contract C-020).
-    ///
-    /// The returned root's own `dir()` names the package directory the shim
-    /// will materialize into. That path is pure arithmetic over the pinned
-    /// identifier, so `${installPath}` resolves to the same value before and
-    /// after the first invocation — which is what lets the entries this root
-    /// contributes stay correct across materialization without recomposing.
+    /// Build one deferred tool's compose root: generate the shim tree, then read its closure's
+    /// carriers back from the ref-linked config blobs.
     ///
     /// # Errors
     ///
-    /// Whatever [`prepare_lazy`](Self::prepare_lazy) surfaces, plus
-    /// [`PackageErrorKind::Internal`] when a closure member's config blob
-    /// cannot be read back from the blob store the shim tree's `refs/blobs/`
-    /// keeps reachable.
+    /// Whatever [`prepare_lazy`](Self::prepare_lazy) surfaces, or [`PackageErrorKind::Internal`]
+    /// when a closure member's config blob cannot be read.
     async fn deferred_root(
         &self,
         package: &ocx_oci::PackageRef,
@@ -1870,13 +1000,7 @@ impl PackageManager {
         let prepared = self.prepare_lazy(package, platform).await?;
         let store = &self.file_structure().packages;
 
-        // The synthesized transitive closure. Every non-root node with its
-        // composed-from-root visibility, in the walk's own deps-before-dependents
-        // order — the same shape `resolve.json` carries for a materialized
-        // package, because every consumer downstream (the surface gate, the
-        // entry-point collision gate, the fatal version-conflict gate) reads it
-        // as if it were one. A truncated TC here would compile, pass every other
-        // test, and silently disable those gates for deferred tools.
+        // The full closure in `resolve.json`'s shape: a truncated one silently disables the surface, collision and conflict gates.
         let mut closure: Vec<Arc<InstallInfo>> = Vec::new();
         let mut root_dependencies: Vec<ResolvedDependency> = Vec::new();
         let mut root_node: Option<ClosureNode> = None;
@@ -1887,18 +1011,11 @@ impl PackageManager {
             }
             root_dependencies.push(ResolvedDependency {
                 identifier: node.identifier.clone(),
-                // `None` only ever means "this is the root", which this branch
-                // has already excluded; a sealed edge is the safe reading of a
-                // visibility the walk could not compose.
                 visibility: node.effective_visibility.unwrap_or(Visibility::SEALED),
             });
             closure.push(Arc::new(self.closure_member(&node, store).await?));
         }
 
-        // `walk_closure_nodes` always folds the root in last, so this is the
-        // shim tree disagreeing with its own closure. Named rather than
-        // `expect`ed: a library must not panic across an API boundary, however
-        // unreachable the state.
         let root_node = root_node.ok_or_else(|| {
             PackageErrorKind::Internal(crate::error::file_error(
                 prepared.shim.root(),
@@ -1919,14 +1036,7 @@ impl PackageManager {
         Ok((Arc::new(root), prepared.advisories))
     }
 
-    /// One closure member as a compose-time [`InstallInfo`], its carriers read
-    /// from the ref-linked config blob and its `dir()` naming the package
-    /// directory the shim will materialize into (C-020).
-    ///
-    /// The member's own `ResolvedPackage` carries its **declared** dependency
-    /// edges — the only thing a consumer asks of it, since `compose` walks the
-    /// root's transitive closure and uses a dep's resolution solely to map
-    /// `${deps.NAME.installPath}` onto a pinned identifier.
+    /// One closure member as a compose-time [`InstallInfo`], carrying its declared dependency edges.
     async fn closure_member(&self, node: &ClosureNode, store: &PackageStore) -> Result<InstallInfo, PackageErrorKind> {
         let metadata = self.closure_metadata(node).await?;
         let resolved = ResolvedPackage {
@@ -1947,9 +1057,7 @@ impl PackageManager {
         ))
     }
 
-    /// Read one closure node's metadata back from the config blob its shim
-    /// tree's `refs/blobs/` keeps reachable — never from a package directory,
-    /// which a deferred tool does not have (C-020).
+    /// Read one closure node's metadata back from its config blob; a deferred tool has no package directory.
     async fn closure_metadata(&self, node: &ClosureNode) -> Result<metadata::Metadata, PackageErrorKind> {
         let blobs = &self.file_structure().blobs;
         let registry = node.identifier.registry();
@@ -1966,24 +1074,15 @@ impl PackageManager {
             })?;
         let raw: metadata::Metadata = serde_json::from_slice(&bytes)
             .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
-        // Same validation every other load path applies — a config blob is
-        // publisher-authored input wherever it is read from.
+        // Validated like every load path: a config blob is publisher-authored input.
         Ok(metadata::ValidMetadata::try_from(raw)
             .map_err(|error| PackageErrorKind::Internal(error.into()))?
             .into())
     }
 }
 
-/// Whether a failed request means "not available on this machine" rather than
-/// "broken" — the one place [`Materialization::LocalOnly`]'s warn-and-omit leg
-/// is decided (scenario S-009).
-///
-/// Wider than [`PackageErrorKind::NotFound`] on purpose. `--no-pull` is
-/// routinely combined with `--offline` or `--frozen`, and under those a tag no
-/// cached index answers surfaces as a *policy block*, not a not-found — so a
-/// `NotFound`-only test would fail the whole compose on exactly the invocation
-/// this leg exists to keep working. Everything else (a malformed manifest, an
-/// I/O failure, a refused shim name) stays a hard error under every policy.
+/// Whether a failed request means "not available on this machine" rather than "broken".
+// Includes policy blocks: `--no-pull` with `--offline`/`--frozen` reports a missing tag that way, not as `NotFound`.
 fn unavailable_locally(kind: &PackageErrorKind) -> bool {
     match kind {
         PackageErrorKind::NotFound | PackageErrorKind::OfflineManifestMissing(_) => true,
@@ -1995,18 +1094,7 @@ fn unavailable_locally(kind: &PackageErrorKind) -> bool {
     }
 }
 
-/// Fill the **OCI-tier** `lazy-mode` ladder (plan contract C-006), unresolved.
-///
-/// Two tiers, not five: `--lazy-mode` ▸ `OCX_LAZY_MODE` ▸ floor `Never`. The
-/// three config tiers live in `ocx.toml`, and an OCI-tier command
-/// (`ocx package env`, `ocx package exec`) reads no `ocx.toml` at any tier —
-/// so they are absent here rather than silently ignored, which is the same
-/// reason `lazy-report` has no group tier.
-///
-/// Split from [`lazy_mode_for_package`] for the same reason
-/// [`project::lazy_mode_ladder_for_tool`](ocx_project::lazy_mode_ladder_for_tool)
-/// is split from its resolving form: the tier order is host-independent, and on
-/// Windows the resolved answer is `Never` for every input.
+/// Fill the OCI-tier `lazy-mode` ladder, unresolved: `--lazy-mode` ▸ `OCX_LAZY_MODE`; no `ocx.toml` tiers.
 pub fn lazy_mode_ladder_for_package(cli: Option<LazyMode>) -> LazyModeLadder {
     LazyModeLadder {
         cli,
@@ -2015,18 +1103,7 @@ pub fn lazy_mode_ladder_for_package(cli: Option<LazyMode>) -> LazyModeLadder {
     }
 }
 
-/// Resolve the `lazy-mode` ladder for one **OCI-tier** package — the form every
-/// production caller uses.
-///
-/// The project-tier sibling is
-/// [`project::lazy_mode_for_tool`](ocx_project::lazy_mode_for_tool), which
-/// lives with the config it reads. This one reads none, so it stays with its
-/// caller.
-///
-/// Resolution goes through [`LazyModeLadder::resolve_for_host`] rather than a
-/// bare `resolve()` — the one host-aware entry point, kept for a future
-/// platform floor. It is a passthrough today: S-010's Windows floor is gone
-/// (C-027), because C-026 ships the shim producer whose absence justified it.
+/// Resolve the `lazy-mode` ladder for one OCI-tier package, through the host-aware `resolve_for_host`.
 pub fn lazy_mode_for_package(cli: Option<LazyMode>) -> LazyMode {
     lazy_mode_ladder_for_package(cli).resolve_for_host()
 }
@@ -3489,7 +2566,7 @@ mod tests {
     fn resolved_package_rejects_extra_fields() {
         use ocx_package::resolved_package::ResolvedPackage;
 
-        // interface_env / private_env were proposed in the M1 draft (rejected).
+        // interface_env / private_env were proposed in an early draft (rejected).
         // This test confirms the wire format does not accidentally accept them.
         let json = r#"{"dependencies":[],"interface_env":[]}"#;
         let result = serde_json::from_str::<ResolvedPackage>(json);
@@ -5065,9 +4142,9 @@ mod tests {
             .as_str()
     }
 
-    // ─ Declaration order (D6.1, C-018, C-025) ────────────────────────────────
+    // ─ Declaration order ────────────────────────────────
 
-    /// C-018 / C-025 (first leg) — a var may reference one declared strictly
+    /// First leg — a var may reference one declared strictly
     /// earlier in the same package, and gets its resolved value.
     ///
     /// Paired with
@@ -5089,7 +4166,7 @@ mod tests {
         assert_eq!(value_of(&entries, "B"), "alpha/x");
     }
 
-    /// C-025 (second leg) — the same two vars, same keys, same values, only
+    /// Second leg — the same two vars, same keys, same values, only
     /// the array order swapped: the reference now points forward and is
     /// refused.
     #[test]
@@ -5114,7 +4191,7 @@ mod tests {
         );
     }
 
-    /// C-020 — a var referencing itself is the same fault, reached through a
+    /// A var referencing itself is the same fault, reached through a
     /// one-var document: its own declaration is not strictly earlier than
     /// itself, so the scope is empty and there is no cycle to detect.
     #[test]
@@ -5139,7 +4216,7 @@ mod tests {
         );
     }
 
-    /// C-021 (first leg) — a key declared twice earlier is refused, not
+    /// First leg — a key declared twice earlier is refused, not
     /// picked: both contributions are legally visible and neither is
     /// privileged.
     #[test]
@@ -5164,7 +4241,7 @@ mod tests {
         );
     }
 
-    /// C-021 (second leg) — duplicates stay legal. Only *referencing* an
+    /// Second leg — duplicates stay legal. Only *referencing* an
     /// ambiguous key is refused; without this leg the refusal above is
     /// indistinguishable from a new uniqueness rule on `Env`.
     #[test]
@@ -5190,16 +4267,16 @@ mod tests {
         );
     }
 
-    // ─ Surface independence (D8, C-024) ──────────────────────────────────────
+    // ─ Surface independence ──────────────────────────────────────
 
-    /// C-024 — an `interface` var may reference a `private` one, and the
+    /// An `interface` var may reference a `private` one, and the
     /// resolved bytes are identical on both surfaces.
     ///
     /// The fixture is a dependency, where `carrier_crosses` is
     /// `has_interface()` on either surface: `I` crosses both times and `S`
     /// crosses neither, so the two runs differ only in the surface asked for.
     ///
-    /// The literal value assertion is not redundant with C-018: an
+    /// The literal value assertion is not redundant with the ordering check: an
     /// implementation resolving `${self.env.S}` to the empty string on **both**
     /// surfaces satisfies equality perfectly, so equality alone cannot tell
     /// surface-independence from uniformly-degenerate.
@@ -5236,16 +4313,16 @@ mod tests {
         }
     }
 
-    // ─ Resolve, then gate: assertions on emit only (D8, C-026, C-027) ────────
+    // ─ Resolve, then gate: assertions on emit only ────────
 
-    /// C-026(a) — a `required` path var whose target is absent and that does
+    /// Case (a) — a `required` path var whose target is absent and that does
     /// **not** cross the active surface is resolved but not asserted.
     ///
     /// This leg cannot red against the stub, and it cannot red against `main`
     /// either: today the var is `continue`d before `EnvResolver::resolve` runs,
     /// so the assertion never fires. Its red state exists only against
     /// resolve-then-gate code that left the existence assertion on the
-    /// non-emitted path — which is exactly the regression D8 would otherwise
+    /// non-emitted path — which is exactly the regression resolve-then-gate would otherwise
     /// introduce. `..._that_crosses_is_asserted_to_exist` is what makes the
     /// pair a check: without it, deleting the assertion outright passes here.
     #[test]
@@ -5267,7 +4344,7 @@ mod tests {
         );
     }
 
-    /// C-026(b) — the otherwise identical `required` path var that **does**
+    /// Case (b) — the otherwise identical `required` path var that **does**
     /// cross still raises `RequiredPathMissing`. This leg carries the pair's
     /// discrimination.
     #[test]
@@ -5301,10 +4378,10 @@ mod tests {
         contexts
     }
 
-    /// C-027(a) — a var referencing a declared-but-uninstalled dependency
+    /// Case (a) — a var referencing a declared-but-uninstalled dependency
     /// composes cleanly when it does not cross the active surface.
     ///
-    /// Same standing as C-026(a): green today because the var is never
+    /// Same standing as the path-var case (a): green today because the var is never
     /// resolved at all, and red only against resolve-then-gate code that kept
     /// `check_exists = true` on the non-emitted path — which would turn a
     /// working install into exit 79. The crossing sibling below is what makes
@@ -5328,7 +4405,7 @@ mod tests {
         );
     }
 
-    /// C-027(b) — the otherwise identical var that **does** cross fails with
+    /// Case (b) — the otherwise identical var that **does** cross fails with
     /// `DependencyNotInstalled`, exit 79.
     #[test]
     fn an_uninstalled_dependency_in_a_crossing_var_fails_composition() {
@@ -5353,7 +4430,7 @@ mod tests {
         );
     }
 
-    /// D8 — a template *fault* in a non-crossing var now surfaces where it
+    /// Resolve-then-gate — a template *fault* in a non-crossing var now surfaces where it
     /// previously never ran. This is the accepted behaviour change, and it is
     /// what keeps the two suppression legs above from reading as "a
     /// non-crossing var is never resolved at all".
@@ -5379,9 +4456,9 @@ mod tests {
         );
     }
 
-    // ─ What is substituted: the resolved value, never the template (C-029) ───
+    // ─ What is substituted: the resolved value, never the template ───
 
-    /// C-029 — composition substitutes the referenced var's **resolved value**,
+    /// Composition substitutes the referenced var's **resolved value**,
     /// not its template.
     ///
     /// The red state is a mutant of the code WP4 adds: an accumulator holding
@@ -5412,13 +4489,13 @@ mod tests {
         );
     }
 
-    /// C-029 / C-009 sibling — bytes a `${self.env.*}` reference substitutes
+    /// Sibling — bytes a `${self.env.*}` reference substitutes
     /// are never rescanned.
     ///
     /// `A` resolves, through the escape, to the literal text
     /// `${deps.tool.installPath}`, and `tool` is present in `dep_contexts`. If
     /// composition re-read substituted bytes, `B` would come out carrying the
-    /// dependency's install path. D12 deletes the install-path injection
+    /// dependency's install path. Dropping the install-path injection
     /// defence on the grounds that substituted bytes are never re-examined;
     /// `${self.env.*}` is the second composition path where that premise could
     /// be falsified.
@@ -5451,7 +4528,7 @@ mod tests {
         );
     }
 
-    // ── C-011: integrations_cross — interface-surface-only carrier ────────
+    // ── Integrations_cross — interface-surface-only carrier ────────
     //
     // ADR `adr_package_integrations.md` §4.1's four-cell truth table.
     // `integrations_cross` takes only `self_view` — no `is_root` — because
@@ -5479,7 +4556,7 @@ mod tests {
         assert!(!integrations_cross(/* self_view = */ true));
     }
 
-    // ── C-017 / H-1: the companion projection's integrations gate ──────────
+    // ── The companion projection's integrations gate ──────────
 
     /// A companion projection composed with integrations SUPPRESSED must not
     /// resolve the payloads at all — not resolve-then-discard.
@@ -5640,23 +4717,21 @@ mod tests {
         );
     }
 
-    // ── WP-8 Specify: the composer's shim slot (lazy package loading) ────────
+    // ── The composer's shim slot (lazy package loading) ─────────────────────
     //
-    // Authored from `.claude/state/plans/plan_lazy_package_loading.md` before
-    // the implementation exists: C-006 (the `lazy-mode` ladders), C-012 (the
-    // shim slot and its PATH position), C-013 + S-005 (the env is a function of
-    // the lock and the mode, never of content-cache state), C-015 (d) (the
-    // advisory channel is fed by the deferred branch only), C-020 (a deferred
-    // root's carriers come from ref-linked config blobs, never a package
-    // directory) and S-009 (`--no-pull` warns and omits).
+    // Covers the `lazy-mode` ladders, the shim slot and its PATH position, an env
+    // that is a function of the lock and the mode (never of content-cache state),
+    // an advisory channel fed by the deferred branch only, a deferred root's
+    // carriers read from ref-linked config blobs (never a package directory), and
+    // `--no-pull` warning and omitting.
 
     use ocx_index::{ChainMode, Index, LocalConfig, LocalIndex};
     use ocx_oci::Platform;
     use ocx_package::install_info::DeferredComposition;
     use ocx_project::{Group, PackageSettings};
 
-    // `lazy_mode_for_tool` is imported from `project`, not `super`: C-006's
-    // F-10 decision puts the project-tier ladder assembler with the config it
+    // `lazy_mode_for_tool` is imported from `project`, not `super`: the ladder
+    // decision puts the project-tier ladder assembler with the config it
     // reads. Its OCI-tier sibling reads no config and stays in this module.
     use ocx_project::{ProjectConfig, lazy_mode_for_tool, lazy_mode_ladder_for_tool};
 
@@ -5692,8 +4767,8 @@ mod tests {
         })
     }
 
-    /// A `path`-modifier env var — the carrier whose `required` leg C-013's
-    /// F-3 decision suppresses for a deferred root.
+    /// A `path`-modifier env var — the carrier whose `required` leg the
+    /// lock-only env decision suppresses for a deferred root.
     fn path_var(key: &str, value: &str, required: bool, visibility: Visibility) -> Var {
         Var {
             key: key.to_string(),
@@ -5751,7 +4826,7 @@ mod tests {
     }
 
     /// An offline `PackageManager` with no sources — every remote resolve is a
-    /// genuine local miss, which is the state S-009's `--no-pull` describes.
+    /// genuine local miss, which is the state `--no-pull` describes.
     fn offline_manager(dir: &std::path::Path) -> PackageManager {
         let fs = FileStructure::with_root(dir.to_path_buf());
         let index = Index::from_chained(
@@ -5777,7 +4852,7 @@ mod tests {
         format!("{}/bin", content.display())
     }
 
-    /// The `PATH` values in emit (push) order — the projection every C-012
+    /// The `PATH` values in emit (push) order — the projection every shim-slot
     /// ordering assertion reads.
     fn path_values(entries: &[Entry]) -> Vec<String> {
         entries
@@ -5787,9 +4862,9 @@ mod tests {
             .collect()
     }
 
-    // ── C-012 / C-003: the slot names `bin/`, never the shim root ───────────
+    // ── The slot names `bin/`, never the shim root ───────────
 
-    /// C-003 + C-012: the emitted PATH entry is the shim's `bin/`
+    /// The emitted PATH entry is the shim's `bin/`
     /// subdirectory. A legal `binaries` claim of `["digest", "refs"]` would
     /// otherwise put a generated launcher on top of the CAS marker and the
     /// forward-ref directory, so the root is never the PATH entry.
@@ -5818,9 +4893,9 @@ mod tests {
         );
     }
 
-    // ── C-012: which roots get a slot, and where in the block ───────────────
+    // ── Which roots get a slot, and where in the block ───────────────
 
-    /// C-012: a deferred root contributes exactly one shim slot.
+    /// A deferred root contributes exactly one shim slot.
     #[test]
     fn a_deferred_root_contributes_its_shim_slot() {
         let dir = tempfile::tempdir().unwrap();
@@ -5844,7 +4919,7 @@ mod tests {
         );
     }
 
-    /// C-012: a materialized root has no shim directory, so the slot is a
+    /// A materialized root has no shim directory, so the slot is a
     /// no-op. Without this row an implementation that pushed unconditionally
     /// would still pass the row above.
     #[test]
@@ -5867,7 +4942,7 @@ mod tests {
         );
     }
 
-    /// C-012: the slot carries `Entrypoints::IMPLICIT_VISIBILITY` (INTERFACE)
+    /// The slot carries `Entrypoints::IMPLICIT_VISIBILITY` (INTERFACE)
     /// at the root, so it is absent under `--self` — a package's private view
     /// bypasses launchers, and a shim is nothing but a launcher.
     #[test]
@@ -5892,15 +4967,15 @@ mod tests {
         );
     }
 
-    /// C-012's ordering clause at the seam: the slot is pushed **before** the
+    /// The shim slot's ordering clause at the seam: the slot is pushed **before** the
     /// root's declared vars and before its synthetic `entrypoints/`.
     ///
     /// Consumers apply entries by PREPENDING (`composer.rs` `emit_dep_path_block`
     /// ordering invariant), so last-pushed is first-resolved. Pushing the slot
     /// first therefore gives it the LOWEST precedence — `entrypoints/` >
     /// `bin/` > `shims/` — which is the whole point: once the first invocation
-    /// has materialized the package, the real directories shadow the shim
-    /// (S-004). A reader who assumes push order equals PATH order inverts this.
+    /// has materialized the package, the real directories shadow the shim.
+    /// A reader who assumes push order equals PATH order inverts this.
     #[test]
     fn the_shim_slot_is_pushed_before_the_roots_own_path_carriers() {
         let dir = tempfile::tempdir().unwrap();
@@ -5938,9 +5013,9 @@ mod tests {
         );
     }
 
-    // ── C-020: a deferred root's carriers come from its closure ─────────────
+    // ── A deferred root's carriers come from its closure ─────────────
 
-    /// C-020: the closure is keyed the way the composer dedups TC entries — on
+    /// The closure is keyed the way the composer dedups TC entries — on
     /// the advisory-stripped identifier — so a tag-bearing TC entry finds the
     /// member the walker recorded under a different tag.
     #[test]
@@ -5968,7 +5043,7 @@ mod tests {
         assert_eq!(found.identifier().digest(), sha256('d'));
     }
 
-    /// C-020: a TC entry the closure does not carry is a disagreement between
+    /// A TC entry the closure does not carry is a disagreement between
     /// the shim tree's ref-linked blobs and the composed TC. `None` is what
     /// lets the caller surface it instead of reaching for a package directory
     /// that does not exist.
@@ -5990,7 +5065,7 @@ mod tests {
         );
     }
 
-    /// C-020: for a deferred root the carriers come from the closure, even
+    /// For a deferred root the carriers come from the closure, even
     /// when a package directory for the same identifier happens to exist.
     ///
     /// The two sources declare DIFFERENT env keys, so a fallback to the package
@@ -6049,7 +5124,7 @@ mod tests {
         );
     }
 
-    /// C-020 control: a materialized root still reads its TC entries from the
+    /// Control: a materialized root still reads its TC entries from the
     /// package store. Without this row the row above is satisfied by an
     /// implementation that never consults the store at all.
     #[tokio::test]
@@ -6091,7 +5166,7 @@ mod tests {
         assert_eq!(keys, vec!["FROM_PACKAGE_STORE"]);
     }
 
-    /// C-020: a TC entry absent from a deferred closure is an error, never a
+    /// A TC entry absent from a deferred closure is an error, never a
     /// silent fall-back to the package store — even when the store could
     /// answer. This is the row that reds on the tempting "try the closure,
     /// else the store" implementation.
@@ -6139,9 +5214,9 @@ mod tests {
         );
     }
 
-    // ── C-012 at compose level, and the gates a deferred root must survive ──
+    // ── The shim slot at compose level, and the gates a deferred root must survive ──
 
-    /// C-012 end to end: `compose` puts a deferred root's shim slot BELOW its
+    /// End to end: `compose` puts a deferred root's shim slot BELOW its
     /// declared `bin/` and its `entrypoints/`.
     ///
     /// The seam-level sibling above cannot catch a `compose` that never calls
@@ -6183,7 +5258,7 @@ mod tests {
         );
     }
 
-    /// C-012: the composed env carries the shim slot on the interface surface
+    /// The composed env carries the shim slot on the interface surface
     /// and **not** under `--self`.
     ///
     /// Both surfaces in one row deliberately: a `--self`-only assertion is a
@@ -6228,7 +5303,7 @@ mod tests {
         );
     }
 
-    /// C-020's defect clause (plan F-4): `check_entrypoints` runs on every
+    /// The deferred-carrier defect clause: `check_entrypoints` runs on every
     /// compose of two or more roots and loads each interface-visible TC entry's
     /// metadata. A deferred root's TC entries have no package directory, so the
     /// multi-root gate must read them through the same closure-aware accessor
@@ -6291,7 +5366,7 @@ mod tests {
         );
     }
 
-    /// Plan F-12: `check_repo_digest_conflicts` reads only `identifier()` and
+    /// `check_repo_digest_conflicts` reads only `identifier()` and
     /// `resolved().dependencies`, so a deferred root participates in the fatal
     /// version-conflict gate **only if the `ResolvedPackage` synthesized from
     /// its closure is faithful**. An empty synthesized TC compiles, passes
@@ -6346,9 +5421,9 @@ mod tests {
         );
     }
 
-    // ── C-013 / S-005: the env is not a function of content-cache state ─────
+    // ── The env is not a function of content-cache state ─────
 
-    /// S-005 + C-013 (F-3 decision): `ocx env` twice, cold store then warm,
+    /// `ocx env` twice, cold store then warm,
     /// is byte-identical for a deferred root **including one that declares a
     /// `required` path var**.
     ///
@@ -6398,10 +5473,10 @@ mod tests {
         );
     }
 
-    // ── C-015 (d) / S-009: what `compose_roots` reports ─────────────────────
+    // ── What `compose_roots` reports ─────────────────────
 
     /// The shape of `compose_roots`' return, pinned at compile time: the three
-    /// channels C-015 (d) and S-009 need are `roots`, `advisories`, `omitted`,
+    /// channels advisories and `--no-pull` need are `roots`, `advisories`, `omitted`,
     /// plus `pulled` for the execution record's `autoInstalled`.
     /// Referenced, never run.
     #[test]
@@ -6431,7 +5506,7 @@ mod tests {
         let _ = signature_binding;
     }
 
-    /// S-009: under `--no-pull` a tool whose metadata is not local is warned
+    /// Under `--no-pull` a tool whose metadata is not local is warned
     /// about and omitted — never a hard failure. Warn-and-omit is the composing
     /// caller's decision, so the omission has to reach it as data.
     #[tokio::test]
@@ -6582,7 +5657,7 @@ mod tests {
         );
     }
 
-    /// C-015 (d): advisories are classified for a **deferred** tool only. An
+    /// Advisories are classified for a **deferred** tool only. An
     /// eagerly-materialized request never reaches `prepare_lazy`, which is the
     /// fact that makes the clause testable at all.
     ///
@@ -6633,7 +5708,7 @@ mod tests {
         );
     }
 
-    // ── C-006: the `lazy-mode` ladders ──────────────────────────────────────
+    // ── The `lazy-mode` ladders ──────────────────────────────────────
     //
     // Every row expects `Always`, which is never the ladder's floor, and sets
     // every tier BELOW the one under test to `Never`. A resolver that consults
@@ -6644,7 +5719,7 @@ mod tests {
     // The rows drive the ladder ASSEMBLERS and resolve with the pure
     // `resolve()`, never `resolve_for_host()`. Which config tier feeds which
     // ladder slot is a host-independent contract, but the host form answers
-    // `Never` for every input on Windows (S-010) — so a row driving it would be
+    // `Never` for every input on Windows — so a row driving it would be
     // green there whatever the wiring did, which is no check at all. The host
     // floor gets its own two-halved row at the end of this block.
 
@@ -6652,7 +5727,7 @@ mod tests {
         PackageRef::new_registry("ns/tool", REGISTRY).clone_with_tag("1.2.3")
     }
 
-    /// A `ProjectConfig` carrying the three config tiers C-006 gives
+    /// A `ProjectConfig` carrying the three config tiers that give
     /// `lazy-mode`. `group` names the group whose table the mode lands in, so
     /// a row can assert the tier applies only to the selected group.
     fn ladder_config(
@@ -6686,7 +5761,7 @@ mod tests {
         config
     }
 
-    /// C-006: the CLI flag outranks every config tier.
+    /// The CLI flag outranks every config tier.
     #[test]
     fn the_cli_lazy_mode_outranks_every_config_tier() {
         let config = ladder_config(
@@ -6701,7 +5776,7 @@ mod tests {
         );
     }
 
-    /// C-006: `[package."<id>"]` outranks `[group.<g>]`.
+    /// `[package."<id>"]` outranks `[group.<g>]`.
     #[test]
     fn the_package_tier_outranks_the_group_tier() {
         let config = ladder_config(
@@ -6716,7 +5791,7 @@ mod tests {
         );
     }
 
-    /// C-006: `[group.<g>]` outranks the toolchain tier — and only for the
+    /// `[group.<g>]` outranks the toolchain tier — and only for the
     /// group the binding came from.
     #[test]
     fn the_group_tier_outranks_the_toolchain_tier() {
@@ -6734,7 +5809,7 @@ mod tests {
         );
     }
 
-    /// C-006: the toolchain tier answers when no more specific tier is set.
+    /// The toolchain tier answers when no more specific tier is set.
     #[test]
     fn the_toolchain_tier_answers_when_no_more_specific_tier_is_set() {
         let config = ladder_config(Some(LazyMode::Always), None, None);
@@ -6745,7 +5820,7 @@ mod tests {
         );
     }
 
-    /// C-006: the package tier keys on `registry/repository` with tag and
+    /// The package tier keys on `registry/repository` with tag and
     /// digest excluded — a config author cannot know the digest a lock pins.
     #[test]
     fn the_package_tier_matches_the_repository_without_its_tag() {
@@ -6761,7 +5836,7 @@ mod tests {
         );
     }
 
-    /// C-006: an unrelated `[package.*]` entry must not answer. Without this
+    /// An unrelated `[package.*]` entry must not answer. Without this
     /// row the one above passes for "take whatever single entry exists".
     #[test]
     fn a_package_entry_for_another_package_never_answers() {
@@ -6777,7 +5852,7 @@ mod tests {
         );
     }
 
-    /// C-006: `OCX_LAZY_MODE` is the last tier above the floor. Without this
+    /// `OCX_LAZY_MODE` is the last tier above the floor. Without this
     /// row an implementation that drops the environment tier entirely passes
     /// every other ladder test.
     #[test]
@@ -6791,7 +5866,7 @@ mod tests {
         );
     }
 
-    /// C-006: the floor is the literal `Never`, reached only when every tier
+    /// The floor is the literal `Never`, reached only when every tier
     /// above it is absent.
     #[test]
     fn the_ladder_floor_is_never() {
@@ -6804,7 +5879,7 @@ mod tests {
         );
     }
 
-    /// C-006: the OCI tier has two tiers, not five — `ocx package env` /
+    /// The OCI tier has two tiers, not five — `ocx package env` /
     /// `exec` read no `ocx.toml` at any tier, so the config tiers are absent
     /// rather than silently ignored.
     #[test]
@@ -6833,7 +5908,7 @@ mod tests {
         );
     }
 
-    // ── S-010: both tier wrappers resolve through the HOST form ─────────────
+    // ── Both tier wrappers resolve through the HOST form ─────────────
     //
     // The rows above drive the ladder assemblers, so nothing there would notice
     // a wrapper that called `resolve()` instead of `resolve_for_host()`. This
@@ -6841,8 +5916,8 @@ mod tests {
     //
     // **One row, on every host.** It used to be a host-gated pair, because
     // `resolve_for_host` forced `LazyMode::Never` on Windows while nothing
-    // there could write a deferred tool's shim slot. C-026 ships that producer
-    // and C-027 removed the floor, so `resolve_for_host` is now a passthrough
+    // there could write a deferred tool's shim slot. That producer now ships
+    // and the floor is gone, so `resolve_for_host` is now a passthrough
     // and both halves assert the same literal — a Windows half saying `Never`
     // would only re-state a removed rule.
     //
@@ -6865,7 +5940,7 @@ mod tests {
         );
     }
 
-    // ── WP-8 Implement: the two rows Specify deferred ───────────────────────
+    // ── The two rows the first pass deferred ───────────────────────
     //
     // Both need `prepare_lazy` to actually SUCCEED, which needs a manifest
     // source serving a manifest plus a config blob. Specify refused to ship the
@@ -6954,7 +6029,7 @@ mod tests {
         // it: `fetch_blob`'s write-through is what puts a closure node's config
         // blob into `$OCX_HOME/blobs`, which is where the shim tree's
         // `refs/blobs/` points and where a deferred root reads its carriers
-        // back from (C-020).
+        // back from.
         let index = Index::from_chained_with_content_store(
             LocalIndex::new(LocalConfig {
                 index_store: ocx_index::IndexStore::machine_local(&fs),
@@ -6972,7 +6047,7 @@ mod tests {
         serde_json::json!({ "identifier": identifier.to_string(), "visibility": visibility, "name": name })
     }
 
-    /// C-015 (d), the mixed batch: one eager tool and one deferred tool in a
+    /// The mixed batch: one eager tool and one deferred tool in a
     /// single `compose_roots`, both carrying the advisory-raising metadata
     /// shape. The advisory appears **exactly once**, and it names the
     /// **deferred** one.
@@ -7055,7 +6130,7 @@ mod tests {
         );
     }
 
-    /// Plan F-12, the half the Specify row could not reach: `deferred_root`
+    /// The half the first pass could not reach: `deferred_root`
     /// synthesizes a **faithful** `ResolvedPackage` from the walked closure.
     ///
     /// The existing row proves the version-conflict gate stays armed for
@@ -7121,7 +6196,7 @@ mod tests {
             "a public edge composes to a public effective visibility"
         );
 
-        // C-020: the member the composer will read that TC entry through is
+        // The member the composer will read that TC entry through is
         // present, and its carriers came from the ref-linked config blob — the
         // package directory for it does not exist.
         let deferred = root.deferred().expect("a deferred request yields a deferred root");
@@ -7144,18 +6219,11 @@ mod tests {
     }
 }
 
-// ── WP-15 specification tests (Specify phase) ───────────────────────────────
-//
-// Written from `plan_toolchain_activation.md` (C-065, C-066, C-067, C-070,
-// S-005, S-006, D-V9) and the wave-3b rulings RUL-78…RUL-84 / RUL-96…RUL-99,
-// against the WP-15 **stub**. Every case names the contract it traces to and
-// the mutation that must red it.
-//
-// The fixture platform is a constant, never the host's: `ComposePaths::resolve`
-// takes the platform as a parameter, so a host-derived one would make every
-// link assertion answer differently on the Windows leg for a reason that has
-// nothing to do with the contract under test. Same choice WP-7's render tests
-// made, for the same reason.
+// ── Following-lane specification tests ──────────────────────────────────────
+// Each case names the contract it traces to and the mutation that must red it. The
+// fixture platform is a constant, never the host's: `ComposePaths::resolve` takes it as
+// a parameter, so a host-derived one would make every link assertion answer differently
+// on the Windows leg for a reason unrelated to the contract under test.
 #[cfg(test)]
 mod wp15_following_lane_spec_tests {
     use std::collections::BTreeMap;
@@ -7208,7 +6276,7 @@ mod wp15_following_lane_spec_tests {
 
     /// A tool whose only leaf is keyed by a platform the composition never
     /// targets — the "no compatible leaf" input `link_target` answers `None`
-    /// for (RUL-31).
+    /// for.
     fn locked_tool_for_another_platform(name: &str, group: &str, repository: &str, seed: char) -> LockedTool {
         LockedTool {
             name: name.to_string(),
@@ -7279,7 +6347,7 @@ mod wp15_following_lane_spec_tests {
 
         /// The digest root one lock entry's link must name, derived the way the
         /// renderer and the heal derive it — through the shared `select_best`
-        /// helper (RUL-31), never by an exact key lookup.
+        /// helper, never by an exact key lookup.
         fn digest_root(&self, tool: &LockedTool) -> PathBuf {
             let identifier = ocx_project::compose::host_leaf_identifier(tool, &platform())
                 .expect("the fixture lock ships a leaf compatible with the fixture platform");
@@ -7290,7 +6358,7 @@ mod wp15_following_lane_spec_tests {
 
         /// The digest root, materialised. A mismatch case must plant a link at
         /// a **different real digest root**, never a dangling one — those are
-        /// two different arms of C-067.
+        /// two different arms of the degrade rule.
         fn seed_digest_root(&self, tool: &LockedTool) -> PathBuf {
             let root = self.digest_root(tool);
             std::fs::create_dir_all(root.join("content").join("bin")).expect("a digest root is creatable");
@@ -7332,15 +6400,15 @@ mod wp15_following_lane_spec_tests {
         }
     }
 
-    // ── C-007 / RUL-83: the `pinned` ladder WP-15 assembles ──────────────────
+    // ── The `pinned` ladder ──────────────────
     //
-    // The resolved value is the single input C-066 gates the whole lane on, so
+    // The resolved value is the single input the digest lane gates on, so
     // each precedence case sets its own tier to one value and EVERY weaker tier
     // to a different one: a resolver that consults the tiers in the wrong order
     // returns the other value and reds. The floor case and the single-tier case
     // populate at most one tier, so a transposition cannot reach them.
 
-    /// C-007 — `--pinned` / `--no-pinned` outranks `ocx.toml` and
+    /// `--pinned` / `--no-pinned` outranks `ocx.toml` and
     /// `OCX_TOOLCHAIN_PINNED`.
     ///
     /// RED: transposing the `cli` and `file` operands of the resolution chain.
@@ -7355,7 +6423,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-007 — `ocx.toml`'s `pinned` key outranks `OCX_TOOLCHAIN_PINNED`: an
+    /// `ocx.toml`'s `pinned` key outranks `OCX_TOOLCHAIN_PINNED`: an
     /// exported variable loses to a project that states a value.
     ///
     /// RED: transposing the `file` and `environment` operands.
@@ -7370,7 +6438,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-007 — `OCX_TOOLCHAIN_PINNED` is the last tier above the floor.
+    /// `OCX_TOOLCHAIN_PINNED` is the last tier above the floor.
     ///
     /// RED: dropping the environment tier entirely. Without this row that
     /// implementation passes every other ladder case.
@@ -7385,11 +6453,11 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-007 — every tier absent means `ocx_project::activate::PINNED_FLOOR`, and the
-    /// floor is the **following** lane (C-065's default).
+    /// Every tier absent means `ocx_project::activate::PINNED_FLOOR`, and the
+    /// floor is the **following** lane (the default).
     ///
     /// RED: a re-spelled `true` literal in place of `PINNED_FLOOR`, which would
-    /// pin every un-configured project and make C-065 unreachable in practice.
+    /// pin every un-configured project and make the following lane unreachable in practice.
     #[test]
     fn an_all_absent_pinned_ladder_resolves_to_the_following_lane_floor() {
         let env = ocx_util::env::overrides::lock();
@@ -7401,7 +6469,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-007 — `--no-pinned` overrides an `ocx.toml` that asked to pin. Its
+    /// `--no-pinned` overrides an `ocx.toml` that asked to pin. Its
     /// entire job.
     ///
     /// RED: collapsing the CLI tier's `Option<bool>` into a bare `bool`, which
@@ -7419,7 +6487,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-007 — the unresolved form reports one tier per source, so the tier
+    /// The unresolved form reports one tier per source, so the tier
     /// order is assertable without also asserting the floor.
     ///
     /// RED: filling `file` from the environment reader (or `environment` from
@@ -7441,13 +6509,13 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    // ── C-067 / RUL-80: the per-entry trust probe ───────────────────────────
+    // ── The per-entry trust probe ───────────────────────────
 
-    /// C-067 — a link naming the lock-derived digest root is one the
+    /// A link naming the lock-derived digest root is one the
     /// composition may follow.
     ///
     /// RED: a probe that answers `false` unconditionally, which would collapse
-    /// the whole following lane into C-066's digest lane.
+    /// the whole following lane into the digest lane.
     #[test]
     fn a_link_naming_the_lock_derived_target_is_trustworthy() {
         let tree = Tree::new();
@@ -7458,7 +6526,7 @@ mod wp15_following_lane_spec_tests {
         assert!(link_is_trustworthy(&entry, &target));
     }
 
-    /// C-067 — an absent entry is not trustworthy, and asking is not an error.
+    /// An absent entry is not trustworthy, and asking is not an error.
     ///
     /// RED: a probe that answers `true` unconditionally.
     #[test]
@@ -7472,7 +6540,7 @@ mod wp15_following_lane_spec_tests {
         assert!(!link_is_trustworthy(&entry, &target));
     }
 
-    /// C-067 — **a mismatch is treated as absent, not as usable.** The link
+    /// **a mismatch is treated as absent, not as usable.** The link
     /// names a *different real digest root*, which is the state a branch switch
     /// leaves behind and the exact input a "the link exists, so follow it"
     /// implementation resolves to the previous package on.
@@ -7497,7 +6565,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-067 / RUL-80 — a real directory where a link belongs is not
+    /// A real directory where a link belongs is not
     /// trustworthy. This is the shape the heal is forbidden to repair (it has
     /// no delete authority), so the composing side has to refuse it.
     ///
@@ -7515,7 +6583,7 @@ mod wp15_following_lane_spec_tests {
         assert!(!link_is_trustworthy(&entry, &target));
     }
 
-    /// C-067 / RUL-79 — the comparison is against the **lock**, never against
+    /// The comparison is against the **lock**, never against
     /// the filesystem: a link naming a digest root that is not materialised is
     /// still the correct link, and that is a lazily-loaded tool's ordinary
     /// state. Paired with the mismatch case above, which is where a "the target
@@ -7533,7 +6601,7 @@ mod wp15_following_lane_spec_tests {
         assert!(link_is_trustworthy(&entry, &target));
     }
 
-    /// RUL-80 — the target comparison is made on the **raw** `read_link`
+    /// The target comparison is made on the **raw** `read_link`
     /// answer, un-canonicalised, because `heal_links` compares raw targets: a
     /// composer that canonicalised would disagree with the repairer and would
     /// follow *through* a target the heal refused to touch.
@@ -7571,12 +6639,12 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    // ── C-066: the pinned lane ──────────────────────────────────────────────
+    // ── The pinned lane ──────────────────────────────────────────────
 
-    /// C-066 + C-007 — under a project that asked to pin, every emitter yields
+    /// Under a project that asked to pin, every emitter yields
     /// digest paths, **no link is consulted, and no tree is touched**.
     ///
-    /// `home.root()` is the assertion because RUL-81 names it: `heal_links`
+    /// `home.root()` is the assertion because the heal rule names it: `heal_links`
     /// calls `ensure_home_root`, which *creates* the root. A pinned composition
     /// that reached the heal would leave one behind.
     ///
@@ -7609,12 +6677,12 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    // ── C-065 / C-067 / C-070: the following lane ───────────────────────────
+    // ── The following lane ───────────────────────────
 
-    /// C-065 — a selected group's entry composes through
+    /// A selected group's entry composes through
     /// `<home>/links/<group>/<entry>`, not through its digest root. The link is
     /// absent to begin with, which is the ordinary post-`git pull` state, and
-    /// C-070's heal creates it (RUL-29) before the probe runs.
+    /// the composing heal creates it before the probe runs.
     ///
     /// RED: `resolve` returning `ComposePaths::digest_only()` on the following
     /// lane, or `install_path_for` ignoring the map.
@@ -7641,15 +6709,15 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-070, **the discriminating case** — `ocx exec -g ci` heals the group it
+    /// **The discriminating case** — `ocx exec -g ci` heals the group it
     /// is about to emit, not the default one. The `ci/cmake` link is stale, the
-    /// shape a branch switch leaves behind (S-006), and the default group holds
+    /// shape a branch switch leaves behind, and the default group holds
     /// a correct link so that a narrowed heal still finds work to do and still
     /// returns a non-zero repair count.
     ///
-    /// RED: narrowing the heal back to `[DEFAULT_GROUP]` (C-062's prompt-path
+    /// RED: narrowing the heal back to `[DEFAULT_GROUP]` (the prompt path's
     /// scope leaking here). The stale `ci` link then survives, the probe refuses
-    /// it (C-067), and the emitted path degrades to the digest root — so both
+    /// it, and the emitted path degrades to the digest root — so both
     /// assertions red, and the on-disk one names the previous package.
     #[tokio::test]
     async fn a_stale_link_in_a_non_default_selected_group_is_healed_before_it_is_probed() {
@@ -7699,7 +6767,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-067 — the belt behind C-070's heal: an entry the heal is not permitted
+    /// The belt behind the composing heal: an entry the heal is not permitted
     /// to repair degrades to a **correct digest path**, per entry, and never
     /// fails the emission. A regular file where a link belongs is the shape
     /// `heal_links` leaves exactly as it found it, because it has no delete
@@ -7744,7 +6812,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-067 / RUL-31 — a lock entry with no leaf compatible with the target
+    /// A lock entry with no leaf compatible with the target
     /// platform has no link to name, so it composes on its digest path rather
     /// than failing the emission.
     ///
@@ -7791,7 +6859,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-070 — the map is built from **the groups this invocation selected**,
+    /// The map is built from **the groups this invocation selected**,
     /// never from every group the lock happens to carry. A correct `ci` link on
     /// disk is not enough to put `ci` on the following lane for an invocation
     /// that selected only the default group.
@@ -7830,7 +6898,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// RUL-98 — two selected groups whose entries collapse to one digest key
+    /// Two selected groups whose entries collapse to one digest key
     /// keep the entry from the **first group in `groups` order**, not the first
     /// in sorted order. Both links name the same directory, so the choice is
     /// observable only in the emitted spelling — which is exactly why it has to
@@ -7868,10 +6936,10 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// RUL-98, the discriminating leg — the slot goes to the first
+    /// The discriminating leg — the slot goes to the first
     /// **trustworthy** candidate, not to the first candidate.
     ///
-    /// The two cases above plant no links, so C-070's heal makes *both*
+    /// The two cases above plant no links, so the composing heal makes *both*
     /// candidates trustworthy and a slot-reserving implementation — one that
     /// records the first candidate it walks and never revisits the key — passes
     /// them. Here the first selected group's entry is a regular file, the shape
@@ -7897,7 +6965,7 @@ mod wp15_following_lane_spec_tests {
         );
 
         // A regular file where `alpha`'s link belongs: `heal_links` leaves it
-        // exactly as it found it, so the probe refuses it (C-067).
+        // exactly as it found it, so the probe refuses it.
         let blocked = tree.entry("alpha", "cmake");
         std::fs::create_dir_all(blocked.parent().expect("an entry has a group parent"))
             .expect("the group directory is creatable");
@@ -7920,7 +6988,7 @@ mod wp15_following_lane_spec_tests {
 
     // ── Block-1: the read path takes the heal's guards too ──────────────────
 
-    /// C-067 / RUL-44 — a home reached through a symlinked project component is
+    /// A home reached through a symlinked project component is
     /// refused on the **read** path, not merely on the write path.
     ///
     /// `heal_links` reports `refuse_symlinked_project_path`'s refusal as
@@ -7947,11 +7015,11 @@ mod wp15_following_lane_spec_tests {
         let digest_root = tree.seed_digest_root(&tool);
 
         // `<project>/.ocx` as a symlink — one component above the home root, the
-        // hole `ensure_home_root` cannot see from where it stands (RUL-44).
+        // hole `ensure_home_root` cannot see from where it stands.
         let elsewhere = tree.tmp.path().join("elsewhere");
         // The home root only: the group directory moved under `links/` and
         // `symlink::create` makes the entry's parents anyway, so pre-creating
-        // it here would be a second spelling of the tree shape (C-010).
+        // it here would be a second spelling of the tree shape.
         std::fs::create_dir_all(elsewhere.join("toolchain")).expect("the relocated tree is creatable");
         ocx_util::fs::symlink::create(&elsewhere, tree.project_dir.join(".ocx"))
             .expect("the hostile link is creatable");
@@ -7979,7 +7047,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// C-067 — a symlinked `<home>/<group>` directory is refused per entry.
+    /// A symlinked `<home>/<group>` directory is refused per entry.
     ///
     /// The sibling hole one level down, and the one `repoint_link`'s own
     /// refusal cannot close: when the entry underneath already reads back the
@@ -8033,7 +7101,7 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// RUL-98, second leg — within one group, the tie-break is the first entry
+    /// Second leg — within one group, the tie-break is the first entry
     /// in `lock.tools` order.
     ///
     /// RED: sorting the tools by name, or last-write-wins insertion. The names
@@ -8064,9 +7132,9 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// RUL-78 — `${deps.*}` stays on digest paths. A dependency is not a lock
+    /// `${deps.*}` stays on digest paths. A dependency is not a lock
     /// entry, so no `<group>/<entry>` link exists for it and no trust test can
-    /// be asked; the digest lane goes through the same seam (RUL-82) but never
+    /// be asked; the digest lane goes through the same seam but never
     /// consults the map, **even when the dependency's digest root happens to be
     /// one a selected group's link names**.
     ///
@@ -8103,9 +7171,9 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    // ── C-065 through the emitters ──────────────────────────────────────────
+    // ── The following lane through the emitters ──────────────────────────────────────────
 
-    /// C-065 — "a package's real bin directory **and every dereference value**"
+    /// "a package's real bin directory **and every dereference value**"
     /// composed through the link: the root's declared `${installPath}/bin`
     /// carrier and its synthetic `entrypoints/` entry both name
     /// `<home>/links/<group>/<entry>/…` rather than the digest root.
@@ -8194,9 +7262,9 @@ mod wp15_following_lane_spec_tests {
         );
     }
 
-    /// RUL-97 — an **integrations payload** is a dereference value too, so a
+    /// An **integrations payload** is a dereference value too, so a
     /// root's `${installPath}` inside one resolves under the home link like
-    /// every other emitted path. Integrations are not on RUL-82's
+    /// every other emitted path. Integrations are not on the
     /// must-stay-digest list; a consumer that *persists* a payload pins it at
     /// that consumer, not here.
     ///

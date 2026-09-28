@@ -6,13 +6,9 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// Top-level status discriminant for [`ConfigUpdateData`].
+/// Top-level `status` of the `ocx config update` report.
 ///
-/// Serde serializes each variant to its `snake_case` name. Status derivation
-/// from the underlying probe / update result is an `Implement`-phase concern
-/// (managed-config phase 4) — this type only carries the already-decided
-/// value.
-///
+/// Each variant serializes as its `snake_case` name.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigUpdateStatus {
@@ -28,7 +24,7 @@ pub enum ConfigUpdateStatus {
     Checked,
     /// A probe-only report (`--check`) whose registry probe could NOT run —
     /// offline, no client, source absent, auth failure, or a registry error.
-    /// Distinct from [`Self::AlreadyCurrent`] so operators can tell "verified
+    /// Distinct from `already_current` so operators can tell "verified
     /// current" apart from "couldn't check" — the report degrades to
     /// local-state only (source/digest/fetched-at, no live drift).
     CheckUnavailable,
@@ -54,11 +50,6 @@ impl std::fmt::Display for ConfigUpdateStatus {
 /// JSON format:
 /// `{"status":"…","source":"…","digest":"…","fetched_at":"…","policy":"…","kill_switches":["…"],"drift":true}`
 /// — optional fields present only when the underlying probe produced them.
-///
-///
-/// Pure data carrier — construct with a struct literal at the call site (no
-/// status derivation lives here; see [`ConfigUpdateStatus`] doc). Fields are
-/// `pub(crate)` so `command/config_update.rs` builds it directly.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigUpdateData {
     pub(crate) status: ConfigUpdateStatus,

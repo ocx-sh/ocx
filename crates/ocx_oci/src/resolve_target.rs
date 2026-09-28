@@ -1,57 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The `--platform` optionality rule, shared by sign, attest and verify so the
-//! three cannot diverge.
+//! The `--platform` optionality rule sign, attest and verify share.
 //!
-//! This module is a **pure decision over a resolution outcome** — no registry,
-//! no index, no I/O. The I/O sequence around it (SSRF guard, index select,
-//! physical rewrite, dial guard, transport reference, and sign's additional
-//! write reference) stays where it is, in each pipeline. What must not diverge
-//! is the rule below, and this is all of it.
-//!
-//! # Not a validity decision
-//!
-//! Everything here answers *which object is acted on*, never *whether a
-//! signature over it is good*. A verification path that reaches
-//! [`SignTarget`] still owes the signing-time proof: a keyless signature's
-//! validity anchors to the **Rekor entry / SET**, never to wall-clock "is this
-//! certificate valid now" — a Fulcio certificate lives ~10 minutes, so the
-//! golden keyless fixtures carry an already-expired one **by construction**
-//! and a wall-clock check would red them every run. Nothing in this module
-//! reads a clock, and nothing added to it may.
+//! Nothing here may read a clock: the golden keyless fixtures carry an
+//! already-expired Fulcio certificate, so a wall-clock check reds them every run.
 
 use crate::{Digest, Manifest, OciIdentifier, Platform, Selection, select_best};
 
 /// What a sign, attest or verify run acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignTarget {
-    /// The manifest digest to sign, or whose signature to verify.
     pub subject_digest: Digest,
-    /// The index that lists `subject_digest`, when `--platform` narrowed into
-    /// one. `None` when the reference resolved to the acted-on object directly.
-    ///
-    /// The membership check reads this: an index signature covers a child only
-    /// when the child was reached **through** that index.
+    /// The index `--platform` narrowed through, if any; an index signature
+    /// covers a child only when the child was reached through that index.
     pub enclosing_index: Option<Digest>,
 }
 
-/// Apply the `--platform` optionality rule.
+/// Apply the `--platform` optionality rule: absent → act on the resolved
+/// object as-is; present → narrow into the index and act on that child.
 ///
-/// * `platform` absent → act on the resolved object as-is, whatever it is.
-/// * `platform` present → narrow into the index and act on that child.
-/// * `platform` present but the resolved object is **not** an index → error.
-///
-/// **The branch is on what resolution returned, never on the reference's
-/// form.** A tag does not imply an index — OCX supports bare-manifest tags —
-/// so `children` is the resolution outcome, not a guess from the reference.
-/// The reference is not a parameter here precisely so that no caller can
-/// reintroduce the guess.
-///
-/// `children` is `None` when the reference resolved to a bare image manifest,
-/// and `Some(candidates)` when it resolved to an image index listing those
-/// `(platform, digest)` pairs. Selection reuses [`select_best`], the one shared
-/// D1 matcher (`adr_platform_model_unification.md`); there is no second one.
+/// Branches on `children` (`None` for a bare manifest), never the reference's
+/// form, via [`select_best`] (`adr_platform_model_unification.md`).
 ///
 /// # Errors
 /// [`ResolveTargetError::NotAnIndex`] when a platform was requested and the
@@ -64,8 +34,6 @@ pub fn resolve_sign_target(
     platform: Option<&Platform>,
 ) -> Result<SignTarget, ResolveTargetError> {
     let Some(platform) = platform else {
-        // No narrowing requested: the resolved object is the target, index or
-        // not. Signing an index signs the index itself.
         return Ok(SignTarget {
             subject_digest: resolved_digest.clone(),
             enclosing_index: None,
@@ -76,8 +44,6 @@ pub fn resolve_sign_target(
             platform: platform.to_string(),
         });
     };
-    // `select_best` takes `(item, platform)`; the contract's candidate shape is
-    // `(platform, digest)`. One transposition, not a second matcher.
     let candidates: Vec<(Digest, Platform)> = children
         .iter()
         .map(|(offered, digest)| (digest.clone(), offered.clone()))
@@ -97,39 +63,16 @@ pub fn resolve_sign_target(
 }
 
 /// What a caller's resolution hands a signing pipeline.
-///
-/// The sign, attest and verify pipelines no longer hold an `&Index` (ADR 1.9,
-/// plan DEC-17): the caller resolves and hands this in through a closure the
-/// pipeline invokes exactly where `resolve_platform_target` was invoked, so an
-/// argument error still precedes a network one.
-///
-/// `index_members` is verify's alone — sign and attest never read it and leave
-/// it empty. One shape rather than two because the difference is one field, and
-/// two near-identical resolver types is a second place for the three verbs to
-/// drift apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSubject {
-    /// What the run acts on, under the `--platform` optionality rule.
     pub target: SignTarget,
-    /// Every digest the enclosing index lists, for verify's C-008 membership
-    /// test. Empty for a bare manifest, and empty on the sign and attest paths.
+    /// Verify's membership set; empty for a bare manifest and on sign/attest.
     pub index_members: Vec<Digest>,
-    /// The physical transport identifier for the subject — the index
-    /// indirection pointer already followed, or the logical reference when no
-    /// source rewrites it.
     pub physical: OciIdentifier,
 }
 
 impl SignTarget {
-    /// Apply the `--platform` optionality rule to a resolution outcome.
-    ///
-    /// [`resolve_sign_target`] with the candidate extraction in front of it:
-    /// `children` is `None` for a bare image manifest and `Some(..)` for an
-    /// image index, decided by what resolution returned rather than by the
-    /// reference's form. Every caller that resolves through the index chain
-    /// goes through here, so the eligibility rule — an entry naming no platform
-    /// (or one OCX cannot represent) is a referrer entry, never something
-    /// `--platform` can mean — is stated once.
+    /// [`resolve_sign_target`] over a resolved manifest's platform candidates.
     ///
     /// # Errors
     /// [`ResolveTargetError`], exactly as [`resolve_sign_target`] raises it.
@@ -138,19 +81,13 @@ impl SignTarget {
         manifest: &Manifest,
         platform: Option<&Platform>,
     ) -> Result<Self, ResolveTargetError> {
-        // `None` for a bare image manifest — resolution reached the acted-on
-        // object directly and there is no index to narrow into. That
-        // distinction, not the reference's form, is what the rule branches on.
         let children: Option<Vec<(Platform, Digest)>> = match manifest {
             Manifest::ImageIndex(index) => Some(
                 index
                     .manifests
                     .iter()
                     .filter_map(|entry| {
-                        // The one shared eligibility rule, same as
-                        // `Index::fetch_candidates`: an entry naming no platform
-                        // (or one OCX cannot represent) is a referrer entry, not
-                        // something `--platform` can ever mean.
+                        // Same rule as `Index::fetch_candidates`: a platformless entry is a referrer.
                         let platform = Platform::candidate_from_descriptor(entry)?;
                         Some((platform, Digest::try_from(entry.digest.clone()).ok()?))
                     })
@@ -162,13 +99,10 @@ impl SignTarget {
     }
 }
 
-/// Every digest a resolved object lists — attestation and referrer entries
-/// included, not only the platform candidates.
+/// Every digest a resolved object lists, referrer entries included.
 ///
-/// The index digest binds each descriptor it carries, so a signature over the
-/// index covers each of them; narrowing this list to `--platform` candidates
-/// would refuse membership for a child the index demonstrably lists. Empty for
-/// a bare image manifest, which lists nothing.
+/// Narrowing this to `--platform` candidates would refuse membership for a
+/// child the signed index demonstrably lists.
 #[must_use]
 pub fn index_members(manifest: &Manifest) -> Vec<Digest> {
     match manifest {
@@ -182,15 +116,8 @@ pub fn index_members(manifest: &Manifest) -> Vec<Digest> {
 }
 
 /// Why the `--platform` narrowing could not name a single object.
-///
-/// Local to this module by design: sign and verify each wrap it into their own
-/// error kind, so the shared decision owes neither taxonomy a variant.
-// Deliberately NOT `#[non_exhaustive]`, unlike its peers in this crate. The
-// sign and verify pipelines each map every variant into their own taxonomy by
-// an exhaustive `match`, and that exhaustiveness is the guard: a new refusal
-// here must make both pipelines decide what it costs, at compile time. A
-// `_` arm bought by `#[non_exhaustive]` would answer for them silently, and
-// this crate is `publish = false`, so the attribute protects no downstream.
+// Not `#[non_exhaustive]`: sign and verify match it exhaustively, and a `_` arm
+// would silently swallow a new variant.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResolveTargetError {
     #[error("--platform {platform} was given but the reference resolved to a single manifest, not an index")]

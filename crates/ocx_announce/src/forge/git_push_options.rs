@@ -1,68 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Rendering the merge-request push options a `git push` carries, and refusing
-//! the values that must never reach them.
+//! Renders the merge-request push options a `git push` carries and refuses the values
+//! that must never reach them.
 //!
-//! Deliberately pure — no workspace, no subprocess, no network — because this is
-//! the value that reaches an external, security-sensitive parser and it is worth
-//! reading on its own. Exactly four option keys are ever sent
-//! (`merge_request.create`, `.target`, `.title`, `.description`), asserted as a
-//! sorted key **set** rather than a count: swapping `.description` for
-//! `merge_request.merge_when_pipeline_succeeds` keeps the count at four while
-//! auto-merging the request and defeating the one governance control this path
-//! exists to respect.
-//!
-//! **ocx is the only gate for almost every byte class.** git's documented wire
-//! grammar is `push-option = 1*( VCHAR | SP )`, but git 2.54.0 does not enforce
-//! it: measured on this host, only a raw LF is refused
-//! (`fatal: push options must not have new line characters`). CR, TAB, BEL, ESC,
-//! DEL, every other C0/C1 control, all non-ASCII, U+202E, U+200B and outright
-//! invalid UTF-8 travel to `GIT_PUSH_OPTION_<n>` byte-for-byte. NUL is stopped
-//! one layer lower still, by `execve` rather than by git. So the guard below is
-//! not a belt on git's braces — it is the whole belt.
-//!
-//! The rule is an **allowlist**: a rendered option string may contain only bytes
-//! `0x20..=0x7E`, minus `;`. A denylist of "`;` plus control characters" is the
-//! exact shape CVE-2026-3854 defeated, where a `;` injected `rails_env`,
-//! `custom_hooks_dir` and `repo_pre_receive_hooks` through GHES's
-//! semicolon-delimited internal `X-Stat` header and reached RCE. And
-//! `char::is_control()` alone is Unicode `Cc`, which misses U+202E, U+200B and
-//! every non-ASCII byte — the half of the class the CVE lives in.
-//!
-//! `=`, `:`, `/` and `,` are **allowed and must stay allowed**: GitLab's own
-//! matcher takes everything after the first `=` as the value, and C-067's values
-//! carry `:` and `/` in the physical repository (`oci://host/path`) and `:` and
-//! `,` in the resolved `login:id` owner pairs. Refusing them breaks the feature.
+//! Only four keys are ever sent: adding `merge_request.merge_when_pipeline_succeeds`
+//! auto-merges the request, defeating the governance review this path respects.
 
 use super::ForgeError;
 
-/// The pkt-line ceiling for one whole `key=value` option string, in bytes.
+/// The pkt-line ceiling for one whole `key=value` option string, in bytes:
+/// `LARGE_PACKET_MAX` (65520) minus the 4-byte length header.
 ///
-/// `LARGE_PACKET_MAX` (65520) minus the 4-byte length header. Measured on git
-/// 2.54.0: at 65516 the option arrives whole, at 65517 git dies with
-/// `fatal: protocol error: impossibly long line` before the receive hook runs.
+/// Measured on git 2.54.0: at 65517 git dies with `impossibly long line` before the hook runs.
 const WIRE_OPTION_CEILING: usize = 65516;
 
-/// Render the four merge-request push options a claim or announce push carries.
-///
-/// Returns them **in send order** as `key` / `key=value` strings. Order is part
-/// of the contract, not an implementation detail: git preserves send order
-/// exactly (measured), and the fixture asserts the delivered options as an
-/// ordered list, so an unordered collection would make the acceptance test
-/// depend on a hash seed.
-///
-/// Every value is checked against the module's allowlist *before* it is rendered,
-/// so nothing outside `0x20..=0x7E` minus `;` ever reaches a pkt-line.
+/// Render the four merge-request push options a claim or announce push carries, in send order.
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError::PushOptionRefused`] when a value is empty or
-/// whitespace-only, carries a byte outside the allowlist, or would push its
-/// whole `key=value` string past the pkt-line ceiling.
+/// Returns [`ForgeError::PushOptionRefused`] when a value is empty or whitespace-only,
+/// carries a byte outside printable ASCII minus `;`, or pushes its `key=value` string past
+/// the pkt-line ceiling.
 pub fn render_push_options(target: &str, title: &str, description: &str) -> Result<Vec<String>, ForgeError> {
-    // `merge_request.create` is rendered bare: git delivers a valueless option
-    // as-is, and the wave-1 fixture asserts that exact spelling on the wire.
+    // Bare, with no `=`: the fixture asserts that exact spelling on the wire.
     Ok(vec![
         "merge_request.create".to_string(),
         render_option("merge_request.target", target)?,
@@ -71,60 +32,29 @@ pub fn render_push_options(target: &str, title: &str, description: &str) -> Resu
     ])
 }
 
-/// Escape a push-option value's newlines into the two-character `\n` sequence
-/// the server converts back.
-///
-/// GitLab documents it: *"To include newlines in push option values (for
-/// example, in a merge request description), use the `\n` escape sequence
-/// instead of a literal newline"* (`docs.gitlab.com/topics/git/commit/`,
-/// implemented by `gitlab-org/gitlab!87020`), and performs the conversion at
-/// parse time, before the description is stored. So a multi-line markdown body
-/// travels as printable ASCII and no literal LF ever reaches a pkt-line — which
-/// is the only reason a claim body can be sent at all: git itself dies with
-/// `fatal: push options must not have new line characters`, and
-/// [`render_option`] refuses the byte one layer earlier.
-///
-/// Applied at the construction site rather than inside [`render_push_options`],
-/// which stays a pure refusing function: every byte this produces still goes
-/// through the allowlist, and a CR, a TAB or a `;` in the same value is refused
-/// exactly as before.
-///
-/// **Version floor, so nobody re-derives it.** An instance predating the
-/// !87020 release (2022-05) stores the literal `\n` rather than converting it —
-/// a cosmetic degradation, never a failure. That floor sits far below the
-/// GitLab version the job-token preflight already requires
-/// (`ci_push_repository_for_job_token_allowed`, GitLab 17), so it is a note and
-/// not a gate.
-///
-/// ponytail: `\n` only — the backslash is deliberately **not** doubled. Every
-/// value that reaches here is a fixed template over structured values (C-067):
-/// the logical name and the physical repository from the identifier grammar,
-/// the branch from `claim_branch`, `login:id` pairs from a charset-guarded
-/// login plus a numeric id, and an enum word. None of them can carry a
-/// backslash, so there is nothing to double. Interpolating an operator-supplied
-/// string into a title or a body breaks that premise — a `\` the operator wrote
-/// before an `n` would then be read by GitLab as a newline they did not write —
-/// and the fix at that point is to escape the backslash here first, not to drop
-/// the escape.
+/// Escape a push-option value's newlines into the two-character `\n` GitLab converts back
+/// at parse time, since git dies on a literal LF in a pkt-line.
 pub fn escape_newlines(value: &str) -> String {
+    // ponytail: `\n` only, backslash not doubled, as every value is a fixed template; once an
+    // operator string is interpolated, escape `\` first or its `\n` reads as a newline.
     value.replace('\n', "\\n")
 }
 
 /// Render one `key=value` option, refusing any value the git wire must not carry.
+// ocx is the only gate: git 2.54.0 refuses only a raw LF (NUL dies in `execve`) and passes
+// every other byte to `GIT_PUSH_OPTION_<n>` verbatim.
 fn render_option(key: &'static str, value: &str) -> Result<String, ForgeError> {
     let refuse = |reason: String| ForgeError::PushOptionRefused { key, reason };
 
     if value.trim().is_empty() {
-        // git accepts `merge_request.title=` and GitLab then titles the request
-        // from the commit subject instead of from the caller's template — a
-        // silent loss of the contract with no error raised anywhere.
+        // git accepts an empty value and GitLab then titles the request from the commit
+        // subject, silently dropping the caller's template.
         return Err(refuse("the value is empty or whitespace only".to_string()));
     }
 
-    // An allowlist, never a denylist: `;` is excluded because CVE-2026-3854
-    // injected `rails_env`, `custom_hooks_dir` and `repo_pre_receive_hooks`
-    // through a semicolon-delimited internal header and reached RCE, and a
-    // denylist of "`;` plus control characters" is the shape that CVE defeated.
+    // An allowlist, never a denylist: CVE-2026-3854 got RCE past a `;`-plus-controls denylist,
+    // and `char::is_control()` misses U+202E, U+200B and all non-ASCII.
+    // `=`, `:`, `/` and `,` must stay allowed: values carry `oci://host/path` and `login:id`.
     if let Some((offset, character)) = value
         .char_indices()
         .find(|&(_, character)| !matches!(character, ' '..='~') || character == ';')

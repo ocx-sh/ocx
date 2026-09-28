@@ -4,26 +4,6 @@
 use ocx_sign::verify::VerificationMode;
 
 /// Whether an SBOM read demands a verifiable signature.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired `--verify`
-/// / `--no-verify` flags. Tri-state, not a boolean with a default: with
-/// neither flag given the mode is resolved from the invocation itself —
-/// identity flags or a matching `[[trust.policy]]` mean verification was asked
-/// for, and their absence means there is nothing to verify against. So
-/// "neither flag" is a third outcome and not a synonym for either, which is
-/// why this returns an `Option` rather than a `bool` (the shape
-/// [`super::BinScan`] uses for the same reason).
-///
-/// The two flags last-win (`overrides_with`, the `git --[no-]verify` idiom),
-/// like every other paired toggle here — combining them is not an error, and
-/// the later one decides. That matters when one of them is injected from
-/// outside the command line by a wrapper or an alias: a conflict would leave
-/// the caller no way to override it back.
-///
-/// `--no-verify` **does** conflict with the certificate flags, which is a
-/// different thing: those are not the other half of a pair, and supplying an
-/// identity while refusing to check it is contradictory rather than
-/// overridden.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Verification {
     /// Require a verified signature; refuse unsigned attachments.
@@ -50,10 +30,6 @@ pub struct Verification {
 impl Verification {
     /// The mode the flags name, or `None` when neither was given and the
     /// invocation's identity sources decide.
-    ///
-    /// At most one arm is reachable: `overrides_with` resets the flag it
-    /// overrode to `false`, so the pair cannot both be set however many times
-    /// they appear. The match order is therefore not a tie-break.
     pub fn requested(&self) -> Option<VerificationMode> {
         match (self.verify, self.no_verify) {
             (true, _) => Some(VerificationMode::Demand),

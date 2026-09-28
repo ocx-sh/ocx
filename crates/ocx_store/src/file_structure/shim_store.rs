@@ -1,129 +1,67 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Identity-keyed store for generated shim directories — the on-disk form of a
-//! **deferred** tool (plan contracts C-003 / C-004,
-//! [#302](https://github.com/ocx-sh/ocx/issues/302)).
-//!
-//! A shim directory exists precisely when a tool is composed onto `PATH`
-//! without its content being materialized. It holds one generated launcher per
-//! declared interface name; invoking any of them triggers the ordinary pull and
-//! execs the real target.
-//!
-//! Layout: `{root}/<registry-slug>/<repo-path>/<algo>/<2hex>/<30hex>/`, then
-//! the [`PackageDir`](super::PackageDir) shape inside it:
+//! Generated shim directories: a deferred tool on `PATH` without its content materialized.
 //!
 //! ```text
 //! bin/            — the generated launchers, one per claimed name
 //! digest          — full digest string for recovery
 //! refs/blobs/     — forward-refs keeping the closure's config blobs reachable
 //! ```
-//!
-//! Two ways this store differs from its neighbours, both load-bearing:
-//!
-//! - **The repository IS in the path**, unlike [`PackageStore`](super::PackageStore),
-//!   which keys on registry + digest alone for cross-repo dedup. A shim body
-//!   names a *pinned identifier*, and that identifier carries the repository,
-//!   so two repositories resolving to one digest do not share a shim tree.
-//!   The repo component is built with [`super::repository_path`], never a
-//!   literal `/` join — the latter produces mixed separators on Windows.
-//! - **Launchers nest under `bin/`, never at the directory root.** A legal
-//!   `binaries` claim of `["digest", "refs"]` passes
-//!   [`BinaryName::try_from`](ocx_package::metadata::BinaryName), so flat
-//!   launchers would overwrite the CAS marker and the refs directory — GC then
-//!   mis-classifies liveness and collects config blobs a live shim needs. One
-//!   path segment closes every present and future sibling name without a second
-//!   validator.
-//!
-//! GC liveness is rooted **directly in the lock pins**, not reachable from a
-//! package: a shim dir exists exactly when the package dir does not, so there is
-//! no package to carry an edge to it (plan contract C-014, WP-9).
 
 use std::path::{Path, PathBuf};
 
 use ocx_util::fs::{DirWalker, WalkDecision};
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, which is what every one of these
-/// functions used to return one conversion later.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// A single shim directory — the [`PackageDir`](super::PackageDir) shape,
-/// minus everything a materialized package has and a deferred tool does not.
-///
-/// See the module docs for the layout and for why launchers live under `bin/`.
+/// One shim directory: `bin/`, `digest` and `refs/blobs/`.
 #[derive(Debug, Clone)]
 pub struct ShimDir {
-    /// The root directory of this shim (parent of `bin/`, `digest`, `refs/`).
     pub dir: PathBuf,
 }
 
 impl ShimDir {
-    /// Root directory of the shim — parent of `bin/`, `digest` and `refs/`.
-    ///
-    /// Its mere existence is the completeness signal: the generation task
-    /// publishes the whole tree by atomic rename, so a consumer needs no
-    /// further probe (plan contract C-020).
+    /// Its existence alone means complete: the tree is published by atomic rename.
     pub fn root(&self) -> &Path {
         &self.dir
     }
 
-    /// Path to the generated launchers directory.
-    ///
-    /// This — not [`root`](Self::root) — is the directory the composer pushes
-    /// onto `PATH` for a deferred tool (plan contract C-012).
+    /// The directory pushed onto `PATH`, not [`root`](Self::root).
     pub fn bin(&self) -> PathBuf {
         self.dir.join(SHIM_BIN_DIRNAME)
     }
 
-    /// Path to the digest marker file, carrying the full digest string the
-    /// truncated CAS path cannot recover.
     pub fn digest_file(&self) -> PathBuf {
         self.dir.join(super::cas_path::DIGEST_FILENAME)
     }
 
-    /// Path to the blob forward-reference directory.
-    ///
-    /// A deferred tool's env carriers are read from the closure's ref-linked
-    /// config blobs rather than from a package directory, so these links are
-    /// what keep those blobs off the GC's unreachable set.
+    /// These links alone keep the closure's config blobs, which carry the env, from GC.
     pub fn refs_blobs_dir(&self) -> PathBuf {
         self.dir.join("refs").join("blobs")
     }
 }
 
-/// Name of the launchers directory inside a shim dir.
-///
-/// Doubles as the walk's shim-dir marker (see [`classify_shim_dir`]) and as
-/// C-022's completeness marker, so the producer and the walker key on one fact.
+// Launchers nest here, never at the root: a legal claim of `digest` or `refs` would overwrite the CAS marker and GC would collect live blobs.
+// Also the walk's shim-dir marker, so producer and walker key on one fact.
 const SHIM_BIN_DIRNAME: &str = "bin";
 
-/// Manages the identity-keyed shim store on the local filesystem.
-///
-/// See the module docs for the layout and for the two ways it diverges from
-/// [`PackageStore`](super::PackageStore).
+/// Shim directories at `{root}/{registry_slug}/{repository}/{cas_shard_path}/`.
 #[derive(Debug, Clone)]
 pub struct ShimStore {
     root: PathBuf,
 }
 
 impl ShimStore {
-    /// Creates a `ShimStore` rooted at `root` (conventionally
-    /// `$OCX_HOME/shims`, wired by [`super::FileStructure::with_root`]).
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// The root directory of the shim store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Returns the shim directory path for the given pinned identifier.
-    ///
-    /// Unlike [`PackageStore::path`](super::PackageStore::path), the
-    /// **repository is part of the path** — see the module docs.
+    /// Keyed by repository too: a launcher names its repository, so two repositories on one digest must not share a tree.
     pub fn path(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
@@ -131,52 +69,28 @@ impl ShimStore {
             .join(super::cas_path::cas_shard_path(&identifier.digest()))
     }
 
-    /// Returns a [`ShimDir`] anchored at this identifier's shim root.
-    ///
-    /// Equivalent to `ShimDir { dir: self.path(identifier) }` — prefer this
-    /// over hand-rolled construction so call sites stay grep-able.
     pub fn shim_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> ShimDir {
         ShimDir {
             dir: self.path(identifier),
         }
     }
 
-    /// Lists all shim directories currently present in the store.
-    ///
-    /// A shim directory is identified by the presence of a `bin/` child whose
-    /// directory tail is a valid CAS path. Recursion stops there, so the
-    /// generated launchers and forward-refs inside a shim are never traversed.
-    ///
-    /// The walk is **unbounded in depth**: the repository sits in the path and
-    /// its segment count is variable, so any fixed bound loses the shims below
-    /// it — and since GC collects whatever this fails to report (plan contract
-    /// C-014), losing one is deleting a live tool.
-    ///
-    /// Returns an empty vec if the store root does not exist yet.
+    /// Lists every shim directory; empty if the root does not exist.
     ///
     /// # Errors
     ///
-    /// Returns an error if the store tree cannot be read.
+    /// The store tree cannot be read.
     pub async fn list_all(&self) -> Result<Vec<ShimDir>> {
         if !self.root.exists() {
             return Ok(Vec::new());
         }
+        // No `max_depth`: repositories vary in depth, and GC deletes any live shim this fails to report.
         DirWalker::new(self.root.clone(), classify_shim_dir).walk().await
     }
 }
 
-/// Classifies a directory for the generic walker.
-///
-/// - `bin/` child and a valid CAS tail → [`WalkDecision::leaf`] with a [`ShimDir`].
-/// - anything else → [`WalkDecision::descend`].
-///
-/// Unlike [`PackageStore::list_all`](super::PackageStore::list_all) this prunes
-/// nothing but a recognized shim: `org/bin` and `org/refs` are legal OCI
-/// repositories, and the repository is in this store's path, so a name-based
-/// skip list would prune a live shim's whole subtree out of GC's view.
-/// Descending past an unrecognized directory can at worst over-report, which
-/// under C-014 retains a dead shim — the harmless direction.
 fn classify_shim_dir(dir: &Path, _depth: usize) -> WalkDecision<ShimDir> {
+    // Never prune by name: `org/bin` is a legal repository, and a pruned subtree's live shims are collected.
     if !dir.join(SHIM_BIN_DIRNAME).is_dir() {
         return WalkDecision::descend();
     }

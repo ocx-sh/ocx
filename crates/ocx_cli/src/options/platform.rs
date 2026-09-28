@@ -3,24 +3,17 @@
 
 /// Shared `--platform` / `-p` argument for commands that resolve against a
 /// single platform.
-///
-/// Flatten into a command struct with `#[clap(flatten)]` to add the standard
-/// `-p/--platform` argument. Absent is the signal for "use the current host
-/// platform" — callers use `conventions::platform_or_default` to apply that
-/// default.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct PlatformOption {
     /// Target platform to resolve packages against.
     ///
-    /// The value is `os/arch[/variant][+feature[,feature...]]`,
-    /// for example `linux/amd64`, `linux/arm64`, or `linux/amd64+libc.glibc`.
-    /// The optional `+feature` suffix filters by `os.features`: OCX selects
-    /// the manifest whose features are a subset of the value you pass, so
-    /// `+libc.glibc` or `+libc.musl` forces a specific libc variant.
-    /// WebAssembly targets are `wasip1/wasm` and `wasip2/wasm`; no host
-    /// reports either, so they are reachable only by naming them here.
-    /// Defaults to the auto-detected host platform. Details:
-    /// <https://ocx.sh/docs/authoring/multi-platform>
+    /// The value is `os/arch[/variant][+feature[,feature...]]`, for example
+    /// `linux/amd64`, `linux/arm64`, or `linux/amd64+libc.glibc`. The optional
+    /// `+feature` suffix filters by `os.features`: OCX selects the manifest whose
+    /// features are a subset of the value you pass, so `+libc.glibc` or
+    /// `+libc.musl` forces a specific libc variant. WebAssembly targets
+    /// (`wasip1/wasm`, `wasip2/wasm`) are reachable only by naming them here.
+    /// Defaults to the host platform. <https://ocx.sh/docs/authoring/multi-platform>
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     pub platform: Option<ocx_oci::Platform>,
 }

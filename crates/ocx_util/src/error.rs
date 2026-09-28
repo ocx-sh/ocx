@@ -1,45 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The two failures every `utility` file raises that no narrower local type
-//! already covers (plan C-042; spec D-042, DEC-11).
-//!
-//! `utility` is the bottom tier: it becomes `ocx_util`, which nothing above it
-//! may be named from. Until this module existed, its files reached back up to
-//! the crate-wide `Error` for exactly two shapes — a file
-//! operation that failed, and a JSON round-trip that failed — and those two
-//! reaches were the whole reason `ocx_util → ocx_lib` still existed on paper.
-//!
-//! Both types are **the same user-visible text** as the wide variants they
-//! replace, because the acceptance suite reads those strings: `error.rs`
-//! converts each into its existing variant on the way up (`From` impls there,
-//! pinned by a round-trip test), so nothing a user or a script can observe
-//! moved with the construction site.
+//! The two failures `ocx_util` raises that no narrower local type covers: a file operation and a JSON round-trip.
 
 use std::path::{Path, PathBuf};
 
 /// A file operation failed, named by the path it failed on.
 ///
-/// **No `source()`, deliberately** (D-042) — the io cause is interpolated into
-/// the message and exposed *only* there. That is the one exception to this
-/// repository's "every wrapping error carries `#[source]`" rule, and it is
-/// exactly one of the two, never both: with both, a `{err:#}` chain walk
-/// printed the io text twice (ocx#286); with `#[source]` alone, every
-/// `to_string()` producer — a warn line, a machine-readable `reason` — named
-/// the path and nothing else (ocx#433). The field is named `cause` rather than
-/// `source` for the same reason: `thiserror` promotes a field *named* `source`
-/// to `Error::source` on its own, so the name is load-bearing.
+/// No `source()`: the io cause lives in the message only, or a `{err:#}` walk prints it twice.
+/// The field is `cause` because `thiserror` promotes a field named `source` to `Error::source`.
 #[derive(Debug, thiserror::Error)]
 #[error("internal file error for '{path}': {cause}", path = .path.display(), cause = .cause)]
 pub struct FileError {
-    /// The path the operation was attempted on.
     pub path: PathBuf,
-    /// The io failure, rendered into the message and never into `source()`.
     pub cause: std::io::Error,
 }
 
 impl FileError {
-    /// Build a [`FileError`] for `path` from the io failure that produced it.
     pub fn new(path: impl AsRef<Path>, cause: std::io::Error) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
@@ -50,65 +27,32 @@ impl FileError {
 
 /// A JSON serialization or deserialization failed.
 ///
-/// Carries the serializer's own error as `#[source]` (via `#[from]`), which is
-/// what the wide variant did and what exit-code classification descends into.
+/// The serializer error stays `source()`, which exit-code classification descends into.
 #[derive(Debug, thiserror::Error)]
 #[error("JSON serialization error")]
 pub struct SerializationError(#[from] pub serde_json::Error);
 
-/// What a `utility` function raises when it can fail in **both** of the tier's
-/// own ways: a JSON round-trip that touches the disk, where either the file or
-/// the codec can be the half that failed (DEC-11).
-///
-/// Both arms are `#[error(transparent)]`, so this type renders as whichever
-/// concrete error it carries and adds no prefix of its own; `error.rs` unwraps
-/// it arm by arm into the wide variant that arm already rendered as.
-///
-/// A function that can only fail one way keeps the concrete type instead —
-/// `LockedFile`'s reads and writes, every `symlink` operation, `move_dir` and
-/// the directory walker all return [`FileError`] itself, and `validate_target`
-/// returns [`crate::archive::Error`]. Narrowing costs nothing and keeps the
-/// union to the one shape that genuinely needs it, so no caller matches an arm
-/// that cannot occur.
+/// Either failure, for a JSON round-trip that touches the disk; a function that fails one way returns the concrete type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A file operation failed.
     #[error(transparent)]
     File(#[from] FileError),
-    /// A JSON round-trip failed.
     #[error(transparent)]
     Serialization(#[from] SerializationError),
 }
 
-/// [`Result`](std::result::Result) over this module's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Flatten an error and its `source()` chain into one line, `": {source}"` per
-/// link.
+/// Flatten an error and its `source()` chain into one line, `": {source}"` per link.
 ///
-/// `Display` renders the outermost message only, which for a wrapper variant
-/// that adds no `{0}` interpolation (`#[error("failed to fetch managed
-/// config")] Fetch(#[from] …)`) names nothing at all. The `{err:#}` chain walk
-/// that makes such an error readable happens at the CLI boundary, so anywhere
-/// an error is rendered into a value that does NOT reach `main` — a warn line,
-/// a machine-readable `reason` field — the chain has to be walked here instead.
-///
-/// A link whose text the output already ends with is skipped: leaf subsystem
-/// errors still interpolate their own source, and this keeps the walk
-/// duplicate-free either way.
+/// Use it for any error rendered short of `main`, whose `{err:#}` walk is the only other one.
 pub fn render_chain(error: &dyn std::error::Error) -> String {
     let mut out = error.to_string();
     append_chain(&mut out, error.source());
     out
 }
 
-/// Append a cause chain to an already-rendered message, `": {source}"` per
-/// link — the shared tail of [`render_chain`] and the batch-entry renderer in
-/// `package_manager::error`, which starts the walk at a different link.
-///
-/// A link whose text the output already ends with is skipped: leaf subsystem
-/// errors still interpolate their own source, and this keeps the walk
-/// duplicate-free either way.
+/// Append a cause chain to an already-rendered message, skipping a link whose text the output already ends with.
 pub fn append_chain(out: &mut String, first_cause: Option<&(dyn std::error::Error + 'static)>) {
     use std::fmt::Write as _;
 

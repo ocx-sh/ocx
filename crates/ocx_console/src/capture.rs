@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Test-only sink for everything the [`Printer`](crate::Printer) writes.
+//! Test-only sink for everything the [`Printer`](crate::Printer) writes: between [`begin`] and [`end`], every
+//! [`Line`](crate::Line) lands here by stream instead of the process's streams.
 //!
-//! The in-process CLI seam runs a command inside the test process, where
-//! `std::io::stdout()` is the test harness's own stream. While a capture is
-//! [`begin`]-ed, every [`Line`](crate::Line) lands here instead, split by the
-//! stream it was bound for, and [`end`] hands both back. Process-global like
-//! the streams it stands in for; the caller serialises (the seam holds
-//! `ocx_util`'s `EnvLock` for the whole run).
+//! Process-global, so the caller serialises captures (the in-process CLI seam holds `EnvLock`).
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -36,8 +32,7 @@ pub fn end() -> (Vec<u8>, Vec<u8>) {
     sink().take().unwrap_or_default()
 }
 
-/// Appends `bytes` to `stream`'s buffer; `false` when no capture is active,
-/// so the caller writes to the real stream instead.
+/// Appends `bytes` to `stream`'s buffer; `false` when no capture is active, so the caller writes the real stream.
 pub fn write(stream: Stream, bytes: &[u8]) -> bool {
     let mut sink = sink();
     let Some((stdout, stderr)) = sink.as_mut() else {

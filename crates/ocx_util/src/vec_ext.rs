@@ -13,9 +13,7 @@ pub trait VecExt<T>: Clone {
     where
         T: Eq + Hash + Clone;
 
-    /// In-place dedup that keeps the **last** occurrence of each element while
-    /// preserving relative order, the mirror of [`Self::unique`] (keep-first).
-    /// `[a, b, a, c]` becomes `[b, a, c]`.
+    /// Keep-last dedup preserving order: `[a, b, a, c]` becomes `[b, a, c]`.
     fn unique_last(&mut self)
     where
         T: Eq + Hash + Clone;

@@ -18,12 +18,10 @@ pub enum CleanKind {
     Object,
     Temp,
     /// A `state/projects/<key>/` directory whose consent stamp was swept.
-    ///
-    /// Reported for the same reason the other two are: revoking a project's
-    /// activation consent is the most consequential thing `ocx clean` does —
-    /// the project goes inert at the next prompt — and a `--dry-run` that did
-    /// not name it would be previewing everything except the part a user would
-    /// want to stop.
+    // Reported like the other two: revoking a project's activation consent is the
+    // most consequential thing `ocx clean` does (the project goes inert at the
+    // next prompt), and a `--dry-run` that did not name it would preview
+    // everything except the part a user would want to stop.
     Consent,
 }
 
@@ -44,9 +42,7 @@ impl fmt::Display for CleanKind {
 /// in dry-run mode when the package would have been collected without the
 /// project registry. Empty in non-dry-run output (held entries are never
 /// collected) and always empty for `temp` and `consent` entries.
-///
-/// See [`adr_clean_project_backlinks.md`] "`ocx clean` UX" for the column
-/// layout and JSON shape specification.
+// Column layout and JSON shape: adr_clean_project_backlinks.md § `ocx clean` UX.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CleanEntry {
     pub kind: CleanKind,
@@ -57,33 +53,14 @@ pub struct CleanEntry {
     pub held_by: Vec<PathBuf>,
 }
 
-/// Results of a clean operation: unreferenced objects, stale temp directories
-/// and swept consent stamps that were removed (or would be removed in a dry
-/// run).
-///
-/// Plain format: three-column table `Type | Held By | Path` when any entry
-/// carries non-empty `held_by` attribution (i.e. dry-run with project-registry
-/// pins); two-column `Type | Path` otherwise. See
-/// [`adr_clean_project_backlinks.md`] "Dry-run preview shape (plain)".
-///
-/// JSON format: array of `{ kind, dry_run, path, held_by }` objects.
+/// Objects, temp directories and consent stamps a clean removed, or would remove in a dry run.
 pub struct Clean {
     pub entries: Vec<CleanEntry>,
 }
 
 impl Clean {
-    /// Constructs a `Clean` report from the task result.
-    ///
-    /// `objects` carries the richer [`CleanedObject`] shape so that
-    /// `held_by` attribution flows through to the plain and JSON output.
-    /// `temp` and `consent` entries always have an empty `held_by` — neither
-    /// stale temp directories nor consent stamps are governed by the project
-    /// registry (see [`adr_clean_project_backlinks.md`] "`ocx clean` UX").
-    ///
-    /// Every field of [`CleanResult`](ocx_package_manager::CleanResult)
-    /// is consumed here, `consent` included: a swept stamp that reached no row
-    /// would make the sweep silent, which is the one thing its own contract
-    /// says it must never be.
+    /// Builds the report from every [`CleanResult`](ocx_package_manager::CleanResult) field; a
+    /// dropped `consent` list would make the stamp sweep silent, which its contract forbids.
     pub fn new(objects: Vec<CleanedObject>, temp: Vec<PathBuf>, consent: Vec<PathBuf>, dry_run: bool) -> Self {
         let mut entries = Vec::with_capacity(objects.len() + temp.len() + consent.len());
         for obj in objects {
@@ -121,18 +98,8 @@ impl Serialize for Clean {
 }
 
 impl Printable for Clean {
-    /// Prints a two- or three-column table depending on whether any entry
-    /// carries `held_by` attribution.
-    ///
-    /// When attribution is present (dry-run with project-registry pins):
-    ///   `Type | Held By | Path`
-    /// where the `Held By` cell joins multiple paths with `, ` and is blank
-    /// for entries with no holding project.
-    ///
-    /// When no entry has attribution (non-dry-run, or dry-run with `--force`):
-    ///   `Type | Path`
-    ///
-    /// See [`adr_clean_project_backlinks.md`] "Dry-run preview shape (plain)".
+    /// `Type | Held By | Path` when any entry carries `held_by`, else `Type | Path`
+    /// (`adr_clean_project_backlinks.md` "Dry-run preview shape (plain)").
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let has_attribution = self.entries.iter().any(|e| !e.held_by.is_empty());
 
@@ -168,8 +135,7 @@ impl Printable for Clean {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. `entries` is written as a bare array.
+// Transparent `Serialize`: the schema is the bare entry array.
 impl schemars::JsonSchema for Clean {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Clean".into()

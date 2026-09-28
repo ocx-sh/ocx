@@ -82,16 +82,6 @@ pub mod update;
 pub mod version;
 pub mod which;
 
-// ci.rs and ci_export.rs are deleted (C4 — handshake §7 / §6).
-// shell_hook.rs, shell_init.rs, shell_env.rs are deleted (C4); their command
-// bodies are gone and `resolve_global_current_env` is relocated into
-// `command/toolchain_env.rs` (Phase 2 relocate, now wired into `ocx env`).
-// install.rs global field + execute_global are deleted (C4).
-// Root variants Install, Uninstall, Select, Exec, Deselect, Which, Deps are
-// moved to `Package` group (C1 — handshake §2). Deselect, Which, and Deps are
-// MOVEs (body preserved); `which` and `deps` are OCI-tier identifier queries
-// that never read `ocx.toml`, so they belong under `ocx package`.
-
 #[derive(Subcommand)]
 pub enum Command {
     /// Compose and print the toolchain environment.
@@ -101,29 +91,24 @@ pub enum Command {
     /// emits JSON. `--shell[=NAME]` is the only eval-safe form.
     Env(toolchain_env::ToolchainEnv),
     /// Add one or more package bindings to ocx.toml.
-    ///
-    /// Resolves each new binding, records it in `ocx.lock`, and re-renders the
-    /// project toolchain into `<project>/.ocx/toolchain/` - or under the
-    /// `toolchain_dir` root, when one is configured. That directory carries
-    /// its own `.gitignore`, so `git status` stays clean.
-    ///
-    /// Each binding is named after the repository basename, so two packages
-    /// with the same basename collide. Prefix an identifier with `NAME=` to
-    /// choose the name yourself: `ocx add glab=ocx.sh/gitlab/cli`.
-    ///
-    /// Adding a binding the target group already declares with the same
-    /// identifier leaves `ocx.toml` byte-identical, including when one batch
-    /// repeats the identifier. Such a binding is re-locked only when
-    /// `ocx.lock` has no entry for it; an existing pin is never re-resolved,
-    /// so run `ocx update <name>` to move one. The packages are downloaded
-    /// either way, so re-running after a failed download finishes the install.
-    ///
-    /// Fails with exit 64 when the binding name is already bound to a
-    /// different identifier. Run `ocx remove <name>` and add it again, or
-    /// `ocx update <name>` to move the pin. The same name in a different
-    /// group is legal. Fails with exit 65 when `ocx.toml` drifted from
-    /// `ocx.lock` before this add (run `ocx lock` to reconcile), or exit 78
-    /// when a carried entry can no longer be migrated (run `ocx update`).
+    #[command(long_about = "\
+        Add one or more package bindings to ocx.toml.\n\n\
+        Resolves each new binding, records it in `ocx.lock`, and re-renders the project toolchain \
+        into `<project>/.ocx/toolchain/` - or under the `toolchain_dir` root, when one is \
+        configured. That directory carries its own `.gitignore`, so `git status` stays clean.\n\n\
+        Each binding is named after the repository basename, so two packages with the same basename \
+        collide. Prefix an identifier with `NAME=` to choose the name yourself: `ocx add \
+        glab=ocx.sh/gitlab/cli`.\n\n\
+        Adding a binding the target group already declares with the same identifier leaves \
+        `ocx.toml` byte-identical, including when one batch repeats the identifier. Such a binding \
+        is re-locked only when `ocx.lock` has no entry for it; an existing pin is never \
+        re-resolved, so run `ocx update <name>` to move one. The packages are downloaded either \
+        way, so re-running after a failed download finishes the install.\n\n\
+        Fails with exit 64 when the binding name is already bound to a different identifier. Run \
+        `ocx remove <name>` and add it again, or `ocx update <name>` to move the pin. The same name \
+        in a different group is legal. Fails with exit 65 when `ocx.toml` drifted from `ocx.lock` \
+        before this add (run `ocx lock` to reconcile), or exit 78 when a carried entry can no \
+        longer be migrated (run `ocx update`).")]
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
@@ -156,24 +141,21 @@ pub enum Command {
     /// Remove credentials for a registry.
     Logout(logout::Logout),
     /// Re-resolve declared tags against the registry; whole file or a subset.
-    ///
-    /// Resolves declared tags live against the registry by default (the root
-    /// `--remote` flag is redundant here, but accepted) and records the result
-    /// in `ocx.lock` only - the local index tag snapshot is never modified.
-    /// A moving tag (`:latest`, `:3`) advances to wherever it points today.
-    /// Under `--frozen`, resolution is capped at the local index snapshot (an
-    /// unsnapshotted tag exits 81); `--offline` forbids network access. Pass
-    /// binding names or `-g/--group` to advance only part of the toolchain
-    /// and freeze the rest: `ocx update ripgrep` advances one binding,
-    /// `ocx update -g ci` advances a whole group. A scoped update needs an
-    /// existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65),
-    /// and rejects an unknown group or name (exit 64).
-    ///
-    /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
-    /// under the `toolchain_dir` root, when one is configured - so the
-    /// `links/<group>/<entry>` tree and the `shells/default/bin` launchers
-    /// reached through the `active` link follow the advanced lock. That
-    /// directory carries its own `.gitignore`, so `git status` stays clean.
+    #[command(long_about = "\
+        Re-resolve declared tags against the registry; whole file or a subset.\n\n\
+        Resolves declared tags live against the registry by default (the root `--remote` flag is \
+        redundant here, but accepted) and records the result in `ocx.lock` only - the local index \
+        tag snapshot is never modified. A moving tag (`:latest`, `:3`) advances to wherever it \
+        points today. Under `--frozen`, resolution is capped at the local index snapshot (an \
+        unsnapshotted tag exits 81); `--offline` forbids network access. Pass binding names or \
+        `-g/--group` to advance only part of the toolchain and freeze the rest: `ocx update \
+        ripgrep` advances one binding, `ocx update -g ci` advances a whole group. A scoped update \
+        needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), and rejects \
+        an unknown group or name (exit 64).\n\n\
+        Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or under the \
+        `toolchain_dir` root, when one is configured - so the `links/<group>/<entry>` tree and the \
+        `shells/default/bin` launchers reached through the `active` link follow the advanced lock. \
+        That directory carries its own `.gitignore`, so `git status` stays clean.")]
     Update(update::Update),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
@@ -185,19 +167,17 @@ pub enum Command {
     #[command(subcommand)]
     Patch(patch::PatchGroup),
     /// Pre-warm the object store, then render the project toolchain.
-    ///
-    /// Fetches every digest-pinned entry the project `ocx.lock` declares into
-    /// the local object store, then renders the project toolchain into
-    /// `<project>/.ocx/toolchain/` - or under the `toolchain_dir` root, when
-    /// one is configured: one link per `links/<group>/<entry>`, plus the
-    /// `shells/default/bin` launchers for the default group, reached through the
-    /// `active` link. That directory carries its own
-    /// `.gitignore`, so `git status` stays clean. This is the primary way a
-    /// project toolchain is rendered; `--dry-run` reports the delta and writes
-    /// nothing.
-    ///
-    /// The package store's own `candidate` and `current` symlinks are left
-    /// alone: those move only when you install or select a package.
+    #[command(long_about = "\
+        Pre-warm the object store, then render the project toolchain.\n\n\
+        Fetches every digest-pinned entry the project `ocx.lock` declares into the local object \
+        store, then renders the project toolchain into `<project>/.ocx/toolchain/` - or under the \
+        `toolchain_dir` root, when one is configured: one link per `links/<group>/<entry>`, plus \
+        the `shells/default/bin` launchers for the default group, reached through the `active` \
+        link. That directory carries its own `.gitignore`, so `git status` stays clean. This is the \
+        primary way a project toolchain is rendered; `--dry-run` reports the delta and writes \
+        nothing.\n\n\
+        The package store's own `candidate` and `current` symlinks are left alone: those move only \
+        when you install or select a package.")]
     Pull(pull::Pull),
     /// Remove one or more package bindings from ocx.toml.
     ///
@@ -227,7 +207,7 @@ pub enum Command {
     /// Print the version of ocx
     Version(version::Version),
     /// External subcommand: dispatched to an `ocx-<name>` binary discovered on PATH.
-    /// See `adr_cli_plugin_pattern.md` and `app::plugin_dispatch`.
+    // See `adr_cli_plugin_pattern.md` and `app::plugin_dispatch`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -263,8 +243,6 @@ impl Command {
             Command::Inspect(inspect) => inspect.execute(context).await,
             Command::Version(_) => unreachable!("Version is handled in the static-command bypass in App::run"),
             Command::External(_) => {
-                // External subcommands are dispatched from `App::run` before
-                // `Context::try_init`, so this arm is unreachable.
                 unreachable!("Command::External must be handled in App::run before reaching execute()")
             }
         }

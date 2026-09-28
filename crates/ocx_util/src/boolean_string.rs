@@ -2,37 +2,17 @@
 // Copyright 2026 The OCX Authors
 
 //! ocx's one boolean vocabulary, and the refusal it raises.
-//!
-//! `utility` becomes `ocx_util`, the bottom tier — so this module carries
-//! neither a clap dependency (plan DEC-2: a CLI-parsing crate has no business
-//! in a domain-free primitives crate) nor a reach back up to
-//! `config::Error` for its refusal (plan C-042).
 
-/// Every spelling `BooleanString::try_from` offers when it refuses one.
-///
-/// Byte-for-byte the string the deleted `clap_builder::ValueEnum` impl
-/// rendered from `value_variants()` — which listed **eight** of the ten
-/// variants: `on` and `off` parse but were never advertised, and this const
-/// preserves that asymmetry rather than quietly fixing it, because the text
-/// is what a user reads when they mistype a boolean in `ocx.toml`.
+/// Every spelling a refusal offers; `on`/`off` parse but stay unlisted so the user-facing text is unchanged.
 pub(crate) const POSSIBLE: &str = "1, y, yes, true, 0, n, no, false";
 
 /// A value that is not one of ocx's boolean spellings.
-///
-/// The `Display` text is a byte-for-byte copy of the deleted
-/// `config::Error::InvalidBooleanString` literal (plan C-042, spec D-012), and
-/// exit-code classification maps it to the same `DataError` that variant took
-/// (`ocx_cli::exit::ocx_util`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid boolean string '{value}', possible values are: {possible}")]
 pub struct BooleanStringError {
     /// The value that failed to parse, as the user spelled it.
     pub value: String,
-    /// The advertised spellings — always this crate's one list of them.
-    ///
-    /// Not linked: the list is `pub(crate)` (DEC-40, it has no consumer
-    /// outside `ocx_util`), so an intra-doc link to it would resolve for
-    /// nobody reading this field from outside.
+    /// The advertised spellings.
     pub possible: String,
 }
 

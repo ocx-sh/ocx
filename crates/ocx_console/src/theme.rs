@@ -1,25 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Central, swappable colour theme.
-//!
-//! Every style used by stdout data rendering lives here — both *entity*
-//! colours (digest, tag, visibility, …) and table/tree *chrome* (header,
-//! rule, separators, zebra). Nothing styles inline at a call site, so the
-//! whole scheme is replaced by selecting a different [`Theme`] without
-//! touching renderers or data types.
-//!
-//! Each named theme is one constructor in its own submodule
-//! ([`colorful`], [`mono`]); [`Theme`] holds only the resolved styles and
-//! a stable [`Theme::name`] so a future config field can pick one via
-//! [`FromStr`]. Paint methods are plain string transforms over
-//! [`console::Style`] — no-ops when colour is disabled, so colour-off
-//! output stays byte-identical to the unstyled form.
-//!
-//! Every method here paints a string the caller already composed. Composing a
-//! *domain* value out of several painted parts belongs to whoever owns that
-//! value — `ocx_cli`'s `api::data::ink_identifier` is the one such composer —
-//! so the palette knows nothing about identifiers, digests or visibility axes.
+//! Central, swappable colour theme; each named theme is one constructor in a submodule.
 
 use std::str::FromStr;
 
@@ -28,13 +10,7 @@ use crate::Style;
 mod colorful;
 mod mono;
 
-/// Which visibility colour a caller is asking for.
-///
-/// The palette has four visibility entries and the theme needs to know which
-/// one — not what a package's env-visibility axes mean. Naming the *style*
-/// keeps the domain type (`private`/`interface` axes, and the vocabulary that
-/// decides how a pair maps onto a colour) on the caller's side, where the
-/// domain lives.
+/// Which of the palette's four visibility colours a caller wants; mapping the domain onto it is the caller's job.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisibilityStyle {
     Public,
@@ -43,20 +19,12 @@ pub enum VisibilityStyle {
     Sealed,
 }
 
-/// Wrap a `console::Style` as a layout-free [`Style`]. Visible to the
-/// per-theme submodules (descendants), not outside `theme`.
+/// Wrap a `console::Style` as a layout-free [`Style`].
 const fn s(inner: console::Style) -> Style {
     Style::new().style(inner)
 }
 
-/// A resolved colour theme: every style, the active colour decision, and a
-/// stable name.
-///
-/// Cheap to construct (a handful of `console::Style` values); built on
-/// demand from the resolved stdout colour so the owning `DataInterface`
-/// stays `Copy`. Fields are private and uniform — entity colours are
-/// reached through paint methods, chrome through accessors — so a call
-/// site never depends on the internal layout.
+/// A resolved colour theme: every style, the active colour decision, and a stable name.
 #[derive(Clone, Debug)]
 pub struct Theme {
     name: &'static str,
@@ -65,34 +33,23 @@ pub struct Theme {
     // Entity colours.
     digest: Style,
     tag: Style,
-    /// Structural punctuation inside a composed value (e.g. the `@` before
-    /// a digest).
+    /// Structural punctuation inside a composed value (e.g. the `@` before a digest).
     punct: Style,
     repeated: Style,
-    /// A short informational note next to a value (media type, byte size,
-    /// modifier kind, dispatch-command divergence) — de-emphasised so it
-    /// reads as an aside, not the value itself.
+    /// A de-emphasised note next to a value (media type, byte size, modifier kind).
     note: Style,
     vis_public: Style,
     vis_private: Style,
     vis_interface: Style,
     vis_sealed: Style,
 
-    /// The key in a labelled-value pair (e.g. `Version: 1.2.3`). Plain bold
-    /// so it stands out from the value without the column-header connotation
-    /// of [`Self::header`] (which is bold *and* underlined for table contexts).
+    /// The key in a labelled-value pair (e.g. `Version: 1.2.3`).
     label: Style,
-    /// A parenthetical or secondary value adjacent to the primary value
-    /// (e.g. a build timestamp shown next to a version, or a file path shown
-    /// next to a name). Plain dim, matching [`Self::note`] in weight but
-    /// separate so the two roles can diverge later without a rename.
+    /// A secondary value beside the primary one (e.g. a build timestamp next to a version).
     aside: Style,
-    /// A verdict the reader has to act on - a refusal, a lost datum, a
-    /// diagnostic that is the point of the command. Distinct from
-    /// [`Self::label`]: a label is structure, this is the answer.
+    /// A verdict the reader has to act on: a refusal, a lost datum.
     alert: Style,
-    /// [`Self::alert`]'s healthy counterpart - a verdict that needs no action,
-    /// so it reads as settled rather than as something to scan for.
+    /// [`Self::alert`]'s healthy counterpart, a verdict that needs no action.
     ok: Style,
 
     // Table / tree chrome.
@@ -105,23 +62,19 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The default theme (`colorful`). `color` is the resolved stdout
-    /// colour decision; when `false` every paint method returns its input
-    /// unchanged.
+    /// The default theme (`colorful`); with `color` false every paint method returns its input unchanged.
     pub fn new(color: bool) -> Self {
         colorful::theme(color)
     }
 
-    /// Returns a copy with the colour decision replaced. Lets a theme
-    /// parsed by name (colour-agnostic) adopt the stream's setting.
+    /// Returns a copy with the colour decision replaced, for a theme parsed by name.
     #[must_use]
     pub fn with_color(mut self, color: bool) -> Self {
         self.color = color;
         self
     }
 
-    /// Stable identifier (`"colorful"`, `"mono"`) — the value a config
-    /// `theme = "…"` field would carry.
+    /// Stable identifier (`"colorful"`, `"mono"`).
     pub fn name(&self) -> &'static str {
         self.name
     }
@@ -154,10 +107,7 @@ impl Theme {
     fn paint(&self, style: &Style, text: impl AsRef<str>) -> String {
         let text = text.as_ref();
         if self.color {
-            // `self.color` is the already-resolved decision (mirrors the
-            // Printer's stdout colour: honours --color, NO_COLOR, tty).
-            // Force styling so the result is deterministic regardless of
-            // console's own tty auto-detection.
+            // Forced, or console's own tty auto-detection overrides the already-resolved decision.
             (**style).clone().force_styling(true).apply_to(text).to_string()
         } else {
             text.to_string()
@@ -184,43 +134,22 @@ impl Theme {
         self.paint(&self.repeated, text)
     }
 
-    /// Colour a short informational note (media type, byte size, modifier
-    /// kind, dispatch-command divergence) — an aside next to a value.
+    /// Colour a short informational note next to a value.
     pub fn note(&self, text: impl AsRef<str>) -> String {
         self.paint(&self.note, text)
     }
 
-    /// Style the key in a labelled-value pair (plain bold). Distinct from
-    /// [`Self::header`], which is bold *and* underlined and reserved for
-    /// table column headers.
+    /// Style the key in a labelled-value pair; table column headers use [`Self::header`].
     pub fn label(&self, text: impl AsRef<str>) -> String {
         self.paint(&self.label, text)
     }
 
-    /// Style a parenthetical or secondary value (plain dim). Distinct from
-    /// [`Self::note`] semantically — `note` annotates an entity, `aside`
-    /// qualifies a value in a labelled-value display — though both currently
-    /// render dim. Kept separate so the two roles can diverge without
-    /// breaking callers.
+    /// Style a parenthetical or secondary value; [`Self::note`] annotates an entity instead.
     pub fn aside(&self, text: impl AsRef<str>) -> String {
         self.paint(&self.aside, text)
     }
 
-    /// One indented `key: value` line, with the key dimmed.
-    ///
-    /// The shared record renderer, and the counterpart to [`DataInterface`]'s
-    /// `print_table` / `print_tree`: a report whose facts are labelled values
-    /// rather than rows or a hierarchy had no vocabulary here, so each such
-    /// report grew its own private helper and the surfaces drifted.
-    ///
-    /// Section heads above these are bold ([`Self::label`]); dimming the key
-    /// beneath them is what gives a block its hierarchy and puts the reader's
-    /// eye on the values — the difference between a view and the flat wall of
-    /// `key: value` pairs that reads as a YAML dump. An empty `value` renders
-    /// the key alone, for the keys that head a list rather than carry a value,
-    /// and drops the separator with it so no line ends in a space.
-    ///
-    /// [`DataInterface`]: crate::DataInterface
+    /// One indented `key: value` line with the key dimmed; an empty `value` renders the key alone, no trailing space.
     pub fn field(&self, indent: &str, key: &str, value: impl AsRef<str>) -> String {
         let value = value.as_ref();
         let key = self.aside(format!("{key}:"));
@@ -231,8 +160,7 @@ impl Theme {
         }
     }
 
-    /// Style a verdict that needs acting on (an inert shell, a lost prior).
-    /// The reader scans for this; use it for the answer, never for chrome.
+    /// Style a verdict that needs acting on (an inert shell, a lost prior); never for chrome.
     pub fn alert(&self, text: impl AsRef<str>) -> String {
         self.paint(&self.alert, text)
     }

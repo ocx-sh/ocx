@@ -1,20 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Cascade algebra and platform-aware push orchestration.
-//!
-//! The cascade algebra ([`decompose`], [`cascade`]) computes which rolling
-//! tags a build-tagged version should update, based on the set of existing
-//! versions and blocking ranges.
-//!
-//! The orchestration layer ([`resolve_cascade_tags`], [`push_with_cascade`])
-//! composes the algebra with [`Client`](ocx_oci::Client) OCI transport
-//! to implement cascade pushes that correctly handle multi-platform registries.
-//!
-//! The submodules read the tag graph back and repair it — the audit half of
-//! the same algebra, behind `ocx package cascade check|repair`. They split
-//! along the one seam that makes the state space unit-testable: [`gather`]
-//! reads, [`graph`] computes with no I/O at all, [`apply`] writes.
+//! Cascade algebra and platform-aware push orchestration; the submodules back
+//! `ocx package cascade check|repair`.
 
 pub mod apply;
 pub mod gather;
@@ -29,14 +17,12 @@ use std::ops::Bound::{Excluded, Unbounded};
 use crate::error::Error as PackageError;
 use crate::version::Version;
 
-/// This tier's own result (E1, plan DEC-27).
 type Result<T> = std::result::Result<T, PackageError>;
 
 // ── Cascade algebra ─────────────────────────────────────────────
 
 /// One level in the cascade chain.
 pub struct CascadeLevel {
-    /// The rolling tag to cascade to (e.g., 3.28.1, 3.28, 3).
     pub target: Version,
     /// Versions in the blocking range (current, target) that could prevent cascade.
     pub blockers: Vec<Version>,
@@ -44,38 +30,25 @@ pub struct CascadeLevel {
 
 /// Result of [`decompose`].
 pub struct CascadeDecomposition {
-    /// Cascade levels from most-specific to least-specific.
+    /// Most-specific first.
     pub levels: Vec<CascadeLevel>,
-    /// Whether this version is eligible to become `latest`.
     /// Always `false` for pre-release versions.
     pub latest_eligible: bool,
-    /// Versions above the highest cascade level that would prevent becoming
-    /// `latest`. Only meaningful when `latest_eligible` is `true`.
+    /// Versions above the highest level that block `latest`.
     pub latest_blockers: Vec<Version>,
 }
 
-/// The cascade chain of a version taken alone: which rolling tags it would
-/// update, and whether it could become `latest`, if nothing blocked it.
-///
-/// The half of [`decompose`] that is a function of `version` only — no version
-/// set is consulted, and none could change the answer. That is what makes it
-/// safe for a caller who wants the chain and not the blockers to skip the
-/// per-level range scans.
+/// The cascade chain of a version taken alone, ignoring blockers.
 pub struct CascadeTargets {
-    /// The rolling tags to cascade to, most-specific first.
+    /// Most-specific first.
     pub targets: Vec<Version>,
-    /// Whether this version is eligible to become `latest`.
     /// Always `false` for pre-release versions.
     pub latest_eligible: bool,
 }
 
-/// Derives a version's cascade chain, with no blocker analysis.
-///
-/// Pre-releases without build produce zero targets (no cascade).
-/// Pre-releases with build produce exactly one (the parent pre-release).
-/// Pre-releases are never eligible for `latest`.
+/// Derives a version's cascade chain: none for a build-less pre-release, the
+/// parent pre-release for one with a build.
 pub fn decompose_targets(version: &Version) -> CascadeTargets {
-    // Pre-releases without build never cascade beyond their own level.
     if version.has_prerelease() && !version.has_build() {
         return CascadeTargets {
             targets: vec![],
@@ -83,7 +56,6 @@ pub fn decompose_targets(version: &Version) -> CascadeTargets {
         };
     }
 
-    // Pre-releases with build: cascade only to the parent pre-release.
     if version.has_prerelease() {
         let parent = version
             .parent()
@@ -100,25 +72,16 @@ pub fn decompose_targets(version: &Version) -> CascadeTargets {
     }
 }
 
-/// Decomposes a version's cascade into discrete levels with pre-computed blocking ranges.
-///
-/// The chain itself comes from [`decompose_targets`]; this adds the blocking
-/// range each level has to clear. Composed rather than duplicated, so the two
-/// can never disagree about where a version cascades to.
+/// Decomposes a version's cascade into [`decompose_targets`]' levels, each with its blocking range.
 pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomposition {
     let CascadeTargets {
         targets,
         latest_eligible,
     } = decompose_targets(version);
 
-    // A pre-release's blocking range is its own: only a later build of the same
-    // core and pre-release blocks it, and the build-less rolling parent must be
-    // excluded explicitly — Ord sorts it above its build-tagged children, so an
-    // unbounded range would let it block its own cascade and freeze the
-    // floating tag at the first build.
+    // Only later builds of the same pre-release block; the build-less parent sorts
+    // above them and would otherwise block its own cascade at the first build.
     if version.has_prerelease() {
-        // At most one target, so the range is scanned at most once — and not at
-        // all for a build-less pre-release, which cascades nowhere.
         let blockers = || {
             others
                 .range((Excluded(version), Unbounded))
@@ -146,10 +109,7 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
         };
     }
 
-    // Each level clears the half-open range between the level below it and its
-    // own target; `latest` clears everything above the last target on the same
-    // variant track (`take_while` works because Ord clusters a variant's
-    // versions together).
+    // `take_while` relies on `Ord` clustering a variant's versions together.
     let mut current = version.clone();
     let mut levels = Vec::with_capacity(targets.len());
     for target in targets {
@@ -173,10 +133,8 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
     }
 }
 
-/// Computes the cascade chain for a version given existing versions.
-///
-/// Not platform-aware — stops at the first level with any blocker.
-/// Use [`resolve_cascade_tags`] for the full platform-aware workflow.
+/// Computes the cascade chain for a version, stopping at the first level with any
+/// blocker; [`resolve_cascade_tags`] is the platform-aware form.
 pub fn cascade(version: &Version, others: impl IntoIterator<Item = Version>) -> (Vec<Version>, bool) {
     let others = others.into_iter().collect::<BTreeSet<_>>();
     let decomposition = decompose(version, &others);
@@ -195,15 +153,10 @@ pub fn cascade(version: &Version, others: impl IntoIterator<Item = Version>) -> 
 
 // ── Platform-aware orchestration ────────────────────────────────
 
-/// Resolves cascade tags by walking [`decompose`] levels and checking
-/// each level's blockers for platform membership.
+/// Resolves the cascade tags (excluding the primary tag) and whether the version
+/// becomes `latest`, counting only blockers that carry `platform`.
 ///
-/// Returns the list of tag strings to cascade to (excluding the primary
-/// tag) and whether this version should also become `latest`.
-///
-/// Registry errors on blocker verification stop the cascade conservatively
-/// (with a warning) rather than propagating — a transient fetch failure
-/// should not abort the entire push.
+/// A blocker read failure stops the cascade with a warning rather than failing the push.
 pub async fn resolve_cascade_tags(
     client: &ocx_oci::Client,
     identifier: &ocx_oci::OciIdentifier,
@@ -246,54 +199,27 @@ pub async fn resolve_cascade_tags(
 }
 
 /// What one cascade push landed.
-///
-/// A named struct rather than a tuple because two of its five members are
-/// digests and two are tag-shaped: as unlabelled positionals, a swapped pair
-/// type-checks silently — and [`platform_digest`](Self::platform_digest) is a
-/// signing input, where the wrong digest means signing the wrong object.
-/// [`PushOutcome`](crate::publisher::PushOutcome) in the sibling module is the
-/// precedent.
 #[derive(Debug)]
 pub struct CascadePushOutcome {
     /// Digest of the primary tag's image index after this platform merged in.
     pub index_digest: ocx_oci::Digest,
-    /// The rolling tags this push cascaded to, most-specific first.
+    /// Most-specific first.
     pub cascade_tags: Vec<String>,
-    /// The digest-named keep tag written, or `None` when `keep_tag` was
-    /// `false` or the merged index carried no entry for this platform.
+    /// `None` when `keep_tag` was off or the merged index has no entry for this platform.
     pub keep_tag: Option<String>,
-    /// The platform manifest digest this push landed on, whatever `keep_tag`
-    /// was — read from the same merged-index descriptor
-    /// [`Client::push_keep_tag`](ocx_oci::Client) reads, so the two can
-    /// never disagree and no second lookup is issued.
-    ///
-    /// `None` only when the merged index carries no entry for this platform:
-    /// the row is omitted rather than faked, matching `keep_tag`.
+    /// The platform manifest digest this push landed on; `None` only when the
+    /// merged index has no entry for this platform.
     pub platform_digest: Option<ocx_oci::Digest>,
-    /// The un-prefixed track tags `--default` aliased this push onto, bare
-    /// version first. Empty unless `default` is set and the pushed version
-    /// carries a variant.
+    /// The un-prefixed track tags `--default` aliased this push onto, bare version first.
     pub aliases: Vec<String>,
-    /// Layer-push counts for this platform's push.
     pub layer_counts: ocx_oci::LayerCounts,
 }
 
-/// Pushes a package to its primary tag, then merges the platform entry
-/// into each cascade tag sequentially (most-specific → least-specific
-/// for partial-failure safety).
+/// Pushes a package to its primary tag, then merges the platform entry into
+/// each cascade tag, most-specific first so a partial failure leaves no gap.
 ///
-/// When `keep_tag` is `true`, the just-pushed platform manifest also
-/// gets a digest-named `__ocx.keep.<algorithm>-<hex>` tag (`adr_index_indirection.md`
-/// Decision E) — looked up once from the primary tag's merged index, so a
-/// cascade never retags a pre-existing entry for a platform this call did
-/// not push.
-///
-/// `annotations` land on the primary tag's index and on every cascade tag's
-/// index alike.
-///
-/// `default` re-tags the pushed version's own variant onto the un-prefixed
-/// track — see [`write_default_variant_aliases`]. It is a no-op for a version
-/// that carries no variant.
+/// `keep_tag` adds the digest-named keep tag (`adr_index_indirection.md`
+/// Decision E); `default` also aliases a variant onto the un-prefixed track.
 #[expect(
     clippy::too_many_arguments,
     reason = "one push: where it lands, what to publish, which tracks it moves, and what to stamp on every index it writes"
@@ -324,8 +250,7 @@ pub async fn push_with_cascade(
         .await?;
 
     let merged = ocx_oci::Manifest::ImageIndex(index);
-    // Hoisted out of the `keep_tag` branch: the platform digest is a signing
-    // input and must be reported under `--no-keep-tag` as well.
+    // Outside the `keep_tag` branch: a signing input, needed under `--no-keep-tag` too.
     let platform_digest = ocx_oci::manifest::platform_manifest_digest(&merged, &package_info.platform);
 
     let aliases = write_default_variant_aliases(
@@ -356,42 +281,15 @@ pub async fn push_with_cascade(
     })
 }
 
-/// Re-tags the platform manifest this push just landed under the un-prefixed
-/// version track, when `default` is set and the pushed version carries a
-/// variant.
+/// Re-tags the platform manifest this push landed under the un-prefixed track
+/// when `default` is set and the version carries a variant; returns the tags
+/// written, bare version first.
 ///
-/// Returns the tags written, bare version first — empty for a version that
-/// carries no variant, which is the library no-op behind the CLI's exit-64
-/// refusal of `--default` on a variant-less tag.
-///
-/// `other_versions` carries the registry's existing versions when the caller
-/// is cascading, and is `None` for a plain push: the bare track then gets the
-/// version tag alone, exactly as the variant track did.
-///
-/// # Why the cascade resolution is reused verbatim
-///
-/// [`resolve_cascade_tags`] is called against `version.without_variant()`, and
-/// that scopes the blocker scan to the bare track by construction rather than
-/// by a filter: `Version`'s ordering keys on the variant first with `None`
-/// sorting **above** every `Some`, so a level's blocker range between two
-/// variant-less endpoints can only contain variant-less versions, and
-/// `latest`'s `take_while` on `variant()` stops at the first prefixed one. A
-/// newer bare `2.0.0` therefore blocks `latest` exactly as it should, while a
-/// newer `slim-2.0.0` does not.
-///
-/// # The write
-///
-/// Each alias is a [`Client::merge_platform_into_index`] against the digest the
-/// variant push already produced — the index at the target tag is pulled or
-/// synthesized, this platform's entry swapped, and the index JSON alone is
-/// PUT. No blob and no manifest is uploaded a second time.
+/// `other_versions` is `None` for a plain push, which aliases the bare version alone.
 ///
 /// # Errors
 ///
-/// Any registry failure resolving the bare track or writing an alias index. A
-/// merged index carrying no entry for this platform writes nothing and returns
-/// empty, the same no-op
-/// [`Client::push_keep_tag`](ocx_oci::Client::push_keep_tag) makes.
+/// Any registry failure resolving the bare track or writing an alias index.
 #[expect(
     clippy::too_many_arguments,
     reason = "the manifest this push landed, the tag it landed under, and what the bare track has to clear"
@@ -406,13 +304,9 @@ pub(crate) async fn write_default_variant_aliases(
     other_versions: Option<&BTreeSet<Version>>,
     annotations: &BTreeMap<String, String>,
 ) -> Result<Vec<String>> {
-    // The flag is off: write nothing.
     if !default {
         return Ok(Vec::new());
     }
-    // A variant-less version has no default to declare. The CLI refuses
-    // `--default` on such a tag with exit 64; this is the matching library
-    // no-op for any other caller.
     if version.variant().is_none() {
         return Ok(Vec::new());
     }
@@ -421,6 +315,7 @@ pub(crate) async fn write_default_variant_aliases(
         return Ok(Vec::new());
     };
 
+    // The variant-less version scopes the blocker scan to the bare track, by `Version`'s variant-first order.
     let bare = version.without_variant();
     let mut tags = vec![bare.to_string()];
     if let Some(others) = other_versions {
@@ -444,21 +339,10 @@ pub(crate) async fn write_default_variant_aliases(
     Ok(tags)
 }
 
-/// Checks blockers sequentially, returning `true` on first platform match.
+/// Whether any blocker carries `platform`.
 ///
-/// Returns `Err` on registry errors — the caller decides how to handle
-/// (typically: stop cascade conservatively with a warning).
-///
-/// The blocker manifests are read from the **canonical** registry
-/// ([`ReadAddressing::Canonical`]), never a configured mirror, for every caller
-/// — `subsystem-oci.md` Invariant #5. This probe's answer decides whether a
-/// rolling tag at the canonical registry moves, and the two outcomes are not
-/// symmetric: an `Err` stops the cascade conservatively (the caller's `Err`
-/// arms above), but a *successful* answer that merely omits the platform is
-/// taken at face value and moves the tag. A stale or hostile mirror therefore
-/// does not need to fail to walk `latest` backwards onto an older release — it
-/// only needs to under-report the platforms of the version that should have
-/// blocked (CWE-345/367).
+/// Reads the canonical registry, never a mirror: a mirror under-reporting a
+/// blocker's platforms would walk `latest` back onto an older release.
 async fn has_blocking_platform(
     client: &ocx_oci::Client,
     identifier: &ocx_oci::OciIdentifier,

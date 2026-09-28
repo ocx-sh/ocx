@@ -3,32 +3,19 @@
 
 //! The hardened HTTP client both forge clients are built on.
 //!
-//! One copy on purpose. The redirect policy here is the guard that stops the
-//! announce credential from being replayed at another host, and a security
-//! control that exists twice is a security control that can drift: the two
-//! clients were byte-identical until someone edited one of them. Anything that
-//! genuinely differs per forge — which header carries the credential, which
-//! status codes may be replayed — stays in that forge's own module.
+//! Keep one copy: a duplicated redirect policy drifts, and the drifted copy replays the credential.
 
 use std::time::Duration;
 
 use super::ForgeError;
 
-/// Client user-agent, shared so a forge cannot be identified by a stale one.
+/// Shared by both forge clients, so neither can send a stale user-agent.
 const USER_AGENT_VALUE: &str = concat!("ocx/", env!("CARGO_PKG_VERSION"));
 
 /// Build the no-redirect, embedded-roots HTTP client the forge clients use.
 ///
-/// Redirects are disabled because reqwest otherwise replays the credential
-/// header on a cross-host 3xx `Location`, exfiltrating the token — the same
-/// hazard for GitHub's `Authorization` and GitLab's `PRIVATE-TOKEN`. These REST
-/// endpoints never legitimately redirect; a non-2xx surfaces as an error, never
-/// chased. Embedded Mozilla roots are seeded so TLS works with no system trust
-/// store (minimal CI runner), mirroring the index HTTP client's hardening
-/// (`oci/index/ocx_index.rs`). `extra_roots` chains operator-supplied CA roots
-/// (ocx#448, C-007) on top — `ForgeKind::client` resolves the CLI's merged
-/// view and hands it to the forge's `new`, so a configured host builds its
-/// client once.
+/// Redirects stay off: reqwest replays the credential header on a cross-host 3xx,
+/// leaking the token. Embedded roots keep TLS working on a host with no system trust store.
 ///
 /// # Errors
 ///

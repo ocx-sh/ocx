@@ -1,34 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Move-to-front deduplication and segment removal for `PATH`-style
-//! environment values.
+//! Move-to-front deduplication and segment removal for `PATH`-style environment values.
 
 use std::ffi::{OsStr, OsString};
 
-/// Whether a `PATH` segment names the same element as `value`.
+/// Whether a `PATH` segment names `value`: exact on Unix, ASCII-case-insensitive on Windows.
 ///
-/// One rule, shared by both functions in this module and by every
-/// `Shell::export_path` /
-/// `remove_list_element` arm (A-19): segment-exact, case-sensitively on Unix
-/// and ASCII-case-insensitively on Windows, where `C:\Opt` and `C:\opt` are
-/// one directory.
-///
-/// The platform is decided at compile time by `cfg!(windows)`, the same way
-/// [`crate::env::PATH_SEPARATOR`] is, because **these helpers operate on
-/// in-process values** — the process environment and the `$GITHUB_ENV` /
-/// `$GITHUB_PATH` sinks — where the host convention is the correct one. That
-/// holds under MSYS too: a Windows-native child spawned from Git-Bash is handed
-/// a `;`-separated `PATH`, not the `:`-separated one its parent shell sees.
-///
-/// It is emphatically **not** because host and shell agree on a separator —
-/// they do not, and nothing here depends on their agreeing. Emitted text is a
-/// different concern with a different rule: `PATH` always routes through
-/// `Shell::export_path`, which keys the
-/// separator per shell, and `export_list` / `remove_list_element` take theirs
-/// from the package metadata's `List` modifier. Keying this module on the shell
-/// instead would break the process-env path it actually serves.
+/// Must match every `Shell::export_path` / `remove_list_element` arm, or emitted and in-process `PATH`s diverge.
 fn same_element(segment: &OsStr, value: &OsStr) -> bool {
+    // Host rule, not the shell's: the process env and `$GITHUB_PATH` follow it even under MSYS.
     if cfg!(windows) {
         segment.eq_ignore_ascii_case(value)
     } else {
@@ -38,14 +19,7 @@ fn same_element(segment: &OsStr, value: &OsStr) -> bool {
 
 /// Strip one — and only one — surrounding pair of `"` from a `PATH` element.
 ///
-/// Windows quotes PATH segments containing spaces, and `std::env::split_paths`
-/// unquotes them on the in-process side, so the two spellings must compare
-/// equal. Only the outermost pair is removed: a directory genuinely named
-/// `""x""` keeps one pair.
-///
-/// `Shell::remove_list_element`'s path-kind arm calls this same function, so
-/// the in-process and emitted halves cannot drift — the rule lives here, at
-/// the bottom tier, rather than in the emitter that used to own it.
+/// Windows quotes space-bearing segments and `split_paths` unquotes them, so both spellings must compare equal.
 pub fn strip_one_quote_pair(value: &str) -> &str {
     value
         .strip_prefix('"')
@@ -53,10 +27,7 @@ pub fn strip_one_quote_pair(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-/// [`strip_one_quote_pair`] over an `OsStr`.
-///
-/// A non-UTF-8 value is returned untouched: quoting is a Windows PATH
-/// convention and Windows paths are always representable.
+/// [`strip_one_quote_pair`] over an `OsStr`; a non-UTF-8 value is returned untouched.
 fn strip_one_quote_pair_os(value: &OsStr) -> &OsStr {
     match value.to_str() {
         Some(text) => OsStr::new(strip_one_quote_pair(text)),
@@ -64,27 +35,10 @@ fn strip_one_quote_pair_os(value: &OsStr) -> &OsStr {
     }
 }
 
-/// The form of `value` [`move_to_front`] **compares** against, never the form it
-/// writes (E3).
+/// The form of `value` [`move_to_front`] compares against, never the form it writes.
 ///
-/// `std::env::split_paths` strips one surrounding pair of `"` from a segment on
-/// **Windows only**, so the operand has to be stripped there to recognise the
-/// ambient spelling of the very copy this module wrote a prompt earlier —
-/// without it the value never matched itself and `PATH` grew by one copy per
-/// prompt, without bound. Off Windows nothing unquotes a segment, so a leading
-/// `"` is part of the directory name and stripping the operand would break the
-/// opposite way.
-///
-/// Named rather than inlined so the platform gate is assertable on either host:
-/// the behaviour it decides is only observable on Windows, but the *rule* is
-/// observable everywhere.
-///
-/// [`remove_segment`] deliberately does not use this — it strips
-/// unconditionally, because it never prepends, so it has no written copy for a
-/// stripped operand to stop matching. That asymmetry is also why the gate is
-/// here and not in [`same_element`], which both functions share: applying it
-/// there would take a second pair off `remove_segment`'s already-stripped
-/// operand.
+/// Stripped on Windows only, where `split_paths` unquotes: without it `PATH` grows a copy per prompt.
+/// Not in [`same_element`], or [`remove_segment`]'s already-stripped operand loses a second pair.
 fn comparison_operand(value: &OsStr) -> &OsStr {
     if cfg!(windows) {
         strip_one_quote_pair_os(value)
@@ -93,37 +47,11 @@ fn comparison_operand(value: &OsStr) -> &OsStr {
     }
 }
 
-/// Re-join `PATH` segments with [`std::env::join_paths`], the exact inverse of
-/// the [`split_paths`](std::env::split_paths) both public functions split with —
-/// the same pairing `Env::lookup_path` uses, for
-/// the same reason.
+/// Re-join `PATH` segments with [`std::env::join_paths`], the inverse of `split_paths`.
 ///
-/// On Windows `split_paths` reads `"` as a quote and **strips it**, so a segment
-/// it yields can legally contain the separator: std's own example is
-/// `c:\foo;c:\som"e;di"r;c:\bar`, whose middle segment is `c:\some;dir`.
-/// `join_paths` re-quotes exactly such a segment. The manual
-/// `push(PATH_SEPARATOR)` join this replaced re-emitted it bare, so the next
-/// consumer split `C:\Tools;Legacy\bin` back into `C:\Tools` and a **relative**
-/// `Legacy\bin` — a directory nobody put on `PATH`, resolved against the working
-/// directory (CWE-426).
-///
-/// That planting happened on the **first** application, and once. The torn value
-/// re-splits into separator-free segments the bare join re-emits unchanged, so
-/// the old code did reach a fixed point and did satisfy `f(f(a)) == f(a)` — its
-/// idempotence was never the defect, and no argument here rests on it. What it
-/// broke besides the relative segment is emit parity: `export_path`'s pwsh arm
-/// splits and re-joins on the same separator without ever stripping a `"`, so it
-/// returns the ambient's quoted bytes verbatim, and the in-process half then
-/// diverged from it byte for byte for the same input — the flapping
-/// [`move_to_front`]'s own parity paragraph exists to prevent.
-///
-/// Both callers are infallible by contract, so a rejection degrades to that bare
-/// join rather than to a `Result`; the fallback's output is byte-identical to the
-/// pre-fix behaviour. The arm is unreachable through either caller, because
-/// `join_paths` rejects only what its own `split_paths` cannot emit — a `"` on
-/// Windows, where every `"` is consumed as a quote, and the separator on Unix,
-/// where every occurrence is a split point.
+/// A bare join re-emits a Windows segment holding `;` unquoted, so the next split yields a relative segment (CWE-426).
 fn join_segments(segments: &[OsString]) -> OsString {
+    // Unreachable: `join_paths` rejects only what `split_paths` cannot emit.
     std::env::join_paths(segments).unwrap_or_else(|_| {
         let mut joined = OsString::new();
         for segment in segments {
@@ -136,18 +64,9 @@ fn join_segments(segments: &[OsString]) -> OsString {
     })
 }
 
-/// The segments of `existing` that survive — non-empty, and not the same element
-/// as `value` — re-joined by [`join_segments`].
-///
-/// The shared body of both public functions: they differ only in how they
-/// normalise the operand before comparing, and in whether they prepend.
+/// The non-empty segments of `existing` that are not `value`, re-joined.
 fn retained(existing: &OsStr, value: &OsStr) -> OsString {
-    // `split_paths` uses the platform path separator (`:` on Unix, `;` on
-    // Windows) — identical to `crate::env::PATH_SEPARATOR` — is `OsStr` native,
-    // so no lossy conversion happens, and unquotes on Windows, which is the
-    // ambient half of A-19's quote normalisation. `same_element` compares raw
-    // bytes rather than via `Path` equality, which would normalise trailing
-    // slashes and diverge from the emitted shell snippets.
+    // Raw bytes, not `Path` equality, which normalises trailing slashes and diverges from the emitted snippets.
     let segments: Vec<OsString> = std::env::split_paths(existing)
         .map(std::path::PathBuf::into_os_string)
         .filter(|segment| !segment.is_empty() && !same_element(segment, value))
@@ -155,70 +74,19 @@ fn retained(existing: &OsStr, value: &OsStr) -> OsString {
     join_segments(&segments)
 }
 
-/// Drops every occurrence of `value` from a `PATH`-style value.
+/// [`move_to_front`] minus the prepend: drops every occurrence of `value`.
 ///
-/// The inverse of [`move_to_front`] minus the prepend, and it shares that
-/// function's splitting, empty-segment dropping and exact-segment comparison —
-/// so a directory added by one is removed by the other.
-///
-/// The caller is a security guard, not a convenience: `ocx launcher shim` must
-/// resolve the invoked name on a `PATH` that no longer contains the shim
-/// directory it was itself invoked from. Leaving it there makes a name the
-/// package claimed but does not ship resolve back to the shim launcher, and
-/// the following `execvp` re-enters the same process forever.
-///
-/// One surrounding pair of `"` is stripped from `value` before comparing, as
-/// `Shell::remove_list_element`
-/// does on its path-kind arm: the caller enumerates the operand from the live
-/// environment, which spells a space-bearing Windows segment either way.
-///
-/// **Precondition** (same as [`move_to_front`]): `value` is a single directory
-/// containing no `PATH_SEPARATOR`. Comparison is segment-exact — deliberately,
-/// so that it matches the emitted shell snippets — which means a segment naming
-/// the same directory by a different string survives untouched: a trailing
-/// slash, a symlink alias, a root spelled one way by the composing process and
-/// another way by the invoked one. This function is therefore not a containment
-/// check and must not be read as one. Callers that must fail closed re-check the
-/// *resolved* answer against the resolved directory, which is the only
-/// comparison those spellings collapse under.
+/// Segment-exact, not containment: a differently spelled alias survives, so a fail-closed caller re-checks the resolved answer.
 pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
+    // As `Shell::remove_list_element`: the live env spells a space-bearing Windows segment either way.
     retained(existing, strip_one_quote_pair_os(value))
 }
 
-/// Move-to-front dedup for a `PATH`-style value.
+/// Move-to-front dedup for a `PATH`-style value: drops empty segments and every copy of `value`, then prepends it.
 ///
-/// Splits `existing` on the platform path separator, drops empty segments and
-/// every segment exactly equal to `value`, then returns `value` followed by the
-/// survivors, re-joined by [`join_segments`] — which re-quotes a survivor that
-/// legally contains the separator, so the survivors re-split one for one.
-/// Infallible.
+/// Mirrors `shell::Shell::export_path`; infallible and idempotent.
 ///
-/// Re-applying the result is a no-op (idempotent), and re-adding a segment that
-/// is already present removes the stale occurrence and moves it to the front —
-/// "last activation wins" for lookup. This mirrors the self-contained idempotent
-/// shell snippets emitted by `shell::Shell::export_path`, so the
-/// in-process child env (`ocx exec` / `ocx package exec`) and the emitted shell
-/// text agree on the same semantics.
-///
-/// `OsStr`-based to match `Env`'s `OsString` storage and avoid a
-/// lossy UTF-8 round-trip on non-UTF-8 paths. Segment comparison is exact (no
-/// prefix/substring match): `/usr/bin` never matches `/usr/bin/extra`, and it
-/// folds ASCII case on Windows only (A-19) — `/opt/Bin` and `/opt/bin` are two
-/// directories on Unix and one on Windows — and it compares through
-/// [`comparison_operand`], which takes one surrounding pair of `"` off the
-/// operand on Windows only. `value` is prepended verbatim regardless: the
-/// applier normalises what it compares against, never what it writes.
-///
-/// **Precondition:** `value` is a single directory containing no
-/// `PATH_SEPARATOR`, and on Windows no `"` (the env resolver yields one resolved
-/// `bin/` dir per entry). A value embedding the separator is treated as one
-/// opaque segment and would not round-trip a re-apply. The `"` half is the price
-/// of writing `value` verbatim: it bypasses [`join_segments`], so on Windows an
-/// unbalanced `"` inside it leaves `split_paths` mid-quote at the separator that
-/// follows, swallowing it and merging `value` with the first survivor — one
-/// segment *fewer*, not more. As a defensive measure an empty `value` is
-/// simply not prepended (the survivors are still de-duplicated), so the result
-/// never carries a leading empty segment.
+/// **Precondition:** `value` is one directory with no `PATH_SEPARATOR` (nor `"` on Windows), or a re-apply does not round-trip.
 ///
 /// # Examples
 ///
@@ -230,22 +98,14 @@ pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
 /// move_to_front("/b:".as_ref(), "/a".as_ref())       == "/a:/b"     // empty dropped
 /// ```
 pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
-    // E3 — **comparison only**. `value` is still prepended byte for byte,
-    // because that is what `export_path`'s pwsh arm writes and the parity
-    // between them is the whole contract: normalise what you compare against,
-    // never what you write.
+    // Comparison only: `value` is prepended byte for byte, as `export_path`'s pwsh arm writes it.
     let operand = comparison_operand(value);
     let survivors = retained(existing, operand);
     if value.is_empty() {
         return survivors;
     }
 
-    // `value` is prepended outside [`join_segments`] on purpose, twice over. It
-    // is written byte for byte (the E3 contract above), and routing it through
-    // `join_paths` would also make a `"`-bearing value reject the join on
-    // Windows — dropping the re-quoting from every *survivor* to preserve one
-    // operand. Its precondition already forbids a separator inside it, which is
-    // the only thing the join would have had to add.
+    // Outside `join_segments`: a `"`-bearing `value` makes `join_paths` reject, dropping every survivor's re-quoting.
     let mut result = OsString::with_capacity(value.len() + 1 + survivors.len());
     result.push(value);
     if !survivors.is_empty() {

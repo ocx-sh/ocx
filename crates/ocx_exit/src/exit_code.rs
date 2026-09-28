@@ -2,113 +2,58 @@
 // Copyright 2026 The OCX Authors
 
 //! Process exit codes shared by all OCX binaries.
-//!
-//! Numeric values align with BSD `sysexits.h` (EX__BASE = 64) to avoid
-//! collisions with shell-reserved codes (1–2) and signal-derived codes
-//! (128+). Scripts can `case $?` on these values for structured error
-//! handling.
 
 /// Process exit codes used by all OCX binaries.
 ///
-/// Numeric values align with BSD `sysexits.h` (EX__BASE = 64) to avoid
-/// collisions with shell-reserved codes (1–2) and signal-derived codes
-/// (128+). Scripts can `case $?` on these values for structured error
-/// handling.
+/// Values follow BSD `sysexits.h` (64+), clear of shell-reserved (1–2) and signal-derived (128+) codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum ExitCode {
     /// Successful completion.
     Success = 0,
-    /// Generic failure — use only when no specific code applies.
+    /// Generic failure, only when no specific code applies.
     Failure = 1,
-    /// Bad CLI invocation: unknown flag, wrong argument count, invalid syntax.
-    /// Mirrors `EX_USAGE` (64).
+    /// Bad CLI invocation: unknown flag, wrong argument count, invalid syntax (`EX_USAGE`).
     UsageError = 64,
-    /// Input data malformed: bad identifier format, invalid digest.
-    /// Mirrors `EX_DATAERR` (65).
+    /// Malformed input data: bad identifier format, invalid digest (`EX_DATAERR`).
     DataError = 65,
-    /// Required resource unavailable: network down, registry unreachable.
-    /// Mirrors `EX_UNAVAILABLE` (69).
-    ///
-    /// Rerunning the same command will not change the outcome — that is what
-    /// separates this from [`ExitCode::TempFail`].
+    /// Required resource unavailable, e.g. registry unreachable; unlike [`ExitCode::TempFail`],
+    /// rerunning will not change the outcome (`EX_UNAVAILABLE`).
     Unavailable = 69,
-    /// I/O error: filesystem permission denied, disk full, read/write failure.
-    /// Mirrors `EX_IOERR` (74).
+    /// I/O failure: filesystem permission denied, disk full, read/write error (`EX_IOERR`).
     IoError = 74,
-    /// Temporary failure that may succeed on retry: rate limit, transient
-    /// network, registry connect failure or timeout.
-    /// Mirrors `EX_TEMPFAIL` (75).
-    ///
-    /// The same command may succeed if it is run again — which is what makes
-    /// automated retry safe on 75 and unsafe on [`ExitCode::Unavailable`].
+    /// Transient failure (rate limit, registry connect failure or timeout); the same command
+    /// may succeed on retry, which makes automated retry safe here only (`EX_TEMPFAIL`).
     TempFail = 75,
-    /// Insufficient permissions: filesystem `EPERM`, or a forge refusing to
-    /// push because the target branch is protected or a pre-receive hook
-    /// declined it, where the refusal is not a capability gate — that is
-    /// [`ExitCode::ForgeCapabilityUnavailable`] (86).
-    /// Mirrors `EX_NOPERM` (77).
+    /// Filesystem `EPERM`, or a forge refusing a push (protected branch, pre-receive hook) where
+    /// the refusal is not a capability gate ([`ExitCode::ForgeCapabilityUnavailable`]) (`EX_NOPERM`).
     PermissionDenied = 77,
-    /// Configuration error: bad `config.toml`, missing required field, parse failure.
-    /// Mirrors `EX_CONFIG` (78).
+    /// Bad `config.toml`: parse failure or missing required field (`EX_CONFIG`).
     ConfigError = 78,
     /// Resource not found: package 404, explicit config path absent.
-    /// OCX-specific; first slot above `EX_CONFIG`.
     NotFound = 79,
     /// Authentication failure: registry 401 or 403, missing credentials.
-    /// OCX-specific.
     AuthError = 80,
-    /// A deliberate local policy (offline, frozen, ...) refused a
-    /// network or resolution operation; loosen the flag or pre-populate the
-    /// local index (e.g. `ocx index update`).
-    /// Distinct from `Unavailable`: the refusal is deliberate policy, not a fault.
+    /// A deliberate local policy (offline, frozen) refused a network or resolution operation;
+    /// loosen the flag or pre-populate the local index. A refusal, not a fault like `Unavailable`.
     PolicyBlocked = 81,
-    /// A managed shell-integration block carries user edits and was left
-    /// untouched (`ocx self setup` without `--force`).
-    /// OCX-specific; script-discoverable so a rerun with `--force` is easy.
+    /// A managed shell-integration block carries user edits and was left untouched
+    /// (`ocx self setup` without `--force`).
     DirtyRcBlock = 82,
-    /// Rekor transparency log service unavailable.
-    ///
-    /// Used by the sign path (Rekor upload failure) AND the verify path
-    /// (Rekor-required verification cannot complete: SET absent + TSA absent,
-    /// Rekor SET verification fails against known Rekor public key, or Rekor
-    /// lookup returns 5xx/timeout). OCX-specific; distinct from `Unavailable`
-    /// to let operators distinguish "registry down" (retry likely helps) from
-    /// "Rekor down" (sign cannot complete, verify of existing v0.3 bundles
-    /// fails if Rekor is needed for SET verification).
+    /// Rekor unavailable on sign (upload failed) or on verify (SET and TSA absent, SET invalid
+    /// against the Rekor key, or lookup 5xx/timeout); distinct from a registry `Unavailable`.
     TransparencyLogUnavailable = 83,
-    /// Registry does not implement the OCI Referrers API and has no fallback-tag
-    /// referrers index. The operation cannot proceed — discovery fails hard rather
-    /// than silently returning empty results. OCX-specific.
+    /// Registry has neither the OCI Referrers API nor a fallback-tag referrers index; discovery
+    /// fails rather than returning empty results.
     ReferrersUnsupported = 84,
-    /// A key reference named a key backend OCX recognises but does not
-    /// implement (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
-    /// `k8s://`). Distinct from `NotFound` (79) and `IoError` (74): the reference
-    /// is well-formed and the backend is real, it simply has no implementation
-    /// here. OCX-specific; scripts can branch on it before any backend exists.
-    ///
-    /// Three doors, one code: `--key`, a `key = "…"` signer in a matched
-    /// `[[trust.policy]]`, and a managed-config payload carrying one. Each
-    /// flattened onto 78 `config_error` at some point, which is the reading
-    /// this code exists to prevent — "not built yet" is not "your config is
-    /// wrong", and only one of them is fixed by editing the config.
+    /// A key reference (`--key`, a `[[trust.policy]]` signer, managed config) names a recognised
+    /// but unimplemented backend (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
+    /// `k8s://`); "not built yet", never a `config_error`.
     UnsupportedKeyBackend = 85,
-    /// A forge is reachable and refuses a write because the instance or the
-    /// target project lacks the capability the selected transport needs —
-    /// job-token push disabled on the target project, or the publishing
-    /// project missing from the target's job-token allowlist. OCX-specific.
-    ///
-    /// Distinct from [`ExitCode::Unavailable`] (69): that code means the
-    /// forge or a required local tool could not be reached at all, while
-    /// this one is raised only after a successful reach. Distinct from
-    /// [`ExitCode::AuthError`] (80): the credential is valid here, and the
-    /// refusal is not on it — an administrator, not the caller, must act.
-    /// Distinct from [`ExitCode::PolicyBlocked`] (81): that code is a
-    /// deliberate caller-side policy whose remedy is always in the caller's
-    /// own hands (loosen the flag); this code's remedy never is. Sibling of
-    /// [`ExitCode::ReferrersUnsupported`] (84): the forge is reachable, but
-    /// a capability it needs is absent, with no fallback.
+    /// A reachable forge refuses a write because the instance or target project lacks the
+    /// capability the transport needs (job-token push disabled, publisher not allowlisted);
+    /// the credential is valid and an administrator, not the caller, must act.
     ForgeCapabilityUnavailable = 86,
 }
 

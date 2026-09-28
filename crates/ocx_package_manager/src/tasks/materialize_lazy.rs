@@ -1,26 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! First-invocation materialization of a **deferred** tool — the library half
-//! of `ocx launcher shim` (plan contracts C-011, S-006).
-//!
-//! A shim directory exists precisely while a tool's content does not. Invoking
-//! any of its generated launchers lands here, and the two things that have to
-//! happen before the real target can be executed both live in this module
-//! rather than in the CLI verb: reading the name set the shim store claims, and
-//! pulling the package.
-//!
-//! **The pull runs on [`PackageManager::read_only_view`], and that is the
-//! contract, not an optimization.** A deferred tool is composed from
-//! `ocx.lock`, so its materialization is the same index-free resolve the lock
-//! already promises — a `tag@digest` pull skips the tag pointer but under
-//! [`LocalWritePolicy::Full`](ocx_index::LocalWritePolicy) still
-//! persists a dispatch object under `index/`, and the blob store's
-//! `AbsentDispatch` recovery writes one back the other way. Either would let a
-//! lazily composed tool grow the local index where its eager twin does not, and
-//! would leave a `--frozen` first invocation writing there at all. Content is
-//! unaffected: blobs, layers and the package tree are written exactly as an
-//! eager install writes them.
+//! First-invocation materialization of a deferred tool, the library half of `ocx launcher shim`.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -34,31 +15,10 @@ use ocx_project::lazy::LazyReport;
 
 use super::super::PackageManager;
 
-/// Extensions a Windows producer appends to a launcher it already wrote
-/// extensionless.
-///
-/// `write_shim_launchers` writes only the extensionless file on every platform
-/// today; a Windows producer adds `<name>.exe` and its `<name>.shimref`
-/// sidecar. `.shimref` and not `.shim`: a shim tree's `bin/` is the one
-/// directory the deferred-tool grammar is written into (`ocx_shim`'s
-/// `SIDECAR_PROBE_ORDER`), and `.shim` names an installed package under
-/// `entrypoints/`, which never appears here.
+/// Extensions a Windows producer appends beside an extensionless launcher (`ocx_shim`'s `SIDECAR_PROBE_ORDER`).
 const GENERATED_SIBLING_EXTENSIONS: [&str; 2] = ["exe", "shimref"];
 
-/// Whether `file_name` is a generated sibling of another launcher in the same
-/// listing, rather than a claimed name in its own right.
-///
-/// The **pair** is what makes it a sibling, not the extension: `BinaryName`
-/// permits interior dots and imposes no suffix rule, so a publisher may claim
-/// `mytool.exe` outright and `prepare_lazy` writes exactly one launcher for it.
-/// Skipping on the extension alone dropped that name from the claim set while
-/// leaving its launcher on `PATH`, so every invocation was refused as
-/// unclaimed — naming the wrong defect, since it *was* claimed. A sibling
-/// therefore has to be accompanied by the extensionless file it belongs to.
-///
-/// Taking a file *stem* unconditionally would be wrong in the other direction:
-/// a claimed `python3.12` has `.12` for an extension and would be reported as
-/// `python3`.
+/// Whether `file_name` is a generated sibling of another launcher in `listing`, not a claimed name.
 fn is_generated_sibling(file_name: &str, listing: &BTreeSet<&str>) -> bool {
     let Some(extension) = Path::new(file_name).extension().and_then(OsStr::to_str) else {
         return false;
@@ -66,37 +26,23 @@ fn is_generated_sibling(file_name: &str, listing: &BTreeSet<&str>) -> bool {
     if !GENERATED_SIBLING_EXTENSIONS.contains(&extension) {
         return false;
     }
-    // `- 1` for the dot; `extension()` guarantees both are present.
+    // Only with its extensionless twin present, or a claimed `mytool.exe` is refused as unclaimed.
+    // `- 1` strips the dot; a file stem would misreport `python3.12` as `python3`.
     listing.contains(&file_name[..file_name.len() - extension.len() - 1])
 }
 
 impl PackageManager {
-    /// The interface names a deferred tool's shim directory claims — one
-    /// generated launcher per name under `bin/`.
-    ///
-    /// The launchers **are** the name set, so this reads the directory rather
-    /// than re-deriving the union from the closure's ref-linked config blobs:
-    /// it costs no closure walk on every first invocation, and it is the set
-    /// the invoked shim actually came from. Trusting the store's directory
-    /// contents is no weaker than trusting the shim body itself, which C-011's
-    /// trust-boundary paragraph already concedes.
-    ///
-    /// An **absent** shim directory yields an empty set rather than an error.
-    /// That is fail-closed: an empty set claims nothing, so every name is
-    /// refused by [`PackageErrorKind::ShimNameNotClaimed`] and no download is
-    /// triggered by a shim whose store entry is gone.
+    /// The interface names a deferred tool's shim directory claims, one launcher per name under `bin/`.
     ///
     /// # Errors
     ///
-    /// Propagates an I/O failure reading the `bin/` directory. A file name that
-    /// is not valid UTF-8, or does not satisfy the [`BinaryName`] grammar, is
-    /// skipped with a debug log — it cannot be the name any shim was invoked
-    /// under, since `argv0` clears the same grammar first.
+    /// Propagates an I/O failure reading `bin/`; a non-UTF-8 or non-[`BinaryName`] file name is skipped.
     pub async fn claimed_shim_names(&self, package: &ocx_oci::PinnedPackageRef) -> crate::Result<BTreeSet<BinaryName>> {
         let bin = self.file_structure().shims.shim_dir(package).bin();
         let mut entries = match tokio::fs::read_dir(&bin).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Empty fails closed: every name is refused, so nothing downloads for a collected shim.
                 log::debug!(
                     "No shim launchers for '{package}' at {}; the claim set is empty.",
                     bin.display()
@@ -106,9 +52,7 @@ impl PackageManager {
             Err(error) => return Err(crate::error::file_error(&bin, error)),
         };
 
-        // Read the whole listing before classifying any of it: a `.exe` is a
-        // generated sibling only when the extensionless file it belongs to is
-        // also present, which is not knowable one entry at a time.
+        // Whole listing first: sibling classification needs the other entries.
         let mut listing: Vec<String> = Vec::new();
         while let Some(entry) = entries
             .next_entry()
@@ -139,41 +83,11 @@ impl PackageManager {
 
     /// Materializes a deferred tool by digest, writing nothing under `index/`.
     ///
-    /// The ordinary pull, on a [`read_only_view`](PackageManager::read_only_view)
-    /// — see the module doc for why the view is the contract. `report` decides
-    /// whether the download renders progress; it is resolved by the caller from
-    /// the full `lazy-report` ladder and consumed here, the one place that
-    /// knows when the transfer starts and ends.
-    ///
-    /// Returns the [`FoundPackage`] rather than the bare install, because a
-    /// shim's caller has to report `resolution.autoInstalled`: a first
-    /// invocation pulls, a second one finds the same package already in the
-    /// store, and only the [`Arrival`](super::find_or_install::Arrival) tells
-    /// the two apart.
-    ///
-    /// The store is probed **before** any channel is chosen. A shim re-enters
-    /// on every invocation of a name the real `bin/` does not shadow, and most
-    /// of those find the package already materialized: opening the
-    /// controlling terminal for them would paint a frame on the user's screen
-    /// for a lookup that moved no bytes. Only a miss reaches the `report`
-    /// decision.
-    ///
-    /// Neither arm of that decision inherits the ambient manager. A shim runs
-    /// *inside* another tool's process tree, so its stderr belongs to whatever
-    /// invoked it — `make`, a build step, a wrapper script — and is the wrong
-    /// channel in both directions: rendering there corrupts the caller's
-    /// stream, and suppressing because it is a pipe hides a multi-hundred-
-    /// megabyte download behind a silent hang. [`Progress`](LazyReport::Progress)
-    /// therefore opens the controlling terminal, degrading to silence when
-    /// there is none; [`Silent`](LazyReport::Silent) renders nowhere, even
-    /// when fd 2 happens to be a terminal.
-    ///
     /// # Errors
     ///
-    /// Whatever the pull surfaces — including
+    /// Whatever the pull surfaces, including
     /// [`PackageErrorKind::Internal`]`(`[`crate::Error::OfflineMode`]`)` when
-    /// `--offline` or `--frozen` refuses the fetch, which is the exit-81 leg of
-    /// C-011.
+    /// `--offline` or `--frozen` refuses the fetch (exit 81).
     pub async fn materialize_deferred(
         &self,
         package: &ocx_oci::PinnedPackageRef,
@@ -181,7 +95,9 @@ impl PackageManager {
         report: LazyReport,
     ) -> Result<FoundPackage, Error> {
         let identifier = package.as_identifier().clone();
+        // Read-only, or a `tag@digest` pull persists a dispatch object under `index/`, even under `--frozen`.
         let view = self.read_only_view();
+        // Probe first, or every cached re-entry opens the terminal and paints a frame for no download.
         match view.find(&identifier, platform.clone()).await {
             Ok(info) => {
                 return Ok(FoundPackage {
@@ -193,6 +109,7 @@ impl PackageManager {
             Err(kind) => return Err(Error::FindFailed(vec![PackageError::new(identifier, kind)])),
         }
 
+        // Never the ambient manager: a shim's stderr belongs to its invoker, which rendering would corrupt.
         let progress = match report {
             LazyReport::Silent => ocx_console::progress::ProgressManager::disabled(),
             LazyReport::Progress => ocx_console::progress::ProgressManager::controlling_terminal().await,
@@ -203,11 +120,7 @@ impl PackageManager {
             .find_or_install_all(std::slice::from_ref(&identifier), platform, Concurrency::cores())
             .await?;
         installed.into_iter().next().ok_or_else(|| {
-            // `find_or_install_all` returns one entry per input identifier, in
-            // input order, so a one-element request either failed above or
-            // yields exactly one entry. Unreachable — an error rather than a
-            // panic so a future change to that contract degrades instead of
-            // aborting a user's tool invocation.
+            // Unreachable; an error, not a panic, so a contract change never aborts a user's tool.
             Error::FindFailed(vec![PackageError::new(identifier, PackageErrorKind::NotFound)])
         })
     }
@@ -223,7 +136,7 @@ mod tests {
 
     use super::*;
 
-    /// A pinned identifier over `top_digest`, tag included — C-011 keeps the
+    /// A pinned identifier over `top_digest`, tag included — this keeps the
     /// advisory tag, and `tag@digest` is precisely the shape that reaches
     /// `persist_dispatch`.
     fn pinned(top_digest: &ocx_oci::Digest) -> ocx_oci::PinnedPackageRef {
@@ -246,7 +159,7 @@ mod tests {
         PackageManager::new(file_structure.clone(), index, None, "localhost:5000")
     }
 
-    /// S-006 / C-011 (F-4): a first-invocation materialization leaves the local
+    /// A first-invocation materialization leaves the local
     /// index at **zero bytes** — not merely "moves no tag pointer".
     ///
     /// The sibling of

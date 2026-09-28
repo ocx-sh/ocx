@@ -13,12 +13,7 @@ const STYLE_PROMPT_LABEL: Style = Style::new().style(console::Style::new().bold(
 const STYLE_WARNING_PREFIX: Style = Style::new().style(console::Style::new().yellow().bold());
 const STYLE_SUCCESS: Style = Style::new().style(console::Style::new().green().bold());
 
-/// stderr diagnostics and interactive input interface.
-///
-/// Owns all human-facing stderr output (status lines, warnings, success
-/// messages) and interactive prompts. When quiet or non-interactive, diagnostic
-/// output routes to the `log` crate instead so it can be filtered or captured
-/// by the subscriber.
+/// stderr diagnostics and interactive prompts; when quiet or non-interactive, diagnostics go to the `log` crate.
 #[derive(Clone, Copy)]
 pub struct UserInterface {
     printer: Printer,
@@ -35,18 +30,13 @@ impl UserInterface {
         }
     }
 
-    /// Whether stdin/stderr is an interactive TTY. Callers use this to fail
-    /// early with an actionable hint (e.g. `--password-stdin`) instead of
-    /// attempting an interactive prompt that can only error here.
+    /// Whether stdin/stderr is an interactive TTY, so callers can fail early with a hint instead of prompting.
     pub fn is_interactive(&self) -> bool {
         self.interactive
     }
 
-    /// Cargo-style diagnostic line to stderr: `action` styled green+bold, then
-    /// `message` plain. No padding — OCX emits a single status line per command,
-    /// so a fixed-width pad would render as stray leading indent.
-    ///
-    /// Non-interactive or quiet: routes to `log::info!`.
+    /// Cargo-style status line to stderr, `action` green+bold then `message` underlined, unpadded;
+    /// `log::info!` when quiet or non-interactive.
     pub fn status(&self, action: &str, message: impl std::fmt::Display) {
         if self.quiet || !self.interactive {
             log::info!("{action}: {message}");
@@ -60,9 +50,7 @@ impl UserInterface {
             .end_line();
     }
 
-    /// Warning line to stderr: yellow-bold `warning:` prefix + plain message.
-    ///
-    /// Non-interactive or quiet: routes to `log::warn!`.
+    /// Warning line to stderr with a yellow-bold `warning:` prefix; `log::warn!` when quiet or non-interactive.
     pub fn warn(&self, message: impl std::fmt::Display) {
         if self.quiet || !self.interactive {
             log::warn!("{message}");
@@ -75,13 +63,7 @@ impl UserInterface {
             .end_line();
     }
 
-    /// Success line to stderr (green+bold when stderr color enabled).
-    ///
-    /// stderr — not stdout — because a success message is a human diagnostic,
-    /// not machine-parseable data; stdout is the CLI's data interface (JSON /
-    /// TSV tables only).
-    ///
-    /// Non-interactive or quiet: routes to `log::info!`.
+    /// Success line to stderr, never stdout, which carries data only; `log::info!` when quiet or non-interactive.
     pub fn success(&self, message: impl std::fmt::Display) {
         if self.quiet || !self.interactive {
             log::info!("{message}");
@@ -90,10 +72,7 @@ impl UserInterface {
         self.printer.cerr().render(message, &STYLE_SUCCESS).end_line();
     }
 
-    /// Blank separator line on stderr.
-    ///
-    /// Non-interactive or quiet: no-op (blank lines are pure visual; the log
-    /// subscriber manages its own line discipline).
+    /// Blank separator line on stderr; a no-op when quiet or non-interactive.
     pub fn status_break(&self) {
         if self.quiet || !self.interactive {
             return;
@@ -101,10 +80,9 @@ impl UserInterface {
         self.printer.cerr().end_line();
     }
 
-    /// Prompt the user for a line of text on stderr, read from stdin.
+    /// Prompt on stderr for a line of text read from stdin.
     ///
-    /// Returns `Err(Unsupported)` when non-interactive; returns
-    /// `Err(UnexpectedEof)` when stdin yields an empty line.
+    /// Errors with `Unsupported` when non-interactive and `UnexpectedEof` on an empty line.
     pub fn prompt_line(&self, label: &str) -> io::Result<String> {
         if !self.interactive {
             return Err(io::Error::new(

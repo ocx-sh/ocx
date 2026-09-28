@@ -1,28 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The build receipt `ocx package create` writes beside the bundle, and the
-//! fallback `ocx package push` / `ocx package test` derive from it.
+//! The build receipt `ocx package create` writes beside the bundle (platform and identifier), so
+//! `push`/`test` need not restate them. A build artifact: never published, no JSON Schema.
 //!
-//! The receipt is a **build artifact**, not package metadata: it records what
-//! `create` was invoked with — the platform it resolved dependency pins and
-//! scanned binaries against, and the identifier it was told the bundle would be
-//! published under — so the two commands that consume a freshly built bundle do
-//! not have to restate either. It never travels to a registry, has no published
-//! JSON Schema, and nothing on the install path reads it.
-//!
-//! It is a **fallback, never an authority**. Per value, the table is:
-//!
-//! | flag | receipt | outcome |
-//! |------|---------|---------|
-//! | given | anything | the flag, in silence — the receipt is not consulted for that value at all |
-//! | absent | recorded | the recorded value |
-//! | absent | not recorded (or no receipt) | [`UsageError`] (64) — nothing determines the value |
-//!
-//! Both fields are optional on the wire, so a receipt supplies whichever half
-//! `create` knew. Callers read the file **lazily** ([`read_beside_bundle`]):
-//! an invocation whose flags already answer everything never opens it, and so
-//! cannot be failed by a corrupt one.
+//! A fallback per value, never an authority: a given flag wins; an absent flag takes the recorded
+//! value, or is a [`UsageError`] (64) when nothing records it.
 
 use std::path::Path;
 
@@ -33,44 +16,31 @@ use crate::error::UsageError;
 use anyhow::Context as _;
 use ocx_oci::layer_ref::LayerRef;
 
-/// Known versions of the build-receipt format.
+/// Known versions of the build-receipt format; an unknown number fails to deserialize.
 ///
-/// `serde_repr` rejects an unknown number at deserialize, so a receipt written
-/// by a newer ocx fails loudly instead of being read as if it were V1.
-/// No `Default`: a defaulted version would let a future `#[serde(default)]`
-/// read a version-less receipt as V1 instead of rejecting it.
+/// No `Default`: it would let a `#[serde(default)]` read a version-less receipt as V1.
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReceiptVersion {
     V1 = 1,
 }
 
-/// What `ocx package create` recorded about the build.
-///
-/// Both fields are optional: `create` records what it was given, and a bundle
-/// built without `--platform` or `--identifier` simply has nothing to say about
-/// that half. Deliberately carries no `schemars::JsonSchema` derive: the
-/// receipt is a local handoff between two commands in one build, not a format
-/// publishers author or registries serve.
+/// What `ocx package create` recorded; each half is absent when `create` was not given it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildReceipt {
-    /// The version of the build-receipt format.
     pub version: ReceiptVersion,
 
-    /// The platform `ocx package create --platform` declared, in the canonical
-    /// grammar (`linux/amd64`, `linux/amd64+libc.glibc`, `any`, ...).
+    /// `create --platform`, in the canonical grammar (`linux/amd64+libc.glibc`, `any`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "platform_field")]
     pub platform: Option<ocx_oci::Platform>,
 
-    /// The identifier `ocx package create --identifier` declared, resolved
-    /// against the default registry.
+    /// `create --identifier`, resolved against the default registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier: Option<ocx_oci::PackageRef>,
 }
 
 impl BuildReceipt {
-    /// A receipt in the current format version recording whatever `create`
-    /// knew. `None` when it knew neither: there is nothing to write.
+    /// A current-version receipt; `None` when `create` knew neither half.
     pub fn new(platform: Option<ocx_oci::Platform>, identifier: Option<ocx_oci::PackageRef>) -> Option<Self> {
         (platform.is_some() || identifier.is_some()).then_some(Self {
             version: ReceiptVersion::V1,
@@ -80,17 +50,11 @@ impl BuildReceipt {
     }
 }
 
-/// Reads the build receipt beside the bundle, if the layers resolve one.
+/// Reads the build receipt beside the bundle. Call it only once a flag is missing, so an
+/// invocation that states everything cannot fail on a file it does not need.
 ///
-/// Call this only once a flag has been found missing — the receipt exists to
-/// fill gaps, so an invocation that states everything must not be able to fail
-/// on a file it does not need.
-///
-/// An absent file is `Ok(None)` — the ordinary "handed a bundle from elsewhere"
-/// case, as is a layer set that anchors no receipt path. Every other failure
-/// propagates: a receipt that exists but cannot be read or parsed must never
-/// degrade into "there is no receipt", which would turn a recorded value into a
-/// usage error about a flag the publisher had no reason to pass.
+/// An absent file or no anchoring layer is `Ok(None)`; every other failure propagates, or a
+/// recorded value would degrade into a usage error about a flag the publisher had no reason to pass.
 ///
 /// # Errors
 ///
@@ -117,18 +81,13 @@ pub async fn read(path: &Path) -> anyhow::Result<Option<BuildReceipt>> {
     Ok(Some(receipt))
 }
 
-/// Resolves the platform `ocx package push` / `ocx package test` operate on.
-///
-/// `explicit` is `--platform`; `receipt` is whatever was read beside the bundle
-/// (`None` when the caller never needed to look). An explicit value wins in
-/// silence — it is not compared against the receipt, because a publisher who
-/// states the target is not asking to be second-guessed.
+/// Resolves the platform `push`/`test` operate on; `explicit` (`--platform`) wins without being
+/// compared against the receipt.
 ///
 /// # Errors
 ///
-/// [`UsageError`] (64) when neither the flag nor the receipt names a platform:
-/// nothing determines which OCI slot the bundle belongs in, and guessing the
-/// host's platform would mislabel every cross-built artifact.
+/// [`UsageError`] (64) when neither names a platform; guessing the host's would mislabel every
+/// cross-built artifact.
 pub fn resolve_target_platform(
     explicit: Option<ocx_oci::Platform>,
     receipt: Option<&BuildReceipt>,
@@ -149,14 +108,10 @@ pub fn resolve_target_platform(
     }
 }
 
-/// Resolves the identifier `ocx package push` publishes under, on exactly the
-/// contract [`resolve_target_platform`] uses for the platform.
+/// Resolves the identifier `push` publishes under, on [`resolve_target_platform`]'s contract.
 ///
-/// The receipt also fills a version gap inside an explicit flag: `-i repo`
-/// without a tag takes the tag the receipt recorded, when the receipt names
-/// the same registry and repository. A receipt about a different repository
-/// contributes nothing — the flag stays tagless and push's ordinary `latest`
-/// default applies.
+/// A tagless `-i repo` takes the receipt's tag only when the receipt names the same registry and
+/// repository; otherwise push's `latest` default applies.
 ///
 /// # Errors
 ///
@@ -166,9 +121,7 @@ pub fn resolve_target_identifier(
     receipt: Option<&BuildReceipt>,
 ) -> Result<ocx_oci::PackageRef, UsageError> {
     if let Some(explicit) = explicit {
-        // The same-repository check is what keeps this a gap-fill rather than
-        // an override: only a receipt describing THIS repository may say which
-        // version the build was.
+        // Same repository only, or a receipt about another repository picks this one's version.
         if explicit.tag().is_none()
             && explicit.digest().is_none()
             && let Some(recorded) = receipt.and_then(|receipt| receipt.identifier.as_ref())
@@ -194,10 +147,8 @@ pub fn resolve_target_identifier(
     }
 }
 
-/// Serializes [`BuildReceipt::platform`] as its canonical grammar string — the
-/// same encoding used for `ocx.lock` keys and `--platform` — rather than
-/// [`ocx_oci::Platform`]'s own `Serialize`, which goes through the OCI JSON object
-/// shape (`{"os":...,"architecture":...}`).
+/// [`BuildReceipt::platform`] as its canonical grammar string (as `ocx.lock` keys), not
+/// [`ocx_oci::Platform`]'s OCI JSON object shape.
 mod platform_field {
     use std::str::FromStr;
 

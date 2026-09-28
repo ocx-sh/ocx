@@ -3,19 +3,8 @@
 
 //! Shared utilities for task modules.
 //!
-//! Free functions only — no `impl PackageManager`. Since `tasks` is a private
-//! module, these helpers are invisible to external consumers.
-//!
-//! ## Selection-state lock order
-//!
-//! Selection-state mutations (the per-repo `current` symlink) are guarded by
-//! the per-repo `.select.lock`.
-//!
-//! - **`{symlinks/{registry}/{repo}}/.select.lock`** (per repo) — held for the
-//!   actual symlink writes/rollback inside [`wire_selection`].
-//!
-//! `deselect` and `uninstall --deselect` acquire the same per-repo
-//! `.select.lock` before clearing symlinks.
+//! Every `current` symlink mutation ([`wire_selection`], `deselect`, `uninstall --deselect`) holds the
+//! per-repo `.select.lock`, or two of them race on the same symlink.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -30,15 +19,9 @@ use ocx_store::{file_structure, file_structure::PackageStore, reference_manager:
 use ocx_util::fs::LockedFile;
 use ocx_util::prelude::SerdeExt;
 
-/// Finds a package in the object store without index resolution.
+/// Finds a package in the object store without index resolution; `None` if absent.
 ///
-/// The identifier must carry a digest. Returns the installed package description pull if
-/// present, or `None` if the object is absent. Also serves as defense layer 2
-/// in the concurrent pull safety model.
-///
-/// Metadata read from disk is validated through [`metadata::ValidMetadata`]
-/// before the [`InstallInfo`] is constructed — defense in depth against stale
-/// or tampered on-disk metadata that predates current validation rules.
+/// On-disk metadata is re-validated through [`metadata::ValidMetadata`], as it may be stale or tampered.
 pub async fn find_in_store(
     objects: &PackageStore,
     identifier: &ocx_oci::PinnedPackageRef,
@@ -69,22 +52,9 @@ pub async fn find_in_store(
     }
 }
 
-/// Reconstructs the [`PinnedPackageRef`](ocx_oci::PinnedPackageRef) for a package
-/// loaded through an install symlink (candidate or current).
+/// Reconstructs the [`PinnedPackageRef`](ocx_oci::PinnedPackageRef) behind a candidate or current symlink.
 ///
-/// Registry and repository come from the caller-supplied [`ocx_oci::PackageRef`].
-/// The digest is read from the shared package directory's `digest` file so the
-/// result is the truly installed content digest, not whatever first installer
-/// happened to win a cross-repo dedup race.
-///
-/// Tag handling depends on `kind`:
-/// - [`SymlinkKind::Candidate`]: caller's tag is preserved — candidate symlinks
-///   are keyed by tag, so the tag and digest always agree by construction.
-/// - [`SymlinkKind::Current`]: caller's tag is stripped. `current` points at
-///   whatever digest was most recently selected, which may have been installed
-///   under a different tag than the caller supplied. Keeping the caller's tag
-///   would produce a hybrid identifier (`pkg:old-tag@new-digest`) that never
-///   existed as a real install.
+/// `Current` drops the caller's tag, which `current` may not hold, or it fabricates a never-installed identifier.
 pub async fn identifier_for_symlink(
     objects: &PackageStore,
     symlink_path: &Path,
@@ -100,19 +70,9 @@ pub async fn identifier_for_symlink(
     Ok(ocx_oci::PinnedPackageRef::try_from(base.clone_with_digest(digest))?)
 }
 
-/// Loads metadata.json and resolve.json for an existing content path.
+/// Loads metadata.json and resolve.json for an object path or install symlink.
 ///
-/// Uses `PackageStore::metadata_for_content` / `resolve_for_content` which
-/// follow symlinks, making this safe for both direct object paths and install
-/// symlinks.
-///
-/// Metadata is checked for *structural readability* via
-/// [`metadata::ValidMetadata`] before being returned. That is deliberately
-/// weaker than the publish gate (D14): a consumption path never refuses a
-/// document because one of its tokens is unrecognised, so metadata written by a
-/// newer ocx still loads and still shows. The refusal moves to the operation
-/// that needs the value — `TemplateResolver::resolve` cannot produce bytes for
-/// a token it does not recognise.
+/// Only structural readability is checked, never publish-time tokens, or metadata from a newer ocx fails to load.
 pub async fn load_object_data(
     objects: &PackageStore,
     content_path: &Path,
@@ -130,42 +90,20 @@ pub async fn load_object_data(
     Ok((metadata, resolved_result?))
 }
 
-/// Upper bound on a metadata config blob's size (declared descriptor size AND
-/// fetched byte length), enforced by [`load_config_metadata`].
-///
-/// Config metadata is KB-scale in practice — a 4 MiB ceiling is orders of
-/// magnitude above any real package and therefore never bites a legitimate
-/// publisher. See `adr_inspect_metadata_closure.md` D5.
+/// Cap on a metadata config blob's declared and fetched size (`adr_inspect_metadata_closure.md` D5).
 pub(super) const MAX_METADATA_BLOB_BYTES: usize = 4 * 1024 * 1024;
 
-/// Fetches the OCX metadata config blob referenced by `manifest`, validates
-/// its media type, deserializes it, and runs publish-time validation.
-///
-/// Shared by the pull pipeline (`setup_owned`) and `inspect` so both apply
-/// identical media-type + [`ValidMetadata`](metadata::ValidMetadata) gating
-/// to the config blob. The blob is fetched through the index
-/// ([`Index::fetch_blob`](ocx_index::Index::fetch_blob)), the single
-/// offline-aware blob accessor: local-CAS first, chain-walk on miss,
-/// write-through on hit, `Ok(None)` when offline and absent locally.
+/// Fetches, media-type checks and validates the OCX metadata config blob `manifest` references.
 pub async fn load_config_metadata(
     index: &ocx_index::Index,
     pinned: &ocx_oci::PinnedPackageRef,
     manifest: &ocx_oci::ImageManifest,
 ) -> Result<metadata::ValidMetadata, PackageErrorKind> {
-    // Config blob media-type check before any fetch — refuse to stage a
-    // wrong-media-type blob into the local CAS.
-    //
-    // `crate::Error::UnsupportedMediaType` already classifies as `DataError`
-    // (65), matching every sibling artifact-type gate. Carry it straight
-    // through rather than boxing it under `ClientError::internal` — that
-    // carrier now defers to its source, but a wrapper that adds no provenance
-    // is still one more node for the chain walker to cross for nothing.
+    // Before any fetch, or a wrong-media-type blob is staged into the local CAS.
     media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
         .map_err(|e| PackageErrorKind::Internal(e.into()))?;
 
-    // D5 step 1 (pre-fetch): the manifest's declared config size is known
-    // before any blob request — reject an over-cap declared size without
-    // touching the network or the cache.
+    // Reject an over-cap declared size before touching the network or the cache.
     if manifest.config.size < 0 || manifest.config.size as u64 > MAX_METADATA_BLOB_BYTES as u64 {
         return Err(PackageErrorKind::Internal(crate::Error::MetadataBlobTooLarge {
             size: manifest.config.size,
@@ -183,12 +121,7 @@ pub async fn load_config_metadata(
     {
         Some(bytes) => bytes,
         None => {
-            // The config blob is absent locally and no source could supply it
-            // (offline, or it was never cached — e.g. after a bare `ocx index
-            // update`, which persists the manifest chain into the index snapshot
-            // but not the config blob). Name the missing digest so the user knows
-            // what to re-pull, mirroring `resolve_top_manifest`'s offline
-            // manifest-missing error — never a bare, digest-less `OfflineMode`.
+            // Offline, or after `ocx index update` (which skips config blobs): name the missing digest.
             return Err(PackageErrorKind::OfflineManifestMissing(Box::new(
                 error::OfflineManifestMissing {
                     identifier: pinned.as_identifier().clone(),
@@ -198,8 +131,7 @@ pub async fn load_config_metadata(
         }
     };
 
-    // D5 step 2 (post-fetch): re-check the actual fetched length — defends
-    // against a registry that declares a small size but serves a larger body.
+    // Re-check: a registry may declare a small size but serve a larger body.
     if bytes.len() > MAX_METADATA_BLOB_BYTES {
         return Err(PackageErrorKind::Internal(crate::Error::MetadataBlobTooLarge {
             size: bytes.len() as i64,
@@ -209,44 +141,24 @@ pub async fn load_config_metadata(
 
     let raw: metadata::Metadata = serde_json::from_slice(&bytes)
         .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
-    // Reject structurally unreadable metadata at the ingress boundary — a
-    // modifier type this binary cannot interpret, a `list` entry violating the
-    // separator contract. Not the token checks: those left this layer with D14,
-    // because a fetch refusing a token it does not recognise would make an ocx
-    // unable to even *show* a package a newer ocx published.
+    // Structural checks only: refusing unknown tokens here would hide packages a newer ocx published.
     metadata::ValidMetadata::try_from(raw).map_err(|error| PackageErrorKind::Internal(error.into()))
 }
 
-/// Drains a [`JoinSet`] of package tasks and collects results preserving
-/// the order given by `packages`.
+/// Drains a [`JoinSet`] of package tasks in `packages` order, batching errors through `error_ctor`.
 ///
-/// Uses an index-based `Vec<Option<T>>` (aligned with `pull.rs::setup_dependencies`)
-/// for O(1) slot assignment rather than a `HashMap` + linear reorder pass.
-/// A `pending` [`HashSet`] is kept as a panic-fallback sentinel: any ID that
-/// completes (success or per-package error) is removed from `pending`; IDs
-/// that survive into the post-drain loop indicate a task vanished without
-/// reporting back (e.g. it panicked without `resume_unwind`).
-///
-/// Tasks whose `JoinHandle` reports a panic are recorded as
-/// [`PackageErrorKind::TaskPanicked`]. If any errors accumulated, they are
-/// wrapped with `error_ctor` and returned as a single batch error.
+/// A task that never reports back is recorded as [`PackageErrorKind::TaskPanicked`].
 pub async fn drain_package_tasks<T: 'static>(
     packages: &[ocx_oci::PackageRef],
     mut tasks: JoinSet<(ocx_oci::PackageRef, Result<T, PackageErrorKind>)>,
     error_ctor: fn(Vec<PackageError>) -> crate::error::Error,
 ) -> Result<Vec<T>, crate::error::Error> {
-    // Build a reverse index: identifier → slot position in `results`.
     let index_map: HashMap<ocx_oci::PackageRef, usize> =
         packages.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
 
     let mut pending: HashSet<ocx_oci::PackageRef> = packages.iter().cloned().collect();
     let mut results: Vec<Option<T>> = std::iter::repeat_with(|| None).take(packages.len()).collect();
-    // Errors carry their input slot index so the batch can be sorted back into
-    // input order before it is surfaced. `join_next` yields in completion
-    // (race) order; without this sort the exit-code classifier — which picks
-    // `errors.first()` — would be nondeterministic (quality-rust.md Async
-    // Patterns; subsystem-cli-api.md "Report Actual Results"). An id absent
-    // from `index_map` (should never happen) sorts last via `usize::MAX`.
+    // Sorted by input slot before surfacing, or the classifier's `errors.first()` follows completion order.
     let mut errors: Vec<(usize, PackageError)> = Vec::new();
 
     while let Some(join_result) = tasks.join_next().await {
@@ -266,9 +178,6 @@ pub async fn drain_package_tasks<T: 'static>(
         }
     }
 
-    // Any ID still in `pending` represents a task that vanished without
-    // reporting back (panic without propagation or JoinError without matching
-    // Ok/Err from a task that was silently dropped).
     for id in pending {
         let idx = index_map.get(&id).copied().unwrap_or(usize::MAX);
         errors.push((idx, PackageError::new(id, PackageErrorKind::TaskPanicked)));
@@ -280,35 +189,17 @@ pub async fn drain_package_tasks<T: 'static>(
         return Err(error_ctor(errors));
     }
 
-    // Collect in input order; `flatten` drops the `None` slots left by
-    // tasks that reported errors (already surfaced above).
     Ok(results.into_iter().flatten().collect())
 }
 
-/// Resolves the top-level manifest for `package` **without** platform
-/// selection, deriving the top-level pinned identifier from the tag (or the
-/// `@digest` when present) and discriminating "tag truly unknown" from "tag
-/// known but manifest blob missing offline".
-///
-/// When `package` carries no digest the tag is taken from
-/// [`ocx_oci::PackageRef::tag_or_latest`], so a bare repository identifier falls
-/// back to the `latest` tag — the same default the `resolve` pipeline uses.
+/// Resolves the top-level manifest for `package` without platform selection; a bare repository means `latest`.
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::NotFound`] — tag/digest truly unknown.
-/// - [`PackageErrorKind::OfflineManifestMissing`] — known tag but the manifest
-///   blob is absent from the local cache in offline mode.
+/// - [`PackageErrorKind::NotFound`] — tag/digest unknown.
+/// - [`PackageErrorKind::OfflineManifestMissing`] — tag known, manifest blob not cached (offline).
 /// - [`PackageErrorKind::Internal`] — index I/O failure.
-/// - [`PackageErrorKind::DigestMissing`] — the resolved top-level digest
-///   could not be pinned onto the identifier.
-// Shared by `resolve::PackageManager::resolve` and `inspect`'s
-// `fetch_top_manifest`: both need the identical tag/digest top-id derivation
-// plus the not-found-vs-offline split before they diverge (resolve continues
-// into platform selection / chain building, inspect adapts the manifest as-is).
-// `op` is caller-supplied; both current callers pass `IndexOperation::Resolve`
-// (inspect deliberately uses `Resolve`, not `Query` — a prior review Block
-// proposing `Query` was rejected: default-mode inspect is a Resolve-class read).
+/// - [`PackageErrorKind::DigestMissing`] — the top-level digest could not be pinned.
 pub async fn resolve_top_manifest(
     index: &ocx_index::Index,
     package: &ocx_oci::PackageRef,
@@ -326,12 +217,7 @@ pub async fn resolve_top_manifest(
     {
         Some(result) => result,
         None => {
-            // Distinguish "tag truly unknown" (NotFound) from "tag cached
-            // locally but manifest blob missing from the cache"
-            // (OfflineManifestMissing — requires online re-pull). We ask
-            // the index for the tag → digest mapping: if that succeeds,
-            // the tag is known, so fetch_manifest returning None implies
-            // the blob is missing rather than the tag is unknown.
+            // A resolvable tag digest means the tag is known and only the manifest blob is missing.
             if let Some(digest) = index
                 .fetch_manifest_digest(&top_id, op)
                 .await
@@ -358,25 +244,12 @@ pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager
     ReferenceManager::new(fs.clone())
 }
 
-/// Checks whether `identifier`'s content is already present and valid in
-/// `fs.blobs`, healing (removing) a present-but-corrupt copy first (CWE-345
-/// — the on-disk bytes are re-hashed against the digest that names them, the
-/// same check [`ocx_index::chained_index`]'s
-/// `recover_absent_dispatch` applies to a dispatch object recovered from the
-/// same store). Returns `true` when the caller still needs to fetch and write
-/// the bytes.
-///
-/// The guaranteed-local fast-path check factored out of
-/// [`stage_and_link_chain_blobs`] so a caller with no installed package to
-/// ref-link into — `inspect`'s closure walker (`tasks/inspect.rs`), which
-/// stages a fetched dep's leaf manifest into this same content-addressed
-/// cache — can reuse it without pulling in ref-linking. A blob staged this
-/// way with no ref is an unreferenced cache entry; `ocx clean` may reclaim
-/// it, same as any other cache-warming write.
+/// Returns `true` when `identifier`'s blob must be fetched, first removing a copy failing its digest (CWE-345).
 pub async fn blob_needs_fetch(
     fs: &file_structure::FileStructure,
     identifier: &ocx_oci::PinnedPackageRef,
 ) -> Result<bool, PackageErrorKind> {
+    // Local before remote: `ocx package test` stages synthesized manifests no registry has.
     let digest = identifier.digest();
     match fs
         .blobs
@@ -397,22 +270,9 @@ pub async fn blob_needs_fetch(
     }
 }
 
-/// Verifies `bytes` — fetched from an index source under `identifier`'s own
-/// claimed digest — actually hash to that digest before a caller persists
-/// them into content-addressed storage (CWE-345 trust-boundary check).
+/// Verifies `bytes` hash to `identifier`'s digest before they enter the CAS (CWE-345).
 ///
-/// [`Index::fetch_manifest_raw_bytes`] is a distinct seam from
-/// [`Index::fetch_blob`]: `fetch_blob` (config blobs) digest-verifies inside
-/// `ChainedIndex` itself before returning or writing through
-/// (`chained_index.rs`'s `digest_matches`), but `fetch_manifest_raw_bytes`
-/// only checks a source's returned bytes are self-consistent with the digest
-/// the *source* computed from them — never against the digest the *caller*
-/// requested. A source that returns wrong bytes under a self-consistent but
-/// unrequested digest would otherwise be written straight into the CAS at
-/// the caller's requested digest path unverified. Every caller that persists
-/// a `fetch_manifest_raw_bytes` result under `identifier`'s digest
-/// (`stage_leaf_manifest`, [`stage_chain_blobs`]'s `Index`/`Manifest` roles)
-/// must call this first.
+/// [`Index::fetch_manifest_raw_bytes`] never checks the requested digest; every caller persisting its bytes calls this.
 pub(super) fn verify_requested_digest(
     identifier: &ocx_oci::PinnedPackageRef,
     bytes: &[u8],
@@ -427,15 +287,7 @@ pub(super) fn verify_requested_digest(
     Ok(())
 }
 
-/// Stages every blob in `resolved.chain` into `fs.blobs` — role-aware fetch
-/// (config via [`Index::fetch_blob`], index/manifest via
-/// [`Index::fetch_manifest_raw_bytes`]), `blob_needs_fetch`-gated, no
-/// ref-linking. The per-blob staging step of [`stage_and_link_chain_blobs`],
-/// factored out so a caller with no installed package to ref-link into
-/// (`inspect --deps`, which stages the root's own resolution chain the same
-/// way it stages each dep node — `tasks/inspect.rs`) can warm the content
-/// cache without pulling in ref-linking. See [`blob_needs_fetch`]'s doc for
-/// the unreferenced-cache-entry contract this leaves behind.
+/// Stages every blob in `resolved.chain` into `fs.blobs`, without ref-linking.
 pub async fn stage_chain_blobs(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -461,6 +313,7 @@ pub async fn stage_chain_blobs(
                         .map_err(|error| PackageErrorKind::Internal(error.into()))?;
                 }
             }
+            // Manifests endpoint: the blobs endpoint does not serve manifest digests.
             ChainRole::Index | ChainRole::Manifest => {
                 if let Some((bytes, _, _)) = index
                     .fetch_manifest_raw_bytes(identifier.as_identifier())
@@ -479,45 +332,9 @@ pub async fn stage_chain_blobs(
     Ok(())
 }
 
-/// Materializes the resolver's manifest + config chain into `$OCX_HOME/blobs`
-/// and forward-refs each blob into the package's `refs/blobs/`.
+/// Stages the resolver's chain into `$OCX_HOME/blobs` and forward-refs each blob into the package's `refs/blobs/`.
 ///
-/// `resolve` persists only **dispatch** objects into the local index
-/// collection (`$OCX_HOME/index`, `adr_index_indirection.md` A3) — a leaf platform
-/// manifest is never copied there. The install path keeps its own copy in
-/// `$OCX_HOME/blobs` (Decision B2): the snapshot travels with a committed
-/// `.ocx/index/`, whereas the blob store travels with the machine and is what
-/// `refs/blobs/` targets and `add_index_retention_edges` traverses for GC.
-/// Routing is role-aware, per [`ChainRole`](super::resolve::ChainRole):
-///
-/// - [`ChainRole::Config`] — genuine content-addressed blob; fetched via the
-///   OCI blobs endpoint ([`Index::fetch_blob`]).
-/// - [`ChainRole::Manifest`] — a platform-selected leaf manifest; always
-///   genuine content, fetched via the OCI manifests endpoint (digest-verified
-///   verbatim bytes, [`Index::fetch_manifest_raw_bytes`]) — the blobs endpoint
-///   does not serve manifest digests.
-/// - [`ChainRole::Index`] — the top-level dispatch entry, which is an OCI
-///   image index whatever the source. Fetched the same way as
-///   [`ChainRole::Manifest`], so `add_index_retention_edges` can later parse
-///   the staged blob and hang each advertised child leaf's retention edge
-///   off it.
-///
-/// Both the blob-store write ([`BlobStore::write_blob`]) and the ref link
-/// ([`ReferenceManager::link_blobs`]) are content-addressed and idempotent, so
-/// the fast-path branches that re-invoke this helper for an already-installed
-/// package pay only cheap existence checks. A chain blob the index cannot
-/// serve (offline and never fetched — e.g. the `pull_local` path, which never
-/// persists the config blob) is skipped; `link_blobs` tolerates the resulting
-/// dangling ref (eventual consistency, GC collects).
-///
-/// A chain blob already present in the blob store is **guaranteed-local** and is
-/// never routed through the index: the local `ocx package test` flow synthesizes
-/// its manifest and stages it straight into `fs.blobs` (never the snapshot), so
-/// an index lookup would miss and — with a client present — fall through to the
-/// registry, which 404s a blob/manifest that was never pushed. The blob-store
-/// existence probe ([`blob_needs_fetch`]) short-circuits that registry
-/// round-trip while leaving the genuine-remote path (blob absent locally →
-/// index → source) untouched.
+/// Idempotent; a blob the index cannot serve (offline) is skipped, leaving a dangling ref for GC.
 pub async fn stage_and_link_chain_blobs(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -531,12 +348,7 @@ pub async fn stage_and_link_chain_blobs(
         .map_err(|error| PackageErrorKind::Internal(error.into()))
 }
 
-/// Acquires the per-repo selection lock for `package`.
-///
-/// The lock file lives at `{symlinks/{registry}/{repo}}/.select.lock` and
-/// serializes mutations of the per-repo `current` symlink across
-/// `install --select`, `deselect`, and `uninstall --deselect`. The returned
-/// [`LockedFile`] guard releases the lock on drop.
+/// Acquires the per-repo `.select.lock` for `package`, released on drop.
 pub async fn acquire_select_lock(
     fs: &file_structure::FileStructure,
     package: &ocx_oci::PackageRef,
@@ -547,42 +359,22 @@ pub async fn acquire_select_lock(
         .map_err(|error| PackageErrorKind::Internal(error.into()))
 }
 
-/// Outcome of [`wire_selection`] for the caller's reporting.
-///
-/// Each field is `Some` only when that symlink was actually written this call.
-/// The host-only gate (issue #179) suppresses a foreign-platform write, and a
-/// plain install without `--select` never writes `current`, so callers must
-/// report the real outcome rather than recomputing a path that may not exist.
+/// Outcome of [`wire_selection`]: each field is `Some` only when that symlink was written this call.
 #[derive(Debug, Clone, Default)]
 pub struct WireSelectionOutcome {
-    /// The `current` symlink written this call, or `None` when `select` was not
-    /// requested or the resolved platform is not host-runnable.
+    /// `None` when `select` was not requested or the platform is not host-runnable.
     pub current: Option<std::path::PathBuf>,
-    /// The `candidates/{tag}` symlink written this call, or `None` when no
-    /// candidate was requested or the resolved platform is not host-runnable.
+    /// `None` when no candidate was requested or the platform is not host-runnable.
     pub candidate: Option<std::path::PathBuf>,
 }
 
-/// Wires the per-repo `current` selection symlink for `package` and optionally
-/// writes the candidate symlink first. Both symlinks target the package root,
-/// so consumers traverse `<symlink>/content/`, `<symlink>/entrypoints/`, or
-/// `<symlink>/metadata.json` from a single anchor.
+/// Wires the candidate and/or `current` symlinks for `package` at the package root.
 ///
-/// Shared by [`super::install::create_install_symlinks`] and the CLI `select`
-/// command so both paths run identical lock acquisition and symlink logic.
-/// Entrypoint name collision detection lives in
-/// [`super::super::composer::check_entrypoints`], called from
-/// `pull.rs` at install Stage 1 against the interface projection of the
-/// transitive closure.
-///
-/// # Lock order
-///
-/// Acquires the per-repo `.select.lock` before the symlink write. See module
-/// docs for the updated lock hierarchy.
+/// Entrypoint collisions are not checked here; [`super::super::composer::check_entrypoints`] does that at install.
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::Internal`] for I/O or symlink failures.
+/// - [`PackageErrorKind::Internal`] for I/O or symlink failures, or a deferred package.
 #[allow(clippy::result_large_err)]
 pub async fn wire_selection(
     fs: &file_structure::FileStructure,
@@ -593,16 +385,9 @@ pub async fn wire_selection(
 ) -> Result<WireSelectionOutcome, PackageErrorKind> {
     let rm = reference_manager(fs);
 
-    // Both `current` and `candidates/{tag}` target the package root.
     let pkg_root = info.dir().dir.as_path();
 
-    // A deferred root's package directory has not been created — the shim tree
-    // creates it on first invocation — so pointing `candidates/{tag}` or
-    // `current` at it would publish a dangling install into the one namespace
-    // users address by name. No live path mints one here (`--lazy-mode` is off
-    // `install`/`select` by contract, and only `compose_roots` builds a deferred
-    // root), so this refuses a state the flag grammar already prevents — which
-    // is the point: the type, not the grammar, is what a future caller meets.
+    // A deferred package has no directory yet, so a symlink to it would publish a dangling install.
     if info.deferred().is_some() {
         return Err(PackageErrorKind::Internal(crate::error::file_error(
             pkg_root,
@@ -610,12 +395,7 @@ pub async fn wire_selection(
         )));
     }
 
-    // The host-only gate (issue #179): `candidates/{tag}` and `current` are
-    // per-repo, platform-agnostic paths that platformless readers (`ocx package
-    // which`, project env) expect to resolve to host-runnable content. A
-    // foreign-platform install (e.g. `-p windows/amd64` on a Linux host) still
-    // lands in the object store, but must not clobber either host pointer;
-    // cross-platform consumers resolve digest-pinned roots directly instead.
+    // Platformless readers (`ocx package which`, project env) expect host-runnable content behind both symlinks.
     let host_runnable = info.is_host_runnable();
 
     let candidate_written = if candidate && host_runnable {
@@ -656,15 +436,11 @@ pub async fn wire_selection(
 
     let current_path = fs.symlinks.current(package);
 
-    // Acquire the per-repo .select.lock for the symlink write.
+    // Named, not `_`: held through the write and its rollback.
     let _select_guard = acquire_select_lock(fs, package).await?;
 
-    // Snapshot the prior `current` symlink target so rollback can restore it
-    // on symlink write failure.
     let prior_current_target = tokio::fs::read_link(&current_path).await.ok();
 
-    // Commit the `current` symlink. Failure here triggers rollback of the
-    // prior symlink target before the error is surfaced.
     log::debug!("Creating current symlink at '{}'.", current_path.display());
     if let Err(e) = rm.link(&current_path, pkg_root) {
         rollback_symlink(&rm, &current_path, prior_current_target.as_deref());
@@ -677,18 +453,12 @@ pub async fn wire_selection(
     })
 }
 
-/// RAII guard for the per-repo `.select.lock`. Releases on drop.
-///
-/// Used by `deselect` / `uninstall --deselect` to hold the same critical
-/// section as [`wire_selection`] while unlinking the symlink pair.
+/// RAII guard for the per-repo `.select.lock`; releases on drop.
 pub struct SelectionLocks {
     _select: LockedFile,
 }
 
-/// Acquires the per-repo `.select.lock`.
-///
-/// Serializes mutations of the per-repo `current` symlink across
-/// `install --select`, `deselect`, and `uninstall --deselect`.
+/// Acquires the per-repo `.select.lock` as a [`SelectionLocks`] guard.
 #[allow(clippy::result_large_err)]
 pub async fn acquire_selection_locks(
     fs: &file_structure::FileStructure,
@@ -698,11 +468,7 @@ pub async fn acquire_selection_locks(
     Ok(SelectionLocks { _select: select })
 }
 
-/// Restores a symlink to its prior state after a partial-select failure.
-///
-/// On any rollback failure we log and continue: the caller already has a real
-/// error to surface, and burying it under a rollback secondary failure would
-/// obscure the root cause.
+/// Restores a symlink to its prior state; a rollback failure is only logged, keeping the caller's error as root cause.
 pub fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior_target: Option<&Path>) {
     match prior_target {
         Some(target) => {
@@ -727,91 +493,51 @@ pub fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior_target
     }
 }
 
-// ── Metadata-only dependency closure walker (ADR D3) ────────────────────────
-//
-// Shared by two genuinely different callers, which is why it lives here rather
-// than inside either of them: `inspect --deps` projects the node list into a
-// report (`Surface` / `ClosureConflicts`), and `prepare_lazy` derives a shim
-// name set from it (plan contract C-008 (a), which forbids a second walker).
-// The *projection* stays in `inspect.rs` — it is report shape, not walk.
-
-/// Phase-1 gather concurrency bound — caps how many per-node fetches
-/// [`gather_closure_nodes`]'s admission queue spawns at once over the closure
-/// frontier (ADR D3 panel W5). Codex C2: this bounds SPAWNED tasks, not just
-/// running fetch bodies — see `gather_closure_nodes`'s doc.
+/// Caps how many per-node fetch tasks [`gather_closure_nodes`] has spawned at once.
 pub(super) const CLOSURE_FETCH_CONCURRENCY: usize = 8;
 
 /// One node of a metadata-only dependency closure.
 #[derive(Debug)]
 pub struct ClosureNode {
-    /// Digest-addressed; advisory tag preserved for display.
+    /// Digest-addressed; the tag is advisory, for display.
     pub identifier: ocx_oci::PinnedPackageRef,
-    /// Digest of the node's OCX metadata config blob, in the same registry as
-    /// [`identifier`](Self::identifier) — pair the two to address it
-    /// (`BlobStore::data(node.identifier.registry(), &node.config_digest)`).
+    /// Digest of the node's metadata config blob, in [`identifier`](Self::identifier)'s registry.
     ///
-    /// Carried because a *deferred* tool has no package directory: its config
-    /// blobs are reachable only through the shim tree's `refs/blobs/`, and the
-    /// generation task has no second walk to re-derive them from (plan
-    /// contracts C-008 / C-014 / C-020). `inspect` ignores it.
+    /// A deferred tool has no package directory, so this is the only route to its config blob.
     pub config_digest: ocx_oci::Digest,
-    /// Composed from the root via `Visibility::through_edge`/`merge`. `None`
-    /// iff `is_root` — the composed-from-root axis is undefined for the root
-    /// itself (the wire key is absent exactly when `root: true`).
+    /// Composed from the root; `None` iff `is_root`.
     pub effective_visibility: Option<metadata::visibility::Visibility>,
-    /// Tri-state, straight from the node's `Bundle.binaries`: key absent on
-    /// the wire means undeclared; `Some(empty)` means the publisher asserts
-    /// zero interface executables.
+    /// `None` means undeclared; `Some(empty)` asserts zero interface executables.
     pub binaries: Option<metadata::Binaries>,
-    /// The node's declared entrypoint map keys.
     pub entrypoints: Vec<metadata::EntrypointName>,
-    /// The node's own env vars, each carrying its declared visibility so the
-    /// interface (`has_interface`) and private (`has_private`) surface
-    /// projections can filter per-axis at aggregate time.
+    /// The node's own env vars, with declared visibility.
     pub env: Vec<ClosureEnvVar>,
-    /// The node's declared integration namespace keys, in `BTreeMap` order.
-    /// Keys only — see `inspect::Surface::integrations` for why no payload.
+    /// Declared integration namespace keys, in `BTreeMap` order.
     pub integrations: Vec<String>,
-    /// The node's own declared dependency edges (as authored).
     pub dependencies: Vec<ClosureEdge>,
     pub is_root: bool,
 }
 
-/// One declared environment variable of a [`ClosureNode`]: the key, its
-/// modifier kind (path vs constant), and its declared visibility (which surface
-/// axes it crosses). The value is deliberately absent — a `${installPath}`-
-/// templated value is only concrete after install, and the surface summary is a
-/// "what keys" claim, not a resolved environment.
+/// One declared env var of a [`ClosureNode`]; no value, as templated values are only concrete after install.
 #[derive(Debug, Clone)]
 pub struct ClosureEnvVar {
     pub key: String,
     pub kind: metadata::env::modifier::ModifierKind,
-    /// The declared separator for a `list`-kind var; `None` for every other
-    /// kind. Package metadata requires `list` to carry one, so this is only
-    /// ever `None` for a non-list var — declaration order is preserved and
-    /// there is no cross-node agreement to settle here, unlike the applied
-    /// entries `ocx env` composes.
+    /// The declared separator of a `list`-kind var; `None` for every other kind.
     pub separator: Option<String>,
     pub visibility: metadata::visibility::Visibility,
 }
 
-/// A declared dependency edge (as authored), carrying its declared visibility.
+/// A declared dependency edge, as authored.
 #[derive(Debug, Clone)]
 pub struct ClosureEdge {
     pub identifier: ocx_oci::PinnedPackageRef,
-    /// The DECLARED edge visibility (goal #2 — "dependencies state their
-    /// linkage visibility"), as distinct from [`ClosureNode::effective_visibility`]
-    /// (the composed-from-root visibility).
+    /// Declared edge visibility, not [`ClosureNode::effective_visibility`].
     pub visibility: metadata::visibility::Visibility,
     pub name: metadata::dependency::DependencyName,
 }
 
-/// One gathered closure node: its RESOLVED pinned identity (the
-/// platform-selected child for an image-index-pinned dep, unchanged for a
-/// flat dep — Codex C1, matches install-time resolution — `pull.rs`'s
-/// `info.identifier()` is likewise the resolved identity, never the index),
-/// its config-blob digest, its validated metadata, and its own declared
-/// dependency edges. [`gather_closure_nodes`]'s output element type.
+/// Resolved identity (the platform-selected child for an image-index dep), config digest, metadata, declared edges.
 type GatheredClosureNode = (
     ocx_oci::PinnedPackageRef,
     ocx_oci::Digest,
@@ -819,12 +545,7 @@ type GatheredClosureNode = (
     Vec<ClosureEdge>,
 );
 
-/// A [`GatheredClosureNode`] tagged with its spawn slot and the edge's
-/// DECLARED identity (as authored — may differ from the gathered node's
-/// resolved identity for an image-index-pinned dep), so completion order
-/// (nondeterministic per `JoinSet::join_next`) can be re-sorted back into
-/// deterministic spawn order (quality-rust.md JoinSet rule) and
-/// [`gather_closure_nodes`]'s declared→resolved alias can be built.
+/// A [`GatheredClosureNode`] tagged with its spawn slot and the edge's declared identity.
 type SlottedClosureNode = (
     usize,
     ocx_oci::PinnedPackageRef,
@@ -834,20 +555,11 @@ type SlottedClosureNode = (
     Vec<ClosureEdge>,
 );
 
-/// Stages `pinned`'s raw manifest bytes into the machine-global blob store
-/// when not already local — mirrors [`stage_and_link_chain_blobs`]'s
-/// `ChainRole::Manifest` step (`adr_index_indirection.md` A3/B2: the local
-/// index never caches a leaf, only dispatch objects; `$OCX_HOME/blobs` is the
-/// sanctioned content-cache home). No ref-link: the walker has no installed
-/// package directory to link into, so the staged blob is an unreferenced
-/// cache entry — `ocx clean` may reclaim it, same as any other cache-warming
-/// write. Shared by the root's own fetch and each dep's fetch
-/// ([`fetch_closure_node`]).
+/// Stages `pinned`'s raw manifest bytes into the blob store when not already local, without ref-linking.
 ///
 /// # Errors
 ///
-/// Returns an error if the manifest cannot be fetched, fails its digest
-/// re-verification, or cannot be written to the blob store.
+/// Returns an error if the manifest cannot be fetched, fails its digest check, or cannot be written.
 pub async fn stage_leaf_manifest(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -859,11 +571,6 @@ pub async fn stage_leaf_manifest(
             .await
             .map_err(|error| PackageErrorKind::Internal(error.into()))?
     {
-        // `fetch_manifest_raw_bytes` verifies the source's returned bytes are
-        // self-consistent with the digest the source computed, never against
-        // the digest actually requested (CWE-345) — re-verify against
-        // `pinned`'s own digest before this write, mirroring
-        // `stage_chain_blobs`'s identical check for the same seam.
         verify_requested_digest(pinned, &bytes)?;
         fs.blobs
             .write_blob(pinned.registry(), &pinned.digest(), &bytes)
@@ -873,30 +580,15 @@ pub async fn stage_leaf_manifest(
     Ok(())
 }
 
-/// Two-phase metadata-only closure walker: Phase 1 parallel metadata gather
-/// (I/O-bound, via [`gather_closure_nodes`]), Phase 2 pure visibility fold
-/// (via [`fold_effective_visibility`]).
+/// Walks the metadata-only dependency closure: deduped nodes, deps before dependents, root last.
 ///
-/// Returns the flat, deduped node list in transitive-closure order (deps
-/// before dependents, root last). Diamonds appear once with the most-open
-/// merged visibility. Projecting that list onto a surface is the caller's
-/// concern, not this walk's.
-///
-/// `root_config_digest` is the root's own metadata config-blob digest, which
-/// only the caller that fetched the root manifest has; every other node's is
-/// read during the gather.
-///
-/// Fail-closed: any single node error aborts the whole closure — a partial
-/// closure must never render as a complete one.
+/// Diamonds merge to their most-open visibility; one node error aborts the whole closure.
 ///
 /// # Errors
 ///
-/// See `adr_inspect_metadata_closure.md` Error Taxonomy: dep manifest/config
-/// absent under offline policy → `PackageErrorKind::Internal(crate::Error::OfflineMode)`;
-/// dep genuinely absent with a source consulted → `PackageErrorKind::NotFound`;
-/// malformed / wrong-media-type / over-cap config → the existing
-/// [`load_config_metadata`] errors; dep image-index child with no platform
-/// match → `PackageErrorKind::FeatureMismatch`.
+/// See `adr_inspect_metadata_closure.md` Error Taxonomy: offline miss → `Internal(OfflineMode)`;
+/// absent with a source consulted → `NotFound`; bad config → [`load_config_metadata`]'s errors;
+/// no platform match → `FeatureMismatch`.
 pub async fn walk_closure_nodes(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -917,8 +609,7 @@ pub async fn walk_closure_nodes(
     ))
 }
 
-/// Per-gather invariants shared by every spawned fetch — grouped so `spawn`
-/// stays under the arg-count lint instead of taking each field separately.
+/// Per-gather invariants shared by every spawned fetch.
 struct GatherContext<'a> {
     fs: &'a file_structure::FileStructure,
     index: &'a ocx_index::Index,
@@ -926,30 +617,7 @@ struct GatherContext<'a> {
     platform: &'a ocx_oci::Platform,
 }
 
-/// Phase 1 — parallel metadata gather. BFS the DAG from `frontier` (the
-/// root's declared dependency edges, deduped by advisory-stripped
-/// DECLARED-identity), fetching each *unique* edge's node concurrently
-/// through a bounded ADMISSION QUEUE: discovered edges wait in `pending`
-/// until fewer than [`CLOSURE_FETCH_CONCURRENCY`] fetches are spawned, so the
-/// bound caps outstanding tasks, not merely running fetch bodies (Codex C2 —
-/// the prior `Semaphore` only gated the fetch body, so a wide frontier still
-/// spawned every edge's task immediately). Digest-addressed edges make
-/// cycles impossible, so the BFS always terminates. Fail-closed: any node
-/// fetch error aborts the whole gather.
-///
-/// Per-node fetch: `fetch_manifest(dep.identifier, IndexOperation::Resolve)`
-/// then [`load_config_metadata`] for an image manifest, or platform-select the
-/// child then [`load_config_metadata`] for a dep pinned to an image index (ADR
-/// D3 "Per-node fetch").
-///
-/// Returns each gathered node's RESOLVED pinned identifier, its config-blob
-/// digest, its [`metadata::ValidMetadata`], and its own declared dependency
-/// edges (feeding [`fold_effective_visibility`]) — deduped by RESOLVED
-/// identity, since two different declared edges (a direct edge and an
-/// image-index edge) can resolve to the same digest (Codex C1). Also returns
-/// the declared→resolved alias map [`fold_effective_visibility`] needs to
-/// translate a [`ClosureEdge`] (always as-authored) to the node it actually
-/// reached.
+/// Parallel BFS metadata gather; returns nodes deduped by resolved identity plus the declared→resolved alias map.
 async fn gather_closure_nodes(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -972,15 +640,9 @@ async fn gather_closure_nodes(
     let mut visited: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     let mut tasks: JoinSet<Result<SlottedClosureNode, PackageErrorKind>> = JoinSet::new();
     let mut next_slot = 0usize;
-    // Discovered edges not yet admitted into `tasks` — `admit` drains this
-    // up to the concurrency bound; slot numbers are assigned at DISCOVERY
-    // time (below), independent of admission order, so the final ordering
-    // stays deterministic regardless of scheduling.
+    // Slots are assigned at discovery, not admission, or the output order follows scheduling.
     let mut pending: std::collections::VecDeque<(usize, ClosureEdge)> = std::collections::VecDeque::new();
 
-    // Spawns one fetch for `edge` into slot `slot`. A plain function (not a
-    // closure) so it can be called from `admit` without fighting the borrow
-    // checker over a captured `&mut JoinSet`.
     fn spawn(
         tasks: &mut JoinSet<Result<SlottedClosureNode, PackageErrorKind>>,
         context: &GatherContext<'_>,
@@ -999,10 +661,7 @@ async fn gather_closure_nodes(
         });
     }
 
-    // Admits queued edges into `tasks` up to the concurrency bound — the
-    // admission bound itself (Codex C2), enforced by never having more than
-    // `CLOSURE_FETCH_CONCURRENCY` tasks spawned at once, rather than a
-    // `Semaphore` gating only the fetch body inside an already-spawned task.
+    // Bounds spawned tasks, not just fetch bodies: a `Semaphore` inside each task would still spawn the whole frontier.
     fn admit(
         tasks: &mut JoinSet<Result<SlottedClosureNode, PackageErrorKind>>,
         context: &GatherContext<'_>,
@@ -1025,27 +684,12 @@ async fn gather_closure_nodes(
     }
     admit(&mut tasks, &context, &mut pending);
 
-    // Results indexed by spawn slot for deterministic ordering
-    // (quality-rust.md JoinSet rule) — `join_next` completion order is
-    // otherwise nondeterministic.
     let mut slots: Vec<Option<GatheredClosureNode>> = Vec::new();
-    // Declared (as-authored) identity → RESOLVED identity, built as each
-    // fetch completes. `fold_effective_visibility` needs this because a
-    // `ClosureEdge` always names the DECLARED identity, which for an
-    // image-index-pinned dep differs from the node it resolved to.
+    // A `ClosureEdge` names the declared identity, which differs from the resolved node for an image-index dep.
     let mut resolved_identity: HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef> = HashMap::new();
-    // RESOLVED identities already gathered (Codex C1/C2 post-selection
-    // dedup). The `visited` check above dedups by DECLARED edge identity,
-    // which cannot see that two different declared edges (e.g. a direct edge
-    // and an image-index edge selecting the same child) resolve to the same
-    // digest — this second, post-fetch check catches that and drops the
-    // duplicate fetch's node instead of inserting a second one (double
-    // counting its claims / manufacturing a false repo conflict downstream).
+    // Two declared edges can resolve to one digest; without this dedup claims double-count downstream.
     let mut resolved_seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     while let Some(joined) = tasks.join_next().await {
-        // Fail-closed: the `?`s below return early on the first node error,
-        // dropping `tasks` — `JoinSet::drop` aborts every task still
-        // in-flight, so a partial closure is never observed by the caller.
         let (slot, declared, resolved_pinned, config_digest, metadata, edges) =
             joined.map_err(|_| PackageErrorKind::TaskPanicked)??;
         resolved_identity.insert(declared.strip_advisory(), resolved_pinned.strip_advisory());
@@ -1058,11 +702,6 @@ async fn gather_closure_nodes(
             }
         }
 
-        // Drop a duplicate resolution instead of inserting a second node;
-        // `slots[slot]` stays `None` and is filtered out below. Still worth
-        // discovering `edges` above regardless of the outcome here — content
-        // addressing guarantees a duplicate's declared deps are byte-identical
-        // to the first resolution's, so `visited` already no-ops any re-spawn.
         if resolved_seen.insert(resolved_pinned.strip_advisory()) {
             if slot >= slots.len() {
                 slots.resize_with(slot + 1, || None);
@@ -1076,23 +715,7 @@ async fn gather_closure_nodes(
     Ok((slots.into_iter().flatten().collect(), resolved_identity))
 }
 
-/// Per-node fetch for the closure walker (ADR D3 "Per-node fetch"): fetches
-/// `dep_pinned`'s manifest via the same `IndexOperation::Resolve` routing
-/// `inspect`'s default mode uses (local-first, write-through on miss), loads
-/// its OCX metadata, and returns the node's RESOLVED identity plus its
-/// config-blob digest, its metadata and its own declared dependency edges.
-///
-/// A dep pinned to an image index (hand-authored — ordinary `ocx package
-/// create` always pins a platform-manifest digest, `dependency_pinning.rs`)
-/// platform-selects the child before loading its config; the returned
-/// identity is the SELECTED CHILD's digest — `dep_pinned`'s own advisory tag
-/// is preserved on it (`Index::fetch_candidates` derives the candidate via
-/// `identifier.clone_with_digest`, so the tag survives selection unchanged)
-/// — matching install-time resolution (`pull.rs`'s `info.identifier()` is
-/// likewise the platform-selected identity, never the index digest; Codex
-/// C1). The authored index reference stays visible, unchanged, on the
-/// parent's [`ClosureEdge`] — only the node's own identity and the gather-time
-/// dedup key move to the resolved child.
+/// Fetches one closure node; a dep pinned to an image index resolves to its platform-selected child.
 async fn fetch_closure_node(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
@@ -1149,10 +772,6 @@ async fn fetch_closure_node(
                 .map_err(|error| PackageErrorKind::Internal(error.into()))?
             {
                 Some((_, ocx_oci::Manifest::Image(img))) => img,
-                // A selected child that is itself an image index, or that
-                // vanished between select and fetch, is not a valid OCI
-                // dependency shape — mirrors the "absent child digest" row
-                // of the ADR Error Taxonomy.
                 Some((_, ocx_oci::Manifest::ImageIndex(_))) | None => return Err(closure_fetch_miss(offline)),
             };
             (child_pinned, image)
@@ -1167,10 +786,7 @@ async fn fetch_closure_node(
     Ok((resolved_pinned, config_digest, metadata, edges))
 }
 
-/// The digest of an image manifest's config descriptor — the OCX metadata
-/// blob. A descriptor whose `digest` string does not parse is a corrupt
-/// manifest, not a missing one, so the structured `DigestError` is carried
-/// (still classifies to `DataError`/65).
+/// The digest of an image manifest's config descriptor, the OCX metadata blob.
 ///
 /// # Errors
 ///
@@ -1180,10 +796,7 @@ pub fn config_blob_digest(image: &ocx_oci::ImageManifest) -> Result<ocx_oci::Dig
         .map_err(|e| PackageErrorKind::Internal(crate::Error::from(e)))
 }
 
-/// Resolves a closure-frontier manifest miss to the correct error, matching
-/// the ADR D3 Error Taxonomy: a policy block under `--offline` (no source
-/// was allowed to be consulted), or a genuine not-found when a source could
-/// have been (or was) consulted.
+/// A closure manifest miss: an offline policy block, or a genuine not-found when a source could be consulted.
 fn closure_fetch_miss(offline: bool) -> PackageErrorKind {
     if offline {
         PackageErrorKind::Internal(crate::Error::OfflineMode)
@@ -1192,9 +805,7 @@ fn closure_fetch_miss(offline: bool) -> PackageErrorKind {
     }
 }
 
-/// Builds a node's declared dependency edges (as authored) from its
-/// validated metadata — the wire-shape source for [`ClosureEdge`], shared by
-/// every gather call site and by the root's own `dependencies` field.
+/// A node's declared dependency edges, as authored.
 fn closure_edges_from_metadata(metadata: &metadata::ValidMetadata) -> Vec<ClosureEdge> {
     metadata
         .dependencies()
@@ -1207,18 +818,8 @@ fn closure_edges_from_metadata(metadata: &metadata::ValidMetadata) -> Vec<Closur
         .collect()
 }
 
-/// Phase 2 — pure visibility fold (no I/O). Computes each gathered node's
-/// effective visibility as seen from the root by folding
-/// `Visibility::through_edge` down every path from the root and
-/// `Visibility::merge`-ing at diamonds — the identical algorithm
-/// [`ocx_package::resolved_package::ResolvedPackage::with_dependencies`]
-/// applies to an installed transitive closure, sourced here from `gathered`
-/// metadata instead of `resolve.json`.
-///
-/// Returns the flat, deduped node list in topological order (deps before
-/// dependents, root last) — `root_pinned`'s own node carries
-/// `effective_visibility: None` and `is_root: true` (the composed-from-root
-/// axis is undefined for the root itself).
+/// Pure visibility fold, the same algorithm as
+/// [`ocx_package::resolved_package::ResolvedPackage::with_dependencies`], over gathered metadata.
 fn fold_effective_visibility(
     root_pinned: &ocx_oci::PinnedPackageRef,
     root_metadata: &metadata::ValidMetadata,
@@ -1231,11 +832,7 @@ fn fold_effective_visibility(
         .map(|entry| (entry.0.strip_advisory(), entry))
         .collect();
 
-    // Bottom-up (post-order) DFS: each node's own `ResolvedPackage` needs its
-    // direct children's already-computed `ResolvedPackage`s, exactly as the
-    // install pipeline computes `resolve.json` while recursively pulling
-    // deps (`pull.rs`). `order` collects the post-order visitation sequence
-    // — deps before dependents, by construction.
+    // Post-order: each node's `ResolvedPackage` needs its children's first.
     let mut resolved: HashMap<ocx_oci::PinnedPackageRef, ResolvedPackage> = HashMap::new();
     let mut order: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
     let root_edges = closure_edges_from_metadata(root_metadata);
@@ -1250,14 +847,7 @@ fn fold_effective_visibility(
         );
     }
 
-    // Root's own `ResolvedPackage`, built the same way, yields every
-    // descendant's effective visibility as seen from the root — the
-    // identical algorithm `ResolvedPackage::with_dependencies` applies at
-    // install time, sourced here from gathered metadata instead of
-    // `resolve.json`. Keyed by RESOLVED identity (Codex C1) — `with_dependencies`
-    // dedups by its identifier argument, so a declared identity here would
-    // fragment a single package into two entries whenever a dep is pinned to
-    // an image index.
+    // Keyed by resolved identity, or an image-index dep fragments into two packages.
     let root_children: Vec<(
         ocx_oci::PinnedPackageRef,
         ResolvedPackage,
@@ -1305,8 +895,6 @@ fn fold_effective_visibility(
         })
         .collect();
 
-    // Root last — the composed-from-root axis is undefined for the root
-    // itself, so `effective_visibility` stays `None` (panel W3).
     nodes.push(ClosureNode {
         identifier: root_pinned.clone(),
         config_digest: root_config_digest,
@@ -1325,11 +913,7 @@ fn fold_effective_visibility(
     nodes
 }
 
-/// A node's own declared env vars as [`ClosureEnvVar`]s, each carrying its
-/// visibility — UNFILTERED, so both surface projections can gate per-axis at
-/// aggregate time. Declaration order is preserved. The metadata-only source
-/// for the composer's two-env emission gate
-/// (`var.visibility.has_interface()` / `has_private()`).
+/// A node's own declared env vars, unfiltered, so both surface projections gate per-axis later.
 fn closure_env_vars(metadata: &metadata::ValidMetadata) -> Vec<ClosureEnvVar> {
     metadata
         .env()
@@ -1337,8 +921,6 @@ fn closure_env_vars(metadata: &metadata::ValidMetadata) -> Vec<ClosureEnvVar> {
         .flatten()
         .map(|var| ClosureEnvVar {
             key: var.key.clone(),
-            // `ValidMetadata` (the parameter type) rejects every modifier type
-            // this binary does not know, so no `Unknown` survives to here.
             kind: metadata::env::modifier::ModifierKind::try_from(&var.modifier)
                 .expect("ValidMetadata rejects unknown modifier types before any closure walk"),
             separator: match &var.modifier {
@@ -1350,14 +932,7 @@ fn closure_env_vars(metadata: &metadata::ValidMetadata) -> Vec<ClosureEnvVar> {
         .collect()
 }
 
-/// A node's own declared integration NAMESPACE keys, in `BTreeMap` order.
-///
-/// Keys only — the payload is deliberately absent for the same reason
-/// [`closure_env_vars`] drops env values: a closure node is not installed, so
-/// `${installPath}` has no value and an interpolated payload would be a
-/// half-truth. Unfiltered, like `closure_env_vars`; the surface gate
-/// (`composer::integrations_cross`) applies at aggregate time in
-/// `inspect::project_surface`.
+/// A node's own declared integration namespace keys, unfiltered; payloads need an install path it lacks.
 fn closure_integrations(metadata: &metadata::ValidMetadata) -> Vec<String> {
     metadata
         .integrations()
@@ -1366,12 +941,7 @@ fn closure_integrations(metadata: &metadata::ValidMetadata) -> Vec<String> {
         .collect()
 }
 
-/// Translates a declared [`ClosureEdge`]'s identity to the RESOLVED identity
-/// [`gather_closure_nodes`] actually gathered a node under (Codex C1) — the
-/// platform-selected child for an image-index-pinned dep, unchanged for a
-/// flat dep. Every edge reachable from root has an alias entry by
-/// construction (`gather_closure_nodes` populates one per fetch it completes,
-/// and it completes a fetch for every edge the BFS discovers).
+/// The resolved identity [`gather_closure_nodes`] gathered `edge` under.
 fn resolved_edge_identity(
     resolved_identity: &HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef>,
     edge: &ClosureEdge,
@@ -1382,16 +952,7 @@ fn resolved_edge_identity(
         .expect("gather_closure_nodes populates the alias map for every edge reachable from root")
 }
 
-/// Post-order DFS over `key`'s declared edges, memoizing each visited node's
-/// own [`ResolvedPackage`] (its transitive closure as seen from itself) into
-/// `resolved` and recording deps-before-dependents visitation order in
-/// `order`. A no-op once `key` is already memoized — every node is visited
-/// at most once regardless of how many edges reach it (diamond dedup).
-/// `key` and every memoization key here are RESOLVED identities (Codex C1) —
-/// `resolved_identity` translates each child edge's declared identity before
-/// recursing, so two different declared edges resolving to the same digest
-/// (a direct edge and an image-index edge selecting it) memoize to the SAME
-/// entry instead of computing the fold twice.
+/// Post-order DFS memoizing each node's [`ResolvedPackage`] under its resolved identity.
 fn visit_closure_node(
     key: &ocx_oci::PinnedPackageRef,
     by_identity: &HashMap<ocx_oci::PinnedPackageRef, GatheredClosureNode>,
@@ -1622,7 +1183,7 @@ mod tests {
         );
     }
 
-    /// Plan F-2: a **deferred** `InstallInfo` is refused by the install-symlink
+    /// A **deferred** `InstallInfo` is refused by the install-symlink
     /// writer, and refused before anything is written.
     ///
     /// `candidates/{tag}` and `current` are the namespace users address by

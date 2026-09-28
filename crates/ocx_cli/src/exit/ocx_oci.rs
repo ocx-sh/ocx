@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the OCI registry, auth and transport error family — the `ocx_oci` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_oci` error family.
 
 use ocx_exit::ExitCode;
 
@@ -19,19 +18,7 @@ use ocx_oci::ssrf::SsrfError;
 use super::{ClassifyExitCode, downcast_arm};
 
 impl ClassifyExitCode for UrlRejection {
-    /// Exit 64 (`UsageError`) for a rejected URL, the same code
-    /// [`SignErrorKind::InvalidEndpointUrl`](ocx_lib::oci::sign::SignErrorKind::InvalidEndpointUrl)
-    /// and its verify twin already give — and 69 (`Unavailable`) for the one
-    /// rejection that is not the operator's fault, an endpoint whose host does
-    /// not resolve. Both answers are carried on the rejection itself, so a
-    /// bare classification and a wrapped one cannot disagree.
-    ///
-    /// This impl is what a *bare* rejection classifies to — one that reached
-    /// the exit boundary without a sign- or verify-side wrap, because it came
-    /// from `[trust.sigstore]` rather than from a flag and there was no
-    /// identifier to attach it to. Matching 64 rather than minting a config
-    /// code keeps one answer for one condition: the same bad URL exits the
-    /// same way whichever tier supplied it.
+    /// The code lives on the rejection, so a bare and a wrapped classification cannot disagree.
     fn classify(&self) -> Option<ExitCode> {
         Some(self.exit())
     }
@@ -39,8 +26,6 @@ impl ClassifyExitCode for UrlRejection {
 
 impl ClassifyExitCode for LayerLayoutError {
     fn classify(&self) -> Option<ExitCode> {
-        // A malformed/hostile manifest annotation read from an untrusted
-        // registry is bad input data (65).
         Some(ExitCode::DataError)
     }
 }
@@ -51,13 +36,6 @@ impl ClassifyExitCode for PinnedIdentifierError {
     }
 }
 
-/// A refused physical dial classifies as whatever the floor underneath it
-/// refused.
-///
-/// The wrapper carries the namespace and the remedy wording; the exit code is
-/// the `SsrfError`'s, exactly as it was when `ocx_index::Error::Ssrf` held the
-/// two fields itself and its arm read `source.classify()`. That arm is
-/// unchanged — this impl is what keeps it meaning the same thing.
 impl ClassifyExitCode for ocx_oci::ssrf::PhysicalDialRefused {
     fn classify(&self) -> Option<ExitCode> {
         self.source.classify()
@@ -67,14 +45,8 @@ impl ClassifyExitCode for ocx_oci::ssrf::PhysicalDialRefused {
 impl ClassifyExitCode for SsrfError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            // The fix is a `trusted_hosts` config entry — a configuration
-            // error (78), not a transient fault. NOTE: the Sigstore side maps
-            // this variant to 64 instead, in `From<SsrfError> for UrlRejection`
-            // (`oci/endpoint.rs`) — change 78 here and that table too.
+            // Sigstore maps this to 64 in `From<SsrfError> for UrlRejection` (`ocx_oci/src/endpoint.rs`); change both together.
             Self::ForbiddenTarget { .. } => ExitCode::ConfigError,
-            // A DNS lookup failure means the physical registry could not be
-            // reached at all — the same "unreachable" category as any other
-            // registry connectivity failure (69).
             Self::Resolution { .. } => ExitCode::Unavailable,
         })
     }
@@ -83,25 +55,14 @@ impl ClassifyExitCode for SsrfError {
 impl ClassifyExitCode for ClientError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            // Provenance only: the routing does not change what went wrong, so
-            // the wrapped error keeps its own code.
             Self::Mirrored { source, .. } => return source.classify(),
             Self::Authentication(_) => ExitCode::AuthError,
             Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_) => ExitCode::NotFound,
             Self::Io { .. } => ExitCode::IoError,
-            // The 75-vs-69 contract: 75 means the same command may succeed if
-            // it is run again, 69 means it will not. `Registry` is the second
-            // case — the registry answered, just not usefully — so a wrapper
-            // that retries on 75 leaves it alone.
+            // 75 means a rerun may succeed, 69 that it will not; wrappers retry on 75.
             Self::Registry(_) => ExitCode::Unavailable,
             Self::RegistryTransient(_) => ExitCode::TempFail,
-            // An incomplete delivery is a transfer fault, not malformed data:
-            // the same pull usually succeeds on retry, so it is TempFail rather
-            // than DataError.
             Self::ShortBlobRead { .. } => ExitCode::TempFail,
-            // A registry that does not serve the Referrers API is answering
-            // correctly about a capability it lacks — never transient, and not
-            // a data fault either, so it carries its own code.
             Self::ReferrersUnsupported { .. } => ExitCode::ReferrersUnsupported,
             Self::DigestMismatch { .. }
             | Self::UnsafeDestination(_)
@@ -115,19 +76,11 @@ impl ClassifyExitCode for ClientError {
             | Self::WrongLayerCount { .. }
             | Self::UnexpectedLayerMediaType { .. }
             | Self::LayerSizeExceeded { .. }
-            // A graph too large to traverse completely is registry-supplied
-            // input this build refuses, not a fault that a rerun can clear.
             | Self::TraversalLimitExceeded { .. }
             | Self::Serialization(_)
             | Self::InvalidEncoding(_) => ExitCode::DataError,
-            // Copied from the `ocx_lib::Error::Digest` arm this stands in for:
-            // both delegate to `DigestError::classify` (65).
             Self::Digest(e) => return e.classify(),
-            // Adds provenance, never a verdict — same doctrine as `Mirrored`.
-            // The wrapped error is a `#[source]`, so returning `None` lets the
-            // chain walker downcast it and recover its own code (an archive
-            // `SymlinkEscape` from a hostile layer must still exit 65, not 1);
-            // nothing classifiable in the chain still falls back to `Failure`.
+            // `None` lets the chain walker reach the wrapped source; a `Some` would exit a hostile-layer `SymlinkEscape` as 1, not 65.
             Self::Internal(_) => return None,
         })
     }
@@ -149,7 +102,6 @@ impl ClassifyExitCode for PlatformError {
 
 impl ClassifyExitCode for IdentifierError {
     fn classify(&self) -> Option<ExitCode> {
-        // Every identifier parse failure is a malformed-input error.
         Some(ExitCode::DataError)
     }
 }
@@ -169,9 +121,6 @@ impl ClassifyExitCode for AuthError {
             },
             Self::NoCredentialStoreAvailable => ExitCode::ConfigError,
             Self::LoginRejected { .. } => ExitCode::AuthError,
-            // Provenance only: the probe adds context, the wire failure keeps
-            // its own code. Anything else would put a second taxonomy for the
-            // same failures beside the one every other command uses.
             Self::ProbeFailed { source, .. } => return source.classify(),
         })
     }

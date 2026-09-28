@@ -1,35 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Conventional wheel repo naming — the one-way-door naming convention.
-//!
-//! Renders the repo-relative reference for a mirrored wheel:
-//! `<scope>/<index-host>/<package>:<sha256>`. The scope is
-//! maintainer-configured (default `pip-packages`); `<index-host>` groups
-//! wheels by their source index; the tag is the wheel's `sha256`. The tag is
-//! content-addressed, so it alone distinguishes every wheel sharing a
-//! repository — wheels that differ by build tag / ABI / platform land under
-//! the same `<package>` repo as distinct tags, and byte-identical wheels
-//! dedupe onto one tag (the property the cross-repo blob mount reuses). The
-//! reference is **repo-relative** — it carries no registry host; the consumer
-//! prepends the registry when building the final [`ocx_oci::PackageRef`].
+//! Conventional wheel repo naming, `<scope>/<index-host>/<package>:<sha256>`: a one-way door, since published
+//! names cannot move.
 
 use crate::select::WheelRef;
 
-/// Fallback index-host segment for a `WheelRef` with no URL.
-///
-/// Per the frozen contract (design spec, `naming` module), `select` (W1.3)
-/// rejects URL-less wheels before they reach this crate, so this value is a
-/// documented safety net, not an expected path — it keeps `wheel_reference`
-/// infallible instead of returning `Result` for a case that should not occur.
+/// Index-host segment for a URL-less `WheelRef`, which `select` already rejects; keeps `wheel_reference` infallible.
 const NO_URL_INDEX_HOST: &str = "unknown-index-host";
 
 /// The default wheel scope when the maintainer configures none.
 pub const DEFAULT_WHEEL_SCOPE: &str = "pip-packages";
 
 /// The maintainer-configured scope prefix for mirrored wheel repos.
-///
-/// Defaults to [`DEFAULT_WHEEL_SCOPE`] via [`WheelScope::default`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheelScope(String);
 
@@ -51,22 +34,12 @@ impl Default for WheelScope {
     }
 }
 
-/// A rendered, repo-relative wheel reference.
-///
-/// Splits the conventional string into its repository path and tag so the
-/// consumer can attach a registry host and digest without re-parsing.
-/// [`Display`](std::fmt::Display) renders `<repository>:<tag>`.
-///
-/// Assumes the wheel has a URL — `<index-host>` derives from the URL host.
-/// URL-less / path-only wheels are not mirrorable and must be rejected upstream
-/// in `select` (W1.4), so `wheel_reference` can stay infallible.
+/// A rendered, repo-relative wheel reference; [`Display`](std::fmt::Display) renders `<repository>:<tag>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheelReference {
-    /// The repo-relative repository path (`<scope>/<index-host>/<package>`) —
-    /// no registry host.
+    /// The repo-relative repository path (`<scope>/<index-host>/<package>`), no registry host.
     pub repository: String,
-    /// The tag: the wheel `sha256` (hex, no `sha256:` prefix). Content-addressed,
-    /// so it alone distinguishes every wheel sharing the repository.
+    /// The tag: the wheel `sha256` (hex, no `sha256:` prefix).
     pub tag: String,
 }
 
@@ -77,26 +50,14 @@ impl std::fmt::Display for WheelReference {
 }
 
 /// Renders the conventional repo-relative [`WheelReference`] for a wheel.
-///
-/// Pure function: `<scope>/<index-host>/<package>:<sha256>`, with the index
-/// host derived from [`WheelRef::url`]. The `sha256` tag is content-addressed,
-/// so wheels that differ by build tag / ABI / platform land under the same
-/// repository as distinct tags — no path segment is needed to disambiguate
-/// them. Never emits a registry host (target-agnostic).
 pub fn wheel_reference(scope: &WheelScope, wheel: &WheelRef) -> WheelReference {
     let index_host = wheel.url.as_deref().and_then(extract_host).unwrap_or(NO_URL_INDEX_HOST);
-    // A well-formed PEP 503 name normalizes to `[a-z0-9-]+`; anything outside
-    // that alphabet (a hostile lock smuggling `:`/`@`/`%` toward the OCI
-    // reference grammar) is dropped here, at the single point where the name
-    // becomes a repository path segment. Same safety-net philosophy as
-    // `NO_URL_INDEX_HOST`: the reference stays infallible, and colliding
-    // hostile names still land on distinct content-addressed tags.
+    // Only `[a-z0-9-]` survives, or a hostile lock smuggles `:`/`@`/`%` into the OCI reference.
     let package: String = normalize_package_name(&wheel.name)
         .chars()
         .filter(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || *ch == '-')
         .collect();
-    // Edge hyphens survive the filter (`-evil` from a stripped leading char)
-    // but sit outside the OCI path-component grammar — trim them too.
+    // Edge hyphens survive the filter but break the OCI path-component grammar.
     let package = package.trim_matches('-').to_string();
     let package = if package.is_empty() {
         "invalid-package-name".to_string()
@@ -110,29 +71,17 @@ pub fn wheel_reference(scope: &WheelScope, wheel: &WheelRef) -> WheelReference {
 }
 
 /// Extracts the host from a URL, stripping scheme, userinfo, port, and path.
-///
-/// Minimal hand-rolled parser: this crate carries no `url` dependency (that
-/// crate is mirror-only per CLAUDE.md's dependency model), and wheel index
-/// URLs (e.g. `https://files.pythonhosted.org/...`) are plain
-/// `scheme://host/path` with no userinfo or IPv6 literal in practice.
 fn extract_host(url: &str) -> Option<&str> {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
     let authority = &after_scheme[..authority_end];
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     let host = host.split(':').next().unwrap_or(host);
-    // Reject a host that would fold into a path-traversal segment once joined
-    // into the repository path (CWE-22 defense-in-depth) — e.g.
-    // `https://../evil` parses to authority "..", which must not be honored.
+    // `.`/`..` would become a path-traversal segment in the repository path.
     (!host.is_empty() && host != "." && host != "..").then_some(host)
 }
 
-/// PEP 503 normalization: lowercase, runs of `-`/`_`/`.` collapsed to a
-/// single `-`. Equivalent to `re.sub(r"[-_.]+", "-", name).lower()`.
-///
-/// `pub(crate)`: `compose` reuses this to normalize a mirror-supplied root
-/// package name before comparing it against a wheel's parsed dist name
-/// (`EntrypointSelection::RootOnly`).
+/// PEP 503 normalization, equivalent to `re.sub(r"[-_.]+", "-", name).lower()`.
 pub fn normalize_package_name(name: &str) -> String {
     let mut normalized = String::with_capacity(name.len());
     let mut last_was_separator = false;

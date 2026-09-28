@@ -6,11 +6,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::{binary::Binaries, dependency::Dependencies, entrypoint::Entrypoints, env, integrations::Integrations};
 
-/// Known versions of the bundle metadata format.
-///
-/// Single variant today; the field exists so future schema bumps can extend
-/// the format without breaking existing readers via `serde_repr`'s
-/// reject-unknown-on-deserialize behaviour.
+/// Known bundle metadata format versions; `serde_repr` rejects unknown ones.
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Default)]
 #[repr(u8)]
 pub enum Version {
@@ -18,8 +14,7 @@ pub enum Version {
     V1 = 1,
 }
 
-// Qualified for the same reason as `crate::version::Version`'s schema name:
-// both land in one `$defs` map, and the unqualified name collided there.
+// Qualified: `crate::version::Version` shares the `$defs` map, and the bare name collides.
 impl schemars::JsonSchema for Version {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("BundleMetadataVersion")
@@ -65,34 +60,32 @@ pub struct Bundle {
     /// Each entry produces a Unix `.sh` script and, on Windows, a native
     /// `.exe` shim plus its `.shim` sidecar under the package's
     /// `entrypoints/` sibling directory at install time.
-    /// Absent or empty means no launchers are generated (backward-compat default).
+    /// Absent or empty means no launchers are generated.
     #[serde(skip_serializing_if = "Entrypoints::is_empty", default)]
     pub entrypoints: Entrypoints,
 
     /// Publisher-declared, unverified claim of interface-surface executable
-    /// names exposed on `PATH` by this package. `None` means undeclared
-    /// (predates this field); `Some([])` means the publisher asserts zero
-    /// interface binaries. Deliberately distinct wire states — see
-    /// `adr_declared_binaries_metadata.md` §1. NOT the `Entrypoints`/`Env`/
-    /// `Dependencies` pattern (`X::is_empty` skip) — `None` and empty carry
-    /// different meaning here.
+    /// names exposed on `PATH` by this package. Absent means undeclared
+    /// (predates this field); `[]` means the publisher asserts zero interface
+    /// binaries. Deliberately distinct wire states.
+    // See `adr_declared_binaries_metadata.md` §1. NOT the `Entrypoints`/`Env`/
+    // `Dependencies` pattern (`X::is_empty` skip) — `None` and empty carry
+    // different meaning here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Binaries>,
 
     /// Vendor-namespaced configuration blocks for tools OCX does not model.
     /// Keys are namespaces (reverse-DNS by convention, not enforced); values
     /// are opaque JSON OCX never interprets, merges, or validates the contents
-    /// of. Absent and empty are the SAME state — the `Entrypoints`/`Env`/
-    /// `Dependencies` skip pattern, deliberately NOT `binaries`' `Option`
-    /// tri-state, because nothing here distinguishes "declares none" from "did
-    /// not say".
+    /// of. Absent and empty are the same state.
+    // The `Entrypoints`/`Env`/`Dependencies` skip pattern, deliberately NOT
+    // `binaries`' `Option` tri-state, because nothing here distinguishes
+    // "declares none" from "did not say".
     #[serde(default, skip_serializing_if = "Integrations::is_empty")]
     pub integrations: Integrations,
 }
 
 impl Bundle {
-    /// The publisher-declared interface-binaries claim, or `None` if
-    /// undeclared.
     pub fn binaries(&self) -> Option<&Binaries> {
         self.binaries.as_ref()
     }

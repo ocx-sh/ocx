@@ -6,32 +6,15 @@ use std::process::ExitCode;
 use crate::api;
 use crate::exit::classify_error;
 
-/// The error boundary every `ocx` invocation exits through: `main`, and the
-/// in-process seam that stands in for it in tests. One function, so the two
-/// cannot drift apart.
+/// The error boundary every `ocx` invocation exits through, `main` and the in-process test seam alike.
 ///
-/// `{error:#}` walks the anyhow source chain so causes (e.g. "permission
-/// denied") surface to users. The level already categorises the line, so there
-/// is no redundant "Error: " prefix.
-///
-/// Neutralised here, at the one boundary every failing command exits through
-/// (CWE-150). A cause chain quotes names read off wire documents and filesystem
-/// walks, and `tracing-subscriber` passes `\n`, `\r`, NUL and the whole `Cf`
-/// bidi set straight to the terminal — see `api::data::sanitize_for_terminal`.
-///
-/// This covers every command, including the ones that log nothing of their
-/// own, but it does not make the per-command sanitizers redundant: a command
-/// that aggregates failures returns only the lowest-index error, so its
-/// siblings' chains are printed there and never arrive here. Both sites,
-/// measured.
-///
-/// `tracing::error!`, not `log::error!`: in production both reach the same
-/// subscriber (the `log` bridge), but the seam installs no bridge — it is a
-/// process global — so only a `tracing` event reaches its captured stderr.
+/// Sanitized here (CWE-150) because cause chains quote wire and filesystem names; per-command
+/// sanitizers still matter, since an aggregating command prints its non-first errors itself.
 pub fn finish(result: anyhow::Result<ExitCode>) -> ExitCode {
     match result {
         Ok(code) => code,
         Err(error) => {
+            // `tracing`, not `log`: the test seam installs no `log` bridge, so a `log` event misses its stderr.
             tracing::error!("{}", api::data::sanitize_for_terminal(&format!("{error:#}")));
             classify_error(error.as_ref()).into()
         }

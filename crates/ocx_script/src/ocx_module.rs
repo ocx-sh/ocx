@@ -3,45 +3,8 @@
 
 //! The `ocx.*` host module exposed to test scripts.
 //!
-//! `#[starlark_module]`-defined and registered under the `ocx` namespace.
-//! Signatures (Starlark-facing):
-//!
-//! - `ocx.run(*args, *, env=None, cwd=None, stdin=None) -> RunResult` —
-//!   positional varargs (first = program, rest = argv; splat a list with
-//!   `ocx.run(*cmd)`); zero positional args → `Failed`. Own piped
-//!   `tokio::process::Command` on the composed env (already through
-//!   `Env::apply_ocx_config`); `env` overlay applied AFTER command resolution
-//!   (resolution uses composed PATH only); reserved keys rejected; `cwd`
-//!   defaults to scratch and is guard- + symlink-rechecked; `stdin` is a
-//!   per-call child stdin string (independent of `--script -`);
-//!   `kill_on_drop(true)` + SIGINT/SIGTERM forwarding (parity with
-//!   `launch::child_process::spawn_and_wait`); child awaited via
-//!   `Handle::current().block_on(...)` under the per-child wall-clock kill
-//!   deadline. Refuses to spawn a program resolving to an `ocx` binary in v1.
-//! - `ocx.env(name) -> str | None` — read one var from the composed env.
-//! - `ocx.target_platform` — typed `Platform` ATTRIBUTE (no parens). Per-run
-//!   constant materialized at globals-build time. Reflects the `-p` flag
-//!   (the platform the package was built/tested for), not the host.
-//!   `p.is_any`, `p.os`, `p.arch`. The OS / arch namespaces (`ocx.os.Linux`,
-//!   `ocx.arch.Amd64`, …) carry the matching constants.
-//! - `ocx.package_root` — read-only package STORE root path ATTRIBUTE (no
-//!   parens, `/`-normalized). Holds `content/`, `refs/`, `metadata.json`, …
-//!   Per-run constant materialized at globals-build time.
-//! - `ocx.content_root` — read-only path ATTRIBUTE for the bundle's own files
-//!   (`<package_root>/content`). This — not `package_root` — is the base
-//!   `read_file` / `exists` fall back to, so a script spells `bin/javac`.
-//! - `ocx.scratch_root` — read-write sandbox root path ATTRIBUTE (no parens,
-//!   `/`-normalized). Per-run constant materialized at globals-build time.
-//! - `ocx.read_file(path, *, max_bytes=1048576) -> str` — guarded read over
-//!   `{scratch_root, content_root}`.
-//! - `ocx.write_file(path, content)` — scratch-only guarded write.
-//! - `ocx.exists(path) -> bool` — guarded existence check over the same two
-//!   roots as `read_file`.
-//! - `ocx.mkdir(path)` — scratch-only recursive idempotent `mkdir -p`.
-//!
-//! Every `path` arg AND `ocx.run(cwd=…)` goes through `guard::resolve_scratch`
-//! (write/`cwd` side) or `guard::resolve_read` (read side) then the Codex C1
-//! symlink re-check before the syscall.
+//! Every path arg and `ocx.run(cwd=…)` goes through a `guard` resolver and then the symlink re-check before the
+//! syscall, or a script escapes the sandbox.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -61,13 +24,10 @@ use super::run_result::{OUTPUT_CAP_BYTES, RunResult};
 use super::sl_error::{fail, script_type};
 use ocx_oci::platform::{Architecture, OperatingSystem};
 
-/// Default `ocx.read_file` size cap (1 MiB).
 const DEFAULT_READ_MAX_BYTES: i32 = 1_048_576;
 
-/// Env keys an `ocx.run(env=...)` overlay may never override (Codex C3). PATH
-/// is reserved so an overlay can never change which binary resolves; the OCX
-/// loader vars are reserved so the overlay cannot redirect a (refused, but
-/// defence-in-depth) re-entrant ocx.
+/// Env keys an `ocx.run(env=...)` overlay may never override, or it changes which binary and OCX config the child
+/// resolves.
 const RESERVED_ENV_KEYS: &[&str] = &[
     "PATH",
     ocx_config::env::keys::OCX_HOME,
@@ -81,25 +41,12 @@ const RESERVED_ENV_KEYS: &[&str] = &[
     ocx_config::env::keys::OCX_REMOTE,
 ];
 
-/// Prefix of the per-registry credential env vars OCX reads (see
-/// `ocx_oci::auth`: `OCX_AUTH_<slug>_{TYPE,USER,TOKEN}`). A script must never be
-/// able to read these out of the inherited host env (exfiltration when
-/// `--clean` is not set), nor set them on a child via the `ocx.run` overlay.
+/// Per-registry credential env vars; a script may neither read them from the inherited env nor set them on a child.
 const CREDENTIAL_ENV_PREFIX: &str = "OCX_AUTH_";
 
-/// Single source of truth for "this env key is off-limits to scripts".
-///
-/// Covers (a) the resolution-affecting reserved keys an `ocx.run(env=...)`
-/// overlay may not override (so the composed sandbox/loader policy is
-/// authoritative) and (b) the `OCX_AUTH_*` credential family (so a script
-/// cannot exfiltrate inherited host secrets via `ocx.env`). Both the overlay
-/// rejection and the `ocx.env` read deny-list consult this one predicate —
-/// the key set is not duplicated.
+/// Whether an env key is off-limits to scripts, for both the `ocx.run` overlay and `ocx.env` reads.
 fn is_reserved_env_key(key: &str) -> bool {
-    // Byte-boundary-safe prefix test: `key[..N]` panics when N falls inside a
-    // multibyte UTF-8 scalar (a script may supply an arbitrary non-ASCII env
-    // key). The credential-mask predicate must NEVER panic — slice the bytes,
-    // not the `str`, and compare ASCII-case-insensitively.
+    // Slice bytes, not the `str`: `key[..N]` panics inside a multibyte scalar of a script-supplied key.
     let credential = key
         .as_bytes()
         .get(..CREDENTIAL_ENV_PREFIX.len())
@@ -107,19 +54,11 @@ fn is_reserved_env_key(key: &str) -> bool {
     RESERVED_ENV_KEYS.iter().any(|r| r.eq_ignore_ascii_case(key)) || credential
 }
 
-/// `/`-normalized string form of a path (portable across platforms).
 fn slash_path(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-/// Spawns `program` with `args` on the composed env (+ optional overlay),
-/// capturing output with a cap, under the per-child wall-clock kill deadline.
-///
-/// Sync by contract (Fix#2): the surrounding `run_script` is sync and called
-/// via `block_in_place`, so the child is awaited via
-/// `Handle::current().block_on(...)`, NOT `.await` / `spawn_blocking`. The
-/// child sets `kill_on_drop(true)` and (Unix) forwards SIGINT/SIGTERM —
-/// parity with `launch::child_process::spawn_and_wait` (Codex C4).
+/// Spawns `program` on the composed env plus overlay, capturing capped output under the wall-clock deadline.
 fn spawn_capture(
     program: &Path,
     args: &[String],
@@ -136,11 +75,7 @@ fn spawn_capture(
 
     let stdin_cfg = if stdin.is_some() { Stdio::piped() } else { Stdio::null() };
 
-    // Feed the composed base env by borrowing iteration (no full `Env` clone
-    // per `ocx.run`), then apply the small overlay delta as a second `.envs`
-    // call — `Command` keeps a key→value map so the later call wins for any
-    // overlapping key (reserved keys were already rejected upstream, so the
-    // overlay only adds/overrides author-chosen vars).
+    // The overlay's `.envs` must come second so its keys win.
     let spawn_res = tokio::process::Command::new(program)
         .args(args)
         .env_clear()
@@ -162,11 +97,7 @@ fn spawn_capture(
                 sink.write_all(input.as_bytes()).await?;
                 sink.shutdown().await
             });
-            // A genuine stdin write failure must surface as an I/O error, not
-            // be silently swallowed into a spurious child failure. `BrokenPipe`
-            // is benign: it means the child closed stdin / exited before
-            // reading all input, which is legal child behaviour, not a host
-            // fault — let the normal wait path report the child's outcome.
+            // `BrokenPipe` only means the child stopped reading, which is legal; the wait reports its outcome.
             if let Err(e) = write_res
                 && e.kind() != std::io::ErrorKind::BrokenPipe
             {
@@ -219,10 +150,7 @@ fn spawn_capture(
             Ok(RunResult::new(exit_code, stdout, stderr, duration_ms, t1 || t2))
         }
         Err(WaitError::TimedOut) => {
-            // Codex C4: record the typed timeout so `engine::classify` surfaces
-            // `ScriptOutcomeKind::Timeout` instead of the generic `Failed`
-            // bucket. The Timeout→exit-code mapping is unchanged (a separately
-            // deferred decision) — only the status becomes observable.
+            // Or `engine::classify` reports this kill as `Failed`, not `Timeout`.
             super::host::note_timeout();
             Err(format!(
                 "ocx.run child exceeded the {} ms wall-clock deadline and was killed",
@@ -233,8 +161,7 @@ fn spawn_capture(
     }
 }
 
-/// Caps a captured stream at [`OUTPUT_CAP_BYTES`], returning the (lossy UTF-8)
-/// text and whether it was truncated.
+/// Caps a captured stream at [`OUTPUT_CAP_BYTES`], returning lossy UTF-8 text and whether it was truncated.
 fn cap_stream(raw: &[u8]) -> (String, bool) {
     if raw.len() > OUTPUT_CAP_BYTES {
         (String::from_utf8_lossy(&raw[..OUTPUT_CAP_BYTES]).into_owned(), true)
@@ -256,15 +183,12 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-/// Internal wait error so the spawn helper distinguishes a timeout kill from a
-/// genuine I/O failure.
 enum WaitError {
     TimedOut,
     Io(std::io::Error),
 }
 
-/// Tokio's `Child` has no borrowing `wait_with_output`; this drains stdout +
-/// stderr concurrently with the wait and returns the status + raw bytes.
+/// A borrowing `wait_with_output`, which tokio's `Child` lacks.
 trait ChildWaitExt {
     async fn wait_with_output_ref(&mut self) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), WaitError>;
     #[cfg(not(unix))]
@@ -274,24 +198,12 @@ trait ChildWaitExt {
 impl ChildWaitExt for tokio::process::Child {
     async fn wait_with_output_ref(&mut self) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), WaitError> {
         use tokio::io::AsyncReadExt;
-        // Bound EACH captured stream DURING streaming: a GiB-producing child
-        // must never be fully buffered then capped after the fact (host OOM).
-        // Capture at most OUTPUT_CAP_BYTES + 1 — the extra byte lets
-        // `cap_stream` detect the producer exceeded the cap (→ truncated=true)
-        // without buffering the rest. Bytes beyond the cap are then drained
-        // into a sink so the child's blocking stdout/stderr writes can return
-        // and the child can exit cleanly. Without that drain, the kernel pipe
-        // fills, the child blocks on `write()` forever, and `self.wait()`
-        // never observes a status — `tokio::join!` then hangs (deadlock).
-        // Truncation detection (cap+1 bytes captured) is preserved.
+        // Cap while reading, or a GiB-producing child exhausts host memory; the `+ 1` lets `cap_stream` see overflow.
         const TAKE_LIMIT: u64 = OUTPUT_CAP_BYTES as u64 + 1;
         let mut out_buf = Vec::new();
         let mut err_buf = Vec::new();
         let mut out = self.stdout.take();
         let mut err = self.stderr.take();
-        // A stream-drain failure must surface as an I/O error, not be silently
-        // dropped (W4 parity with the stdin path): swallowing it reports
-        // partial output alongside an apparently-valid child status.
         let read_out = async {
             let Some(s) = out.as_mut() else {
                 return Ok::<(), std::io::Error>(());
@@ -299,8 +211,7 @@ impl ChildWaitExt for tokio::process::Child {
             AsyncReadExt::take(&mut *s, TAKE_LIMIT)
                 .read_to_end(&mut out_buf)
                 .await?;
-            // Discard anything beyond the cap so the child unblocks. Sink is
-            // a zero-cost no-op writer — bytes are consumed and dropped.
+            // Drain the rest, or the child blocks on a full pipe and `join!` deadlocks.
             tokio::io::copy(&mut *s, &mut tokio::io::sink()).await?;
             Ok(())
         };
@@ -327,26 +238,15 @@ impl ChildWaitExt for tokio::process::Child {
     }
 }
 
-/// True if `program` carries a path separator (so it is a path, not a bare
-/// PATH-looked-up name). `\` counts on every platform for portability parity
-/// with the rest of the sandbox (which treats `\` as a separator everywhere).
+/// True if `program` carries a path separator; `\` counts on every platform, as elsewhere in the sandbox.
 fn program_is_path(program: &str) -> bool {
     program.contains('/') || program.contains('\\')
 }
 
 /// Resolves a program name to the binary the child will execute.
 ///
-/// Codex C3: a PATH-only name resolves against the composed env's PATH only
-/// (the overlay must not change resolution). A path-bearing `program`
-/// (`./tool`, `bin/tool`) must resolve relative to the *validated* guarded
-/// `cwd` — NOT the process CWD — because the child runs with `current_dir(cwd)`
-/// applied; resolving it against the outer CWD would bind (and refuse-check)
-/// the wrong binary.
-///
-/// A bare name goes through
-/// [`Env::resolve_test_command`](ocx_config::env::Env::resolve_test_command), so a
-/// name the package under test ships but cannot execute fails the script
-/// instead of silently running the host's copy.
+/// A bare name resolves on the composed env's PATH only, never the overlay's. A path resolves against the guarded
+/// `cwd` the child runs in, or the re-entrancy check inspects the wrong binary.
 fn resolve_program(base_env: &ocx_config::env::Env, program: &str, cwd: &Path) -> Result<std::path::PathBuf, String> {
     if program_is_path(program) {
         let raw = Path::new(program);
@@ -359,10 +259,8 @@ fn resolve_program(base_env: &ocx_config::env::Env, program: &str, cwd: &Path) -
     base_env.resolve_test_command(program).map_err(|e| e.to_string())
 }
 
-/// Returns true if `resolved` is (or resolves to) an `ocx` binary — refused in
-/// v1 (Fix#6): a nested unsandboxed `ocx` would write the real `$OCX_HOME`.
+/// True if `resolved` is an `ocx` binary, which is refused: a nested `ocx` would write the real `$OCX_HOME`.
 fn is_ocx_binary(base_env: &ocx_config::env::Env, resolved: &Path) -> bool {
-    // Fast pre-filter: the file stem already reads as `ocx`.
     let stem = resolved
         .file_stem()
         .and_then(|s| s.to_str())
@@ -372,17 +270,12 @@ fn is_ocx_binary(base_env: &ocx_config::env::Env, resolved: &Path) -> bool {
         return true;
     }
 
-    // A PATH symlink `foo -> /usr/bin/ocx` defeats the stem check (stem is
-    // `foo`) and a raw `==` against `OCX_BINARY_PIN` (the link path differs
-    // from the pin path). Canonicalize BOTH sides so the symlink is resolved
-    // to its real target before comparison.
+    // Canonicalize both sides, or a symlink `foo -> ocx` passes both the stem check and a raw pin comparison.
     let canonical_resolved = std::fs::canonicalize(resolved).ok();
     let Some(canonical_resolved) = canonical_resolved else {
         return false;
     };
 
-    // Refuse if the canonical target equals the pinned running binary or the
-    // current executable, each canonicalized the same way.
     let mut pins: Vec<std::path::PathBuf> = Vec::new();
     if let Some(pin) = base_env.get(ocx_config::env::keys::OCX_BINARY_PIN) {
         pins.push(Path::new(pin).to_path_buf());
@@ -406,7 +299,6 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
         #[starlark(require = named)] stdin: Option<&str>,
         eval: &mut starlark::eval::Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        // Parse positional argv. Zero positional → Failed (R2).
         let argv: Vec<&str> = args
             .items
             .iter()
@@ -417,7 +309,6 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
             .split_first()
             .ok_or_else(|| fail("ocx.run requires at least a program"))?;
 
-        // Overlay dict (after-resolution; reserved keys rejected — Codex C3).
         let overlay: Vec<(String, String)> = match env {
             None => Vec::new(),
             Some(v) => {
@@ -442,7 +333,6 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
         let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
 
         let (resolved, cwd_path, wall_clock) = host::with(|s| {
-            // cwd default = scratch root; guarded + symlink re-checked (C1).
             let cwd_path = match cwd {
                 None => Ok(s.scratch_root.clone()),
                 Some(c) => guard::resolve_scratch(c, &s.scratch_root)
@@ -453,11 +343,7 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
                             .map(|()| p)
                     }),
             };
-            // Codex C3: resolve a path-bearing `program` against the VALIDATED
-            // cwd (the binary the child will actually exec), not the process
-            // CWD. Falls back to the guarded scratch root when the cwd is
-            // rejected so the (refused) re-entrant check still runs on a
-            // deterministic path rather than the outer CWD.
+            // A rejected cwd falls back to scratch, never the process CWD.
             let cwd_for_resolve = cwd_path
                 .as_ref()
                 .map(PathBuf::as_path)
@@ -469,7 +355,6 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
         let cwd_path = cwd_path.map_err(fail)?;
         let resolved = resolved.map_err(fail)?;
 
-        // Refuse re-entrant ocx (Fix#6).
         let reentrant = host::with(|s| is_ocx_binary(&s.env, &resolved));
         if reentrant {
             return Err(fail(
@@ -486,11 +371,7 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
 
     /// `ocx.env(name) -> str | None`
     fn env(#[starlark(require = pos)] name: &str) -> starlark::Result<NoneOr<String>> {
-        // Credential / resolution-reserved keys are never readable: when
-        // `--clean` is not set the composed env inherits the host's
-        // `OCX_AUTH_*` secrets, and a script must not be able to exfiltrate
-        // them (or probe the loader policy). Returns `None`, indistinguishable
-        // from "unset", so a script cannot even detect their presence.
+        // `None`, as if unset, or a script can exfiltrate inherited `OCX_AUTH_*` secrets or detect them.
         if is_reserved_env_key(name) {
             return Ok(NoneOr::None);
         }
@@ -510,11 +391,7 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
             guard::resolve_read(path, &s.scratch_root, &s.content_root)
                 .map_err(|e| e.to_string())
                 .and_then(|p| {
-                    // Symlink re-check against the root that actually contains
-                    // the resolved path (read side is NOT exempt — C1). The
-                    // read-only side contains against the CONTENT root, not the
-                    // package root: a bundle symlink reaching up into the store's
-                    // `refs/` or `metadata.json` is an escape.
+                    // The content root, not the package root, or a bundle symlink reaches the store's `refs/`.
                     let root = if p.starts_with(&s.scratch_root) {
                         &s.scratch_root
                     } else {
@@ -594,9 +471,6 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
     }
 }
 
-/// Registers the `ocx.os` namespace: one frozen `OsValue` constant per
-/// [`OperatingSystem::VARIANTS`] entry. Variant names mirror the Rust enum
-/// exactly (`Linux`, `Darwin`, `Windows`).
 fn os_members(globals: &mut GlobalsBuilder) {
     for variant in OperatingSystem::VARIANTS {
         let value = OsValue(*variant);
@@ -604,8 +478,6 @@ fn os_members(globals: &mut GlobalsBuilder) {
     }
 }
 
-/// Registers the `ocx.arch` namespace: one frozen `ArchValue` constant per
-/// [`Architecture::VARIANTS`] entry (`Amd64`, `Arm64`).
 fn arch_members(globals: &mut GlobalsBuilder) {
     for variant in Architecture::VARIANTS {
         let value = ArchValue(*variant);
@@ -613,29 +485,12 @@ fn arch_members(globals: &mut GlobalsBuilder) {
     }
 }
 
-/// Registers the `ocx` namespace on the globals builder, plus the nested
-/// `ocx.os` and `ocx.arch` typed-enum namespaces and the per-run
-/// `ocx.target_platform`, `ocx.package_root`, and `ocx.scratch_root`
-/// attributes.
+/// Registers the `ocx` namespace with its per-run attributes, frozen from the host scope.
 ///
-/// These per-run constants are materialized as **attributes** (not methods) by
-/// reading the host scope at globals-build time and freezing the values into
-/// the namespace: `target_platform` from the host
-/// [`Platform`][ocx_oci::Platform], and the three roots from the host's
-/// package / content / scratch directories. This requires `host::scoped` to be installed
-/// BEFORE `build_globals` runs (see [`super::engine::evaluate`]).
+/// With no host scope installed, `target_platform` is `Platform::Any` and the roots are empty strings.
 pub(super) fn ocx_module(globals: &mut GlobalsBuilder) {
-    // Falls back to `Platform::Any` when no host scope is installed (LSP
-    // build, structural-parity test). The runtime path always has a scope.
     let platform = host::try_with(|s| PlatformValue::from_platform(&s.platform))
         .unwrap_or_else(|| PlatformValue::from_platform(&ocx_oci::Platform::Any));
-    // `package_root` / `content_root` / `scratch_root` are per-run path
-    // constants (the package store dir, the bundle's own files inside it, and
-    // the writable scratch dir). `content_root` is the one reads resolve
-    // against — see `guard::resolve_read`. Like
-    // `target_platform`, they take no arguments and never change during a run,
-    // so they are attributes, not methods. Empty string when no host scope is
-    // installed (LSP / parity build); the runtime path always has a scope.
     let package_root = host::try_with(|s| slash_path(&s.package_root)).unwrap_or_default();
     let content_root = host::try_with(|s| slash_path(&s.content_root)).unwrap_or_default();
     let scratch_root = host::try_with(|s| slash_path(&s.scratch_root)).unwrap_or_default();

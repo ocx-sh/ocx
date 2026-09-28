@@ -2,13 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Report type for `ocx package sign` output.
-//!
-//! Renders the subject + referrer descriptors the sign pipeline produced,
-//! plus the cert identity/issuer embedded in the signing cert. This lets
-//! downstream tools (CI verification, human review) confirm exactly what
-//! was signed and by whom without re-fetching the bundle.
-
-// Consumed by `command/package_sign.rs` in Phase 5.
 
 use ocx_console::Cell;
 use ocx_exit::ExitCode;
@@ -19,23 +12,11 @@ use crate::api::data::sanitize_for_terminal;
 
 /// Summary of a signing operation, keyless or under a key.
 ///
-/// Plain format: single "Field | Value" table listing the identifier, subject
-/// digest, one `Signature (<format>)` row per leg, platform, key model, cert
-/// identity, and cert OIDC issuer (one row per field — `Printable`
-/// single-table rule honored). `subject_digest` is the answer (what was
-/// signed) and renders full; a leg's digests shorten to 12 hex — a full
-/// `sha256:<64hex>` earns its row only once per view. Everything stays full
-/// in JSON.
-///
-/// A leg's two digests are distinct and not interchangeable: `payload_digest`
-/// is the SHA-256 of the signed blob (the Sigstore bundle under `bundle`, the
-/// simplesigning claim under `simplesigning` — what the transparency record
-/// covers), while `manifest_digest` is the SHA-256 of the manifest it hangs
-/// from (the OCI referrer, or the `sha256-<hex>.sig` sidecar). Consumers
-/// routinely need one or the other.
-///
-/// `signer` is the signing mechanism used: `"keyless-fulcio"`, or the key
-/// backend's own slug under a key.
+/// Digests are always full in JSON. A leg's two digests are not
+/// interchangeable: `payload_digest` is the SHA-256 of the signed blob (what
+/// the transparency record covers), `manifest_digest` that of the manifest it
+/// hangs from. `signer` is `"keyless-fulcio"`, or the key backend's own slug
+/// under a key.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SignatureReport {
     /// User-facing identifier string that was signed (echoes the CLI arg).
@@ -45,26 +26,21 @@ pub struct SignatureReport {
     /// One entry per wire shape that was written or attempted, in write order.
     ///
     /// `--signature-format both` emits two **independent** signatures, so the
-    /// run is best-effort per leg rather than atomic (spec D8): a leg that
-    /// failed is reported alongside one that succeeded, and the exit code comes
-    /// from the failure. Hiding the successful leg behind the failure would
-    /// leave the operator re-signing what is already published.
+    /// run is best-effort per leg rather than atomic: a leg that failed is
+    /// reported alongside one that succeeded, and the exit code comes from the
+    /// failure.
     pub legs: Vec<SignatureLegReport>,
     /// Platform narrowed into (e.g., `linux/amd64`), or `any` when
     /// `--platform` was absent and the run signed whatever resolved.
     pub platform: String,
-    /// Signing mechanism used (C-S1-1 contract field). Always `"keyless-fulcio"` in Slice 1.
+    /// Signing mechanism used: `"keyless-fulcio"`, or the key backend's own slug under a key.
     pub signer: String,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     pub certificate_identity: String,
     /// Certificate OIDC issuer URL embedded in the Fulcio cert.
     pub certificate_oidc_issuer: String,
-    /// Which key model produced this signature (`keyless`, `file`, and — once
-    /// they exist — `aws_kms` and friends).
-    ///
-    /// A consumer can already distinguish `file` from a future `awskms` without
-    /// the backends existing, which is the point of freezing the vocabulary
-    /// before the implementations (spec §WP9 contract 4).
+    /// Which key model produced this signature: `keyless`, `file`, or a
+    /// key-backend scheme.
     pub key_backend: ocx_trust::key_ref::KeyBackendKind,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,15 +80,8 @@ pub struct SignatureLegReport {
     pub error: Option<String>,
 }
 
-/// How the `--platform` request reads in a report when none was made.
-///
-/// The flag is a narrowing modifier, not a selector, so its absence is a legal
-/// outcome the report has to name. `any` is what the absence means — the run
-/// put no platform constraint on what it acted on — and it is the same spelling
-/// the sign/attest/verify error messages use for the same absence, so a reader
-/// meets one word for one state. Keeping the field a plain string is
-/// deliberate: it is a shipped JSON contract (C-S1-1), and turning it null
-/// would break every consumer reading it unconditionally.
+/// Names an absent `--platform` `any`, the word the sign/attest/verify errors use.
+// Stays a string, never null: consumers read the shipped field unconditionally.
 fn platform_label(platform: Option<&ocx_oci::Platform>) -> String {
     platform.map_or_else(|| "any".to_string(), ocx_oci::Platform::to_string)
 }
@@ -142,22 +111,13 @@ impl SignatureReport {
     }
 
     /// Record the code the process exits with, so the envelope agrees with it.
-    ///
-    /// A `--signature-format both` run where one leg failed still prints this
-    /// report — it is the only place the leg that *landed* is named — and then
-    /// exits with the failure's code.
     #[must_use]
     pub fn with_exit_code(mut self, exit_code: ExitCode) -> Self {
         self.exit_code = exit_code;
         self
     }
 
-    /// Record which key model signed, and its key hint under a key.
-    ///
-    /// `signer` moves with it: the field was the constant `"keyless-fulcio"`
-    /// while keyless was the only model, and a key-mode signature reported as
-    /// `"keyless-fulcio"` would be a lie in the one field a consumer reads to
-    /// tell them apart.
+    /// Record which key model signed (moving `signer` with it), and its key hint under a key.
     #[must_use]
     pub fn with_key_model(mut self, backend: ocx_trust::key_ref::KeyBackendKind, hint: Option<String>) -> Self {
         self.signer = match backend {
@@ -178,24 +138,11 @@ impl SignatureReport {
 }
 
 impl SignatureReport {
-    /// The (label, value) pairs `print_plain` renders, in display order.
+    /// The (label, value) rows `print_plain` renders; only `subject_digest` stays a full digest.
     ///
-    /// Extracted from `print_plain` so the digest-shortening contract can be
-    /// pinned by a unit test: `Printer` writes directly to the real process
-    /// stdout with no injectable writer (see `data_interface.rs`), so
-    /// `print_plain`'s rendered bytes cannot be captured in-process. This pure
-    /// helper carries the same field list with no `Printer` dependency.
-    /// Every value is neutralized for the terminal (CWE-150), not only the two
-    /// obviously-foreign ones. `certificate_identity` and
-    /// `certificate_oidc_issuer` are read out of the Fulcio certificate this
-    /// run received, so their content is the certificate authority's answer
-    /// rather than ours. `identifier` reaches here as argv, which is still not
-    /// operator-authored under `ocx exec` and a script-supplied identifier —
-    /// the same position `command/index_common.rs` already takes. The digests
-    /// and the platform are typed values that cannot carry a control
-    /// character, and are routed anyway: a filter applied per field has to be
-    /// re-argued for every field added later, and the neutralization is
-    /// identity on them — pinned by `ordinary_values_pass_through_verbatim`.
+    /// Split out because `Printer` has no injectable writer, so tests pin the rows here.
+    /// Every value is sanitized (CWE-150), typed ones too: certificate fields and argv are
+    /// foreign input, and a per-field filter would need re-arguing for each new field.
     fn plain_fields(&self) -> Vec<(String, String)> {
         let mut fields = vec![
             ("Identifier".to_string(), sanitize_for_terminal(&self.identifier)),
@@ -216,9 +163,7 @@ impl SignatureReport {
                 "Key backend".to_string(),
                 sanitize_for_terminal(&self.key_backend.to_string()),
             ),
-            // Stated, never omitted: a missing transparency record is a legal
-            // outcome under a key, and an operator must be able to read it off
-            // the result rather than infer it from an absent row.
+            // Stated as `none`, never omitted: no record is a legal outcome under a key.
             (
                 "Transparency log".to_string(),
                 match self.transparency_log_index {
@@ -227,9 +172,6 @@ impl SignatureReport {
                 },
             ),
         ];
-        // One row per leg, so `--signature-format both` shows two outcomes
-        // rather than one and an omission. A failed leg says so in the value
-        // instead of vanishing.
         for leg in &self.legs {
             let value = match (&leg.manifest_digest, &leg.error) {
                 (Some(digest), _) => digest.to_short_string(),
@@ -244,11 +186,6 @@ impl SignatureReport {
 
 impl Printable for SignatureReport {
     fn print_plain(&self, data: &ocx_console::DataInterface) {
-        // `subject_digest` is the answer (what was signed) and stays full;
-        // `bundle_digest`/`referrer_digest` shorten to 12 hex so only one
-        // full sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
-        // Column Budget"). `signer` has no row — it is the constant
-        // "keyless-fulcio" for Slice 1. Both remain full/present in JSON.
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
         for (label, value) in self.plain_fields() {
             rows[0].push(Cell::from(label));
@@ -257,12 +194,7 @@ impl Printable for SignatureReport {
         data.print_table(&["Field".into(), "Value".into()], &rows);
     }
 
-    /// Emit a C-S1-1 envelope:
-    /// `{"schema_version":1,"command":"package sign","exit_code":<code>,"data":{...}}`.
-    ///
-    /// `exit_code` is 0 for a run where every leg landed, and the failing leg's
-    /// code for a partial `--signature-format both` run — the same value the
-    /// process returns.
+    /// Emit the JSON envelope; its `exit_code` is the process's, non-zero on a partial run.
     fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
@@ -273,12 +205,7 @@ impl Printable for SignatureReport {
 }
 
 impl SignatureReport {
-    /// The envelope document `print_json` emits.
-    ///
-    /// Separate from `print_json` only because `DataInterface` writes to the
-    /// process's stdout, so a test can reach the rendered bytes no other way —
-    /// and the envelope's `exit_code` is a claim about the process that has to
-    /// be checked against a report that failed a leg.
+    /// The envelope `print_json` emits, split out because `DataInterface` writes only to stdout.
     fn envelope(&self) -> anyhow::Result<String> {
         crate::error_envelope::render_envelope_with_exit_code("package sign", self, self.exit_code)
     }
