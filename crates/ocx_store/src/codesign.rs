@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Ad-hoc signs every Mach-O file under `content_path`, or Apple Silicon kills them; no-op off macOS, failures only warn.
+/// Ad-hoc signs every Mach-O file under `content_path` whose signature does not verify, or Apple Silicon kills it;
+/// no-op off macOS, failures only warn.
 ///
 /// Per file, never per bundle: re-sealing third-party bundles raises Team ID conflicts (`adr_codesign_per_file_signing.md`).
 pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
@@ -167,11 +168,19 @@ async fn remove_quarantine(content_path: &Path) {
 ///
 /// Keeping `requirements` pins a Team ID an ad-hoc signature cannot satisfy (`adr_codesign_per_file_signing.md § Signing command`).
 async fn sign_binary(path: &Path) {
+    // `--force` on a bundle's main executable replaces the bundle signature, unbinding `Info.plist` and
+    // breaking the resource seal (ocx#546), so a signature that already verifies is never touched.
+    if try_codesign(&["--verify", "--strict"], path).await {
+        log::debug!("Keeping valid signature: {}", path.display());
+        return;
+    }
+
     log::debug!("Signing Mach-O binary: {}", path.display());
 
     let args = &["--sign", "-", "--force", "--preserve-metadata=entitlements"];
 
     if try_codesign(args, path).await {
+        log::debug!("Signed: {}", path.display());
         return;
     }
 
@@ -192,10 +201,7 @@ async fn try_codesign(args: &[&str], path: &Path) -> bool {
         .await;
 
     match result {
-        Ok(output) if output.status.success() => {
-            log::debug!("Signed: {}", path.display());
-            true
-        }
+        Ok(output) if output.status.success() => true,
         Ok(output) => {
             let msg = format_process_output(&output.stdout, &output.stderr);
             log::debug!("codesign attempt failed for {}: {}", path.display(), msg);
@@ -524,6 +530,74 @@ mod tests {
         assert!(
             verify_signature(&binary).await,
             "binary should be signed after sign_extracted_content"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sign_extracted_content_leaves_sealed_app_bundle_untouched() {
+        let env = ocx_util::env::overrides::lock();
+        env.remove("OCX_NO_CODESIGN");
+
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
+        let bundle = content.join("Foo.app");
+        let macos_dir = bundle.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos_dir).unwrap();
+        build_unsigned_binary(&macos_dir, "Foo");
+        std::fs::remove_file(macos_dir.join("Foo.c")).unwrap();
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Foo</string>
+<key>CFBundleIdentifier</key><string>sh.ocx.test.foo</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+
+        let seal = std::process::Command::new("codesign")
+            .args(["--sign", "-", "--force"])
+            .arg(&bundle)
+            .output()
+            .expect("failed to seal bundle");
+        assert!(
+            seal.status.success(),
+            "failed to seal bundle: {}",
+            String::from_utf8_lossy(&seal.stderr)
+        );
+
+        // A fixed past mtime makes any rewrite of the executable observable, however it re-signs.
+        let executable = macos_dir.join("Foo");
+        let pinned = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&executable)
+            .unwrap()
+            .set_modified(pinned)
+            .unwrap();
+
+        let result = super::sign_extracted_content(&content).await;
+        assert!(result.is_ok(), "sign_extracted_content should succeed");
+
+        assert_eq!(
+            std::fs::metadata(&executable).unwrap().modified().unwrap(),
+            pinned,
+            "a validly signed executable must not be re-signed"
+        );
+        let verify = tokio::process::Command::new("codesign")
+            .args(["--verify", "--strict"])
+            .arg(&bundle)
+            .output()
+            .await
+            .expect("failed to run codesign --verify");
+        assert!(
+            verify.status.success(),
+            "sealed bundle must still verify after install: {}",
+            String::from_utf8_lossy(&verify.stderr)
         );
     }
 }

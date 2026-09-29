@@ -148,7 +148,7 @@ macOS requires all executable code to carry a valid <Tooltip term="code signatur
 
 When a publisher never signed their binaries before packaging, the extracted files will be unsigned and macOS will refuse to run them. Signatures that were present before packaging survive the tar round-trip — they are part of the binary content, not extended attributes.
 
-ocx handles this automatically: after extracting a package, it recursively walks the content directory, detects <Tooltip term="Mach-O binaries">The native executable format on macOS and iOS. ocx identifies them by reading the first four bytes of each file and checking for known magic numbers (`0xFEEDFACF` for 64-bit, `0xCAFEBABE` for universal, etc.).</Tooltip>, and signs each one individually with an ad-hoc signature. Quarantine flags are stripped. No configuration required.
+ocx handles this automatically: after extracting a package, it recursively walks the content directory, detects <Tooltip term="Mach-O binaries">The native executable format on macOS and iOS. ocx identifies them by reading the first four bytes of each file and checking for known magic numbers (`0xFEEDFACF` for 64-bit, `0xCAFEBABE` for universal, etc.).</Tooltip>, and signs each one that lacks a valid signature with an ad-hoc signature. Binaries that already verify are left as they are. Quarantine flags are stripped. No configuration required.
 
 ::: info Same approach as Homebrew
 [Homebrew][homebrew] solves the identical problem with the same technique — per-file ad-hoc signing without bundle sealing — see [`codesign_patched_binary`][homebrew-codesign] in their source. ocx applies signatures after extraction rather than after patching, but the `codesign` invocation is equivalent.
@@ -162,15 +162,17 @@ Quarantine removal (applied to the entire content directory first):
 xattr -dr com.apple.quarantine <content_path>
 ```
 
-For each Mach-O binary found in the content directory (recursive walk, symlinks not followed):
+For each Mach-O binary found in the content directory (recursive walk, symlinks not followed) whose existing signature fails `codesign --verify --strict`:
 
 ```sh
-codesign --sign - --force --preserve-metadata=entitlements,flags,runtime <binary>
+codesign --sign - --force --preserve-metadata=entitlements <binary>
 ```
 
-`entitlements`, `flags`, and `runtime` are preserved from the original signature.
-`requirements` (the original certificate's Team ID constraint) is intentionally dropped —
-preserving it would cause dyld "different Team IDs" errors when loading third-party frameworks.
+A binary whose signature already verifies is left untouched, so a sealed `.app` bundle keeps its bundle signature.
+Only `entitlements` are preserved from the original signature.
+`flags` would carry the hardened-runtime bit, whose library validation rejects ad-hoc signed libraries.
+`requirements` holds the original certificate's Team ID constraint, which an ad-hoc signature cannot satisfy.
+Preserving either causes dyld "different Team IDs" errors when loading third-party frameworks.
 Hardlinked files (same inode) are signed only once.
 :::
 
@@ -192,7 +194,7 @@ If a binary still fails to launch after installation, sign it manually:
 
 ::: code-group
 ```sh [Single binary]
-codesign --sign - --force --preserve-metadata=entitlements,flags,runtime /path/to/binary
+codesign --sign - --force --preserve-metadata=entitlements /path/to/binary
 ```
 
 ```sh [Remove quarantine]
