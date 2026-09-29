@@ -188,3 +188,24 @@ No ordering requirement. Parallelism within each directory.
 - [Homebrew keg.rb — per-file signing reference](https://raw.githubusercontent.com/Homebrew/brew/master/Library/Homebrew/extend/os/mac/keg.rb)
 - [Apple TN2206: macOS Code Signing In Depth](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)
 - [Analysis: Team ID mismatch root cause](./analysis_codesign_team_id_mismatch.md)
+
+---
+
+## Amendment 2026-09-29 — keep signatures that already verify
+
+**Trigger:** [ocx-sh/ocx#546](https://github.com/ocx-sh/ocx/issues/546). The accepted trade-off
+"the bundle seal is irrelevant for OCX" does not hold: `SMAppService` login items, user
+notifications, keychain access groups and notarization all read the bundle's code identity.
+`codesign --force` on a bundle's main executable replaces the bundle signature with a standalone
+one (identifier `<name>-<hash>`, `Info.plist` not bound, no sealed resources), so every sealed
+`.app` failed `codesign --verify --strict` after install.
+
+**Decision:** before signing a Mach-O file, run `codesign --verify --strict` on it and skip it when
+that passes. On a bundle's main executable the verify resolves to the bundle, so an intact seal is
+kept. Everything else in this ADR stands: files that fail verification are still signed per file,
+ad-hoc, with `--preserve-metadata=entitlements` only.
+
+**Why Option C's objection does not apply:** the Team-ID conflict it names arises only when ocx
+re-signs *some* binaries of a load chain ad-hoc while keeping others under a certificate. A
+package whose binaries all verify is left untouched, so its chain stays consistent. A package
+mixing valid certificate-signed code with invalid code was already unloadable as published.
