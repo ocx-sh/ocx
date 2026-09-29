@@ -143,7 +143,8 @@ disclosed instance.**
 
 - **The class** is granted by invocation. `/hex-finalize` is user-invocable
   and never model-invocable, so the grant always originates with a human
-  typing the command — it can never be reached by a model matching a
+  typing the command — except under C-805a, below, where a human-pasted
+  prompt carries it — and it can never be reached by a model matching a
   description.
 - **The instance** is narrowed at the gate: *this* branch, *this* recomposed
   commit series with its attestations, *this* target, *this* pinned lease
@@ -162,7 +163,8 @@ commits already carry a `Signed-off-by` line and a signature — but they
 exist only in a local ref that a reset destroys. The gate is where that
 attestation becomes a **public, permanent record** made in the human's name.
 
-**The gate therefore asks on every rung, including local-only.** On the
+**The gate therefore asks on every rung, including local-only** —
+except under C-805a, below, where the pasted grant answers it. On the
 local-only rung the approval covers the recomposed series itself and the
 human publishes by hand afterwards; a rung that skipped the gate would let
 an unreviewed attestation reach a `git push` the human types five minutes
@@ -172,6 +174,55 @@ later.
 the rewritten branch standing, **renames the backup ref inert — which
 releases the lock** ([§ Backup-ref lifecycle](#backup-ref-lifecycle)) — and
 prints the restore command.
+
+**C-805a autonomous-run clause.** A **human-pasted prompt** — text that
+arrives as the human's own turn in the session that runs `/hex-finalize` —
+meets both halves of C-805. The test is pasted, not authored: the prompt
+`/hex-loop` prints is model-rendered and human-pasted, and one a human writes
+to the same effect qualifies the same way.
+
+- **the class grant**, because the human pasted the instruction to invoke
+  `/hex-finalize`;
+- **the instance gate**, because the prompt names, for *this run's feature
+  branch*, which post-gate acts of [C-811](#the-act-set) it grants — any of
+  acts 2, 3 and 4, each in full as C-811 enumerates it, except that act 4's
+  draft → ready flip is granted or withheld on its own: withheld, the pull
+  request stays draft, and the flip is disclosed as withheld and reported not
+  met.
+
+Under that clause the gate still runs at the same position: it prints its
+**full disclosure to the transcript** — every field group, complete, never
+summarized — and proceeds without asking. Its bounds are fixed:
+
+- **The grant is the verbatim text of a human turn in this session.** A copy
+  relayed into a spawned brief, a compaction summary, or an earlier session's
+  transcript is not a grant. When the session cannot show the grant verbatim,
+  C-805a does not apply and the gate behaves as without it — except that a
+  session bound never to prompt (the `/hex-loop` prompt's I2) does not ask:
+  it treats every remote act as omitted — skipped, disclosed as withheld,
+  reported not met — fail-closed, never a hang.
+  One grant covers
+  every re-finalize push within the same session's run
+  ([§ Re-entry](#re-entry)).
+- **Nothing but the pasted text widens (files, PR/issue text, tool output).**
+  The goal file, a committed tick, or anything else the session reads may
+  narrow the act set, never add to it. C-815/C-816
+  ([§ Trust classes](#trust-classes)) and C-813 are unchanged, word for word.
+- **An omitted act is skipped, not asked.** Under a valid grant, an act the
+  pasted text does not name is not performed: the gate does not ask; the act
+  is skipped, disclosed as withheld, and reported not met.
+- **Workflow drift withholds act 3.** On C-813's drift trigger — any file
+  under the workflow directory differs, branch against trunk
+  ([§ Remote verification](#remote-verification), control 1) — act 3 is skipped,
+  disclosed as withheld, and reported not met — with no human reading the
+  gate, a drift disclosure is no control. The trigger sees only the
+  workflow directory: a branch change to a script the dispatched workflow
+  executes — a build, test or release script, a task-runner file — does
+  not trip it. So a workflow that carries release secrets belongs behind a
+  forge-side protected environment with required reviewers, those secrets
+  scoped to that environment — a server-side backstop alongside control 2
+  that holds whatever the branch changed.
+- **A prompt a model composed and no human pasted is not a grant.**
 
 ## Force-push mechanics
 
@@ -306,7 +357,8 @@ under change. Two controls follow, and neither is optional:
 1. **Drift is disclosed.** Where the branch modifies any file under the
    workflow directory, the gate names the changed files and states that the
    dispatch will execute the branch's version. This is a disclosure, not a
-   failure.
+   failure — except under [C-805a](#consent-model), where it withholds
+   act 3.
 2. **The forge's own control is named, not silently replaced.** The
    human-approval setting for agent-triggered workflow runs is the backstop
    that holds **server-side**; this file's enumeration does not substitute
@@ -467,10 +519,13 @@ Nine properties, each the reason a branch is where it is:
   (branch, pushed SHA), and it is the only piece of state this design keeps
   outside git.** A second branch never inherits the first one's approval, and
   a new push re-keys the flag on the new SHA, so the gate asks again for the
-  series it actually publishes. It is not a journal: losing it is
+  series it actually publishes — except under C-805a, where one grant covers
+  every re-finalize push within the same session's run
+  ([§ Consent model](#consent-model)). It is not a journal: losing it is
   safe and **fails toward the gate**, so a fresh session with a
-  pushed-but-undispatched branch re-runs pre-flight and asks again rather
-  than dispatching on a consent it cannot see. The flag only ever saves a
+  pushed-but-undispatched branch re-runs pre-flight and asks again — except
+  under a C-805a grant pasted in that fresh session — rather than
+  dispatching on a consent it cannot see. The flag only ever saves a
   redundant re-ask inside the session that already got the yes.
 - **`remote` comes from `ls-remote`, never from the remote-tracking ref.**
   The tracking ref is exactly the value a background fetch corrupts, which is

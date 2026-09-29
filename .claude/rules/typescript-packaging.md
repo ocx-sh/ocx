@@ -5,6 +5,12 @@ paths:
   - "**/eslint.config.*"
   - "**/biome.json"
   - "**/biome.jsonc"
+  - "**/package-lock.json"
+  - "**/npm-shrinkwrap.json"
+  - "**/pnpm-lock.yaml"
+  - "**/pnpm-workspace.yaml"
+  - "**/yarn.lock"
+  - "**/bun.lock"
 summary: The declared contract — the tsconfig strictness floor per shape, the manifest, and verifying a package that ships a bin
 keywords: typescript,tsconfig,package.json,strict,engines,exports,bin,publint,attw,npm,lockfile,dependencies,scripts,nodenext
 license: Apache-2.0

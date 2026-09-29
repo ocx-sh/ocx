@@ -111,6 +111,16 @@ propose adopting what exists via pointer before proposing anything new:
   first, and nothing is asked of a project that never discussed
   anything. See
   [`references/audit.md`](references/audit.md#discussions-home-documented-conditional).
+- Is a goals home documented — a **conditional** item, asked only when a
+  goal file already exists, or the user asks for one; hex never raises it
+  first, and nothing is asked of a project that never ran a goal loop.
+  See
+  [`references/audit.md`](references/audit.md#goals-home-documented-conditional).
+- Are goal-loop defaults recorded — a `- Goal loop:` prose hint in
+  `hex.md › Preferences`, proposed with consent when Memory notes of
+  hand-written goal prompts show a de facto default? Optional; absent is
+  fine. See
+  [`references/audit.md`](references/audit.md#goal-loop-defaults-recorded-optional).
 - Do the project's rules carry architectural context (boundaries,
   invariants, security-sensitive paths), not just style/lint rules?
 - Is product context documented — what the product is, who uses it and
@@ -226,6 +236,23 @@ and `/hex-discuss`'s own `<home>/<slug>.md` alike (its already-exists and
 git-tracked conditions belong to the fold; the no-symlink, no-directory
 clause still binds — a dangling symlink reads as absent). This step only
 asks and records the answer, never restates them.
+
+**Goals home (conditional).** When the [goals-home
+item](references/audit.md#goals-home-documented-conditional) fires,
+propose in this order: an existing practiced location first, else
+`.agents/goals/` as the **last resort** — with consent. Record the one
+outcome as a `hex.md › Pointers` row:
+``- Goals: `<home>` — per-run goal files (/hex-loop).``
+`<home>` is the location the user consented to, `.agents/goals/` only
+when the last resort was taken. There is no seed offer: goal files are
+written only by `/hex-loop`, one per run, from
+`assets/templates/goal.md`. Mechanics are defined once elsewhere: home
+resolution and verify-on-consumption in
+[`../hex-core/references/memory.md`](../hex-core/references/memory.md#location-and-resolution),
+containment in
+[`../hex-core/references/archive.md`](../hex-core/references/archive.md#destination-resolution),
+whose **path** conditions bind `/hex-loop`'s `<home>/<slug>.md` write.
+This step only asks and records the answer, never restates them.
 
 **Selective test command.** A command found by the [selective-test
 item](references/audit.md#selective-test-command-documented) is proposed
@@ -352,7 +379,8 @@ the other two sections:
   documented, where the project's security-sensitive / hot-path convention
   is documented, where spec/plan/ADR conventions live, the doc and
   product-knowledge homes provisioned in Step 2, the discussions home when
-  one was resolved, key architectural rules, any worktree-location
+  one was resolved, the goals home when one was resolved, key
+  architectural rules, any worktree-location
   deviation, and the constitution location (optional). The sensitive-path
   row is the named source the high-risk merge trigger reads; the
   key-architectural-rules pointer beside it keeps its own job — naming the
@@ -461,7 +489,8 @@ user's spellings untouched rather than collapsing them.
 - [`references/audit.md`](references/audit.md) — the audit checklist and
   the best-practice block templates used in Steps 1, 2, and 6.
 - `assets/templates/` — the fallback `plan.md`, `adr.md`,
-  `discussion.md`, `research.md`, `spec.md` used in Step 3.
+  `discussion.md`, `research.md`, `spec.md` used in Step 3, and
+  `goal.md`, which only `/hex-loop` instantiates.
 
 The reference links above resolve when `hex-core` is installed alongside
 this skill; if it isn't: `grim add ghcr.io/michael-herwig/arcana/hex-core:latest`.

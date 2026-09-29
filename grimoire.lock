@@ -4,8 +4,8 @@ agent = []
 lock_version = 1
 declaration_hash_version = 1
 declaration_hash = "sha256:c566c33228738106d21d50e6030e1d53012b97d4d12dfd369d27b0815a939bda"
-generated_by = "grim 0.14.2"
-generated_at = "2026-09-27T22:32:15Z"
+generated_by = "grim 0.14.3"
+generated_at = "2026-09-29T15:48:54Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -131,7 +131,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "code-docs"
-pinned = "ghcr.io/ocx-sh/lore/code-docs@sha256:179354fe1e02cca7eb0d211838c13840d9410eb9b2d73c3a947f6eb0fee6fc20"
+pinned = "ghcr.io/ocx-sh/lore/code-docs@sha256:9ee9c2e3c6198cfd5926ab48b793bcbc874ecfe751b434d65c0c5bd22d576141"
 
 [[rule.bundles]]
 repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
@@ -163,19 +163,19 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "python-packaging"
-pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:83b48110ecdfdc874b6714e7c7ba10deb199f4bf0cdc3169631cb884d842c802"
+pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:caa8b2d586442c289ee718117b2a424e02ed8089ea669b444088ef1aa74f6af1"
 bundle = "ghcr.io/ocx-sh/lore/python-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "python-quality"
-pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:81ea86fdb1d8e2cc46b9192f300fc67a21aede449905e5e80c70702d5df4f497"
+pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:02cbac6b635220fbda58b6fed76abcab840969d3d0670c559070e739a29db964"
 bundle = "ghcr.io/ocx-sh/lore/python-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "rust-cargo"
-pinned = "ghcr.io/ocx-sh/lore/rust-cargo@sha256:92d04c3338fa8e7e474eeddf02038c88fa82e44d1ec8fd1095221ae52fddc4ac"
+pinned = "ghcr.io/ocx-sh/lore/rust-cargo@sha256:a47a13cae30ed6a96538c89ad4445ba43668638eb2ffdd173b9e6044719a4ff8"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
 bundle_tag = "latest"
 
@@ -187,13 +187,13 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "typescript-packaging"
-pinned = "ghcr.io/ocx-sh/lore/typescript-packaging@sha256:aea500feedc681d161c96daf504d7e68638733e473dd0b8778ac72832190c503"
+pinned = "ghcr.io/ocx-sh/lore/typescript-packaging@sha256:07292079463d943fd5be01d40c3c9f7b3fd88c3a3eb308c0fe119e1a354820f2"
 bundle = "ghcr.io/ocx-sh/lore/typescript-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "typescript-quality"
-pinned = "ghcr.io/ocx-sh/lore/typescript-quality@sha256:f76456817459ba29060c8cc5d62449b1c7a9a47ae65f44938f8f7788950a26c3"
+pinned = "ghcr.io/ocx-sh/lore/typescript-quality@sha256:0531d9e5197a2634a3be9c287eadabb17ddb81e06cb049adbb28b970d85c951d"
 bundle = "ghcr.io/ocx-sh/lore/typescript-essentials"
 bundle_tag = "latest"
 
@@ -222,7 +222,7 @@ id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
 name = "code-docs-essentials"
 repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/code-docs-essentials@sha256:6451c0575d0722c6970983478641fd16bd06ea68e7e304a0aac60fc65b8726a2"
+pinned = "ghcr.io/ocx-sh/lore/code-docs-essentials@sha256:300035d09cfadca25ce5f4c54df877ba86d19f4fdc8be59f2a3979316465e945"
 
 [[bundle.member]]
 kind = "skill"
@@ -336,7 +336,7 @@ id = "ghcr.io/michael-herwig/arcana/nox-review:latest"
 name = "python-essentials"
 repo = "ghcr.io/ocx-sh/lore/python-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:0312af6e6eed618a17b0bcb68f027b640e76596932445acb724694458b081399"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:d24b327100ec8d56b6ffb3c79d95ecbbddd3d630f64c9fae8a07f2074f332f98"
 
 [[bundle.member]]
 kind = "skill"
@@ -388,7 +388,7 @@ id = "ghcr.io/ocx-sh/lore/rust-quality:latest"
 name = "typescript-essentials"
 repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:1d3400ff08c87fb3283067b70e51d9383f0edb2553de73bff3fa30e9d4a3a4e5"
+pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:af27f2ad8b40ca2fa3276e143b1866fd899b719487484a7c2a857f48475ad7b7"
 
 [[bundle.member]]
 kind = "skill"

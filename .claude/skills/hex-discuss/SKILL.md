@@ -57,7 +57,7 @@ leaves `State: parked`, re-enterable later under the same slug.
 The opening turn asks once, as one composite ask with three slots: (1) the
 problem in the user's own words, not a restatement or a guess; (2) a
 source-material inventory — "dump anything": tickets, example apps, references,
-code; (3) the outcome shape — plan, ADR, spec, or just clarity. Any subset is
+code; (3) the outcome shape — plan, ADR, spec, a goal loop, or just clarity. Any subset is
 answerable: the run proceeds with what it has and never re-asks a skipped slot.
 Slot 3 pre-sets the drain target ([Handoff](#handoff)); slot 2 seeds the
 artifact's `## Related` section and grounds every researcher prompt.
@@ -166,7 +166,8 @@ lane as research artifacts, each written against the header contract in
 
 The interview ends when the [restate](#the-restate-gate) can be filled without
 a gap — **never at a question count, and never at a turn budget**. A question
-answered in a few turns drains inline, deleting the entry stub, so the run
+answered in a few turns drains inline, deleting the entry stub — never to
+[→ loop](#handoff), which always keeps its artifact — so the run
 nets **zero discussion files** — the entry wave may already have landed
 research artifacts before that inline drain fires, and those persist in the
 shared research home, listed in the terminal report. **An inline drain is
@@ -278,7 +279,7 @@ applies in substance: every drain ends with the terminal-state report and,
 where a next command exists, the `Next:` line. Its orchestrator-only fields —
 classification, tier, overlays — do not apply.
 
-Four drain targets, adding zero new write paths. After the yes:
+Five drain targets, adding zero new write paths. After the yes:
 
 - **→ plan** — `Next: /hex-plan "<title>, per <artifact path>"`
 - **→ ADR** — `Next: /hex-architect <artifact path>`
@@ -287,6 +288,11 @@ Four drain targets, adding zero new write paths. After the yes:
   **never writes a spec and never invokes a fold**, so
   [`archive.md`](../hex-core/references/archive.md#safety-envelope)'s envelope
   stays the only fold path.
+- **→ loop** — `Next: /hex-loop <artifact path>`. The drain sets
+  `State: handed-off → loop` and writes `Ratified: <date> → loop`. The
+  artifact is **always kept** — it is `/hex-loop`'s source, so this target
+  **never drains inline**: a discussion that would otherwise drain inline
+  keeps its artifact instead.
 - **→ project context** — a durable convention the discussion surfaced is
   recorded post-gate as a promotion candidate in `hex.md › Memory`
   ([Constraints](#constraints)), where the next `/hex-init` re-audit picks it
@@ -299,14 +305,14 @@ Four drain targets, adding zero new write paths. After the yes:
   convention belongs in project context, written only by `/hex-init`. This
   skill **never writes CLAUDE.md or AGENTS.md**.
 
-Neither downstream command carries a tier: this skill has none of its own, so
+No downstream command carries a tier: this skill has none of its own, so
 the receiving orchestrator's classifier resolves it, and a tier appears only
 when the user named one at the restate. The exception is the → ADR target,
 whose fast path refuses the two lowest tiers on arrival — the restate states
 the `high` floor instead of emitting a dead-end command.
 
 Terminal states: `parked`, or
-`handed-off → plan | architect | context | dropped` — a `State:` vocabulary
+`handed-off → plan | architect | loop | context | dropped` — a `State:` vocabulary
 whose single home is the template `hex-init/assets/templates/discussion.md`,
 which defines it while this file only consumes it. **`dropped` is a valid
 success** — a discussion concluding the thing should not be built is reported
@@ -316,11 +322,11 @@ carries **no `Next:` line**: nothing runs next. Every drain closes on:
 ```markdown
 ## Discussion Complete: <topic>
 
-- State: `handed-off → plan | architect | context | dropped`, or `parked`
+- State: `handed-off → plan | architect | loop | context | dropped`, or `parked`
 - Written: <discussion artifact>, <research artifacts>, `hex.md` Memory and
   Pointers rows — every path this run touched
 - Next: `/hex-plan "<title>, per <path>"` · `/hex-architect <path>` ·
-  `/hex-init` (→ context); no `Next:` line for `dropped` or `parked`
+  `/hex-loop <path>` · `/hex-init` (→ context); no `Next:` line for `dropped` or `parked`
 ```
 
 ## Announce form

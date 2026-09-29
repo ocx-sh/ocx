@@ -148,10 +148,11 @@ Error: <path> is State: <s> — a discussion is fast-path input only at 'handed-
 | `State:` value | The one `Fix:` line printed |
 |---|---|
 | `handed-off → plan` | `Fix: this discussion's target is /hex-plan — run that, or paste the decision as free text.` |
+| `handed-off → loop` | `Fix: this discussion's target is /hex-loop — run that, or paste the decision as free text.` |
 | `handed-off → context` | `Fix: this discussion's outcome was promoted to project context — run /hex-init to adopt it, or paste the decision as free text.` |
 | `handed-off → dropped` | `Fix: this discussion ratified not building — a new /hex-discuss "<topic>" revisits it — the dropped artifact stays dropped — or paste the decision as free text.` |
 | `active` or `parked` | `Fix: resume it with /hex-discuss "<topic>" and drain it to → architect, or paste the decision as free text.` |
-| anything else — a `State:` line is present but its value is not in the vocabulary (a hand-typed value like `done`, a typo'd arrow, a state from an older vocabulary) | `Fix: set State: to one of active, parked, handed-off → plan, handed-off → architect, handed-off → context, handed-off → dropped — or paste the decision as free text.` |
+| anything else — a `State:` line is present but its value is not in the vocabulary (a hand-typed value like `done`, a typo'd arrow, a state from an older vocabulary) | `Fix: set State: to one of active, parked, handed-off → plan, handed-off → architect, handed-off → loop, handed-off → context, handed-off → dropped — or paste the decision as free text.` |
 
 The last row is a refusal like the others, not a fallthrough to free text: a
 header the run cannot parse is a header it cannot trust. That vocabulary has a

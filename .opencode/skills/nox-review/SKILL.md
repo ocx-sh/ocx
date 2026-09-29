@@ -7,7 +7,7 @@ metadata:
   keywords: review,adversarial,cross-model,second-opinion,diff,plan,worktree,isolation
   repository: https://github.com/michael-herwig/arcana
   hex-adversary-scopes: "code-diff,plan-artifact"
-  hex-adversary-version: "0.4.1"
+  hex-adversary-version: "0.5.0"
 ---
 
 # nox-review — adversarial review under a second harness

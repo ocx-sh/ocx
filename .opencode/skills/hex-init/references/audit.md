@@ -143,6 +143,49 @@ anything is asked nothing, and hex never raises the question on its own.
   as absent). This item only asks and records the answer, never restates
   them.
 
+### Goals home documented (conditional)
+
+A **conditional** item — asked only when a goal file already exists,
+**or** the user asks for one. A project that has never run a goal loop is
+asked nothing, and hex never raises the question on its own.
+
+- **Proposal order:** an existing practiced location first — a
+  `docs/goals*` or `goals/` tree the project already uses — else
+  `.agents/goals/` as the **last resort**, with consent.
+- **Recorded as:** one `hex.md › Pointers` row —
+  ``- Goals: `<home>` — per-run goal files (/hex-loop).``
+  `<home>` is the location the user consented to, `.agents/goals/` only
+  when the last resort was taken. `/hex-loop` reads this row, never
+  writes it.
+- **No seed offer:** goal files are written only by `/hex-loop`, one per
+  run, from [`../assets/templates/goal.md`](../assets/templates/goal.md);
+  nothing is copied into the home.
+- Verify-on-consumption and the re-audit apply unchanged — this item adds
+  no staleness mechanism of its own. The mechanics it feeds are defined
+  once: home resolution in
+  [`memory.md`](../../hex-core/references/memory.md#location-and-resolution),
+  containment in
+  [`archive.md`](../../hex-core/references/archive.md#destination-resolution),
+  whose **path** conditions bind `/hex-loop`'s `<home>/<slug>.md` write.
+  This item only asks and records the answer, never restates them.
+
+### Goal-loop defaults recorded? (optional)
+
+- **Look for:** a `- Goal loop:` prose hint in `hex.md › Preferences`.
+- **Where:** `.agents/memory/hex.md` only. No network read; executes
+  nothing.
+- **Documented looks like:** a `- Goal loop:` bullet whose sub-items
+  follow the grammar defined once in
+  [`hex-loop/SKILL.md`](../../hex-loop/SKILL.md#preferences-hint), or an
+  explicit note that the shipped defaults are accepted.
+- **De facto discovery:** a `hex.md › Memory` note of a hand-written goal
+  prompt — a value it repeated run after run — proposes the matching
+  `Goal loop:` sub-item for adoption as `hex.md › Preferences` prose, with
+  consent. It is prose, never a config key: `config.md`'s vocabulary gains
+  nothing here.
+- **Optional** — no candidates and no hint means the shipped defaults
+  apply and the item stays silent.
+
 ### Rules carry architectural context?
 
 - **Look for:** rules or conventions that state module boundaries,
@@ -195,6 +238,15 @@ anything is asked nothing, and hex never raises the question on its own.
   the ignore file. Flag it if `.agents/` is ignored wholesale — that drops
   the team-shared `.agents/memory/hex.md` from version control and
   must be narrowed to `.agents/worktrees/` specifically.
+
+### Retro home gitignored? (conditional)
+
+Asked only when a retro home exists (`.agents/retro/`, or the Pointers `Retro:` row), or the user asks.
+
+- **Look for:** the retro inbox (`<home>/inbox/`) excluded from version control.
+- **Where:** the ignore file, and `hex.md › Pointers` for a declared home.
+- **Resolved looks like:** the exact path `<home>/inbox/` (trailing slash) in the ignore file, with `<home>/ledger/` and `<home>/reports/` **not** ignored. Flag `.agents/` or `<home>/` ignored wholesale — that drops the committed ledger and reports.
+- **Recorded as:** one `hex.md › Pointers` row — ``- Retro: `<home>` — inbox (gitignored), ledger + reports (committed); owner /hex-retro.`` `/hex-retro` reads this row, never writes it.
 
 ### Cross-model adversary skill installed?
 
@@ -481,7 +533,7 @@ checkouts are ignored.
 ```markdown
 <!-- hex:start -->
 Swarm memory: `.agents/memory/hex.md` (search upward; pointers + preferences).
-Commands: `/hex-init`, `/hex-discuss`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`, `/hex-finalize`.
+Commands: `/hex-init`, `/hex-discuss`, `/hex-loop`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-architect`, `/hex-finalize`.
 <!-- hex:end -->
 ```
 
