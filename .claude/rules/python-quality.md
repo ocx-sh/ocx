@@ -1,6 +1,9 @@
 ---
 paths:
   - "**/*.py"
+  - "**/*.pyi"
+  - "**/ruff.toml"
+  - "**/.ruff.toml"
 summary: The Python quality index — the gate, the non-negotiables, the pinned exit-code contract, and where the depth lives
 keywords: python,quality,standards,review,typing,async,subprocess,pytest,exit-codes,cli,security,logging,packaging,ruff,pyright
 license: Apache-2.0

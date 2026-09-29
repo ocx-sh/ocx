@@ -8,8 +8,9 @@ undocumented. One file per discussion; slug derives from the topic and
 stays stable for the discussion's life.
 Owner: /hex-discuss. Handoff: /hex-plan; /hex-architect (fast-path input
 only at `handed-off → architect`); a spec is never written here directly
-(reached via /hex-review's Fold-Back on the converged plan); project
-context via the next /hex-init re-audit.
+(reached via /hex-review's Fold-Back on the converged plan); /hex-loop
+(at `handed-off → loop`, this artifact is its source — always kept);
+project context via the next /hex-init re-audit.
 
 Every path this artifact names is repo-root-relative (`.agents/adrs/…`,
 `hex/hex-core/…`) — the fast path's claim diff resolves paths
@@ -20,7 +21,7 @@ conversation, and every file or interface it touches is named.
 <!--
 Header contract: no schema-version marker (house rule).
 State ∈ active | parked | handed-off → plan | handed-off → architect |
-handed-off → context | handed-off → dropped. The vocabulary stays in
+handed-off → loop | handed-off → context | handed-off → dropped. The vocabulary stays in
 this comment: a literal option list on the State line reads as a
 malformed state to every consumer that scans the discussions home.
 The shipped value is `parked`, not `active`: /hex-init seeds this file
@@ -31,7 +32,7 @@ never copied into a real artifact.
 -->
 State: parked · Updated: [YYYY-MM-DD]
 <!-- Optional: Participants: [who; turn count; date range] -->
-<!-- Written by the drain itself, never by hand: Ratified: [YYYY-MM-DD] → [plan | architect | context | dropped] -->
+<!-- Written by the drain itself, never by hand: Ratified: [YYYY-MM-DD] → [plan | architect | loop | context | dropped] -->
 <!-- Optional: Confidence: [who ratified; research vintages backing the decisions] -->
 
 <!--

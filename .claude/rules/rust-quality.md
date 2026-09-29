@@ -83,7 +83,7 @@ filed under. One level deep; these files do not point at each other.
 | Handling registry content, archives, paths from outside, subprocesses, credentials, TLS | [rust-quality/security.md](rust-quality/security.md) |
 | Writing or changing a test, a fixture, a snapshot, or a test seam | [rust-quality/testing.md](rust-quality/testing.md) |
 | A change made for speed, or one that could plausibly cost it | [rust-quality/performance.md](rust-quality/performance.md) |
-| Writing a doc comment, a log line, a span, or user-facing diagnostic output | [rust-quality/docs-and-tracing.md](rust-quality/docs-and-tracing.md) |
+| Writing a doc comment's sections or examples, a log line, a span, or user-facing diagnostic output. What any comment keeps, where it goes and how long it runs is the `code-docs` rule | [rust-quality/docs-and-tracing.md](rust-quality/docs-and-tracing.md) |
 | Designing a public function signature, a derive set, or a conversion | [rust-quality/api-and-idioms.md](rust-quality/api-and-idioms.md) |
 | Choosing a crate, or writing code against an API you have not checked this year | [rust-quality/current-apis.md](rust-quality/current-apis.md) |
 | Serializing anything, changing an on-disk or wire format, or emitting output another tool parses | [rust-quality/data-and-formats.md](rust-quality/data-and-formats.md) |
@@ -112,3 +112,7 @@ set where everything blocks teaches the reader to negotiate with all of it.
   or a release profile** — it does not glob `.github/workflows/`, because a
   workflow filename says nothing about its language and the directory holds
   every other job the repository has.
+- **`code-docs`** — comments, doc comments, decision-record pointers and test
+  names as documentation, in every language. It decides what a comment keeps,
+  where each clause goes and how long a block runs; DOC-18 to DOC-20 point
+  there. Loads on every source file, so a `.rs` edit loads both.

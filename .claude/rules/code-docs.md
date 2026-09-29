@@ -28,6 +28,34 @@ paths:
   - "**/*.cxx"
   - "**/*.hpp"
   - "**/*.hh"
+  - "**/*.hxx"
+  - "**/*.m"
+  - "**/*.mm"
+  - "**/*.rb"
+  - "**/*.php"
+  - "**/*.lua"
+  - "**/*.dart"
+  - "**/*.zig"
+  - "**/*.sh"
+  - "**/*.bash"
+  - "**/*.zsh"
+  - "**/*.ps1"
+  - "**/*.psm1"
+  - "**/Makefile"
+  - "**/*.mk"
+  - "**/Dockerfile"
+  - "**/CMakeLists.txt"
+  - "**/*.cmake"
+  - "**/BUILD"
+  - "**/BUILD.bazel"
+  - "**/*.bzl"
+  - "**/*.star"
+  - "**/MODULE.bazel"
+  - "**/WORKSPACE"
+  - "**/WORKSPACE.bazel"
+  - "**/*.nix"
+  - "**/*.gradle"
+  - "**/*.groovy"
 summary: The code-comments index, holding the guard floor, where each clause goes, the length caps and ratchet, the gate, and where the depth lives
 keywords: comments,code-comments,doc-comments,docstrings,rustdoc,tsdoc,jsdoc,godoc,javadoc,kdoc,guards,comment-density,ratchet,decision-records,adr,plan-ids,process-ids,interface-text,clap,json-schema,mcp,ai-agents
 license: Apache-2.0
@@ -183,6 +211,10 @@ never come off.
   are protected; its misses are unclassified.
 - **Repo-minted IDs.** A green `ids` run proves nothing until `--discover` has
   a verdict for every prefix the repo mints.
+- **Files the census does not lex.** The rule also loads on build files and
+  scripts (CMake, Bazel, Nix, Gradle, shell, Makefiles), but the census and
+  the checks read only the extensions in `EXT_LANG`. Every row holds there in
+  review.
 - **Citations in prose.** "The ADR on caching, decision 1A" carries no token,
   so interface text that cites a record in words passes the scanner. Row 10
   holds it, in review.

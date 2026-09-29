@@ -4,6 +4,9 @@ paths:
   - "**/*.tsx"
   - "**/*.mts"
   - "**/*.cts"
+  - "**/.npmrc"
+  - "**/.yarnrc.yml"
+  - "**/bunfig.toml"
 summary: The TypeScript quality index — the gate, the non-negotiables, and where the depth lives
 keywords: typescript,quality,standards,review,types,async,errors,exit-codes,security,modules,testing,eslint,biome,tsconfig,node,browser,vscode
 license: Apache-2.0

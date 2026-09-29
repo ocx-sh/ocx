@@ -52,5 +52,5 @@ grim add ghcr.io/michael-herwig/arcana/hex-core:latest
 ```
 
 Cross-skill mentions elsewhere use the command form: `/hex-init`,
-`/hex-discuss`, `/hex-plan`, `/hex-execute`, `/hex-review`,
+`/hex-discuss`, `/hex-loop`, `/hex-plan`, `/hex-execute`, `/hex-review`,
 `/hex-architect`, `/hex-finalize`.

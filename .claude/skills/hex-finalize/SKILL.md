@@ -25,8 +25,10 @@ nothing for a tier to select.
 
 **Entry is explicit invocation only, never a description match** — the
 invocation *is* the grant for the action class, so it must originate with a
-human. The frontmatter says so to clients that read it; the rule binds in
-clients that drop those keys. Exit is the handoff block, or a pre-flight halt.
+human, or a session acting on a human-pasted C-805a grant
+([`finalize.md` § Consent model](../hex-core/references/finalize.md#consent-model)).
+The frontmatter says so to clients that read it; the rule binds in clients
+that drop those keys. Exit is the handoff block, or a pre-flight halt.
 
 **This is the one hex command that writes to a remote.** Every *rule* it obeys
 is defined once in [`finalize.md`](../hex-core/references/finalize.md) and
@@ -75,7 +77,9 @@ the gate.** An already-published rewrite is resumed from rather than rebuilt —
 and that resume still reaches the [gate](#gate), with a **reduced act set**
 naming no rewrite and no force-push. Whether this session already passed the
 gate for the pushed SHA is session-local, not a journal: losing it **fails
-toward the gate**, so a fresh session re-asks.
+toward the gate**, so a fresh session re-asks — except under a
+[C-805a](../hex-core/references/finalize.md#consent-model)
+grant pasted in that fresh session.
 
 **Resolutions — none of these halts:**
 
@@ -253,10 +257,12 @@ clobber an armed ref, and the one command that releases the lock.
 
 ## Gate
 
-**One approval, at the local/remote boundary, on every rung.** Its position
-differs from the shared shape for one reason: the thing it must disclose — the
-concrete recomposed commit list with its attestations — **does not exist until
-the rewrite is computed**.
+**One approval, at the local/remote boundary, on every rung** — except under
+[C-805a](../hex-core/references/finalize.md#consent-model),
+where the pasted grant answers it. Its position differs from the shared shape
+for one reason: the thing it must disclose — the concrete recomposed commit
+list with its attestations — **does not exist until the rewrite is
+computed**.
 [`finalize.md` § Consent model](../hex-core/references/finalize.md#consent-model)
 owns why that is one gate and not two.
 
@@ -305,11 +311,17 @@ above those three**, and the gate says so before the push.
 
 The closing prompt carries the **publication framing**: the pre-gate commits
 already carry a sign-off and a signature, but only in a local ref a reset
-destroys — approving is where that attestation becomes permanent and public.
+destroys — approving is where that attestation becomes permanent and public
+(except under
+[C-805a](../hex-core/references/finalize.md#consent-model),
+where the pasted grant is that approval).
 
-**The gate asks on every rung, including local-only**, where the approval covers
-the recomposed series and the human publishes by hand. A rung that skipped it
-would let an unreviewed attestation reach a `git push` typed five minutes later.
+**The gate asks on every rung, including local-only** — except under C-805a
+([`finalize.md` § Consent model](../hex-core/references/finalize.md#consent-model)),
+where it prints the full disclosure and the pasted grant answers it. On the
+local-only rung the approval covers the recomposed series and the human
+publishes by hand. A rung that skipped the gate would let an unreviewed
+attestation reach a `git push` typed five minutes later.
 
 **A `no` ends the run with the rewritten branch standing** —
 [`finalize.md` § Consent model](../hex-core/references/finalize.md#consent-model)
@@ -317,8 +329,11 @@ owns what the decline itself performs.
 
 ## Remote
 
-Only after a `yes`. Three acts, in order, each scoped to the one branch and its
-one pull request; the enumeration and its explicit never-list are fixed in
+Only after a `yes` — or, under
+[C-805a](../hex-core/references/finalize.md#consent-model),
+only the acts its pasted grant names. Three acts, in order, each scoped to the
+one branch and its one pull request; the enumeration and its explicit
+never-list are fixed in
 [`finalize.md` § The act set](../hex-core/references/finalize.md#the-act-set),
 and no discovered convention or file content adds to it.
 
