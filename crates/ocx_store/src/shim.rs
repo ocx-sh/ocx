@@ -3,7 +3,9 @@
 
 //! Embedded prebuilt `ocx-shim` executable bytes (`adr_windows_exe_shim.md` Contract 3).
 //!
-//! Refresh on every `crates/ocx_shim` change: `task rust:shim:build TARGET=<arch>-pc-windows-gnullvm`, copy to `shims/`, update [`SHIM_SHA256`].
+//! Refresh on every `crates/ocx_shim` change: take the `ocx-shim-fresh-<target>` artifacts from that
+//! change's `build-windows-shims.yml` run (or `task rust:shim:build TARGET=<arch>-pc-windows-gnullvm`),
+//! copy them to `shims/`, update [`SHIM_SHA256`].
 
 // Blobs built with rustc 1.95.0, cargo-zigbuild 0.22.3, Zig 0.16.0 (PyPI `ziglang==0.16.0`, sha256
 // 2317bbb91798556d9d0f38aabdac23db83f0979b25f767259ae474546724087c): nothing else pins Zig.
@@ -17,13 +19,13 @@ pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
 
 /// SHA-256 of the committed blob: a corruption canary, not a provenance control; empty off Windows.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_SHA256: &str = "6ed3c0a8d77dcce37a598b62a19c81a3597d463b92c1ce07910b7226f62dd427";
+pub const SHIM_SHA256: &str = "fc124d0dd2d1bcf29e5b504132695b5b478b96aa8c0470857baa2227ca26ccb1";
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-aarch64.exe");
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_SHA256: &str = "ee95a81567416092c46f6eb198e3f7e382e7490c574181211b8d46a35510e296";
+pub const SHIM_SHA256: &str = "1766a13861870fddc465201773a22ca07aba30866a6c3bdac93ad13e53cd0596";
 
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_BYTES: &[u8] = &[];

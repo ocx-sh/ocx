@@ -302,7 +302,7 @@ jobs:
           echo "last shim source change: $(git log -1 --format='%h %s' "$last_src")"
           echo "last blob re-cut:        $(git log -1 --format='%h %s' "$last_blob")"
           echo "Re-cut them from THIS run's ocx-shim-fresh-<target> artifacts and update"
-          echo "both SHIM_SHA256 constants in crates/ocx_store/src/shim.rs (ritual: shim.rs:19-33)."
+          echo "both SHIM_SHA256 constants in crates/ocx_store/src/shim.rs (ritual: its module doc)."
           exit 1
 
   # Windows acceptance: the genuinely Win32-dependent shim behaviours
