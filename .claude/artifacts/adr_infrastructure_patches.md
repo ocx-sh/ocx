@@ -54,7 +54,7 @@ The load-bearing requirements (C-numbers used throughout):
 |---|---|
 | **C1** | **Compositional load.** A site package's *interface* environment composes into the *root execution environment*, overriding the publisher's values for the same key (infra intent wins). |
 | **C2** | **Entry-point tiering.** Entry points run in their own composed environment (`self_view=true`) and must inherit the root's patches; entry-point-owned packages may carry their own patches. |
-| **C3** | **Visibility tiering.** A patch for a dependency that reaches the root only on the *private* surface must load **only** into the private surface. Patches inherit the interface/private visibility of the target they patch. |
+| **C3** | **Visibility tiering.** A patch composes as part of the target it patches: its env is read on the surface that target is admitted through, exactly as if the target had declared it. A root target is admitted on the active surface, so a companion's `private` var reaches that root's own launchers and `--self` and never its consumers; a dependency target is admitted only through its interface, so its companion contributes interface vars alone. A patch for a dependency that reaches the root only on the *private* surface therefore loads **only** into the private surface. |
 | **C4** | **Site policy floats; identity does not.** Patches are an **ambient site tier** (the execution-env twin of `[mirrors]`), not lockfile content. The active policy refreshes **independently of base-package installs** and works offline once synced. Reproducibility of *tools* (the lock) and of *site policy* are orthogonal domains — patch identity is deliberately **not** folded into base-package identity. (Validated by Nix `impureEnvVars`, Cargo `config.toml` source-replacement, Spack site scope, Lmod `SitePackage.lua`, containerd `hosts.toml` — see Industry Context.) |
 | **C5** | **Loading guarantee.** Every applicable patch is *always* loaded when its target loads — including patches for transitive deps, including encapsulated entry-point deps needing the patch on their private surface. No silent skips. |
 | **C6** | **CAS persistence + GC.** Patch descriptors and companion packages persist in the blob/layer CAS so the offline contract holds (zip `OCX_HOME` → unzip elsewhere → reinstall → identical patched env), and GC must keep them reachable. |
@@ -119,7 +119,7 @@ Keep base-package TCs **pure** (publisher-declared deps only). Maintain a **sepa
 
 ## Decision Outcome
 
-**Chosen: Option B — compose-time site overlay, with companion env inheriting the visited TC entry's effective `Visibility`.** Patches are site-loaded packages composed by the existing two-env composer through a thin overlay step; their lifecycle (sync, update, GC) is independent of the base package's install.
+**Chosen: Option B — compose-time site overlay, with each companion composed as part of the targets it patches.** Patches are site-loaded packages composed by the existing two-env composer through a thin overlay step; their lifecycle (sync, update, GC) is independent of the base package's install.
 
 ### The overlay mechanism (concrete)
 
@@ -131,9 +131,12 @@ PHASE 1 — base compose (unchanged): for each root, emit TC-entry interface var
           set of visited identifiers admitted on the active surface (the `want`=true set).
 
 PHASE 2 — site overlay (new), appended AFTER all Phase-1 output:
-  for each admitted identifier I (TC entries + roots, in deterministic order):
-      for companion in site_patches.for(I):         // pre-resolved SitePatchSet, passed into compose
-          emit companion's INTERFACE vars only       // never the companion's private surface
+  pass 1: for each admitted identifier I (TC entries + roots, in deterministic order):
+      for companion C in site_patches.for(I):       // pre-resolved SitePatchSet, passed into compose
+          axes[C] |= root(I) ? surface(self_view)   // PRIVATE under self_view, else INTERFACE
+                             : INTERFACE            // a dep is admitted through its interface only
+  pass 2: for each matched companion C, once:
+          emit C's vars whose visibility intersects axes[C]
 ```
 
 The overlay needs `[patches]` config + tag/descriptor reads to know which companions apply — which `composer::compose(roots, store, self_view)` does **not** have (it sees only `PackageStore`). So the overlay is **not** derived inside the composer. The `PackageManager`/`Context` layer (where `resolve_env` lives, and which holds the resolved `PatchConfig`) builds a **`SitePatchSet`** via `SitePatchResolver` and passes it in: `compose(roots, store, self_view, &site_patches)` (or, equivalently, Phase 2 runs in `resolve_env` *after* `compose` returns Phase 1's admitted set). Inside compose, `site_patches.for(I)` is a pure lookup into the pre-resolved set — no config read, no I/O. This mirrors how the mirror feature resolves a `MirrorMap` at `Context` (`resolve_mirror_map`) and hands it to the client rather than having the client read config.
@@ -141,13 +144,13 @@ The overlay needs `[patches]` config + tag/descriptor reads to know which compan
 Two invariants make this correct:
 
 - **Global-last ordering (C1).** Every companion var is emitted after *all* publisher vars (deps and roots), so infra always overrides publisher for shared keys, regardless of whether the patched package is a deep transitive dep or the root. Deterministic companion order: targets in Phase-1 visit order, then descriptor rule order, then companion-list order.
-- **Interface-only projection (no private leak).** A companion is emitted exactly like a dependency — only its `has_interface()` vars cross into the target env (`emit_interface_vars` semantics, `composer.rs:343`). The **target's** surface (`want`) decides *whether* the companion block is emitted; it never decides *which of the companion's surfaces* is read. Even under a launcher's `self_view=true`, the companion contributes only its interface vars — its own private env / private deps stay sealed. (This corrects an earlier "companion as visibility-inherited sub-root" framing, which would have leaked the companion's private surface under `self_view=true`.) A companion's *own* transitive deps contribute through the companion's interface projection, resolved when the companion was installed.
+- **Part-of-target projection.** A companion is composed as part of its targets, on a surface mask `axes_C` that is the union over every target it matched: PRIVATE for a root target under `self_view`, INTERFACE for a root target otherwise, INTERFACE for a dependency target. A companion var crosses iff its visibility intersects `axes_C`, and each companion projects once on its full mask, however many targets it matched. So a `private` var reaches the root target's own launchers and `--self` but never the consumer env, an `interface` var reaches consumers but not the target's own launchers, and `public` reaches both. **A dependency target cannot leak a private var:** a dependency reaches any surface only through its interface, so its companion is granted INTERFACE alone — granting PRIVATE there would push the var into every consumer of the root. A companion's own transitive deps are admitted on the same mask, exactly as a root composed on that surface. Integrations keep the outer composition's gate (interface view only), independent of the mask. (Supersedes the earlier interface-only projection, under which a companion's `private` var never reached even its own target's launchers.)
 
 The `SitePatchSet` itself resolves entirely from local state (`[patches]` config + tag store + persisted descriptor blobs → companion installs under `packages/`) — no ledger, no network. It is built once per `resolve_env` call and reused for every root.
 
 > **Amendment (2026-09-30, #564):** "no network" holds only for a companion that has a recorded pin. A **required** companion with no pin (a base installed before its rule existed, or a lost pin file) is resolved live and the pin is recorded, never under `--offline` or `OCX_PATCH_SNAPSHOT`, where it fails closed (exit 79). An unpinned **optional** companion is skipped silently with no network call; install, pull, lock and `ocx patch sync` pick it up. Composition records a missing pin but never advances an existing one.
 
-**Why "the visited entry's surface gates the block" is the whole of C3.** The composer already computed, per root, whether identifier `I` reaches the interface or private surface (`composer.rs:122`). The patch is *for* `I`, so its block is emitted iff `I` was admitted — a private-only dep's patch is therefore present only under `self_view=true` and absent from the default interface env. No new visibility algebra: the gate reuses the boolean the composer already has; the projection reuses the interface-only dep emission.
+**Why "the visited entry's surface gates the block" is the whole of C3.** The composer already computed, per root, whether identifier `I` reaches the interface or private surface (`composer.rs:122`). The patch is *for* `I`, so its block is emitted iff `I` was admitted — a private-only dep's patch is therefore present only under `self_view=true` and absent from the default interface env. No new visibility algebra: the gate reuses the boolean the composer already has; the projection reuses `Visibility` masks the composer already composes with.
 
 ### Entry-point inheritance (C2)
 
@@ -375,7 +378,7 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 
 ### Phase 4 — `SitePatchResolver` + compose-time overlay + display (#115) ↓
 - ✚ `SitePatchResolver` at the `PackageManager`/`Context` layer → `SitePatchSet` (from `[patches]` config + tag store + descriptor blobs). `resolve_env` builds it and threads it into the overlay.
-- Add the **Phase-2 overlay**: extend `compose(roots, store, self_view, &site_patches)` (or run Phase 2 in `resolve_env` after `compose` returns the admitted set). Phase 1 records the admitted-identifier set per active surface; Phase 2 appends, globally last, each matched companion's **interface-only** vars (gate = target admitted; projection = interface). `site_patches.for(I)` is a pure lookup — **no config/I-O inside `compose`**. Global (root) descriptor overlays every root's interface surface, before package-specific. Covers root + entry-point (`self_view=true`) paths.
+- Add the **Phase-2 overlay**: extend `compose(roots, store, self_view, &site_patches)` (or run Phase 2 in `resolve_env` after `compose` returns the admitted set). Phase 1 records the admitted-identifier set per active surface; Phase 2 appends, globally last, each matched companion's vars on its part-of-target mask (gate = target admitted; projection = the target's surface — `self_view` for a root, interface for a dependency). `site_patches.for(I)` is a pure lookup — **no config/I-O inside `compose`**. Global (root) descriptor overlays every root's interface surface, before package-specific. Covers root + entry-point (`self_view=true`) paths.
 - `ocx env`/`ocx deps` `[patch]` annotations + `--show-patches`.
 - **`ConstantTracker` rework dropped** (append-order last-wins). Large shrink.
 
@@ -397,7 +400,7 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 
 - [ ] Configure patch registry, install base, `ocx exec` shows companion-overridden env in correct order (C1).
 - [ ] **Global-last ordering:** a patch on a *transitive dependency* overrides a `Constant` **and** a `Path` var that the **root** package itself declares — patch wins (C1; the Phase-2 regression Codex flagged).
-- [ ] **Interface-only projection:** a companion carrying a private-only env var (and a private-only dep) never appears in the patched target's env, even when the target is reached under `--self`/launcher `self_view=true` (no private-surface leak).
+- [ ] **Part-of-target projection:** a companion's `private` var reaches its root target's launcher and `--self` env and is absent from `ocx package env`; its `interface` var is absent from the root target's launcher and `--self`; a companion matched only through a dependency target contributes only its interface vars on either surface (no private leak).
 - [ ] Private-only dep's patch absent from default (interface) env, present under `--self` (C3); entry-point launcher inherits root patches (C2/C5).
 - [ ] **No new store, no ledger:** companion lands in `packages/` (deduped via `layers/`), descriptor blobs in `blobs/`, discovery state in `tags/` — no `artifacts/` dir and no `state/patches.json` created; only `ocx patch freeze` writes `patches.snapshot.json`.
 - [ ] **GC roots from `SitePatchResolver` (no pin list):** `clean` derives companion roots from config + tags + descriptor blobs and passes them to `ReachabilityGraph::build`; no `refs/symlinks/` root written against a base install symlink; base `resolve.json` never mutated (C6).
@@ -441,3 +444,4 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 | 2026-09-30 | sion branch (#565) | Supersedes "Unified match: one flat glob over the full canonical identifier": multi-form match with a bare-repository rule covering every tag and digest; table in "One match semantic". |
 | 2026-09-30 | sion branch (#550) | Project-lock bases are GC and sync roots; `ocx clean --force` drops them. Amends "GC reachability (C6)". |
 | 2026-10-01 | sion branch (S1) | Under `OCX_PATCH_SNAPSHOT` every command but `patch sync` and `patch freeze` uses only the snapshot's descriptors and pins: no tag resolve, no descriptor-state or pin write, a missing pinned descriptor or companion fetched by digest (never offline, where a required one exits 79). `patch sync` under a snapshot exits 78. Replaces "compose prefers the snapshot, else live" in "Determinism = whole-tier freeze" and Phase 5. |
+| 2026-10-01 | architect | **A patch composes as part of its target** (C3 restated). A companion's vars are projected on its targets' surface mask — `self_view` surface for a root target, INTERFACE for a dependency, union when it matched both — instead of interface-only. Breaking: an `interface`-only companion var no longer reaches the target's own launchers or `--self` (declare it `public`); a `private` var now does. |
