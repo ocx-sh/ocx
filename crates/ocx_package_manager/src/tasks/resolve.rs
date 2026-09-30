@@ -761,6 +761,10 @@ impl PackageManager {
         // Keyed by full `registry/repo:tag`: a catch-all companion is projected and emitted once,
         // under the first matching base. Fail-closed checks still run on every base.
         let mut companion_projection_cache: HashMap<ocx_oci::PackageRef, CompanionOutcome> = HashMap::new();
+        // Shared across companions and seeded with the base, so a package reached twice emits once, in
+        // its first position (#306); an entry comparison would miss a root the base emits on its link.
+        let mut emitted: HashSet<ocx_oci::PinnedPackageRef> =
+            admitted.iter().map(ocx_oci::PinnedPackageRef::strip_advisory).collect();
 
         let mut patch_set: SitePatchSet = SitePatchSet::new();
 
@@ -972,7 +976,9 @@ impl PackageManager {
                 // Interface surface, attributed to the companion. Binaries and entrypoints stay dropped:
                 // never on PATH here, so admitting them would advertise unreachable binaries.
                 let companion_arc = std::sync::Arc::new(companion_install_info);
-                match composer::compose_companion(&companion_arc, package_store, collect_integrations).await {
+                match composer::compose_companion(&companion_arc, package_store, collect_integrations, &mut emitted)
+                    .await
+                {
                     Ok(out) => {
                         // A cache miss proves no earlier base emitted it; empty output is still `Projected`.
                         let pinned = companion_arc.identifier().clone();
@@ -5213,11 +5219,10 @@ mod phase4_spec_tests {
 
     // ── One integrations row per (package, namespace) ───────────────────────
     //
-    // The base roots and every companion are composed by SEPARATE `compose`
-    // calls, and each dedups only within itself. A package reachable from two
-    // of those calls therefore arrives at the merge site twice, so the
-    // one-row-per-(package, namespace) contract is owned by the merge, not by
-    // any single compose.
+    // A companion's closure skips packages the base or an earlier companion
+    // emitted, but a companion itself is always emitted, so a companion an
+    // earlier composition already reached still arrives at the merge twice:
+    // the one-row-per-(package, namespace) contract is owned by the merge.
 
     /// Seed `store` with a dependency that declares exactly one integrations
     /// namespace, and return it together with the TC that reaches it.
@@ -5336,17 +5341,10 @@ mod phase4_spec_tests {
     /// A dependency reachable from BOTH a base root and a patch companion
     /// contributes its integrations exactly once.
     ///
-    /// The base compose admits the dep and emits its row; the companion's own
-    /// projection admits the very same dep and emits it again. Neither compose
-    /// can see the other's `seen` set, so without dedup at the merge the
-    /// consumer receives the identical (package, namespace) row twice, which
-    /// reads as two independent declarations.
-    ///
-    /// The two legs reach the dep under DIFFERENT advisory tags, which is the
-    /// axis the merge-site key turns on: rows carry the tag-bearing identifier,
-    /// so a key that does not strip the tag sees two packages. This leg pins the
-    /// seed side of the dedup (base rows seed the set, the companion's row is
-    /// tested against it).
+    /// The two legs reach the dep under DIFFERENT advisory tags: rows carry the
+    /// tag-bearing identifier, so a dedup key that does not strip the tag sees
+    /// two packages and the consumer receives the identical (package, namespace)
+    /// row twice, which reads as two independent declarations.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_dep_reachable_from_a_base_and_a_companion_contributes_one_row() {
         let dir = TempDir::new().unwrap();
@@ -5393,14 +5391,10 @@ mod phase4_spec_tests {
     /// Two companions reaching one shared dependency contribute its
     /// integrations once between them.
     ///
-    /// Same defect as `a_dep_reachable_from_a_base_and_a_companion_contributes_one_row`
-    /// with the base removed: the duplication is between two companion
-    /// projections, both landing in the SAME overlay under one admitted base,
-    /// so it survives any dedup keyed on the companion identifier.
-    ///
-    /// The two companions reach the dep under different advisory tags, pinning
-    /// the insert side of the merge-site key: nothing seeded the set here, so
-    /// both rows are tested against each other rather than against a base row.
+    /// Same shape as `a_dep_reachable_from_a_base_and_a_companion_contributes_one_row`
+    /// with the base removed: both projections land in the SAME overlay under one
+    /// admitted base, so a dedup keyed on the companion identifier cannot catch it,
+    /// and the two advisory tags must still collapse to one package.
     #[tokio::test(flavor = "multi_thread")]
     async fn two_companions_reaching_one_dep_contribute_one_row() {
         let dir = TempDir::new().unwrap();
@@ -5428,6 +5422,165 @@ mod phase4_spec_tests {
             1,
             "two companions sharing one dep must contribute its row once; rows: {:?}",
             attribution.integrations
+        );
+    }
+
+    /// A companion that an earlier companion already reached as a dependency is still emitted
+    /// itself, so its row arrives at the merge twice and only the merge-site key keeps it once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_an_earlier_companion_reaches_contributes_its_row_once() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+
+        let (second, second_pinned) = seed_companion_with_tc(&manager, "proxy-config", 'e', &ResolvedPackage::new());
+        let (first, _) = seed_companion_with_tc(
+            &manager,
+            "ca-bundle",
+            'c',
+            &tc_reaching(&with_advisory_tag(&second_pinned, "1")),
+        );
+        seed_global_descriptor(&manager, &config, &[&first, &second]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (_entries, _compose_count, _provenance, attribution) = manager
+            .resolve_env_with_attribution(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("resolve_env_with_attribution must succeed");
+
+        assert_eq!(
+            integration_rows(&attribution, &second_pinned, "vendor.companion"),
+            1,
+            "a companion reached earlier as a dependency must contribute its row once; rows: {:?}",
+            attribution.integrations
+        );
+    }
+
+    // ── A dependency shared with the base or another companion emits once ──
+
+    /// Install a companion whose closure is `resolved` and whose own interface var `var_key`
+    /// proves its projection engaged; returns the tag identifier a descriptor names it by.
+    fn seed_companion_with_var(
+        manager: &PackageManager,
+        name: &str,
+        hex_char: char,
+        resolved: &ResolvedPackage,
+        var_key: &str,
+    ) -> PackageRef {
+        let digest = sha256(hex_char);
+        let tag_id = PackageRef::new_registry(name, PATCH_REGISTRY).clone_with_tag("latest");
+        let pinned_id = PinnedPackageRef::try_from(tag_id.clone_with_digest(digest.clone())).unwrap();
+        seed_package_with_constant_var(
+            &manager.file_structure().packages,
+            &pinned_id,
+            resolved,
+            var_key,
+            name,
+            Visibility::INTERFACE,
+        );
+        seed_companion_pin(manager.file_structure(), &tag_id, &digest);
+        tag_id
+    }
+
+    /// A dependency the base already emits keeps its base position and is not repeated in the
+    /// overlay, so it carries no patch provenance.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dependency_shared_with_the_base_is_emitted_once_at_its_base_position() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let shared_dep = pinned("shareddep", 'd');
+        seed_package_with_constant_var(
+            &store,
+            &shared_dep,
+            &ResolvedPackage::new(),
+            "SHARED_VAR",
+            "shared",
+            Visibility::INTERFACE,
+        );
+        let companion = seed_companion_with_var(&manager, "ca-bundle", 'c', &tc_reaching(&shared_dep), "COMPANION_VAR");
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', tc_reaching(&shared_dep)));
+
+        let (entries, patch_start, provenance) = manager
+            .resolve_env_with_patch_boundary(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+
+        let overlay = &entries[patch_start..patch_start + provenance.len()];
+        assert!(
+            overlay.iter().any(|e| e.key == "COMPANION_VAR"),
+            "positive control: the companion projection engaged; entries: {entries:?}"
+        );
+        let shared_positions: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.key == "SHARED_VAR")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            shared_positions.len(),
+            1,
+            "a dependency shared by the base and a companion must be emitted once; entries: {entries:?}"
+        );
+        assert!(
+            shared_positions[0] < patch_start,
+            "the shared dependency keeps its base position, outside the overlay; entries: {entries:?}, \
+             patch_start: {patch_start}"
+        );
+    }
+
+    /// Two companions reaching one dependency emit it once, under the first; the second still
+    /// contributes its own var.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dependency_shared_by_two_companions_is_emitted_once() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let shared_dep = pinned("shareddep", 'd');
+        seed_package_with_constant_var(
+            &store,
+            &shared_dep,
+            &ResolvedPackage::new(),
+            "SHARED_VAR",
+            "shared",
+            Visibility::INTERFACE,
+        );
+        let first = seed_companion_with_var(&manager, "ca-bundle", 'c', &tc_reaching(&shared_dep), "FIRST_VAR");
+        let second = seed_companion_with_var(&manager, "proxy-config", 'e', &tc_reaching(&shared_dep), "SECOND_VAR");
+        seed_global_descriptor(&manager, &config, &[&first, &second]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (entries, patch_start, provenance) = manager
+            .resolve_env_with_patch_boundary(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+
+        let overlay = &entries[patch_start..patch_start + provenance.len()];
+        for marker in ["FIRST_VAR", "SECOND_VAR"] {
+            assert!(
+                overlay.iter().any(|e| e.key == marker),
+                "positive control: both companions engaged (missing {marker}); entries: {entries:?}"
+            );
+        }
+        let shared: Vec<usize> = overlay
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.key == "SHARED_VAR")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            shared.len(),
+            1,
+            "a dependency two companions share must be emitted once; entries: {entries:?}"
+        );
+        assert_eq!(
+            provenance[shared[0]].companion, first,
+            "the shared dependency is emitted under the first companion; provenance: {provenance:?}"
         );
     }
 
