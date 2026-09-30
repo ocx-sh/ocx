@@ -33,12 +33,11 @@ pub struct PatchSyncReport {
 // ── Shared base enumerator ────────────────────────────────────────────────────
 
 /// Every installed base identifier in the symlink store, with slugified registry hostnames restored.
-pub async fn enumerate_installed_bases(
-    file_structure: &ocx_store::file_structure::FileStructure,
-) -> crate::Result<Vec<ocx_oci::PackageRef>> {
+pub async fn enumerate_installed_bases(manager: &PackageManager) -> crate::Result<Vec<ocx_oci::PackageRef>> {
     use ocx_util::fs::path_exists_lossy;
 
-    let snapshot = ocx_index::IndexStore::machine_local(file_structure);
+    let file_structure = manager.file_structure();
+    let snapshot = manager.effective_index_store();
     let snapshot = &snapshot;
     let symlink_root = file_structure.symlinks.root().to_path_buf();
 
@@ -134,7 +133,7 @@ impl PackageManager {
             return Ok(PatchSyncReport::default());
         };
 
-        let installed_bases = enumerate_installed_bases(self.file_structure()).await?;
+        let installed_bases = enumerate_installed_bases(self).await?;
         let total_checked = installed_bases.len() + 1; // +1 for the global root
 
         let file_structure = self.file_structure();
@@ -349,9 +348,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn enumerate_installed_bases_empty_store_returns_empty() {
         let tmp = TempDir::new().unwrap();
-        let fs = FileStructure::with_root(tmp.path().to_path_buf());
         // No symlink directory created — should return empty, not error.
-        let result = enumerate_installed_bases(&fs).await;
+        let result = enumerate_installed_bases(&make_offline_manager(tmp.path())).await;
         let bases = result.expect("enumerate_installed_bases on empty store must not error");
         assert!(
             bases.is_empty(),
@@ -946,7 +944,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn enumerate_installed_bases_returns_only_seeded_bases() {
         let tmp = TempDir::new().unwrap();
-        let fs = ocx_store::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
 
         // Seed two distinct installed bases.
         let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
@@ -961,7 +958,9 @@ mod tests {
             tokio::fs::write(&candidate_path, b"").await.unwrap();
         }
 
-        let bases = enumerate_installed_bases(&fs).await.expect("enumerate must succeed");
+        let bases = enumerate_installed_bases(&make_offline_manager(tmp.path()))
+            .await
+            .expect("enumerate must succeed");
 
         // Returns exactly the seeded bases.
         assert_eq!(
