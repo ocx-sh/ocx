@@ -60,8 +60,13 @@ async fn leaf_present_in_any_tier(file_structure: &FileStructure, leaf: &ocx_oci
 }
 
 /// GC roots from every live registered project's `ocx.lock` and from
-/// `$OCX_HOME/ocx.lock`; one unreadable lock yields [`CollectedRoots::RetainAll`].
-pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructure) -> crate::Result<CollectedRoots> {
+/// `$OCX_HOME/ocx.lock`, with their patch bases for `platform`; one unreadable
+/// lock yields [`CollectedRoots::RetainAll`].
+pub(crate) async fn collect_project_roots(
+    ocx_home: &Path,
+    file_structure: &FileStructure,
+    platform: &ocx_oci::Platform,
+) -> crate::Result<CollectedRoots> {
     let registry = ProjectRegistry::new(ocx_home);
 
     // The obsolete JSON ledger is benign, so it is removed at debug, never WARN.
@@ -90,12 +95,29 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
     // JoinSet order is nondeterministic, so results are sorted below: the reachability graph keys on it.
     let mut load_set: JoinSet<LockLoad> = JoinSet::new();
     for lock_path in entries {
+        let platform = platform.clone();
         load_set.spawn(async move {
             match ProjectLock::from_path(&lock_path).await {
-                Ok(Some(lock)) => LockLoad::Loaded(LoadedLock {
-                    lock_path,
-                    tools: lock.tools,
-                }),
+                Ok(Some(lock)) => {
+                    // Fail closed: untagged fallback bases miss tag-scoped rules and collect their companions.
+                    let config = match super::patch_sync::read_lock_config(&lock_path).await {
+                        Ok(config) => config,
+                        Err(e) => {
+                            log::warn!(
+                                "Project root '{}': ocx.toml unreadable; retaining all objects this run \
+                                 (fail-closed): {e}",
+                                lock_path.display()
+                            );
+                            return LockLoad::Indeterminate;
+                        }
+                    };
+                    let patch_bases = super::patch_sync::lock_bases(&lock, config.as_ref(), &platform);
+                    LockLoad::Loaded(LoadedLock {
+                        lock_path,
+                        tools: lock.tools,
+                        patch_bases,
+                    })
+                }
                 Ok(None) => {
                     log::debug!(
                         "Skipping project root '{}': lock file no longer present.",
@@ -156,6 +178,10 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
         buckets[index].push((group, name, resolved));
     }
 
+    let patch_bases = loaded
+        .iter()
+        .flat_map(|loaded_lock| loaded_lock.patch_bases.iter().cloned())
+        .collect();
     let mut roots: Vec<ProjectRootDigests> = loaded
         .into_iter()
         .zip(buckets)
@@ -173,13 +199,17 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
         .collect();
 
     roots.sort_by(|a, b| a.ocx_lock_path.cmp(&b.ocx_lock_path));
-    Ok(CollectedRoots::Roots(roots))
+    Ok(CollectedRoots::Roots(ProjectRoots {
+        digests: roots,
+        patch_bases,
+    }))
 }
 
 /// A registered project's parsed `ocx.lock`.
 struct LoadedLock {
     lock_path: PathBuf,
     tools: Vec<ocx_project::lock::LockedTool>,
+    patch_bases: Vec<ocx_oci::PackageRef>,
 }
 
 /// Outcome of loading a single registered project's `ocx.lock`.
@@ -191,10 +221,18 @@ enum LockLoad {
     Indeterminate,
 }
 
-/// Result of [`collect_project_roots`].
-pub enum CollectedRoots {
+/// Every readable project lock's GC roots and patch bases.
+pub(crate) struct ProjectRoots {
     /// Per-project roots, deterministically ordered.
-    Roots(Vec<ProjectRootDigests>),
+    pub(crate) digests: Vec<ProjectRootDigests>,
+    /// Lock entries as `ocx lock` discovered their patch companions, for
+    /// [`PackageManager::resolve_site_patch_roots`].
+    pub(crate) patch_bases: Vec<ocx_oci::PackageRef>,
+}
+
+/// Result of [`collect_project_roots`].
+pub(crate) enum CollectedRoots {
+    Roots(ProjectRoots),
     /// A live project's lock was unreadable: the caller must retain every object,
     /// or a partial root set collects that project's packages.
     RetainAll,
@@ -206,11 +244,16 @@ impl PackageManager {
     /// root packages (`adr_project_gc_symlink_ledger.md`).
     pub async fn clean(&self, dry_run: bool, force: bool) -> crate::Result<CleanResult> {
         let ocx_home = self.file_structure().root().to_path_buf();
+        let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
 
-        let project_roots: Vec<ProjectRootDigests> = if force {
-            Vec::new()
+        // `--force` reads no project lock, so their patch companions lose their roots too.
+        let project_roots = if force {
+            ProjectRoots {
+                digests: Vec::new(),
+                patch_bases: Vec::new(),
+            }
         } else {
-            match collect_project_roots(&ocx_home, self.file_structure()).await? {
+            match collect_project_roots(&ocx_home, self.file_structure(), &host_platform).await? {
                 CollectedRoots::Roots(roots) => roots,
                 CollectedRoots::RetainAll => {
                     // Consent stamps are retained too: over-retention is the safe direction.
@@ -224,13 +267,17 @@ impl PackageManager {
             }
         };
 
-        let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         // Snapshot pins too: compose resolves snapshot-first, so a record-only root set
         // collects what a frozen build still reads.
         let patch_roots = self
-            .resolve_site_patch_roots(&host_platform, super::resolve::PatchRootScope::RecordedAndSnapshot)
+            .resolve_site_patch_roots(
+                &host_platform,
+                super::resolve::PatchRootScope::RecordedAndSnapshot,
+                &project_roots.patch_bases,
+            )
             .await?;
-        let garbage_collector = GarbageCollector::build(self.file_structure(), &project_roots, &patch_roots).await?;
+        let garbage_collector =
+            GarbageCollector::build(self.file_structure(), &project_roots.digests, &patch_roots).await?;
 
         let targets = garbage_collector.unreachable_objects();
         let attribution = garbage_collector.roots_attribution();
@@ -711,8 +758,11 @@ repository = "localhost:5000/shfmt"
             "precondition: the tool is deferred, not materialized"
         );
 
-        let roots = match collect_project_roots(&ocx_home, &file_structure).await.unwrap() {
-            CollectedRoots::Roots(roots) => roots,
+        let roots = match collect_project_roots(&ocx_home, &file_structure, &ocx_oci::Platform::any())
+            .await
+            .unwrap()
+        {
+            CollectedRoots::Roots(roots) => roots.digests,
             CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
         };
 
@@ -739,8 +789,11 @@ repository = "localhost:5000/shfmt"
         tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
 
         let file_structure = FileStructure::with_root(ocx_home.clone());
-        let roots = match collect_project_roots(&ocx_home, &file_structure).await.unwrap() {
-            CollectedRoots::Roots(roots) => roots,
+        let roots = match collect_project_roots(&ocx_home, &file_structure, &ocx_oci::Platform::any())
+            .await
+            .unwrap()
+        {
+            CollectedRoots::Roots(roots) => roots.digests,
             CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
         };
 
@@ -781,10 +834,12 @@ repository = "localhost:5000/shfmt"
             "aaaa0000000000000000000000000000000000000000000000000000000000bb",
         )
         .await;
-        let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
+        let result = collect_project_roots(&ocx_home, &file_structure, &ocx_oci::Platform::any())
+            .await
+            .unwrap();
 
         let roots = match result {
-            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::Roots(roots) => roots.digests,
             CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
         };
 
@@ -806,6 +861,39 @@ repository = "localhost:5000/shfmt"
         );
     }
 
+    /// A lock whose `ocx.toml` cannot be read or parsed fails closed: the untagged fallback bases
+    /// miss tag-scoped rules, so a partial root set would collect their companions. A missing
+    /// `ocx.toml` is no error.
+    #[tokio::test]
+    async fn collect_roots_retains_all_when_the_lock_config_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let ocx_home = dir.path().to_path_buf();
+        tokio::fs::write(ocx_home.join("ocx.lock"), LOCK_WITH_ONE_TOOL)
+            .await
+            .unwrap();
+        let file_structure = FileStructure::with_root(ocx_home.clone());
+        let platform = ocx_oci::Platform::any();
+        let collect = || collect_project_roots(&ocx_home, &file_structure, &platform);
+
+        assert!(
+            matches!(collect().await.unwrap(), CollectedRoots::Roots(_)),
+            "a missing ocx.toml reads as a stale lock, not an error"
+        );
+
+        tokio::fs::write(ocx_home.join("ocx.toml"), "[tools\n").await.unwrap();
+        assert!(
+            matches!(collect().await.unwrap(), CollectedRoots::RetainAll),
+            "a malformed ocx.toml must retain everything"
+        );
+
+        tokio::fs::remove_file(ocx_home.join("ocx.toml")).await.unwrap();
+        tokio::fs::create_dir(ocx_home.join("ocx.toml")).await.unwrap();
+        assert!(
+            matches!(collect().await.unwrap(), CollectedRoots::RetainAll),
+            "an unreadable ocx.toml must retain everything"
+        );
+    }
+
     /// When `$OCX_HOME/ocx.lock` is absent, `collect_project_roots` treats the
     /// global lock as a no-op: `from_path` returns `Ok(None)` for a missing file
     /// and the function neither errors nor adds any global roots.
@@ -822,10 +910,12 @@ repository = "localhost:5000/shfmt"
         tokio::fs::create_dir_all(ocx_home.join("projects")).await.unwrap();
 
         let file_structure = FileStructure::with_root(ocx_home.clone());
-        let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
+        let result = collect_project_roots(&ocx_home, &file_structure, &ocx_oci::Platform::any())
+            .await
+            .unwrap();
 
         let roots = match result {
-            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::Roots(roots) => roots.digests,
             CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
         };
 
@@ -871,10 +961,12 @@ repository = "localhost:5000/shfmt"
             "bbbb0000000000000000000000000000000000000000000000000000000000cc",
         )
         .await;
-        let result = collect_project_roots(&ocx_home, &file_structure).await.unwrap();
+        let result = collect_project_roots(&ocx_home, &file_structure, &ocx_oci::Platform::any())
+            .await
+            .unwrap();
 
         let roots = match result {
-            CollectedRoots::Roots(roots) => roots,
+            CollectedRoots::Roots(roots) => roots.digests,
             CollectedRoots::RetainAll => panic!("expected Roots, got RetainAll"),
         };
 

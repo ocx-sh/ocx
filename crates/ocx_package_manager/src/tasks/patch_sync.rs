@@ -116,12 +116,137 @@ async fn read_tag_state_best_effort(tags_path: &std::path::Path, id: &ocx_oci::P
     }
 }
 
+/// The `ocx.toml` beside `lock_path`; `None` when it is absent.
+///
+/// # Errors
+///
+/// Any read or parse failure other than a missing file.
+pub(crate) async fn read_lock_config(
+    lock_path: &std::path::Path,
+) -> Result<Option<ocx_project::ProjectConfig>, ocx_project::Error> {
+    match ocx_project::ProjectConfig::from_path(&lock_path.with_file_name("ocx.toml")).await {
+        Ok(config) => Ok(Some(config)),
+        Err(ocx_project::Error::Project(ocx_project::ProjectError {
+            kind: ocx_project::ProjectErrorKind::Io(error),
+            ..
+        })) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `lock`'s entries as `ocx lock` and `ocx exec` discover their companions for `platform`:
+/// digest-bearing, tagged only while `lock` binds to `config`. An entry with no leaf there has none.
+pub(crate) fn lock_bases(
+    lock: &ocx_project::ProjectLock,
+    config: Option<&ocx_project::ProjectConfig>,
+    platform: &ocx_oci::Platform,
+) -> Vec<ocx_oci::PackageRef> {
+    lock.lenient_host_identifiers(config, platform)
+        .into_iter()
+        .filter_map(|(_, identifier)| identifier.ok().map(Into::into))
+        .collect()
+}
+
+/// How [`load_project_locks`] treats a registered project's unreadable `ocx.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnreadableConfig {
+    /// Warn and use the lock's untagged leaves: a sync only installs companions, so a missed tagged base costs nothing lasting.
+    Fallback,
+    /// Fail: a freeze would write a snapshot missing the companions that project's tagged bases discover.
+    Refuse,
+}
+
+/// Every live registered project lock and the home lock, with their configs, never pruning the
+/// ledger; an unreadable ledger or lock is skipped with a warning.
+///
+/// # Errors
+///
+/// [`PatchError::ProjectConfigUnreadable`](crate::patch::PatchError::ProjectConfigUnreadable)
+/// under [`UnreadableConfig::Refuse`].
+async fn load_project_locks(
+    file_structure: &ocx_store::file_structure::FileStructure,
+    unreadable_config: UnreadableConfig,
+) -> Result<Vec<(ocx_project::ProjectLock, Option<ocx_project::ProjectConfig>)>, crate::patch::PatchError> {
+    let ocx_home = file_structure.root();
+    let mut dirs = match ocx_project::ProjectRegistry::new(ocx_home)
+        .live_projects_read_only()
+        .await
+    {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            log::warn!("patch bases: skipping registered projects, the ledger is unreadable: {error}");
+            Vec::new()
+        }
+    };
+    dirs.push(ocx_home.to_path_buf());
+
+    let mut locks = Vec::new();
+    for dir in dirs {
+        let lock_path = dir.join("ocx.lock");
+        let lock = match ocx_project::ProjectLock::from_path(&lock_path).await {
+            Ok(Some(lock)) => lock,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!("patch bases: skipping unreadable lock in '{}': {error}", dir.display());
+                continue;
+            }
+        };
+        let config = match read_lock_config(&lock_path).await {
+            Ok(config) => config,
+            Err(source) if unreadable_config == UnreadableConfig::Refuse => {
+                return Err(crate::patch::PatchError::ProjectConfigUnreadable {
+                    path: lock_path.with_file_name("ocx.toml"),
+                    source: Box::new(source),
+                });
+            }
+            Err(error) => {
+                log::warn!(
+                    "patch bases: ignoring unreadable '{}', using the lock's untagged leaves: {error}",
+                    lock_path.with_file_name("ocx.toml").display()
+                );
+                None
+            }
+        };
+        locks.push((lock, config));
+    }
+    Ok(locks)
+}
+
+/// `installed` followed by the `extra` bases it lacks.
+pub(crate) fn union_bases(
+    mut installed: Vec<ocx_oci::PackageRef>,
+    extra: impl IntoIterator<Item = ocx_oci::PackageRef>,
+) -> Vec<ocx_oci::PackageRef> {
+    let mut seen: std::collections::HashSet<ocx_oci::PackageRef> = installed.iter().cloned().collect();
+    installed.extend(extra.into_iter().filter(|base| seen.insert(base.clone())));
+    installed
+}
+
+impl PackageManager {
+    /// Project-lock bases for `platform` from the live registered projects and the home lock,
+    /// read-only; an unreadable ledger or lock warns and is skipped.
+    ///
+    /// # Errors
+    ///
+    /// [`PatchError::ProjectConfigUnreadable`](crate::patch::PatchError::ProjectConfigUnreadable)
+    /// when a project's `ocx.toml` cannot be read or parsed.
+    pub async fn project_patch_bases(&self, platform: &ocx_oci::Platform) -> crate::Result<Vec<ocx_oci::PackageRef>> {
+        Ok(load_project_locks(self.file_structure(), UnreadableConfig::Refuse)
+            .await?
+            .iter()
+            .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), platform))
+            .collect())
+    }
+}
+
 // ── PackageManager::sync_patches ──────────────────────────────────────────────
 
 impl PackageManager {
-    /// Re-fetches every descriptor for the installed bases plus the global root, never crawling the registry.
+    /// Re-fetches every descriptor for the installed bases, the project-lock bases and the global
+    /// root, never crawling the registry.
     ///
-    /// One pass per concrete platform in `platforms`; an empty slice resolves no companions.
+    /// One pass per concrete platform in `platforms`, each with the project-lock bases built for
+    /// that platform's leaves; an empty slice resolves no companions.
     ///
     /// # Errors
     ///
@@ -137,8 +262,23 @@ impl PackageManager {
             return Ok(PatchSyncReport::default());
         };
 
-        let installed_bases = enumerate_installed_bases(self).await?;
-        let total_checked = installed_bases.len() + 1; // +1 for the global root
+        let installed = enumerate_installed_bases(self).await?;
+        let project_locks = load_project_locks(self.file_structure(), UnreadableConfig::Fallback).await?;
+        // Per platform: a project base carries that platform's leaf, as `ocx lock` discovered it.
+        let bases_per_platform: Vec<(&ocx_oci::Platform, Vec<ocx_oci::PackageRef>)> = platforms
+            .iter()
+            .map(|platform| {
+                let project = project_locks
+                    .iter()
+                    .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), platform));
+                (platform, union_bases(installed.clone(), project))
+            })
+            .collect();
+        let all_bases = union_bases(
+            Vec::new(),
+            bases_per_platform.iter().flat_map(|(_, bases)| bases.iter().cloned()),
+        );
+        let total_checked = all_bases.len() + 1; // +1 for the global root
 
         let file_structure = self.file_structure();
 
@@ -152,7 +292,7 @@ impl PackageManager {
             std::collections::BTreeMap::new();
         let global_before = read_tag_state_best_effort(&global_tags_path, &global_id).await;
         sources.insert(global_tags_path.clone(), (global_id.clone(), global_before));
-        for base_id in &installed_bases {
+        for base_id in &all_bases {
             let pkg_id = patch_descriptor_id(patches, base_id);
             let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_id);
             if let std::collections::btree_map::Entry::Vacant(slot) = sources.entry(pkg_tags_path.clone()) {
@@ -161,9 +301,9 @@ impl PackageManager {
             }
         }
 
-        for platform in platforms {
+        for (platform, bases) in &bases_per_platform {
             // `GlobalOnly`: a synthetic base would expand into a package-specific source outside the known set.
-            if installed_bases.is_empty() {
+            if bases.is_empty() {
                 match self
                     .discover_and_install_patches_with_mode(
                         &global_id,
@@ -183,7 +323,7 @@ impl PackageManager {
                 }
             } else {
                 // `Both`, not `PackageSpecificOnly`, or a required global companion is absent for later offline execs.
-                for base_id in &installed_bases {
+                for base_id in bases {
                     match self
                         .discover_and_install_patches_with_mode(
                             base_id,
@@ -2043,5 +2183,236 @@ mod tests {
             err.contains("RequiredCompanionFailed") || err.contains("required-companion"),
             "A6: offline compose failure must reference the required companion; got {err}"
         );
+    }
+
+    // ── Project-lock bases: the identity `ocx lock` discovered companions under ──
+
+    /// Every `warn!` this test binary emits; a process-global logger, so each test
+    /// searches for a needle unique to its own fixture and never drains the buffer.
+    static CAPTURED_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct CapturingLogger;
+
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                CAPTURED_WARNINGS.lock().unwrap().push(record.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    fn install_warning_capture() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            log::set_boxed_logger(Box::new(CapturingLogger))
+                .expect("nothing else in this test binary installs a logger");
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+    }
+
+    fn warned_about(needle: &str) -> bool {
+        CAPTURED_WARNINGS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    const BASE_CONFIG: &str = "[tools]\ncmake = \"localhost:5000/cmake:3.28\"\n";
+    const BASE_LEAF: &str = "sha256:aaaa0000000000000000000000000000000000000000000000000000000000bb";
+
+    fn linux() -> ocx_oci::Platform {
+        "linux/amd64".parse().expect("valid platform")
+    }
+
+    /// An `ocx.lock` pinning `cmake` at [`BASE_LEAF`], recording `declaration_hash`.
+    fn base_lock(declaration_hash: &str) -> String {
+        format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "{declaration_hash}"
+generated_by = "ocx test"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "localhost:5000/cmake"
+
+[tool.platforms]
+"linux/amd64" = "{BASE_LEAF}"
+"#
+        )
+    }
+
+    /// `dir/ocx.toml` = [`BASE_CONFIG`] and an `ocx.lock` bound to it.
+    async fn write_current_project(dir: &Path) {
+        let config = ocx_project::ProjectConfig::from_toml_str(BASE_CONFIG).expect("parse ocx.toml");
+        tokio::fs::write(dir.join("ocx.toml"), BASE_CONFIG).await.unwrap();
+        tokio::fs::write(dir.join("ocx.lock"), base_lock(config.declaration_hash_cached()))
+            .await
+            .unwrap();
+    }
+
+    /// A lock bound to its `ocx.toml` yields `repo:tag@leaf`, the identifier `ocx lock` discovered.
+    #[tokio::test]
+    async fn project_patch_bases_carry_the_declared_tag_on_the_lock_leaf() {
+        let home = TempDir::new().unwrap();
+        write_current_project(home.path()).await;
+
+        let bases = make_offline_manager(home.path())
+            .project_patch_bases(&linux())
+            .await
+            .unwrap();
+
+        let expected: ocx_oci::PackageRef = format!("localhost:5000/cmake:3.28@{BASE_LEAF}").parse().unwrap();
+        assert_eq!(bases, vec![expected]);
+    }
+
+    /// A stale lock, or one without `ocx.toml`, yields `repo@leaf`, never the bare `repo`
+    /// a matcher reads as `:latest`.
+    #[tokio::test]
+    async fn project_patch_bases_of_a_stale_lock_are_digest_bearing_and_untagged() {
+        let stale = TempDir::new().unwrap();
+        tokio::fs::write(stale.path().join("ocx.toml"), BASE_CONFIG)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            stale.path().join("ocx.lock"),
+            base_lock(&format!("sha256:{}", "0".repeat(64))),
+        )
+        .await
+        .unwrap();
+        let no_config = TempDir::new().unwrap();
+        tokio::fs::write(
+            no_config.path().join("ocx.lock"),
+            base_lock(&format!("sha256:{}", "0".repeat(64))),
+        )
+        .await
+        .unwrap();
+
+        for home in [&stale, &no_config] {
+            let bases = make_offline_manager(home.path())
+                .project_patch_bases(&linux())
+                .await
+                .unwrap();
+            let expected: ocx_oci::PackageRef = format!("localhost:5000/cmake@{BASE_LEAF}").parse().unwrap();
+            assert_eq!(bases, vec![expected], "{}", home.path().display());
+            assert!(bases.iter().all(|base| base.digest().is_some() && base.tag().is_none()));
+        }
+    }
+
+    /// A platform the lock has no leaf for yields no base for that entry.
+    #[tokio::test]
+    async fn project_patch_bases_skip_an_entry_without_a_leaf_for_the_platform() {
+        let home = TempDir::new().unwrap();
+        write_current_project(home.path()).await;
+
+        let bases = make_offline_manager(home.path())
+            .project_patch_bases(&"darwin/arm64".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(bases.is_empty(), "{bases:?}");
+    }
+
+    /// Registers a project whose `ocx.lock` is readable and whose `ocx.toml` is a directory
+    /// (a non-`NotFound` read error on every platform), beside an unreadable home lock.
+    async fn project_with_unreadable_config(home: &TempDir) -> TempDir {
+        tokio::fs::create_dir_all(home.path().join("ocx.lock")).await.unwrap();
+        let project = TempDir::new().unwrap();
+        tokio::fs::write(
+            project.path().join("ocx.lock"),
+            base_lock(&format!("sha256:{}", "0".repeat(64))),
+        )
+        .await
+        .unwrap();
+        tokio::fs::create_dir_all(project.path().join("ocx.toml"))
+            .await
+            .unwrap();
+        ocx_project::ProjectRegistry::new(home.path())
+            .register(project.path())
+            .await
+            .expect("register");
+        project
+    }
+
+    /// Under `Fallback` (`patch sync`) an unreadable lock is skipped and an unreadable
+    /// `ocx.toml` falls back to the lock's untagged leaves, each with a warning.
+    #[tokio::test]
+    async fn sync_project_locks_warn_and_skip_an_unreadable_lock_or_config() {
+        install_warning_capture();
+        let home = TempDir::new().unwrap();
+        let project = project_with_unreadable_config(&home).await;
+
+        let locks = load_project_locks(
+            make_offline_manager(home.path()).file_structure(),
+            UnreadableConfig::Fallback,
+        )
+        .await
+        .expect("fallback never fails");
+
+        let bases: Vec<ocx_oci::PackageRef> = locks
+            .iter()
+            .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), &linux()))
+            .collect();
+        let expected: ocx_oci::PackageRef = format!("localhost:5000/cmake@{BASE_LEAF}").parse().unwrap();
+        assert_eq!(bases, vec![expected]);
+        let unreadable_lock = format!("skipping unreadable lock in '{}'", home.path().display());
+        assert!(warned_about(&unreadable_lock), "missing warning: {unreadable_lock}");
+        let config_path = dunce::canonicalize(project.path()).unwrap().join("ocx.toml");
+        let unreadable_config = format!("ignoring unreadable '{}'", config_path.display());
+        assert!(warned_about(&unreadable_config), "missing warning: {unreadable_config}");
+    }
+
+    /// `patch freeze` refuses an unreadable `ocx.toml` instead of snapshotting untagged
+    /// leaves, which would miss the companions that project's tagged bases discover.
+    #[tokio::test]
+    async fn project_patch_bases_refuse_an_unreadable_config() {
+        let home = TempDir::new().unwrap();
+        let project = project_with_unreadable_config(&home).await;
+
+        let error = make_offline_manager(home.path())
+            .project_patch_bases(&linux())
+            .await
+            .expect_err("an unreadable ocx.toml must fail the freeze");
+
+        let crate::Error::Patch(patch_error) = &error else {
+            panic!("expected a patch error, got {error:?}");
+        };
+        let crate::patch::PatchError::ProjectConfigUnreadable { path, .. } = patch_error.as_ref() else {
+            panic!("expected ProjectConfigUnreadable, got {patch_error:?}");
+        };
+        assert_eq!(path, &dunce::canonicalize(project.path()).unwrap().join("ocx.toml"));
+    }
+
+    /// `patch sync` and `patch freeze` read the ledger without pruning a departed project's link.
+    #[tokio::test]
+    async fn project_patch_bases_never_prune_the_ledger() {
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        write_current_project(project.path()).await;
+        ocx_project::ProjectRegistry::new(home.path())
+            .register(project.path())
+            .await
+            .expect("register");
+        tokio::fs::remove_file(project.path().join("ocx.lock")).await.unwrap();
+        let projects_dir = home.path().join("projects");
+        let links_before = std::fs::read_dir(&projects_dir).unwrap().count();
+
+        let bases = make_offline_manager(home.path())
+            .project_patch_bases(&linux())
+            .await
+            .unwrap();
+
+        assert!(bases.is_empty(), "{bases:?}");
+        assert_eq!(std::fs::read_dir(&projects_dir).unwrap().count(), links_before);
+        assert_eq!(links_before, 1);
     }
 }

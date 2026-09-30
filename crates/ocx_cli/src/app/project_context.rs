@@ -294,7 +294,7 @@ pub async fn record_activation_consent_over(
 ///
 /// # Errors
 ///
-/// Propagates errors from `PackageManager::pull_all` when `eager` is `true`.
+/// When `eager`: a failed pull, or a fatal patch discovery failure (`DiscoverFailed`) naming the base.
 pub async fn materialize_lock(
     context: &crate::app::Context,
     lock: &ocx_project::ProjectLock,
@@ -317,7 +317,7 @@ pub async fn materialize_lock(
         .collect();
     context
         .manager()
-        .pull_all(&identifiers, platform, context.concurrency(), true)
+        .pull_all(&identifiers, platform, context.concurrency(), false)
         .await?;
     Ok(())
 }

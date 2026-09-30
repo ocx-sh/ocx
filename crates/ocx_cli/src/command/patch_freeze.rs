@@ -20,10 +20,15 @@ impl PatchFreezeArgs {
         let snapshot_path = snapshot_dir.join(PATCH_SNAPSHOT_FILE);
 
         let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
+        let project_bases = context
+            .manager()
+            .project_patch_bases(&host)
+            .await
+            .map_err(anyhow::Error::new)?;
         // `Recorded`, or an already-active snapshot re-freezes its own output.
         let roots = context
             .manager()
-            .resolve_site_patch_roots(&host, ocx_package_manager::PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&host, ocx_package_manager::PatchRootScope::Recorded, &project_bases)
             .await
             .map_err(anyhow::Error::new)?;
 

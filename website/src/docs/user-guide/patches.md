@@ -178,7 +178,11 @@ ocx package exec java:21 -- java -version
 ```
 
 The companion packages install automatically during `ocx patch sync`, or during the next
-`ocx exec` / `ocx package exec` for new packages. The composed environment is visible with:
+`ocx exec` / `ocx package exec` for new packages. Project commands discover too: `ocx lock`,
+`ocx pull` and `ocx exec` install the companions of the tools in `ocx.toml`, with no
+`ocx package install` first. `ocx lock --no-pull` skips discovery, `ocx pull` discovers only the
+tools it pulls eagerly, and `ocx exec` resolves required companions only
+(see [Working offline][patches-offline]). The composed environment is visible with:
 
 ```sh
 ocx package env java:21 --show-patches
@@ -353,7 +357,9 @@ descriptor that names one repository at two tags freezes both versions independe
 The file is derived state, not something to hand-edit: it records a format version, and a
 version this `ocx` does not read is refused (exit [`65`][exit-codes]) with the remedy to
 re-run `ocx patch freeze`. Re-freezing is offline and takes no longer than the first run.
-`ocx patch freeze` reads what this machine has recorded, never an active snapshot.
+`ocx patch freeze` reads what this machine has recorded, never an active snapshot, and it
+fails with exit [`78`][exit-codes] when a project's `ocx.toml` exists but cannot be read,
+rather than writing a snapshot without that project's companions.
 
 Point [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] at the file to make commands use only
 the pinned digests:
@@ -400,9 +406,9 @@ After the `[patches]` tier is configured, keep descriptors and companions curren
 ocx patch sync
 ```
 
-`patch sync` re-fetches every descriptor for all installed packages and the global descriptor,
-installs any newly-referenced companion packages, and re-checks packages installed before
-the `[patches]` tier was added. It is safe to run frequently; it piggybacks on the same
+`patch sync` re-fetches every descriptor for all installed packages, the tools locked in every
+known project's `ocx.lock`, and the global descriptor, installs any newly-referenced companion
+packages, and re-checks packages installed before the `[patches]` tier was added. It is safe to run frequently; it piggybacks on the same
 index-update mechanism as `ocx index update`.
 
 Other commands contact the patch registry less often. `ocx package install`, `ocx package pull`,
@@ -584,6 +590,9 @@ For the full field reference, see the [`[patches]` configuration section][config
 
 <!-- schemas -->
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
+
+<!-- internal -->
+[patches-offline]: #patches-offline
 
 <!-- reference -->
 [reference-env-path]: ../reference/metadata.md#env-path
