@@ -138,8 +138,8 @@ pub(crate) async fn compose(
     .await
 }
 
-/// Compose one patch companion as a standalone root, always on the interface surface;
-/// `collect_integrations` is the outer composition's gate.
+/// Compose one patch companion as part of its targets, on the surface `axes` those targets are
+/// admitted through; `collect_integrations` is the outer composition's gate.
 ///
 /// `emitted` holds the packages already emitted (advisory tag stripped): a dependency in it is
 /// skipped, and on success the companion's own emissions join it. The companion itself is always
@@ -151,6 +151,7 @@ pub(crate) async fn compose(
 pub(crate) async fn compose_companion(
     companion: &Arc<InstallInfo>,
     store: &PackageStore,
+    axes: Visibility,
     collect_integrations: bool,
     emitted: &mut HashSet<ocx_oci::PinnedPackageRef>,
 ) -> crate::Result<ComposeOutput> {
@@ -160,8 +161,8 @@ pub(crate) async fn compose_companion(
     let out = compose_gated(
         std::slice::from_ref(companion),
         store,
-        Visibility::INTERFACE,
-        // Never derived from the pinned surface: an absent dep dir would fail a surface that carries no integrations.
+        axes,
+        // Never derived from `axes`: an absent dep dir would fail a surface that carries no integrations.
         collect_integrations,
         &crate::composer::ComposePaths::digest_only(),
         &mut attempt,
@@ -4699,7 +4700,7 @@ mod tests {
     /// A companion projection composed with integrations SUPPRESSED must not
     /// resolve the payloads at all — not resolve-then-discard.
     ///
-    /// The projection is pinned to `self_view = false` (no private leak), so it
+    /// The projection composes on its targets' surface, not the caller's, so it
     /// cannot derive the caller's gate; before the explicit input it collected
     /// unconditionally. Resolution asserts every `${deps.*}` content directory
     /// exists, so a payload naming an uninstalled dependency failed the WHOLE
@@ -4740,6 +4741,7 @@ mod tests {
         let collected = compose_companion(
             &companion,
             &store,
+            Visibility::INTERFACE,
             /* collect_integrations = */ true,
             &mut Default::default(),
         )
@@ -4752,6 +4754,7 @@ mod tests {
         let suppressed = compose_companion(
             &companion,
             &store,
+            Visibility::INTERFACE,
             /* collect_integrations = */ false,
             &mut Default::default(),
         )
@@ -4837,7 +4840,9 @@ mod tests {
 
         let mut emitted: std::collections::HashSet<PinnedPackageRef> =
             base.admitted.iter().map(PinnedPackageRef::strip_advisory).collect();
-        let out = compose_companion(&companion, &store, true, &mut emitted).await.unwrap();
+        let out = compose_companion(&companion, &store, Visibility::INTERFACE, true, &mut emitted)
+            .await
+            .unwrap();
 
         assert!(
             out.entries.iter().any(|entry| entry.key == "COMPANION_VAR"),
@@ -4946,6 +4951,7 @@ mod tests {
         let Err(err) = compose_companion(
             &root,
             &store,
+            Visibility::INTERFACE,
             /* collect_integrations = */ true,
             &mut Default::default(),
         )

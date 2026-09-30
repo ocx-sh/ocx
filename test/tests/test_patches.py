@@ -122,8 +122,9 @@ def _make_companion(
     tmp_path: Path,
     env_key: str,
     env_value: str,
+    visibility: str = "public",
 ) -> PackageInfo:
-    """Publish an env-only companion package with INTERFACE-visible env var.
+    """Publish an env-only companion with one env var of ``visibility``, ``public`` by default.
 
     Always published `platform="any"`: a binary-free, env-only companion is
     the canonical `any`-published package (adr_platform_model_unification.md
@@ -146,7 +147,7 @@ def _make_companion(
                 "key": env_key,
                 "type": "constant",
                 "value": env_value,
-                "visibility": "interface",
+                "visibility": visibility,
             }
         ],
         cascade=True,
@@ -1649,7 +1650,7 @@ def test_patch_companion_contributes_integrations(
                 "key": "INTEGRATIONS_COMPANION_CA",
                 "type": "constant",
                 "value": "/etc/ssl/integrations-companion-ca.pem",
-                "visibility": "interface",
+                "visibility": "public",
             }
         ],
         integrations={
@@ -1677,7 +1678,7 @@ def test_patch_companion_contributes_integrations(
     result = ocx.json("package", "env", base_pkg.short)
     entries = result["entries"]
     assert any(e["key"] == "INTEGRATIONS_COMPANION_CA" for e in entries), (
-        f"sanity: the companion's interface env var must reach the composed "
+        f"sanity: the companion's public env var must reach the composed "
         f"env, proving the companion mechanism actually engaged; got keys: "
         f"{[e['key'] for e in entries]}"
     )
@@ -1707,8 +1708,8 @@ def test_patch_companion_contributes_integrations(
         f"`--self` is the private surface and carries no integrations from "
         f"any contributor; got {self_view['integrations']}"
     )
-    # Positive control for the empty assertion above: the companion's ENV
-    # still crosses `--self` (only its integrations carrier is gated) —
+    # Positive control for the empty assertion above: the companion's public
+    # ENV still crosses `--self` (only its integrations carrier is gated) —
     # this is the other half of the C-017 coherence argument. Without this,
     # a future change that gated the whole companion overlay by `self_view`
     # would leave `integrations == []` green while deleting the premise
@@ -3029,6 +3030,64 @@ def test_patch_on_private_dep_only_under_self(
             "PRODUCT GAP: private dep companion absent from --self view (must be present).\n"
             f"--self keys: {self_keys}"
         )
+
+
+def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A companion composes as part of its target: its ``private`` var reaches the
+    target's own entrypoint launcher and ``ocx package env --self``, and never the
+    consumer view ``ocx package env``.
+
+    The shape of a package whose entrypoint runs through a private runtime
+    dependency, patched with a launcher-only option. The rule is a catch-all
+    because the launcher re-derives against a synthetic base id only such a rule
+    matches.
+    """
+    companion_repo = _unique_repo("part_of_target_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(
+        ocx, companion_repo, "1.0.0", tmp_path, "JDK_JAVA_OPTIONS", "-Dpatched=1", visibility="private"
+    )
+    descriptor_path = tmp_path / "part_of_target_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry, required=False)
+    publish = ocx.run(
+        "patch", "publish", "--descriptor", str(descriptor_path), "--global",
+        format=None, check=False,
+    )
+    assert publish.returncode == 0, f"global patch publish must succeed:\n{publish.stderr}"
+
+    runtime = make_package(ocx, _unique_repo("part_of_target_runtime"), "1.0.0", tmp_path, cascade=True)
+    base_pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints={"showenv": {"command": "env"}},
+        dependencies=[_dep_entry(ocx, runtime, visibility="private")],
+    )
+    ocx.plain("package", "install", base_pkg.short)
+
+    self_entries = ocx.json("package", "env", "--self", base_pkg.short)["entries"]
+    assert _entry_by_key(self_entries, "JDK_JAVA_OPTIONS") is not None, (
+        "a private companion var must reach its target's `--self` surface; got keys: "
+        f"{[e['key'] for e in self_entries]}"
+    )
+
+    launched = ocx.run("package", "exec", base_pkg.short, "--", "showenv", format=None, check=False)
+    assert launched.returncode == 0, (
+        f"the launcher must run; rc={launched.returncode}\nstderr: {launched.stderr}"
+    )
+    assert "JDK_JAVA_OPTIONS=-Dpatched=1" in launched.stdout.splitlines(), (
+        "a private companion var must reach its target's own launcher; got env dump:\n"
+        f"{launched.stdout}"
+    )
+
+    consumer_entries = _env_entries(ocx, base_pkg.short)
+    assert _entry_by_key(consumer_entries, "JDK_JAVA_OPTIONS") is None, (
+        "a private companion var must never reach the consumer view; got keys: "
+        f"{[e['key'] for e in consumer_entries]}"
+    )
 
 
 def test_patch_on_public_dep_inherited_by_consumer(

@@ -894,7 +894,7 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
     }
 
     for provenance in inputs.patch_companions {
-        // `interface`: `composer::compose_companion` composes with `self_view = false`.
+        // `interface` whatever surface the companion composed on: `PatchProvenance` does not carry it.
         if let Some(descriptor) = project(
             &provenance.pinned,
             Placement {

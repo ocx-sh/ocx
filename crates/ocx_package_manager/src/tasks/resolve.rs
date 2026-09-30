@@ -12,7 +12,7 @@ use crate::{composer, error::PackageError, error::PackageErrorKind, patch::Patch
 use ocx_index::{IndexOperation, SelectResult};
 use ocx_package::{
     install_info::InstallInfo, metadata::binary::BinaryName, metadata::entrypoint::EntrypointName,
-    metadata::env::entry::Entry, metadata::integrations::IntegrationEntry,
+    metadata::env::entry::Entry, metadata::integrations::IntegrationEntry, metadata::visibility::Visibility,
 };
 
 use super::super::PackageManager;
@@ -24,7 +24,7 @@ use super::super::PackageManager;
 pub struct PatchProvenance {
     /// The descriptor rule `match` glob that admitted the companion for the base.
     pub rule_match: String,
-    /// The companion identifier whose interface projection produced this entry.
+    /// The companion identifier whose projection produced this entry.
     pub companion: ocx_oci::PackageRef,
     /// The digest-complete install the companion resolved to. Kept beside the tag because
     /// the snapshot and last sync decide which digest a tag reaches; without it an audit
@@ -117,8 +117,8 @@ mod patch_overlay_tests {
     }
 }
 
-/// What a companion contributes under one admitted base: provenance-paired INTERFACE env
-/// entries plus its `integrations` (`adr_package_integrations.md § Patch companions`).
+/// What a companion contributes under one admitted base: provenance-paired env entries plus
+/// its `integrations` (`adr_package_integrations.md § Patch companions`).
 pub struct CompanionOverlay {
     pub entries: Vec<(Entry, PatchProvenance)>,
     pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
@@ -129,7 +129,7 @@ pub struct CompanionOverlay {
 /// The projection lands in the FIRST matching base's overlay; a rule matching N bases
 /// would otherwise land the companion N times (duplicate JSON entries, exports, PATH prepends).
 enum CompanionOutcome {
-    /// Emitted under the first matching base; possibly empty (private-only, no
+    /// Emitted under the first matching base; possibly empty (nothing on this surface, no
     /// integrations), which is still not [`Missing`](Self::Missing).
     Projected,
     /// Not installed, lookup failed, or composition failed. The required-companion check
@@ -663,12 +663,10 @@ impl PackageManager {
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
 
-        // Gate before projecting companions: resolution asserts every `${deps.*}` dir exists, so
-        // gating after fails a required companion over a value this surface never carries
-        // (`adr_package_integrations.md § Patch companions`).
-        let collect_integrations = composer::integrations_cross(self_view);
+        let roots: HashSet<ocx_oci::PinnedPackageRef> =
+            packages.iter().map(|root| root.identifier().strip_advisory()).collect();
         if let Some(mut patch_set) = self
-            .build_site_patch_set(&out.admitted, no_patches, platform, collect_integrations)
+            .build_site_patch_set(&out.admitted, &roots, self_view, no_patches, platform)
             .await?
         {
             // One row per (identifier minus advisory tag, namespace) across the whole composition,
@@ -720,19 +718,24 @@ impl PackageManager {
     /// Reads local state, except that an unpinned or uninstalled required companion resolves live
     /// and is pinned; never under `--offline` or an active patch snapshot.
     ///
-    /// `collect_integrations` is forwarded because projection runs at `self_view = false` and
-    /// cannot derive it; without it a companion naming an uninstalled dependency would fail a
-    /// composition whose surface carries no integrations.
+    /// A companion composes as part of the targets it matched: on the `self_view` surface under a
+    /// root in `roots` (advisory tag stripped), through the interface under a dependency, and on
+    /// the union when it matched both.
     async fn build_site_patch_set(
         &self,
         admitted: &[ocx_oci::PinnedPackageRef],
+        roots: &HashSet<ocx_oci::PinnedPackageRef>,
+        self_view: bool,
         no_patches: &std::collections::BTreeSet<String>,
         platform: &ocx_oci::Platform,
-        collect_integrations: bool,
     ) -> crate::Result<Option<SitePatchSet>> {
         let Some(patches) = self.patches() else {
             return Ok(None);
         };
+        // Gate before projecting: resolution asserts every `${deps.*}` dir exists, so gating after
+        // fails a required companion over a value this surface never carries
+        // (`adr_package_integrations.md § Patch companions`).
+        let collect_integrations = composer::integrations_cross(self_view);
 
         let file_structure = self.file_structure();
         let package_store = &file_structure.packages;
@@ -767,6 +770,9 @@ impl PackageManager {
             admitted.iter().map(ocx_oci::PinnedPackageRef::strip_advisory).collect();
 
         let mut patch_set: SitePatchSet = SitePatchSet::new();
+        // First pass: the matched companions per admitted target, and each companion's surface.
+        let mut matched: Vec<(&ocx_oci::PinnedPackageRef, Vec<crate::patch::CompanionEntry>)> = Vec::new();
+        let mut companion_axes: HashMap<ocx_oci::PackageRef, Visibility> = HashMap::new();
 
         // Loads run concurrently (core-bounded) into slots by admitted index, so emission order,
         // error determinism and the projection cache never depend on completion order.
@@ -875,6 +881,24 @@ impl PackageManager {
                 companions
             };
 
+            // A dependency is admitted onto this surface through its interface alone, so that is
+            // all its companions may add; a leaked private var would reach every consumer.
+            let target_axes = if roots.contains(&admitted_id.strip_advisory()) {
+                composer::surface_axes(self_view)
+            } else {
+                Visibility::INTERFACE
+            };
+            for companion_entry in &companions {
+                companion_axes
+                    .entry(companion_entry.identifier.clone())
+                    .and_modify(|axes| *axes = axes.merge(target_axes))
+                    .or_insert(target_axes);
+            }
+            matched.push((admitted_id, companions));
+        }
+
+        // Second pass: every match is known, so each companion projects once on its full surface.
+        for (admitted_id, companions) in matched {
             // Projection is cached per companion, but the rule glob is per (base, companion), so
             // provenance attaches only when a projection lands in this base's overlay.
             let mut companion_overlay = CompanionOverlay {
@@ -973,11 +997,21 @@ impl PackageManager {
                     }
                 };
 
-                // Interface surface, attributed to the companion. Binaries and entrypoints stay dropped:
-                // never on PATH here, so admitting them would advertise unreachable binaries.
+                // Attributed to the companion. Binaries and entrypoints stay dropped: never on PATH
+                // here, so admitting them would advertise unreachable binaries.
                 let companion_arc = std::sync::Arc::new(companion_install_info);
-                match composer::compose_companion(&companion_arc, package_store, collect_integrations, &mut emitted)
-                    .await
+                let axes = companion_axes
+                    .get(companion_id)
+                    .copied()
+                    .unwrap_or(Visibility::INTERFACE);
+                match composer::compose_companion(
+                    &companion_arc,
+                    package_store,
+                    axes,
+                    collect_integrations,
+                    &mut emitted,
+                )
+                .await
                 {
                     Ok(out) => {
                         // A cache miss proves no earlier base emitted it; empty output is still `Projected`.
@@ -1008,7 +1042,7 @@ impl PackageManager {
                 }
             }
 
-            // A companion with integrations but no interface env still contributes.
+            // A companion with integrations but no env still contributes.
             if !companion_overlay.entries.is_empty() || !companion_overlay.integrations.is_empty() {
                 patch_set.insert(admitted_id.clone(), companion_overlay);
             }
@@ -3239,25 +3273,17 @@ mod phase4_spec_tests {
         );
     }
 
-    // ── Interface-only / no private leak ─────────────────────────────────────
+    // ── A companion's surface follows its targets ────────────────────────────
 
-    /// A companion's private-only env var (Visibility::PRIVATE) must never appear
-    /// in the target's env, even when the target is composed under self_view=true.
-    ///
-    /// The companion is projected via `compose([companion], store, false)` —
-    /// interface surface only — so the companion's PRIVATE var is excluded.
-    ///
-    /// With no descriptor persisted (NeverLooked, offline), resolve_env succeeds
-    /// and the companion's PRIVATE var is absent from the output (no overlay loaded).
-    ///
-    /// Traceability: Interface-only / no-private-leak invariant.
+    /// With no descriptor persisted (NeverLooked, offline) no rule matches, so an installed
+    /// companion's private var stays out of `--self` too: only a match grafts a companion.
     #[tokio::test]
-    async fn no_private_leak_companion_private_var_absent_even_under_self_view() {
+    async fn an_unmatched_companion_contributes_nothing_under_self_view() {
         let dir = TempDir::new().unwrap();
         let manager = make_manager(&dir).with_patches(Some(test_patch_config()));
         let store = manager.file_structure().packages.clone();
 
-        // Companion (to be installed locally): has ONLY a PRIVATE var.
+        // Installed locally, but no descriptor names it.
         let companion_id = pinned("companion-ca", 'c');
         seed_package_with_constant_var(
             &store,
@@ -3265,7 +3291,7 @@ mod phase4_spec_tests {
             &ResolvedPackage::new(),
             "COMPANION_SECRET",
             "secret_value",
-            Visibility::PRIVATE, // private only — must not leak
+            Visibility::PRIVATE,
         );
 
         // Base dep installed locally (companion will be fetched for this dep).
@@ -3294,22 +3320,14 @@ mod phase4_spec_tests {
 
         assert!(
             !entries.iter().any(|e| e.key == "COMPANION_SECRET"),
-            "companion PRIVATE var must not appear in the env (no descriptor → no overlay)"
+            "an unmatched companion must not appear in the env (no descriptor → no overlay)"
         );
     }
 
-    /// No-private-leak live: a companion that carries ONLY a PRIVATE env var
-    /// must NEVER appear in the resolved env, even under self_view=true, because
-    /// the companion is projected via `compose([companion], store, false)` which
-    /// gates out private surface.
-    ///
-    /// This test seeds a real global descriptor + companion package so the live
-    /// companion-projection path executes, verifying that `compose([companion],
-    /// store, false)` (interface surface) excludes the companion's PRIVATE var.
-    ///
-    /// Traceability: Interface-only / no-private-leak invariant (live projection path).
+    /// A catch-all companion carrying only a PRIVATE var composes as part of the root it
+    /// matched: the var reaches the root's `--self` surface and never the interface surface.
     #[tokio::test(flavor = "multi_thread")]
-    async fn no_private_leak_live_companion_private_var_excluded_by_interface_projection() {
+    async fn a_catch_all_companion_private_var_reaches_self_view_and_never_the_interface() {
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use ocx_oci::Algorithm;
 
@@ -3319,7 +3337,7 @@ mod phase4_spec_tests {
         let blob_store = manager.file_structure().blobs.clone();
         let tag_store = manager.file_structure().clone();
 
-        // ── Companion: has ONLY a PRIVATE var (must never leak). ──────────────
+        // ── Companion: has ONLY a PRIVATE var. ────────────────────────────────
         // Store under PATCH_REGISTRY so find_companion_local's PackageStore
         // lookup resolves to the same registry the tag-store entry uses.
         let companion_digest = sha256('c');
@@ -3334,7 +3352,7 @@ mod phase4_spec_tests {
             &ResolvedPackage::new(),
             "COMPANION_SECRET",
             "secret_val",
-            Visibility::PRIVATE, // PRIVATE — must be excluded by interface projection
+            Visibility::PRIVATE,
         );
 
         // Write companion's root-document tag entry in the wire grammar so
@@ -3392,17 +3410,29 @@ mod phase4_spec_tests {
             },
         ));
 
-        // Under self_view=true: the dep IS admitted (private surface), so the
-        // companion overlay is attempted. But `compose([companion], store, false)`
-        // (interface projection) must exclude the companion's PRIVATE var.
         let entries = manager
-            .resolve_env(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
+            .resolve_env(
+                std::slice::from_ref(&root),
+                true,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
             .await
             .unwrap();
+        assert_eq!(
+            entries.iter().filter(|e| e.key == "COMPANION_SECRET").count(),
+            1,
+            "a companion matching the root carries its PRIVATE var onto the root's --self surface once; \
+             entries: {entries:?}"
+        );
 
+        let entries = manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
         assert!(
             !entries.iter().any(|e| e.key == "COMPANION_SECRET"),
-            "no-private-leak live: companion's PRIVATE var must be absent even under self_view=true; entries: {entries:?}"
+            "a companion's PRIVATE var must never reach the interface surface; entries: {entries:?}"
         );
     }
 
@@ -4853,7 +4883,7 @@ mod phase4_spec_tests {
         );
     }
 
-    /// The companion projection call (`compose([companion], store, false)`) is
+    /// The companion projection (`composer::compose_companion`) is
     /// NOT itself patched — companions are projected via a plain compose call
     /// that does not recurse into `build_site_patch_set`.
     ///
@@ -4872,7 +4902,7 @@ mod phase4_spec_tests {
         let store = make_store(dir.path());
 
         // Simulate what the Phase 4 implementation does: project a companion
-        // via compose([companion], store, false) — interface surface only.
+        // via a plain compose call.
         let companion_id = pinned("companion-tool", 'c');
         seed_package_with_constant_var(
             &store,
@@ -4989,6 +5019,16 @@ mod phase4_spec_tests {
         patch_config: &ocx_config::patch::ResolvedPatchConfig,
         companion_tag_ids: &[&PackageRef],
     ) {
+        seed_global_descriptor_matching(manager, patch_config, "*", companion_tag_ids).await;
+    }
+
+    /// [`seed_global_descriptor`] with one rule whose `match` glob is `rule_match`.
+    pub(super) async fn seed_global_descriptor_matching(
+        manager: &PackageManager,
+        patch_config: &ocx_config::patch::ResolvedPatchConfig,
+        rule_match: &str,
+        companion_tag_ids: &[&PackageRef],
+    ) {
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use ocx_oci::Algorithm;
 
@@ -4998,7 +5038,7 @@ mod phase4_spec_tests {
         let packages: Vec<String> = companion_tag_ids.iter().map(|id| id.to_string()).collect();
         let descriptor_json = serde_json::json!({
             "version": 1,
-            "rules": [{ "match": "*", "packages": packages }]
+            "rules": [{ "match": rule_match, "packages": packages }]
         })
         .to_string();
         let layer_bytes = descriptor_json.as_bytes();
@@ -5584,6 +5624,279 @@ mod phase4_spec_tests {
         );
     }
 
+    // ── A companion composes as part of its target ───────────────────────────
+
+    /// Install a companion carrying the env entries `env` (a metadata `env` array) over the
+    /// closure `resolved`; returns the tag identifier a descriptor names it by.
+    fn seed_companion_with_env(
+        manager: &PackageManager,
+        name: &str,
+        hex_char: char,
+        resolved: &ResolvedPackage,
+        env: serde_json::Value,
+    ) -> PackageRef {
+        let digest = sha256(hex_char);
+        let tag_id = PackageRef::new_registry(name, PATCH_REGISTRY).clone_with_tag("latest");
+        let pinned_id = PinnedPackageRef::try_from(tag_id.clone_with_digest(digest.clone())).unwrap();
+        seed_package_with_metadata(
+            &manager.file_structure().packages,
+            &pinned_id,
+            resolved,
+            &serde_json::json!({ "type": "bundle", "version": 1, "env": env }),
+        );
+        seed_companion_pin(manager.file_structure(), &tag_id, &digest);
+        tag_id
+    }
+
+    fn constant_var(key: &str, visibility: &str) -> serde_json::Value {
+        serde_json::json!({ "key": key, "type": "constant", "value": key.to_lowercase(), "visibility": visibility })
+    }
+
+    /// A root `plantuml` with a private dependency `jre`, both installed.
+    fn seed_plantuml_with_private_jre(dir: &TempDir, store: &PackageStore) -> Arc<InstallInfo> {
+        let jre = pinned("jre", 'j');
+        seed_package_with_constant_var(
+            store,
+            &jre,
+            &ResolvedPackage::new(),
+            "JAVA_HOME",
+            "jre",
+            Visibility::PUBLIC,
+        );
+        Arc::new(make_install_info(
+            dir.path(),
+            "plantuml",
+            'p',
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: jre,
+                    visibility: Visibility::PRIVATE,
+                }],
+            },
+        ))
+    }
+
+    fn count_key(entries: &[metadata_env::entry::Entry], key: &str) -> usize {
+        entries.iter().filter(|entry| entry.key == key).count()
+    }
+
+    /// A companion patching a root's own entrypoint: its `private` var reaches the root's private
+    /// surface (launchers, `--self`) and never the interface surface a consumer composes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_private_companion_var_reaches_its_root_targets_self_surface_only() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let companion = seed_companion_with_env(
+            &manager,
+            "plantuml-patch",
+            'c',
+            &ResolvedPackage::new(),
+            serde_json::json!([constant_var("JDK_JAVA_OPTIONS", "private")]),
+        );
+        seed_global_descriptor_matching(&manager, &config, "*plantuml*", &[&companion]).await;
+        let root = seed_plantuml_with_private_jre(&dir, &store);
+
+        let self_entries = manager
+            .resolve_env(
+                std::slice::from_ref(&root),
+                true,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            self_entries.iter().any(|e| e.key == "JAVA_HOME"),
+            "premise: the private jre is admitted under --self; entries: {self_entries:?}"
+        );
+        assert_eq!(
+            count_key(&self_entries, "JDK_JAVA_OPTIONS"),
+            1,
+            "a private companion var must reach its root target's private surface; entries: {self_entries:?}"
+        );
+
+        let interface_entries = manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+        assert_eq!(
+            count_key(&interface_entries, "JDK_JAVA_OPTIONS"),
+            0,
+            "a private companion var must never reach the interface surface; entries: {interface_entries:?}"
+        );
+    }
+
+    /// A dependency target is admitted onto the root's surface through its interface only, so a
+    /// companion patching it contributes its interface and never its private vars.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_on_a_dependency_target_contributes_only_its_interface() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let companion = seed_companion_with_env(
+            &manager,
+            "jre-patch",
+            'c',
+            &ResolvedPackage::new(),
+            serde_json::json!([
+                constant_var("JRE_PRIVATE", "private"),
+                constant_var("JRE_INTERFACE", "interface")
+            ]),
+        );
+        seed_global_descriptor_matching(&manager, &config, "*jre*", &[&companion]).await;
+        let root = seed_plantuml_with_private_jre(&dir, &store);
+
+        let entries = manager
+            .resolve_env(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+        assert_eq!(
+            count_key(&entries, "JRE_INTERFACE"),
+            1,
+            "a dependency target's companion contributes its interface; entries: {entries:?}"
+        );
+        assert_eq!(
+            count_key(&entries, "JRE_PRIVATE"),
+            0,
+            "a dependency target's companion never contributes its private vars; entries: {entries:?}"
+        );
+    }
+
+    /// One companion matching both a root and its dependency under `--self` projects the union
+    /// of both surfaces, once: every var appears exactly one time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_matching_a_root_and_a_dependency_composes_both_surfaces_once() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let companion = seed_companion_with_env(
+            &manager,
+            "catch-all",
+            'c',
+            &ResolvedPackage::new(),
+            serde_json::json!([
+                constant_var("C_PRIVATE", "private"),
+                constant_var("C_INTERFACE", "interface"),
+                constant_var("C_PUBLIC", "public"),
+            ]),
+        );
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = seed_plantuml_with_private_jre(&dir, &store);
+
+        let (entries, patch_start, provenance) = manager
+            .resolve_env_with_patch_boundary(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+        for key in ["C_PRIVATE", "C_INTERFACE", "C_PUBLIC"] {
+            assert_eq!(
+                count_key(&entries, key),
+                1,
+                "{key}: a root and a dependency match project the union once; entries: {entries:?}"
+            );
+        }
+        assert_eq!(
+            entries.len(),
+            patch_start + provenance.len(),
+            "the overlay stays one trailing region; entries: {entries:?}, patch_start: {patch_start}"
+        );
+    }
+
+    /// A leaf root's own launcher sees its private surface, where an interface-only companion var
+    /// does not belong; a `public` var reaches both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_interface_only_companion_var_is_absent_from_a_root_targets_self_surface() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+
+        let companion = seed_companion_with_env(
+            &manager,
+            "leaf-patch",
+            'c',
+            &ResolvedPackage::new(),
+            serde_json::json!([
+                constant_var("C_INTERFACE", "interface"),
+                constant_var("C_PUBLIC", "public")
+            ]),
+        );
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "leafpkg", 'r', ResolvedPackage::new()));
+
+        let entries = manager
+            .resolve_env(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+        assert_eq!(
+            count_key(&entries, "C_PUBLIC"),
+            1,
+            "positive control: the companion projected; entries: {entries:?}"
+        );
+        assert_eq!(
+            count_key(&entries, "C_INTERFACE"),
+            0,
+            "an interface-only companion var is not part of its root target's private surface; entries: {entries:?}"
+        );
+    }
+
+    /// A private companion var is now emitted under `--self`, so its `required` path is asserted
+    /// there: a missing one fails a required companion closed, and the interface view, which never
+    /// carries the var, still composes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_required_companion_fails_closed_when_its_private_path_is_missing_under_self() {
+        let dir = TempDir::new().unwrap();
+        let config = ResolvedPatchConfig {
+            required: true,
+            ..test_patch_config()
+        };
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+
+        let companion = seed_companion_with_env(
+            &manager,
+            "agent-patch",
+            'c',
+            &ResolvedPackage::new(),
+            serde_json::json!([{
+                "key": "JAVA_AGENT",
+                "type": "path",
+                "required": true,
+                "value": "${installPath}/missing",
+                "visibility": "private",
+            }]),
+        );
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "leafpkg", 'r', ResolvedPackage::new()));
+
+        let self_result = manager
+            .resolve_env(
+                std::slice::from_ref(&root),
+                true,
+                super::EnvScope::package_tier(),
+                &super::host_platform(),
+            )
+            .await;
+        let Err(error) = self_result else {
+            panic!(
+                "a required companion whose private path is missing must fail closed under --self; got {self_result:?}"
+            );
+        };
+        assert!(
+            format!("{error:#}").contains("agent-patch"),
+            "the refusal names the companion; got: {error:#}"
+        );
+
+        manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("the interface view never carries the private var, so its path is never asserted");
+    }
+
     // ── The --self surface never resolves a discarded payload ─────────────────
 
     /// Under `--self` the composition carries zero integrations, so a
@@ -5591,12 +5904,11 @@ mod phase4_spec_tests {
     /// discarded.
     ///
     /// Payload resolution asserts that every `${deps.*}` content directory
-    /// exists. The companion projection is pinned to the interface surface and
-    /// so cannot derive the caller's gate; while it collected unconditionally, a
-    /// payload naming an uninstalled dependency failed the projection outright —
-    /// a hard error for this `required` tier, and a silent drop of the
-    /// companion's env entries for an optional one. This reaches the launcher
-    /// hot path, which composes with `self_view = true`.
+    /// exists. While the projection collected unconditionally, a payload naming
+    /// an uninstalled dependency failed it outright — a hard error for this
+    /// `required` tier, and a silent drop of the companion's env entries for an
+    /// optional one. This reaches the launcher hot path, which composes with
+    /// `self_view = true`.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_companion_payload_naming_an_absent_dep_does_not_fail_the_self_surface() {
         let dir = TempDir::new().unwrap();
@@ -5624,7 +5936,7 @@ mod phase4_spec_tests {
             &serde_json::json!({
                 "type": "bundle",
                 "version": 1,
-                "env": [{ "key": "COMPANION_VAR", "type": "constant", "value": "present", "visibility": "interface" }],
+                "env": [{ "key": "COMPANION_VAR", "type": "constant", "value": "present", "visibility": "public" }],
                 "dependencies": [{ "identifier": absent_dep.to_string(), "visibility": "public" }],
                 "integrations": { "vendor.example": { "path": "${deps.absentdep.installPath}" } },
             }),
@@ -5646,7 +5958,7 @@ mod phase4_spec_tests {
         );
         assert!(
             entries.iter().any(|e| e.key == "COMPANION_VAR"),
-            "the companion's interface env var must still compose — the suppressed carrier is the only thing dropped; \
+            "the companion's public env var must still compose — the suppressed carrier is the only thing dropped; \
              entries: {entries:?}"
         );
     }
