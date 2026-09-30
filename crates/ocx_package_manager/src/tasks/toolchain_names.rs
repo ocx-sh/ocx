@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The exposed-name algebra: which names a closure exposes and who owns each, one answer for `ocx env`,
-//! `ocx inspect --closure`, [`super::prepare_lazy`] and the rendered `bin/`, never a directory scan.
+//! The exposed-name algebra: which names a tool's closure exposes and who owns each, one answer for
+//! [`super::prepare_lazy`] and the rendered `bin/`, never a directory scan. A patch companion sits
+//! outside the closure, so its dependencies' names are claimed at composition, not here.
 //! See `adr_toolchain_activation.md` § Name set.
 
 use std::collections::{BTreeMap, BTreeSet};

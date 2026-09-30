@@ -114,6 +114,15 @@ pub(crate) fn integrations_cross(self_view: bool) -> bool {
     !self_view
 }
 
+/// Whether a composed root is a package of its own or a patch companion grafted onto its targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootRole {
+    /// Its launchers are its own: `entrypoints/` on `PATH` and claimed.
+    Package,
+    /// Its launchers would run the companion's env, not its target's: off `PATH`, unclaimed.
+    Graft,
+}
+
 /// Compose the runtime env from one or more root packages; `self_view` selects the private
 /// (`--self`) surface over the interface one.
 ///
@@ -133,6 +142,7 @@ pub(crate) async fn compose(
         surface_axes(self_view),
         integrations_cross(self_view),
         paths,
+        RootRole::Package,
         &mut HashSet::new(),
     )
     .await
@@ -143,7 +153,7 @@ pub(crate) async fn compose(
 ///
 /// `emitted` holds the packages already emitted (advisory tag stripped): a dependency in it is
 /// skipped, and on success the companion's own emissions join it. The companion itself is always
-/// emitted.
+/// emitted, but never its launchers ([`RootRole::Graft`]).
 ///
 /// # Errors
 ///
@@ -165,6 +175,7 @@ pub(crate) async fn compose_companion(
         // Never derived from `axes`: an absent dep dir would fail a surface that carries no integrations.
         collect_integrations,
         &crate::composer::ComposePaths::digest_only(),
+        RootRole::Graft,
         &mut attempt,
     )
     .await?;
@@ -183,6 +194,7 @@ async fn compose_gated(
     axes: Visibility,
     collect_integrations: bool,
     paths: &ComposePaths,
+    role: RootRole,
     seen: &mut HashSet<ocx_oci::PinnedPackageRef>,
 ) -> crate::Result<ComposeOutput> {
     // A single root was already gated at install time.
@@ -316,7 +328,8 @@ async fn compose_gated(
             {
                 admitted_binaries.extend(binaries.iter().map(|name| (root.identifier().clone(), name.clone())));
             }
-            if carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes)
+            if role == RootRole::Package
+                && carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes)
                 && let Some(entrypoints) = root.metadata().entrypoints()
             {
                 admitted_entrypoints.extend(
@@ -347,15 +360,26 @@ async fn compose_gated(
             // First, so it resolves last (consumers prepend): `entrypoints/` > `bin/` > `shims/`.
             emit_shim_slot(root, axes, &mut entries);
 
-            emit_root_path_block(
-                root.metadata(),
-                &root_pkg,
-                &root_content,
-                &root_dep_contexts,
-                axes,
-                content_state,
-                &mut entries,
-            )?;
+            match role {
+                RootRole::Package => emit_root_path_block(
+                    root.metadata(),
+                    &root_pkg,
+                    &root_content,
+                    &root_dep_contexts,
+                    axes,
+                    content_state,
+                    &mut entries,
+                )?,
+                RootRole::Graft => emit_package_vars(
+                    root.metadata(),
+                    &root_content,
+                    &root_dep_contexts,
+                    /* is_root = */ true,
+                    axes,
+                    content_state,
+                    &mut entries,
+                )?,
+            }
         }
     }
 

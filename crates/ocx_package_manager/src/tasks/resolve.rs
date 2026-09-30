@@ -118,10 +118,10 @@ mod patch_overlay_tests {
 }
 
 /// What a companion contributes under one admitted base: provenance-paired env entries plus
-/// its `integrations` (`adr_package_integrations.md § Patch companions`).
+/// the claims of what it admitted (`adr_package_integrations.md § Patch companions`).
 pub struct CompanionOverlay {
     pub entries: Vec<(Entry, PatchProvenance)>,
-    pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
+    pub claims: AdmittedClaims,
 }
 
 /// Whether a companion's one-time projection was emitted, cached per companion identifier.
@@ -684,8 +684,10 @@ impl PackageManager {
                         entries.push(entry);
                         provenance.push(entry_provenance);
                     }
+                    attribution.binaries.extend(overlay.claims.binaries);
+                    attribution.entrypoints.extend(overlay.claims.entrypoints);
                     // Empty when the gate is off; nothing was collected upstream.
-                    for (identifier, entry) in overlay.integrations {
+                    for (identifier, entry) in overlay.claims.integrations {
                         if seen_integrations.insert((identifier.strip_advisory(), entry.namespace.clone())) {
                             attribution.integrations.push((identifier, entry));
                         }
@@ -911,7 +913,7 @@ impl PackageManager {
             // provenance attaches only when a projection lands in this base's overlay.
             let mut companion_overlay = CompanionOverlay {
                 entries: Vec::new(),
-                integrations: Vec::new(),
+                claims: AdmittedClaims::default(),
             };
             for companion_entry in &companions {
                 let companion_id = &companion_entry.identifier;
@@ -1005,8 +1007,6 @@ impl PackageManager {
                     }
                 };
 
-                // Attributed to the companion. Binaries and entrypoints stay dropped: never on PATH
-                // here, so admitting them would advertise unreachable binaries.
                 let companion_arc = std::sync::Arc::new(companion_install_info);
                 let axes = companion_axes
                     .get(companion_id)
@@ -1045,7 +1045,10 @@ impl PackageManager {
                         companion_overlay
                             .entries
                             .extend(out.entries.into_iter().map(|entry| (entry, make_provenance(&pinned))));
-                        companion_overlay.integrations.extend(out.admitted_integrations);
+                        // Claimed like any composition's, so a claim never contradicts `PATH`.
+                        companion_overlay.claims.binaries.extend(out.admitted_binaries);
+                        companion_overlay.claims.entrypoints.extend(out.admitted_entrypoints);
+                        companion_overlay.claims.integrations.extend(out.admitted_integrations);
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Projected);
                     }
                     Err(error) => {
@@ -1068,8 +1071,12 @@ impl PackageManager {
                 }
             }
 
-            // A companion with integrations but no env still contributes.
-            if !companion_overlay.entries.is_empty() || !companion_overlay.integrations.is_empty() {
+            // A companion with claims but no env still contributes.
+            if !companion_overlay.entries.is_empty()
+                || !companion_overlay.claims.binaries.is_empty()
+                || !companion_overlay.claims.entrypoints.is_empty()
+                || !companion_overlay.claims.integrations.is_empty()
+            {
                 patch_set.insert(admitted_id.clone(), companion_overlay);
             }
         }
@@ -5910,6 +5917,117 @@ mod phase4_spec_tests {
         assert!(
             entries.iter().any(|e| e.key == "COMPANION_VAR"),
             "the companion projects; entries: {entries:?}"
+        );
+    }
+
+    // ── A companion's launchers stay off PATH; its dependencies' are claimed ──
+
+    /// A companion's `entrypoints/` would launch the companion's own env, not its target's: it
+    /// never reaches `PATH`, and no entrypoint claim names the companion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companions_own_launchers_stay_off_path_and_unclaimed() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let digest = sha256('c');
+        let companion = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(companion.clone_with_digest(digest.clone())).unwrap();
+        seed_package_with_metadata(
+            &manager.file_structure().packages,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "entrypoints": { "patched-tool": {} },
+                "env": [constant_var("COMPANION_VAR", "public")],
+            }),
+        );
+        seed_companion_pin(manager.file_structure(), &companion, &digest);
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (entries, _, _, attribution) = manager
+            .resolve_env_with_attribution(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+
+        assert!(
+            entries.iter().any(|e| e.key == "COMPANION_VAR"),
+            "positive control: the companion projects; entries: {entries:?}"
+        );
+        let launchers = manager
+            .file_structure()
+            .packages
+            .package_dir(&companion_pinned)
+            .entrypoints();
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.key == "PATH" && std::path::Path::new(&e.value) == launchers),
+            "a companion's own launchers stay off PATH; entries: {entries:?}"
+        );
+        assert!(
+            !attribution
+                .entrypoints
+                .iter()
+                .any(|(owner, _)| owner.digest() == digest),
+            "no entrypoint claim names the companion; claims: {:?}",
+            attribution.entrypoints
+        );
+    }
+
+    /// A companion's dependency composes like any dependency: its launchers reach `PATH`, and its
+    /// binaries and entrypoints are claimed, so a claim never contradicts `PATH`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_dependencys_launchers_and_binaries_are_claimed() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let store = manager.file_structure().packages.clone();
+        let dep = pinned("toolsdep", 'd');
+        seed_package_with_metadata(
+            &store,
+            &dep,
+            &ResolvedPackage::new(),
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "binaries": ["dtool"],
+                "entrypoints": { "dlaunch": {} },
+            }),
+        );
+        let companion = seed_companion_with_var(&manager, "ca-bundle", 'c', &tc_reaching(&dep), "COMPANION_VAR");
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (entries, _, _, attribution) = manager
+            .resolve_env_with_attribution(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+
+        let launchers = store.package_dir(&dep).entrypoints();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "PATH" && std::path::Path::new(&e.value) == launchers),
+            "positive control: the dependency's launchers reach PATH; entries: {entries:?}"
+        );
+        assert!(
+            attribution
+                .entrypoints
+                .iter()
+                .any(|(owner, name)| owner.digest() == dep.digest() && name.as_str() == "dlaunch"),
+            "the dependency's launcher on PATH is claimed; claims: {:?}",
+            attribution.entrypoints
+        );
+        assert!(
+            attribution
+                .binaries
+                .iter()
+                .any(|(owner, name)| owner.digest() == dep.digest() && name.as_str() == "dtool"),
+            "the dependency's binary is claimed; claims: {:?}",
+            attribution.binaries
         );
     }
 
