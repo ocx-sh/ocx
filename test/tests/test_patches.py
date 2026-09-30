@@ -6169,3 +6169,49 @@ def test_companion_conflicting_with_an_earlier_companion_is_refused(
         f"a required conflicting companion fails with exit 65; rc={required.returncode}\n"
         f"stderr: {required.stderr}"
     )
+
+
+def test_companion_launchers_stay_off_path_and_its_dependency_launchers_are_claimed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A companion's own entrypoint launchers would run the companion's env, not its target's,
+    so they stay off ``PATH`` and unclaimed; its dependency's launchers reach ``PATH`` like any
+    dependency's, and are claimed.
+    """
+    dep = make_package_with_entrypoints(
+        ocx, _unique_repo("companion_dep_tools"), tmp_path,
+        entrypoints={"deplaunch": {"command": "hello"}},
+        file_prefix="dep",
+    )
+    companion_repo = _unique_repo("launching_companion")
+    make_package_with_entrypoints(
+        ocx, companion_repo, tmp_path,
+        entrypoints={"companionlaunch": {"command": "hello"}},
+        file_prefix="companion",
+        dependencies=[_dep_entry(ocx, dep, visibility="public")],
+        env=[{"key": "LAUNCHING_COMPANION_VAR", "type": "constant", "value": "on", "visibility": "public"}],
+    )
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "launching_companion_descriptor.json"
+    _write_descriptor(
+        descriptor_path, rules=[{"match": "*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}]
+    )
+    _write_config(ocx, registry, required=False)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+
+    report = ocx.json("package", "env", base_pkg.short)
+    entries = report["entries"]
+    assert _entry_by_key(entries, "LAUNCHING_COMPANION_VAR") is not None, (
+        f"positive control: the companion projects; got keys: {[e['key'] for e in entries]}"
+    )
+    launcher_dirs = [
+        e["value"] for e in entries
+        if e["key"] == "PATH" and Path(e["value"]).name == "entrypoints"
+    ]
+    assert len(launcher_dirs) == 1, (
+        f"only the dependency's launchers reach PATH, never the companion's; got: {launcher_dirs}"
+    )
+    claimed = {claim["name"] for claim in report.get("entrypoints", [])}
+    assert "deplaunch" in claimed, f"the dependency's launcher on PATH is claimed; got: {claimed}"
+    assert "companionlaunch" not in claimed, f"the companion's launcher is unclaimed; got: {claimed}"
