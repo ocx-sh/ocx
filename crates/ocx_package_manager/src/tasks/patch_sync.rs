@@ -1986,7 +1986,12 @@ mod tests {
         // re-fetches EAGERLY; the required companion then fails → fail closed.
         let base_id = ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         let result = manager
-            .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Lazy,
+                PatchDescriptorScope::Both,
+            )
             .await;
         assert!(
             result.is_err(),

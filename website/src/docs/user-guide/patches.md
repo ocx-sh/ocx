@@ -384,9 +384,16 @@ ocx patch sync
 
 `patch sync` re-fetches every descriptor for all installed packages and the global descriptor,
 installs any newly-referenced companion packages, and re-checks packages installed before
-the `[patches]` tier was added. This is the only command that contacts the patch registry.
-It is safe to run frequently; it piggybacks on the same index-update mechanism as
-`ocx index update`.
+the `[patches]` tier was added. It is safe to run frequently; it piggybacks on the same
+index-update mechanism as `ocx index update`.
+
+Other commands contact the patch registry less often. `ocx package install`, `ocx package pull`,
+`ocx pull`, `ocx lock`, `ocx add`, `ocx update` and `ocx package test` re-check each descriptor
+they have seen before, whether it was found or absent, and fetch it again when it changed.
+`ocx exec` and `ocx env` use the cached state and fetch only a descriptor they have never seen.
+A failed re-check falls back to the cache, unless the tier is `required`, where it fails the
+command. Under a `required` tier, a descriptor that was present and is now gone is an error
+(exit 79) until `ocx patch sync` records it as absent.
 
 Without `--platform`, `patch sync` resolves companions for **every concrete ship platform**, not
 just the platform running the sync — the same default [`ocx lock`][cmd-lock] uses. This is

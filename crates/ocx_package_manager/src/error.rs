@@ -31,6 +31,9 @@ pub enum Error {
     /// A select operation failed for one or more packages.
     #[error("{}", format_batch("select", _0))]
     SelectFailed(Vec<PackageError>),
+    /// Patch discovery failed for one or more base packages.
+    #[error("{}", format_batch("discover patches for", _0))]
+    DiscoverFailed(Vec<PackageError>),
     /// The self-update check failed before any install was attempted (boxed: the type is recursive).
     #[error("self-update check failed: {}", render_entry(_0))]
     SelfCheckFailed(Box<PackageError>),

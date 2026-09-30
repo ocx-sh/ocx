@@ -18,5 +18,6 @@ pub use error::PatchError;
 pub use matcher::glob_match;
 pub use persistence::{
     FetchedDescriptorBlobs, PersistedDigests, fetch_patch_descriptor_blobs, persist_patch_descriptor,
+    probe_patch_descriptor_digest,
 };
 pub use snapshot::{PATCH_SNAPSHOT_FILE, PatchSnapshot, SnapshotVersion};

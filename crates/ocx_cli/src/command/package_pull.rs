@@ -40,6 +40,7 @@ impl PackagePull {
                 &oci_packages,
                 conventions::platform_or_default(self.platform.platform.clone()),
                 context.concurrency(),
+                false,
             )
             .await?;
 

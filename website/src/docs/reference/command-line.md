@@ -3807,6 +3807,8 @@ Downloads packages into the local [object store][fs-objects] without creating
 Unlike [`install`](#install), this command only populates the content-addressed object store — no
 candidate or current symlinks are created. If a package declares [dependencies][ug-dependencies], all transitive dependencies are pulled into the object store as well. This is the recommended primitive for CI environments where reproducibility matters and symlink management is unnecessary.
 
+With a [`[patches]`][config-patches] tier configured, `pull` revalidates the package's patch descriptors and installs the matching companions, like [`package install`][cmd-package-install]. A `required` companion that cannot be found exits 79; any other install failure exits with its cause's code.
+
 Like [`package install`][cmd-package-install], `pull` verifies a policy-covered package's [Sigstore][sigstore] signature automatically before downloading, aborting fail-closed on a mismatch or a tampered artifact. See the auto-verify contract under [`install`](#package-install) below for the seam, the operator-config-only policy scope, the `--no-verify` / [`OCX_NO_VERIFY`][env-no-verify] opt-out, and offline behavior.
 
 **Usage**
@@ -5745,6 +5747,12 @@ This command also picks up patches for packages installed before the `[patches]`
 configured. All states are re-checked regardless of what was previously recorded. Running
 `patch sync` is equivalent to `ocx index update` for the patch tier — not to the similarly-named
 `ocx index sync`, despite the shared verb.
+
+`ocx package install`, `ocx package pull`, `ocx pull`, `ocx lock`, `ocx add`, `ocx update` and
+`ocx package test` also re-check descriptors they have seen before, and refetch one that changed.
+`ocx exec` and `ocx env` fetch only a descriptor they have never seen. Under a `required` tier, a
+descriptor that was present and is now gone fails the command (exit 79) until `ocx patch sync`
+records it as absent.
 
 Without `--platform`, `patch sync` resolves **every concrete ship platform**
 (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) — not just the

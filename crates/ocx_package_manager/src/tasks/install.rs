@@ -3,10 +3,10 @@
 
 use tokio::task::JoinSet;
 
-use crate::{concurrency, concurrency::Concurrency, error::PackageError, error::PackageErrorKind};
+use crate::{concurrency::Concurrency, error::PackageError, error::PackageErrorKind};
 use ocx_package::install_info::InstallInfo;
 
-use super::super::PackageManager;
+use super::{super::PackageManager, patch_discovery::PatchDiscoveryMode};
 
 impl PackageManager {
     /// Pulls a package, then creates its candidate and/or current symlinks and discovers patches.
@@ -21,16 +21,8 @@ impl PackageManager {
 
         create_install_symlinks(self, package, &install_info, candidate, select).await?;
 
-        if let Err(error) = self.discover_and_install_patches(package, &platform).await {
-            // A non-required patch tier that is empty or unreachable must not abort the base install.
-            if super::patch_discovery::install_discovery_error_is_fatal(self.patches(), &error) {
-                return Err(error);
-            }
-            log::warn!(
-                "patch discovery for '{package}' failed (patch tier not required): {error}; \
-                 continuing without companions"
-            );
-        }
+        self.discover_patches_best_effort(package, &platform, PatchDiscoveryMode::Revalidate)
+            .await?;
 
         Ok(install_info)
     }
@@ -46,7 +38,8 @@ impl PackageManager {
         // `true` for internal installs of `ocx` itself (self update, bootstrap), which discover no patches.
         skip_discovery: bool,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
-        let infos = self.pull_all(&packages, platform.clone(), concurrency).await?;
+        // Discovery runs below, once the symlinks exist.
+        let infos = self.pull_all(&packages, platform.clone(), concurrency, true).await?;
 
         // Parallel is safe: candidate paths are per-tag and `current` is guarded by `.select.lock`.
         if candidate || select {
@@ -83,52 +76,8 @@ impl PackageManager {
         }
 
         if !skip_discovery {
-            // Capped, or the discovery fan-out outruns the concurrency the caller asked for.
-            let semaphore = concurrency.semaphore();
-            let mut tasks: JoinSet<(usize, Result<usize, PackageErrorKind>)> = JoinSet::new();
-
-            for (index, pkg) in packages.iter().enumerate() {
-                let mgr = self.clone();
-                let pkg = pkg.clone();
-                let platform = platform.clone();
-                let sem = semaphore.clone();
-                tasks.spawn(async move {
-                    // Named, not `_`: the permit must span the whole discovery call.
-                    let _permit = concurrency::acquire_permit(&sem).await;
-                    let result = match mgr.discover_and_install_patches(&pkg, &platform).await {
-                        Err(error)
-                            if !super::patch_discovery::install_discovery_error_is_fatal(mgr.patches(), &error) =>
-                        {
-                            log::warn!(
-                                "patch discovery for '{pkg}' failed (patch tier not required): {error}; \
-                                 continuing without companions"
-                            );
-                            Ok(0)
-                        }
-                        other => other,
-                    };
-                    (index, result)
-                });
-            }
-
-            let mut indexed_discovery_errors: Vec<(usize, PackageError)> = Vec::new();
-            while let Some(join_result) = tasks.join_next().await {
-                match join_result {
-                    Ok((index, Err(kind))) => {
-                        indexed_discovery_errors.push((index, PackageError::new(packages[index].clone(), kind)));
-                    }
-                    Ok((_, Ok(_))) => {}
-                    Err(panic) => {
-                        tasks.abort_all();
-                        std::panic::resume_unwind(panic.into_panic());
-                    }
-                }
-            }
-
-            if !indexed_discovery_errors.is_empty() {
-                let errors = finalize_indexed_errors(indexed_discovery_errors);
-                return Err(crate::error::Error::InstallFailed(errors));
-            }
+            self.discover_patches_all(&packages, &platform, PatchDiscoveryMode::Revalidate, concurrency)
+                .await?;
         }
 
         Ok(infos)
@@ -149,7 +98,7 @@ async fn create_install_symlinks(
 }
 
 /// Sorts errors back into input order, or the exit code (taken from the first error) depends on a completion race.
-fn finalize_indexed_errors(mut indexed_errors: Vec<(usize, PackageError)>) -> Vec<PackageError> {
+pub(super) fn finalize_indexed_errors(mut indexed_errors: Vec<(usize, PackageError)>) -> Vec<PackageError> {
     indexed_errors.sort_by_key(|(index, _)| *index);
     indexed_errors.into_iter().map(|(_, error)| error).collect()
 }

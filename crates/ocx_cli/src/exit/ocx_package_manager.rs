@@ -31,6 +31,7 @@ impl ClassifyExitCode for PatchError {
             Self::FetchFailed { source } => source.classify(),
             Self::BlobWriteFailed { .. } => Some(ExitCode::IoError),
             Self::PolicyBlocked { .. } => Some(ExitCode::PolicyBlocked),
+            Self::DescriptorVanished { .. } => Some(ExitCode::NotFound),
             Self::InvalidDescriptorJson { .. }
             | Self::UnsupportedVersion { .. }
             | Self::UnsupportedSnapshotVersion { .. }
@@ -58,6 +59,7 @@ impl ClassifyExitCode for PackageManagerError {
             | Self::InspectFailed(es)
             // Batch variants carry no `#[source]`, so the chain walker never reaches the inner kind.
             | Self::SelectFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
+            Self::DiscoverFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
             // Write `e.classify()`, never `e.classify()?`: `STANDS_IN_FOR`'s normaliser strips only `return` and a binder.
             Self::OfflineMode => Some(ExitCode::PolicyBlocked),
             Self::InternalFile(_, _) => Some(ExitCode::IoError),
@@ -344,6 +346,24 @@ mod tests {
             PackageManagerError::SelectFailed(errors).classify(),
             Some(ExitCode::DataError)
         );
+    }
+
+    /// A vanished required descriptor names discovery, not install, and exits 79.
+    #[test]
+    fn discover_failed_classifies_a_vanished_descriptor_as_not_found() {
+        let descriptor = ocx_oci::PackageRef::new_registry("global", "patches.example.com");
+        let errors = vec![PackageError::new(
+            ocx_oci::PackageRef::new_registry("a", "example.com"),
+            PackageErrorKind::PatchDiscovery(PatchError::DescriptorVanished {
+                identifier: Box::new(descriptor),
+            }),
+        )];
+        let error = PackageManagerError::DiscoverFailed(errors);
+        assert!(
+            error.to_string().starts_with("failed to discover patches for package"),
+            "got: {error}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::NotFound));
     }
 
     // ── moved from ocx_package_manager::error with the impl ──

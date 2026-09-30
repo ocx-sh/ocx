@@ -91,6 +91,23 @@ pub async fn fetch_patch_descriptor_blobs(
     }))
 }
 
+/// HEADs the `__ocx.patch` manifest digest for `patch_identifier` without downloading it, comparable
+/// against a recorded descriptor digest; `Ok(None)` when the tag does not exist.
+///
+/// # Errors
+///
+/// [`PatchError::FetchFailed`] — a network or auth error from the OCI client.
+pub async fn probe_patch_descriptor_digest(
+    client: &ocx_oci::client::Client,
+    patch_identifier: &PackageRef,
+) -> Result<Option<Digest>, PatchError> {
+    let tag_identifier = ocx_oci::OciIdentifier::passthrough(patch_identifier).clone_with_tag(InternalTag::PATCH_TAG);
+    client
+        .probe_manifest_digest_addressed(&tag_identifier, ocx_oci::client::ReadAddressing::Mirrored)
+        .await
+        .map_err(|source| PatchError::FetchFailed { source })
+}
+
 /// Maps a [`ocx_oci::client::ClientError`] from
 /// [`ocx_oci::client::Client::fetch_single_layer_artifact`] onto [`PatchError`].
 fn map_fetch_error(error: ocx_oci::client::error::ClientError) -> PatchError {

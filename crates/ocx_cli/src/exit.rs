@@ -1813,6 +1813,26 @@ mod tests {
             pattern: "Self::LayerNotStaged { .. }",
             value: "Some(ExitCode::Failure)",
         },
+        // Patch discovery's batch failure delegates to its first base's kind, as
+        // every other batch variant does.
+        NewArm {
+            target: "PackageManagerError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::DiscoverFailed(es)",
+            value: "es.first().and_then(|pe| pe.kind.classify())",
+        },
+        // A required-tier descriptor gone from the registry is a missing
+        // resource, the same 79 a missing required companion exits with.
+        NewArm {
+            target: "PatchError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::DescriptorVanished { .. }",
+            value: "Some(ExitCode::NotFound)",
+        },
         // A registry that will not delete tags needs an operator, so it gets
         // its own code rather than 69 or 75, which both invite a retry.
         NewArm {
