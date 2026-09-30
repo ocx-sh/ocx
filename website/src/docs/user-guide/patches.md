@@ -29,8 +29,9 @@ It declares rules: when an installed package's identifier matches a glob pattern
 these companion packages to its execution environment.
 
 At `ocx exec` time, OCX fetches the descriptor, identifies the matching companions, and
-composes their `interface` environment entries on top of the base package's entries. The
-base package is never modified.
+composes their environment entries as part of the package they match: each entry lands on
+the surface the package itself is read through, as if the package had declared it. The
+base package is never modified. See [Companions Are Part of Their Target][patches-how-part-of-target].
 
 A companion's `integrations` block, if it declares one, contributes the same way any
 package's does — attributed to the companion's own identifier, never merged into anything
@@ -112,6 +113,87 @@ toolchain match patch rules without the declared tag until `ocx lock` runs.
 Rules are evaluated in order and unioned: a Java install matched by both rules above gets
 both companions composed in.
 
+### Companions are part of their target {#patches-how-part-of-target}
+
+A companion's env var carries the same [`visibility`][reference-visibility] any package's
+var does, and it is read on the surfaces that visibility names for the package it patches.
+A package has two [surfaces][env-composition-surfaces]: the interface surface its consumers
+see, and the private surface its own generated launchers see (also
+[`ocx package env --self`][cmd-package-env] and `ocx package exec --self`).
+
+| Companion var | Target's consumers, `ocx package env`, shells, dependents | Target's own launchers, `--self` |
+|---|---|---|
+| `private` | no | yes, when the target is a root of the composition |
+| `interface` | yes | no |
+| `public` | yes | yes, when the target is a root of the composition |
+
+A var that declares no `visibility` is `private`.
+
+The private column applies only when the target is a root of the composition. A target that is
+a dependency of the package being composed is admitted through its interface alone. Its
+companion then contributes its `interface` and `public` vars wherever that dependency's
+interface surface reaches, and its `private` vars never load. A private var therefore cannot
+leak into the consumers of a package that depends on the target.
+
+Three more rules follow from "as if the target had declared it":
+
+- A companion's own dependencies are admitted the same way. Its private dependencies load
+  only where its private side loads.
+- A catch-all rule that matches a root and its dependencies composes the union of the two
+  sides under `--self` and in launchers, with each entry applied once. The consumer view
+  takes the interface side only.
+- `${installPath}`, `${deps.*}` and `${self.env.*}` inside a companion resolve against the
+  companion, not the target.
+
+For example, `plantuml` has a private dependency on a JRE, and its entrypoint runs
+`java -jar ${installPath}/plantuml.jar`. A companion matched to plantuml declares
+`JDK_JAVA_OPTIONS` as `private`:
+
+```json
+{
+  "env": [
+    {
+      "key": "JDK_JAVA_OPTIONS",
+      "type": "list",
+      "separator": " ",
+      "value": "-Dhttps.proxyHost=proxy.corp.example",
+      "visibility": "private"
+    }
+  ]
+}
+```
+
+Only plantuml's launcher sees the flag. The JRE is shared by other Java packages, and
+neither it nor plantuml's consumers receive it.
+
+Patch entries apply after all package env, so site policy wins over what a package
+declares. Project `[env]` and `--env` apply after them.
+
+### Conflicts and launchers {#patches-how-conflicts}
+
+A companion brings its own dependencies into the environment, so it can name a repository the
+environment already carries. Suppose its closure reaches that repository at a different digest
+than the base, or than an earlier companion. The later companion is refused.
+
+A `required` companion fails the command with exit 65. An optional one is skipped with a
+warning.
+
+Two companion roots of the same repository at different tags are not a conflict. Both apply,
+each as its own companion. A dependency the base or an earlier companion already composed is
+emitted once.
+
+A companion's own entrypoint launchers are never put on `PATH`, since they run the companion's
+environment rather than its target's. Its own `binaries` claim is admitted, and so are the
+claims and launchers of its dependencies, as for any dependency.
+
+### Execution time only {#patches-how-execution-time}
+
+Patches are composed when OCX builds an environment to run something: `ocx exec`,
+`ocx package exec`, `ocx package test`, `ocx env`, `ocx package env` and generated launchers.
+Metadata-only views do not model them. `ocx package inspect --closure`, `ocx inspect --closure`
+and the name sets a toolchain render derives for `PATH` describe the closure the packages
+declare, without companions.
+
 ### One companion per runtime {#patches-how-per-runtime}
 
 The descriptor above ships two companions for what is conceptually one CA bundle: a
@@ -155,15 +237,24 @@ contributed:
       "type": "list",
       "separator": " ",
       "value": "-Djavax.net.ssl.trustStore=${installPath}/cacerts",
-      "visibility": "interface"
+      "visibility": "public"
     }
   ]
 }
 ```
 
-`visibility` is `interface`: the companion contributes this flag to the base package's
-consumers without needing it for any runtime of its own. See [Appending option
-lists][authoring-env-surface-lists] for when to reach for `list` in your own packages.
+`visibility` is `public`: the flag reaches the JDK's consumers, and the JDK's own launchers
+when the JDK is the package being run. A JDK pulled in as a dependency receives the flag
+through its interface alone. See [Appending option lists][authoring-env-surface-lists] for when
+to reach for `list` in your own packages.
+
+A catch-all rule such as `"match": "*"` matches every root and every dependency. Under
+`--self` and in launchers it composes the union of the private and interface sides. The
+consumer view takes the interface side only.
+
+A value meant for everyone, like a CA bundle path or a truststore flag, belongs on a `public`
+var. A `private` var misses consumers, and an `interface` var reaches a launcher only through
+a dependency the rule matches.
 
 ## Consumer experience {#patches-consumer}
 
@@ -215,6 +306,15 @@ JAVA_TRUST   ocx.sh/java:* corp/jdk-trust:1.0
 A base with no applicable patch prints "no patches apply" and exits `0` — not an error.
 `patch why` is the narrower diagnostic: only the `Variable | Rule | Companion` provenance
 table, without the rest of the composed environment `--show-patches` prints alongside it.
+
+`patch why` traces the surface the base's consumers see. Add `--self` to trace the private
+surface instead, the one the base's own launchers see:
+
+```sh
+ocx patch why java:21 --self
+```
+
+A companion's `private` vars appear in that table and not in the consumer one.
 
 ## Maintainer workflow {#patches-maintainer}
 
@@ -273,6 +373,17 @@ in that environment instead:
 ocx patch test \
   --descriptor ./my-descriptor.json \
   java:21 -- java -version
+```
+
+`patch test` composes the surface the base's consumers see. Add `--self` to preview the
+private surface, the one the base's own launchers see, which is where a companion's `private`
+vars land:
+
+```sh
+ocx patch test \
+  --descriptor ./my-descriptor.json \
+  --self \
+  java:21
 ```
 
 If the companion package is not yet published, supply a local archive instead of pulling it
@@ -568,8 +679,8 @@ For the full field reference, see the [`[patches]` configuration section][config
   forwarded to subprocesses.
 - [Environment reference: `OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] — the snapshot
   path variable.
-- [Environment composition][env-composition] — how companion `interface` entries compose
-  onto the base package's execution environment.
+- [Environment composition][env-composition] — how companion entries compose onto the
+  base package's interface and private surfaces.
 - [`[mirrors]` reference][config-mirrors] — the transport-level sibling to the patch tier.
 - [Command reference: `patch`][cmd-patch] — `publish`, `sync`, `freeze`, `test`, `why`.
 - [Command reference: `--frozen`][arg-frozen] — the package tier's freeze, and why it
@@ -597,6 +708,7 @@ For the full field reference, see the [`[patches]` configuration section][config
 <!-- reference -->
 [reference-env-path]: ../reference/metadata.md#env-path
 [reference-env-list]: ../reference/metadata.md#env-list
+[reference-visibility]: ../reference/metadata.md#env-entry-visibility
 
 <!-- authoring -->
 [authoring-env-surface-lists]: ../authoring/env-surface.md#lists
@@ -611,11 +723,13 @@ For the full field reference, see the [`[patches]` configuration section][config
 
 <!-- env composition -->
 [env-composition]: ../reference/env-composition.md
+[env-composition-surfaces]: ../reference/env-composition.md#visibility-surfaces
 [env-composition-patch-opt-out]: ../reference/env-composition.md#patch-opt-out-scope
 [env-composition-integrations-companions]: ../reference/env-composition.md#integrations-companions
 
 <!-- commands -->
 [cmd-patch]: ../reference/command-line.md#patch
+[cmd-package-env]: ../reference/command-line.md#package-env
 [cmd-patch-why]: ../reference/command-line.md#patch-why
 [cmd-patch-sync]: ../reference/command-line.md#patch-sync
 [cmd-index-update]: ../reference/command-line.md#index-update
@@ -632,3 +746,6 @@ For the full field reference, see the [`[patches]` configuration section][config
 
 <!-- in-depth -->
 [fs-index]: ../in-depth/indices.md#local
+
+<!-- internal -->
+[patches-how-part-of-target]: #patches-how-part-of-target

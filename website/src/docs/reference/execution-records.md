@@ -289,7 +289,13 @@ A later invocation of the same binary resolves straight to its now-real `entrypo
 
 ## Patch companions in the record {#execution-records-patch}
 
-A [patch companion][patches-how] composes onto `PATH` beside the packages it patches rather than replacing them, and the record treats it as one more package rather than a side channel: any companion admitted for this invocation appears in `packages[]` as an ordinary entry — `name`, `uri`, `digest`, `annotations` — carrying `sh.ocx.role: "companion"` alongside the existing `"root"` / `"dependency"` values. Companions are always listed **last** — after every root and every dependency — so scanning `packages[]` in order gives roots, then dependencies, then companions.
+A [patch companion][patches-how] composes as part of the packages it patches rather than replacing them, and the record treats it as one more package rather than a side channel. Any companion admitted for this invocation appears in `packages[]` as an ordinary entry — `name`, `uri`, `digest`, `annotations` — carrying `sh.ocx.role: "companion"` alongside the existing `"root"` / `"dependency"` values.
+
+Each companion carries `sh.ocx.visibility`, the surface it was composed on. It is `private` under `--self` when the companion matched only roots, and `interface` when it matched only dependencies or when the view is a consumer's. Under `--self` it is `public` when the companion matched both a root and a dependency.
+
+The companion's own dependencies are recorded with `sh.ocx.role: "dependency"`. A package the roots or an earlier entry already reached keeps its first position and role. A companion that contributes only [integrations][env-composition-integrations] is recorded too.
+
+The order is every root, then every package dependency, then every companion, then the companions' dependencies. Scanning `packages[]` in order gives that sequence.
 
 `resolution.patchSnapshot` names the patch snapshot pinned for this invocation, when one is in force via [`ocx patch freeze`][cmd-patch-freeze] or [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot]:
 
@@ -437,6 +443,9 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 
 <!-- user guide -->
 [patches-how]: ../user-guide/patches.md#patches-how
+
+<!-- env composition -->
+[env-composition-integrations]: ./env-composition.md#integrations-companions
 
 <!-- in-depth -->
 [in-depth-lazy-loading]: ../in-depth/lazy-loading.md#deferred-tools

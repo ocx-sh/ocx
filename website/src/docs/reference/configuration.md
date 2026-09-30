@@ -586,8 +586,9 @@ The `[patches]` tier points at an operator-controlled OCI registry that hosts
 [patch descriptors][patches-user-guide]. Descriptors map glob patterns over package
 identifiers to **companion packages** — small packages that carry site-specific
 environment overlays (CA bundles, proxy endpoint variables, license-server hints). At
-exec time OCX composes matched companions' `interface` environment entries on top of the
-base package's entries without modifying the base package.
+exec time OCX composes a matched companion's environment entries as part of the package it
+matched, on the surfaces that package is read through, without modifying the base package.
+See [Companions are part of their target][patches-how-part-of-target].
 
 The `[patches]` tier is the execution-environment twin of `[mirrors]`: `[mirrors]`
 adapts where bytes come from; `[patches]` adapts what environment a binary runs in. Both
@@ -2211,6 +2212,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 
 <!-- patches user guide -->
 [patches-user-guide]: ../user-guide/patches.md
+[patches-how-part-of-target]: ../user-guide/patches.md#patches-how-part-of-target
 [env-no-update-check]: ./environment.md#ocx-no-update-check
 [env-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
