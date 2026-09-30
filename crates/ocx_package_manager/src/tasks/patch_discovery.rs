@@ -4,11 +4,14 @@
 //! Lazy three-state patch discovery and companion install
 //! (`adr_infrastructure_patches.md § Three-state discovery`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+use tokio::task::JoinSet;
 
 use crate::{
     patch::FetchedDescriptorBlobs, patch::PatchDescriptor, patch::fetch_patch_descriptor_blobs,
-    patch::persist_patch_descriptor,
+    patch::persist_patch_descriptor, patch::probe_patch_descriptor_digest,
 };
 use ocx_config::patch::{PatchConfig, ResolvedPatchConfig, expand_patch_path};
 use ocx_oci::{self, PackageRef, tag::InternalTag};
@@ -16,7 +19,9 @@ use ocx_package::install_info::InstallInfo;
 
 use ocx_util::fs::LockedJsonFile;
 
-use super::super::{PackageManager, error::PackageErrorKind};
+use super::super::{PackageManager, error::PackageError, error::PackageErrorKind};
+use super::install::finalize_indexed_errors;
+use crate::{concurrency, concurrency::Concurrency};
 
 // ── Safety limits ─────────────────────────────────────────────────────────────
 
@@ -109,8 +114,10 @@ impl PatchTagMap {
 /// Whether a discovery pass may skip already-recorded states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchDiscoveryMode {
-    /// Install time: fetch only on `NeverLooked`.
+    /// Compose time: fetch only on `NeverLooked`.
     Lazy,
+    /// Explicit network commands: [`Lazy`](Self::Lazy), plus a manifest-digest probe of each recorded source that refetches on drift.
+    Revalidate,
     /// `ocx patch sync`: re-fetch every descriptor source regardless of state.
     Sync,
 }
@@ -124,26 +131,131 @@ pub(super) enum PatchDescriptorScope {
     GlobalOnly,
 }
 
-// ── PackageManager::discover_and_install_patches ──────────────────────────────
+// ── PackageManager discovery ──────────────────────────────────────────────────
 
 impl PackageManager {
-    /// Discovers patches for an installed base and installs its companions; returns how many were installed.
+    /// Patch discovery for one base; a failure is fatal only under a required tier or for a
+    /// required companion, otherwise warned and the base keeps no companions.
     ///
     /// # Errors
     ///
-    /// `RequiredCompanionFailed` when a `required = true` companion fails to install; optional ones only warn.
-    pub async fn discover_and_install_patches(
+    /// The fatal discovery error: a descriptor failure under a required tier, or `RequiredCompanionFailed`.
+    pub async fn discover_patches_best_effort(
         &self,
-        base_id: &PackageRef,
+        base: &PackageRef,
         platform: &ocx_oci::Platform,
-    ) -> Result<usize, PackageErrorKind> {
-        self.discover_and_install_patches_with_mode(
-            base_id,
-            platform,
-            PatchDiscoveryMode::Lazy,
-            PatchDescriptorScope::Both,
-        )
-        .await
+        mode: PatchDiscoveryMode,
+    ) -> Result<(), PackageErrorKind> {
+        let result = self
+            .discover_and_install_patches_with_mode(base, platform, mode, PatchDescriptorScope::Both)
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => tolerate_discovery_error(self.patches(), base, error),
+        }
+    }
+
+    /// Patch discovery for every base in parallel under `concurrency`; fatal failures surface in input order.
+    ///
+    /// Under [`PatchDiscoveryMode::Revalidate`] each distinct descriptor is re-checked once, not once per base.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DiscoverFailed`](crate::error::Error::DiscoverFailed) naming each base whose discovery failed fatally.
+    pub async fn discover_patches_all(
+        &self,
+        packages: &[PackageRef],
+        platform: &ocx_oci::Platform,
+        mode: PatchDiscoveryMode,
+        concurrency: Concurrency,
+    ) -> Result<(), crate::error::Error> {
+        let Some(patches) = self.patches() else {
+            return Ok(());
+        };
+        if self.is_offline() || packages.is_empty() {
+            return Ok(());
+        }
+
+        let revalidated = if mode == PatchDiscoveryMode::Revalidate {
+            let mut seen: HashSet<PackageRef> = HashSet::new();
+            let mut ids: Vec<PackageRef> = Vec::new();
+            // The first base naming a descriptor carries its failure.
+            let mut owners: Vec<usize> = Vec::new();
+            for (index, package) in packages.iter().enumerate() {
+                for id in descriptor_ids(patches, package, PatchDescriptorScope::Both) {
+                    if seen.insert(id.clone()) {
+                        ids.push(id);
+                        owners.push(index);
+                    }
+                }
+            }
+            let (revalidated, errors) = revalidate_descriptors(self, patches, &ids, concurrency).await;
+            if !errors.is_empty() {
+                let errors = errors
+                    .into_iter()
+                    .map(|(position, kind)| {
+                        let owner = owners[position];
+                        (owner, PackageError::new(packages[owner].clone(), kind))
+                    })
+                    .collect();
+                return Err(crate::error::Error::DiscoverFailed(finalize_indexed_errors(errors)));
+            }
+            Some(Arc::new(revalidated))
+        } else {
+            None
+        };
+
+        // Capped, or the discovery fan-out outruns the concurrency the caller asked for.
+        let semaphore = concurrency.semaphore();
+        let mut tasks: JoinSet<(usize, Result<usize, PackageErrorKind>)> = JoinSet::new();
+        for (index, package) in packages.iter().enumerate() {
+            let manager = self.clone();
+            let package = package.clone();
+            let platform = platform.clone();
+            let semaphore = semaphore.clone();
+            let revalidated = revalidated.clone();
+            tasks.spawn(async move {
+                // Named, not `_`: the permit must span the whole discovery call.
+                let _permit = concurrency::acquire_permit(&semaphore).await;
+                let result = discover_from(
+                    &manager,
+                    &package,
+                    &platform,
+                    mode,
+                    PatchDescriptorScope::Both,
+                    revalidated.as_deref(),
+                )
+                .await;
+                (index, result)
+            });
+        }
+
+        let mut fatal: Vec<(usize, PackageError)> = Vec::new();
+        let mut all_clean = true;
+        while let Some(join_result) = tasks.join_next().await {
+            match join_result {
+                Ok((index, Err(kind))) => {
+                    all_clean = false;
+                    if let Err(kind) = tolerate_discovery_error(self.patches(), &packages[index], kind) {
+                        fatal.push((index, PackageError::new(packages[index].clone(), kind)));
+                    }
+                }
+                Ok((_, Ok(_))) => {}
+                Err(panic) => {
+                    tasks.abort_all();
+                    std::panic::resume_unwind(panic.into_panic());
+                }
+            }
+        }
+        if !fatal.is_empty() {
+            return Err(crate::error::Error::DiscoverFailed(finalize_indexed_errors(fatal)));
+        }
+
+        // Any failed base keeps the last-known-good descriptor digests for the whole batch.
+        if all_clean && let Some(revalidated) = revalidated {
+            commit_descriptor_advances(&revalidated.pending).await?;
+        }
+        Ok(())
     }
 
     /// Patch discovery parameterised by mode and scope; returns the companions installed.
@@ -157,253 +269,29 @@ impl PackageManager {
         let Some(patches) = self.patches() else {
             return Ok(0);
         };
-
         // Here, not in the caller, so every caller is guarded.
         if self.is_offline() {
             return Ok(0);
         }
 
-        let file_structure = self.file_structure();
-        let blob_store = &file_structure.blobs;
-
-        let global_id = global_descriptor_id(patches);
-        let descriptor_ids: Vec<PackageRef> = match scope {
-            // Order is precedence: package-specific last, so its companions win on dedup.
-            PatchDescriptorScope::Both => vec![global_id, patch_descriptor_id(patches, base_id)],
-            PatchDescriptorScope::GlobalOnly => vec![global_id],
-        };
-
-        let mut descriptors: Vec<PatchDescriptor> = Vec::new();
-        // Re-sync advances only, committed after every required companion installs to keep last-known-good.
-        let mut pending_tag_writes: Vec<PendingDescriptorCommit> = Vec::new();
-
-        for descriptor_id in &descriptor_ids {
-            let tags_path = file_structure.patch_descriptor_path(descriptor_id);
-            let state = PatchTagMap::read(&tags_path)
-                .await
-                .map_err(PackageErrorKind::Internal)?;
-
-            match state {
-                PatchDiscoveryState::NeverLooked => {
-                    // Eager, so a later offline compose fails closed on a missing required companion.
-                    match fetch_and_persist_descriptor(
-                        self,
-                        descriptor_id,
-                        &tags_path,
-                        DescriptorCommit::Eager,
-                        &mut pending_tag_writes,
-                    )
-                    .await?
-                    {
-                        Some(descriptor) => {
-                            descriptors.push(descriptor);
-                        }
-                        None => {
-                            // The helper already recorded "looked, no descriptor".
-                        }
-                    }
-                }
-                PatchDiscoveryState::LookedNoDescriptor => {
-                    if mode == PatchDiscoveryMode::Sync {
-                        log::debug!(
-                            "patch discovery (sync): re-fetching '{}' — previously no descriptor, force-rechecking",
-                            descriptor_id
-                        );
-                        // A descriptor appearing now is a first discovery: eager.
-                        match fetch_and_persist_descriptor(
-                            self,
-                            descriptor_id,
-                            &tags_path,
-                            DescriptorCommit::Eager,
-                            &mut pending_tag_writes,
-                        )
-                        .await?
-                        {
-                            Some(descriptor) => {
-                                descriptors.push(descriptor);
-                            }
-                            None => {
-                                // The helper already recorded "looked, no descriptor".
-                            }
-                        }
-                    } else {
-                        log::debug!(
-                            "patch discovery: skipping '{}' — previously looked, no descriptor found",
-                            descriptor_id
-                        );
-                    }
-                }
-                PatchDiscoveryState::LookedHasDescriptor { manifest_digest } => {
-                    if mode == PatchDiscoveryMode::Sync {
-                        log::debug!(
-                            "patch discovery (sync): re-fetching '{}' — force-rechecking existing descriptor (recorded digest: {})",
-                            descriptor_id,
-                            manifest_digest
-                        );
-                        // Deferred, so a required-companion failure preserves the recorded digest.
-                        match fetch_and_persist_descriptor(
-                            self,
-                            descriptor_id,
-                            &tags_path,
-                            DescriptorCommit::Deferred,
-                            &mut pending_tag_writes,
-                        )
-                        .await?
-                        {
-                            Some(descriptor) => {
-                                descriptors.push(descriptor);
-                            }
-                            None => {
-                                // Vanished upstream; the helper recorded "looked, no descriptor".
-                            }
-                        }
-                        continue;
-                    }
-                    let digest = match ocx_oci::Digest::try_from(manifest_digest.as_str()) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            // A failed re-fetch must leave the state intact, or a transient error records "no patch".
-                            log::warn!(
-                                "patch discovery: invalid cached manifest digest '{}' for '{}': {error}; re-fetching",
-                                manifest_digest,
-                                descriptor_id
-                            );
-                            // No last-known-good exists to keep, so eager.
-                            if let Some(descriptor) = fetch_and_persist_descriptor(
-                                self,
-                                descriptor_id,
-                                &tags_path,
-                                DescriptorCommit::Eager,
-                                &mut pending_tag_writes,
-                            )
-                            .await?
-                            {
-                                descriptors.push(descriptor);
-                            }
-                            continue;
-                        }
-                    };
-                    match load_descriptor_from_cas(blob_store, descriptor_id.registry(), &digest).await {
-                        Ok(descriptor) => {
-                            descriptors.push(descriptor);
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "patch discovery: failed to load cached descriptor for '{}': {error}; re-fetching",
-                                descriptor_id
-                            );
-                            // The cached blob is corrupt or missing: no last-known-good to keep, so eager.
-                            if let Some(descriptor) = fetch_and_persist_descriptor(
-                                self,
-                                descriptor_id,
-                                &tags_path,
-                                DescriptorCommit::Eager,
-                                &mut pending_tag_writes,
-                            )
-                            .await?
-                            {
-                                descriptors.push(descriptor);
-                            }
-                        }
-                    }
-                }
-            }
+        if mode != PatchDiscoveryMode::Revalidate {
+            return discover_from(self, base_id, platform, mode, scope, None).await;
         }
-
-        // A later package-specific entry overwrites the global one's `required`; order stays first-seen.
-        let mut companion_order: Vec<ocx_oci::PackageRef> = Vec::new();
-        let mut companion_map: HashMap<ocx_oci::PackageRef, crate::patch::CompanionEntry> = HashMap::new();
-        for descriptor in &descriptors {
-            let entries = descriptor.collect_companions(base_id, patches.required);
-            for entry in entries {
-                if !companion_map.contains_key(&entry.identifier) {
-                    companion_order.push(entry.identifier.clone());
-                }
-                companion_map.insert(entry.identifier.clone(), entry);
-            }
+        let ids = descriptor_ids(patches, base_id, scope);
+        let (revalidated, errors) = revalidate_descriptors(self, patches, &ids, Concurrency::cores()).await;
+        if let Some((_, error)) = errors.into_iter().next() {
+            return Err(error);
         }
-        let companions: Vec<crate::patch::CompanionEntry> = companion_order
-            .into_iter()
-            .filter_map(|id| companion_map.remove(&id))
-            .collect();
-
-        if companions.len() > MAX_TOTAL_COMPANIONS {
-            return Err(PackageErrorKind::PatchDiscovery(
-                crate::patch::PatchError::DescriptorTooLarge {
-                    detail: format!(
-                        "total companion count {} across all descriptors exceeds maximum {}",
-                        companions.len(),
-                        MAX_TOTAL_COMPANIONS
-                    ),
-                },
-            ));
-        }
-
-        let mut installed_count: usize = 0;
-        if companions.is_empty() {
-            log::debug!("patch discovery: no companions for '{}'", base_id);
-        } else {
-            log::debug!(
-                "patch discovery: installing {} companion(s) for '{}'",
-                companions.len(),
-                base_id
-            );
-            for companion in companions {
-                // Allowed, but surfaced so a compromised descriptor is noticeable.
-                if companion.identifier.registry() != patch_registry_host(patches) {
-                    log::warn!(
-                        "patch discovery: companion '{}' is hosted on registry '{}' which differs from the configured patch registry '{}'; this is allowed but unexpected — verify your patch descriptor",
-                        companion.identifier,
-                        companion.identifier.registry(),
-                        patches.registry
-                    );
-                }
-                let companion_id = companion.identifier.clone();
-                match self.install_companion(&companion_id, platform.clone(), mode).await {
-                    Ok(_) => {
-                        installed_count += 1;
-                        log::debug!("patch discovery: companion '{}' installed", companion_id);
-                    }
-                    Err(kind) => {
-                        if companion.required {
-                            // Before the deferred commit loop, so each re-sync source keeps its prior digest.
-                            return Err(PackageErrorKind::RequiredCompanionFailed {
-                                companion: companion_id,
-                                source: Box::new(kind),
-                            });
-                        } else if matches!(
-                            kind,
-                            PackageErrorKind::PatchDiscovery(crate::patch::PatchError::PolicyBlocked { .. })
-                        ) {
-                            // Debug, not warn: the steady state of every offline build.
-                            log::debug!(
-                                "patch discovery: optional companion '{}' is unpinned and offline mode may not resolve it; skipping",
-                                companion_id
-                            );
-                        } else {
-                            log::warn!(
-                                "patch discovery: optional companion '{}' failed (skipping): {}",
-                                companion_id,
-                                kind
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        for commit in &pending_tag_writes {
-            PatchTagMap::write_has_descriptor(&commit.tags_path, &commit.manifest_digest)
-                .await
-                .map_err(PackageErrorKind::Internal)?;
-        }
-
-        Ok(installed_count)
+        let installed = discover_from(self, base_id, platform, mode, scope, Some(&revalidated)).await?;
+        commit_descriptor_advances(&revalidated.pending)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+        Ok(installed)
     }
 
     /// Installs a companion into the object store, pinned in patch state, never in the local index.
     ///
-    /// Never calls `discover_and_install_patches`, or discovery recurses into companions.
+    /// Never calls `discover_and_install_patches_with_mode`, or discovery recurses into companions.
     pub async fn install_companion(
         &self,
         companion_id: &PackageRef,
@@ -414,7 +302,7 @@ impl PackageManager {
         let store_only = self.read_only_view();
 
         // `Sync` skips the pin: it exists to see the tag move.
-        if mode == PatchDiscoveryMode::Lazy
+        if mode != PatchDiscoveryMode::Sync
             && let Some(digest) = self
                 .companion_pin(companion_id)
                 .await
@@ -553,6 +441,346 @@ pub(super) fn install_discovery_error_is_fatal(
     patches.is_some_and(|patches| patches.required) || matches!(error, PackageErrorKind::RequiredCompanionFailed { .. })
 }
 
+/// `Ok` for a non-fatal discovery failure, which is warned and leaves `base` without companions.
+fn tolerate_discovery_error(
+    patches: Option<&ResolvedPatchConfig>,
+    base: &PackageRef,
+    error: PackageErrorKind,
+) -> Result<(), PackageErrorKind> {
+    if install_discovery_error_is_fatal(patches, &error) {
+        return Err(error);
+    }
+    log::warn!("patch discovery for '{base}' failed (patch tier not required): {error}; continuing without companions");
+    Ok(())
+}
+
+/// The descriptor sources `base_id` consults, in precedence order: package-specific last, so its companions win on dedup.
+fn descriptor_ids(patches: &ResolvedPatchConfig, base_id: &PackageRef, scope: PatchDescriptorScope) -> Vec<PackageRef> {
+    let global_id = global_descriptor_id(patches);
+    match scope {
+        PatchDescriptorScope::Both => vec![global_id, patch_descriptor_id(patches, base_id)],
+        PatchDescriptorScope::GlobalOnly => vec![global_id],
+    }
+}
+
+/// Descriptor sources a Revalidate pass re-checked once, read by every base it covers.
+#[derive(Default)]
+struct RevalidatedDescriptors {
+    /// Every re-checked source; a non-fatal re-check failure holds its recorded state, so no base refetches it.
+    descriptors: HashMap<PackageRef, Option<PatchDescriptor>>,
+    /// Drifted recorded descriptors, advanced only once every base installed its required companions.
+    pending: Vec<PendingDescriptorCommit>,
+}
+
+/// Re-checks each of `ids` against the registry, concurrently under `concurrency`.
+///
+/// Returns the re-checked sources and the fatal failures by position in `ids`; a failure under a
+/// non-required tier is warned once and its recorded state stands.
+async fn revalidate_descriptors(
+    manager: &PackageManager,
+    patches: &ResolvedPatchConfig,
+    ids: &[PackageRef],
+    concurrency: Concurrency,
+) -> (RevalidatedDescriptors, Vec<(usize, PackageErrorKind)>) {
+    let semaphore = concurrency.semaphore();
+    let outcomes = futures::future::join_all(ids.iter().map(|id| {
+        let semaphore = semaphore.clone();
+        async move {
+            let _permit = concurrency::acquire_permit(&semaphore).await;
+            let mut pending = Vec::new();
+            let result = revalidate_descriptor(manager, patches, id, &mut pending).await;
+            (result, pending)
+        }
+    }))
+    .await;
+
+    let mut revalidated = RevalidatedDescriptors::default();
+    let mut fatal = Vec::new();
+    for (position, (id, (result, pending))) in ids.iter().zip(outcomes).enumerate() {
+        match result {
+            Ok(descriptor) => {
+                revalidated.descriptors.insert(id.clone(), descriptor);
+                revalidated.pending.extend(pending);
+            }
+            Err(error) if patches.required => fatal.push((position, error)),
+            Err(error) => {
+                log::warn!("patch discovery: could not re-check '{id}': {error}; using the cached state");
+                let recorded = recorded_descriptor_offline(manager, id).await;
+                revalidated.descriptors.insert(id.clone(), recorded);
+            }
+        }
+    }
+    (revalidated, fatal)
+}
+
+/// `id`'s recorded descriptor from the CAS, never fetched; `None` when absent or unreadable.
+async fn recorded_descriptor_offline(manager: &PackageManager, id: &PackageRef) -> Option<PatchDescriptor> {
+    use super::resolve::{DescriptorLoadResult, load_descriptor_for_id};
+
+    let tags_path = manager.file_structure().patch_descriptor_path(id);
+    match load_descriptor_for_id(&manager.file_structure().blobs, id.registry(), &tags_path).await {
+        Ok(DescriptorLoadResult::Loaded(_, descriptor)) => Some(descriptor),
+        Ok(DescriptorLoadResult::NotPresent) => None,
+        Ok(DescriptorLoadResult::Corrupt(error, _)) | Err(error) => {
+            log::warn!("patch discovery: cached state for '{id}' is unreadable: {error}; skipping it");
+            None
+        }
+    }
+}
+
+/// One source's Revalidate: probe the recorded state and refetch on drift.
+///
+/// # Errors
+///
+/// A failed probe or refetch, and [`PatchError::DescriptorVanished`](crate::patch::PatchError::DescriptorVanished)
+/// when a required tier's recorded descriptor is gone: only `ocx patch sync` may record it absent.
+async fn revalidate_descriptor(
+    manager: &PackageManager,
+    patches: &ResolvedPatchConfig,
+    descriptor_id: &PackageRef,
+    pending: &mut Vec<PendingDescriptorCommit>,
+) -> Result<Option<PatchDescriptor>, PackageErrorKind> {
+    let tags_path = manager.file_structure().patch_descriptor_path(descriptor_id);
+    let state = PatchTagMap::read(&tags_path)
+        .await
+        .map_err(PackageErrorKind::Internal)?;
+    if state == PatchDiscoveryState::NeverLooked {
+        return load_recorded_descriptor(manager, descriptor_id, &tags_path, state, pending).await;
+    }
+
+    let client = manager.require_client().map_err(PackageErrorKind::Internal)?;
+    let probed = probe_patch_descriptor_digest(client, descriptor_id)
+        .await
+        .map_err(PackageErrorKind::PatchDiscovery)?;
+    match (&state, probed) {
+        (PatchDiscoveryState::LookedHasDescriptor { manifest_digest }, Some(digest))
+            if *manifest_digest == digest.to_string() =>
+        {
+            load_recorded_descriptor(manager, descriptor_id, &tags_path, state, pending).await
+        }
+        (PatchDiscoveryState::LookedNoDescriptor, None) => Ok(None),
+        (PatchDiscoveryState::LookedHasDescriptor { .. }, _) => {
+            // Deferred, so a failed required companion keeps the last-known-good digest.
+            let fetched =
+                fetch_and_persist_descriptor(manager, descriptor_id, &tags_path, DescriptorCommit::Deferred, pending)
+                    .await?;
+            if fetched.is_none() {
+                if patches.required {
+                    return Err(PackageErrorKind::PatchDiscovery(
+                        crate::patch::PatchError::DescriptorVanished {
+                            identifier: Box::new(descriptor_id.clone()),
+                        },
+                    ));
+                }
+                record_no_descriptor(&tags_path).await?;
+            }
+            Ok(fetched)
+        }
+        // Appeared since the last look: a first discovery, so eager.
+        _ => fetch_or_record_absent(manager, descriptor_id, &tags_path, DescriptorCommit::Eager, pending).await,
+    }
+}
+
+/// The descriptor a recorded `state` stands for, fetching only when nothing usable is recorded.
+async fn load_recorded_descriptor(
+    manager: &PackageManager,
+    descriptor_id: &PackageRef,
+    tags_path: &std::path::Path,
+    state: PatchDiscoveryState,
+    pending: &mut Vec<PendingDescriptorCommit>,
+) -> Result<Option<PatchDescriptor>, PackageErrorKind> {
+    let manifest_digest = match state {
+        // Eager, so a later offline compose fails closed on a missing required companion.
+        PatchDiscoveryState::NeverLooked => {
+            return fetch_or_record_absent(manager, descriptor_id, tags_path, DescriptorCommit::Eager, pending).await;
+        }
+        PatchDiscoveryState::LookedNoDescriptor => {
+            log::debug!("patch discovery: skipping '{descriptor_id}' — previously looked, no descriptor found");
+            return Ok(None);
+        }
+        PatchDiscoveryState::LookedHasDescriptor { manifest_digest } => manifest_digest,
+    };
+    let digest = match ocx_oci::Digest::try_from(manifest_digest.as_str()) {
+        Ok(digest) => digest,
+        Err(error) => {
+            // No last-known-good exists to keep, so eager.
+            log::warn!(
+                "patch discovery: invalid cached manifest digest '{manifest_digest}' for '{descriptor_id}': {error}; re-fetching"
+            );
+            return fetch_or_record_absent(manager, descriptor_id, tags_path, DescriptorCommit::Eager, pending).await;
+        }
+    };
+    match load_descriptor_from_cas(&manager.file_structure().blobs, descriptor_id.registry(), &digest).await {
+        Ok(descriptor) => Ok(Some(descriptor)),
+        Err(error) => {
+            // The cached blob is corrupt or missing: no last-known-good to keep, so eager.
+            log::warn!("patch discovery: failed to load cached descriptor for '{descriptor_id}': {error}; re-fetching");
+            fetch_or_record_absent(manager, descriptor_id, tags_path, DescriptorCommit::Eager, pending).await
+        }
+    }
+}
+
+/// Discovers `base_id`'s descriptors and installs their companions; returns how many installed.
+///
+/// A source in `revalidated` is taken as re-checked; any other is read by `mode`.
+async fn discover_from(
+    manager: &PackageManager,
+    base_id: &PackageRef,
+    platform: &ocx_oci::Platform,
+    mode: PatchDiscoveryMode,
+    scope: PatchDescriptorScope,
+    revalidated: Option<&RevalidatedDescriptors>,
+) -> Result<usize, PackageErrorKind> {
+    let Some(patches) = manager.patches() else {
+        return Ok(0);
+    };
+    let file_structure = manager.file_structure();
+
+    let mut descriptors: Vec<PatchDescriptor> = Vec::new();
+    // Re-sync advances only, committed after every required companion installs to keep last-known-good.
+    let mut pending_tag_writes: Vec<PendingDescriptorCommit> = Vec::new();
+
+    for descriptor_id in descriptor_ids(patches, base_id, scope) {
+        if let Some(descriptor) = revalidated.and_then(|revalidated| revalidated.descriptors.get(&descriptor_id)) {
+            descriptors.extend(descriptor.clone());
+            continue;
+        }
+        let tags_path = file_structure.patch_descriptor_path(&descriptor_id);
+        let state = PatchTagMap::read(&tags_path)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+        let descriptor = if mode == PatchDiscoveryMode::Sync {
+            // Deferred for a recorded descriptor, so a required-companion failure preserves its digest.
+            let commit = match state {
+                PatchDiscoveryState::LookedHasDescriptor { .. } => DescriptorCommit::Deferred,
+                _ => DescriptorCommit::Eager,
+            };
+            log::debug!("patch discovery (sync): re-fetching '{descriptor_id}' (recorded: {state:?})");
+            fetch_or_record_absent(manager, &descriptor_id, &tags_path, commit, &mut pending_tag_writes).await?
+        } else {
+            load_recorded_descriptor(manager, &descriptor_id, &tags_path, state, &mut pending_tag_writes).await?
+        };
+        descriptors.extend(descriptor);
+    }
+
+    // A later package-specific entry overwrites the global one's `required`; order stays first-seen.
+    let mut companion_order: Vec<ocx_oci::PackageRef> = Vec::new();
+    let mut companion_map: HashMap<ocx_oci::PackageRef, crate::patch::CompanionEntry> = HashMap::new();
+    for descriptor in &descriptors {
+        let entries = descriptor.collect_companions(base_id, patches.required);
+        for entry in entries {
+            if !companion_map.contains_key(&entry.identifier) {
+                companion_order.push(entry.identifier.clone());
+            }
+            companion_map.insert(entry.identifier.clone(), entry);
+        }
+    }
+    let companions: Vec<crate::patch::CompanionEntry> = companion_order
+        .into_iter()
+        .filter_map(|id| companion_map.remove(&id))
+        .collect();
+
+    if companions.len() > MAX_TOTAL_COMPANIONS {
+        return Err(PackageErrorKind::PatchDiscovery(
+            crate::patch::PatchError::DescriptorTooLarge {
+                detail: format!(
+                    "total companion count {} across all descriptors exceeds maximum {}",
+                    companions.len(),
+                    MAX_TOTAL_COMPANIONS
+                ),
+            },
+        ));
+    }
+
+    let mut installed_count: usize = 0;
+    if companions.is_empty() {
+        log::debug!("patch discovery: no companions for '{}'", base_id);
+    } else {
+        log::debug!(
+            "patch discovery: installing {} companion(s) for '{}'",
+            companions.len(),
+            base_id
+        );
+        for companion in companions {
+            // Allowed, but surfaced so a compromised descriptor is noticeable.
+            if companion.identifier.registry() != patch_registry_host(patches) {
+                log::warn!(
+                    "patch discovery: companion '{}' is hosted on registry '{}' which differs from the configured patch registry '{}'; this is allowed but unexpected — verify your patch descriptor",
+                    companion.identifier,
+                    companion.identifier.registry(),
+                    patches.registry
+                );
+            }
+            let companion_id = companion.identifier.clone();
+            match manager.install_companion(&companion_id, platform.clone(), mode).await {
+                Ok(_) => {
+                    installed_count += 1;
+                    log::debug!("patch discovery: companion '{}' installed", companion_id);
+                }
+                Err(kind) => {
+                    if companion.required {
+                        // Before the deferred commit loop, so each re-sync source keeps its prior digest.
+                        return Err(PackageErrorKind::RequiredCompanionFailed {
+                            companion: companion_id,
+                            source: Box::new(kind),
+                        });
+                    } else if matches!(
+                        kind,
+                        PackageErrorKind::PatchDiscovery(crate::patch::PatchError::PolicyBlocked { .. })
+                    ) {
+                        // Debug, not warn: the steady state of every offline build.
+                        log::debug!(
+                            "patch discovery: optional companion '{}' is unpinned and offline mode may not resolve it; skipping",
+                            companion_id
+                        );
+                    } else {
+                        log::warn!(
+                            "patch discovery: optional companion '{}' failed (skipping): {}",
+                            companion_id,
+                            kind
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    commit_descriptor_advances(&pending_tag_writes)
+        .await
+        .map_err(PackageErrorKind::Internal)?;
+    Ok(installed_count)
+}
+
+/// Records each deferred descriptor advance.
+async fn commit_descriptor_advances(pending: &[PendingDescriptorCommit]) -> crate::Result<()> {
+    for commit in pending {
+        PatchTagMap::write_has_descriptor(&commit.tags_path, &commit.manifest_digest).await?;
+    }
+    Ok(())
+}
+
+/// Records "looked, no descriptor" for a source.
+async fn record_no_descriptor(tags_path: &std::path::Path) -> Result<(), PackageErrorKind> {
+    PatchTagMap::write_no_descriptor(tags_path)
+        .await
+        .map_err(PackageErrorKind::Internal)
+}
+
+/// [`fetch_and_persist_descriptor`], recording "looked, no descriptor" when there is no patch tag.
+async fn fetch_or_record_absent(
+    manager: &PackageManager,
+    descriptor_id: &PackageRef,
+    tags_path: &std::path::Path,
+    commit: DescriptorCommit,
+    pending: &mut Vec<PendingDescriptorCommit>,
+) -> Result<Option<PatchDescriptor>, PackageErrorKind> {
+    let fetched = fetch_and_persist_descriptor(manager, descriptor_id, tags_path, commit, pending).await?;
+    if fetched.is_none() {
+        record_no_descriptor(tags_path).await?;
+    }
+    Ok(fetched)
+}
+
 /// A re-sync's `LookedHasDescriptor` advance, held until every required companion installs.
 struct PendingDescriptorCommit {
     tags_path: std::path::PathBuf,
@@ -568,7 +796,7 @@ enum DescriptorCommit {
     Deferred,
 }
 
-/// Fetches and persists one descriptor source and records its state; `None` when there is no patch tag.
+/// Fetches and persists one descriptor source and records its state; `None`, recording nothing, when there is no patch tag.
 async fn fetch_and_persist_descriptor(
     manager: &PackageManager,
     descriptor_id: &PackageRef,
@@ -587,9 +815,6 @@ async fn fetch_and_persist_descriptor(
     match fetched {
         None => {
             log::debug!("patch discovery: no descriptor at '{}'", descriptor_id);
-            PatchTagMap::write_no_descriptor(tags_path)
-                .await
-                .map_err(PackageErrorKind::Internal)?;
             Ok(None)
         }
         Some(FetchedDescriptorBlobs {
@@ -720,7 +945,7 @@ mod tests {
     /// Build a minimal offline `PackageManager` for unit testing.
     ///
     /// No OCI client → `is_offline()` returns `true`. Useful for testing
-    /// short-circuit behaviour of `discover_and_install_patches`.
+    /// short-circuit behaviour of `discover_and_install_patches_with_mode`.
     fn make_offline_manager(ocx_home: &Path) -> super::super::super::PackageManager {
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
         let local_index = LocalIndex::new(LocalConfig {
@@ -745,7 +970,7 @@ mod tests {
     ///
     /// `is_offline()` returns `false` because `client = Some(...)`. Network calls
     /// will fail, but this lets tests probe code paths that the offline short-circuit
-    /// in `discover_and_install_patches` would otherwise skip.
+    /// in `discover_and_install_patches_with_mode` would otherwise skip.
     fn make_online_manager(ocx_home: &Path) -> super::super::super::PackageManager {
         use ocx_oci::ClientBuilder;
         let fs = FileStructure::with_root(ocx_home.to_path_buf());
@@ -1397,9 +1622,9 @@ mod tests {
         assert!(offline.is_offline(), "offline_view must produce an offline manager");
     }
 
-    // ── discover_and_install_patches short-circuits ───────────────────────────
+    // ── discover_and_install_patches_with_mode short-circuits ───────────────────────────
 
-    /// `discover_and_install_patches` returns `Ok(())` immediately when no patch
+    /// `discover_and_install_patches_with_mode` returns `Ok(())` immediately when no patch
     /// tier is configured (`self.patches` is `None`).
     ///
     /// Contract: "Returns `Ok(())` immediately when self.patches is `None`
@@ -1416,15 +1641,20 @@ mod tests {
         let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Must short-circuit to Ok(()) without panicking or hitting unimplemented!.
         let result = manager
-            .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Lazy,
+                PatchDescriptorScope::Both,
+            )
             .await;
         assert!(
             result.is_ok(),
-            "discover_and_install_patches must return Ok(()) when patches is None"
+            "discover_and_install_patches_with_mode must return Ok(()) when patches is None"
         );
     }
 
-    /// `discover_and_install_patches` returns `Ok(())` immediately when offline,
+    /// `discover_and_install_patches_with_mode` returns `Ok(())` immediately when offline,
     /// even when a patch tier is configured.
     ///
     /// Contract: "Returns `Ok(())` immediately when self.is_offline()
@@ -1445,11 +1675,214 @@ mod tests {
         let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Must short-circuit to Ok(()) without any network call.
         let result = manager
-            .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Lazy,
+                PatchDescriptorScope::Both,
+            )
             .await;
         assert!(
             result.is_ok(),
-            "discover_and_install_patches must return Ok(()) when offline (even with patch config present)"
+            "discover_and_install_patches_with_mode must return Ok(()) when offline (even with patch config present)"
+        );
+    }
+
+    // ── Revalidate ────────────────────────────────────────────────────────────
+
+    /// A manager whose registry is `data`, with a patch tier of the given posture.
+    fn make_stub_manager(
+        ocx_home: &Path,
+        data: &ocx_oci::client::test_transport::StubTransportData,
+        required: bool,
+    ) -> PackageManager {
+        let fs = FileStructure::with_root(ocx_home.to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        let client = ocx_oci::client::test_transport::stub_client(data);
+        PackageManager::new(fs, index, Some(client), "localhost:5000").with_patches(Some(ResolvedPatchConfig {
+            required,
+            ..test_patch_config()
+        }))
+    }
+
+    /// Records `state` for both descriptor sources `base_id` consults.
+    async fn record_descriptor_states(manager: &PackageManager, base_id: &PackageRef, global: Option<&str>) {
+        let patches = manager.patches().expect("patch tier configured");
+        let global_path = manager
+            .file_structure()
+            .patch_descriptor_path(&global_descriptor_id(patches));
+        match global {
+            Some(digest) => PatchTagMap::write_has_descriptor(&global_path, digest).await.unwrap(),
+            None => PatchTagMap::write_no_descriptor(&global_path).await.unwrap(),
+        }
+        let package_path = manager
+            .file_structure()
+            .patch_descriptor_path(&patch_descriptor_id(patches, base_id));
+        PatchTagMap::write_no_descriptor(&package_path).await.unwrap();
+    }
+
+    /// A Revalidate probe the registry refuses fails a required tier and leaves an optional one on its cache.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_revalidate_probe_is_fatal_only_under_a_required_tier() {
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        for required in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            let data = ocx_oci::client::test_transport::StubTransportData::new();
+            data.write().ensure_auth_error_override = Some("probe refused".into());
+            let manager = make_stub_manager(tmp.path(), &data, required);
+            record_descriptor_states(&manager, &base_id, None).await;
+
+            let result = manager
+                .discover_and_install_patches_with_mode(
+                    &base_id,
+                    &ocx_oci::Platform::any(),
+                    PatchDiscoveryMode::Revalidate,
+                    PatchDescriptorScope::Both,
+                )
+                .await;
+            let global_path = manager
+                .file_structure()
+                .patch_descriptor_path(&global_descriptor_id(manager.patches().unwrap()));
+            assert_eq!(
+                PatchTagMap::read(&global_path).await.unwrap(),
+                PatchDiscoveryState::LookedNoDescriptor,
+                "a failed probe must leave the recorded state alone (required = {required})"
+            );
+            if required {
+                let error = result.expect_err("a required tier cannot confirm its descriptors, so it fails closed");
+                assert!(matches!(error, PackageErrorKind::PatchDiscovery(_)), "got: {error}");
+            } else {
+                assert_eq!(result.expect("an optional tier keeps its cached state"), 0);
+            }
+        }
+    }
+
+    /// A required tier whose recorded descriptor now 404s fails closed and keeps the record;
+    /// an optional tier records it absent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_vanished_descriptor_fails_closed_only_under_a_required_tier() {
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let recorded = format!("sha256:{}", "d".repeat(64));
+        for required in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            // Nothing seeded: every manifest is a 404.
+            let data = ocx_oci::client::test_transport::StubTransportData::new();
+            let manager = make_stub_manager(tmp.path(), &data, required);
+            record_descriptor_states(&manager, &base_id, Some(&recorded)).await;
+
+            let result = manager
+                .discover_and_install_patches_with_mode(
+                    &base_id,
+                    &ocx_oci::Platform::any(),
+                    PatchDiscoveryMode::Revalidate,
+                    PatchDescriptorScope::Both,
+                )
+                .await;
+            let global_path = manager
+                .file_structure()
+                .patch_descriptor_path(&global_descriptor_id(manager.patches().unwrap()));
+            let state = PatchTagMap::read(&global_path).await.unwrap();
+            if required {
+                let error = result.expect_err("a vanished required descriptor must fail closed");
+                assert!(
+                    matches!(
+                        error,
+                        PackageErrorKind::PatchDiscovery(crate::patch::PatchError::DescriptorVanished { .. })
+                    ),
+                    "got: {error}"
+                );
+                assert_eq!(
+                    state,
+                    PatchDiscoveryState::LookedHasDescriptor {
+                        manifest_digest: recorded.clone()
+                    },
+                    "only `ocx patch sync` may record a required descriptor absent"
+                );
+            } else {
+                assert_eq!(result.expect("an optional tier records the descriptor absent"), 0);
+                assert_eq!(state, PatchDiscoveryState::LookedNoDescriptor);
+            }
+        }
+    }
+
+    /// The three bases, their shared global root and two package descriptors, recorded as looked-and-absent.
+    async fn three_bases_two_repositories(manager: &PackageManager) -> Vec<PackageRef> {
+        let bases: Vec<PackageRef> = ["ocx.sh/cmake:3.28", "ocx.sh/cmake:3.29", "ocx.sh/ninja:1.12"]
+            .iter()
+            .map(|base| PackageRef::parse(base).expect("valid identifier"))
+            .collect();
+        for base in &bases {
+            record_descriptor_states(manager, base, None).await;
+        }
+        bases
+    }
+
+    fn probe_count(data: &ocx_oci::client::test_transport::StubTransportData) -> usize {
+        data.read()
+            .calls
+            .iter()
+            .filter(|call| *call == "fetch_manifest_digest")
+            .count()
+    }
+
+    /// Revalidate probes each distinct descriptor once, not once per base naming it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_probes_each_distinct_descriptor_once_across_bases() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = make_stub_manager(tmp.path(), &data, false);
+        let bases = three_bases_two_repositories(&manager).await;
+
+        manager
+            .discover_patches_all(
+                &bases,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Revalidate,
+                Concurrency::cores(),
+            )
+            .await
+            .expect("every descriptor probes absent, as recorded");
+        assert_eq!(
+            probe_count(&data),
+            3,
+            "global, cmake and ninja once each; six would be one probe per base and source"
+        );
+    }
+
+    /// A failed optional re-check holds the recorded state for every base: no base refetches it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_optional_recheck_is_not_refetched_per_base() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        data.write().pull_manifest_error_override = Some("registry refused".into());
+        let manager = make_stub_manager(tmp.path(), &data, false);
+        // Never looked: the pre-pass fetches instead of probing, and every fetch fails.
+        let bases: Vec<PackageRef> = ["ocx.sh/cmake:3.28", "ocx.sh/cmake:3.29", "ocx.sh/ninja:1.12"]
+            .iter()
+            .map(|base| PackageRef::parse(base).expect("valid identifier"))
+            .collect();
+
+        manager
+            .discover_patches_all(
+                &bases,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Revalidate,
+                Concurrency::cores(),
+            )
+            .await
+            .expect("an optional tier keeps going on its recorded state");
+        let fetches = data
+            .read()
+            .calls
+            .iter()
+            .filter(|call| *call == "pull_manifest_raw")
+            .count();
+        assert_eq!(
+            fetches, 3,
+            "global, cmake and ninja once each in the pre-pass, never again per base"
         );
     }
 
@@ -1482,16 +1915,16 @@ mod tests {
 
     // ── Recursion guard ───────────────────────────────────────────────────────
 
-    /// Regression guard: `install_companion` and `discover_and_install_patches`
+    /// Regression guard: `install_companion` and `discover_and_install_patches_with_mode`
     /// are distinct methods on `PackageManager`.
     ///
     /// The recursion guard is enforced by code structure: companions are installed
     /// through `install_companion`, which calls the pull primitive directly without
-    /// invoking `discover_and_install_patches`. Only the user-facing install
-    /// boundary calls `discover_and_install_patches`.
+    /// invoking `discover_and_install_patches_with_mode`. Only the user-facing install
+    /// boundary calls `discover_and_install_patches_with_mode`.
     ///
     /// This test is a compile-time assertion: if either method is removed or if
-    /// `install_companion` is merged into `discover_and_install_patches`, the
+    /// `install_companion` is merged into `discover_and_install_patches_with_mode`, the
     /// function-pointer casts below will fail to compile.
     ///
     /// Traces: TESTABILITY §recursion guard; DELIVERABLES §2g.
@@ -1501,7 +1934,7 @@ mod tests {
         // The casts verify the methods have the expected async-fn signatures.
         // `fn(_, _, _) -> _` is the coercion point — if the method does not exist
         // or has a different argument count the cast fails at compile time.
-        let _ = PackageManager::discover_and_install_patches as fn(_, _, _) -> _;
+        let _ = PackageManager::discover_and_install_patches_with_mode as fn(_, _, _, _, _) -> _;
         // `install_companion` takes `self`, `&PackageRef`, `Platform`, `PatchDiscoveryMode`.
         let _ = PackageManager::install_companion as fn(_, _, _, _) -> _;
         // If both casts compile, the two methods exist as distinct items.
@@ -1714,7 +2147,7 @@ mod tests {
     /// This test mechanically proves the recursion guard: even with a patch tier
     /// configured, calling `install_companion` on an offline manager must leave
     /// the tag-store untouched. If `install_companion` were ever changed to call
-    /// `discover_and_install_patches`, the tag-store file for the companion's
+    /// `discover_and_install_patches_with_mode`, the tag-store file for the companion's
     /// patch repo would be written (either `LookedNoDescriptor` or
     /// `LookedHasDescriptor`), causing this assertion to fail.
     ///
@@ -1730,7 +2163,7 @@ mod tests {
         let patches = test_patch_config();
 
         // Build an offline manager with a patch tier configured. The patch tier
-        // would cause `discover_and_install_patches` to attempt a network fetch
+        // would cause `discover_and_install_patches_with_mode` to attempt a network fetch
         // (if online) — but `install_companion` must never invoke discovery at all.
         let manager = make_offline_manager(tmp.path()).with_patches(Some(patches.clone()));
         assert!(manager.is_offline(), "setup: manager must be offline");
@@ -1739,7 +2172,7 @@ mod tests {
         // The companion identifier to install.
         let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
 
-        // Compute the tag-store path that `discover_and_install_patches` WOULD write
+        // Compute the tag-store path that `discover_and_install_patches_with_mode` WOULD write
         // for this companion's patch repo, using the same logic as the discovery code.
         // If discovery were invoked for the companion, it would compute:
         //   patch_descriptor_id(&patches, &companion_id) → PackageRef at patches.corp.com
@@ -1768,11 +2201,11 @@ mod tests {
         );
 
         // The critical assertion: the tag-store file must remain absent.
-        // If `install_companion` had called `discover_and_install_patches`, it
+        // If `install_companion` had called `discover_and_install_patches_with_mode`, it
         // would have short-circuited at the `is_offline()` check — but that check
-        // lives INSIDE discover_and_install_patches, not before it. Writing to the
+        // lives INSIDE discover_and_install_patches_with_mode, not before it. Writing to the
         // tag store requires reaching the NeverLooked branch inside
-        // discover_and_install_patches. Since `install_companion` calls `pull`
+        // discover_and_install_patches_with_mode. Since `install_companion` calls `pull`
         // directly without going through discovery, the tag-store must stay untouched.
         assert!(
             !companion_patch_tags_path.exists(),
@@ -1789,27 +2222,27 @@ mod tests {
     }
 
     /// Behavioral recursion guard: `install_companion` does NOT invoke
-    /// `discover_and_install_patches` even when the manager is NOT offline.
+    /// `discover_and_install_patches_with_mode` even when the manager is NOT offline.
     ///
     /// The offline test above relies on the `is_offline()` short-circuit inside
-    /// `discover_and_install_patches`. This test uses a manager with a real client
+    /// `discover_and_install_patches_with_mode`. This test uses a manager with a real client
     /// (not offline) so the short-circuit does NOT protect us — the guard must hold
     /// structurally. The companion's patch tag-store is seeded as `LookedNoDescriptor`,
     /// which would be the state written by `write_no_descriptor` if discovery
     /// were invoked and then found no descriptor. We can't seed it as NeverLooked
     /// and expect the write path to trigger without a real network, so we assert
-    /// a complementary invariant: any state that `discover_and_install_patches`
+    /// a complementary invariant: any state that `discover_and_install_patches_with_mode`
     /// would write (i.e. `LookedNoDescriptor` → key absent vs `LookedHasDescriptor`
     /// → key present) must not appear to CHANGE between before and after the call.
     ///
     /// We seed `LookedHasDescriptor` with a synthetic digest. If `install_companion`
-    /// called `discover_and_install_patches`, discovery would:
+    /// called `discover_and_install_patches_with_mode`, discovery would:
     ///   1. Read `LookedHasDescriptor` → try to load from CAS → fail (blob absent).
     ///   2. Log a warning and try to re-fetch from network → fail (no real registry).
     ///   3. Leave the tag-store entry in `LookedHasDescriptor` state (per Fix 3).
     /// So the file content would be IDENTICAL. This is not observable.
     ///
-    /// Instead we seed it as ABSENT (NeverLooked). `discover_and_install_patches`
+    /// Instead we seed it as ABSENT (NeverLooked). `discover_and_install_patches_with_mode`
     /// with a NeverLooked state would call `fetch_and_persist_descriptor` which
     /// calls `require_client()` and then `fetch_patch_descriptor_blobs` — which
     /// would FAIL with a network error. On failure the function returns `Err` and
@@ -1817,7 +2250,7 @@ mod tests {
     /// the file is also absent. So this case is indistinguishable too.
     ///
     /// The definitive structural invariant therefore relies on Fix 5 (total-companion
-    /// cap): if `discover_and_install_patches` ran for the companion and somehow
+    /// cap): if `discover_and_install_patches_with_mode` ran for the companion and somehow
     /// managed to collect companions (impossible without network here), it would
     /// enforce the cap. The compile-time structural test
     /// (`install_companion_and_discovery_exist_as_distinct_methods`) remains the
@@ -1832,7 +2265,7 @@ mod tests {
         let patches = test_patch_config();
 
         // Non-offline manager (has client) with patch tier configured.
-        // The offline short-circuit will NOT fire inside discover_and_install_patches
+        // The offline short-circuit will NOT fire inside discover_and_install_patches_with_mode
         // — if install_companion called it, it would proceed past the is_offline() check.
         let manager = make_online_manager(tmp.path()).with_patches(Some(patches.clone()));
         assert!(!manager.is_offline(), "setup: manager must NOT be offline");
@@ -1866,7 +2299,7 @@ mod tests {
 
         // Critical: even with a non-offline manager, install_companion must NOT have
         // written any patch tag-store entries. If the recursion guard was violated and
-        // discover_and_install_patches was called, it would have attempted network
+        // discover_and_install_patches_with_mode was called, it would have attempted network
         // access (non-offline), failed, and potentially written LookedNoDescriptor.
         // With the guard intact, install_companion calls pull directly → nothing
         // is written to the patch tag-store.
@@ -1880,7 +2313,7 @@ mod tests {
         );
     }
 
-    /// Safety cap: `discover_and_install_patches` returns an error when the total
+    /// Safety cap: `discover_and_install_patches_with_mode` returns an error when the total
     /// number of companions across all descriptors exceeds `MAX_TOTAL_COMPANIONS`.
     ///
     /// This test exercises the defense-in-depth cap added in Fix 5 by directly
@@ -2096,7 +2529,7 @@ mod tests {
         );
     }
 
-    /// Cross-registry companion warning is not a block — `discover_and_install_patches`
+    /// Cross-registry companion warning is not a block — `discover_and_install_patches_with_mode`
     /// proceeds even when a companion's registry differs from the patch registry.
     ///
     /// Since the warning is a `log::warn!` with no side effect, this test asserts
@@ -2116,11 +2549,16 @@ mod tests {
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
         let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let result = manager
-            .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
+            .discover_and_install_patches_with_mode(
+                &base_id,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Lazy,
+                PatchDescriptorScope::Both,
+            )
             .await;
         assert!(
             result.is_ok(),
-            "discover_and_install_patches must return Ok when offline (cross-registry warning is advisory only); got: {result:?}"
+            "discover_and_install_patches_with_mode must return Ok when offline (cross-registry warning is advisory only); got: {result:?}"
         );
     }
 }

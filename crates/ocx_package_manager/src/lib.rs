@@ -332,7 +332,7 @@ use ocx_store::file_structure;
 /// (see [`resolve_env`](Self::resolve_env)). Progress renders through a span-free
 /// [`ProgressManager`], never the `tracing` span tree (ADR adr_progress_architecture).
 /// The optional [`ResolvedPatchConfig`] enables patch discovery after a
-/// user-requested base install; `None` makes `discover_and_install_patches` a no-op.
+/// user-requested base install; `None` makes patch discovery a no-op.
 #[derive(Clone)]
 pub struct PackageManager {
     file_structure: file_structure::FileStructure,
@@ -343,7 +343,7 @@ pub struct PackageManager {
     /// Site-tier patch registry configuration.
     ///
     /// `None` = no patch tier configured (the `[patches]` section is absent
-    /// from every loaded config tier). When `Some`, `discover_and_install_patches`
+    /// from every loaded config tier). When `Some`, patch discovery
     /// runs after every user-requested base install (online only).
     patches: Option<ResolvedPatchConfig>,
     /// Frozen companion pinning snapshot for opt-in determinism.

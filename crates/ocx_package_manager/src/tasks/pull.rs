@@ -76,7 +76,8 @@ impl PackageManager {
         setup_with_tracker(self, package, platform, groups)
     }
 
-    /// Pulls packages in parallel, sharing one singleflight session across them.
+    /// Pulls packages in parallel, sharing one singleflight session across them, then re-checks
+    /// their patches unless `skip_discovery`.
     ///
     /// `concurrency` bounds only root pulls; bounding dependency or layer setup would
     /// deadlock a dependency waiting on a permit its own ancestor holds.
@@ -85,6 +86,8 @@ impl PackageManager {
         packages: &[ocx_oci::PackageRef],
         platform: ocx_oci::Platform,
         concurrency: Concurrency,
+        // `true` for callers that discover later themselves, and for internal pulls of `ocx` itself.
+        skip_discovery: bool,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
         if packages.is_empty() {
             return Ok(Vec::new());
@@ -112,7 +115,17 @@ impl PackageManager {
             });
         }
 
-        super::common::drain_package_tasks(packages, tasks, crate::error::Error::InstallFailed).await
+        let infos = super::common::drain_package_tasks(packages, tasks, crate::error::Error::InstallFailed).await?;
+        if !skip_discovery {
+            self.discover_patches_all(
+                packages,
+                &platform,
+                super::patch_discovery::PatchDiscoveryMode::Revalidate,
+                concurrency,
+            )
+            .await?;
+        }
+        Ok(infos)
     }
 }
 
@@ -1494,6 +1507,7 @@ mod tests {
                     &packages,
                     ocx_oci::Platform::Any,
                     crate::concurrency::Concurrency::cores(),
+                    true,
                 )
                 .await;
         }

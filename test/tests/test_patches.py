@@ -42,7 +42,11 @@ from src.helpers import (
     push_managed_config,
     resolved_metadata_path,
 )
-from src.registry import fetch_platform_manifest_digest
+from src.registry import (
+    delete_manifest,
+    fetch_manifest_digest,
+    fetch_platform_manifest_digest,
+)
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 # The global descriptor lives at a FIXED repository under each patch registry
@@ -445,6 +449,24 @@ def test_required_true_missing_companion_fails_closed(
         "Installing base with required=true missing companion must fail (fail-closed C7). "
         f"Got exit 0.\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def _run_ocx(ocx: OcxRunner, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run the binary with `args` verbatim, never raising on a non-zero exit."""
+    return subprocess.run(
+        [str(ocx.binary), *args], capture_output=True, text=True, env=env or ocx.env, check=False
+    )
+
+
+def _patch_state(ocx: OcxRunner) -> dict[str, bytes]:
+    """Every recorded descriptor state and companion pin, by path under `$OCX_HOME/state`."""
+    state = ocx.ocx_home / "state"
+    return {
+        str(path.relative_to(state)): path.read_bytes()
+        for tier in ("patch-descriptors", "patch-companions")
+        for path in sorted((state / tier).rglob("*"))
+        if path.is_file()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4261,6 +4283,213 @@ def test_tag_scoped_rule_required_missing_companion_fails_closed_from_lock(
         f"exit the missing companion itself classifies as; got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def test_install_rechecks_a_cached_no_descriptor_state(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """ocx-sh/ocx#551: `index update` records "looked, no descriptor" for the
+    global descriptor. A descriptor published afterwards must take effect on the
+    next `package install`, not wait for someone to delete the state: the required
+    rule's companion is missing, so install and exec both fail closed.
+    """
+    nonexistent_companion = f"{registry}/nonexistent-companion-{uuid4().hex[:8]}:latest"
+    descriptor_path = tmp_path / "late_required_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [nonexistent_companion], "required": True}],
+    )
+    _write_config(ocx, registry, required=False)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    index = ocx.plain("index", "update", base_pkg.short)
+    assert index.returncode == 0, f"ocx index update must succeed:\n{index.stderr}"
+
+    # The precondition the recheck exists for: the file is present and the descriptor key absent.
+    tier_repo_dir = ocx.ocx_home / "state" / "patch-descriptors" / registry_dir(registry) / f"p{vars(ocx)['patch_tier']}"
+    global_state = tier_repo_dir / "global.json"
+    assert global_state.exists(), (
+        f"setup: `index update` must record the global descriptor as looked at {global_state}"
+    )
+    assert "__ocx.patch" not in json.loads(global_state.read_text()), (
+        f"setup: the recorded state must be `no descriptor`; got: {global_state.read_text()}"
+    )
+
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    companion_name = nonexistent_companion.split("/", 1)[1].split(":", 1)[0]
+    install = ocx.run("package", "install", base_pkg.short, format=None, check=False)
+    assert install.returncode == 79, (
+        "a descriptor published after the last check must be picked up by install and fail "
+        f"closed on its missing required companion; got {install.returncode}.\nstderr: {install.stderr}"
+    )
+    assert companion_name in install.stderr, (
+        f"install must name the missing companion {companion_name}; stderr: {install.stderr}"
+    )
+    assert "required companion" in install.stderr, (
+        f"the error must say a required companion failed; stderr: {install.stderr}"
+    )
+    result = ocx.run("package", "exec", base_pkg.short, "--", "true", format=None, check=False)
+    assert result.returncode == 79, (
+        f"exec must fail closed on the required rule; got {result.returncode}.\nstderr: {result.stderr}"
+    )
+    assert companion_name in result.stderr, (
+        f"exec must name the missing companion {companion_name}; stderr: {result.stderr}"
+    )
+    assert "required companion" in result.stderr, (
+        f"the error must say a required companion failed; stderr: {result.stderr}"
+    )
+
+
+def test_install_rechecks_a_cached_descriptor_republished_with_a_new_rule(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """ocx-sh/ocx#551: a found descriptor that is re-published with a further rule is
+    picked up by the next `package install`, which refetches it on the digest drift.
+    """
+    first_repo = _unique_repo("recheck_first")
+    _make_companion(ocx, first_repo, "1.0.0", tmp_path, "RECHECK_FIRST", "first")
+    second_repo = _unique_repo("recheck_second")
+    _make_companion(ocx, second_repo, "1.0.0", tmp_path, "RECHECK_SECOND", "second")
+    match = f"{registry}/{unique_repo}:*"
+    first_rule = {"match": match, "packages": [f"{registry}/{first_repo}:1.0.0"]}
+    second_rule = {"match": match, "packages": [f"{registry}/{second_repo}:1.0.0"]}
+
+    _write_config(ocx, registry, required=False)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    descriptor_path = tmp_path / "recheck_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[first_rule])
+    _publish_descriptor_global(ocx, descriptor_path)
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"first install must succeed:\n{install.stderr}"
+    assert _entry_by_key(_env_entries(ocx, base_pkg.short), "RECHECK_FIRST") is not None
+
+    _write_descriptor(descriptor_path, rules=[first_rule, second_rule])
+    _publish_descriptor_global(ocx, descriptor_path)
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"second install must succeed:\n{install.stderr}"
+    entries = _env_entries(ocx, base_pkg.short)
+    assert _entry_by_key(entries, "RECHECK_SECOND") is not None, (
+        f"the re-published rule must apply after the next install; got keys: {[e['key'] for e in entries]}"
+    )
+
+
+def test_install_fails_closed_on_a_required_descriptor_deleted_from_the_registry(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Under a required tier a descriptor that vanishes from the registry after install fails the
+    next `package install` (exit 79) and keeps the recorded state, so compose still carries the
+    companion the last good descriptor named.
+    """
+    companion_repo = _unique_repo("vanish_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "VANISH_COMPANION", "kept")
+    _write_config(ocx, registry, required=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "vanish_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}])
+    _publish_descriptor_global(ocx, descriptor_path)
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"first install must succeed:\n{install.stderr}"
+
+    global_repo = f"p{vars(ocx)['patch_tier']}/global"
+    delete_manifest(registry, global_repo, fetch_manifest_digest(registry, global_repo, "__ocx.patch"))
+    before = _patch_state(ocx)
+
+    install = ocx.run("package", "install", base_pkg.short, format=None, check=False)
+    assert install.returncode == 79, (
+        f"a required descriptor gone from the registry must fail install with 79; got {install.returncode}\n"
+        f"stderr: {install.stderr}"
+    )
+    assert _patch_state(ocx) == before, "the failed install must leave every descriptor state and pin byte-identical"
+    entry = _entry_by_key(_env_entries(ocx, base_pkg.short), "VANISH_COMPANION")
+    assert entry is not None and entry["value"] == "kept", (
+        f"the failed install must leave the recorded descriptor in effect; got {entry}"
+    )
+
+
+def test_patch_sync_records_a_vanished_required_descriptor_absent(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Under a required tier `ocx patch sync` is the command that records a vanished descriptor as
+    absent: afterwards the global descriptor state no longer names `__ocx.patch`.
+    """
+    companion_repo = _unique_repo("sync_vanish_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "SYNC_VANISH", "kept")
+    _write_config(ocx, registry, required=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "sync_vanish_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}])
+    _publish_descriptor_global(ocx, descriptor_path)
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"first install must succeed:\n{install.stderr}"
+    global_state = (
+        ocx.ocx_home / "state" / "patch-descriptors" / registry_dir(registry) / f"p{vars(ocx)['patch_tier']}" / "global.json"
+    )
+    assert "__ocx.patch" in json.loads(global_state.read_text()), (
+        f"setup: the install must record the global descriptor; got: {global_state.read_text()}"
+    )
+
+    global_repo = f"p{vars(ocx)['patch_tier']}/global"
+    delete_manifest(registry, global_repo, fetch_manifest_digest(registry, global_repo, "__ocx.patch"))
+
+    sync = ocx.run("patch", "sync", format=None, check=False)
+    assert sync.returncode == 0, f"patch sync must succeed:\n{sync.stderr}"
+    assert "__ocx.patch" not in json.loads(global_state.read_text()), (
+        f"patch sync must record the vanished descriptor as absent; got: {global_state.read_text()}"
+    )
+
+
+def test_package_pull_pins_a_matching_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx package pull` runs patch discovery, so a companion the descriptor names is pinned
+    and installed: an offline env right after it composes the companion.
+    """
+    companion_repo = _unique_repo("pull_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PULL_COMPANION", "pulled")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "pull_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    pull = ocx.plain("package", "pull", base_pkg.short)
+    assert pull.returncode == 0, f"package pull must succeed:\n{pull.stderr}"
+    env = _run_ocx(ocx, "--offline", "--format", "json", "package", "env", base_pkg.short)
+    assert env.returncode == 0, f"offline package env must succeed after the pull; rc={env.returncode}\n{env.stderr}"
+    entry = _entry_by_key(json.loads(env.stdout)["entries"], "PULL_COMPANION")
+    assert entry is not None and entry["value"] == "pulled", (
+        f"package pull must have installed the companion for an offline compose; got {entry}"
+    )
+    assert _companion_pin(ocx, registry, companion_repo), "package pull must pin the matching companion"
+
+
+def test_package_pull_revalidates_a_republished_descriptor(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx package pull` re-checks a descriptor it already recorded: a rule published between
+    two pulls has its companion pinned by the second.
+    """
+    first_repo = _unique_repo("pull_first")
+    _make_companion(ocx, first_repo, "1.0.0", tmp_path, "PULL_FIRST", "first")
+    second_repo = _unique_repo("pull_second")
+    _make_companion(ocx, second_repo, "1.0.0", tmp_path, "PULL_SECOND", "second")
+    first_rule = {"match": "*", "packages": [f"{registry}/{first_repo}:1.0.0"]}
+    second_rule = {"match": "*", "packages": [f"{registry}/{second_repo}:1.0.0"]}
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "pull_revalidate_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[first_rule])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    pull = ocx.plain("package", "pull", base_pkg.short)
+    assert pull.returncode == 0, f"first package pull must succeed:\n{pull.stderr}"
+    assert _companion_pin(ocx, registry, first_repo), "setup: the first pull must pin the first companion"
+
+    _write_descriptor(descriptor_path, rules=[first_rule, second_rule])
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    pull = ocx.plain("package", "pull", base_pkg.short)
+    assert pull.returncode == 0, f"second package pull must succeed:\n{pull.stderr}"
+    assert _companion_pin(ocx, registry, second_repo), "the second pull must pin the republished rule's companion"
 
 
 def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(

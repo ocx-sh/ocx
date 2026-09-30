@@ -123,6 +123,14 @@ pub enum PatchError {
         source: crate::Error,
     },
 
+    /// A required tier's recorded descriptor is gone from the registry. Only `ocx patch sync` may
+    /// record it absent, so the last known descriptor stands.
+    #[error("patch descriptor '{identifier}' is no longer in the registry; run `ocx patch sync` to record it absent")]
+    DescriptorVanished {
+        /// The descriptor source that answered not-found.
+        identifier: Box<ocx_oci::PackageRef>,
+    },
+
     /// A companion carries no recorded patch-tier pin and `--offline` forbids
     /// resolving its tag to discover one. `--frozen` is not a cause: a
     /// companion resolves live under it.

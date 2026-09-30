@@ -317,7 +317,7 @@ pub async fn materialize_lock(
         .collect();
     context
         .manager()
-        .pull_all(&identifiers, platform, context.concurrency())
+        .pull_all(&identifiers, platform, context.concurrency(), true)
         .await?;
     Ok(())
 }

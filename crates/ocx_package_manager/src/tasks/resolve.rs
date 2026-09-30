@@ -1287,7 +1287,7 @@ async fn blob_data_size(
 
 /// Outcome of a descriptor load from the tag store + CAS.
 #[derive(Debug)]
-enum DescriptorLoadResult {
+pub(super) enum DescriptorLoadResult {
     /// Never looked, or looked and found none: skip silently.
     NotPresent,
     /// Read and parsed; carries the tag-store manifest digest so callers skip a second read.
@@ -1299,7 +1299,7 @@ enum DescriptorLoadResult {
 }
 
 /// Load the [`PatchDescriptor`] recorded at `tags_path`, offline.
-async fn load_descriptor_for_id(
+pub(super) async fn load_descriptor_for_id(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
     tags_path: &std::path::Path,

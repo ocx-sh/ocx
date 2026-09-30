@@ -40,7 +40,7 @@ Content-addressed storage, a local index, persistent state, stable symlinks, and
         <Description>the managed-config tier's own snapshot pin</Description>
       </Node>
       <Node name="patch-descriptors/" icon="📄">
-        <Description>per-repository record of whether a patch descriptor was found</Description>
+        <Description>per-repository record of whether a patch descriptor was found, re-checked by install, pull, lock, add, update and package test</Description>
       </Node>
       <Node name="patch-companions/" icon="📌">
         <Description>per-repository companion tag→digest pins — never in the local index</Description>
