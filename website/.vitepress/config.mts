@@ -75,6 +75,10 @@ export default defineConfig({
           link: "/docs/user-guide/promoting-packages",
         },
         {
+          text: "Snapshot Tracks",
+          link: "/docs/user-guide/snapshot-tracks",
+        },
+        {
           text: "Authoring",
           link: "/docs/authoring/",
           collapsed: true,

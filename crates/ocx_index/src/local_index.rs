@@ -142,8 +142,9 @@ impl LocalIndex {
     pub async fn refresh_tags(&self, identifier: &ocx_oci::PackageRef, source: &super::Index) -> Result<()> {
         log::info!("Refreshing tags for identifier '{}'.", identifier);
 
-        // A served root document is what marks a published source.
-        if let Some((bytes, root)) = source.fetch_root_document(identifier).await? {
+        // A served root document is what marks a published source; revalidated because the merge
+        // may drop an ephemeral row the root no longer lists.
+        if let Some((bytes, root)) = source.revalidate_root_document(identifier).await? {
             self.refresh_published(identifier, source, &bytes, &root).await
         } else {
             self.refresh_derived(identifier, source).await
@@ -221,9 +222,7 @@ impl LocalIndex {
                 Some(tag) => RootScope::Tags(std::slice::from_ref(tag)),
                 None => RootScope::Package,
             };
-            let pins = self.commit_published_root(identifier, bytes, scope).await?;
-            self.sweep_dispatch_orphans(identifier, &pins).await;
-            return Ok(());
+            return self.commit_and_sweep_published_root(identifier, bytes, scope).await;
         };
 
         // Partial success commits only persisted tags under a tag scope: `RootScope::Package` would
@@ -235,14 +234,12 @@ impl LocalIndex {
             .map(|(tag, _)| tag.as_str())
             .collect();
         // Matched, never `?`-ed, or the tag failure in `error` is dropped unreported.
-        if !adopted.is_empty() {
-            match self
-                .commit_published_root(identifier, bytes, RootScope::Tags(&adopted))
+        if !adopted.is_empty()
+            && let Err(commit) = self
+                .commit_and_sweep_published_root(identifier, bytes, RootScope::Tags(&adopted))
                 .await
-            {
-                Ok(pins) => self.sweep_dispatch_orphans(identifier, &pins).await,
-                Err(commit) => return Err(withheld_by_commit_failure(identifier, &error, commit)),
-            }
+        {
+            return Err(withheld_by_commit_failure(identifier, &error, commit));
         }
         Err(error)
     }
@@ -618,7 +615,20 @@ impl LocalIndex {
         Ok(Some(physical.at_version_of(identifier)))
     }
 
-    /// Merge a fetched published root into the local copy within `scope`, never deleting a tag
+    /// [`commit_published_root`](Self::commit_published_root), then sweep the dispatch objects no
+    /// surviving pin references.
+    pub(super) async fn commit_and_sweep_published_root(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        fetched_bytes: &[u8],
+        scope: RootScope<'_>,
+    ) -> Result<()> {
+        let pins = self.commit_published_root(identifier, fetched_bytes, scope).await?;
+        self.sweep_dispatch_orphans(identifier, &pins).await;
+        Ok(())
+    }
+
+    /// Merge a fetched published root into the local copy within `scope`, never deleting a durable tag
     /// (`adr_index_indirection.md#a2`), then write the source's `config.json` if absent
     /// (`adr_servable_index_snapshot.md`).
     pub(super) async fn commit_published_root(
@@ -784,6 +794,9 @@ fn published_pins(bytes: Option<&[u8]>) -> Vec<ocx_oci::Digest> {
 /// every field a newer writer added.
 fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) -> Option<Vec<u8>> {
     let fetched_root: serde_json::Value = serde_json::from_slice(fetched).ok()?;
+    // The typed parse, not just valid JSON, or a root missing `repository` re-merges and re-fails
+    // `write_root` on every update instead of healing.
+    let usable = committed.is_some_and(|bytes| serde_json::from_slice::<super::wire::IndexRoot>(bytes).is_ok());
     let adopted: Vec<(String, serde_json::Value)> = match scope {
         RootScope::Tags(named) => {
             let entries: Vec<(String, serde_json::Value)> = named
@@ -796,7 +809,7 @@ fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) ->
                     entry.map(|entry| ((*tag).to_string(), entry))
                 })
                 .collect();
-            if entries.is_empty() {
+            if entries.is_empty() && !usable {
                 // No write, or a first-sight package adopts `repository` on a tag its root never listed.
                 return None;
             }
@@ -813,9 +826,6 @@ fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) ->
         RootScope::Routing => Vec::new(),
     };
 
-    // The typed parse, not just valid JSON, or a root missing `repository` re-merges and re-fails
-    // `write_root` on every update instead of healing.
-    let usable = committed.is_some_and(|bytes| serde_json::from_slice::<super::wire::IndexRoot>(bytes).is_ok());
     let mut root: serde_json::Value = match committed.filter(|_| usable).map(serde_json::from_slice) {
         Some(Ok(root)) => root,
         _ => {
@@ -847,12 +857,39 @@ fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) ->
     let Some(tags) = tags.as_object_mut() else {
         return Some(fetched.to_vec());
     };
-    for (tag, entry) in adopted {
+    let is_ephemeral = |entry: &serde_json::Value| {
+        entry
+            .get("ephemeral")
+            .is_some_and(super::wire::RootTag::is_ephemeral_marker)
+    };
+    for (tag, mut entry) in adopted {
+        // A durable local row never takes the source's ephemeral marker, or a later update drops a
+        // pin this machine promised to keep.
+        if is_ephemeral(&entry)
+            && tags.get(&tag).is_some_and(|committed| !is_ephemeral(committed))
+            && let Some(fields) = entry.as_object_mut()
+        {
+            fields.remove("ephemeral");
+        }
         if tags.get(&tag) != Some(&entry) {
             tags.insert(tag, entry);
             changed = true;
         }
     }
+    // Only an ephemeral row the authoritative root no longer lists is dropped; a durable pin is
+    // never deleted, and a tag the root lists was adopted above. A root with no `tags` object
+    // lists nothing we can trust, so it drops nothing rather than everything.
+    let in_scope = |tag: &str| match scope {
+        RootScope::Package => true,
+        RootScope::Tags(named) => named.contains(&tag),
+        RootScope::Routing => false,
+    };
+    let listed = fetched_root.get("tags").and_then(serde_json::Value::as_object);
+    tags.retain(|tag, entry| {
+        let dropped = in_scope(tag) && is_ephemeral(entry) && listed.is_some_and(|listed| !listed.contains_key(tag));
+        changed |= dropped;
+        !dropped
+    });
     (changed || !usable).then(|| super::serialize_root(&root))
 }
 
@@ -1801,6 +1838,12 @@ mod tests {
             &self,
             _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
+            panic!("a refresh may drop rows, so it must revalidate the root, never read a cached one")
+        }
+        async fn revalidate_root_document(
+            &self,
+            _: &ocx_oci::PackageRef,
+        ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
             if !self.published {
                 return Ok(None);
             }
@@ -2043,6 +2086,275 @@ mod tests {
             "a committed root is left exactly as committed: replacing its \
              repository is a routing migration, which is `ocx index update`'s"
         );
+    }
+
+    /// A root document pinning one row per `(tag, leaf, ephemeral)`; `leaf` picks the dispatch
+    /// digest via [`content_for`].
+    fn root_with_rows(rows: &[(&str, char, bool)]) -> String {
+        let tags = rows
+            .iter()
+            .map(|(tag, leaf, ephemeral)| {
+                let marker = if *ephemeral { r#","ephemeral":true"# } else { "" };
+                format!(r#""{tag}":{{"content":"{}"{marker}}}"#, content_for(*leaf))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{{tags}}}}}"#)
+    }
+
+    /// The tag names of a merged root, sorted.
+    fn merged_tag_names(bytes: &[u8]) -> Vec<String> {
+        let root: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let mut names: Vec<String> = root["tags"].as_object().unwrap().keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Seed `rows` as the committed root and stage every row's dispatch object.
+    async fn seed_rows(index: &LocalIndex, rows: &[(&str, char, bool)]) {
+        index
+            .seed_root_document(&repo_id(), root_with_rows(rows).as_bytes())
+            .await
+            .unwrap();
+        for (_, leaf, _) in rows {
+            let (bytes, digest) = object_for(*leaf);
+            index.stage_dispatch_bytes(&repo_id(), &digest, &bytes).await.unwrap();
+        }
+    }
+
+    fn dispatch_object_exists(dir: &TempDir, leaf: char) -> bool {
+        store(dir)
+            .dispatch_object_path(REGISTRY, REPO, &content_for(leaf))
+            .exists()
+    }
+
+    #[test]
+    fn package_scope_drops_an_absent_ephemeral_row_and_keeps_the_rest() {
+        let committed = root_with_rows(&[("keep", '1', false), ("gone", '2', true), ("old", '3', false)]);
+        let fetched = root_with_rows(&[("keep", '1', false)]);
+
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Package)
+            .expect("dropping an ephemeral row is a change, so the merge must write");
+
+        assert_eq!(
+            merged_tag_names(&merged),
+            ["keep", "old"],
+            "the ephemeral row the root no longer lists is dropped; the durable row it also lacks survives"
+        );
+    }
+
+    #[test]
+    fn package_scope_keeps_an_absent_durable_row() {
+        let committed = root_with_rows(&[("keep", '1', false), ("old", '2', false)]);
+        let fetched = root_with_rows(&[("keep", '1', false), ("new", '3', false)]);
+
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Package)
+            .expect("the new tag is a change");
+
+        assert_eq!(
+            merged_tag_names(&merged),
+            ["keep", "new", "old"],
+            "a durable pin the root stopped listing is never deleted"
+        );
+    }
+
+    #[test]
+    fn package_scope_keeps_an_ephemeral_row_the_root_still_lists() {
+        let committed = root_with_rows(&[("a", '1', true)]);
+        let fetched = root_with_rows(&[("a", '1', true)]);
+
+        assert!(
+            merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Package).is_none(),
+            "an ephemeral row the root still lists is unchanged, so nothing is written"
+        );
+    }
+
+    #[test]
+    fn tags_scope_drops_a_named_ephemeral_tag_the_root_lacks() {
+        let committed = root_with_rows(&[("a", '1', true), ("b", '2', true), ("c", '3', false)]);
+        let fetched = root_with_rows(&[("c", '3', false)]);
+
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Tags(&["a"]))
+            .expect("dropping the named ephemeral row is a change, so the merge must write");
+
+        assert_eq!(
+            merged_tag_names(&merged),
+            ["b", "c"],
+            "only the named row goes; a sibling ephemeral row is not this scope's to drop"
+        );
+    }
+
+    #[test]
+    fn tags_scope_keeps_a_named_durable_tag_the_root_lacks() {
+        let committed = root_with_rows(&[("a", '1', false)]);
+        let fetched = root_with_rows(&[("z", '9', false)]);
+
+        assert!(
+            merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Tags(&["a"])).is_none(),
+            "a durable pin is never dropped, whatever the root lists"
+        );
+    }
+
+    #[test]
+    fn tags_scope_adopts_a_named_tag_the_root_lists_instead_of_dropping_it() {
+        let committed = root_with_rows(&[("a", '1', true)]);
+        let fetched = root_with_rows(&[("a", '2', false)]);
+
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Tags(&["a"]))
+            .expect("the root moved the tag, so the merge must write");
+
+        let root: serde_json::Value = serde_json::from_slice(&merged).unwrap();
+        assert_eq!(
+            root["tags"]["a"]["content"].as_str(),
+            Some(content_for('2').to_string().as_str()),
+            "a tag the root lists is adopted, ephemeral locally or not"
+        );
+    }
+
+    #[test]
+    fn a_durable_row_stays_durable_when_the_source_marks_it_ephemeral() {
+        let committed = root_with_rows(&[("a", '1', false)]);
+        let fetched = root_with_rows(&[("a", '2', true)]);
+
+        for scope in [RootScope::Package, RootScope::Tags(&["a"])] {
+            let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), scope)
+                .expect("the root moved the tag, so the merge must write");
+            let root: serde_json::Value = serde_json::from_slice(&merged).unwrap();
+            assert_eq!(
+                root["tags"]["a"]["content"].as_str(),
+                Some(content_for('2').to_string().as_str()),
+                "the moved pin is adopted"
+            );
+            assert!(
+                root["tags"]["a"].get("ephemeral").is_none(),
+                "a durable local row never takes the source's ephemeral marker: {}",
+                root["tags"]["a"]
+            );
+
+            let omitting = root_with_rows(&[("z", '9', false)]);
+            let later = merge_root(Some(&merged), omitting.as_bytes(), scope);
+            assert!(
+                later.is_none_or(|bytes| merged_tag_names(&bytes).contains(&"a".to_string())),
+                "a later root omitting the tag cannot drop the row"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_row_keeps_the_sources_ephemeral_marker_and_an_ephemeral_row_takes_updates() {
+        let committed = root_with_rows(&[("old", '1', true)]);
+        let fetched = root_with_rows(&[("old", '2', true), ("new", '3', true)]);
+
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Package)
+            .expect("the root moved one tag and added another");
+        let root: serde_json::Value = serde_json::from_slice(&merged).unwrap();
+        assert_eq!(root["tags"]["new"]["ephemeral"], serde_json::Value::Bool(true));
+        assert_eq!(root["tags"]["old"]["ephemeral"], serde_json::Value::Bool(true));
+        assert_eq!(
+            root["tags"]["old"]["content"].as_str(),
+            Some(content_for('2').to_string().as_str()),
+            "an ephemeral local row is still updated"
+        );
+    }
+
+    #[test]
+    fn tags_scope_writes_nothing_for_an_absent_tag_when_no_root_is_committed() {
+        let fetched = root_with_rows(&[("z", '9', false)]);
+
+        assert!(
+            merge_root(None, fetched.as_bytes(), RootScope::Tags(&["ghost"])).is_none(),
+            "with nothing committed there is nothing to drop, and a first-sight package must not adopt \
+             `repository` on a tag its root never listed"
+        );
+    }
+
+    #[test]
+    fn a_fetched_root_without_a_tags_object_drops_no_ephemeral_row() {
+        let committed = root_with_rows(&[("gone", '1', true)]);
+        let fetched = format!(r#"{{"repository":"oci://{REGISTRY}/{REPO}"}}"#);
+
+        for scope in [RootScope::Package, RootScope::Tags(&["gone"])] {
+            assert!(
+                merge_root(Some(committed.as_bytes()), fetched.as_bytes(), scope).is_none(),
+                "a root that lists no tags at all is no evidence a row is gone"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_scope_never_drops_an_ephemeral_row() {
+        let committed = root_with_rows(&[("a", '1', true)]);
+        let fetched = root_with_rows(&[("z", '9', false)]);
+
+        assert!(
+            merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Routing).is_none(),
+            "routing is package-level fields only and never touches a row"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_index_update_drops_an_absent_ephemeral_row_and_sweeps_its_object() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_rows(
+            &index,
+            &[("keep", '1', false), ("gone", '2', true), ("old", '3', false)],
+        )
+        .await;
+        assert!(
+            dispatch_object_exists(&dir, '2'),
+            "prerequisite: the ephemeral row's object is on disk"
+        );
+
+        let source = ScriptedSource::new(&[("keep", '1')]);
+        index.refresh_tags(&repo_id(), &source.index()).await.unwrap();
+
+        assert_eq!(
+            merged_tag_names(&std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap()),
+            ["keep", "old"],
+            "the ephemeral row is gone, the durable pin the root also lacks survives"
+        );
+        assert!(
+            !dispatch_object_exists(&dir, '2'),
+            "no row references the dropped row's object any more, so the sweep removes it"
+        );
+        assert!(dispatch_object_exists(&dir, '1'), "the listed tag's object stays");
+        assert!(dispatch_object_exists(&dir, '3'), "the durable pin's object stays");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tag_scoped_update_drops_only_that_ephemeral_row_when_the_root_lacks_it() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_rows(&index, &[("a", '1', true), ("b", '2', true)]).await;
+
+        let source = ScriptedSource::new(&[("z", '9')]);
+        index.refresh_tags(&tagged_id("a"), &source.index()).await.unwrap();
+
+        assert_eq!(
+            merged_tag_names(&std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap()),
+            ["b"],
+            "the named ephemeral row is dropped; its sibling was not named"
+        );
+        assert!(!dispatch_object_exists(&dir, '1'), "the dropped row's object is swept");
+        assert!(dispatch_object_exists(&dir, '2'), "the sibling's object stays");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tag_scoped_update_keeps_a_durable_row_the_root_lacks() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_rows(&index, &[("a", '1', false)]).await;
+
+        let source = ScriptedSource::new(&[("z", '9')]);
+        index.refresh_tags(&tagged_id("a"), &source.index()).await.unwrap();
+
+        assert_eq!(
+            merged_tag_names(&std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap()),
+            ["a"],
+            "a durable pin survives an update whose root lacks it"
+        );
+        assert!(dispatch_object_exists(&dir, '1'), "and so does its object");
     }
 
     /// C-012 — a failing tag does not discard its package's succeeded tags.

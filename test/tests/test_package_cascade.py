@@ -420,7 +420,7 @@ def test_j12_tags_file_holds_exactly_the_created_aliases(
     and would otherwise commit a digest this run never wrote. A preview wrote
     nothing, so it records nothing but the tags an index finding already
     names — never its plan, which is what `planned` in the JSON report is
-    for. A second repair against the now-healthy graph writes an empty file.
+    for. A second repair against the now-healthy graph leaves the tags already in the file.
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     expected = ["1", "1.0", "latest"]
@@ -443,7 +443,35 @@ def test_j12_tags_file_holds_exactly_the_created_aliases(
 
     again = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
     assert again.returncode == 0
-    assert tags_path.read_text() == ""
+    assert sorted(tags_path.read_text().splitlines()) == expected, (
+        "a repair that moves nothing leaves the tags already in the file"
+    )
+
+
+def test_j12b_tags_file_appends_to_an_existing_file(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--tags-file` onto a file that already holds tags keeps them, adds the
+    moved aliases after, and ends every line with a newline, whether the
+    existing file was newline- or comma-joined. A run that moves nothing
+    still writes the file.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+
+    tags_path = tmp_path / "tags.txt"
+    tags_path.write_text("0.9.0,0.9")
+    result = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
+    assert result.returncode == 0
+    lines = tags_path.read_text().splitlines()
+    assert lines[:2] == ["0.9.0", "0.9"], f"existing tags stay first: {lines}"
+    assert sorted(lines[2:]) == ["1", "1.0", "latest"]
+    assert tags_path.read_text().endswith("\n")
+
+    moved_nothing = tmp_path / "nothing.txt"
+    moved_nothing.write_text("0.9.0,0.9")
+    again = _repair(ocx, "--tags-file", str(moved_nothing), unique_repo)
+    assert again.returncode == 0
+    assert moved_nothing.read_text() == "0.9.0\n0.9\n", "only a real write rewrites the comma file as lines"
 
 
 def test_j13_tags_file_rejects_a_multi_package_run(

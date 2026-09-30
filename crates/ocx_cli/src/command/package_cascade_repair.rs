@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Context as _;
 use clap::Parser;
 use ocx_package::cascade::{apply, graph};
 
@@ -22,8 +21,8 @@ use crate::options;
     using only content the registry already serves - a repair publishes nothing new, it re-points. \
     The full plan is computed first and every manifest it references is checked to still exist, so \
     a run that cannot be completed writes nothing at all.\n\n\
-    Repairing the registry does not update the public index. Pass `--tags-file PATH` to record the \
-    tags this run moved, then hand that file to `ocx package announce --tags-file PATH`.\n\n\
+    Repairing the registry does not update the public index. Pass `--tags-file PATH` to append the \
+    tags this run moved, one per line, then hand that file to `ocx package announce --tags-file PATH`.\n\n\
     Exits 0 when every attempted write succeeded, 65 when a finding remains (including a tag that \
     cannot be fixed without publishing new content), and 64 when a package names a digest or a tag \
     that is not a version, or when `--tags-file` is given more than one package.")]
@@ -32,12 +31,12 @@ pub struct PackageCascadeRepair {
     #[arg(long)]
     dry_run: bool,
 
-    /// Write the rolling tags this run moved or created to this file, one per
-    /// line, for `ocx package announce --tags-file`. Takes one package
+    /// Append the rolling tags this run moved or created to this file, one per
+    /// line, for `ocx package announce --tags-file`. Creates the file if
+    /// absent and keeps the tags already in it. Takes one package
     /// per run, since the file names no package and `announce` publishes it
     /// against one. Written on a dry run too - a preview moves nothing, so
-    /// the file then holds only the tags an index finding already names, and
-    /// is empty when there are none.
+    /// it adds only the tags an index finding already names.
     #[arg(long = "tags-file", value_name = "PATH")]
     tags_file: Option<PathBuf>,
 
@@ -94,11 +93,9 @@ impl PackageCascadeRepair {
         context.api().report(&report)?;
 
         if let Some(path) = &self.tags_file {
-            // Written on every run, empty included, or an unconditional `announce --tags-file` finds no file.
-            tokio::fs::write(path, announce_tags_body(&report.entries))
-                .await
-                .map_err(|error| ocx_util::error::FileError::new(path, error))
-                .with_context(|| format!("writing announce tags to {}", path.display()))?;
+            // Appended like `push --tags-file`, so a pipeline's earlier tags survive. Written on every
+            // run, empty included, or an unconditional `announce --tags-file` finds no file.
+            crate::conventions::append_tags_file(path, &run_tags(&report.entries)).await?;
         }
 
         Ok(crate::conventions::cascade_repair_exit_code(&report).into())
@@ -127,18 +124,13 @@ fn announce_tags(report: &graph::CascadeReport, outcomes: &[apply::RepairOutcome
         .collect()
 }
 
-/// The `--tags-file` body: one tag per line, sorted and deduped.
-fn announce_tags_body(entries: &[RepairEntry]) -> String {
+/// This run's tags for the `--tags-file`: sorted and deduped across packages.
+fn run_tags(entries: &[RepairEntry]) -> Vec<String> {
     let tags: BTreeSet<&str> = entries
         .iter()
         .flat_map(|entry| entry.tags.iter().map(String::as_str))
         .collect();
-    if tags.is_empty() {
-        return String::new();
-    }
-    let mut body = tags.into_iter().collect::<Vec<_>>().join("\n");
-    body.push('\n');
-    body
+    tags.into_iter().map(str::to_string).collect()
 }
 
 #[cfg(test)]
@@ -249,7 +241,9 @@ mod tests {
     fn the_tags_body_round_trips_through_the_announce_parser() {
         let entries = vec![entry(&["3.28", "3", "latest"]), entry(&["latest", "1"])];
 
-        let parsed = crate::conventions::parse_tags_file(announce_tags_body(&entries).as_bytes());
+        let parsed = crate::conventions::parse_tags_file(
+            crate::conventions::merge_tags_file(&[], &run_tags(&entries)).as_bytes(),
+        );
 
         assert_eq!(
             parsed,
@@ -259,9 +253,31 @@ mod tests {
     }
 
     #[test]
+    fn the_tags_body_appends_to_what_the_file_already_holds() {
+        let existing = vec!["3.28.1".to_string(), "latest".to_string()];
+
+        let body = crate::conventions::merge_tags_file(&existing, &run_tags(&[entry(&["3", "latest"])]));
+
+        assert_eq!(
+            body, "3.28.1\nlatest\n3\n",
+            "existing tags first, new ones after, no duplicates"
+        );
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_move_keeps_what_the_file_already_holds() {
+        let existing = vec!["3.28.1".to_string()];
+
+        assert_eq!(
+            crate::conventions::merge_tags_file(&existing, &run_tags(&[entry(&[])])),
+            "3.28.1\n"
+        );
+    }
+
+    #[test]
     fn a_run_with_nothing_to_move_writes_an_empty_body() {
         assert!(
-            announce_tags_body(&[entry(&[])]).is_empty(),
+            run_tags(&[entry(&[])]).is_empty(),
             "an empty file is a safe no-op for the announce follow-up"
         );
         assert!(crate::conventions::parse_tags_file(b"").is_empty());

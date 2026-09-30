@@ -317,11 +317,12 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
     make_package(ocx, unique_repo, "3.0.0", tmp_path, cascade=False)
     announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab")
 
-    # The winner adds 2.0.0 with a placeholder digest, so the loser's retry can
-    # be shown to genuinely RE-OBSERVE it rather than copy it forward.
+    # The winner adds 2.0.0 with a placeholder digest no registry serves, so only
+    # a retry that read the winning head can carry it.
     placeholder = "sha256:" + "0" * 64
     winning_root = json.loads(_committed_bytes(fake_forge, package))
-    winning_root["tags"]["2.0.0"] = {"content": placeholder, "observed": "2026-07-24T00:00:00Z"}
+    winner_row = {"content": placeholder, "observed": "2026-07-24T00:00:00Z"}
+    winning_root["tags"]["2.0.0"] = winner_row
     fake_forge.gitlab_concurrent_advance[f"{FORK_FULL}/{branch_name(package)}"] = {
         f"p/{package}.json": json.dumps(winning_root).encode()
     }
@@ -345,8 +346,8 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
     assert set(final_tags) == {"1.0.0", "2.0.0", "3.0.0"}, (
         "the retry must union against the winning head, never delete its 2.0.0"
     )
-    assert final_tags["2.0.0"]["content"] != placeholder, (
-        "the concurrently added tag must be genuinely re-observed on the retry"
+    assert final_tags["2.0.0"] == winner_row, (
+        "the file does not list the winner's 2.0.0, so the retry carries its row verbatim from the winning head"
     )
 
 

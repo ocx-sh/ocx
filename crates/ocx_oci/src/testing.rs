@@ -30,14 +30,14 @@
 pub use crate::client::push_blob_buffered;
 pub use crate::client::test_transport::{StubTransport, StubTransportData, referrers_key};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
 use crate::client::error::ClientError;
-use crate::client::{OciTransport, ProgressFn};
+use crate::client::{DeleteOutcome, ManifestPresence, OciTransport, ProgressFn};
 use crate::referrer::ReferrerManifest;
 use crate::{Algorithm, Descriptor, Digest, ImageManifest, Manifest, Reference, RegistryOperation};
 
@@ -99,9 +99,27 @@ pub struct RecordingTransport {
     /// Panic on any write. A read-only pipeline says so here, so a push it was
     /// never meant to make fails loudly instead of quietly succeeding.
     refuse_pushes: bool,
+    /// Answers for successive `delete_manifest` calls; an empty queue panics.
+    delete_results: Arc<Mutex<VecDeque<Answer<DeleteOutcome>>>>,
+    /// Answers for successive `probe_manifest` calls; an empty queue panics.
+    probe_results: Arc<Mutex<VecDeque<Answer<ManifestPresence>>>>,
 }
 
 impl RecordingTransport {
+    /// Answer successive `delete_manifest` calls with `results`, in order.
+    #[must_use]
+    pub fn answering_deletes(self, results: Vec<Answer<DeleteOutcome>>) -> Self {
+        *self.delete_results.lock().expect("recorder lock") = results.into();
+        self
+    }
+
+    /// Answer successive `probe_manifest` calls with `results`, in order.
+    #[must_use]
+    pub fn answering_probes(self, results: Vec<Answer<ManifestPresence>>) -> Self {
+        *self.probe_results.lock().expect("recorder lock") = results.into();
+        self
+    }
+
     /// The digest a manifest read that misses the store claims.
     #[must_use]
     pub fn serving_subject_digest(mut self, digest: impl Into<String>) -> Self {
@@ -344,6 +362,25 @@ impl OciTransport for RecordingTransport {
     ) -> Answer<String> {
         self.refuse_write("push_blob_from_path");
         push_blob_buffered(self, image, path, digest, on_progress).await
+    }
+
+    async fn delete_manifest(&self, image: &Reference) -> Answer<DeleteOutcome> {
+        self.record("delete_manifest", image);
+        self.refuse_write("delete_manifest");
+        self.delete_results
+            .lock()
+            .expect("recorder lock")
+            .pop_front()
+            .expect("a RecordingTransport asked to delete needs `answering_deletes`")
+    }
+
+    async fn probe_manifest(&self, image: &Reference) -> Answer<ManifestPresence> {
+        self.record("probe_manifest", image);
+        self.probe_results
+            .lock()
+            .expect("recorder lock")
+            .pop_front()
+            .expect("a RecordingTransport asked to probe needs `answering_probes`")
     }
 
     async fn push_referrer_manifest(
@@ -619,6 +656,14 @@ impl OciTransport for SbomTransport {
 
     async fn push_blob_from_path(&self, _: &Reference, _: &Path, _: &Digest, _: ProgressFn) -> Answer<String> {
         unimplemented!("reading an SBOM never pushes a file-backed blob")
+    }
+
+    async fn delete_manifest(&self, _: &Reference) -> Answer<DeleteOutcome> {
+        unimplemented!("reading an SBOM never deletes")
+    }
+
+    async fn probe_manifest(&self, _: &Reference) -> Answer<ManifestPresence> {
+        unimplemented!("the sbom scan never probes a manifest")
     }
 
     async fn push_referrer_manifest(&self, _: &Reference, _: &Digest, _: &[u8], _: &str) -> Answer<Descriptor> {

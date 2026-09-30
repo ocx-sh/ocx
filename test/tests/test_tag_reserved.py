@@ -187,9 +187,9 @@ def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
     """Source 3 of 3 — a tags file (`--tags-file`, the file
-    `ocx package push --tags-file` writes). The union is committed ∪ file;
-    the drop applies to the union, so a reserved name is filtered whichever
-    side it entered from.
+    `ocx package push --tags-file` writes). The run is given only the file's
+    tags, so a reserved name the file lists is dropped, while a committed row
+    the file leaves out, reserved or not, is carried verbatim.
     """
     make_package(ocx, unique_repo, "1.2.3", tmp_path, cascade=False)
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
@@ -207,11 +207,11 @@ def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
         ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(tmp_path / "out"), package
     )
 
-    assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocxfoo", _LEGACY_KEEP]), (
-        "a reserved name must be dropped whether it came from the committed root or the file"
+    assert report["reserved_tags_dropped"] == [_LEGACY_KEEP], (
+        "only the reserved name the file gives is dropped; the committed row is not given"
     )
     root = json.loads((tmp_path / "out" / "p" / f"{package}.json").read_bytes())
-    assert sorted(root["tags"]) == ["1.2.3", "2.0.0"]
+    assert sorted(root["tags"]) == ["1.2.3", "2.0.0", "__ocxfoo"]
 
 
 def test_announce_entirely_reserved_selection_is_the_existing_empty_set_error(

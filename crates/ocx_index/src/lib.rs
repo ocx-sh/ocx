@@ -444,6 +444,14 @@ impl Index {
         self.inner.fetch_root_document(identifier).await
     }
 
+    /// [`Self::fetch_root_document`] read past every cache, for a local removal decision.
+    pub async fn revalidate_root_document(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+    ) -> Result<Option<(Vec<u8>, wire::IndexRoot)>> {
+        self.inner.revalidate_root_document(identifier).await
+    }
+
     /// The physical location a source rewrites `identifier` to, or `None`; re-addressed at
     /// `identifier`'s version so a source that dropped the tag or digest cannot hand back the wrong one.
     async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {

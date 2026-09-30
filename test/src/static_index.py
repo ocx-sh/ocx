@@ -95,6 +95,7 @@ def write_package(
     deprecated_message: str | None = None,
     superseded_by: str | None = None,
     yanked: bool = False,
+    ephemeral: bool = False,
     extra_tags: Sequence[str] = (),
 ) -> PackageEntry:
     """Writes a root document + its OCI image index under `repository`.
@@ -116,6 +117,8 @@ def write_package(
         # Wire shape is an object (`RootTag::yanked` is `Option<YankMarker>` in
         # `wire.rs`), never a bare boolean — a publisher's reason + timestamp.
         tag_entry["yanked"] = {"reason": "critical security issue", "at": "2026-02-01T00:00:00Z"}
+    if ephemeral:
+        tag_entry["ephemeral"] = True
     root: dict = {"repository": physical_repository, "tags": {tag: tag_entry}}
     tag_digests = {tag: f"sha256:{index_hex}"}
     extra_bodies: dict[str, bytes] = {}
@@ -123,7 +126,10 @@ def write_package(
         extra_platform = "sha256:" + hashlib.sha256(f"{platform_digest}:{extra}".encode()).hexdigest()
         extra_body = index_bytes(extra_platform, os=os, architecture=architecture)
         extra_hex = hashlib.sha256(extra_body).hexdigest()
-        root["tags"][extra] = {"content": f"sha256:{extra_hex}", "observed": "2026-01-01T00:00:00Z"}
+        extra_entry: dict = {"content": f"sha256:{extra_hex}", "observed": "2026-01-01T00:00:00Z"}
+        if ephemeral:
+            extra_entry["ephemeral"] = True
+        root["tags"][extra] = extra_entry
         tag_digests[extra] = f"sha256:{extra_hex}"
         extra_bodies[extra_hex] = extra_body
     if status is not None:

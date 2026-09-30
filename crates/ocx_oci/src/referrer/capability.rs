@@ -285,6 +285,20 @@ mod tests {
             unimplemented!()
         }
 
+        async fn delete_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::DeleteOutcome> {
+            unimplemented!()
+        }
+
+        async fn probe_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::ManifestPresence> {
+            unimplemented!()
+        }
+
         async fn push_referrer_manifest(
             &self,
             _image: &crate::native::Reference,

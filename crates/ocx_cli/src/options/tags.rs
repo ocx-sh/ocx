@@ -61,7 +61,7 @@ pub(crate) async fn read_tags_file(path: &std::path::Path) -> anyhow::Result<Vec
     Ok(crate::conventions::parse_tags_file(&bytes))
 }
 
-/// The same read for `package push --tags-file`, which creates the file, so
+/// The same read for the push and repair `--tags-file` writers, which create the file, so
 /// absence is an empty set.
 ///
 /// Absence only: treating `TooLarge` or `NotRegularFile` as empty would let

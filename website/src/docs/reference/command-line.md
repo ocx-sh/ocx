@@ -299,10 +299,10 @@ OCX exposes a stable, typed exit-code taxonomy so scripts can discriminate failu
 
 Most package tools return 0 on success and 1 on any failure. That forces downstream scripts to either ignore the error category or grep stderr — both are fragile. A CI wrapper cannot distinguish "registry unreachable, retry in 30 seconds" from "package not found, fail the build" without parsing error text that can change.
 
-OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–86 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
+OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–87 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
 
 :::info
-The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–86.
+The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–87.
 :::
 
 | Code | Name | Mnemonic | When used | Recovery |
@@ -313,19 +313,20 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a manifest fetch that got back something other than a manifest — an HTML page from a misconfigured [mirror][config-mirrors], for instance — refused by its content type before digest verification ever runs; also registry-served content whose digest does not match the descriptor; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]); also a registry-controlled redirect or auth realm that OCX refuses to follow during push or pull — a session URL or redirect naming a different registry host, a plaintext credential realm, a redirect that would drop TLS, or a redirect on an upload request at all (see [Redirect Refusals][authoring-building-pushing-redirect-refusals]); also the startup [extra-CA-root check][config-extra-ca-certs-refusals] refusing a path-form `extra_ca_certs` bundle — or an [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] value read as a path — whose PEM block is tagged anything but `CERTIFICATE`, that does not parse as an X.509 certificate, or that is cut off before its `-----END` line | Validate identifiers and file contents; for a mirror serving a non-manifest response, check the mirror's own health and its `[mirrors]` routing; for a feature mismatch or ambiguous selection, override with `--platform`; for a refused redirect or realm, see [Redirect Refusals][authoring-building-pushing-redirect-refusals] — it is a registry-side problem or a missing `insecure` entry, never one a rerun fixes |
 | 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a registry or index endpoint whose TLS certificate the verifier refused (`UnknownIssuer` behind an intercepting proxy — the message names the remedy, see [extra CA roots][config-extra-ca-certs]; the Sigstore legs keep their own codes for the same refusal: Fulcio 75, Rekor 83, the TUF fetch 78); also a local resource that cannot be reached; also a guarded registry or Sigstore endpoint host that fails to resolve at all — a proxied destination is unaffected, since the configured proxy resolves it instead of OCX (see [Proxies][env-external-proxies]) | Inspect stderr; fix the registry or the URL before retrying |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure; also a path-form [`extra_ca_certs`][config-extra-ca-certs-refusals] bundle that is unreadable, not a regular file, or over 32 KiB | Check filesystem permissions and free space |
-| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure (a refused or unanswered connection, never a refused certificate — that is 69) or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
+| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: a [`package prune`](#package-prune) tag still present after its delete, or one the registry holds that the index does not list yet; an [`announce`](#package-announce) that finds a tag it took for gone back in the registry; registry connect failure (a refused or unanswered connection, never a refused certificate — that is 69) or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: filesystem EPERM, offline sign refused, OIDC pre-check failed | Adjust filesystem permissions, or drop `--offline` to sign |
 | 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a registry host the SSRF guard refuses outright (see [`trusted_hosts`][config-registries-trusted-hosts]), a matched [`[[trust.policy]]`][config-trust] entry is malformed. Three carve-outs from that last one, each keyed on what was actually unusable: an unreadable or non-regular `key` path is 74, a key file whose bytes are not a key is 65, and an unimplemented key backend is 85. An inline `key_pem` that is not a key stays here — config text is what is wrong; also inline `extra_ca_certs_pem`/`OCX_EXTRA_CA_CERTS` text that fails the same [extra-CA checks][config-extra-ca-certs-refusals] (a bundle cut off before its `-----END` line included), or a file with both `extra_ca_certs` and `extra_ca_certs_pem` set | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
-| 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
+| 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade. Also the [`package prune`](#package-prune) safeguard: a selected tag the index lists as durable, or a namespace with no index and no `--force` | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
 | 82 | DirtyRcBlock | OCX | A managed shell-integration block carried user edits and `ocx self setup` ran without `--force`; the block was left untouched. Distinct from ConfigError (78): the content is valid but intentionally user-modified | Re-run with `--force`, or edit the block manually and re-run |
 | 83 | TransparencyLogUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
 | 84 | ReferrersUnsupported | OCX | Registry cannot hold a referrer — `sign` and `attest` also try the tag-schema fallback index first; `push` and `copy --referrers` require the API itself. Write path only; the read path lands on 79 instead | Use a registry with OCI 1.1 referrers support |
 | 85 | UnsupportedKeyBackend | OCX | A key reference named a KMS backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Reachable from `--key`, from a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], and from a managed-config payload carrying one. Distinct from 79 and 74: the reference is well-formed and the backend is real, it simply has no implementation here | Use a file key, or wait for the backend |
 | 86 | ForgeCapabilityUnavailable | OCX | A forge answered and refused a write because the instance or the target project lacks a capability the selected `--transport` needs — job-token pushes disabled on the index project, or the publishing project missing from that project's job-token allowlist. Distinct from 69 (the forge was reached), from 80 (the credential is valid and is not what was refused) and from 81 (the remedy is never in the caller's own hands). Sibling of 84: reachable, but a needed capability is absent with no fallback | Ask an administrator of the index project to enable job-token pushes and allowlist the publishing project, or announce over `--transport api` with an access token |
+| 87 | RegistryDeleteUnsupported | OCX | The registry does not delete tags: [`package prune`](#package-prune) got a 405 (with `UNSUPPORTED` or no error body), a 400 `UNSUPPORTED` or a 400 `DIGEST_INVALID` on its first `DELETE`, before anything was deleted. Distinct from 80 (the credential is fine) and 84 (a different missing capability). Never a transient fault | Use a registry that supports tag deletion; a rerun never helps |
 
-**75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
+**75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The one exception is [`package prune`](#package-prune): its 69 for an unreachable index root is safe to retry, because the index locates the registry. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
 
 Scripts can `case $?` on these stable values:
 
@@ -345,6 +346,7 @@ case $? in
     84) echo "publish couldn't write a referrer; registry serves no referrers store" ;;
     85) echo "key backend recognised but not implemented; use a file key" ;;
     86) echo "forge lacks a capability this transport needs; an admin must act" ;;
+    87) echo "registry does not delete tags; prune cannot run here" ;;
     *)  echo "unexpected failure (exit $?)"; exit 1 ;;
 esac
 ```
@@ -1162,6 +1164,8 @@ bare identifier (e.g., `kitware/cmake`) records every tag the source currently l
 **Only the packages you name are touched, and nothing else is fetched.** A package left out keeps
 every tag pin and its `repository` pointer exactly as committed, even when the source has moved on.
 
+An update never deletes a durable pin. A row marked `"ephemeral": true` is the one exception (see [`announce --ephemeral`](#package-announce)). When the served root no longer lists it, the update drops the row and its dispatch object. A bare identifier considers every local ephemeral row. A tagged one considers only the tag it names.
+
 Nothing here syncs a whole index as a side effect, because a remote index floats (packages appear,
 platforms get added, tags move) while the local copy is the set of snapshots you deliberately asked
 for. See [Indices][in-depth-indices-update] for why that is the shape. The whole-registry form is a
@@ -1227,10 +1231,10 @@ endpoint: Docker Hub disables it outright, and GHCR supports it only with an aut
 correctly-scoped token — a registry that refuses `_catalog` fails that registry's whole snapshot.
 
 It is one explicit, operator-invoked read of each source's catalog **at that instant**, not a
-standing subscription and not a replica. A merge never deletes, so repeated runs accumulate a union
-of snapshots: a package that disappeared upstream keeps the tags this machine already recorded.
-[`regenerate`](#index-regenerate) is the only command that removes anything, and only a catalog
-entry whose root document is already gone — it cannot retract a package, for which the answer is a
+standing subscription and not a replica. A merge never deletes a durable pin, so repeated runs accumulate a union
+of snapshots: a package that disappeared upstream keeps the tags this machine already recorded. The exception is an ephemeral row the source's root no longer lists, which the merge drops.
+[`regenerate`](#index-regenerate) is the only command that removes a durable entry or a catalog
+entry, and only a catalog entry whose root document is already gone — it cannot retract a package, for which the answer is a
 fresh index home.
 
 **Several registries are one run, not several.** Every `<REGISTRY>` is enumerated before any of them
@@ -2946,13 +2950,28 @@ A run that produces no change — the rebuilt entry is byte-identical to the one
 
 An unchanged run normally opens no pull request either. Two exceptions exist. The first: a run whose announce branch still carries commits the index repository does not have — an earlier run's update reached the branch but never reached a pull request, so the unchanged run opens (or reuses) one and reports it, rather than leaving that work stranded. The second: an unchanged run — nothing new to carry forward — whose open pull request can no longer merge. That is a failure, not a no-op: the run exits 65 and names the branch. Close the pull request or delete the branch, and the next announce rebuilds it.
 
-`--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. Only `status` reports that nothing moved.
+`--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. The one exception is a `--tags-file` that lists no tag: that run exits 0 before it writes anything, so `dir` is not created. Only `status` reports that nothing moved.
 
 Every run also observes the package description published by [`ocx package description push`][cmd-package-describe]. When its artifact has moved since the last announce, the entry's description block is rebuilt — title, summary, keywords, and content-addressed copies of the README and logo — and the report's `desc_status` reads `updated`. An unmoved description costs one request and writes nothing. A description recorded in the index that the registry no longer serves stops the run rather than clearing it silently.
 
 Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a package with no committed entry exits 79, and the first-time claim that creates one is [`ocx package claim`](#package-claim).
 
-A tag that is not a version — the OCX-internal `__ocx` namespace, which carries the keep tag from [`--keep-tag`][cmd-package-push], or the frozen legacy `sha256.<hex>` keep tag — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since keep tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set named by `--tags` or `--tags-file` that resolves to nothing but reserved tags exits 64. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped`.
+A tag that is not a version — the OCX-internal `__ocx` namespace, which carries the keep tag from [`--keep-tag`][cmd-package-push], or the frozen legacy `sha256.<hex>` keep tag — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since keep tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set named by `--tags` that resolves to nothing but reserved tags exits 64. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped`.
+
+A `--tags-file` that lists no tag, or only reserved ones, changes nothing. The run exits 0 before any registry or forge work, unless `--yank` or `--unyank` was given. That lets a pipeline feed announce the empty file a [`prune`][cmd-package-prune] rerun writes.
+
+**Removals.** Announce observes only the tags it is given: the `--tags` list, the `--tags-file` lines, the registry listing under `--tags-from-registry`, or every committed row under `--refresh`. It reads the canonical registry, never a `[mirrors]` entry or a cache. A committed row it is not given is carried into the rebuilt entry unchanged, in committed order.
+
+A given tag the registry reports as `MANIFEST_UNKNOWN` is gone, and the outcome depends on its row.
+
+| Row in the committed entry | Reached by | Result |
+|---|---|---|
+| Ephemeral | any mode | Row removed |
+| Durable | `--tags`, `--tags-file` | Row removed. You named it, so it is yours to remove; on a governed index the review bot sees it |
+| Durable | `--refresh`, `--tags-from-registry` | Row kept and listed in `durable_missing`, exit 0 |
+| None | any mode | Exit 79, a typo stays an error |
+
+A removed row's `o/` object is deleted with it unless another row still references it. `--tags` keeps its replace semantics: a committed tag it does not name is dropped, and a durable drop needs review on a governed index. Additions and removals travel in one announce, so a pipeline makes one index change. The [snapshot tracks guide][ug-snapshot-tracks] shows the whole loop.
 
 **Usage**
 
@@ -2966,10 +2985,11 @@ ocx package announce (--tags <TAGS> | --tags-file <PATH> | --tags-from-registry 
 |------|-------------|---------|
 | `<NAMESPACE>/<NAME>` | Package to announce, e.g. `acme/widget` (required, positional). Flags come before it. | — |
 | `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-file`/`--tags-from-registry`/`--refresh`; exactly one is required. | — |
-| `--tags-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
-| `--tags-from-registry` | Add every tag the package's registry repository currently holds to the already-committed curated set. Never removes a committed tag; a yanked tag stays yanked. Reserved tags are filtered out of the listing before the union. | — |
-| `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`) without changing which tags are curated. | — |
-| `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`, and the one mode that needs no credential. | — |
+| `--tags-file <PATH>` | Add, update or remove the tags listed in this file (comma- or newline-separated): a listed tag the registry no longer has is removed from the index. Rows the file does not list are carried as they are. A file that lists no tag changes nothing. | — |
+| `--tags-from-registry` | Add every tag the package's registry repository currently holds. Remove ephemeral rows whose tag is gone, and report durable ones in `durable_missing`. A yanked tag stays yanked. Reserved tags are filtered out of the listing. Schedule `--refresh` for convergence, not this flag: it turns a snapshot pushed but not yet announced with `--ephemeral` into a durable row. | — |
+| `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`). Remove ephemeral rows whose tag is gone, and report durable ones in `durable_missing`. Adds no tag. | — |
+| `--ephemeral` | Mark the tags this run adds as removable without review. A tag already in the index keeps the marker it has: the marker never changes on an existing row. Conflicts with `--refresh`. Push ephemeral builds with `--no-keep-tag`, or [prune][cmd-package-prune] frees no storage: the keep tag pins the manifest, so it and its layers stay out of registry garbage collection after the tag is deleted. | — |
+| `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing, except a `--tags-file` no-op, which writes nothing. Mutually exclusive with `--fork`, and the one mode that needs no credential. | — |
 | `--fork <REPOSITORY>` | Open (or update) the pull or merge request from this fork, as `[HOST/]NAMESPACE/PROJECT`. Omit it to push the announce branch straight to `--index-repo`, which needs push access on that repository. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
 | `--index-repo <REPOSITORY>` | Index repository the pull or merge request targets, as `[HOST/]NAMESPACE/PROJECT`. Give the host for a self-hosted instance; the namespace may be a nested GitLab group path. | `ocx-sh/index` |
 | `--forge <FORGE>` | Which forge hosts the index: `github` or `gitlab`. Inferred for `github.com` and `gitlab.com`; **required** for a self-hosted host. | inferred |
@@ -2989,10 +3009,14 @@ The package used to be named by a `--package` flag. That spelling is deprecated:
 | A curated tag's physical host resolves to a private, loopback, link-local, or metadata address — add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow | 78 |
 | Any mode other than `--out` run without [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] set, the token was rejected (401/403), or — without `--fork` — the token cannot push to `--index-repo`. The last is checked before anything is written and names the repository and the missing permission | 80 |
 | The physical registry could not be resolved (DNS failure), or the forge is unreachable or returned a 5xx | 69 |
-| A curated tag does not resolve on the physical registry — check for a typo | 79 |
+| A named tag has no committed row and does not resolve on the physical registry — check for a typo. Nothing is written | 79 |
+| The registry answers a tag with a 404 that carries no error code or one other than `MANIFEST_UNKNOWN` (for example `NAME_UNKNOWN`), so its absence is not confirmed. Only `MANIFEST_UNKNOWN` counts as gone; nothing is removed. Any other error keeps its own code, so a 401 exits 80 | 79 |
 | The package is unclaimed — no committed root exists for it yet. Claiming one is a human-lane action, never something announce performs | 79 |
 | The forge rate-limited the run (429), or a concurrent announce kept winning the branch — retry | 75 |
-| A curated set named by `--tags` or `--tags-file` resolved to nothing but reserved tags — nothing left to announce. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped` | 64 |
+| A tag the registry reported gone answers present on the confirming read, because a push raced the two reads — rerun | 75 |
+| A curated set named by `--tags` resolved to nothing but reserved tags — nothing left to announce. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped`. A `--tags-file` that lists no tag, or only reserved ones, is a no-op that exits 0 before any forge or registry work (see above) | 64 |
+| `--ephemeral` together with `--refresh` | 64 |
+| A named tag outside the OCI tag grammar, including `--tags ''`, which names one empty tag rather than an empty set. Nothing is written | 64 |
 | `--index-repo` names a self-hosted host and no `--forge` was given, or `--fork` names the namespace that already owns the index (fork it into itself — omit `--fork` instead) | 64 |
 | `--fork` names a different host than `--index-repo`, or either coordinate's host is malformed. A fork lives on the same instance as its upstream, and a host that is not a hostname is refused rather than interpreted | 64 |
 | `--index-repo` or `--fork` names a nested namespace on GitHub, which has no nested organizations. Checked before any request | 64 |
@@ -3023,16 +3047,20 @@ The package used to be named by a `--package` flag. That spelling is deprecated:
     { "name": "job-token-push", "status": "skipped", "detail": null },
     { "name": "job-token-allowlist", "status": "skipped", "detail": null }
   ],
-  "reserved_tags_dropped": []
+  "reserved_tags_dropped": [],
+  "removed": [],
+  "durable_missing": []
 }
 ```
 
-`status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; otherwise `pull_request_url`/`pull_request_number` are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it, and `fork` is `null` whenever `--fork` was not given. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in every mode that opens a pull request. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
+`status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; otherwise `pull_request_url`/`pull_request_number` are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it, and `fork` is `null` whenever `--fork` was not given. `written_paths` lists the files written under `--out`: the whole entry on every run, `unchanged` included. A `--tags-file` no-op writes nothing. The list stays empty in every mode that opens a pull request. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
+
+`removed` names the tags whose rows this run deleted because the registry no longer has them. `durable_missing` names the durable rows that a `--refresh` or `--tags-from-registry` run found gone and kept. Both are always arrays, empty rather than absent.
 
 `forge`, `transport`, `credential_kind`, `push_credential_kind`, `branch` and `capability_checks` carry the same vocabularies and the same guarantees as they do on [`claim`](#package-claim) — including the one that matters most for a pipeline: `capability_checks` is non-empty on **every** run, so a wrapper can assert the preflight ran instead of trusting a bare exit 0. `branch` is `null` under `--out`, which opens no request and so has no branch.
 
 ::: tip
-[`ocx package push --tags-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-file` reads, so a publish pipeline can feed one straight into the other:
+[`ocx package push --tags-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the newline format `--tags-file` reads (commas are accepted too), so a publish pipeline can feed one straight into the other:
 
 ```shell
 ocx package push -i acme/widget:1.2.3 -c --tags-file tags.txt widget.tar.xz
@@ -3301,14 +3329,14 @@ Identifier forms and scope selection are identical to [`cascade check`](#package
 
 For each broken alias, `repair` rebuilds the whole platform index entry from the same fold `check` diffs against, preserving every observed entry the fold does not itself supersede — an [OCI annotation][oci-annotations] already on the index, a non-platform entry like an attestation, or an orphaned alias tag whose child manifest still exists on the registry. An orphan is preserved while its child is resolvable and dropped only once it provably is not: before writing, every referenced platform manifest is checked to still exist, and a missing one is dropped **only if every entry naming that digest is an orphan slot**. If the same digest also backs a slot the fold expects (a manifest shared across two platforms, a Rosetta-style alias) or an entry with no platform at all (an annotation or attestation), the **whole alias** is refused instead (reported, not silently skipped) rather than quietly losing content, while every other alias in the run still writes. Writes are batched — nothing reaches the registry until the whole run's plan is built — and proceed concurrently per tag. After each write, `repair` re-reads the tag it just wrote and warns (does not fail) if the digest disagrees with what was pushed, which is evidence of a concurrent publisher racing the same tag rather than something `repair` can safely resolve — the write itself still landed, so the outcome is reported `raced` only when nothing was written at all (the tag moved between this run's read and its write), never when the write landed but a read-back disagreed. There is no [conditional-request][mdn-if-match] guard on the write itself — avoid running `repair` against a repository with a publish in flight.
 
-`repair` only ever touches the **registry** side of the tag graph — reaching the public [index][in-depth-indices] with the fix is a second, separate hop through [`ocx package announce`][cmd-package-announce]. `--tags-file <PATH>` writes one bare alias-tag name per line, in the same comma/newline format [`announce --tags-file`][cmd-package-announce] reads — one spelling, one file, both ends — so a pipeline can chain the two directly:
+`repair` only ever touches the **registry** side of the tag graph — reaching the public [index][in-depth-indices] with the fix is a second, separate hop through [`ocx package announce`][cmd-package-announce]. `--tags-file <PATH>` appends one bare alias-tag name per line, newline-separated with a trailing newline, keeping the tags already in the file — the format [`announce --tags-file`][cmd-package-announce] reads, one spelling, one file, both ends — so a pipeline can chain the two directly:
 
 ```shell
 ocx package cascade repair --tags-file tags.txt acme/cmake
 ocx package announce --tags-file tags.txt --fork myuser/index acme/cmake
 ```
 
-The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce` names a single package positionally, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. The file means the same thing under `--dry-run`: the tags present in the registry as this run left them. A preview writes nothing, so it contributes no landed tag and its file holds its index-staleness findings alone — usually empty. It never records the plan, because a tag no run put on the wire is a tag `announce` must not commit; the plan a preview computed is in the JSON report instead, as each entry's `planned`. The file is written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-file` unconditionally, the same way [`ocx package push --tags-file`][cmd-package-push] chains into `announce`. `--tags-file`'s union semantics matter here: it never drops an already-committed tag, and it adds a tag that was never committed at all — an alias `repair` had to create from scratch — so one follow-up command covers a re-pointed alias and a brand-new one alike. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
+The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce` names a single package positionally, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. The file means the same thing under `--dry-run`: the tags present in the registry as this run left them. A preview writes nothing, so it contributes no landed tag and its file holds its index-staleness findings alone — usually empty. It never records the plan, because a tag no run put on the wire is a tag `announce` must not commit; the plan a preview computed is in the JSON report instead, as each entry's `planned`. The file is created if absent and written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-file` unconditionally, the same way [`ocx package push --tags-file`][cmd-package-push] chains into `announce`. `--tags-file` acts only on the tags it lists. It updates a re-pointed alias. It also adds an alias `repair` had to create from scratch, so one follow-up command covers both. Announce also removes a listed tag the registry no longer has, which a repair never produces. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
 
 **Usage**
 
@@ -3325,7 +3353,7 @@ ocx package cascade repair [OPTIONS] <IDENTIFIER>...
 | Name | Description | Default |
 |---|---|---|
 | `--dry-run` | Compute and report the repair plan without writing to the registry. | off |
-| `--tags-file <PATH>` | Write this run's alias-tag handoff to [`ocx package announce --tags-file`][cmd-package-announce], one bare tag per line. One package per invocation only — a second package's tags in the same file has no owner to attribute them to (usage error, exit 64, nothing written). Records the tags whose write landed, unioned with any tag an index-staleness finding names — under `--dry-run` too, where nothing landed and only the findings remain. Never the plan: see each entry's `planned` in the JSON report for that. Written on every run; empty when there is nothing to hand off. | — |
+| `--tags-file <PATH>` | Append this run's alias-tag handoff for [`ocx package announce --tags-file`][cmd-package-announce], one bare tag per line, keeping the tags already in the file and creating it if absent. One package per invocation only — a second package's tags in the same file has no owner to attribute them to (usage error, exit 64, nothing written). Records the tags whose write landed, unioned with any tag an index-staleness finding names — under `--dry-run` too, where nothing landed and only the findings remain. Never the plan: see each entry's `planned` in the JSON report for that. Written on every run; empty when there is nothing to hand off. | — |
 | `-h`, `--help` | Print help information. | — |
 
 **Exit codes**
@@ -3426,6 +3454,125 @@ ocx package cascade repair [OPTIONS] <IDENTIFIER>...
 ```
 
 `entries[].report` is the same [`cascade check`](#package-cascade-check) report shape for this package — findings this run is repairing, not a separate schema. `planned` carries the whole replacement index computed for each broken alias, `reasons` echoing the exact rows that justified it; `outcomes` is empty for a preview (`dry_run: true`), since nothing was attempted. `written`'s `verified` is `false` when this run's post-write read-back found a different digest than it just pushed — evidence of a concurrent publisher, not a failure: the write still landed, and the plain-text table shows it as `written-unverified` rather than a distinct JSON outcome. `dropped` names the dead orphan-only digests this write removed before it went on the wire — omitted, never an empty array, when nothing was dropped. `raced` means a concurrent publisher moved the tag between this run's read and its write, so nothing was written for it (`expected`/`live` are each `null` when that side of the race never held the tag); rerunning the repair re-reads the new state. A `refused` outcome's `outcome` object nests the same tagged shape as `unrepairable` above (`{ "outcome": "refused", "reason": "child-manifest-missing", "tag": "…", "digest": "…" }`, and so on for the other two reasons) — this alias was never attempted; a `failed` outcome's is `{ "outcome": "failed", "message": "…" }`, a write the registry itself rejected. `entries[].tags` is this package's contribution to the top-level `--tags-file` file — `3.28` here, not `3`, because the raced write never landed. `tags_file` is the path `--tags-file` was given, `null` when the flag was not passed. Representative shape, as with `cascade check` above — the shipped report's exact key spelling is not a frozen contract, only the finding classes a script branches on.
+
+#### `prune` {#package-prune}
+
+Deletes tags from a package's registry repository, guarded by the index. Snapshot builds such as `0.5.0-canary_20260930101500` pile up in a registry, and this is the command that removes them. The [snapshot tracks guide][ug-snapshot-tracks] shows it inside a pipeline.
+
+Prune deletes registry tags only. It never deletes a digest, a platform manifest, a keep tag or a referrer, and it never writes the index. Reclaiming storage is left to the registry's garbage collection. Removing the index rows is a separate step, the one [`ocx package announce`][cmd-package-announce] performs for the tags prune writes to `--tags-file`.
+
+::: warning Push ephemeral builds with `--no-keep-tag`
+Push ephemeral builds with `--no-keep-tag`, or prune frees no storage. A push writes a `__ocx.keep.<algorithm>-<hex>` tag for each platform manifest by default ([`--keep-tag`][cmd-package-push]). Prune deletes only the tag it names, so the keep tag stays. A manifest that a tag still names is never collected, so its layers stay in the registry after the prune.
+:::
+
+##### Selecting tags {#package-prune-selecting}
+
+There are two selection modes, and exactly one is required. Naming both, or neither, is a usage error.
+
+- **Explicit.** Name the tags as `[TAG]...`. Prune deletes exactly those tags, in input order, duplicates removed. Any tag is allowed except a digest, a `__ocx.keep.` tag, or a name outside the OCI tag grammar.
+- **Structural.** `--prerelease <VERSION>` selects every build of one pre-release plus its rolling tag. `0.5.0-canary` selects `0.5.0-canary_<build>` for every build and `0.5.0-canary` itself. A tag matches when it parses as the same variant, core and pre-release with a build. Selection reads the registry's tag listing, never the index.
+
+A pre-release build cascades only into its own pre-release track. Deleting a whole family therefore never touches `x.y`, `x` or `latest`.
+
+`--keep-builds <N>` keeps the newest N builds and the rolling tag, and deletes the rest. Newest means version order, which compares the build segment as text. Build ids must be fixed-width, so push with `--build-timestamp=datetime`. `--build-timestamp=date` is not enough: two builds on one day share a tag, and the second push overwrites the first.
+
+##### Locating the registry {#package-prune-locating}
+
+For a namespace with an index, prune reads the package's root from the configured index URL, whether or not `--force` is set. The read bypasses `[mirrors]` and caches and commits nothing to the local index. The root's `repository` pointer names the registry repository, and the same SSRF guard as [`announce`][cmd-package-announce] checks its host. A namespace with no index uses `<PACKAGE>` itself as the repository.
+
+##### Safeguard {#package-prune-safeguard}
+
+Before the first delete, prune checks every selected tag against the served root.
+
+| Tag in the served root | Tag in the registry | Verdict |
+|---|---|---|
+| Listed with `"ephemeral": true` | any | Deletable |
+| Listed without the marker | any | Refused, reason `durable` |
+| Not listed | present | Refused, reason `not_in_index` |
+| Not listed | absent | Reported as `absent`, nothing to do |
+
+Any refusal aborts the whole run before the first delete, and the remaining tags are reported `not_attempted`. When both reasons occur, exit 81 wins, because a retry cannot fix a durable tag. `not_in_index` exits 75, which clears once the pending announce merges. With no index and no `--force`, the run exits 81.
+
+`--force` lifts the two refusals and nothing else. A `durable` or `not_in_index` tag becomes deletable, and the root is still read. A tag absent everywhere stays `absent`. The index row of a forced tag stays until a reviewed announce removes it.
+
+##### Deleting {#package-prune-deleting}
+
+Prune deletes builds oldest first and the rolling tag last. After each `DELETE /v2/<repository>/manifests/<tag>` it confirms the tag is gone with a canonical manifest read, three tries 250 ms apart. Any not-found answer after prune's own successful delete counts as gone. A tag still present exits 75.
+
+Deleting the last tag of a repository can remove the repository on some registries. The confirmation accepts that answer.
+
+A delete is not conditional. A push that cascades into the rolling tag at the same moment can lose to the delete. Serialize the jobs of one track, as the [snapshot tracks guide][ug-snapshot-tracks-serialize] shows.
+
+##### Registry support {#package-prune-registry-support}
+
+Tag deletion is optional in the [OCI distribution spec][oci-delete-tags]. A registry that refuses it fails the first delete with exit 87 (`registry_delete_unsupported`), before anything is deleted. Never retry 87. See [Registry support][ug-snapshot-tracks-registries] for the registries checked.
+
+**Usage**
+
+```shell
+ocx package prune [OPTIONS] <PACKAGE> [TAG]...
+```
+
+**Arguments**
+
+- `<PACKAGE>`: Package whose tags to delete, e.g. `ocx.acme.example/acme/tool`. Required.
+- `[TAG]...`: Delete exactly these tags. Omit them when `--prerelease` selects the tags.
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `--prerelease <VERSION>` | Select every build of this pre-release and its rolling tag, e.g. `0.5.0-canary`. The value must be a pre-release with no build (`0.5.0` and `0.5.0-canary_20260101000000` are usage errors). Conflicts with `[TAG]...`. | — |
+| `--keep-builds <N>` | With `--prerelease`: keep the newest N builds and the rolling tag. `N` is at least 1. Requires `--prerelease`. | — |
+| `--force` | Delete tags the index does not mark ephemeral, or with no index to ask. | off |
+| `--tags-file <PATH>` | Append each gone tag the index lists, one per line, newline-terminated, for [`ocx package announce --tags-file`][cmd-package-announce]. Creates the file if absent and keeps the tags already in it. Written on every run that gets past selection, empty included, and never on a dry run. | — |
+| `--dry-run` | Run the safeguard and report. Deletes nothing and writes nothing. | off |
+| `-h`, `--help` | Print help information. | — |
+
+The tags file receives each selected tag that is gone from the registry and still listed in the root. That covers tags this run deleted and tags already gone. A forced delete of a tag the root does not list writes nothing for it, because `announce` has no row to remove. A rerun after a full delete therefore feeds `announce` the same list. A run that fails partway writes the file, with what is gone so far, before it exits.
+
+A dry run exits 81 or 75 exactly as the real run would; 80 and 87 surface only on a real delete.
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| Every selected tag is gone or kept, nothing was selected, or a dry run whose real run would pass | 0 |
+| Neither `[TAG]...` nor `--prerelease`, or both; `--prerelease` not a pre-release without a build; `--keep-builds` without `--prerelease` or below 1; a digest, a `__ocx.keep.` tag or a malformed name as `[TAG]` | 64 |
+| The registry or the index is unreachable. The index locates the registry, so `--force` does not skip that read; retry | 69 |
+| An I/O error writing `--tags-file`, after the deletes it lists. `error.kind` is `io_error` with **no** `error.detail` | 74 |
+| A tag is still present after its delete, the registry answered 429 or 503, or a selected tag is in the registry but not yet in the index (`not_in_index`) | 75 |
+| The root's `repository` pointer names a host the SSRF guard refuses. Zero deletes were sent; see [`trusted_hosts`][config-registries-trusted-hosts] | 78 |
+| The index has no root for the package | 79 |
+| The registry answered 401 or 403 on the first delete. The credential lacks delete rights, or the tag is protected | 80 |
+| The safeguard refused a `durable` tag; a namespace with no index and no `--force`; or [`--offline`](#arg-offline), which is refused before any network or index read | 81 |
+| The registry does not delete tags. Nothing was deleted | 87 |
+
+**JSON report**
+
+```json
+{
+  "package": "ocx.acme.example/acme/tool",
+  "repository": "registry.gitlab.example.com/acme/tool",
+  "selection": { "prerelease": "0.5.0-canary", "keep_builds": 2 },
+  "force": false,
+  "dry_run": true,
+  "index": { "url": "https://ocx.acme.example", "root_sha256": "sha256:4f1c…" },
+  "tags": [
+    { "tag": "0.5.0-canary_20260926093300", "digest": "sha256:c07e…", "action": "would_delete", "reason": null },
+    { "tag": "0.5.0-canary_20260928101500", "digest": "sha256:8812…", "action": "kept", "reason": "newest" },
+    { "tag": "0.5.0-canary", "digest": "sha256:e4d0…", "action": "kept", "reason": "rolling" }
+  ]
+}
+```
+
+`selection` is `{ "tags": [...] }` for an explicit run, and `keep_builds` is `null` without `--keep-builds`. `index` is `null` for a namespace with no index.
+
+`tags` lists the rows in processing order: builds oldest first, the rolling tag last. `action` is one of `deleted`, `absent`, `would_delete`, `kept`, `refused` or `not_attempted`. `reason` is `newest` or `rolling` on a kept row, and `durable` or `not_in_index` on a refused one. Otherwise it is `null`.
+
+`digest` is the root row's `content`. Failing that it is the digest the registry answered with, else `null`.
+
+Under `--format json`, a run that entered the safeguard and then failed prints only this document on stdout, so stdout stays one JSON document. The exit code is the status, and the error message goes to stderr. A routing failure (index unreachable, pointer refused, no root) prints the envelope alone, because the repository is not yet known. The plain report is a table with the columns `Action`, `Tag`, `Digest` and `Reason`.
 
 #### `create` {#package-create}
 
@@ -3728,8 +3875,8 @@ ocx package push [OPTIONS] <LAYERS>...
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `kitware/cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`kitware/cmake:3.28.1`, `kitware/cmake:3.28`, `kitware/cmake:3`, and `kitware/cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../in-depth/versioning.md#cascades).
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
-- `--keep-tag` / `--no-keep-tag`: `--keep-tag` (default) also pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag for each platform manifest pushed in this invocation; `--no-keep-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the keep tag itself keeps the manifest reachable. A digest whose keep tag would exceed the OCI 128-character tag limit (`sha512`, at 146) gets none, rather than a truncated one two digests could collide on. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores keep tags entirely.
-- `--tags-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
+- `--keep-tag` / `--no-keep-tag`: `--keep-tag` (default) also pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag for each platform manifest pushed in this invocation; `--no-keep-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the keep tag itself keeps the manifest reachable. That same pin defeats [`ocx package prune`](#package-prune). Prune deletes only the tag it names. A keep tag left behind keeps the manifest and its layers out of registry garbage collection. Push ephemeral builds with `--no-keep-tag`, or prune frees no storage. A digest whose keep tag would exceed the OCI 128-character tag limit (`sha512`, at 146) gets none, rather than a truncated one two digests could collide on. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores keep tags entirely.
+- `--tags-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file, one per line (creating it if absent), so [`ocx package announce --tags-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the published [image index][oci-image-index]. Repeatable; see [Annotations](#package-push-annotations) below.
 - `--ci-annotations[=<PROVIDER>]`: Derive `org.opencontainers.image.source`, `.revision`, `.created` and `.version` from the CI environment and record them on every index this push writes, cascade tags included. `github` reads `$GITHUB_SERVER_URL`, `$GITHUB_REPOSITORY` and `$GITHUB_SHA`; `gitlab` reads `$CI_PROJECT_URL`, `$CI_COMMIT_SHA` and `$CI_PIPELINE_CREATED_AT`. `$SOURCE_DATE_EPOCH`, when set, decides `.created` on either provider, so the annotation agrees with the `created` the same push writes on its [referrer manifest](#package-attest). `.version` strips the variant prefix — pushing `full-1.2.3` annotates `1.2.3` — and a tag that is not a version writes no `.version` key at all, which is not an error. Bare `--ci-annotations` autodetects the provider and is a usage error (exit 64) where none is detectable. A space-separated value is rejected too: `--ci-annotations gitlab` leaves the flag bare and hands `gitlab` to the layer positional, so the value must be attached with `=` (`--ci-annotations=gitlab`) — a bare `--ci-annotations` followed by a layer argument named `github` or `gitlab` is a usage error (exit 64) as well, and a layer path genuinely named that can be written `./gitlab`. `created` is always stamped, since its source (the clock, or `$SOURCE_DATE_EPOCH`/`$CI_PIPELINE_CREATED_AT`) can never be missing; `source` and `revision` write no annotation when their variable is unset or blank rather than an empty one, and an explicit `--annotation` on the same key wins. See [Annotations](#package-push-annotations) below.
 - `--default`: Let the pushed tag's own variant also own the un-prefixed version track. A package whose every build is a named variant (`full-1.2.3`, `slim-1.2.3`) publishes no bare `1.2.3`, so an install with no variant resolves nothing; passing this flag on the push of a variant-prefixed tag additionally tags the same manifest under the version with the prefix stripped — one upload, two tag sets, because only the [image index][oci-image-index] of each alias is written and no blob or manifest is uploaded twice. With `--cascade` the bare track cascades too (`1.2.3`, `1.2`, `1`, `latest`), blocked by a newer bare version exactly as any other track is; without it only the bare version is written. The pushed tag must carry a variant — `--default` on a tag with no variant is a usage error (exit 64): `--default requires a variant-prefixed tag, but <tag> carries no variant`. In a pipeline that pushes every variant, pass this flag only on the build whose variant should own the bare track. Aliases written are appended to `--tags-file` alongside the variant's own tags, and reported as `aliases_written` under `--format json`.
@@ -4591,7 +4738,7 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 }
 ```
 
-`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). A `remediation` key is reserved in the envelope shape but not currently emitted. The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `unavailable`, `temp_fail`, `transparency_log_unavailable`, `referrers_unsupported`, `io_error`, `internal`.
+`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). A `remediation` key is reserved in the envelope shape but not currently emitted. The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `unavailable`, `temp_fail`, `transparency_log_unavailable`, `referrers_unsupported`, `registry_delete_unsupported`, `io_error`, `internal`.
 
 **`detail` discriminants for `package sign`** (frozen contract C-S1-1):
 
@@ -6379,6 +6526,13 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-ocx-announce-token]: ./environment.md#ocx-announce-token
 [env-ocx-announce-git-token]: ./environment.md#ocx-announce-git-token
 [config-registries-trusted-hosts]: ./configuration.md#keys-registries-trusted-hosts
+
+<!-- commands (package prune) -->
+[cmd-package-prune]: #package-prune
+[ug-snapshot-tracks]: ../user-guide/snapshot-tracks.md
+[ug-snapshot-tracks-serialize]: ../user-guide/snapshot-tracks.md#snapshot-tracks-serialize
+[ug-snapshot-tracks-registries]: ../user-guide/snapshot-tracks.md#snapshot-tracks-registries
+[oci-delete-tags]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#deleting-tags
 
 <!-- commands (package cascade) -->
 [cmd-index-update]: #index-update

@@ -26,6 +26,8 @@ impl ClassifyExitCode for AnnounceError {
             // Never `TempFail`: a rerun reproduces it exactly, so a retrying publisher would loop.
             Self::CommittedTagsDropped { .. } => Some(ExitCode::DataError),
             Self::UnresolvedTag { .. } => Some(ExitCode::NotFound),
+            // A push landed between the two reads; a rerun observes the tag as present.
+            Self::ObserveRaced { .. } => Some(ExitCode::TempFail),
             Self::UnclaimedPackage { .. } => Some(ExitCode::NotFound),
             // Not `NotFound`: the artifact exists, only its shape is wrong.
             Self::TagIsNotAnImageIndex { .. } => Some(ExitCode::DataError),

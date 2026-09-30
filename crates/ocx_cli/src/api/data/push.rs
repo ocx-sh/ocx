@@ -296,6 +296,7 @@ mod tests {
         layer_counts: LayerCounts,
     ) -> PushOutcome {
         PushOutcome::new(
+            "1.0.0".to_string(),
             digest(digest_hex),
             cascade_tags,
             keep_tags,
@@ -310,6 +311,7 @@ mod tests {
     /// below able to tell them apart.
     fn multi_platform_outcome(keep_tags: Vec<String>) -> PushOutcome {
         PushOutcome::new(
+            "1.0.0".to_string(),
             digest("e"),
             Vec::new(),
             keep_tags,
@@ -560,6 +562,7 @@ mod attestation_tests {
     #[test]
     fn the_bare_track_a_push_aliased_is_reported_in_write_order() {
         let outcome = PushOutcome::new(
+            "full-1.2.3".to_string(),
             ocx_oci::Digest::try_from(format!("sha256:{}", "b".repeat(64)).as_str()).expect("digest parses"),
             vec!["full-1.2".to_string(), "full-1".to_string()],
             Vec::new(),

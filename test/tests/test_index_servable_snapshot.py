@@ -2209,3 +2209,73 @@ def test_reading_semantics_are_unchanged_by_the_sync_rework(
     assert (index_dir / NAMESPACE / "p" / f"{later.repository}.json").is_file(), (
         "and pins it from there"
     )
+
+
+# ---------------------------------------------------------------------------
+# An ephemeral row the served root dropped leaves the local copy on the next update
+# ---------------------------------------------------------------------------
+
+
+def test_an_update_drops_an_ephemeral_row_the_served_root_lost_and_keeps_the_durable_pin(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """A publisher marks one tag ephemeral and later serves a root listing
+    neither it nor the durable tag. The next `ocx index update <pkg>` drops the
+    ephemeral row and its dispatch object from the local copy; the durable pin,
+    which the served root also lacks, stays.
+
+    The first update is the control: both rows are local and the marker rode the
+    snapshot, so what the second update removes was really there. The durable
+    tag surviving is what keeps a blanket "drop every absent row" from passing.
+    """
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    repository = f"{unique_repo}/pkg"
+    physical = f"oci://{ocx.registry}/{repository}"
+    platform_digest = "sha256:" + hashlib.sha256(repository.encode()).hexdigest()
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="durable",
+        physical_repository=physical,
+        platform_digest=platform_digest,
+        extra_tags=["ephemeral"],
+    )
+    static_index.write_config(index_server.root)
+    root_path = index_server.root / "p" / f"{repository}.json"
+    served = json.loads(root_path.read_text(encoding="utf-8"))
+    served["tags"]["ephemeral"]["ephemeral"] = True
+    root_path.write_bytes(json.dumps(served, sort_keys=True, separators=(",", ":")).encode())
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    package = f"{NAMESPACE}/{repository}"
+    local_root = index_dir / NAMESPACE / "p" / f"{repository}.json"
+
+    def dispatch_object(tag: str) -> Path:
+        content_hex = entry.tag_digests[tag].split(":", 1)[1]
+        return index_dir / NAMESPACE / "p" / repository / "o" / "sha256" / f"{content_hex}.json"
+
+    ocx.plain("--index", str(index_dir), "index", "update", package)
+    first = json.loads(local_root.read_text(encoding="utf-8"))
+    assert sorted(first["tags"]) == ["durable", "ephemeral"], f"control: both rows are local: {first['tags']}"
+    assert first["tags"]["ephemeral"].get("ephemeral") is True, (
+        f"control: the ephemeral marker rode the snapshot: {first['tags']['ephemeral']}"
+    )
+    assert dispatch_object("ephemeral").is_file(), "control: the ephemeral row's dispatch object is local"
+
+    static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="other",
+        physical_repository=physical,
+        # Its own object: sharing the durable tag's would keep that file alive whatever the sweep did.
+        platform_digest="sha256:" + hashlib.sha256(f"{repository}:other".encode()).hexdigest(),
+    )
+    ocx.plain("--index", str(index_dir), "index", "update", package)
+
+    after = json.loads(local_root.read_text(encoding="utf-8"))
+    assert sorted(after["tags"]) == ["durable", "other"], (
+        f"the ephemeral row is gone, the durable pin survives, the new tag is adopted: {sorted(after['tags'])}"
+    )
+    assert not dispatch_object("ephemeral").exists(), "no row references the dropped row's object, so it is swept"
+    assert dispatch_object("durable").is_file(), "the durable pin keeps its dispatch object"

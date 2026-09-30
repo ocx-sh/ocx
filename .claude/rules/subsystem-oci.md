@@ -311,6 +311,10 @@ digest, both provenance kinds — `commit_root_tags` (derived) always upserted, 
 `commit_published_root` now does too. The copy records what this machine snapshotted, so a
 publisher retiring a version cannot break a machine pinned to it.
 
+The one exception is an ephemeral row (`"ephemeral": true`): one the served root no longer lists is
+dropped under `Package` and under a named `Tags` scope. Durable pins are still never dropped, and
+`Routing` never touches a row.
+
 **A dispatch object with no surviving pin is a different thing — owner mandate, always on.**
 `regenerate::sweep_orphan_objects` runs at the end of every `refresh_published`/`refresh_derived`
 (so `ocx index update` and `ocx index sync`), inside the same source lock, and removes every

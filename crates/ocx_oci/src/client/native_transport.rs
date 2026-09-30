@@ -261,6 +261,90 @@ fn referrers_unsupported_or_registry_error(
     }
 }
 
+/// Maps a tag DELETE's answer: 404 or 400 `NAME_UNKNOWN` is already absent, a refused verb is
+/// [`ClientError::DeleteUnsupported`], anything else defers to [`registry_error`].
+fn delete_outcome_or_error(
+    result: std::result::Result<(), oci_client::errors::OciDistributionError>,
+    image: &crate::native::Reference,
+) -> Result<super::DeleteOutcome> {
+    use super::DeleteOutcome::AlreadyAbsent;
+    use oci_client::errors::OciDistributionError::{RegistryError, ServerError};
+    use oci_client::errors::OciErrorCode::{DigestInvalid, NameUnknown, Unsupported};
+    let Err(e) = result else {
+        return Ok(super::DeleteOutcome::Deleted);
+    };
+    let unsupported = |status| {
+        Err(ClientError::DeleteUnsupported {
+            registry: image.registry().to_string(),
+            status,
+        })
+    };
+    let mapped = match &e {
+        RegistryError { status, envelope, .. } => {
+            let has = |wanted| envelope.errors.iter().any(|err| err.code == wanted);
+            match *status {
+                404 => Some(Ok(AlreadyAbsent)),
+                // The repository is gone, so a rerun over it converges.
+                400 if has(NameUnknown) => Some(Ok(AlreadyAbsent)),
+                // A 405 carrying another code (`DENIED` for a referenced manifest) is not a missing verb.
+                405 if has(Unsupported) => Some(unsupported(405)),
+                400 if has(Unsupported) || has(DigestInvalid) => Some(unsupported(400)),
+                _ => None,
+            }
+        }
+        ServerError { code: 404, .. } => Some(Ok(AlreadyAbsent)),
+        ServerError { code: 405, .. } => Some(unsupported(405)),
+        _ => None,
+    };
+    mapped.unwrap_or_else(|| Err(registry_error(e)))
+}
+
+/// Maps a manifest GET's answer to its digest or the not-found code the envelope carried,
+/// read before the fold in [`manifest_not_found_or_registry_error`] erases it.
+fn manifest_presence_or_error(
+    result: std::result::Result<String, oci_client::errors::OciDistributionError>,
+    image: &crate::native::Reference,
+) -> Result<super::ManifestPresence> {
+    use super::NotFoundCode;
+    use oci_client::errors::OciDistributionError::{ImageManifestNotFoundError, RegistryError, ServerError};
+    use oci_client::errors::OciErrorCode;
+    let e = match result {
+        Ok(digest) => {
+            return crate::Digest::try_from(digest.as_str())
+                .map(super::ManifestPresence::Present)
+                .map_err(|err| {
+                    ClientError::InvalidManifest(format!("digest '{digest}' served for {image} is malformed: {err}"))
+                });
+        }
+        Err(e) => e,
+    };
+    // The same misses the fetch path folds into `ManifestNotFound`, with the code kept; a code on any
+    // status but 404 is not a miss, or a 403 carrying `MANIFEST_UNKNOWN` would drive a removal.
+    let code = match &e {
+        ImageManifestNotFoundError(_) | ServerError { code: 404, .. } => Some(NotFoundCode::Unspecified),
+        RegistryError {
+            status: 404, envelope, ..
+        } => {
+            let has = |wanted| envelope.errors.iter().any(|err| err.code == wanted);
+            // `NAME_UNKNOWN` first: only `MANIFEST_UNKNOWN` may drive a removal, so a mixed answer must not.
+            if has(OciErrorCode::NameUnknown) {
+                Some(NotFoundCode::NameUnknown)
+            } else if has(OciErrorCode::ManifestUnknown) {
+                Some(NotFoundCode::ManifestUnknown)
+            } else if has(OciErrorCode::NotFound) {
+                Some(NotFoundCode::Unspecified)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    match code {
+        Some(code) => Ok(super::ManifestPresence::Absent(code)),
+        None => Err(registry_error(e)),
+    }
+}
+
 /// Filters referrer entries by `artifact_type` and converts them to [`crate::Descriptor`].
 ///
 /// The only filtering callers can rely on: a server may ignore the query filter.
@@ -507,6 +591,21 @@ impl OciTransport for NativeTransport {
                 Ok(MountOutcome::UploadRequired)
             }
         }
+    }
+
+    async fn delete_manifest(&self, image: &crate::native::Reference) -> Result<super::DeleteOutcome> {
+        let auth = self.auth_for(image).await;
+        delete_outcome_or_error(self.client.delete_manifest(image, &auth).await, image)
+    }
+
+    async fn probe_manifest(&self, image: &crate::native::Reference) -> Result<super::ManifestPresence> {
+        let auth = self.auth_for(image).await;
+        let answer = self
+            .client
+            .pull_manifest_raw(image, &auth, crate::media_type::ACCEPTED_MANIFEST_MEDIA_TYPES)
+            .await
+            .map(|(_, digest)| digest);
+        manifest_presence_or_error(answer, image)
     }
 
     async fn push_referrer_manifest(
@@ -850,6 +949,7 @@ mod tests {
 
     fn envelope_error(code: OciErrorCode) -> OciDistributionError {
         OciDistributionError::RegistryError {
+            status: 404,
             envelope: OciEnvelope {
                 errors: vec![OciError {
                     code,
@@ -1156,6 +1256,293 @@ mod tests {
         }
     }
 
+    /// A tag DELETE's answer decides whether prune converges (already gone), stops for an operator
+    /// (the registry will not delete tags) or fails like any other registry call.
+    mod delete_mapping {
+        use super::*;
+        use crate::client::DeleteOutcome;
+
+        fn wire(status: u16, code: OciErrorCode) -> OciDistributionError {
+            OciDistributionError::RegistryError {
+                status,
+                envelope: OciEnvelope {
+                    errors: vec![OciError {
+                        code,
+                        message: String::new(),
+                        detail: serde_json::Value::Null,
+                    }],
+                },
+                url: "https://registry.test/v2/mirror/cmake/manifests/4.3.3".to_string(),
+            }
+        }
+
+        /// A refusal whose body was not an envelope reaches the mapper as a bare status.
+        fn bare(status: u16) -> OciDistributionError {
+            OciDistributionError::ServerError {
+                code: status,
+                url: "https://registry.test/v2/mirror/cmake/manifests/4.3.3".to_string(),
+                message: String::new(),
+            }
+        }
+
+        fn map(error: OciDistributionError) -> crate::client::Result<DeleteOutcome> {
+            delete_outcome_or_error(Err(error), &reference())
+        }
+
+        #[test]
+        fn an_accepted_delete_is_deleted() {
+            assert_eq!(
+                delete_outcome_or_error(Ok(()), &reference()).expect("success maps to Deleted"),
+                DeleteOutcome::Deleted
+            );
+        }
+
+        #[test]
+        fn a_404_with_or_without_an_envelope_is_already_absent() {
+            for error in [
+                wire(404, OciErrorCode::ManifestUnknown),
+                wire(404, OciErrorCode::NameUnknown),
+                wire(404, OciErrorCode::Unsupported),
+                bare(404),
+            ] {
+                let label = format!("{error:?}");
+                assert_eq!(
+                    map(error).unwrap_or_else(|e| panic!("{label} must converge, got {e:?}")),
+                    DeleteOutcome::AlreadyAbsent,
+                    "{label}"
+                );
+            }
+        }
+
+        /// A registry that answers a DELETE in a repository it has never held with 400, not 404.
+        #[test]
+        fn a_400_name_unknown_is_already_absent() {
+            assert_eq!(
+                map(wire(400, OciErrorCode::NameUnknown)).expect("must converge"),
+                DeleteOutcome::AlreadyAbsent
+            );
+        }
+
+        #[test]
+        fn a_refused_verb_is_delete_unsupported_and_keeps_the_status() {
+            for (error, status) in [
+                (wire(405, OciErrorCode::Unsupported), 405),
+                (bare(405), 405),
+                (wire(400, OciErrorCode::Unsupported), 400),
+                // A registry that deletes by digest only rejects a tag reference this way.
+                (wire(400, OciErrorCode::DigestInvalid), 400),
+            ] {
+                let label = format!("{error:?}");
+                let mapped = map(error).expect_err(&label);
+                assert!(
+                    matches!(
+                        &mapped,
+                        ClientError::DeleteUnsupported { registry, status: seen }
+                            if registry == "registry.test" && *seen == status
+                    ),
+                    "{label} must be DeleteUnsupported, got {mapped:?}"
+                );
+            }
+        }
+
+        /// A referenced manifest refused as `DENIED` is a permission answer, not a missing verb.
+        #[test]
+        fn a_405_denied_keeps_the_existing_mapping() {
+            let mapped = map(wire(405, OciErrorCode::Denied)).expect_err("a denial is an error");
+            assert!(matches!(mapped, ClientError::Authentication(_)), "got {mapped:?}");
+        }
+
+        #[test]
+        fn a_bare_400_is_not_a_refused_verb() {
+            for error in [bare(400), wire(400, OciErrorCode::NameInvalid)] {
+                let label = format!("{error:?}");
+                let mapped = map(error).expect_err(&label);
+                assert!(
+                    matches!(mapped, ClientError::Registry(_)),
+                    "{label} must stay a registry fault, got {mapped:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_401_or_403_is_an_authentication_error() {
+            for error in [
+                OciDistributionError::UnauthorizedError {
+                    url: "https://registry.test/v2/mirror/cmake/manifests/4.3.3".to_string(),
+                },
+                wire(401, OciErrorCode::Unauthorized),
+                wire(403, OciErrorCode::Denied),
+                bare(401),
+                bare(403),
+            ] {
+                let label = format!("{error:?}");
+                let mapped = map(error).expect_err(&label);
+                assert!(
+                    matches!(mapped, ClientError::Authentication(_)),
+                    "{label} must be Authentication, got {mapped:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_429_or_503_is_transient() {
+            for error in [bare(429), bare(503), wire(429, OciErrorCode::Toomanyrequests)] {
+                let label = format!("{error:?}");
+                let mapped = map(error).expect_err(&label);
+                assert!(
+                    matches!(mapped, ClientError::RegistryTransient(_)),
+                    "{label} must be transient, got {mapped:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn any_other_status_is_a_registry_fault() {
+            for error in [bare(500), bare(409), wire(409, OciErrorCode::ManifestInvalid)] {
+                let label = format!("{error:?}");
+                let mapped = map(error).expect_err(&label);
+                assert!(
+                    matches!(mapped, ClientError::Registry(_)),
+                    "{label} must fall back to Registry, got {mapped:?}"
+                );
+            }
+        }
+    }
+
+    /// A manifest GET's miss keeps which code it carried, because only `MANIFEST_UNKNOWN` may drive a
+    /// removal.
+    mod probe_mapping {
+        use super::*;
+        use crate::client::{ManifestPresence, NotFoundCode};
+
+        fn wire(code: OciErrorCode) -> OciDistributionError {
+            envelope_error(code)
+        }
+
+        fn map(result: std::result::Result<String, OciDistributionError>) -> crate::client::Result<ManifestPresence> {
+            manifest_presence_or_error(result, &reference())
+        }
+
+        fn absent(error: OciDistributionError) -> NotFoundCode {
+            let label = format!("{error:?}");
+            match map(Err(error)) {
+                Ok(ManifestPresence::Absent(code)) => code,
+                other => panic!("{label} must be Absent, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_200_is_present_with_its_digest() {
+            let digest = format!("sha256:{}", "a".repeat(64));
+            assert_eq!(
+                map(Ok(digest)).expect("a served manifest is present"),
+                ManifestPresence::Present(crate::Digest::Sha256("a".repeat(64)))
+            );
+        }
+
+        #[test]
+        fn a_not_found_code_on_a_status_other_than_404_is_not_a_miss() {
+            let mut error = wire(OciErrorCode::ManifestUnknown);
+            if let OciDistributionError::RegistryError { status, .. } = &mut error {
+                *status = 403;
+            }
+            let mapped = map(Err(error));
+            assert!(
+                !matches!(mapped, Ok(ManifestPresence::Absent(_))),
+                "a 403 carrying MANIFEST_UNKNOWN must not read as absent, got {mapped:?}"
+            );
+        }
+
+        /// Only `MANIFEST_UNKNOWN` drives a removal, so an answer carrying both codes must not.
+        #[test]
+        fn name_unknown_wins_over_manifest_unknown() {
+            let mut error = wire(OciErrorCode::ManifestUnknown);
+            if let OciDistributionError::RegistryError { envelope, .. } = &mut error {
+                envelope.errors.push(OciError {
+                    code: OciErrorCode::NameUnknown,
+                    message: String::new(),
+                    detail: serde_json::Value::Null,
+                });
+            }
+            assert_eq!(absent(error), NotFoundCode::NameUnknown);
+        }
+
+        #[test]
+        fn manifest_unknown_is_kept() {
+            assert_eq!(
+                absent(wire(OciErrorCode::ManifestUnknown)),
+                NotFoundCode::ManifestUnknown
+            );
+        }
+
+        #[test]
+        fn name_unknown_is_kept() {
+            assert_eq!(absent(wire(OciErrorCode::NameUnknown)), NotFoundCode::NameUnknown);
+        }
+
+        #[test]
+        fn a_404_without_an_envelope_is_unspecified() {
+            assert_eq!(absent(server_error(404)), NotFoundCode::Unspecified);
+            assert_eq!(
+                absent(OciDistributionError::ImageManifestNotFoundError(
+                    "registry.test/mirror/cmake:4.3.3".to_string()
+                )),
+                NotFoundCode::Unspecified
+            );
+        }
+
+        /// A generic `NOT_FOUND` names neither of the two codes a removal decision reads.
+        #[test]
+        fn a_404_carrying_another_code_is_unspecified() {
+            assert_eq!(absent(wire(OciErrorCode::NotFound)), NotFoundCode::Unspecified);
+        }
+
+        #[test]
+        fn a_failure_that_is_not_a_miss_stays_an_error() {
+            let unavailable = map(Err(server_error(503))).expect_err("a 503 is not a miss");
+            assert!(
+                matches!(unavailable, ClientError::RegistryTransient(_)),
+                "got {unavailable:?}"
+            );
+
+            let denied = map(Err(OciDistributionError::UnauthorizedError {
+                url: "https://registry.test/v2/mirror/cmake/manifests/4.3.3".to_string(),
+            }))
+            .expect_err("a 401 is not a miss");
+            assert!(matches!(denied, ClientError::Authentication(_)), "got {denied:?}");
+        }
+    }
+
+    /// The fetch path folds every not-found flavour into `ManifestNotFound`; keeping the code for a
+    /// probe must not change what those callers see.
+    mod manifest_not_found_mapping {
+        use super::*;
+
+        #[test]
+        fn every_not_found_flavour_still_folds_to_manifest_not_found() {
+            for error in [
+                envelope_error(OciErrorCode::ManifestUnknown),
+                envelope_error(OciErrorCode::NameUnknown),
+                envelope_error(OciErrorCode::NotFound),
+                server_error(404),
+                OciDistributionError::ImageManifestNotFoundError("registry.test/mirror/cmake:4.3.3".to_string()),
+            ] {
+                let label = format!("{error:?}");
+                let mapped = manifest_not_found_or_registry_error(error, &reference());
+                assert!(
+                    matches!(&mapped, ClientError::ManifestNotFound(image) if image == "registry.test/mirror/cmake:4.3.3"),
+                    "{label} must stay ManifestNotFound, got {mapped:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_failure_that_is_not_a_miss_is_not_manifest_not_found() {
+            let mapped = manifest_not_found_or_registry_error(server_error(503), &reference());
+            assert!(matches!(mapped, ClientError::RegistryTransient(_)), "got {mapped:?}");
+        }
+    }
+
     /// Regression tests for issue #194 — `list_referrers` must distinguish a
     /// registry that lacks the OCI 1.1 Referrers API (404 on the endpoint)
     /// from a subject with zero referrers (200, empty `manifests`), and from
@@ -1170,6 +1557,7 @@ mod tests {
 
         fn envelope_error(code: OciErrorCode) -> OciDistributionError {
             OciDistributionError::RegistryError {
+                status: 404,
                 envelope: OciEnvelope {
                     errors: vec![OciError {
                         code,

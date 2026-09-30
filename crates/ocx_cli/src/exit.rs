@@ -1806,6 +1806,107 @@ mod tests {
             pattern: "Self::LayerNotStaged { .. }",
             value: "Some(ExitCode::Failure)",
         },
+        // A registry that will not delete tags needs an operator, so it gets
+        // its own code rather than 69 or 75, which both invite a retry.
+        NewArm {
+            target: "ClientError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::DeleteUnsupported { .. }",
+            value: "ExitCode::RegistryDeleteUnsupported",
+        },
+        // A tag delete handed no explicit tag, or a digest, is a caller's
+        // mistake: `latest` or every sharing tag would be deleted instead.
+        NewArm {
+            target: "ClientError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::DeleteNeedsTag(_) | Self::InvalidTag(_)",
+            value: "ExitCode::UsageError",
+        },
+        // An argument naming no pre-release family, a digest, an invalid tag, or a non-bare package is a usage error.
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::NotAPrereleaseFamily { .. } | Self::DigestTag { .. } | Self::InvalidTag { .. } | Self::PackageNotBare { .. }",
+            value: "Some(ExitCode::UsageError)",
+        },
+        // A root that cannot be read or a pointer the guard refuses keeps the index error's own code.
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::RootUnreadable { source, .. } | Self::RepositoryPointer { source, .. }",
+            value: "source.classify()",
+        },
+        // A package the index has no root for is not found.
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::NotInIndex { .. }",
+            value: "Some(ExitCode::NotFound)",
+        },
+        // No index to mark a tag ephemeral is a policy refusal, lifted by --force.
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::NoIndex { .. }",
+            value: "Some(ExitCode::PolicyBlocked)",
+        },
+        // A durable tag is 81 even beside a pending one: a retry cannot fix it.
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::Refused { durable, .. } if !durable.is_empty()",
+            value: "Some(ExitCode::PolicyBlocked)",
+        },
+        // A tag not yet in the index, or still served after its delete, can succeed on a retry.
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::Refused { .. } | Self::StillPresent { .. }",
+            value: "Some(ExitCode::TempFail)",
+        },
+        // A refused delete keeps the registry error's own code (80 for a credential).
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::DeleteDenied { source, .. }",
+            value: "source.classify()",
+        },
+        NewArm {
+            target: "PruneError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::Registry(source)",
+            value: "source.classify()",
+        },
+        // A tag read absent, then present on the follow-up probe: a push raced
+        // the two reads, and a rerun observes the tag as present.
+        NewArm {
+            target: "AnnounceError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::ObserveRaced { .. }",
+            value: "Some(ExitCode::TempFail)",
+        },
     ];
 
     /// A baseline arm whose **declaring type was deleted**, named with what

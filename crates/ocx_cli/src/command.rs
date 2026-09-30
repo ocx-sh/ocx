@@ -49,6 +49,7 @@ pub mod package_description;
 pub mod package_description_pull;
 pub mod package_description_push;
 pub mod package_inspect;
+pub mod package_prune;
 pub mod package_pull;
 pub mod package_push;
 pub mod package_receipt;

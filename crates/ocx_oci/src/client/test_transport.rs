@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::error::ClientError;
 use super::mirror_map::ParsedMirror;
-use super::transport::{MountOutcome, OciTransport, Result};
+use super::transport::{DeleteOutcome, ManifestPresence, MountOutcome, OciTransport, Result};
 use super::{Client, MirrorMap};
 use crate::{Algorithm, RegistryOperation};
 
@@ -69,6 +69,14 @@ pub struct StubTransportInner {
     pub mount_results: Vec<Result<MountOutcome>>,
     /// Log of `mount_blob` calls: `(target_repository, source_repository, digest)`.
     pub mount_calls: Vec<(String, String, String)>,
+    /// Successive results for `delete_manifest` calls (consumed FIFO); an empty queue is an error.
+    pub delete_results: Vec<Result<DeleteOutcome>>,
+    /// Log of `delete_manifest` calls: the whole reference, registry included.
+    pub delete_calls: Vec<String>,
+    /// Successive results for `probe_manifest` calls (consumed FIFO); an empty queue is an error.
+    pub probe_results: Vec<Result<ManifestPresence>>,
+    /// Log of `probe_manifest` calls: the whole reference, registry included.
+    pub probe_calls: Vec<String>,
     /// `"<repository>@<subject digest>"` → referrer descriptors; grown by `push_referrer_manifest` under
     /// `capture_pushes`.
     pub referrers: HashMap<String, Vec<crate::Descriptor>>,
@@ -466,6 +474,26 @@ impl OciTransport for StubTransport {
         outcome
     }
 
+    async fn delete_manifest(&self, image: &crate::native::Reference) -> Result<DeleteOutcome> {
+        self.record("delete_manifest");
+        let mut inner = self.data.write();
+        inner.delete_calls.push(image.to_string());
+        if inner.delete_results.is_empty() {
+            return Err(unseeded("delete_manifest"));
+        }
+        inner.delete_results.remove(0)
+    }
+
+    async fn probe_manifest(&self, image: &crate::native::Reference) -> Result<ManifestPresence> {
+        self.record("probe_manifest");
+        let mut inner = self.data.write();
+        inner.probe_calls.push(image.to_string());
+        if inner.probe_results.is_empty() {
+            return Err(unseeded("probe_manifest"));
+        }
+        inner.probe_results.remove(0)
+    }
+
     async fn push_referrer_manifest(
         &self,
         image: &crate::native::Reference,
@@ -551,6 +579,11 @@ fn referrer_artifact_type(manifest_bytes: &[u8]) -> Option<String> {
         .get("artifactType")?
         .as_str()
         .map(str::to_string)
+}
+
+/// An unseeded queue fails the call, so a test that forgot to seed cannot pass on a default answer.
+fn unseeded(method: &str) -> ClientError {
+    ClientError::Internal(format!("StubTransport: no seeded result for {method}").into())
 }
 
 #[cfg(test)]

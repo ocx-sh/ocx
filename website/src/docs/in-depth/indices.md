@@ -138,7 +138,11 @@ A **later** catalog sync that finds the *remote* root digest has moved past the 
 - **Tagged identifier** (e.g., `kitware/cmake:3.28`) — adopts that one tag. Every sibling pin, and the `repository` pointer, stay exactly as committed. A tagged update is a statement about one version.
 - **Bare identifier** (e.g., `cmake`) — adopts every tag the source currently lists, plus the package-level fields. Naming the package with no tag is the sanctioned point to take a routing migration: you asked about the package, so the package's own pointer moves.
 
-**An update never deletes a pin.** A tag the source has stopped listing stays in the local copy, with the digest it was pinned to, on both source kinds. The copy is not a mirror of the remote's current tag list — it is the record of what this machine snapshotted, so a publisher retiring a version cannot silently break a machine still pinned to it. Merge is the only write verb: local entries outside the scope of the update are never touched, and entries the remote dropped are never removed.
+**An update never deletes a durable pin.** A tag the source has stopped listing stays in the local copy, with the digest it was pinned to, on both source kinds. The copy is not a mirror of the remote's current tag list — it is the record of what this machine snapshotted, so a publisher retiring a version cannot silently break a machine still pinned to it. Merge is the only write verb: local entries outside the scope of the update are never touched, and durable entries the remote dropped are never removed.
+
+**The one exception is an ephemeral row.** A row marked `"ephemeral": true`, announced with [`ocx package announce --ephemeral`][cmd-package-announce], is a snapshot meant to disappear. When the served root no longer lists it, a bare update drops it. A tagged update drops it only when it names that tag.
+
+A durable pin the root also lacks survives. `ocx --remote` resolving a tag the root lacks also drops a local ephemeral row of that tag before it exits 79.
 
 **It does clean up after itself, always on.** After every [`ocx index update`][cmd-index-update] and [`ocx index sync`][cmd-index-sync] — published and plain-registry sources alike — the local copy removes every dispatch object under `o/` that no surviving pin of that package's root references any more: the object a moved tag's *old* digest left behind, never an object a pin still names. This is a referenced-set diff computed from the package's own on-disk root, not a directory walk, so an object orphaned before this shipped is not collected retroactively (accepted, no migration), and a sibling package refresh's just-written object is never mistaken for orphaned — it is referenced by its own root by construction. Runs silently (`debug!`-level only, no stdout/stderr line). Description blobs are not modelled in the local copy at all and are left untouched either way. [`ocx index regenerate`][cmd-index-regenerate] is unaffected — its own "removes no root document and no dispatch object" contract is unchanged.
 
@@ -149,8 +153,8 @@ directly is one way to ask; [`ocx index sync <REGISTRY>`][cmd-index-sync] is the
 it reads that source's own catalog **at that instant** to choose the set, then does exactly the same
 per-package work as if each were named bare. Nothing else moves a pin: not a resolve, not a listing,
 not an update of a different package, and there is no spelling of "sync everything, kept in sync" —
-`index sync` is a single explicit read, not a standing subscription, and repeated runs still only
-ever add.
+`index sync` is a single explicit read, not a standing subscription, and repeated runs never
+remove a durable pin.
 
 "Sync everything, automatically" has no well-defined meaning against a partially materialized copy: it
 would either clone a floating remote (making the copy stop being a lock) or re-snapshot whatever

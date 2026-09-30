@@ -26,6 +26,19 @@ pub const LAYER_PUSH_CONCURRENCY: usize = 4;
 /// it rather than truncating the digest.
 pub const MAX_OCI_TAG_LEN: usize = 128;
 
+/// Whether `tag` matches the distribution-spec tag grammar `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`.
+///
+/// A tag is interpolated into `/v2/<name>/manifests/<tag>`, so anything outside the grammar
+/// (`/`, `%`, `?`, `#`) could address a different manifest than the one named.
+pub fn is_valid_oci_tag(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric() || first == '_')
+        && tag.len() <= MAX_OCI_TAG_LEN
+        && chars.all(|next| next.is_ascii_alphanumeric() || matches!(next, '.' | '_' | '-'))
+}
+
 /// Hard cap on a registry-served manifest body (CWE-400).
 ///
 /// A digest match is not a size check: a hostile `repository` pointer can serve a
@@ -151,7 +164,10 @@ pub use mirror_map::MirrorMap;
 /// the trait has no default so a production transport must stream.
 #[cfg(any(test, feature = "__testing"))]
 pub use transport::push_blob_buffered;
-pub use transport::{MountOutcome, OciTransport, ProgressFn, ReferrersListing, no_progress};
+pub use transport::{
+    DeleteOutcome, ManifestPresence, MountOutcome, NotFoundCode, OciTransport, ProgressFn, ReferrersListing,
+    no_progress,
+};
 
 use error::ClientError;
 
@@ -400,13 +416,13 @@ impl Client {
     /// Pre-authenticates for `identifier` with the given scope, to fail fast on
     /// credential issues before real work starts.
     ///
-    /// `Push` authenticates against the canonical host; every other scope is a read
+    /// `Push` and `Delete` authenticate against the canonical host; `Pull` is a read
     /// keyed off the mirror host via [`transport_reference`](Self::transport_reference).
     pub async fn ensure_auth(&self, identifier: &OciIdentifier, operation: crate::RegistryOperation) -> Result<()> {
         // Exhaustive so a new `RegistryOperation` variant forces a routing decision
         // instead of silently inheriting the mirror-aware read path.
         let image = match operation {
-            crate::RegistryOperation::Push => identifier.canonical_reference(),
+            crate::RegistryOperation::Push | crate::RegistryOperation::Delete => identifier.canonical_reference(),
             crate::RegistryOperation::Pull => self.transport_reference(identifier),
         };
         self.transport().ensure_auth(&image, operation).await?;
@@ -440,8 +456,9 @@ impl Client {
 
     /// [`list_tags`](Self::list_tags), answering an absent repository with an empty list.
     ///
-    /// For a cascade prelude only. Every other failure still propagates, so a
-    /// transient 5xx is never mistaken for an empty list and cascaded against.
+    /// For a cascade prelude and a prune family selection, where an unknown repository
+    /// holds no tags to act on. Every other failure still propagates, so a transient
+    /// 5xx is never mistaken for an empty list and cascaded or selected against.
     pub async fn list_tags_or_empty_addressed(
         &self,
         identifier: OciIdentifier,
@@ -697,6 +714,48 @@ impl Client {
             .await?;
 
         Ok(Some(tag))
+    }
+
+    // ── Tag removal (always canonical: a mirror never answers a removal) ──
+
+    /// Deletes the tag `identifier` names from its canonical registry.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::DeleteNeedsTag`] — no explicit tag, or a digest (which would delete every sharing tag).
+    /// - [`ClientError::InvalidTag`] — a tag outside the OCI grammar.
+    /// - [`ClientError::DeleteUnsupported`] — the registry does not delete tags.
+    pub async fn delete_tag(&self, identifier: &OciIdentifier) -> Result<DeleteOutcome> {
+        // A missing tag would default to `latest` in the reference and delete that.
+        if identifier.tag().is_none() || identifier.digest().is_some() {
+            return Err(ClientError::DeleteNeedsTag(identifier.to_string()));
+        }
+        if identifier.tag().is_some_and(|tag| !is_valid_oci_tag(tag)) {
+            return Err(ClientError::InvalidTag(identifier.to_string()));
+        }
+        let image = self.transport_write_reference(identifier);
+        self.transport()
+            .ensure_auth(&image, crate::RegistryOperation::Delete)
+            .await?;
+        self.transport().delete_manifest(&image).await
+    }
+
+    /// GETs `identifier`'s manifest from its canonical registry, keeping the not-found code.
+    ///
+    /// Uncached: every call is a fresh GET, so a removal decision never reads a memo.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::InvalidTag`] for a tag outside the OCI grammar, before any request.
+    pub async fn probe_manifest_canonical(&self, identifier: &OciIdentifier) -> Result<ManifestPresence> {
+        if identifier.tag().is_some_and(|tag| !is_valid_oci_tag(tag)) {
+            return Err(ClientError::InvalidTag(identifier.to_string()));
+        }
+        let image = self.read_reference(identifier, ReadAddressing::Canonical);
+        self.transport()
+            .ensure_auth(&image, crate::RegistryOperation::Pull)
+            .await?;
+        self.transport().probe_manifest(&image).await
     }
 
     // ── Blob introspection ────────────────────────────────────────────
@@ -1481,6 +1540,9 @@ impl Client {
         max_bytes: usize,
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, crate::Manifest)>, ClientError> {
+        if identifier.tag().is_some_and(|tag| !is_valid_oci_tag(tag)) {
+            return Err(ClientError::InvalidTag(identifier.to_string()));
+        }
         let image = self.read_reference(identifier, addressing);
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Pull)
@@ -3337,6 +3399,20 @@ mod tests {
                 data: self.bytes_before_error.clone(),
                 pos: 0,
             }))
+        }
+
+        async fn delete_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::DeleteOutcome> {
+            unimplemented!()
+        }
+
+        async fn probe_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::ManifestPresence> {
+            unimplemented!()
         }
 
         async fn push_referrer_manifest(
@@ -5737,6 +5813,20 @@ mod tests {
                 Ok(format!("sha256:{}", "a".repeat(64)))
             }
 
+            async fn delete_manifest(
+                &self,
+                _image: &crate::native::Reference,
+            ) -> crate::client::Result<crate::client::DeleteOutcome> {
+                unimplemented!()
+            }
+
+            async fn probe_manifest(
+                &self,
+                _image: &crate::native::Reference,
+            ) -> crate::client::Result<crate::client::ManifestPresence> {
+                unimplemented!()
+            }
+
             async fn push_referrer_manifest(
                 &self,
                 image: &crate::native::Reference,
@@ -6360,6 +6450,7 @@ mod tests {
             "ocx_package/src/cascade/gather.rs",
             "ocx_package/src/cascade/apply.rs",
             "ocx_package/src/cascade/equivalence.rs",
+            "ocx_package/src/prune/tests.rs",
         ];
 
         // One walk for both gates, floored on what it READ. They were two
@@ -7168,6 +7259,236 @@ mod tests {
                 registry.state.exchanges.load(Ordering::SeqCst),
                 3,
                 "each repository still mints its own scoped token"
+            );
+        }
+    }
+
+    /// Removing a tag is always addressed to the canonical registry: a mirror answers reads, never a
+    /// removal, and a delete sent to it would report a stale copy as gone.
+    mod tag_removal {
+        use super::*;
+        use crate::client::{DeleteOutcome, ManifestPresence, NotFoundCode};
+
+        const CANONICAL: &str = "example.com/test/pkg:1.0";
+
+        fn mirrored(data: &StubTransportData) -> Client {
+            stub(data).with_test_mirror("example.com", "mirror.invalid", "upstream")
+        }
+
+        fn nothing_reached_the_transport(data: &StubTransportData) {
+            let inner = data.read();
+            assert!(
+                inner.calls.is_empty(),
+                "no transport call may precede the refusal: {:?}",
+                inner.calls
+            );
+            assert!(inner.delete_calls.is_empty());
+        }
+
+        #[tokio::test]
+        async fn delete_tag_refuses_a_digest_before_any_transport_call() {
+            let data = StubTransportData::new();
+            data.write().delete_results = vec![Ok(DeleteOutcome::Deleted)];
+
+            let error = stub(&data)
+                .delete_tag(&test_identifier_with_digest(&"b".repeat(64)))
+                .await
+                .expect_err("a digest delete would remove every tag sharing it");
+
+            assert!(matches!(error, ClientError::DeleteNeedsTag(_)), "got {error:?}");
+            nothing_reached_the_transport(&data);
+        }
+
+        /// The tag alone is not enough: a reference carrying both still names a digest.
+        #[tokio::test]
+        async fn delete_tag_refuses_a_tag_that_also_carries_a_digest() {
+            let data = StubTransportData::new();
+            let id = test_identifier("1.0").clone_with_digest(crate::Digest::Sha256("b".repeat(64)));
+
+            let error = stub(&data).delete_tag(&id).await.expect_err("a digest is refused");
+
+            assert!(matches!(error, ClientError::DeleteNeedsTag(_)), "got {error:?}");
+            nothing_reached_the_transport(&data);
+        }
+
+        /// `canonical_reference()` would default the missing tag to `latest` and delete that.
+        #[tokio::test]
+        async fn delete_tag_refuses_an_identifier_with_no_explicit_tag() {
+            let data = StubTransportData::new();
+            let id = OciIdentifier::from_parts("test/pkg", "example.com");
+
+            let error = stub(&data).delete_tag(&id).await.expect_err("no tag is refused");
+
+            assert!(matches!(error, ClientError::DeleteNeedsTag(_)), "got {error:?}");
+            nothing_reached_the_transport(&data);
+        }
+
+        /// A tag outside the grammar would be spliced into the manifest URL and address another path.
+        #[tokio::test]
+        async fn delete_probe_and_fetch_refuse_a_tag_outside_the_oci_grammar() {
+            for tag in [
+                "x/../../other/manifests/1.0",
+                "sha256%3Aab",
+                "a?b",
+                "a#b",
+                ".hidden",
+                "",
+            ] {
+                let data = StubTransportData::new();
+                let id = test_identifier("1.0").clone_with_tag(tag);
+
+                let deleted = stub(&data)
+                    .delete_tag(&id)
+                    .await
+                    .expect_err("an invalid tag is refused");
+                let probed = stub(&data)
+                    .probe_manifest_canonical(&id)
+                    .await
+                    .expect_err("an invalid tag is refused");
+
+                let fetched = stub(&data)
+                    .fetch_manifest_raw_bytes_addressed(&id, ReadAddressing::Canonical)
+                    .await
+                    .expect_err("an invalid tag is refused");
+
+                assert!(
+                    matches!(deleted, ClientError::InvalidTag(_)),
+                    "{tag:?}: got {deleted:?}"
+                );
+                assert!(matches!(probed, ClientError::InvalidTag(_)), "{tag:?}: got {probed:?}");
+                assert!(
+                    matches!(fetched, ClientError::InvalidTag(_)),
+                    "{tag:?}: got {fetched:?}"
+                );
+                nothing_reached_the_transport(&data);
+                assert!(
+                    data.read().probe_calls.is_empty(),
+                    "{tag:?}: the probe reached the transport"
+                );
+            }
+        }
+
+        #[test]
+        fn the_oci_tag_grammar_bounds_the_first_character_the_alphabet_and_the_length() {
+            for valid in ["1.0", "_x", "0.5.0-canary_20260101000000", &"a".repeat(MAX_OCI_TAG_LEN)] {
+                assert!(is_valid_oci_tag(valid), "{valid:?}");
+            }
+            for invalid in [
+                "",
+                "-x",
+                ".x",
+                "a+b",
+                "a:b",
+                "a@b",
+                "a/b",
+                &"a".repeat(MAX_OCI_TAG_LEN + 1),
+            ] {
+                assert!(!is_valid_oci_tag(invalid), "{invalid:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn delete_tag_reports_what_the_registry_answered() {
+            for answer in [DeleteOutcome::Deleted, DeleteOutcome::AlreadyAbsent] {
+                let data = StubTransportData::new();
+                data.write().delete_results = vec![Ok(answer)];
+
+                let outcome = stub(&data)
+                    .delete_tag(&test_identifier("1.0"))
+                    .await
+                    .expect("the answer is passed through");
+
+                assert_eq!(outcome, answer);
+                assert_eq!(data.read().delete_calls, [CANONICAL]);
+            }
+        }
+
+        #[tokio::test]
+        async fn delete_tag_passes_an_unsupported_registry_through() {
+            let data = StubTransportData::new();
+            data.write().delete_results = vec![Err(ClientError::DeleteUnsupported {
+                registry: "example.com".to_string(),
+                status: 405,
+            })];
+
+            let error = stub(&data)
+                .delete_tag(&test_identifier("1.0"))
+                .await
+                .expect_err("the refusal propagates");
+
+            assert!(
+                matches!(&error, ClientError::DeleteUnsupported { registry, status: 405 } if registry == "example.com"),
+                "got {error:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_tag_goes_to_the_canonical_registry_never_the_mirror() {
+            let data = StubTransportData::new();
+            data.write().delete_results = vec![Ok(DeleteOutcome::Deleted)];
+
+            mirrored(&data)
+                .delete_tag(&test_identifier("1.0"))
+                .await
+                .expect("delete succeeds");
+
+            assert_eq!(
+                data.read().delete_calls,
+                [CANONICAL],
+                "the delete must name the canonical reference, not the mirror host"
+            );
+            assert_eq!(
+                data.read().auth_calls,
+                [("example.com".to_string(), crate::RegistryOperation::Delete)],
+                "the delete token is minted at the canonical host, not the mirror"
+            );
+        }
+
+        #[tokio::test]
+        async fn probe_manifest_canonical_goes_to_the_canonical_registry_never_the_mirror() {
+            let data = StubTransportData::new();
+            data.write().probe_results = vec![Ok(ManifestPresence::Absent(NotFoundCode::ManifestUnknown))];
+
+            let presence = mirrored(&data)
+                .probe_manifest_canonical(&test_identifier("1.0"))
+                .await
+                .expect("probe succeeds");
+
+            assert_eq!(presence, ManifestPresence::Absent(NotFoundCode::ManifestUnknown));
+            assert_eq!(
+                data.read().probe_calls,
+                [CANONICAL],
+                "the probe must name the canonical reference, not the mirror host"
+            );
+        }
+
+        #[tokio::test]
+        async fn probe_manifest_canonical_reports_a_present_digest() {
+            let data = StubTransportData::new();
+            let digest = crate::Digest::Sha256("c".repeat(64));
+            data.write().probe_results = vec![Ok(ManifestPresence::Present(digest.clone()))];
+
+            let presence = stub(&data)
+                .probe_manifest_canonical(&test_identifier("1.0"))
+                .await
+                .expect("probe succeeds");
+
+            assert_eq!(presence, ManifestPresence::Present(digest));
+        }
+
+        #[tokio::test]
+        async fn ensure_auth_for_delete_authenticates_the_canonical_host() {
+            let data = StubTransportData::new();
+
+            mirrored(&data)
+                .ensure_auth(&test_identifier("1.0"), crate::RegistryOperation::Delete)
+                .await
+                .expect("auth succeeds");
+
+            assert_eq!(
+                data.read().auth_calls,
+                [("example.com".to_string(), crate::RegistryOperation::Delete)],
+                "a delete token is minted at the canonical host, unlike a pull"
             );
         }
     }

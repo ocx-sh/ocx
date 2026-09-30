@@ -13,6 +13,7 @@ use ocx_package::libc_lint::LibcLintError;
 use ocx_package::metadata::authoring::AuthoringError;
 use ocx_package::metadata::dependency::DependencyError as MetadataDependencyError;
 use ocx_package::metadata::template::TemplateError;
+use ocx_package::prune::PruneError;
 use ocx_package::publisher::CopyError;
 use ocx_package::publisher::CopyErrorKind;
 use ocx_package::publisher::PublishGateError;
@@ -129,6 +130,25 @@ impl ClassifyExitCode for PackageError {
     }
 }
 
+impl ClassifyExitCode for PruneError {
+    fn classify(&self) -> Option<ExitCode> {
+        match self {
+            Self::NotAPrereleaseFamily { .. }
+            | Self::DigestTag { .. }
+            | Self::InvalidTag { .. }
+            | Self::PackageNotBare { .. } => Some(ExitCode::UsageError),
+            Self::RootUnreadable { source, .. } | Self::RepositoryPointer { source, .. } => source.classify(),
+            Self::NotInIndex { .. } => Some(ExitCode::NotFound),
+            Self::NoIndex { .. } => Some(ExitCode::PolicyBlocked),
+            // A retry cannot fix a durable tag; a pending announce can merge.
+            Self::Refused { durable, .. } if !durable.is_empty() => Some(ExitCode::PolicyBlocked),
+            Self::Refused { .. } | Self::StillPresent { .. } => Some(ExitCode::TempFail),
+            Self::DeleteDenied { source, .. } => source.classify(),
+            Self::Registry(source) => source.classify(),
+        }
+    }
+}
+
 impl ClassifyExitCode for LibcLintError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
@@ -185,6 +205,7 @@ pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<
     downcast_arm!(cause, TemplateError);
     downcast_arm!(cause, LayerRefParseError);
     downcast_arm!(cause, PublishGateError);
+    downcast_arm!(cause, PruneError);
     None
 }
 
@@ -611,5 +632,153 @@ mod tests {
         ] {
             assert_eq!(error.classify(), Some(ExitCode::DataError), "for {error}");
         }
+    }
+
+    // ── prune ──
+
+    fn prune_ssrf_error() -> ocx_index::error::Error {
+        ocx_index::error::Error::Ssrf {
+            source: ocx_oci::ssrf::PhysicalDialRefused {
+                namespace: "ocx.sh".to_string(),
+                source: ocx_oci::ssrf::SsrfError::ForbiddenTarget {
+                    host: "127.0.0.1".to_string(),
+                    ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                },
+            },
+        }
+    }
+
+    /// A refusal the caller can only fix by naming something else exits 64, never 65 or 1.
+    #[test]
+    fn prune_argument_faults_exit_with_usage_error() {
+        for error in [
+            PruneError::NotAPrereleaseFamily {
+                value: "0.5.0".to_string(),
+            },
+            PruneError::DigestTag {
+                value: "sha256:aa".to_string(),
+            },
+            PruneError::PackageNotBare {
+                package: "ocx.sh/acme/tool:1".to_string(),
+            },
+        ] {
+            assert_eq!(error.classify(), Some(ExitCode::UsageError), "for {error}");
+            assert_eq!(crate::exit::classify_library_error(&error), ExitCode::UsageError);
+        }
+    }
+
+    #[test]
+    fn prune_package_the_index_does_not_hold_exits_79() {
+        let error = PruneError::NotInIndex {
+            package: "ocx.sh/acme/tool".to_string(),
+            url: "https://index.example".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::NotFound));
+        assert_eq!(crate::exit::classify_library_error(&error), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn prune_without_an_index_exits_81() {
+        let error = PruneError::NoIndex {
+            package: "registry.example/acme/tool".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::PolicyBlocked));
+        assert_eq!(crate::exit::classify_library_error(&error), ExitCode::PolicyBlocked);
+    }
+
+    /// A durable tag is 81 even when a not-yet-announced tag was refused beside it: a retry
+    /// cannot fix the durable one, so 75 would send a wrapper into a loop.
+    #[test]
+    fn prune_durable_refusal_wins_over_a_pending_one() {
+        let refused = |durable: &[&str], not_in_index: &[&str]| PruneError::Refused {
+            package: "ocx.sh/acme/tool".to_string(),
+            url: "https://index.example".to_string(),
+            durable: durable.iter().map(|tag| (*tag).to_string()).collect(),
+            not_in_index: not_in_index.iter().map(|tag| (*tag).to_string()).collect(),
+        };
+
+        assert_eq!(refused(&["release"], &[]).classify(), Some(ExitCode::PolicyBlocked));
+        assert_eq!(
+            refused(&["release"], &["fresh"]).classify(),
+            Some(ExitCode::PolicyBlocked),
+            "81 wins over 75"
+        );
+        assert_eq!(refused(&[], &["fresh"]).classify(), Some(ExitCode::TempFail));
+        assert_eq!(
+            crate::exit::classify_library_error(&refused(&["release"], &["fresh"])),
+            ExitCode::PolicyBlocked
+        );
+    }
+
+    #[test]
+    fn prune_tag_still_served_after_its_delete_exits_75() {
+        let error = PruneError::StillPresent {
+            repository: "registry.example/acme/tool".to_string(),
+            tag: "snap".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::TempFail));
+        assert_eq!(crate::exit::classify_library_error(&error), ExitCode::TempFail);
+    }
+
+    #[test]
+    fn prune_credential_without_delete_rights_exits_80() {
+        let error = PruneError::DeleteDenied {
+            repository: "registry.example/acme/tool".to_string(),
+            tag: "snap".to_string(),
+            source: ocx_oci::client::error::ClientError::Authentication("token lacks delete".into()),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::AuthError));
+        assert_eq!(crate::exit::classify_library_error(&error), ExitCode::AuthError);
+    }
+
+    /// The pass-through arm keeps each registry failure on the code the rest of `ocx` gives it.
+    #[test]
+    fn prune_registry_failures_keep_their_client_error_codes() {
+        let unsupported = PruneError::Registry(ocx_oci::client::error::ClientError::DeleteUnsupported {
+            registry: "registry.example".to_string(),
+            status: 405,
+        });
+        assert_eq!(unsupported.classify(), Some(ExitCode::RegistryDeleteUnsupported));
+        assert_eq!(
+            crate::exit::classify_library_error(&unsupported),
+            ExitCode::RegistryDeleteUnsupported
+        );
+
+        let transient = PruneError::Registry(ocx_oci::client::error::ClientError::RegistryTransient(
+            "simulated 503".into(),
+        ));
+        assert_eq!(transient.classify(), Some(ExitCode::TempFail));
+
+        let unreachable = PruneError::Registry(ocx_oci::client::error::ClientError::Registry("unreachable".into()));
+        assert_eq!(unreachable.classify(), Some(ExitCode::Unavailable));
+    }
+
+    #[test]
+    fn prune_forbidden_repository_pointer_exits_78() {
+        let error = PruneError::RepositoryPointer {
+            package: "ocx.sh/acme/tool".to_string(),
+            source: prune_ssrf_error(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+        assert_eq!(crate::exit::classify_library_error(&error), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn prune_unreadable_root_takes_the_index_error_code() {
+        let unreadable = |source| PruneError::RootUnreadable {
+            package: "ocx.sh/acme/tool".to_string(),
+            url: "https://index.example".to_string(),
+            source,
+        };
+        let unreachable = unreadable(ocx_index::error::Error::IndexHttpFailed {
+            url: "https://index.example/p/acme/tool.json".to_string(),
+            status: None,
+            source: "connection refused".into(),
+        });
+        assert_eq!(unreachable.classify(), Some(ExitCode::Unavailable));
+        assert_eq!(crate::exit::classify_library_error(&unreachable), ExitCode::Unavailable);
+
+        let forbidden = unreadable(prune_ssrf_error());
+        assert_eq!(forbidden.classify(), Some(ExitCode::ConfigError));
     }
 }

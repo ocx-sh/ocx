@@ -81,7 +81,20 @@ pub trait IndexTransport: Send + Sync {
     /// not-modified outcome.
     async fn get(&self, url: &str) -> Result<IndexFetch>;
 
+    /// [`Self::get`] with every HTTP cache on the path told to revalidate, for a read a removal
+    /// decision rests on. The default is `get`: a transport with no HTTP layer has no cache.
+    async fn get_uncached(&self, url: &str) -> Result<IndexFetch> {
+        self.get(url).await
+    }
+
     fn box_clone(&self) -> Box<dyn IndexTransport>;
+}
+
+/// Whether an HTTP cache on the path may answer a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    Cacheable,
+    Revalidate,
 }
 
 impl Clone for Box<dyn IndexTransport> {
@@ -206,8 +219,15 @@ impl ReqwestIndexTransport {
 
     /// One attempt at `url`, from dispatch through the last body byte. A retryable outcome
     /// carries its terminal value, so giving up never changes the error the caller sees.
-    async fn attempt(client: &reqwest::Client, url: &str) -> Attempt<Result<IndexFetch>> {
-        let mut response = match client.get(url).send().await {
+    async fn attempt(client: &reqwest::Client, url: &str, freshness: Freshness) -> Attempt<Result<IndexFetch>> {
+        let mut request = client.get(url);
+        if freshness == Freshness::Revalidate {
+            // `Pragma` for HTTP/1.0 intermediaries that ignore `Cache-Control` (RFC 9111 §5.4).
+            request = request
+                .header(reqwest::header::CACHE_CONTROL, "no-cache")
+                .header(reqwest::header::PRAGMA, "no-cache");
+        }
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(source) => return Self::transport_failure(url, None, source),
         };
@@ -330,6 +350,20 @@ impl IndexTransport for ReqwestIndexTransport {
     /// Fetches `url`, retrying transient failures under [`RetryPolicy`] and the run-global
     /// [`RetryBudget`], which bounds retry volume as `outer_cap` bounds each attempt.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
+        self.fetch(url, Freshness::Cacheable).await
+    }
+
+    async fn get_uncached(&self, url: &str) -> Result<IndexFetch> {
+        self.fetch(url, Freshness::Revalidate).await
+    }
+
+    fn box_clone(&self) -> Box<dyn IndexTransport> {
+        Box::new(self.clone())
+    }
+}
+
+impl ReqwestIndexTransport {
+    async fn fetch(&self, url: &str, freshness: Freshness) -> Result<IndexFetch> {
         // The in-process CLI seam's no-network guarantee; `false` outside tests.
         if ocx_oci::client::network_refused() {
             return Err(super::error::Error::IndexHttpFailed {
@@ -354,13 +388,9 @@ impl IndexTransport for ReqwestIndexTransport {
                     policy.attempts
                 );
             }
-            Self::attempt(client, url).await
+            Self::attempt(client, url, freshness).await
         })
         .await
-    }
-
-    fn box_clone(&self) -> Box<dyn IndexTransport> {
-        Box::new(self.clone())
     }
 }
 
@@ -572,6 +602,12 @@ impl OcxIndex {
         }
     }
 
+    /// The base URL this source reads, with any `user[:password]@` userinfo redacted, for a
+    /// report or error message.
+    pub fn redacted_base_url(&self) -> String {
+        redact_url(&self.base_url)
+    }
+
     /// This source's SSRF escape hatch ([`OcxIndexConfig::trusted_hosts`]).
     pub fn trusted_hosts(&self) -> &[String] {
         &self.trusted_hosts
@@ -769,7 +805,7 @@ impl OcxIndex {
             // A hit and a confirmed miss are both answers, unlike an assumed v1.
             Acquisition::Resolved(root) => return Ok(root),
         };
-        match self.fetch_root(repository).await {
+        match self.fetch_root(repository, Freshness::Cacheable).await {
             Ok(cached) => {
                 self.memoize_root(repository, cached.clone()).await;
                 // Waiters get the parse; the bytes reach `fetch_root_document` through the memo.
@@ -782,9 +818,13 @@ impl OcxIndex {
     }
 
     /// One `GET p/<repo>.json`; `Ok(None)` only on a confirmed 404.
-    async fn fetch_root(&self, repository: &str) -> Result<Option<CachedRoot>> {
+    async fn fetch_root(&self, repository: &str, freshness: Freshness) -> Result<Option<CachedRoot>> {
         let url = format!("{}/p/{}.json", self.base_url, repository);
-        match self.transport.get(&url).await? {
+        let fetched = match freshness {
+            Freshness::Cacheable => self.transport.get(&url).await?,
+            Freshness::Revalidate => self.transport.get_uncached(&url).await?,
+        };
+        match fetched {
             IndexFetch::Found { bytes } => {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
                 Ok(Some(CachedRoot {
@@ -875,12 +915,40 @@ impl OcxIndex {
         Ok(Some((content, index)))
     }
 
-    /// The physical [`ocx_oci::OciIdentifier`] the root's `repository` pointer names, at
-    /// `identifier`'s tag/digest; transport-only.
-    async fn physical_identifier(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
-        let Some(root) = self.resolve_root(identifier.repository()).await? else {
-            return Ok(None);
-        };
+    /// One live `GET` of the root for `repository`, paired with the sha256 of the served bytes.
+    /// Never memoized and never committed locally; `Ok(None)` only on a confirmed 404.
+    ///
+    /// The root read is the canonical one only when this source was built with an empty
+    /// `[mirrors]` index map; otherwise it is the mirror's copy.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat) on an unknown
+    /// format version; [`Error::MalformedIndexDocument`](super::error::Error::MalformedIndexDocument)
+    /// when the served root does not parse; the transport error otherwise.
+    pub async fn fetch_root_uncached(&self, repository: &str) -> Result<Option<(ocx_oci::Digest, IndexRoot)>> {
+        // Uncoalesced gate: `check_format_version` wraps a refusal in `SourceFetchFailed`, and callers
+        // of this one-shot read match the typed `UnsupportedIndexFormat`.
+        let gated = self.cache.read().await.config.is_some();
+        if !gated {
+            self.fetch_format_config().await?;
+        }
+        Ok(self.fetch_root(repository, Freshness::Revalidate).await?.map(|cached| {
+            (
+                ocx_oci::Algorithm::Sha256.hash(&*cached.bytes),
+                Arc::unwrap_or_clone(cached.parsed),
+            )
+        }))
+    }
+
+    /// The physical [`ocx_oci::OciIdentifier`] `root`'s `repository` pointer names, after the
+    /// SSRF guard has judged its host against this source's trusted and insecure hosts.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MalformedPhysicalRef`](super::error::Error::MalformedPhysicalRef) for an
+    /// unparseable pointer; [`Error::Ssrf`](super::error::Error::Ssrf) for a forbidden target.
+    pub async fn guard_repository_pointer(&self, root: &IndexRoot) -> Result<ocx_oci::OciIdentifier> {
         let physical = super::parse_repository_pointer(&root.repository)?;
         let registry = physical.registry();
         // SSRF floor: `registry` comes from remote-controlled index data, so it is validated before
@@ -901,6 +969,16 @@ impl OcxIndex {
                 source,
             },
         })?;
+        Ok(physical)
+    }
+
+    /// The physical [`ocx_oci::OciIdentifier`] the root's `repository` pointer names, at
+    /// `identifier`'s tag/digest; transport-only.
+    async fn physical_identifier(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
+        let Some(root) = self.resolve_root(identifier.repository()).await? else {
+            return Ok(None);
+        };
+        let physical = self.guard_repository_pointer(&root).await?;
         Ok(Some(physical.at_version_of(identifier)))
     }
 
@@ -1127,6 +1205,17 @@ impl index_impl::IndexImpl for OcxIndex {
         }
     }
 
+    async fn revalidate_root_document(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<(Vec<u8>, IndexRoot)>> {
+        if !self.serves_registry(identifier.registry()) {
+            return Ok(None);
+        }
+        self.check_format_version().await?;
+        let fetched = self.fetch_root(identifier.repository(), Freshness::Revalidate).await?;
+        // Replaces the memo, so the dispatch reads that follow agree with the root just committed.
+        self.memoize_root(identifier.repository(), fetched.clone()).await;
+        Ok(fetched.map(|cached| ((*cached.bytes).clone(), (*cached.parsed).clone())))
+    }
+
     async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
@@ -1211,6 +1300,8 @@ mod tests {
         failures: Arc<Mutex<std::collections::HashSet<String>>>,
         /// URLs whose response is withheld for [`HELD_RESPONSE`].
         held: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// URLs asked for through [`IndexTransport::get_uncached`].
+        uncached: StubRequests,
     }
 
     impl StubIndexTransport {
@@ -1232,6 +1323,10 @@ mod tests {
 
         fn request_urls(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
+        }
+
+        fn uncached_urls(&self) -> Vec<String> {
+            self.uncached.lock().unwrap().clone()
         }
 
         fn request_count(&self, url: &str) -> usize {
@@ -1265,6 +1360,11 @@ mod tests {
                 Some(bytes) => Ok(IndexFetch::Found { bytes: bytes.clone() }),
                 None => Ok(IndexFetch::NotFound),
             }
+        }
+
+        async fn get_uncached(&self, url: &str) -> Result<IndexFetch> {
+            self.uncached.lock().unwrap().push(url.to_string());
+            self.get(url).await
         }
 
         fn box_clone(&self) -> Box<dyn IndexTransport> {
@@ -1612,6 +1712,314 @@ mod tests {
         assert!(
             !matches!(error, super::super::error::Error::Ssrf { .. }),
             "a trusted host must pass the SSRF guard (failure must come from the fetch, not the guard); got {error:?}"
+        );
+    }
+
+    // ── canonical root read ──────────────────────────────────────────────────
+
+    /// Deliberately not the canonical serialisation of what it parses to: a digest taken over a
+    /// re-serialised root, rather than over the served bytes, cannot equal the digest of this text.
+    const SERVED_ROOT: &str = concat!(
+        "{\n",
+        "   \"repository\" :  \"oci://ghcr.io/ocx-contrib/cmake\",\n",
+        "   \"tags\" : { \"3.28\" : { \"content\" : \"sha256:",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "\" } }\n",
+        "}\n"
+    );
+
+    #[tokio::test]
+    async fn fetch_root_uncached_returns_the_sha256_of_the_served_bytes_and_the_parsed_root() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.insert(&root_url(), SERVED_ROOT.as_bytes());
+        let source = make_source(transport, false);
+
+        let (digest, root) = source
+            .fetch_root_uncached(REPO)
+            .await
+            .expect("a served root reads")
+            .expect("a served root is present");
+
+        assert_eq!(digest, Algorithm::Sha256.hash(SERVED_ROOT.as_bytes()));
+        assert_eq!(root.repository, "oci://ghcr.io/ocx-contrib/cmake");
+        assert!(root.tags.contains_key("3.28"));
+    }
+
+    #[tokio::test]
+    async fn removal_deciding_root_reads_bypass_http_caches() {
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, false);
+        let source = make_source(transport.clone(), false);
+
+        source
+            .fetch_root_uncached(REPO)
+            .await
+            .expect("prune's read")
+            .expect("root present");
+        source
+            .revalidate_root_document(&tagged_id())
+            .await
+            .expect("the update read")
+            .expect("root present");
+
+        assert_eq!(
+            transport.uncached_urls(),
+            [root_url(), root_url()],
+            "both removal-deciding root reads must tell HTTP caches to revalidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_reads_leave_http_caches_alone() {
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, false);
+        let source = make_source(transport.clone(), false);
+
+        source
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect("resolve")
+            .expect("the tag resolves");
+        source.fetch_root_document(&tagged_id()).await.expect("grow read");
+
+        assert!(
+            transport.request_count(&root_url()) > 0,
+            "non-vacuity: the ordinary reads reached the root"
+        );
+        assert!(
+            transport.uncached_urls().is_empty(),
+            "a resolve must stay cacheable: {:?}",
+            transport.uncached_urls()
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidate_root_document_bypasses_and_replaces_the_memo() {
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, false);
+        let source = make_source(transport.clone(), false);
+        source
+            .resolve_root(REPO)
+            .await
+            .expect("memoizing read")
+            .expect("root present");
+
+        transport.insert(&root_url(), SERVED_ROOT.as_bytes());
+        let (bytes, _) = source
+            .revalidate_root_document(&tagged_id())
+            .await
+            .expect("revalidated read")
+            .expect("root present");
+
+        assert_eq!(
+            bytes,
+            SERVED_ROOT.as_bytes(),
+            "a warm memo must not answer a revalidated read"
+        );
+        let memoized = source
+            .resolve_root(REPO)
+            .await
+            .expect("memo read")
+            .expect("root present");
+        assert_eq!(
+            memoized.tags.get("3.28").map(|tag| tag.content.to_string()),
+            Some(format!("sha256:{}", "a".repeat(64))),
+            "the later reads see the revalidated root"
+        );
+        assert_eq!(
+            transport.request_count(&root_url()),
+            2,
+            "the read after revalidation is answered from the replaced memo"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_root_uncached_is_none_when_the_root_is_not_served() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let source = make_source(transport, false);
+
+        let root = source
+            .fetch_root_uncached(REPO)
+            .await
+            .expect("a 404 root is an answer, not an error");
+
+        assert!(root.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_root_uncached_asks_the_wire_on_every_call() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.insert(&root_url(), SERVED_ROOT.as_bytes());
+        let source = make_source(transport.clone(), false);
+
+        source.fetch_root_uncached(REPO).await.expect("first read");
+        source.fetch_root_uncached(REPO).await.expect("second read");
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            2,
+            "the uncached read is never memoized: it must observe the wire as it is now"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_root_uncached_bypasses_a_root_the_source_already_memoized() {
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, false);
+        let source = make_source(transport.clone(), false);
+        source
+            .resolve_root(REPO)
+            .await
+            .expect("the memoizing read")
+            .expect("the root is served");
+        assert_eq!(transport.request_count(&root_url()), 1);
+
+        source
+            .fetch_root_uncached(REPO)
+            .await
+            .expect("uncached read")
+            .expect("root present");
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            2,
+            "a warm memo must not answer an uncached read"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_root_uncached_does_not_seed_the_memo_the_ordinary_read_uses() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.insert(&root_url(), SERVED_ROOT.as_bytes());
+        let source = make_source(transport.clone(), false);
+        source.fetch_root_uncached(REPO).await.expect("uncached read");
+        assert_eq!(transport.request_count(&root_url()), 1);
+
+        source
+            .resolve_root(REPO)
+            .await
+            .expect("the ordinary read")
+            .expect("the root is served");
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            2,
+            "the ordinary read must not be answered from an uncached read's result"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_root_uncached_surfaces_a_transport_failure_as_an_error() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.fail(&root_url());
+        let source = make_source(transport, false);
+
+        let error = source
+            .fetch_root_uncached(REPO)
+            .await
+            .expect_err("a dead endpoint is not an absent root");
+
+        assert!(
+            matches!(error, super::super::error::Error::IndexHttpFailed { .. }),
+            "expected the transport error, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_root_uncached_refuses_an_unsupported_format_version_before_reading_the_root() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":99}"#);
+        transport.insert(&root_url(), SERVED_ROOT.as_bytes());
+        let source = make_source(transport.clone(), false);
+
+        let error = source
+            .fetch_root_uncached(REPO)
+            .await
+            .expect_err("an unknown format version is refused");
+
+        assert!(
+            matches!(error, super::super::error::Error::UnsupportedIndexFormat { .. }),
+            "expected the format-version refusal, got {error:?}"
+        );
+        assert_eq!(transport.request_count(&root_url()), 0);
+    }
+
+    // ── repository-pointer guard ─────────────────────────────────────────────
+
+    fn root_pointing_at(pointer: &str) -> IndexRoot {
+        serde_json::from_str(&format!(r#"{{"repository":"{pointer}","tags":{{}}}}"#)).expect("a root parses")
+    }
+
+    #[tokio::test]
+    async fn guard_repository_pointer_refuses_a_forbidden_host() {
+        let source = make_source(StubIndexTransport::new(), false);
+
+        let error = source
+            .guard_repository_pointer(&root_pointing_at("oci://127.0.0.1/x"))
+            .await
+            .expect_err("a loopback pointer must be refused");
+
+        assert!(
+            matches!(
+                error,
+                super::super::error::Error::Ssrf {
+                    source: ocx_oci::ssrf::PhysicalDialRefused {
+                        source: ocx_oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                        ..
+                    },
+                }
+            ),
+            "expected an SSRF ForbiddenTarget refusal, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_repository_pointer_admits_a_forbidden_host_the_operator_trusts() {
+        let source = make_source_with(
+            StubIndexTransport::new(),
+            false,
+            stub_client(),
+            vec!["169.254.169.254".to_string()],
+        );
+
+        let physical = source
+            .guard_repository_pointer(&root_pointing_at("oci://169.254.169.254/x"))
+            .await
+            .expect("a trusted host passes the guard");
+
+        assert_eq!(physical.registry(), "169.254.169.254");
+    }
+
+    #[tokio::test]
+    async fn guard_repository_pointer_returns_the_parsed_identifier_for_a_permitted_host() {
+        let source = make_source(StubIndexTransport::new(), false);
+
+        let physical = source
+            .guard_repository_pointer(&root_pointing_at("oci://93.184.216.34/ocx-contrib/cmake"))
+            .await
+            .expect("a public address passes the guard");
+
+        assert_eq!(physical.registry(), "93.184.216.34");
+        assert_eq!(physical.repository(), "ocx-contrib/cmake");
+    }
+
+    #[tokio::test]
+    async fn guard_repository_pointer_refuses_an_unparseable_pointer() {
+        let source = make_source(StubIndexTransport::new(), false);
+
+        let error = source
+            .guard_repository_pointer(&root_pointing_at("not a pointer"))
+            .await
+            .expect_err("an unparseable pointer is refused");
+
+        assert!(
+            matches!(error, super::super::error::Error::MalformedPhysicalRef { .. }),
+            "expected MalformedPhysicalRef, got {error:?}"
         );
     }
 
@@ -3781,7 +4189,11 @@ mod transport_wire_tests {
         /// that a redirect went unfollowed — only the absence of the redirect's
         /// own target from this list can.
         targets: Arc<Mutex<Vec<String>>>,
+        /// Every request's header lines, lowercased, in arrival order.
+        headers: RequestHeaders,
     }
+
+    type RequestHeaders = Arc<Mutex<Vec<Vec<String>>>>;
 
     impl StubIndexEndpoint {
         async fn start(script: Vec<Reply>) -> Self {
@@ -3792,15 +4204,18 @@ mod transport_wire_tests {
             let counter = Arc::clone(&served);
             let targets = Arc::new(Mutex::new(Vec::new()));
             let log = Arc::clone(&targets);
+            let headers: RequestHeaders = Arc::new(Mutex::new(Vec::new()));
+            let header_log = Arc::clone(&headers);
             tokio::spawn(async move {
                 while let Ok((socket, _)) = listener.accept().await {
                     let script = script.clone();
                     let counter = Arc::clone(&counter);
                     let log = Arc::clone(&log);
+                    let header_log = Arc::clone(&header_log);
                     tokio::spawn(async move {
                         let index = counter.fetch_add(1, Ordering::SeqCst);
                         let reply = script[index.min(script.len() - 1)].clone();
-                        serve(socket, reply, log).await;
+                        serve(socket, reply, log, header_log).await;
                     });
                 }
             });
@@ -3809,6 +4224,7 @@ mod transport_wire_tests {
                 address,
                 served,
                 targets,
+                headers,
             }
         }
 
@@ -3823,9 +4239,18 @@ mod transport_wire_tests {
         fn targets(&self) -> Vec<String> {
             self.targets.lock().unwrap().clone()
         }
+
+        fn request_headers(&self) -> Vec<Vec<String>> {
+            self.headers.lock().unwrap().clone()
+        }
     }
 
-    async fn serve(socket: tokio::net::TcpStream, reply: Reply, targets: Arc<Mutex<Vec<String>>>) {
+    async fn serve(
+        socket: tokio::net::TcpStream,
+        reply: Reply,
+        targets: Arc<Mutex<Vec<String>>>,
+        header_log: RequestHeaders,
+    ) {
         let (read_half, mut write_half) = socket.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
 
@@ -3836,14 +4261,16 @@ mod transport_wire_tests {
         if let Some(target) = request_line.split_whitespace().nth(1) {
             targets.lock().unwrap().push(target.to_string());
         }
+        let mut lines = Vec::new();
         loop {
             let mut header = String::new();
             match reader.read_line(&mut header).await {
                 Ok(0) | Err(_) => return,
                 Ok(_) if header.trim_end().is_empty() => break,
-                Ok(_) => {}
+                Ok(_) => lines.push(header.trim_end().to_ascii_lowercase()),
             }
         }
+        header_log.lock().unwrap().push(lines);
 
         match reply {
             Reply::Status { code, headers, body } => {
@@ -3911,6 +4338,32 @@ mod transport_wire_tests {
                 drop(write_half);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_uncached_get_tells_every_http_cache_to_revalidate_and_a_plain_get_does_not() {
+        let endpoint = StubIndexEndpoint::start(vec![ok()]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        transport.get_uncached(&endpoint.url()).await.expect("uncached get");
+        transport.get(&endpoint.url()).await.expect("plain get");
+
+        let headers = endpoint.request_headers();
+        assert_eq!(headers.len(), 2, "one request each: {headers:?}");
+        for line in ["cache-control: no-cache", "pragma: no-cache"] {
+            assert!(
+                headers[0].iter().any(|sent| sent == line),
+                "the uncached get must send `{line}`: {:?}",
+                headers[0]
+            );
+        }
+        assert!(
+            !headers[1]
+                .iter()
+                .any(|sent| sent.starts_with("cache-control:") || sent.starts_with("pragma:")),
+            "a plain get must leave caches alone: {:?}",
+            headers[1]
+        );
     }
 
     /// Bounds generous enough that only the retry ladder is under test.

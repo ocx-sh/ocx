@@ -665,6 +665,22 @@ impl Context {
         Ok(sources)
     }
 
+    /// The published-index source for `namespace`, built without any `[mirrors]` index override so
+    /// a read names the canonical index. `None` when the namespace has no index.
+    pub fn canonical_index_source(&self, namespace: &str) -> anyhow::Result<Option<ocx_index::OcxIndex>> {
+        let sources = Self::build_index_sources(
+            true,
+            &self.config,
+            self.local_mirrors.as_ref(),
+            &std::collections::BTreeMap::new(),
+            &self.mirror_map,
+            &self.insecure_hosts,
+            &self.progress,
+            &self.extra_roots_merged,
+        )?;
+        Ok(sources.into_iter().find(|source| source.namespace() == namespace))
+    }
+
     pub fn default_registry(&self) -> &str {
         &self.default_registry
     }

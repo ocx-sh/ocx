@@ -65,6 +65,16 @@ pub trait IndexImpl: Send + Sync {
         Ok(None)
     }
 
+    /// [`Self::fetch_root_document`] past every cache, the in-process memo and any HTTP cache on
+    /// the path, for a read a local removal decision rests on. The default suits a source with
+    /// neither.
+    async fn revalidate_root_document(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+    ) -> Result<Option<(Vec<u8>, super::IndexRoot)>> {
+        self.fetch_root_document(identifier).await
+    }
+
     /// The physical transport identifier a root's `repository` pointer rewrites
     /// `identifier` to; `Ok(None)` = no rewrite.
     ///

@@ -57,6 +57,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The registry double the prune tests drive the delete loop through.
+ocx_oci = { workspace = true, features = ["__testing"] }
 # The bundler and scan tests build a package root and a scratch root.
 tempfile.workspace = true
 

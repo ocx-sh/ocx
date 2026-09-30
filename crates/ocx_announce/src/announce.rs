@@ -48,6 +48,34 @@ pub async fn announce(
     // Seeded here, not in the one arm that probes, or every other run reports no capability rows.
     let mut capability_checks = PushAccess::skipped_all();
 
+    // Before any forge or registry work: a rerun prune that selected nothing writes an empty tags file.
+    if matches!(request.curated, TagSelection::UnionFile(_))
+        && request.yank.is_empty()
+        && request.unyank.is_empty()
+        && let Ok(pipeline::ResolvedTags {
+            tags: given,
+            reserved_dropped,
+        }) = pipeline::resolve_curated_tags(&request.curated, &[], &[])
+        && given.is_empty()
+    {
+        return Ok(AnnounceOutcome {
+            package,
+            status: AnnounceStatus::Unchanged,
+            pull_request: None,
+            fork: None,
+            written_paths: Vec::new(),
+            reserved_tags_dropped: reserved_dropped,
+            desc_status: AnnounceStatus::Unchanged,
+            branch: match request.target {
+                AnnounceTarget::Out(_) => String::new(),
+                AnnounceTarget::Fork(_) | AnnounceTarget::Direct => branch,
+            },
+            capability_checks,
+            removed: Vec::new(),
+            durable_missing: Vec::new(),
+        });
+    }
+
     // Endpoints come from the fork's real identity, since `--fork` may name one renamed away from upstream.
     // Read-only `find_fork`, never `ensure_fork`: an unchanged run must not create a fork.
     let fork_target = match &request.target {
@@ -108,6 +136,9 @@ pub async fn announce(
         observed,
         mut reserved_dropped,
         desc_updated,
+        mut removed,
+        mut durable_missing,
+        body,
     } = observe_and_rebuild(
         publisher,
         forge,
@@ -130,12 +161,19 @@ pub async fn announce(
     } else {
         AnnounceStatus::Updated
     };
-    let message = format!("announce: curate {package}");
-    let pull_request_body = format!("Publisher-curated tag update for `{package}`.");
+    let title = format!("announce: curate {package}");
+    // The commit alone carries the run URL: the request body is also a push option, which admits no link.
+    let run = request
+        .run_url
+        .as_deref()
+        .map(|url| format!("\nRun: {url}\n"))
+        .unwrap_or_default();
+    let message = format!("{title}\n\n{body}{run}");
 
     match &request.target {
         AnnounceTarget::Out(directory) => {
             // Writes even when unchanged, or `announce --out dir && publish dir` publishes an empty directory.
+            // An empty `--tags-file` never reaches here: that run exits 0 without writing.
             let written_paths = pipeline::write_out(directory, &files).await?;
             Ok(AnnounceOutcome {
                 package,
@@ -147,6 +185,8 @@ pub async fn announce(
                 desc_status,
                 branch: String::new(),
                 capability_checks,
+                removed,
+                durable_missing,
             })
         }
         AnnounceTarget::Fork(_) | AnnounceTarget::Direct => {
@@ -164,6 +204,8 @@ pub async fn announce(
                         desc_status,
                         branch: branch.clone(),
                         capability_checks: capability_checks.clone(),
+                        removed,
+                        durable_missing,
                     });
                 }
                 // `branch_sha` is `Some` only for `Live`.
@@ -171,14 +213,7 @@ pub async fn announce(
                     && root_read.branch_sha.is_some()
                 {
                     let pull_request = forge
-                        .open_or_update_pull_request(
-                            &request.index_repo,
-                            repo,
-                            &branch,
-                            INDEX_BASE_REF,
-                            &message,
-                            &pull_request_body,
-                        )
+                        .open_or_update_pull_request(&request.index_repo, repo, &branch, INDEX_BASE_REF, &title, &body)
                         .await?;
                     return Ok(AnnounceOutcome {
                         package,
@@ -190,6 +225,8 @@ pub async fn announce(
                         desc_status,
                         branch: branch.clone(),
                         capability_checks: capability_checks.clone(),
+                        removed,
+                        durable_missing,
                     });
                 }
                 // No other state carries unmerged work; opening a request here yields a spent branch's unmergeable one.
@@ -203,6 +240,8 @@ pub async fn announce(
                     desc_status,
                     branch: branch.clone(),
                     capability_checks: capability_checks.clone(),
+                    removed,
+                    durable_missing,
                 });
             }
             // After the unchanged return, so a no-op run neither creates a fork nor demands push permission.
@@ -261,8 +300,8 @@ pub async fn announce(
                             &commit_repo,
                             &branch,
                             INDEX_BASE_REF,
-                            &message,
-                            &pull_request_body,
+                            &title,
+                            &body,
                         )
                         .await
                 }
@@ -326,8 +365,10 @@ pub async fn announce(
                         &package,
                     )
                     .await?;
-                    // Replace, never union: only the retry's drop list describes what was announced.
+                    // Replace, never union: only the retry's lists describe what was announced.
                     reserved_dropped = merged.reserved_dropped;
+                    removed = merged.removed;
+                    durable_missing = merged.durable_missing;
                     desc_status = AnnounceStatus::from_changed(merged.desc_updated);
                     // Identical racing announces regenerate the same bytes; committing would push an empty-diff
                     // commit, a governance threat the index bot flags.
@@ -356,7 +397,7 @@ pub async fn announce(
                                     sha: &head_sha,
                                     branch: retry_branch,
                                 },
-                                &message,
+                                &format!("{title}\n\n{}{run}", merged.body),
                                 &merged.files,
                                 branch_state.ref_update(),
                             )
@@ -369,8 +410,8 @@ pub async fn announce(
                             &commit_repo,
                             &branch,
                             INDEX_BASE_REF,
-                            &message,
-                            &pull_request_body,
+                            &title,
+                            &merged.body,
                         )
                         .await?
                 }
@@ -387,6 +428,8 @@ pub async fn announce(
                 desc_status,
                 branch: branch.clone(),
                 capability_checks: capability_checks.clone(),
+                removed,
+                durable_missing,
             })
         }
     }
@@ -413,6 +456,10 @@ struct Rebuilt {
     reserved_dropped: Vec<String>,
     /// Whether the `__ocx.desc` observation moved this pass.
     desc_updated: bool,
+    removed: Vec<String>,
+    durable_missing: Vec<String>,
+    /// The commit and request body describing this pass's changes.
+    body: String,
 }
 
 /// One full regeneration pass over `base.root`, producing the atomic file set.
@@ -455,15 +502,17 @@ async fn observe_and_rebuild(
         tags: curated,
         reserved_dropped,
     } = pipeline::resolve_curated_tags(&request.curated, &base_tags, &discovered)?;
-    let observed = pipeline::observe_curated(publisher, &physical, &curated).await?;
+    let observations = pipeline::observe_curated(publisher, &physical, &curated).await?;
+    let plan = pipeline::plan_tags(observations, base_root, &request.curated, &physical.display)?;
     let desc = pipeline::observe_desc(publisher, &physical, base_root).await?;
-    let mut root = pipeline::regenerate(base_root, &observed, now);
-    // A committed tag the regenerated set lacks is a real deletion from the index; additive selections refuse it.
+    let mut root = pipeline::regenerate(base_root, &plan, &request.curated, request.ephemeral, now);
+    // Only a confirmed-absent row may leave under an additive selection; any other loss is refused.
     if matches!(
         request.curated,
         TagSelection::UnionFile(_) | TagSelection::Refresh | TagSelection::FromRegistry
     ) {
-        let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &reserved_dropped);
+        let exempt: Vec<String> = reserved_dropped.iter().chain(&plan.removed).cloned().collect();
+        let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &exempt);
         if !dropped.is_empty() {
             return Err(AnnounceError::CommittedTagsDropped {
                 path: root_path.to_string(),
@@ -481,13 +530,18 @@ async fn observe_and_rebuild(
     // Diffed against the commit's own base, never a second read, or a concurrent writer's objects get swept.
     let orphans = pipeline::orphan_paths(Some(base_root), &root, package, forge, base.repo, base.sha).await?;
     let root_bytes = serialize_root(&root);
-    let files = pipeline::build_files(root_path, &root_bytes, package, &observed, &desc.blobs, &orphans);
+    let files = pipeline::build_files(root_path, &root_bytes, package, &plan.observed, &desc.blobs, &orphans);
+    let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &plan.removed);
+    let body = pipeline::change_body(package, base_root, &plan, &dropped);
     Ok(Rebuilt {
         root_bytes,
         files,
-        observed,
+        observed: plan.observed,
         reserved_dropped,
         desc_updated: desc.desc.is_some(),
+        removed: plan.removed,
+        durable_missing: plan.durable_missing,
+        body,
     })
 }
 
@@ -700,6 +754,7 @@ mod tests {
     use crate::forge::{CapabilityName, CheckStatus, ForgeError, ForgeIdentity, ForkIdentity};
 
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+    use ocx_oci::client::{ManifestPresence, NotFoundCode};
 
     /// A committed root for `acme/widget` on a loopback physical repository,
     /// carrying `tags` verbatim.
@@ -740,6 +795,8 @@ mod tests {
             // the guard's route decision does not depend on the ambient
             // environment.
             insecure_hosts: Vec::new(),
+            ephemeral: false,
+            run_url: None,
         }
     }
 
@@ -1110,6 +1167,10 @@ mod tests {
         opens: usize,
         push_access_probes: usize,
         mergeability_reads: usize,
+        /// The message of each `commit_files` call, in call order.
+        messages: Vec<String>,
+        /// The body of each `open_or_update_pull_request` call, in call order.
+        request_bodies: Vec<String>,
     }
 
     impl FakeForge {
@@ -1202,6 +1263,22 @@ mod tests {
 
         fn opens(&self) -> usize {
             self.state.lock().expect("the fixture lock is uncontended").opens
+        }
+
+        fn commit_messages(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .messages
+                .clone()
+        }
+
+        fn request_bodies(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .request_bodies
+                .clone()
         }
 
         fn push_access_probes(&self) -> usize {
@@ -1341,11 +1418,12 @@ mod tests {
             _repo: &RepoCoordinate,
             _branch: &str,
             _base: CommitBase<'_>,
-            _message: &str,
+            message: &str,
             files: &BTreeMap<String, FileChange>,
             update: RefUpdate,
         ) -> Result<String, ForgeError> {
             let mut state = self.state.lock().expect("the fixture lock is uncontended");
+            state.messages.push(message.to_string());
             state.commits.push((files.clone(), update));
             let sequence = state.commits.len();
             if let Some(Some(failure)) = state.commit_failures.pop_front() {
@@ -1361,10 +1439,11 @@ mod tests {
             _branch: &str,
             _base: &str,
             _title: &str,
-            _body: &str,
+            body: &str,
         ) -> Result<PullRequest, ForgeError> {
             let mut state = self.state.lock().expect("the fixture lock is uncontended");
             state.opens += 1;
+            state.request_bodies.push(body.to_string());
             if let Some(Some(failure)) = state.open_failures.pop_front() {
                 return Err(failure);
             }
@@ -2282,6 +2361,835 @@ mod tests {
                 .any(|path| path.ends_with(&format!("{readme_hex}.md"))),
             "the readme blob rides out with the root: {:?}",
             outcome.written_paths
+        );
+    }
+
+    // ── removal: what a run does with a tag the registry no longer serves ────
+
+    const EARLIER_STAMP: &str = "2026-07-01T00:00:00Z";
+
+    /// A committed row without an `ephemeral` marker.
+    fn durable_row(content: &str) -> Value {
+        serde_json::json!({ "content": content, "observed": EARLIER_STAMP })
+    }
+
+    fn ephemeral_row(content: &str) -> Value {
+        serde_json::json!({ "content": content, "observed": EARLIER_STAMP, "ephemeral": true })
+    }
+
+    fn publisher_over(data: &StubTransportData) -> Publisher {
+        Publisher::new(ocx_oci::Client::with_transport(Box::new(StubTransport::new(
+            data.clone(),
+        ))))
+    }
+
+    /// Queue `count` follow-up probe answers of `ManifestUnknown`; the probe
+    /// queue is consumed in call order, so identical answers stay unambiguous
+    /// however the reads interleave.
+    fn probes_answer_manifest_unknown(data: &StubTransportData, count: usize) {
+        data.write().probe_results = (0..count)
+            .map(|_| Ok(ManifestPresence::Absent(NotFoundCode::ManifestUnknown)))
+            .collect();
+    }
+
+    fn tag_keys(root_bytes: &[u8]) -> Vec<String> {
+        let root: Value = serde_json::from_slice(root_bytes).expect("the root is JSON");
+        root["tags"]
+            .as_object()
+            .expect("the root carries a tags object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn tag_row(root_bytes: &[u8], tag: &str) -> Value {
+        let root: Value = serde_json::from_slice(root_bytes).expect("the root is JSON");
+        root["tags"][tag].clone()
+    }
+
+    fn pulls(data: &StubTransportData) -> usize {
+        data.read()
+            .calls
+            .iter()
+            .filter(|call| *call == "pull_manifest_raw")
+            .count()
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    /// Everything a directory holds, so "nothing was written" is an assertion
+    /// about the directory rather than about one path.
+    fn directory_entries(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(directory)
+            .expect("the scratch directory exists")
+            .map(|entry| entry.expect("a readable entry").path())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_removes_a_vanished_row_when_it_is_ephemeral() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let root = committed_root(serde_json::json!({
+            "1.0.0": durable_row(&served),
+            "2.0.0": ephemeral_row(&digest('b')),
+        }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Refresh),
+        )
+        .await
+        .expect("a vanished ephemeral row is removed, not refused");
+
+        assert_eq!(rebuilt.removed, strings(&["2.0.0"]));
+        assert!(rebuilt.durable_missing.is_empty());
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0"]));
+        assert_eq!(
+            data.read().probe_calls.len(),
+            1,
+            "one follow-up probe, for the one tag that read absent"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_keeps_and_reports_a_vanished_durable_row() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let kept = durable_row(&digest('b'));
+        let root = committed_root(serde_json::json!({
+            "1.0.0": durable_row(&served),
+            "2.0.0": kept,
+        }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Refresh),
+        )
+        .await
+        .expect("a vanished durable row is kept, not refused");
+
+        assert!(rebuilt.removed.is_empty());
+        assert_eq!(rebuilt.durable_missing, strings(&["2.0.0"]));
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0", "2.0.0"]));
+        assert_eq!(
+            tag_row(&rebuilt.root_bytes, "2.0.0"),
+            kept,
+            "the kept row is carried byte for byte"
+        );
+    }
+
+    /// A row with an explicit `false` marker is durable: only `true` makes a row ephemeral.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_row_marked_ephemeral_false_is_kept_like_any_durable_row() {
+        let data = StubTransportData::new();
+        probes_answer_manifest_unknown(&data, 1);
+        let root = committed_root(serde_json::json!({
+            "2.0.0": { "content": digest('b'), "observed": EARLIER_STAMP, "ephemeral": false },
+        }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Refresh),
+        )
+        .await
+        .expect("a false marker does not authorise a removal");
+
+        assert!(rebuilt.removed.is_empty());
+        assert_eq!(rebuilt.durable_missing, strings(&["2.0.0"]));
+    }
+
+    /// Naming a tag is the reviewed act that authorises removing a durable row,
+    /// and `--tags-file` re-observes only what it lists.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tags_file_naming_a_vanished_durable_row_removes_it_and_touches_no_other_row() {
+        let data = StubTransportData::new();
+        probes_answer_manifest_unknown(&data, 1);
+        let untouched = durable_row(&digest('a'));
+        let root = committed_root(serde_json::json!({
+            "1.0.0": untouched,
+            "2.0.0": durable_row(&digest('b')),
+        }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::UnionFile(strings(&["2.0.0"]))),
+        )
+        .await
+        .expect("a named durable row is removed");
+
+        assert_eq!(rebuilt.removed, strings(&["2.0.0"]));
+        assert!(rebuilt.durable_missing.is_empty());
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0"]));
+        assert_eq!(tag_row(&rebuilt.root_bytes, "1.0.0"), untouched);
+        assert_eq!(pulls(&data), 1, "the unlisted committed row was never read");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tags_list_naming_a_vanished_durable_row_removes_it() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let root = committed_root(serde_json::json!({
+            "1.0.0": durable_row(&served),
+            "2.0.0": durable_row(&digest('b')),
+        }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Replace(strings(&["1.0.0", "2.0.0"]))),
+        )
+        .await
+        .expect("a named durable row is removed");
+
+        assert_eq!(rebuilt.removed, strings(&["2.0.0"]));
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_vanished_tag_with_no_committed_row_is_unresolved() {
+        let data = StubTransportData::new();
+        probes_answer_manifest_unknown(&data, 1);
+        let root = committed_root(serde_json::json!({}));
+
+        let Err(error) = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Replace(strings(&["9.9.9"]))),
+        )
+        .await
+        else {
+            panic!("a tag with nothing to remove and nothing to serve is a typo, not a no-op");
+        };
+
+        assert!(
+            matches!(error, AnnounceError::UnresolvedTag { ref tag, .. } if tag == "9.9.9"),
+            "got {error:?}"
+        );
+    }
+
+    /// Only `ManifestUnknown` may remove a row: `registry:2` answers it for an
+    /// absent repository too, so the other codes name a fault, not a deletion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_not_found_other_than_manifest_unknown_is_unresolved_and_removes_nothing() {
+        for code in [NotFoundCode::NameUnknown, NotFoundCode::Unspecified] {
+            let data = StubTransportData::new();
+            data.write().probe_results = vec![Ok(ManifestPresence::Absent(code))];
+            let root = committed_root(serde_json::json!({ "2.0.0": ephemeral_row(&digest('b')) }));
+
+            let Err(error) = rebuild(
+                &publisher_over(&data),
+                &FakeForge::new(),
+                &root,
+                &request(TagSelection::Refresh),
+            )
+            .await
+            else {
+                panic!("{code:?} must not remove a row");
+            };
+
+            assert!(
+                matches!(error, AnnounceError::UnresolvedTag { .. }),
+                "{code:?}: got {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_not_found_other_than_manifest_unknown_writes_nothing_to_out() {
+        for code in [NotFoundCode::NameUnknown, NotFoundCode::Unspecified] {
+            let directory = tempfile::TempDir::new().expect("a scratch directory");
+            let data = StubTransportData::new();
+            data.write().probe_results = vec![Ok(ManifestPresence::Absent(code))];
+            let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+                "base",
+                &committed_root(serde_json::json!({ "2.0.0": ephemeral_row(&digest('b')) })),
+            );
+
+            let result = run_announce(
+                &forge,
+                TagSelection::Refresh,
+                AnnounceTarget::Out(directory.path().to_path_buf()),
+                data,
+            )
+            .await;
+
+            assert!(
+                matches!(result, Err(AnnounceError::UnresolvedTag { .. })),
+                "{code:?}: the run refuses"
+            );
+            assert!(
+                directory_entries(directory.path()).is_empty(),
+                "{code:?}: nothing was written"
+            );
+        }
+    }
+
+    /// A push landed between the read that found the tag absent and the probe
+    /// that found it present.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tag_that_appears_between_the_read_and_the_probe_fails_the_run_and_writes_nothing() {
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let data = StubTransportData::new();
+        data.write().probe_results = vec![Ok(ManifestPresence::Present(ocx_oci::Digest::Sha256("c".repeat(64))))];
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+            "base",
+            &committed_root(serde_json::json!({ "2.0.0": ephemeral_row(&digest('b')) })),
+        );
+
+        let result = run_announce(
+            &forge,
+            TagSelection::Refresh,
+            AnnounceTarget::Out(directory.path().to_path_buf()),
+            data,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::ObserveRaced { ref tag, .. }) if tag == "2.0.0"),
+            "the raced tag is named"
+        );
+        assert!(directory_entries(directory.path()).is_empty(), "nothing was written");
+    }
+
+    /// Two vanished rows under `--refresh`, one ephemeral and one durable: the
+    /// never-deleting selection's guard must not read the confirmed removal as a
+    /// lost tag, and must not hide the kept row either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refresh_that_removes_one_row_and_keeps_another_is_not_a_dropped_tag() {
+        let data = StubTransportData::new();
+        probes_answer_manifest_unknown(&data, 2);
+        let root = committed_root(serde_json::json!({
+            "1.0.0": ephemeral_row(&digest('a')),
+            "2.0.0": durable_row(&digest('b')),
+        }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Refresh),
+        )
+        .await
+        .expect("a confirmed removal is exempt from the dropped-tags guard");
+
+        assert_eq!(rebuilt.removed, strings(&["1.0.0"]));
+        assert_eq!(rebuilt.durable_missing, strings(&["2.0.0"]));
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["2.0.0"]));
+    }
+
+    // ── --tags-from-registry is a sync ───────────────────────────────────────
+
+    /// A committed row the listing lacks is asked for by GET before it counts
+    /// as gone; a registry that still serves it keeps the row and reports nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_registry_asks_for_a_committed_row_the_listing_lacks_before_counting_it_gone() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        seed_index(&data, "2.0.0");
+        data.write().tags = vec![vec!["2.0.0".to_string()]];
+        let root = committed_root(serde_json::json!({ "1.0.0": ephemeral_row(&served) }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::FromRegistry),
+        )
+        .await
+        .expect("a row the registry still serves survives a listing that lacks it");
+
+        assert!(rebuilt.removed.is_empty());
+        assert!(rebuilt.durable_missing.is_empty());
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0", "2.0.0"]));
+        assert_eq!(
+            pulls(&data),
+            2,
+            "the listed tag and the committed one the listing lacks were both read"
+        );
+        assert!(
+            data.read().probe_calls.is_empty(),
+            "a served tag needs no follow-up probe"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_registry_reports_a_durable_row_that_is_in_neither_the_listing_nor_the_registry() {
+        let data = StubTransportData::new();
+        seed_index(&data, "2.0.0");
+        data.write().tags = vec![vec!["2.0.0".to_string()]];
+        probes_answer_manifest_unknown(&data, 1);
+        let root = committed_root(serde_json::json!({ "1.0.0": durable_row(&digest('b')) }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::FromRegistry),
+        )
+        .await
+        .expect("a durable row reached only by the sync is kept");
+
+        assert!(rebuilt.removed.is_empty());
+        assert_eq!(rebuilt.durable_missing, strings(&["1.0.0"]));
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0", "2.0.0"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_registry_removes_an_ephemeral_row_that_is_in_neither_the_listing_nor_the_registry() {
+        let data = StubTransportData::new();
+        seed_index(&data, "2.0.0");
+        data.write().tags = vec![vec!["2.0.0".to_string()]];
+        probes_answer_manifest_unknown(&data, 1);
+        let root = committed_root(serde_json::json!({ "1.0.0": ephemeral_row(&digest('b')) }));
+
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::FromRegistry),
+        )
+        .await
+        .expect("a vanished ephemeral row is removed by the sync");
+
+        assert_eq!(rebuilt.removed, strings(&["1.0.0"]));
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["2.0.0"]));
+    }
+
+    // ── --ephemeral marks what a run adds ────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ephemeral_flag_marks_the_row_a_run_adds_and_no_other() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        seed_index(&data, "2.0.0");
+        let root = committed_root(serde_json::json!({ "1.0.0": durable_row(&served) }));
+        let mut ephemeral_request = request(TagSelection::UnionFile(strings(&["1.0.0", "2.0.0"])));
+        ephemeral_request.ephemeral = true;
+
+        let rebuilt = rebuild(&publisher_over(&data), &FakeForge::new(), &root, &ephemeral_request)
+            .await
+            .expect("the run adds one tag");
+
+        assert_eq!(
+            tag_row(&rebuilt.root_bytes, "2.0.0")["ephemeral"],
+            serde_json::json!(true)
+        );
+        assert!(
+            tag_row(&rebuilt.root_bytes, "1.0.0").get("ephemeral").is_none(),
+            "an existing row keeps its marker, here none"
+        );
+    }
+
+    // ── the commit and request body ──────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_body_of_a_removing_run_names_the_added_removed_and_kept_tags() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        seed_index(&data, "3.0.0");
+        data.write().tags = vec![vec!["1.0.0".to_string(), "3.0.0".to_string()]];
+        probes_answer_manifest_unknown(&data, 2);
+        let root = committed_root(serde_json::json!({
+            "1.0.0": durable_row(&served),
+            "2.0.0": ephemeral_row(&digest('b')),
+            "4.0.0": durable_row(&digest('c')),
+        }));
+        let rebuilt = rebuild(
+            &publisher_over(&data),
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::FromRegistry),
+        )
+        .await
+        .expect("the sync adds, removes and keeps");
+
+        assert_eq!(
+            rebuilt.body,
+            "Publisher-curated tag update for `acme/widget`.\n\
+             \nAdded or updated: 3.0.0\n\
+             \nRemoved: 2.0.0\n\
+             \nKept, gone from the registry: 4.0.0\n",
+            "each tag sits under its own label"
+        );
+    }
+
+    // ── announce end to end ──────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_removal_reaches_the_written_root_and_the_outcome() {
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+            "base",
+            &committed_root(serde_json::json!({
+                "1.0.0": durable_row(&served),
+                "2.0.0": ephemeral_row(&digest('b')),
+            })),
+        );
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Refresh,
+            AnnounceTarget::Out(directory.path().to_path_buf()),
+            data,
+        )
+        .await
+        .expect("the removal is written");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        assert_eq!(outcome.removed, strings(&["2.0.0"]));
+        assert!(outcome.durable_missing.is_empty());
+        let written = std::fs::read(directory.path().join(ROOT_PATH)).expect("the root was written");
+        assert_eq!(tag_keys(&written), strings(&["1.0.0"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kept_durable_row_changes_nothing_and_reports_unchanged() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+            "base",
+            &committed_root(serde_json::json!({
+                "1.0.0": durable_row(&served),
+                "2.0.0": durable_row(&digest('b')),
+            })),
+        );
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, data)
+            .await
+            .expect("a kept row is not a failure");
+
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+        assert_eq!(outcome.durable_missing, strings(&["2.0.0"]));
+        assert!(outcome.removed.is_empty());
+        assert!(forge.commits().is_empty(), "nothing moved, so nothing is committed");
+    }
+
+    /// The removed row's index object leaves in the commit that stops
+    /// referencing it, and the row that stays keeps its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_removed_rows_unshared_object_is_deleted_in_the_same_commit() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+            "base",
+            &committed_root(serde_json::json!({
+                "1.0.0": durable_row(&served),
+                "2.0.0": ephemeral_row(&digest('b')),
+            })),
+        );
+
+        run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, data)
+            .await
+            .expect("the removal commits");
+
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 1);
+        let files = &commits[0].0;
+        assert!(
+            matches!(files.get(&object(&digest('b'), "json")), Some(FileChange::Delete)),
+            "the removed row's object is deleted: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !matches!(files.get(&object(&served, "json")), Some(FileChange::Delete)),
+            "the carried row's object stays"
+        );
+    }
+
+    /// The removed row shares its digest with a row that stays, so the one
+    /// object both name is still referenced and must not be deleted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_removed_rows_object_is_kept_while_another_row_still_references_it() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+            "base",
+            &committed_root(serde_json::json!({
+                "1.0.0": durable_row(&served),
+                "2.0.0": ephemeral_row(&served),
+            })),
+        );
+
+        run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, data)
+            .await
+            .expect("the removal commits");
+
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 1);
+        assert!(
+            !commits[0].0.values().any(|change| matches!(change, FileChange::Delete)),
+            "no object is deleted while a remaining row names it: {:?}",
+            commits[0].0.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_commit_links_the_run_its_request_does_not_and_both_name_the_removed_tags() {
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        probes_answer_manifest_unknown(&data, 1);
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
+            "base",
+            &committed_root(serde_json::json!({
+                "1.0.0": durable_row(&served),
+                "2.0.0": ephemeral_row(&digest('b')),
+            })),
+        );
+        let mut with_url = request_to(TagSelection::Refresh, AnnounceTarget::Direct);
+        with_url.run_url = Some("https://ci.example/run/7".to_string());
+
+        announce(&publisher_over(&data), Some(&forge as &dyn Forge), with_url)
+            .await
+            .expect("the removal commits and opens");
+
+        let message = forge.commit_messages().remove(0);
+        let request_body = forge.request_bodies().remove(0);
+        for (surface, text) in [("commit message", &message), ("request body", &request_body)] {
+            assert!(text.contains("2.0.0"), "the {surface} names the removed tag: {text}");
+        }
+        assert!(
+            message.contains("https://ci.example/run/7"),
+            "the commit links the run: {message}"
+        );
+        // The request body doubles as a git push option, which must carry no link.
+        assert!(
+            !request_body.contains("http"),
+            "the request body carries no link: {request_body}"
+        );
+    }
+
+    /// An open request's stale branch may carry a row an earlier run
+    /// removed; the rebuild re-proposes it, and the next announce that names the
+    /// tag removes it again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_row_a_stale_rebuild_re_proposes_is_removed_by_the_next_naming_announce() {
+        let base = committed_root(serde_json::json!({}));
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let branch_root = committed_root(serde_json::json!({
+            "9.0.0": ephemeral_row(&digest('9')),
+        }));
+        let stale = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &base)
+            .with_root("branch", &branch_root)
+            .stale_with(pull_request(5));
+
+        run_announce(
+            &stale,
+            TagSelection::UnionFile(strings(&["1.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the stale rebuild lands");
+        let proposed = stale.commits();
+        assert_eq!(proposed.len(), 1);
+        let re_proposed = committed_root_bytes(&proposed[0]);
+        assert!(
+            re_proposed.contains("9.0.0"),
+            "the branch's row rides the rebuild: {re_proposed}"
+        );
+
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        probes_answer_manifest_unknown(&registry, 1);
+        let live = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("proposed")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &base)
+            .with_root(
+                "proposed",
+                &serde_json::from_str::<Value>(&re_proposed).expect("the proposed root is JSON"),
+            );
+
+        let outcome = run_announce(
+            &live,
+            TagSelection::UnionFile(strings(&["9.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("naming the tag removes it");
+
+        assert_eq!(outcome.removed, strings(&["9.0.0"]));
+        let commits = live.commits();
+        assert_eq!(commits.len(), 1);
+        assert!(
+            !committed_root_bytes(&commits[0]).contains("9.0.0"),
+            "the removed row is gone from the branch"
+        );
+        assert_eq!(
+            tag_keys(committed_root_bytes(&commits[0]).as_bytes()),
+            strings(&["1.0.0"])
+        );
+    }
+
+    // ── an empty --tags-file is a no-op ──────────────────────────────────────
+
+    /// The forge knows nothing here — no ref, no root — so any read yields an
+    /// unclaimed-package error, and `Ok` is reachable only from a return ahead
+    /// of every forge and branch step.
+    async fn assert_a_no_op_before_any_forge_work(selection: TagSelection) {
+        let data = StubTransportData::new();
+        let forge = FakeForge::new().failing_reads();
+
+        let outcome = run_announce(&forge, selection, AnnounceTarget::Direct, data.clone())
+            .await
+            .expect("a selection that names no version is a success that changes nothing");
+
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+        assert_eq!(
+            outcome.branch, "indexbot-announce-acme-widget",
+            "the branch a later run would use"
+        );
+        assert!(outcome.pull_request.is_none());
+        assert!(outcome.removed.is_empty());
+        assert!(outcome.durable_missing.is_empty());
+        assert!(forge.commits().is_empty());
+        assert_eq!(forge.opens(), 0);
+        assert_eq!(forge.push_access_probes(), 0);
+        assert_eq!(forge.mergeability_reads(), 0);
+        assert!(
+            data.read().calls.is_empty(),
+            "no registry call: {:?}",
+            data.read().calls
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_tags_file_is_a_no_op_before_any_forge_work() {
+        assert_a_no_op_before_any_forge_work(TagSelection::UnionFile(Vec::new())).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tags_file_holding_only_reserved_tags_is_a_no_op_before_any_forge_work() {
+        let keep = format!("__ocx.keep.sha256-{}", "a".repeat(64));
+        assert_a_no_op_before_any_forge_work(TagSelection::UnionFile(vec![keep, "__ocx.desc".to_string()])).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_tags_file_writes_nothing_to_out() {
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let forge = FakeForge::new().failing_reads();
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::UnionFile(Vec::new()),
+            AnnounceTarget::Out(directory.path().to_path_buf()),
+            StubTransportData::new(),
+        )
+        .await
+        .expect("an empty selection is a no-op for --out too");
+
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+        assert!(outcome.branch.is_empty(), "--out has no branch");
+        assert!(outcome.written_paths.is_empty());
+        assert!(directory_entries(directory.path()).is_empty());
+    }
+
+    /// A yank beside an empty file is work to do: it lands on its row, and every
+    /// other row is carried byte for byte without a registry read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_tags_file_with_a_yank_yanks_and_carries_every_other_row() {
+        let data = StubTransportData::new();
+        let carried = ephemeral_row(&digest('b'));
+        let root = committed_root(serde_json::json!({
+            "1.0.0": durable_row(&digest('a')),
+            "2.0.0": carried,
+        }));
+        let mut yanking = request(TagSelection::UnionFile(Vec::new()));
+        yanking.yank = strings(&["1.0.0"]);
+        yanking.yank_reason = "broken".to_string();
+
+        let rebuilt = rebuild(&publisher_over(&data), &FakeForge::new(), &root, &yanking)
+            .await
+            .expect("the yank applies to a carried row");
+
+        assert_eq!(tag_keys(&rebuilt.root_bytes), strings(&["1.0.0", "2.0.0"]));
+        assert_eq!(tag_row(&rebuilt.root_bytes, "1.0.0")["yanked"]["reason"], "broken");
+        assert_eq!(tag_row(&rebuilt.root_bytes, "2.0.0"), carried);
+        assert_eq!(pulls(&data), 0, "no tag was given, so none was read");
+    }
+
+    /// `--tags` keeps its refusal: only the file form is a no-op.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_tags_list_is_still_refused() {
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})));
+
+        let result = run_announce(
+            &forge,
+            TagSelection::Replace(Vec::new()),
+            AnnounceTarget::Direct,
+            StubTransportData::new(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AnnounceError::NoCuratedTags { .. })));
+    }
+
+    // ── observation reads the canonical registry ─────────────────────────────
+
+    /// With a mirror configured for the physical host the tag still resolves,
+    /// though the mirror serves nothing: the stub holds the manifest at the
+    /// canonical address only, so a run that observed through the mirror
+    /// could not resolve it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_observes_the_canonical_registry_when_a_mirror_is_configured() {
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let data = StubTransportData::new();
+        let served = seed_index(&data, "1.0.0");
+        let publisher = Publisher::new(ocx_oci::client::test_transport::mirrored_stub_client(
+            &data,
+            "127.0.0.1",
+            "mirror.invalid",
+            "mirrored",
+        ));
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})));
+
+        let outcome = announce(
+            &publisher,
+            Some(&forge as &dyn Forge),
+            request_to(
+                TagSelection::Replace(strings(&["1.0.0"])),
+                AnnounceTarget::Out(directory.path().to_path_buf()),
+            ),
+        )
+        .await
+        .expect("the tag resolves at its canonical address");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        let written = std::fs::read(directory.path().join(ROOT_PATH)).expect("the root was written");
+        assert_eq!(tag_row(&written, "1.0.0")["content"], serde_json::json!(served));
+        assert!(
+            data.read().read_targets.iter().any(|target| target.1 == "127.0.0.1"),
+            "the tag was read from the canonical host: {:?}",
+            data.read().read_targets
         );
     }
 }

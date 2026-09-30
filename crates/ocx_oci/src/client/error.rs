@@ -121,6 +121,18 @@ pub enum ClientError {
     /// The reachable registry has no referrers path this operation can use; the raising site logs the cause.
     #[error("registry {registry} has no usable OCI referrers path for this subject")]
     ReferrersUnsupported { registry: String },
+
+    /// The registry refused a tag delete as an operation it does not offer; retrying cannot help.
+    #[error("registry {registry} does not support deleting tags (HTTP {status})")]
+    DeleteUnsupported { registry: String, status: u16 },
+
+    /// A tag delete was handed a reference without an explicit tag, or with a digest.
+    #[error("'{0}' does not name exactly one tag; a tag delete takes an explicit tag and no digest")]
+    DeleteNeedsTag(String),
+
+    /// A tag outside the OCI grammar, refused before it reaches a manifest URL.
+    #[error("'{0}' is not a valid OCI tag")]
+    InvalidTag(String),
 }
 
 /// Which bounded traversal ran out of room, for [`ClientError::TraversalLimitExceeded`].

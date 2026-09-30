@@ -229,3 +229,22 @@ fn full_fields_root_parses_into_the_typed_index_root_with_the_real_yanked_object
         })
     );
 }
+
+#[test]
+fn ephemeral_tag_row_parses_into_the_typed_index_root_and_a_foreign_value_reads_as_durable() {
+    // The serving index marks a moving tag with a JSON `true`; any other value must stay parseable
+    // (read as durable) so a newer index server never makes a package unresolvable here.
+    let digest = format!("sha256:{}", "c".repeat(64));
+    let json = format!(
+        r#"{{"repository":"oci://ghcr.io/kitware/cmake","tags":{{
+            "nightly":{{"content":"{digest}","ephemeral":true}},
+            "3.27":{{"content":"{digest}"}},
+            "odd":{{"content":"{digest}","ephemeral":"soon"}}
+        }}}}"#
+    );
+    let root: IndexRoot = serde_json::from_str(&json).expect("typed IndexRoot parse with an ephemeral tag row");
+
+    assert!(root.tags["nightly"].ephemeral);
+    assert!(!root.tags["3.27"].ephemeral);
+    assert!(!root.tags["odd"].ephemeral);
+}

@@ -75,6 +75,24 @@ pub struct RootTag {
     /// Per-tag yank marker; absence means not yanked.
     #[serde(default)]
     pub yanked: Option<YankMarker>,
+    /// Whether the publisher marked this tag as a moving pointer with no retention promise.
+    /// Only a JSON `true` counts; any other value reads as durable and never fails the root parse.
+    #[serde(default, deserialize_with = "lenient_flag")]
+    pub ephemeral: bool,
+}
+
+impl RootTag {
+    /// Whether a row's raw `ephemeral` value marks it ephemeral: only a JSON `true` does.
+    pub fn is_ephemeral_marker(value: &serde_json::Value) -> bool {
+        matches!(value, serde_json::Value::Bool(true))
+    }
+}
+
+// A strict `bool` would make one foreign value fail the whole root, as the yank marker's defaults guard against.
+fn lenient_flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(RootTag::is_ephemeral_marker(&serde_json::Value::deserialize(
+        deserializer,
+    )?))
 }
 
 /// Per-tag yank marker wire object (●); callers act on presence alone, the fields
@@ -382,6 +400,52 @@ mod tests {
             yanked.at, "",
             "an absent timestamp degrades to empty, never to a parse failure"
         );
+    }
+
+    /// Parses a one-tag root whose tag row carries `extra` verbatim after `content`.
+    fn root_with_tag_row(extra: &str) -> IndexRoot {
+        let json = format!(
+            r#"{{"repository":"oci://ghcr.io/kitware/cmake","tags":{{"3.27":{{"content":"{}"{extra}}}}}}}"#,
+            test_digest('c')
+        );
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("`{extra}` must not fail the root parse: {error}"))
+    }
+
+    #[test]
+    fn ephemeral_true_marks_the_tag_ephemeral() {
+        assert!(root_with_tag_row(r#","ephemeral":true"#).tags["3.27"].ephemeral);
+    }
+
+    #[test]
+    fn ephemeral_absent_false_null_and_foreign_values_parse_as_durable() {
+        // Forward-compat like the yank marker: a value this client does not understand must
+        // never fail the whole root and make the package unresolvable.
+        for extra in [
+            "",
+            r#","ephemeral":false"#,
+            r#","ephemeral":null"#,
+            r#","ephemeral":"true""#,
+            r#","ephemeral":"yes""#,
+            r#","ephemeral":1"#,
+            r#","ephemeral":0"#,
+            r#","ephemeral":{"at":"2026-01-01T00:00:00Z"}"#,
+            r#","ephemeral":[true]"#,
+        ] {
+            assert!(
+                !root_with_tag_row(extra).tags["3.27"].ephemeral,
+                "`{extra}` must read as durable"
+            );
+        }
+    }
+
+    #[test]
+    fn ephemeral_is_independent_of_the_yank_marker() {
+        let tag = root_with_tag_row(r#","ephemeral":true,"yanked":{"reason":"r","at":"a"}"#)
+            .tags
+            .remove("3.27")
+            .unwrap();
+        assert!(tag.ephemeral);
+        assert!(tag.yanked.is_some());
     }
 
     // ── the dispatch object a tag points at ───────────────────────────────
