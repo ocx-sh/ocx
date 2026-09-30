@@ -34,6 +34,7 @@ from uuid import uuid4
 
 import pytest
 
+from src import static_index
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import (
     make_package,
@@ -2962,6 +2963,129 @@ def test_index_update_does_not_pin_a_global_companion_in_the_local_index(
     )
     assert _companion_pin(ocx, registry, companion_repo) == pin, (
         "the companion pin must survive the sync piggyback unchanged (same digest, same tag)"
+    )
+
+
+def test_patch_sync_pins_companions_of_a_rule_matching_an_index_name(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A rule written against an index-routed name gets its companion pinned by `patch sync`.
+
+    The package is installed as `corp.example/<repo>/pkg`, an index name whose
+    root document points at the physical registry. The sync must enumerate the
+    installed base under that name (what `exec` composes under), not under
+    `<physical host>/<index path>`, or no rule written against the name matches.
+    """
+    namespace = "corp.example"
+    companion_repo = _unique_repo("index_name_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "INDEX_NAME_PROBE", "on")
+
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
+    leaf_digest = fetch_platform_manifest_digest(registry, base.repo, base.tag)
+    os_name, arch_name = base.platform.split("/")
+    index_repository = f"{unique_repo}/pkg"
+    index_name = f"{namespace}/{index_repository}:1.0.0"
+
+    site_root = tmp_path / "static_index_root"
+    site_root.mkdir()
+    with static_index.running(site_root) as server:
+        static_index.write_config(server.root)
+        static_index.write_package(
+            server.root,
+            repository=index_repository,
+            tag="1.0.0",
+            physical_repository=f"oci://{registry}/{base.repo}",
+            platform_digest=leaf_digest,
+            os=os_name,
+            architecture=arch_name,
+        )
+        config_path = _write_config(ocx, registry)
+        registry_host = registry.split(":", 1)[0]
+        with config_path.open("a") as config:
+            config.write(
+                f'\n[registries."{namespace}"]\nindex = "{server.base_url}"\n'
+                f'trusted_hosts = ["{registry_host}"]\n'
+            )
+        ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{server.host}"
+
+        ocx.plain("index", "update", index_name)
+        ocx.plain("package", "install", index_name)
+
+        descriptor_path = tmp_path / "index_name_descriptor.json"
+        _write_descriptor(
+            descriptor_path,
+            rules=[
+                {
+                    "match": f"{namespace}/{index_repository}:*",
+                    "packages": [f"{registry}/{companion_repo}:1.0.0"],
+                    "required": True,
+                }
+            ],
+        )
+        _publish_descriptor_global(ocx, descriptor_path)
+
+        sync = ocx.run("patch", "sync", format=None, check=False)
+        assert sync.returncode == 0, f"patch sync must succeed; got {sync.returncode}\nstderr: {sync.stderr}"
+
+        pin = _companion_pin(ocx, registry, companion_repo)
+        assert pin.get("1.0.0", "").startswith("sha256:"), (
+            f"the sync must pin the companion of a rule matching the index name; got: {pin}"
+        )
+
+        executed = ocx.plain("package", "exec", index_name, "--", "env")
+        assert "INDEX_NAME_PROBE=on" in executed.stdout, (
+            f"exec must compose the companion env under the index name; stdout: {executed.stdout}"
+        )
+
+
+def test_patch_sync_restores_a_port_host_base_from_a_redirected_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`patch sync` restores an installed base's real registry host from the redirected index.
+
+    The store slugs `localhost:5000` to `localhost_5000`; only the root document in
+    the index the run is pointed at (`OCX_INDEX`) restores the port. A sync that reads
+    the machine-local `$OCX_HOME/index` instead finds nothing there, keeps the slug, and
+    a rule written against `localhost:5000/<repo>` matches nothing, so nothing is pinned.
+    """
+    companion_repo = _unique_repo("redirected_index_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "REDIRECTED_INDEX_PROBE", "on")
+
+    redirected_index = tmp_path / "redirected_index"
+    ocx.env["OCX_INDEX"] = str(redirected_index)
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True, index=False)
+    _write_config(ocx, registry)
+    ocx.plain("index", "update", base.short)
+    ocx.plain("package", "install", base.short)
+
+    root_document = Path(registry_dir(registry)) / "p" / f"{unique_repo}.json"
+    assert (redirected_index / root_document).exists(), (
+        f"setup: `index update` must have written the base's root document into {redirected_index}"
+    )
+    assert not (ocx.ocx_home / "index" / root_document).exists(), (
+        "setup: the machine-local index must not hold the base's root document, or the "
+        "redirect is not what the sync reads"
+    )
+
+    descriptor_path = tmp_path / "redirected_index_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[
+            {
+                "match": f"{registry}/{unique_repo}:*",
+                "packages": [f"{registry}/{companion_repo}:1.0.0"],
+                "required": True,
+            }
+        ],
+    )
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    sync = ocx.run("patch", "sync", format=None, check=False)
+    assert sync.returncode == 0, f"patch sync must succeed; got {sync.returncode}\nstderr: {sync.stderr}"
+
+    pin = _companion_pin(ocx, registry, companion_repo)
+    assert pin.get("1.0.0", "").startswith("sha256:"), (
+        f"the sync must pin the companion of a rule naming the port host; got: {pin}"
     )
 
 

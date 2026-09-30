@@ -1138,7 +1138,7 @@ impl PackageManager {
         // Same reader as `find_companion_local`, so GC roots and compose derive from one answer.
         let local_index = companion_manifest_index(self);
 
-        let installed_base_ids = super::patch_sync::enumerate_installed_bases(self.file_structure()).await?;
+        let installed_base_ids = super::patch_sync::enumerate_installed_bases(self).await?;
         let _ = symlink_root;
 
         let mut companion_set: Vec<ocx_oci::PackageRef> = Vec::new();
