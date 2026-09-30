@@ -133,12 +133,17 @@ pub(crate) async fn compose(
         surface_axes(self_view),
         integrations_cross(self_view),
         paths,
+        &mut HashSet::new(),
     )
     .await
 }
 
 /// Compose one patch companion as a standalone root, always on the interface surface;
 /// `collect_integrations` is the outer composition's gate.
+///
+/// `emitted` holds the packages already emitted (advisory tag stripped): a dependency in it is
+/// skipped, and on success the companion's own emissions join it. The companion itself is always
+/// emitted.
 ///
 /// # Errors
 ///
@@ -147,29 +152,37 @@ pub(crate) async fn compose_companion(
     companion: &Arc<InstallInfo>,
     store: &PackageStore,
     collect_integrations: bool,
+    emitted: &mut HashSet<ocx_oci::PinnedPackageRef>,
 ) -> crate::Result<ComposeOutput> {
+    // Committed only on success, or an optional companion that fails half-way hides deps it never emitted.
+    let mut attempt = emitted.clone();
     // Digest lane: a companion is not a lock entry, so no link names it.
-    compose_gated(
+    let out = compose_gated(
         std::slice::from_ref(companion),
         store,
         Visibility::INTERFACE,
         // Never derived from the pinned surface: an absent dep dir would fail a surface that carries no integrations.
         collect_integrations,
         &crate::composer::ComposePaths::digest_only(),
+        &mut attempt,
     )
-    .await
+    .await?;
+    *emitted = attempt;
+    Ok(out)
 }
 
 /// The composition itself over the surface axes `axes`, with the integrations carrier gated by an
 /// explicit input.
 ///
 /// Every emitted package path goes through `paths`, so "digest or link" is answered in one place.
+/// A dependency already in `seen` (advisory tag stripped) is skipped; every emitted package joins it.
 async fn compose_gated(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
     axes: Visibility,
     collect_integrations: bool,
     paths: &ComposePaths,
+    seen: &mut HashSet<ocx_oci::PinnedPackageRef>,
 ) -> crate::Result<ComposeOutput> {
     // A single root was already gated at install time.
     if roots.len() > 1 {
@@ -179,7 +192,7 @@ async fn compose_gated(
     check_repo_digest_conflicts(roots, axes)?;
 
     let mut entries: Vec<Entry> = Vec::new();
-    let mut seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
+    let mut emitted_roots: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     let mut admitted: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
     let mut admitted_binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)> = Vec::new();
     let mut admitted_entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)> = Vec::new();
@@ -291,7 +304,9 @@ async fn compose_gated(
 
         // Roots emit after their TC, so the root's `PATH` prepends win lookup over its deps.
         let root_key = root.identifier().strip_advisory();
-        if seen.insert(root_key) {
+        // Keyed apart from `seen`, so a root an earlier composition already emitted still grafts here.
+        if emitted_roots.insert(root_key.clone()) {
+            seen.insert(root_key);
             // Tag-bearing, as for deps.
             admitted.push(root.identifier().clone());
 
@@ -4722,19 +4737,117 @@ mod tests {
             },
         ));
 
-        let collected = compose_companion(&companion, &store, /* collect_integrations = */ true).await;
+        let collected = compose_companion(
+            &companion,
+            &store,
+            /* collect_integrations = */ true,
+            &mut Default::default(),
+        )
+        .await;
         assert!(
             collected.is_err(),
             "fixture check: collecting integrations must resolve the payload and fail on the absent dependency"
         );
 
-        let suppressed = compose_companion(&companion, &store, /* collect_integrations = */ false)
-            .await
-            .expect("a suppressed carrier must not be resolved, so the absent dependency cannot fail the projection");
+        let suppressed = compose_companion(
+            &companion,
+            &store,
+            /* collect_integrations = */ false,
+            &mut Default::default(),
+        )
+        .await
+        .expect("a suppressed carrier must not be resolved, so the absent dependency cannot fail the projection");
         assert!(
             suppressed.admitted_integrations.is_empty(),
             "suppressed projection must carry no integrations: {:?}",
             suppressed.admitted_integrations
+        );
+    }
+
+    // ── A companion's closure dedups against what is already emitted ──
+
+    /// A companion dependency that is also a base root is not emitted a second time.
+    ///
+    /// The base emits the root on its followed link while the companion would emit the digest
+    /// root, so the two entries differ and only package identity can tell they are one package.
+    #[tokio::test]
+    async fn a_companion_dependency_that_is_a_base_root_on_a_followed_link_is_not_emitted_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let shared_id = pinned("shared", 's');
+        let shared_json = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [{ "key": "SHARED_HOME", "type": "constant", "value": "${installPath}", "visibility": "public" }],
+        })
+        .to_string();
+        let shared_dir = store.path(&shared_id);
+        std::fs::create_dir_all(shared_dir.join("content")).unwrap();
+        std::fs::write(shared_dir.join("metadata.json"), &shared_json).unwrap();
+        std::fs::write(
+            shared_dir.join("resolve.json"),
+            serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+        )
+        .unwrap();
+        let base_root = Arc::new(InstallInfo::new(
+            shared_id.clone(),
+            serde_json::from_str::<metadata::Metadata>(&shared_json).unwrap(),
+            ResolvedPackage::new(),
+            ocx_store::file_structure::PackageDir {
+                dir: shared_dir.clone(),
+            },
+        ));
+
+        let link = dir.path().join("toolchain").join("shared");
+        let paths = crate::composer::ComposePaths {
+            trusted: std::collections::HashMap::from([(shared_dir.clone(), link.clone())]),
+        };
+        let base = compose(&[base_root], &store, false, &paths).await.unwrap();
+        let base_value = base
+            .entries
+            .iter()
+            .find(|entry| entry.key == "SHARED_HOME")
+            .map(|entry| entry.value.clone())
+            .expect("premise: the base emits the shared root");
+        assert!(
+            base_value.starts_with(&*link.to_string_lossy()),
+            "premise: the base root is emitted on its followed link, got {base_value}"
+        );
+
+        let companion_json = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [{ "key": "COMPANION_VAR", "type": "constant", "value": "on", "visibility": "interface" }],
+        })
+        .to_string();
+        let companion = Arc::new(InstallInfo::new(
+            pinned("companion", 'c'),
+            serde_json::from_str::<metadata::Metadata>(&companion_json).unwrap(),
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: shared_id.clone(),
+                    visibility: Visibility::PUBLIC,
+                }],
+            },
+            ocx_store::file_structure::PackageDir {
+                dir: dir.path().join("companion"),
+            },
+        ));
+
+        let mut emitted: std::collections::HashSet<PinnedPackageRef> =
+            base.admitted.iter().map(PinnedPackageRef::strip_advisory).collect();
+        let out = compose_companion(&companion, &store, true, &mut emitted).await.unwrap();
+
+        assert!(
+            out.entries.iter().any(|entry| entry.key == "COMPANION_VAR"),
+            "positive control: the companion's own var composes; entries: {:?}",
+            out.entries
+        );
+        assert!(
+            !out.entries.iter().any(|entry| entry.key == "SHARED_HOME"),
+            "a dependency the base already emitted as a root must not be emitted again; entries: {:?}",
+            out.entries
         );
     }
 
@@ -4830,7 +4943,14 @@ mod tests {
             },
         ));
 
-        let Err(err) = compose_companion(&root, &store, /* collect_integrations = */ true).await else {
+        let Err(err) = compose_companion(
+            &root,
+            &store,
+            /* collect_integrations = */ true,
+            &mut Default::default(),
+        )
+        .await
+        else {
             panic!("a self-env token in the root's own payload must be refused");
         };
         let message = err.to_string();
