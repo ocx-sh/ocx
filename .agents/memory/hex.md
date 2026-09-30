@@ -113,6 +113,7 @@ research-axes:
 - Retro candidate (checklist-item): "Proxied grep/find/cat results are not evidence; decide via /usr/sbin/git and rtk proxy grep" — ledger project-shell-read-failures, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (project-context): "rm/pkill denials retried; decide the allowed cleanup path" — ledger project-rm-denied, .agents/retro/reports/2026-09-28.md.
 
+- **Plan (hex/patch-lock-advisory-tag, 2026-09-29, review): `.claude/artifacts/plan_patch_lock_advisory_tag.md`** — tag-scoped patch rules vs `ocx.lock`; WP1+WP2 merged, L2 fixed; hex-review (high) round-2 findings applied (one lock-currency predicate); next `/hex-review`.
 - **Plan (hex/code-docs-cleanup, 2026-09-28, plan-approved): `.claude/artifacts/plan_code_docs_cleanup.md`** —
   code-docs cleanup, 22 WPs in 4 waves (adopt checks → per-crate sweeps → schemars text → baseline
   lock-in). Next: `/hex-execute` on it. Pointer also in `.claude/state/current_plan.md`.
