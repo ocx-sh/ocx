@@ -663,10 +663,8 @@ impl PackageManager {
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
 
-        let roots: HashSet<ocx_oci::PinnedPackageRef> =
-            packages.iter().map(|root| root.identifier().strip_advisory()).collect();
         if let Some(mut patch_set) = self
-            .build_site_patch_set(&out.admitted, &roots, self_view, no_patches, platform)
+            .build_site_patch_set(&out.admitted, packages, self_view, no_patches, platform)
             .await?
         {
             // One row per (identifier minus advisory tag, namespace) across the whole composition,
@@ -719,12 +717,12 @@ impl PackageManager {
     /// and is pinned; never under `--offline` or an active patch snapshot.
     ///
     /// A companion composes as part of the targets it matched: on the `self_view` surface under a
-    /// root in `roots` (advisory tag stripped), through the interface under a dependency, and on
-    /// the union when it matched both.
+    /// root in `packages`, through the interface under a dependency, and on the union when it
+    /// matched both. One whose closure holds a repository at another digest than the env's fails.
     async fn build_site_patch_set(
         &self,
         admitted: &[ocx_oci::PinnedPackageRef],
-        roots: &HashSet<ocx_oci::PinnedPackageRef>,
+        packages: &[Arc<InstallInfo>],
         self_view: bool,
         no_patches: &std::collections::BTreeSet<String>,
         platform: &ocx_oci::Platform,
@@ -768,6 +766,16 @@ impl PackageManager {
         // its first position (#306); an entry comparison would miss a root the base emits on its link.
         let mut emitted: HashSet<ocx_oci::PinnedPackageRef> =
             admitted.iter().map(ocx_oci::PinnedPackageRef::strip_advisory).collect();
+        let roots: HashSet<ocx_oci::PinnedPackageRef> =
+            packages.iter().map(|root| root.identifier().strip_advisory()).collect();
+        // Every package the env carries, judged from `resolved()` rather than what was emitted:
+        // `emitted` skips a dependency reached twice, a conflict check must not. Accepted companion
+        // roots sit apart: one repository at two tags is two companions, never a conflict.
+        let mut accepted: Vec<ocx_oci::PinnedPackageRef> =
+            composer::surface_closure(packages, composer::surface_axes(self_view))
+                .cloned()
+                .collect();
+        let mut accepted_companions: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
 
         let mut patch_set: SitePatchSet = SitePatchSet::new();
         // First pass: the matched companions per admitted target, and each companion's surface.
@@ -1004,16 +1012,34 @@ impl PackageManager {
                     .get(companion_id)
                     .copied()
                     .unwrap_or(Visibility::INTERFACE);
-                match composer::compose_companion(
-                    &companion_arc,
-                    package_store,
-                    axes,
-                    collect_integrations,
-                    &mut emitted,
+                let companion_pinned = companion_arc.identifier();
+                let companion_deps: Vec<ocx_oci::PinnedPackageRef> =
+                    composer::admitted_dependencies(&companion_arc, axes).cloned().collect();
+                // Every pair on the surface but two companion roots; a conflict fails the later one.
+                let conflict = composer::refuse_digest_conflicts(
+                    accepted
+                        .iter()
+                        .chain(&companion_deps)
+                        .chain(std::iter::once(companion_pinned)),
                 )
-                .await
-                {
+                .and_then(|()| composer::refuse_digest_conflicts(accepted_companions.iter().chain(&companion_deps)));
+                let projection = match conflict {
+                    Ok(()) => {
+                        composer::compose_companion(
+                            &companion_arc,
+                            package_store,
+                            axes,
+                            collect_integrations,
+                            &mut emitted,
+                        )
+                        .await
+                    }
+                    Err(conflict) => Err(conflict.into()),
+                };
+                match projection {
                     Ok(out) => {
+                        accepted.extend(companion_deps);
+                        accepted_companions.push(companion_pinned.clone());
                         // A cache miss proves no earlier base emitted it; empty output is still `Projected`.
                         let pinned = companion_arc.identifier().clone();
                         companion_overlay
@@ -5621,6 +5647,269 @@ mod phase4_spec_tests {
         assert_eq!(
             provenance[shared[0]].companion, first,
             "the shared dependency is emitted under the first companion; provenance: {provenance:?}"
+        );
+    }
+
+    // ── A companion whose closure conflicts with its target's is refused ─────
+
+    /// Whether `error` is a required companion failing on a repository/digest conflict.
+    fn is_companion_digest_conflict(error: &crate::Error) -> bool {
+        let crate::Error::ResolveFailed(package_errors) = error else {
+            return false;
+        };
+        package_errors.iter().any(|package_error| {
+            matches!(
+                &package_error.kind,
+                crate::error::PackageErrorKind::RequiredCompanionFailed { source, .. }
+                    if matches!(
+                        source.as_ref(),
+                        crate::error::PackageErrorKind::Internal(crate::Error::Dependency(
+                            crate::error::DependencyError::Conflict { .. }
+                        ))
+                    )
+            )
+        })
+    }
+
+    /// Seed `conflictdep` at digests `1` and `2`, each carrying `CONFLICT_VAR`; returns both pins.
+    fn seed_conflicting_dep(manager: &PackageManager) -> (PinnedPackageRef, PinnedPackageRef) {
+        let store = manager.file_structure().packages.clone();
+        let first = pinned("conflictdep", '1');
+        let second = pinned("conflictdep", '2');
+        for dep in [&first, &second] {
+            seed_package_with_constant_var(
+                &store,
+                dep,
+                &ResolvedPackage::new(),
+                "CONFLICT_VAR",
+                &dep.digest().to_string(),
+                Visibility::INTERFACE,
+            );
+        }
+        (first, second)
+    }
+
+    /// The base reaches one digest of a repository and a required companion another: the env
+    /// would carry both, so the companion fails closed on the conflict.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_required_companion_reaching_another_digest_of_a_base_repository_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let config = ResolvedPatchConfig {
+            required: true,
+            ..test_patch_config()
+        };
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (base_dep, companion_dep) = seed_conflicting_dep(&manager);
+        let companion = seed_companion_with_var(
+            &manager,
+            "ca-bundle",
+            'c',
+            &tc_reaching(&companion_dep),
+            "COMPANION_VAR",
+        );
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', tc_reaching(&base_dep)));
+
+        let error = manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect_err("a required companion whose closure conflicts with the base must fail closed");
+
+        assert!(
+            error.to_string().contains("required companion"),
+            "the failure names the required companion; got: {error}"
+        );
+        assert!(
+            is_companion_digest_conflict(&error),
+            "the cause is the repository/digest conflict; got: {error:?}"
+        );
+    }
+
+    /// The same conflict under an optional companion skips it whole: neither its own var nor
+    /// the conflicting digest reaches the env.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_optional_companion_reaching_another_digest_of_a_base_repository_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (base_dep, companion_dep) = seed_conflicting_dep(&manager);
+        let companion = seed_companion_with_var(
+            &manager,
+            "ca-bundle",
+            'c',
+            &tc_reaching(&companion_dep),
+            "COMPANION_VAR",
+        );
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', tc_reaching(&base_dep)));
+
+        let entries = manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("an optional conflicting companion is skipped, not fatal");
+
+        assert!(
+            !entries.iter().any(|e| e.key == "COMPANION_VAR"),
+            "the conflicting companion is skipped whole; entries: {entries:?}"
+        );
+        let conflict_values: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.key == "CONFLICT_VAR")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(
+            conflict_values,
+            vec![base_dep.digest().to_string().as_str()],
+            "only the base's digest reaches the env; entries: {entries:?}"
+        );
+    }
+
+    /// Two companions reaching two digests of one repository conflict with each other: the first
+    /// projects, the second is refused (skipped when optional, fatal when required).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_conflicting_with_an_earlier_companion_is_refused() {
+        for required in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let config = ResolvedPatchConfig {
+                required,
+                ..test_patch_config()
+            };
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let (first_dep, second_dep) = seed_conflicting_dep(&manager);
+            let first = seed_companion_with_var(&manager, "ca-bundle", 'c', &tc_reaching(&first_dep), "FIRST_VAR");
+            let second =
+                seed_companion_with_var(&manager, "proxy-config", 'e', &tc_reaching(&second_dep), "SECOND_VAR");
+            seed_global_descriptor(&manager, &config, &[&first, &second]).await;
+            let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+            let result = manager
+                .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+                .await;
+
+            if required {
+                let error = result.expect_err("a required companion conflicting with an earlier one fails closed");
+                assert!(
+                    error.to_string().contains("proxy-config"),
+                    "the refused companion is the second; got: {error}"
+                );
+                assert!(is_companion_digest_conflict(&error), "got: {error:?}");
+            } else {
+                let entries = result.expect("an optional conflicting companion is skipped, not fatal");
+                assert!(
+                    entries.iter().any(|e| e.key == "FIRST_VAR"),
+                    "positive control: the first companion projects; entries: {entries:?}"
+                );
+                assert!(
+                    !entries.iter().any(|e| e.key == "SECOND_VAR"),
+                    "the second, conflicting companion is skipped; entries: {entries:?}"
+                );
+                let conflict_values: Vec<&str> = entries
+                    .iter()
+                    .filter(|e| e.key == "CONFLICT_VAR")
+                    .map(|e| e.value.as_str())
+                    .collect();
+                assert_eq!(conflict_values, vec![first_dep.digest().to_string().as_str()]);
+            }
+        }
+    }
+
+    /// A companion's root against another companion's dependency on the same repository at
+    /// another digest is a conflict in either order, and the later companion is the one refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_root_and_another_companions_dependency_conflict_in_either_order() {
+        for root_first in [true, false] {
+            let dir = TempDir::new().unwrap();
+            let config = ResolvedPatchConfig {
+                required: true,
+                ..test_patch_config()
+            };
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let other_ca_bundle = PinnedPackageRef::try_from(
+                PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(sha256('9')),
+            )
+            .unwrap();
+            seed_package_with_constant_var(
+                &manager.file_structure().packages,
+                &other_ca_bundle,
+                &ResolvedPackage::new(),
+                "OTHER_CA_VAR",
+                "other",
+                Visibility::INTERFACE,
+            );
+            let ca_bundle = seed_companion_with_var(&manager, "ca-bundle", 'c', &ResolvedPackage::new(), "CA_VAR");
+            let proxy = seed_companion_with_var(
+                &manager,
+                "proxy-config",
+                'e',
+                &tc_reaching(&other_ca_bundle),
+                "PROXY_VAR",
+            );
+            let (order, later) = if root_first {
+                ([&ca_bundle, &proxy], "proxy-config")
+            } else {
+                ([&proxy, &ca_bundle], "ca-bundle")
+            };
+            seed_global_descriptor(&manager, &config, &order).await;
+            let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+            let error = manager
+                .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+                .await
+                .expect_err("a root against another companion's dependency at another digest conflicts");
+
+            assert!(
+                is_companion_digest_conflict(&error),
+                "root_first={root_first}: got {error:?}"
+            );
+            let crate::Error::ResolveFailed(package_errors) = &error else {
+                panic!("root_first={root_first}: got {error:?}");
+            };
+            let refused: Vec<&str> = package_errors
+                .iter()
+                .filter_map(|package_error| match &package_error.kind {
+                    crate::error::PackageErrorKind::RequiredCompanionFailed { companion, .. } => {
+                        Some(companion.repository())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                refused,
+                vec![later],
+                "root_first={root_first}: the later companion is the one refused"
+            );
+        }
+    }
+
+    /// A companion's private edge to another digest stays off an interface projection, so it
+    /// is no conflict there: only what the companion's surface admits is judged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_dependency_its_surface_does_not_admit_is_no_conflict() {
+        let dir = TempDir::new().unwrap();
+        let config = ResolvedPatchConfig {
+            required: true,
+            ..test_patch_config()
+        };
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (base_dep, companion_dep) = seed_conflicting_dep(&manager);
+        let private_edge = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: companion_dep,
+                visibility: Visibility::PRIVATE,
+            }],
+        };
+        let companion = seed_companion_with_var(&manager, "ca-bundle", 'c', &private_edge, "COMPANION_VAR");
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', tc_reaching(&base_dep)));
+
+        let entries = manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect("a dependency the companion's surface never admits cannot conflict");
+
+        assert!(
+            entries.iter().any(|e| e.key == "COMPANION_VAR"),
+            "the companion projects; entries: {entries:?}"
         );
     }
 

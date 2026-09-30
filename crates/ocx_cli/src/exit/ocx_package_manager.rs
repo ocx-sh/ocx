@@ -432,6 +432,25 @@ mod tests {
         );
     }
 
+    /// A required companion refused for reaching a second digest of a repository the env already
+    /// carries exits 65, the same as the conflict on a plain composition.
+    #[test]
+    fn required_companion_failed_on_a_digest_conflict_classifies_as_data_error() {
+        use ocx_package_manager::error::PackageError;
+
+        let conflict = DependencyError::Conflict {
+            repository: ocx_oci::Repository::from(&PackageRef::new_registry("dep", "example.com")),
+            identifiers: Vec::new(),
+        };
+        let kind = PackageErrorKind::RequiredCompanionFailed {
+            companion: PackageRef::parse("patches.corp.com/ca:latest").expect("valid"),
+            source: Box::new(PackageErrorKind::Internal(PackageManagerError::from(conflict))),
+        };
+        let entry = PackageError::new(PackageRef::new_registry("", ""), kind);
+        let boxed = anyhow::Error::from(PackageManagerError::ResolveFailed(vec![entry]));
+        assert_eq!(crate::exit::classify_library_error(boxed.as_ref()), ExitCode::DataError);
+    }
+
     // recovered from crate::exit::classify
     /// `DependencyError::SetupFailed` itself returns `None` from `classify()` so the
     /// chain walker continues via `source()`. With `singleflight::Error::Failed` carrying
