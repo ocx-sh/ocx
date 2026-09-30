@@ -230,7 +230,8 @@ impl ToolchainEnv {
                 env: project_env,
                 toolchain: Some(Box::new(toolchain)),
             };
-            manager
+            // `composing`, not `manager`: under `--no-pull` a required companion miss must not resolve live.
+            composing
                 .resolve_env_with_attribution(&infos, false, scope, &target)
                 .await?
         };

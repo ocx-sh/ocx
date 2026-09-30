@@ -5704,8 +5704,8 @@ ocx patch <SUBCOMMAND>
 Resolves every companion and descriptor digest in the active patch overlay and writes
 `patches.snapshot.json` beside `ocx.lock` (or in `$OCX_HOME` under `--global`).
 
-Set [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] to the file's path so all subsequent
-composition prefers the pinned digests over live tag lookups. Adopting a snapshot is a
+Set [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] to the file's path so every subsequent
+command uses only the pinned digests and never looks up a live tag. Adopting a snapshot is a
 deliberate opt-in and is independent of [`--frozen`][arg-frozen], which scopes to the
 package tier: freeze the patch tier by pointing that variable at this file. Companions are
 pinned per `repository:tag`, so a descriptor naming one repository at two tags freezes both
@@ -5752,7 +5752,9 @@ configured. All states are re-checked regardless of what was previously recorded
 `ocx package test` also re-check descriptors they have seen before, and refetch one that changed.
 `ocx exec` and `ocx env` fetch only a descriptor they have never seen. Under a `required` tier, a
 descriptor that was present and is now gone fails the command (exit 79) until `ocx patch sync`
-records it as absent.
+records it as absent. Under [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] none of them re-checks a
+descriptor or resolves its tag: each reads the snapshot's, fetching it by its frozen digest only
+when the local store lacks it, and never under `--offline`.
 
 Without `--platform`, `patch sync` resolves **every concrete ship platform**
 (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) — not just the
@@ -5780,6 +5782,7 @@ ocx patch sync [OPTIONS]
 | Code | Meaning |
 |------|---------|
 | 0 | Sync complete, including a no-op when no `[patches]` tier is configured. |
+| 78 | [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] is set: a sync advances the pins the snapshot freezes. Unset it to advance pins. |
 | 81 | `--offline` blocked the sync — `patch sync` is an explicit online action and always requires network access, unlike lazy discovery at install time. |
 | *other* | A `required` companion failed to install for one of the known bases; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
 

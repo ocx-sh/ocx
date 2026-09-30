@@ -230,7 +230,7 @@ impl PackageManager {
     /// Materialize a local companion archive into this (scratch) store for
     /// `ocx patch test --companion-archive`, then pin its tag → digest in the
     /// scratch store's patch state so companion resolution
-    /// ([`find_companion_local`]) finds it WITHOUT a registry round-trip — the
+    /// ([`find_companion_local_at`]) finds it WITHOUT a registry round-trip — the
     /// contract `--companion-archive` promises.
     ///
     /// The pin lands in this manager's own `FileStructure` (the scratch root),
@@ -242,7 +242,7 @@ impl PackageManager {
     /// can skip the registry pull for it (an UNPUBLISHED local companion would
     /// otherwise fail the pull and abort the preview before compose runs).
     ///
-    /// [`find_companion_local`]: super::resolve
+    /// [`find_companion_local_at`]: super::resolve
     ///
     /// # Errors
     ///

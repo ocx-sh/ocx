@@ -451,11 +451,302 @@ def test_required_true_missing_companion_fails_closed(
     )
 
 
+def _install_then_unpin(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, key: str, *, required: bool
+) -> tuple[PackageInfo, Path]:
+    """Install a base whose descriptor names one companion, then delete the companion's pin.
+
+    Returns the base and the deleted pin's path; the companion stays installed, only unpinned.
+    """
+    companion_repo = _unique_repo(key.lower())
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, key, "live-resolved")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / f"{key.lower()}_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": "*", "packages": [f"{registry}/{companion_repo}:1.0.0"], "required": required}],
+    )
+    _write_config(ocx, registry, required=required)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    _companion_pin(ocx, registry, companion_repo)
+    pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion_repo}.json"
+    pin_path.unlink()
+    return base_pkg, pin_path
+
+
 def _run_ocx(ocx: OcxRunner, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run the binary with `args` verbatim, never raising on a non-zero exit."""
     return subprocess.run(
         [str(ocx.binary), *args], capture_output=True, text=True, env=env or ocx.env, check=False
     )
+
+
+def _freeze_snapshot(ocx: OcxRunner) -> Path:
+    """Run `ocx --global patch freeze` and return the snapshot path it wrote."""
+    result = ocx.run("--global", "patch", "freeze", format="json", check=False)
+    assert result.returncode == 0, f"patch freeze must succeed:\n{result.stderr}"
+    return Path(json.loads(result.stdout)["path"])
+
+
+def test_env_candidate_resolves_and_pins_an_unpinned_required_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A required companion with no pin (installed before the rule existed, or pin lost)
+    resolves live at compose time and records the pin again.
+
+    `--candidate` composes with no patch discovery at all, so only the compose-time live
+    resolution can bring the companion back.
+    """
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "UNPINNED_REQUIRED", required=True)
+
+    result = _run_ocx(ocx, "--format", "json", "package", "env", "--candidate", base_pkg.short)
+    assert result.returncode == 0, (
+        f"env must resolve the unpinned required companion live; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    entry = _entry_by_key(json.loads(result.stdout)["entries"], "UNPINNED_REQUIRED")
+    assert entry is not None and entry["value"] == "live-resolved", (
+        f"the live-resolved companion's env var must be composed; got {entry}"
+    )
+    assert pin_path.exists(), "the live resolution must record the companion pin again"
+
+
+def test_exec_skips_an_unpinned_optional_companion_without_resolving_it(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """An optional companion with no pin is not resolved at compose time: exec runs without
+    it, and no pin appears until an install or `ocx patch sync` records one.
+    """
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "UNPINNED_OPTIONAL", required=False)
+
+    result = _run_ocx(ocx, "package", "exec", base_pkg.short, "--", "env")
+    assert result.returncode == 0, f"exec must succeed without the optional companion:\n{result.stderr}"
+    assert not any(line.startswith("UNPINNED_OPTIONAL=") for line in result.stdout.splitlines()), (
+        f"an unpinned optional companion must not compose; env dump:\n{result.stdout}"
+    )
+    assert not pin_path.exists(), "compose must not resolve and pin an optional companion"
+
+
+def test_snapshot_without_the_required_companion_fails_closed_without_resolving(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Under `OCX_PATCH_SNAPSHOT` the snapshot is the frozen answer: a required companion it
+    does not pin fails the compose (exit 79) instead of resolving live, and writes no pin.
+    """
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "SNAPSHOT_REQUIRED", required=True)
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    result = _run_ocx(ocx, "package", "env", "--candidate", base_pkg.short, env=snapshot_env)
+    assert result.returncode == 79, (
+        f"a required companion missing from the snapshot must fail closed with 79; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not pin_path.exists(), "a snapshot-driven compose must not resolve and pin a companion"
+
+
+def test_offline_unpinned_required_companion_fails_closed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Under `--offline` an unpinned required companion cannot resolve, so the compose fails (exit 79)."""
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "OFFLINE_REQUIRED", required=True)
+
+    result = _run_ocx(ocx, "--offline", "package", "env", "--candidate", base_pkg.short)
+    assert result.returncode == 79, (
+        f"an unpinned required companion must fail closed offline with 79; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not pin_path.exists(), "an offline compose must not pin a companion"
+
+
+def test_snapshot_without_an_optional_companion_composes_without_it(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """An optional companion the snapshot does not pin is absent from the composed env."""
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "SNAPSHOT_OPTIONAL", required=False)
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    result = _run_ocx(ocx, "package", "exec", base_pkg.short, "--", "env", env=snapshot_env)
+    assert result.returncode == 0, f"exec must succeed without the optional companion:\n{result.stderr}"
+    assert not any(line.startswith("SNAPSHOT_OPTIONAL=") for line in result.stdout.splitlines()), (
+        f"an optional companion missing from the snapshot must not compose; env dump:\n{result.stdout}"
+    )
+    assert not pin_path.exists(), "a snapshot-driven compose must not pin a companion"
+
+
+@pytest.mark.parametrize("required", [False, True], ids=["optional", "required"])
+def test_snapshot_omission_overrides_a_recorded_pin(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, required: bool
+) -> None:
+    """A companion the snapshot omits stays out even though its recorded pin and install remain:
+    optional → absent from the env, required → exit 79. The record is left byte-identical.
+    """
+    key = "OMITTED_REQUIRED" if required else "OMITTED_OPTIONAL"
+    companion = _make_companion(ocx, _unique_repo(key.lower()), "1.0.0", tmp_path / "c", key, "recorded")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion.fq], "required": required}])
+    _write_config(ocx, registry, required=required)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+
+    snapshot_path = _freeze_snapshot(ocx)
+    snapshot = json.loads(snapshot_path.read_text())
+    assert snapshot["companions"].pop(companion.fq, None) is not None, (
+        f"setup: the freeze must have pinned the companion; got {snapshot}"
+    )
+    snapshot_path.write_text(json.dumps(snapshot))
+    pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion.repo}.json"
+    pin_before = pin_path.read_bytes()
+
+    result = _run_ocx(
+        ocx, "package", "exec", base_pkg.short, "--", "env", env={**ocx.env, "OCX_PATCH_SNAPSHOT": str(snapshot_path)}
+    )
+    if required:
+        assert result.returncode == 79, (
+            f"a required companion the snapshot omits must fail with 79 despite its recorded pin; "
+            f"got {result.returncode}\nstderr: {result.stderr}"
+        )
+    else:
+        assert result.returncode == 0, f"exec must succeed without the optional companion:\n{result.stderr}"
+        assert not any(line.startswith(f"{key}=") for line in result.stdout.splitlines()), (
+            f"an optional companion the snapshot omits must not compose from its recorded pin; env dump:\n{result.stdout}"
+        )
+    assert pin_path.read_bytes() == pin_before, "a snapshot-driven exec must leave the recorded pin untouched"
+
+
+def test_exec_under_a_snapshot_never_resolves_an_omitted_required_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`package exec` under `OCX_PATCH_SNAPSHOT` never resolves a required companion the
+    snapshot omits, in discovery or in compose: it fails closed (exit 79) and writes no pin.
+    """
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "EXEC_SNAPSHOT", required=True)
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    result = _run_ocx(ocx, "package", "exec", base_pkg.short, "--", "true", env=snapshot_env)
+    assert result.returncode == 79, (
+        f"a required companion missing from the snapshot must fail exec with 79; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not pin_path.exists(), "a snapshot-driven exec must not resolve and pin a companion"
+
+
+def _fresh_runner_on_the_same_tier(ocx: OcxRunner, tmp_path: Path, registry: str) -> OcxRunner:
+    """A second, empty `$OCX_HOME` whose `[patches]` tier names the same registry path as `ocx`'s."""
+    home = tmp_path / "fresh_home"
+    home.mkdir()
+    fresh = OcxRunner(ocx.binary, home, registry)
+    vars(fresh)["patch_tier"] = vars(ocx)["patch_tier"]
+    return fresh
+
+
+def _freeze_a_base_with_one_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, key: str
+) -> tuple[PackageInfo, Path]:
+    """Install a base whose required per-base descriptor names one companion, then freeze.
+
+    Returns the base and the snapshot path.
+    """
+    companion = _make_companion(ocx, _unique_repo(key.lower()), "1.0.0", tmp_path / "companion", key, "frozen")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion.fq]}])
+    _write_config(ocx, registry, required=True)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    return base_pkg, _freeze_snapshot(ocx)
+
+
+def test_a_snapshot_composes_on_a_fresh_machine_by_fetching_its_pinned_descriptor(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A snapshot frozen on one machine drives `package exec` on an empty `$OCX_HOME`: the
+    descriptor it pins is fetched by its frozen digest, the companion pulled by its digest, and
+    no descriptor state or companion pin is recorded.
+    """
+    base_pkg, snapshot = _freeze_a_base_with_one_companion(ocx, unique_repo, tmp_path, registry, "FRESH_SNAPSHOT")
+    fresh = _fresh_runner_on_the_same_tier(ocx, tmp_path, registry)
+    _write_config(fresh, registry, required=True)
+
+    result = _run_ocx(
+        fresh, "package", "exec", base_pkg.short, "--", "env",
+        env={**fresh.env, "OCX_PATCH_SNAPSHOT": str(snapshot)},
+    )
+    assert result.returncode == 0, (
+        f"exec on a fresh machine must fetch the snapshot's descriptor; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "FRESH_SNAPSHOT=frozen" in result.stdout.splitlines(), (
+        f"the snapshot-pinned companion must compose on the fresh machine; env dump:\n{result.stdout}"
+    )
+    assert _patch_state(fresh) == {}, "a snapshot-driven exec must record no descriptor state and no companion pin"
+
+
+def test_offline_a_snapshot_descriptor_missing_from_the_store_fails_closed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Offline on a machine whose store lacks the descriptor a snapshot pins, a required tier
+    fails closed with not-found (exit 79), never an I/O error, and records nothing.
+    """
+    base_pkg, snapshot = _freeze_a_base_with_one_companion(ocx, unique_repo, tmp_path, registry, "OFFLINE_FRESH")
+    fresh = _fresh_runner_on_the_same_tier(ocx, tmp_path, registry)
+    # Installed before the tier exists, so no descriptor reaches this store.
+    fresh.plain("package", "install", base_pkg.short)
+    _write_config(fresh, registry, required=True)
+
+    result = _run_ocx(
+        fresh, "--offline", "package", "exec", base_pkg.short, "--", "true",
+        env={**fresh.env, "OCX_PATCH_SNAPSHOT": str(snapshot)},
+    )
+    assert result.returncode == 79, (
+        f"a snapshot descriptor missing offline must fail with 79; got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "pinned by the patch snapshot" in result.stderr, f"the error must name the snapshot pin; stderr: {result.stderr}"
+    assert _patch_state(fresh) == {}, "an offline exec must record no descriptor state and no companion pin"
+
+
+def test_exec_skips_a_pinned_optional_companion_that_is_not_installed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A compose never pulls an optional companion: one that is pinned but no longer installed
+    is left out of `package exec`, and stays uninstalled.
+    """
+    companion = _make_companion(ocx, _unique_repo("gone"), "1.0.0", tmp_path / "companion", "GONE_OPTIONAL", "pulled")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion.fq], "required": False}])
+    _write_config(ocx, registry, required=False)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    companion_path = Path(ocx.json("package", "which", companion.short)[companion.short]["path"])
+    # The pin keeps the companion rooted, so drop it for the clean and put it back after.
+    pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion.repo}.json"
+    pin = pin_path.read_bytes()
+    pin_path.unlink()
+    clean = ocx.run("clean", "--force", format=None, check=False)
+    assert clean.returncode == 0, f"setup: clean must succeed:\n{clean.stderr}"
+    assert not companion_path.exists(), f"setup: clean must collect the unpinned companion: {companion_path}"
+    pin_path.write_bytes(pin)
+
+    result = _run_ocx(ocx, "package", "exec", base_pkg.short, "--", "env")
+    assert result.returncode == 0, f"exec must succeed without the optional companion:\n{result.stderr}"
+    assert not any(line.startswith("GONE_OPTIONAL=") for line in result.stdout.splitlines()), (
+        f"an uninstalled optional companion must not compose; env dump:\n{result.stdout}"
+    )
+    assert not companion_path.exists(), "a compose must not pull an optional companion"
+
+
+def test_offline_exec_never_resolves_an_unpinned_required_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--offline package exec` fails closed (exit 79) on an unpinned required companion and writes no pin."""
+    base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "EXEC_OFFLINE", required=True)
+
+    result = _run_ocx(ocx, "--offline", "package", "exec", base_pkg.short, "--", "true")
+    assert result.returncode == 79, (
+        f"an unpinned required companion must fail offline exec with 79; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not pin_path.exists(), "an offline exec must not pin a companion"
 
 
 def _patch_state(ocx: OcxRunner) -> dict[str, bytes]:
@@ -467,6 +758,132 @@ def _patch_state(ocx: OcxRunner) -> dict[str, bytes]:
         for path in sorted((state / tier).rglob("*"))
         if path.is_file()
     }
+
+
+def test_install_under_a_snapshot_ignores_a_required_rule_added_after_the_freeze(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`package install` under `OCX_PATCH_SNAPSHOT` reads the frozen descriptor: a required rule
+    published after the freeze is not seen, nothing is probed or re-recorded, and no pin is written.
+    """
+    frozen = _make_companion(ocx, _unique_repo("frozen"), "1.0.0", tmp_path / "a", "FROZEN_RULE", "frozen")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [frozen.fq]}])
+    _write_config(ocx, registry, required=True)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    late = _make_companion(ocx, _unique_repo("late"), "1.0.0", tmp_path / "b", "LATE_RULE", "late")
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [frozen.fq, late.fq]}])
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    before = _patch_state(ocx)
+    assert before, "setup: the online install must have recorded patch state"
+
+    result = _run_ocx(ocx, "package", "install", base_pkg.short, env=snapshot_env)
+    assert result.returncode == 0, (
+        f"install under a snapshot must ignore the post-freeze rule; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    assert _patch_state(ocx) == before, (
+        "install under a snapshot must neither re-record a descriptor nor write a companion pin"
+    )
+
+
+def _cold_snapshot_runner(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, key: str
+) -> tuple[PackageInfo, str, Path, dict[str, str]]:
+    """Freeze a base whose required companion composes `<key>=pulled`, then unpin and collect it.
+
+    The descriptor names the rolling tag `:1`, so a later publish can move it. Returns the base,
+    the companion repository, the collected install path and the snapshot env: a runner that
+    has only the snapshot.
+    """
+    companion_repo = _unique_repo(key.lower())
+    companion = _make_companion(ocx, companion_repo, "1.0.0", tmp_path / "c", key, "pulled")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [f"{registry}/{companion_repo}:1"]}])
+    _write_config(ocx, registry, required=True)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    companion_path = Path(ocx.json("package", "which", companion.short)[companion.short]["path"])
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    _companion_pin(ocx, registry, companion_repo)
+    (ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion_repo}.json").unlink()
+    clean = ocx.run("clean", "--force", format=None, check=False)
+    assert clean.returncode == 0, f"setup: clean must succeed:\n{clean.stderr}"
+    assert not companion_path.exists(), f"setup: clean must collect the unrecorded companion: {companion_path}"
+    return base_pkg, companion_repo, companion_path, snapshot_env
+
+
+def test_cold_exec_under_a_snapshot_pulls_the_pinned_companion_by_digest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Online `package exec` under `OCX_PATCH_SNAPSHOT` pulls a snapshot-pinned companion that is
+    not installed by its snapshot digest, even after its tag moved, composes it, and records no pin.
+    """
+    base_pkg, companion_repo, _, snapshot_env = _cold_snapshot_runner(
+        ocx, unique_repo, tmp_path, registry, "COLD_SNAPSHOT"
+    )
+    # The tag moves after the freeze; `index=False` so only a live resolve could see it.
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.1",
+        tmp_path / "moved",
+        bins=[],
+        env=[{"key": "COLD_SNAPSHOT", "type": "constant", "value": "moved", "visibility": "interface"}],
+        cascade=True,
+        platform="any",
+        index=False,
+    )
+
+    result = _run_ocx(ocx, "package", "exec", base_pkg.short, "--", "env", env=snapshot_env)
+    assert result.returncode == 0, (
+        f"exec must pull the snapshot-pinned companion; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "COLD_SNAPSHOT=pulled" in result.stdout.splitlines(), (
+        f"the companion must be pulled by its snapshot digest, not its moved tag; env dump:\n{result.stdout}"
+    )
+    pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion_repo}.json"
+    assert not pin_path.exists(), "a snapshot-driven exec must not record a companion pin"
+
+
+def test_offline_exec_under_a_snapshot_never_pulls_a_pinned_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`--offline package exec` under `OCX_PATCH_SNAPSHOT` does not pull a snapshot-pinned companion
+    that is not installed: the required companion fails the run with 79 and stays uninstalled.
+    """
+    base_pkg, _, companion_path, snapshot_env = _cold_snapshot_runner(
+        ocx, unique_repo, tmp_path, registry, "OFFLINE_COLD"
+    )
+
+    result = _run_ocx(ocx, "--offline", "package", "exec", base_pkg.short, "--", "true", env=snapshot_env)
+    assert result.returncode == 79, (
+        f"an offline exec must fail closed on the uninstalled pinned companion with 79; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not companion_path.exists(), f"an offline exec must not install the companion: {companion_path}"
+
+
+def test_patch_sync_under_a_snapshot_is_refused(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx patch sync` advances the pins a snapshot freezes, so under `OCX_PATCH_SNAPSHOT` it
+    refuses up front with a config error (exit 78) naming the variable, and records nothing.
+    """
+    _base_pkg, pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "SYNC_SNAPSHOT", required=True)
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    result = _run_ocx(ocx, "patch", "sync", env=snapshot_env)
+    assert result.returncode == 78, (
+        f"patch sync under a snapshot must be refused with 78; got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "OCX_PATCH_SNAPSHOT" in result.stderr, f"the refusal must name the variable; stderr: {result.stderr}"
+    assert not pin_path.exists(), "a refused sync must not record a companion pin"
 
 
 # ---------------------------------------------------------------------------

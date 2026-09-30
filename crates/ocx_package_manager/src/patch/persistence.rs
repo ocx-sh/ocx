@@ -50,7 +50,8 @@ pub struct FetchedDescriptorBlobs {
 
 /// Fetches the `__ocx.patch` manifest and its single descriptor layer for
 /// `patch_identifier`, returning `Ok(None)` when the tag does not exist ("looked,
-/// no patch"). Reaches the network: never call it from `compose` or GC leaf paths.
+/// no patch"). A digest on `patch_identifier` fetches that exact manifest, verified
+/// against it. Reaches the network: never call it from `compose` or GC leaf paths.
 ///
 /// # Errors
 ///
@@ -68,6 +69,11 @@ pub async fn fetch_patch_descriptor_blobs(
 ) -> Result<Option<FetchedDescriptorBlobs>, PatchError> {
     // Dialled as named, never index-routed: a descriptor is not a package and no index serves one.
     let tag_identifier = ocx_oci::OciIdentifier::passthrough(patch_identifier).clone_with_tag(InternalTag::PATCH_TAG);
+    // `clone_with_tag` drops the digest; a snapshot fetch must stay pinned to it.
+    let tag_identifier = match patch_identifier.digest() {
+        Some(digest) => tag_identifier.clone_with_digest(digest),
+        None => tag_identifier,
+    };
 
     let artifact = match client
         .fetch_single_layer_artifact(
