@@ -59,7 +59,7 @@ impl LauncherExec {
         let package_dir = PackageDir::with_root(validated);
 
         // A launcher always composes its package's self view (public + private surface).
-        let info = manager.install_info_from_package_root(package_dir.root()).await?;
+        let info = manager.install_info_from_package_root(package_dir.root(), None).await?;
         // Scoped to this re-entry, never grafted onto the global manager tier, so it cannot leak into
         // nested `ocx` commands.
         let no_patches = ocx_config::patch::patches_from_env()

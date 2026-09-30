@@ -3966,7 +3966,7 @@ Malformed layout syntax at publish (`strip` not a `u8`, an unknown key, a duplic
 
 #### `test` {#package-test}
 
-Materializes a package locally without a registry round-trip and runs a command or script in its composed env. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. Either a trailing `-- CMD [ARGS...]` or a `--script PATH` is required; the two forms are mutually exclusive.
+Materializes a package locally and runs a command or script in its composed env. The package itself needs no registry round-trip, but with a [`[patches]`][config-patches] tier configured the command contacts the patch registry and composes the companions that match the identifier; see [Testing locally][authoring-testing]. Mirrors the argument shape of [`package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then `--platform`. Either a trailing `-- CMD [ARGS...]` or a `--script PATH` is required; the two forms are mutually exclusive.
 
 ::: warning Commands resolve against the package first
 A bare command name is looked up in the package's own directories before the host `PATH`, and the package's copy of a name is never skipped:

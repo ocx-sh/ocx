@@ -19,14 +19,14 @@ use crate::{conventions, options};
 use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
 use ocx_shell::shell::reconcile;
 
-/// Materialize a package locally (no registry round-trip) and run a command in its env.
+/// Materialize a package locally and run a command in its env
 ///
 /// Mirrors `ocx package push` inputs (identifier + `--platform` + `--metadata` +
-/// layers). The package is built into a temp directory, its declared deps are
-/// auto-installed into the regular packages store, env is composed via the
-/// same path as `ocx exec`, and the trailing `-- CMD [ARGS...]` is invoked in
-/// that env. The temp directory is auto-deleted on success and on failure
-/// unless `--keep` or `--output` is given.
+/// layers). The package is built into a temp directory, deps are installed, env is
+/// composed as for `ocx exec`, and `-- CMD [ARGS...]` runs in it. The temp directory
+/// is deleted unless `--keep` or `--output` is given. The package needs no registry
+/// round-trip; a `[patches]` tier still contacts the patch registry and composes the
+/// companions matching the identifier, as an install would.
 #[derive(Parser)]
 pub struct PackageTest {
     /// Path to the package metadata JSON file. Defaults to a sibling of the
@@ -280,9 +280,19 @@ impl PackageTest {
             .pull_local(&identifier, info, &self.layers, Some(&dest_path))
             .await?;
 
+        // The bundle under test composes the same site companions an install of
+        // this identifier would. `pull_local` stays discovery-free for its other caller.
+        manager
+            .discover_patches_best_effort(
+                &identifier,
+                &platform,
+                ocx_package_manager::PatchDiscoveryMode::Revalidate,
+            )
+            .await?;
+
         // Step 5: Bridge to env composition via install_info_from_package_root.
         let info_via_root = manager
-            .install_info_from_package_root(&dest_path)
+            .install_info_from_package_root(&dest_path, Some(&identifier))
             .await
             .context("loading install info from materialized package root")?;
         // Overrides are the caller's own contribution; the OCI tier reads no
@@ -494,9 +504,9 @@ impl PackageTest {
         //    for the cleaner "no extra process" semantic. `td_guard` is None
         //    in this branch.
         // A maintainer preview over a locally materialized, unpublished package:
-        // there is no registry identity and the digest is synthetic, so a record
-        // would describe something that was never published. The exclusion is
-        // declared rather than implicit — see `ExemptionReason`.
+        // the digest is computed locally, so a record would describe something
+        // that was never published. The exclusion is declared rather than
+        // implicit — see `ExemptionReason`.
         //
         // It is also bounded by the operator's posture: `Launch::exempt` refuses
         // under `required = true`, so the policy is resolved here and handed to

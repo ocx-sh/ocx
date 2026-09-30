@@ -34,6 +34,8 @@ OCX will:
 
 The child's exit code is forwarded unchanged. A failing test command (`exit 7`) gives you exit code 7.
 
+When a [patch tier][ug-patches] is configured, the companions that match `--identifier` are composed onto the bundle under test, as an install would. `package test` needs no flag for this, and a required companion that cannot be installed fails the run.
+
 ### What the command name resolves to {#basic-resolution}
 
 A bare command name is resolved against the package's own directories before the host `PATH`, and the package's copy of a name is never quietly passed over. The point of `package test` is to test what you are about to publish, so a name your package ships has to be the thing that runs.
@@ -381,6 +383,9 @@ For `.star` syntax highlighting in VS Code, add the [vscode-bazel][vscode-bazel]
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md
 [authoring-env-surface]: ./env-surface.md
+
+<!-- user guide -->
+[ug-patches]: ../user-guide/patches.md#patches
 
 <!-- reference -->
 [ref-script-host-api]: ../reference/script-host-api.md
