@@ -154,6 +154,7 @@ Exempt from overlap detection (intended broad coupling):
 | `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/hex-*/**` |
 | `subsystem-script.md` + `subsystem-tests.md` | `test/tests/test_package_test_script.py` |
 | `code-docs.md` + `rust-quality.md` | `**/*.rs` |
+| `code-docs.md` + `bazel-quality.md` | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/MODULE.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel` |
 | `code-docs.md` + `python-quality.md` | `**/*.py` |
 | `code-docs.md` + `typescript-quality.md` | `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` |
 | `code-docs.md` + `bazel-quality.md` | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/MODULE.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel` |
