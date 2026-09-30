@@ -234,8 +234,8 @@ pub enum PackageErrorKind {
         owners: Vec<ocx_oci::PinnedPackageRef>,
     },
 
-    /// A `required = true` companion failed to install, failing the whole install.
-    #[error("required companion install failed for '{companion}'")]
+    /// A `required = true` companion failed to install or compose, failing the whole operation.
+    #[error("required companion '{companion}' could not be applied")]
     RequiredCompanionFailed {
         /// Identifier of the companion package that failed to install.
         companion: ocx_oci::PackageRef,
@@ -473,8 +473,8 @@ mod tests {
             "the companion's cause must appear exactly once; got: {rendered}"
         );
         assert!(
-            rendered.contains("license-server"),
-            "the message must name the companion; got: {rendered}"
+            rendered.contains("required companion 'patches.corp.com/license-server' could not be applied"),
+            "the message names the companion and covers a resolve-time failure, not only an install; got: {rendered}"
         );
     }
 }

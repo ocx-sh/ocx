@@ -563,13 +563,24 @@ fn emit_root_path_block(
 ///
 /// [`DependencyError::Conflict`] for the first conflicting repository.
 pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) -> Result<(), DependencyError> {
-    if let Some(conflict) = collect_repo_digest_conflicts(roots, axes).into_iter().next() {
-        return Err(DependencyError::Conflict {
+    refuse_digest_conflicts(surface_closure(roots, axes))
+}
+
+/// [`check_repo_digest_conflicts`] over an identifier set already projected onto its surface.
+///
+/// # Errors
+///
+/// [`DependencyError::Conflict`] for the first conflicting repository.
+pub(crate) fn refuse_digest_conflicts<'a>(
+    identifiers: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
+) -> Result<(), DependencyError> {
+    match digest_conflicts(identifiers).into_iter().next() {
+        Some(conflict) => Err(DependencyError::Conflict {
             repository: conflict.repository,
             identifiers: conflict.identifiers,
-        });
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Warn for every conflict [`check_repo_digest_conflicts`] would refuse; `deps` uses it so the tree stays inspectable.
@@ -597,15 +608,38 @@ pub(crate) struct DigestConflict {
 
 /// Collects version conflicts across the union closure projected onto `axes`, sorted by repository.
 pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) -> Vec<DigestConflict> {
+    digest_conflicts(surface_closure(roots, axes))
+}
+
+/// Each root's identifier and its dependencies admitted on `axes`, from `resolved()`.
+pub(crate) fn surface_closure(
+    roots: &[Arc<InstallInfo>],
+    axes: Visibility,
+) -> impl Iterator<Item = &ocx_oci::PinnedPackageRef> {
+    roots
+        .iter()
+        .flat_map(move |root| std::iter::once(root.identifier()).chain(admitted_dependencies(root, axes)))
+}
+
+/// `root`'s dependencies admitted on `axes`, from `resolved()`.
+pub(crate) fn admitted_dependencies(
+    root: &InstallInfo,
+    axes: Visibility,
+) -> impl Iterator<Item = &ocx_oci::PinnedPackageRef> {
+    root.resolved()
+        .dependencies
+        .iter()
+        .filter(move |dep| dep_admitted_on(dep.visibility, axes))
+        .map(|dep| &dep.identifier)
+}
+
+/// The repositories `identifiers` reach at two or more digests, sorted by repository.
+pub(crate) fn digest_conflicts<'a>(
+    identifiers: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
+) -> Vec<DigestConflict> {
     let mut by_repository: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
-    for root in roots {
-        record_repo_identifier(root.identifier(), &mut by_repository);
-        for dep in &root.resolved().dependencies {
-            if !dep_admitted_on(dep.visibility, axes) {
-                continue;
-            }
-            record_repo_identifier(&dep.identifier, &mut by_repository);
-        }
+    for identifier in identifiers {
+        record_repo_identifier(identifier, &mut by_repository);
     }
     by_repository
         .into_iter()

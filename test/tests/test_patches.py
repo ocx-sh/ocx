@@ -122,9 +122,8 @@ def _make_companion(
     tmp_path: Path,
     env_key: str,
     env_value: str,
-    visibility: str = "public",
 ) -> PackageInfo:
-    """Publish an env-only companion with one env var of ``visibility``, ``public`` by default.
+    """Publish an env-only companion package with a PUBLIC-visible env var.
 
     Always published `platform="any"`: a binary-free, env-only companion is
     the canonical `any`-published package (adr_platform_model_unification.md
@@ -147,7 +146,7 @@ def _make_companion(
                 "key": env_key,
                 "type": "constant",
                 "value": env_value,
-                "visibility": visibility,
+                "visibility": "public",
             }
         ],
         cascade=True,
@@ -1708,8 +1707,8 @@ def test_patch_companion_contributes_integrations(
         f"`--self` is the private surface and carries no integrations from "
         f"any contributor; got {self_view['integrations']}"
     )
-    # Positive control for the empty assertion above: the companion's public
-    # ENV still crosses `--self` (only its integrations carrier is gated) —
+    # Positive control for the empty assertion above: the companion's ENV
+    # still crosses `--self` (only its integrations carrier is gated) —
     # this is the other half of the C-017 coherence argument. Without this,
     # a future change that gated the whole companion overlay by `self_view`
     # would leave `integrations == []` green while deleting the premise
@@ -3046,8 +3045,15 @@ def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
     """
     companion_repo = _unique_repo("part_of_target_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
-    _make_companion(
-        ocx, companion_repo, "1.0.0", tmp_path, "JDK_JAVA_OPTIONS", "-Dpatched=1", visibility="private"
+    make_package(
+        ocx,
+        companion_repo,
+        "1.0.0",
+        tmp_path,
+        bins=[],
+        env=[{"key": "JDK_JAVA_OPTIONS", "type": "constant", "value": "-Dpatched=1", "visibility": "private"}],
+        cascade=True,
+        platform="any",
     )
     descriptor_path = tmp_path / "part_of_target_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
@@ -6055,3 +6061,111 @@ def test_execution_record_for_lock_resolved_tool_has_no_tag_annotation_or_qualif
             "a lock-resolved tool's resolution.autoInstalled identifier must be "
             f"tagless (repo@digest, no repo:tag@digest); got {entry!r}"
         )
+
+
+def test_companion_reaching_another_version_of_a_base_dependency_is_refused(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """The env would carry one repository at two digests, the base's and the companion's: an
+    optional companion is skipped with a warning, a required one fails with exit 65.
+    """
+    dep_repo = _unique_repo("conflict_dep")
+    base_dep, companion_dep = (
+        make_package(
+            ocx, dep_repo, version, tmp_path,
+            env=[{"key": "CONFLICT_VAR", "type": "constant", "value": version, "visibility": "public"}],
+            cascade=True,
+        )
+        for version in ("1.0.0", "2.0.0")
+    )
+    # Host platform, not `any`: an `any` bundle refuses a digest-pinned dependency.
+    companion_repo = _unique_repo("conflicting")
+    make_package(
+        ocx, companion_repo, "1.0.0", tmp_path,
+        bins=[],
+        env=[{"key": "CONFLICTING_VAR", "type": "constant", "value": "conflicting", "visibility": "public"}],
+        dependencies=[_dep_entry(ocx, companion_dep, visibility="public")],
+        cascade=True,
+    )
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    base_pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path,
+        dependencies=[_dep_entry(ocx, base_dep, visibility="public")],
+        cascade=True,
+    )
+    descriptor_path = tmp_path / "conflict_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry, required=False)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+
+    optional = ocx.run("package", "env", base_pkg.short, check=False)
+    assert optional.returncode == 0, (
+        f"an optional conflicting companion is skipped, not fatal; rc={optional.returncode}\n"
+        f"stderr: {optional.stderr}"
+    )
+    entries = json.loads(optional.stdout)["entries"]
+    assert _entry_by_key(entries, "CONFLICTING_VAR") is None, (
+        f"the conflicting companion is skipped whole; got keys: {[e['key'] for e in entries]}"
+    )
+    assert [e["value"] for e in entries if e["key"] == "CONFLICT_VAR"] == ["1.0.0"], (
+        f"only the base's version reaches the env; got entries: {entries}"
+    )
+    assert "conflicting versions for" in optional.stderr, (
+        f"skipping the companion warns with the conflict; stderr: {optional.stderr}"
+    )
+
+    _write_config(ocx, registry, required=True)
+    required = ocx.run("package", "env", base_pkg.short, check=False)
+    assert required.returncode == 65, (
+        f"a required conflicting companion fails with exit 65; rc={required.returncode}\n"
+        f"stderr: {required.stderr}"
+    )
+    assert "conflicting versions for" in required.stderr, f"stderr: {required.stderr}"
+
+
+def test_companion_conflicting_with_an_earlier_companion_is_refused(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Two companions reaching two versions of one repository: the first projects, the second
+    is skipped when optional and fails with exit 65 when required.
+    """
+    dep_repo = _unique_repo("conflict_dep")
+    companion_fqs = []
+    for label, version in (("first", "1.0.0"), ("second", "2.0.0")):
+        dep = make_package(
+            ocx, dep_repo, version, tmp_path,
+            env=[{"key": "CONFLICT_VAR", "type": "constant", "value": version, "visibility": "public"}],
+            cascade=True,
+        )
+        # Host platform, not `any`: an `any` bundle refuses a digest-pinned dependency.
+        companion_repo = _unique_repo(label)
+        make_package(
+            ocx, companion_repo, "1.0.0", tmp_path,
+            bins=[],
+            env=[{"key": f"{label.upper()}_VAR", "type": "constant", "value": label, "visibility": "public"}],
+            dependencies=[_dep_entry(ocx, dep, visibility="public")],
+            cascade=True,
+        )
+        companion_fqs.append(f"{registry}/{companion_repo}:1.0.0")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "two_companions_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": companion_fqs}])
+    _write_config(ocx, registry, required=False)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+
+    entries = _env_entries(ocx, base_pkg.short)
+    keys = [e["key"] for e in entries]
+    assert "FIRST_VAR" in keys, f"positive control: the first companion projects; got keys: {keys}"
+    assert "SECOND_VAR" not in keys, f"the second, conflicting companion is skipped; got keys: {keys}"
+    assert [e["value"] for e in entries if e["key"] == "CONFLICT_VAR"] == ["1.0.0"], (
+        f"only the first companion's version reaches the env; got entries: {entries}"
+    )
+
+    _write_config(ocx, registry, required=True)
+    required = ocx.run("package", "env", base_pkg.short, check=False)
+    assert required.returncode == 65, (
+        f"a required conflicting companion fails with exit 65; rc={required.returncode}\n"
+        f"stderr: {required.stderr}"
+    )

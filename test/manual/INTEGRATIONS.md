@@ -683,8 +683,8 @@ over the concrete ship matrix and fails the whole sync on the platforms that
 were never pushed:
 
 ```
-ERROR failed to resolve package: required companion install failed for
-'localhost:5000/patches/corp-ca-bundle:1.0.0': package not found
+ERROR failed to resolve package: required companion
+'localhost:5000/patches/corp-ca-bundle:1.0.0' could not be applied: package not found
 ```
 
 Pass `-p linux/amd64` (the setup script does).
