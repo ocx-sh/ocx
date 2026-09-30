@@ -208,6 +208,37 @@ fn registry_declined(source: &(dyn std::error::Error + 'static)) -> bool {
     }
 }
 
+/// Outcome of deleting one tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// The registry removed the tag.
+    Deleted,
+    /// The registry answered that the tag was not there.
+    AlreadyAbsent,
+}
+
+/// What a manifest GET found, keeping the not-found code a removal decision needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestPresence {
+    /// The registry served the manifest; the digest it was served under.
+    Present(crate::Digest),
+    /// The registry answered 404; the code its envelope carried.
+    Absent(NotFoundCode),
+}
+
+/// The envelope code a registry answered a missing manifest with.
+///
+/// Only `ManifestUnknown` may drive a removal; `registry:2` answers it for an absent repository too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotFoundCode {
+    /// A 404 carrying `MANIFEST_UNKNOWN`.
+    ManifestUnknown,
+    /// A 404 carrying `NAME_UNKNOWN`, and taking precedence over `MANIFEST_UNKNOWN`.
+    NameUnknown,
+    /// A 404 with no envelope, or none of the two codes above.
+    Unspecified,
+}
+
 /// Outcome of a cross-repository blob mount attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountOutcome {
@@ -349,6 +380,16 @@ pub trait OciTransport: crate::sealed::Sealed + Send + Sync {
         let _ = (image, source_repository, digest);
         Ok(MountOutcome::UploadRequired)
     }
+
+    /// Deletes the tag `image` names; `image` is the canonical reference, with a tag and no digest.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::DeleteUnsupported`] when the registry does not delete tags.
+    async fn delete_manifest(&self, image: &crate::native::Reference) -> Result<DeleteOutcome>;
+
+    /// GETs the manifest `image` (the canonical reference) names, reporting which not-found code a miss carried.
+    async fn probe_manifest(&self, image: &crate::native::Reference) -> Result<ManifestPresence>;
 
     // ── Referrer operations (OCI 1.1) ────────────────────────────────
 
@@ -670,6 +711,20 @@ mod tests {
             _on_progress: ProgressFn,
         ) -> Result<String> {
             unimplemented!("not needed for pull_blob_streaming default-impl test")
+        }
+
+        async fn delete_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::DeleteOutcome> {
+            unimplemented!()
+        }
+
+        async fn probe_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::ManifestPresence> {
+            unimplemented!()
         }
 
         async fn push_referrer_manifest(
@@ -1025,6 +1080,20 @@ mod tests {
             _on_progress: ProgressFn,
         ) -> Result<String> {
             unimplemented!("the fallback-index tests never push a blob")
+        }
+
+        async fn delete_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::DeleteOutcome> {
+            unimplemented!()
+        }
+
+        async fn probe_manifest(
+            &self,
+            _image: &crate::native::Reference,
+        ) -> crate::client::Result<crate::client::ManifestPresence> {
+            unimplemented!()
         }
 
         async fn push_referrer_manifest(

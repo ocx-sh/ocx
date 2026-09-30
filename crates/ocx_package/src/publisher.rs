@@ -31,6 +31,8 @@ pub struct Publisher {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PushOutcome {
+    /// The primary tag as written, build-metadata suffix included.
+    pub primary_tag: String,
     /// The primary tag's image-index digest after the last platform merge.
     pub manifest_digest: ocx_oci::Digest,
     /// Rolling cascade tags written besides the primary tag (`3.28`, `3`, `latest`), ordered
@@ -52,6 +54,7 @@ pub struct PushOutcome {
 
 impl PushOutcome {
     pub fn new(
+        primary_tag: String,
         manifest_digest: ocx_oci::Digest,
         cascade_tags: Vec<String>,
         keep_tags: Vec<String>,
@@ -60,6 +63,7 @@ impl PushOutcome {
         layer_counts: ocx_oci::LayerCounts,
     ) -> Self {
         Self {
+            primary_tag,
             manifest_digest,
             cascade_tags,
             keep_tags,
@@ -177,6 +181,7 @@ impl Publisher {
             manifest_digest = Some(digest);
         }
         Ok(PushOutcome {
+            primary_tag: identifier.tag_or_latest().to_string(),
             manifest_digest: manifest_digest.ok_or(crate::error::Error::EmptyPushSet)?,
             cascade_tags: Vec::new(),
             keep_tags,
@@ -254,6 +259,7 @@ impl Publisher {
             }
         }
         Ok(PushOutcome {
+            primary_tag: identifier.tag_or_latest().to_string(),
             manifest_digest: manifest_digest.ok_or(crate::error::Error::EmptyPushSet)?,
             cascade_tags,
             keep_tags,
@@ -428,7 +434,7 @@ mod tests {
         ))));
         let mut mac = test_info();
         mac.platform = "darwin/arm64".parse().expect("platform parses");
-        publisher
+        let outcome = publisher
             .push(
                 &test_target("0.3.0"),
                 vec![test_info(), mac],
@@ -440,6 +446,7 @@ mod tests {
             )
             .await
             .expect("fan-out push succeeds");
+        assert_eq!(outcome.primary_tag, "0.3.0_20260514120000");
 
         let inner = data.read();
         let (index_bytes, _) = inner

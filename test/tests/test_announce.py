@@ -535,11 +535,12 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # The winner adds `2.0.0`, advancing the branch head between our read and
-    # our commit. Its `content` is a placeholder — the retry re-observes every
-    # curated tag, so the value the racer wrote must not survive verbatim.
+    # our commit. Its `content` is a placeholder no registry serves, so only a
+    # retry that read the winning head can carry it.
     placeholder = f"sha256:{'e' * 64}"
     concurrent = committed_root(fake_forge, package)
-    concurrent["tags"]["2.0.0"] = {"content": placeholder, "observed": FIXED_CLOCK}
+    winner_row = {"content": placeholder, "observed": FIXED_CLOCK}
+    concurrent["tags"]["2.0.0"] = winner_row
     branch = branch_name(package)
     fake_forge.concurrent_ref_advance[f"forkuser/index/{branch}"] = {
         f"p/{package}.json": json.dumps(concurrent).encode()
@@ -556,8 +557,8 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     assert set(final_tags) == {"1.0.0", "2.0.0", "3.0.0"}, (
         "the retry must union against the winning head, never delete its 2.0.0"
     )
-    assert final_tags["2.0.0"]["content"] != placeholder, (
-        "the concurrently added tag must be genuinely re-observed on the retry"
+    assert final_tags["2.0.0"] == winner_row, (
+        "the file does not list the winner's 2.0.0, so the retry carries its row verbatim from the winning head"
     )
 
 

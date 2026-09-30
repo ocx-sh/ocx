@@ -7,19 +7,22 @@ use std::path::PathBuf;
 
 use crate::forge::{ForkIdentity, PullRequest, PushAccess, RepoCoordinate};
 
-/// How the caller curated the tag set.
+/// Which tags the run is given; a committed row outside that set is carried verbatim.
+///
+/// A given tag the registry no longer has is removed when its row is ephemeral
+/// or the tag was named (`Replace`, `UnionFile`); a durable row reached only by
+/// `Refresh` or `FromRegistry` is kept and reported as missing.
 #[derive(Debug, Clone)]
 pub enum TagSelection {
     /// `--tags`: the list is the universe; a committed tag absent from it is dropped.
     Replace(Vec<String>),
-    /// `--tags-file`: union with the committed root; only
-    /// [`Replace`](TagSelection::Replace) deletes.
+    /// `--tags-file`: exactly the listed tags; an empty list is a no-op.
     UnionFile(Vec<String>),
-    /// `--refresh`: re-observe every committed tag (catching moved digests)
-    /// without scanning the registry or touching yank markers.
+    /// `--refresh`: every committed tag, without scanning the registry or
+    /// touching yank markers.
     Refresh,
-    /// `--tags-from-registry`: union of every tag the physical repository holds
-    /// with the committed root; nothing committed is dropped and yank markers survive.
+    /// `--tags-from-registry`: every tag the physical repository holds, plus
+    /// every committed tag, the latter asked by GET before it counts as gone.
     FromRegistry,
 }
 
@@ -65,6 +68,10 @@ pub struct AnnounceRequest {
     /// scheme decides which proxy variable applies
     /// ([`DialScheme::for_registry`](ocx_oci::ssrf::DialScheme::for_registry)).
     pub insecure_hosts: Vec<String>,
+    /// Mark every row this run adds as ephemeral; an existing row's marker never changes.
+    pub ephemeral: bool,
+    /// The CI run that made this announce, listed in the commit and request body.
+    pub run_url: Option<String>,
 }
 
 /// Whether the announce changed the committed root.
@@ -110,4 +117,8 @@ pub struct AnnounceOutcome {
     /// row as [`Skipped`](crate::forge::CheckStatus::Skipped). Render through
     /// [`PushAccess::checks`].
     pub capability_checks: PushAccess,
+    /// Rows removed because their tag is confirmed gone from the registry.
+    pub removed: Vec<String>,
+    /// Durable rows whose tag is gone but that the run kept, since nothing named them.
+    pub durable_missing: Vec<String>,
 }

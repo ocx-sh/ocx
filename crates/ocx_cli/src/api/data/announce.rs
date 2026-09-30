@@ -91,6 +91,13 @@ pub struct AnnounceReport {
     /// announce drops them and reports them here rather than failing the run.
     /// Always an array, empty rather than absent.
     pub reserved_tags_dropped: Vec<String>,
+    /// Tags whose rows this run removed from the index because the registry no
+    /// longer has them. Always an array, empty rather than absent.
+    pub removed: Vec<String>,
+    /// Durable tags the registry no longer has, found by `--refresh` or
+    /// `--tags-from-registry` and kept in the index; name them with `--tags` or
+    /// `--tags-file` to remove them. Always an array, empty rather than absent.
+    pub durable_missing: Vec<String>,
 }
 
 impl AnnounceReport {
@@ -125,6 +132,8 @@ impl AnnounceReport {
             // Every row, `Skipped` included: the report contract forbids filtering them out.
             capability_checks: CapabilityCheckEntry::from_checks(outcome.capability_checks.checks()),
             reserved_tags_dropped: outcome.reserved_tags_dropped,
+            removed: outcome.removed,
+            durable_missing: outcome.durable_missing,
         }
     }
 
@@ -249,6 +258,8 @@ mod tests {
             }),
             written_paths: Vec::new(),
             reserved_tags_dropped: Vec::new(),
+            removed: Vec::new(),
+            durable_missing: Vec::new(),
             desc_status: AnnounceStatus::Unchanged,
             branch: "indexbot-announce-acme-widget".to_string(),
             capability_checks: PushAccess::skipped_all(),
@@ -263,6 +274,8 @@ mod tests {
             fork: None,
             written_paths: Vec::new(),
             reserved_tags_dropped: Vec::new(),
+            removed: Vec::new(),
+            durable_missing: Vec::new(),
             desc_status: AnnounceStatus::Unchanged,
             branch: "indexbot-announce-acme-widget".to_string(),
             capability_checks: PushAccess::skipped_all(),
@@ -356,6 +369,8 @@ mod tests {
             fork: None,
             written_paths: vec!["p/acme/widget.json".to_string()],
             reserved_tags_dropped: Vec::new(),
+            removed: Vec::new(),
+            durable_missing: Vec::new(),
             desc_status: AnnounceStatus::Unchanged,
             branch: String::new(),
             capability_checks: PushAccess::skipped_all(),
@@ -367,6 +382,30 @@ mod tests {
             value.get("written_paths").and_then(|v| v.as_array()),
             Some(&vec![serde_json::Value::String("p/acme/widget.json".to_string())])
         );
+    }
+
+    /// `removed` and `durable_missing` carry the outcome's tags through, each
+    /// under its own key and in the order announce reported them, so a script
+    /// can tell a row the run deleted from a row it only flagged.
+    #[test]
+    fn removed_and_durable_missing_tags_reach_the_json_report_under_their_own_keys() {
+        let outcome = AnnounceOutcome {
+            removed: vec!["1.0.0-build.1".to_string(), "1.0.0-build.2".to_string()],
+            durable_missing: vec!["0.9.0".to_string()],
+            ..outcome_updated()
+        };
+        let value = serde_json::to_value(report(outcome)).unwrap();
+        assert_eq!(value["removed"], serde_json::json!(["1.0.0-build.1", "1.0.0-build.2"]));
+        assert_eq!(value["durable_missing"], serde_json::json!(["0.9.0"]));
+    }
+
+    /// A run that removed nothing and flagged nothing still names both keys, as
+    /// empty arrays, so a consumer never has to test for absence.
+    #[test]
+    fn removed_and_durable_missing_are_empty_arrays_when_nothing_vanished() {
+        let value = serde_json::to_value(report(outcome_unchanged())).unwrap();
+        assert_eq!(value["removed"], serde_json::json!([]));
+        assert_eq!(value["durable_missing"], serde_json::json!([]));
     }
 
     /// The description moves on its own axis: a run can rewrite `desc` (and its
@@ -441,6 +480,8 @@ mod tests {
                 "written_paths",
                 "capability_checks",
                 "reserved_tags_dropped",
+                "removed",
+                "durable_missing",
             ],
             "C-061's key set, in the contract's order — and no `owners`/`author`, whose absence C-061 names"
         );

@@ -74,8 +74,9 @@ pub enum ExitCode {
     /// Authentication failure: registry 401, missing credentials.
     /// Tool-specific.
     AuthError = 80,
-    /// A deliberate local policy (`--offline` or `--frozen`) refused a network
-    /// or resolution operation — not a fault. Distinct from `Unavailable`.
+    /// A deliberate local policy (`--offline`, `--frozen`, or the prune safeguard
+    /// against deleting a durable tag) refused an operation — not a fault.
+    /// Distinct from `Unavailable`; `--force` bypasses the prune safeguard.
     PolicyBlocked = 81,
     /// A managed shell-integration block was left untouched because it carried
     /// user edits and the command ran without a force flag. Tool-specific;
@@ -95,6 +96,18 @@ pub enum ExitCode {
     /// referrers index. The operation cannot proceed — discovery fails hard rather
     /// than silently returning empty results. Tool-specific.
     ReferrersUnsupported = 84,
+    /// A key reference (`--key`, a `[[trust.policy]]` signer, managed config) names a recognised
+    /// but unimplemented backend (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
+    /// `k8s://`); "not built yet", never a `config_error`.
+    UnsupportedKeyBackend = 85,
+    /// A reachable forge refuses a write because the instance or target project lacks the
+    /// capability the transport needs (job-token push disabled, publisher not allowlisted);
+    /// the credential is valid and an administrator, not the caller, must act.
+    ForgeCapabilityUnavailable = 86,
+    /// The registry does not delete tags (405, 400 `UNSUPPORTED`, or 400 `DIGEST_INVALID` from a
+    /// registry that deletes by digest only); an operator must enable deletion or use another
+    /// registry, so a retry never helps.
+    RegistryDeleteUnsupported = 87,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -209,6 +222,9 @@ case $? in
     82) echo "managed shell rc block left dirty; rerun with --force" ;;
     83) echo "rekor unavailable; retry or skip signing" ;;
     84) echo "registry lacks referrers support; use a registry with OCI 1.1 referrers" ;;
+    85) echo "key backend not implemented; use a file key" ;;
+    86) echo "forge lacks a capability the transport needs; ask an administrator or use --transport api" ;;
+    87) echo "registry does not delete tags; use a registry that does" ;;
     *)  echo "unknown failure ($?)"; exit 1 ;;
 esac
 ```

@@ -76,6 +76,10 @@ pub enum AnnounceError {
     #[error("tag {tag} does not resolve on {repository} — check for a typo")]
     UnresolvedTag { tag: String, repository: String },
 
+    /// A tag read as absent, then present on the follow-up probe: a push raced the two reads.
+    #[error("tag {tag} on {repository} appeared while it was being observed; retry the announce")]
+    ObserveRaced { tag: String, repository: String },
+
     /// Fetching a curated tag's manifest from the physical registry failed.
     ///
     /// Boxed, or `ClientError`'s size trips `clippy::result_large_err`.

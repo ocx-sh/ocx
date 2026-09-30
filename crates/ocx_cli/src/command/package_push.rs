@@ -19,7 +19,15 @@ use crate::options::rekor_upload::RekorUploadOpt;
 use crate::options::signature_format::SignatureFormatOpt;
 use crate::{conventions, options};
 
+const KEEP_TAG_LONG_HELP: &str = "\
+Write a `__ocx.keep.sha256-<hex>` tag for each platform manifest published (default).\n\n\
+The keep tag names the digest directly, so a stray delete of a rolling or cascade tag can never \
+orphan a manifest something else still pins. It also pins the manifest against pruning: push \
+ephemeral builds with `--no-keep-tag`, or prune frees no storage.";
+
 #[derive(Parser)]
+// The shared flag's help is generic; only a push knows its builds may be ephemeral.
+#[clap(mut_arg("keep_tag", |arg| arg.long_help(KEEP_TAG_LONG_HELP)))]
 // `requires` refuses a signing modifier without `--sign`/`--sbom`, which would otherwise be a silent no-op.
 #[clap(group(clap::ArgGroup::new("signing_target").args(["sign", "sbom"]).multiple(true)))]
 #[clap(group(
@@ -50,10 +58,6 @@ pub struct PackagePush {
     #[clap(long = "default")]
     default: bool,
 
-    /// Push a `__ocx.keep.sha256-<hex>` tag pointing at each pushed platform
-    /// manifest (default). A stray delete of a rolling or cascade tag can then
-    /// never orphan a digest something else still pins, since the keep tag
-    /// names it directly. Pass `--no-keep-tag` to skip it.
     #[clap(flatten)]
     keep_tag: options::KeepTag,
 
@@ -129,8 +133,8 @@ pub struct PackagePush {
     ci_annotations: Option<Option<ocx_shell::ci::CiFlavor>>,
 
     /// After a successful push, append the pushed tag and any cascade tags
-    /// to this file (creating it if absent), so `ocx package announce
-    /// --tags-file` can pick them up.
+    /// to this file, one per line (creating it if absent), so `ocx package
+    /// announce --tags-file` can pick them up.
     ///
     /// This is a scratch file for one pipeline run, not a persistent list -
     /// a stale file left over from an earlier run could re-add a tag that
@@ -405,7 +409,7 @@ impl PackagePush {
         };
 
         // No `__ocx.keep.*` tags: announce drops them, so the file would name tags never announced.
-        let mut pushed_tags = vec![identifier.tag_or_latest().to_string()];
+        let mut pushed_tags = vec![outcome.primary_tag.clone()];
         pushed_tags.extend(outcome.cascade_tags.iter().cloned());
         pushed_tags.extend(outcome.aliases_written.iter().cloned());
 
@@ -478,7 +482,7 @@ impl PackagePush {
 
         // After the report, so a tags-file failure never swallows a push that already landed.
         if let Some(path) = &self.tags_file
-            && let Err(error) = append_to_tags_file(path, &pushed_tags).await
+            && let Err(error) = conventions::append_tags_file(path, &pushed_tags).await
         {
             context.ui().warn(format!(
                 "the push succeeded but the tags file {} was not written",
@@ -597,18 +601,6 @@ fn merge_annotations(generated: BTreeMap<String, String>, explicit: &[(String, S
     let mut merged = generated;
     merged.extend(explicit.iter().cloned());
     merged
-}
-
-/// Appends `tags` onto the tags-file at `path` (created if absent),
-/// deduping against whatever is already there.
-async fn append_to_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
-    // Bounded, not a bare `fs::read`, or `--tags-file /dev/zero` reads until memory runs out.
-    let existing = crate::options::tags::read_tags_file_if_present(path).await?;
-    let merged = conventions::merge_tags_file(&existing, tags);
-    tokio::fs::write(path, merged)
-        .await
-        .map_err(|error| ocx_util::error::FileError::new(path, error))
-        .with_context(|| format!("writing tags file {}", path.display()))
 }
 
 #[cfg(test)]
@@ -741,44 +733,18 @@ mod annotation_tests {
 }
 
 #[cfg(test)]
-mod tags_file_tests {
-    use super::append_to_tags_file;
+mod keep_tag_help_tests {
+    use clap::CommandFactory as _;
 
-    #[tokio::test]
-    async fn creates_the_file_with_the_pushed_and_cascade_tags() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("announce.txt");
-
-        append_to_tags_file(
-            &path,
-            &[
-                "3.28.1".to_string(),
-                "3.28".to_string(),
-                "3".to_string(),
-                "latest".to_string(),
-            ],
-        )
-        .await
-        .expect("append succeeds");
-
-        let content = tokio::fs::read_to_string(&path).await.expect("read announce file");
-        assert_eq!(content, "3.28.1,3.28,3,latest");
-    }
-
-    #[tokio::test]
-    async fn a_second_overlapping_append_dedupes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("announce.txt");
-
-        append_to_tags_file(&path, &["3.28.1".to_string(), "3.28".to_string()])
-            .await
-            .expect("first append succeeds");
-        append_to_tags_file(&path, &["3.28.2".to_string(), "3.28".to_string()])
-            .await
-            .expect("second append succeeds");
-
-        let content = tokio::fs::read_to_string(&path).await.expect("read announce file");
-        assert_eq!(content, "3.28.1,3.28,3.28.2");
+    #[test]
+    fn the_keep_tag_long_help_says_when_to_disable_it() {
+        let command = super::PackagePush::command();
+        let arg = command
+            .get_arguments()
+            .find(|a| a.get_id() == "keep_tag")
+            .expect("keep_tag");
+        let help = arg.get_long_help().expect("long help").to_string();
+        assert!(help.contains("push ephemeral builds with `--no-keep-tag`, or prune frees no storage"));
     }
 }
 

@@ -186,7 +186,16 @@ impl Graph {
                 repository: "oci://example.com/test/pkg".to_string(),
                 tags: commits
                     .into_iter()
-                    .map(|(tag, content)| (tag, RootTag { content, yanked: None }))
+                    .map(|(tag, content)| {
+                        (
+                            tag,
+                            RootTag {
+                                content,
+                                yanked: None,
+                                ephemeral: false,
+                            },
+                        )
+                    })
                     .collect(),
                 status: None,
                 deprecated_message: None,

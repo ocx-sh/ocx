@@ -408,6 +408,11 @@ impl ChainedIndex {
         grow_root: bool,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         let mut last_error: Option<super::error::Error> = None;
+        // A pinned tag+digest pull grows no root, or the write would shadow the canonical `ocx.lock`.
+        let grows_root = grow_root
+            && self.write_policy == LocalWritePolicy::Full
+            && identifier.tag().is_some()
+            && identifier.digest().is_none();
         for (source, authoritative) in self.candidate_sources(identifier).await {
             let fetched = if self.write_policy == LocalWritePolicy::ReadOnly {
                 self.local_index.fetch_dispatch_only(source, identifier).await
@@ -422,12 +427,7 @@ impl ChainedIndex {
                     {
                         log::debug!("could not cache the leaf manifest for '{identifier}' ({digest}): {error}");
                     }
-                    // A pinned tag+digest pull grows no root, or the write would shadow the canonical `ocx.lock`.
-                    if grow_root
-                        && self.write_policy == LocalWritePolicy::Full
-                        && identifier.tag().is_some()
-                        && identifier.digest().is_none()
-                    {
+                    if grows_root {
                         match source.source_kind() {
                             // Exactly this tag: sibling pins and `repository` are not this resolve's to move.
                             SourceKind::Published => {
@@ -460,6 +460,9 @@ impl ChainedIndex {
                     // Kept apart from the `Err` arm, or an index outage becomes a confident "not in index".
                     if authoritative {
                         if let Some(base_url) = source.index_base_url() {
+                            if grows_root && matches!(source.source_kind(), SourceKind::Published) {
+                                self.drop_ephemeral_row_the_root_lacks(source, identifier).await;
+                            }
                             return Err(super::error::Error::NotInIndex {
                                 identifier: identifier.to_string(),
                                 namespace: identifier.registry().to_string(),
@@ -487,6 +490,31 @@ impl ChainedIndex {
             return Err(e);
         }
         Ok(None)
+    }
+
+    /// A tag the authoritative root no longer lists loses its local row when that row is ephemeral.
+    ///
+    /// Best effort: an unreadable or unparseable root proves nothing, so it mutates nothing and the
+    /// caller still reports not-found.
+    async fn drop_ephemeral_row_the_root_lacks(&self, source: &super::Index, identifier: &ocx_oci::PackageRef) {
+        let Some(tag) = identifier.tag() else { return };
+        // Only a root that lacks the tag proves it gone; one that lists it with an unreadable object
+        // must not be committed, or the row is adopted with no object behind it.
+        let root_bytes = match source.revalidate_root_document(identifier).await {
+            Ok(Some((bytes, root))) if !root.tags.contains_key(tag) => bytes,
+            Ok(_) => return,
+            Err(error) => {
+                log::debug!("could not re-read the root for '{identifier}': {error}");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .local_index
+            .commit_and_sweep_published_root(identifier, &root_bytes, RootScope::Tags(&[tag]))
+            .await
+        {
+            log::debug!("could not drop the ephemeral row for '{identifier}': {error}");
+        }
     }
 
     /// Remote-mode `Query` read-through: the first source hit, never persisted.
@@ -3469,6 +3497,215 @@ mod chain_refs_tests {
             root.repository, FETCHED_REPOSITORY,
             "routing comes from the fetched root — there was no committed pointer to protect"
         );
+    }
+
+    // ── a `--remote` miss on an index-authoritative tag drops its ephemeral local row ──
+
+    /// What a [`RootlessTagSource`] answers when asked for its root document.
+    #[derive(Clone)]
+    enum RootAnswer {
+        Serves(String),
+        Transport,
+        Absent,
+    }
+
+    /// An index-authoritative published source that holds no manifest for any tag and serves
+    /// `answer` as its revalidated root document — the state after a publisher removed a tag.
+    #[derive(Clone)]
+    struct RootlessTagSource {
+        answer: RootAnswer,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for RootlessTagSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            Ok(None)
+        }
+        /// A stale cached root still listing the tag: a drop decided on it must never happen.
+        async fn fetch_root_document(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
+            let bytes = root_listing_the_resolved_tag().into_bytes();
+            let parsed = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, parsed)))
+        }
+        async fn revalidate_root_document(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
+            match &self.answer {
+                RootAnswer::Serves(root) => {
+                    let bytes = root.clone().into_bytes();
+                    let parsed = serde_json::from_slice(&bytes).unwrap();
+                    Ok(Some((bytes, parsed)))
+                }
+                RootAnswer::Transport => Err(super::super::error::Error::IndexHttpFailed {
+                    url: "https://index.example.com/p/cmake.json".to_string(),
+                    status: None,
+                    source: "scripted transport failure".into(),
+                }),
+                RootAnswer::Absent => Ok(None),
+            }
+        }
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
+            if identifier.registry() == REGISTRY {
+                Jurisdiction::Authoritative
+            } else {
+                Jurisdiction::Outside
+            }
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn index_base_url(&self) -> Option<&str> {
+            Some("https://index.example.com")
+        }
+        fn source_kind(&self) -> super::SourceKind {
+            super::SourceKind::Published
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// The root the source serves: it lists neither `TAG` nor `SIBLING_TAG`.
+    fn root_without_the_resolved_tag() -> String {
+        format!(
+            r#"{{"repository":"oci://ghcr.io/x/cmake","tags":{{"3.30":{{"content":"{}"}}}}}}"#,
+            digest_b()
+        )
+    }
+
+    /// The root the source serves when it still lists `TAG` although it holds no manifest for it.
+    fn root_listing_the_resolved_tag() -> String {
+        format!(
+            r#"{{"repository":"oci://ghcr.io/x/cmake","tags":{{"{TAG}":{{"content":"{}"}}}}}}"#,
+            digest_b()
+        )
+    }
+
+    /// The local copy's root: `TAG` and `SIBLING_TAG` both pinned, each ephemeral or durable as given.
+    fn local_root_pinning_both_tags(tag_ephemeral: bool, sibling_ephemeral: bool) -> String {
+        let marker = |ephemeral: bool| if ephemeral { r#","ephemeral":true"# } else { "" };
+        format!(
+            r#"{{"repository":"oci://ghcr.io/x/cmake","tags":{{"{TAG}":{{"content":"{}"{}}},"{SIBLING_TAG}":{{"content":"{}"{}}}}}}}"#,
+            digest_a(),
+            marker(tag_ephemeral),
+            digest_b(),
+            marker(sibling_ephemeral),
+        )
+    }
+
+    fn local_tag_names(dir: &TempDir) -> Vec<String> {
+        let root: super::super::IndexRoot =
+            serde_json::from_slice(&std::fs::read(index_store(dir).root_document_path(REGISTRY, REPO)).unwrap())
+                .unwrap();
+        let mut names: Vec<String> = root.tags.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    async fn resolve_remote_expecting_not_found(dir: &TempDir, answer: RootAnswer) -> String {
+        let chained = Index::from_chained(
+            make_local_index(dir),
+            vec![Index::from_impl(RootlessTagSource { answer })],
+            ChainMode::Remote,
+        );
+        let error = chained
+            .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
+            .await
+            .expect_err("the index does not hold the tag, so the resolve is not found");
+        format!("{error:#}")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_resolve_of_a_tag_the_root_lacks_drops_its_ephemeral_local_row_and_reports_not_found() {
+        let dir = TempDir::new().unwrap();
+        index_store(&dir)
+            .write_root_document(REGISTRY, REPO, local_root_pinning_both_tags(true, true).as_bytes())
+            .await
+            .unwrap();
+        let object = index_store(&dir).dispatch_object_path(REGISTRY, REPO, &digest_a());
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&object, b"dispatch object").unwrap();
+
+        let text = resolve_remote_expecting_not_found(&dir, RootAnswer::Serves(root_without_the_resolved_tag())).await;
+
+        assert!(
+            text.contains("is not in the index at"),
+            "the outcome is still not-found: {text}"
+        );
+        assert_eq!(
+            local_tag_names(&dir),
+            [SIBLING_TAG],
+            "the resolved tag's ephemeral row is dropped; a sibling the user did not resolve is untouched"
+        );
+        assert!(
+            !object.exists(),
+            "no row pins the dropped row's object any more, so it is swept"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_resolve_of_a_tag_the_root_lacks_keeps_a_durable_local_row() {
+        let dir = TempDir::new().unwrap();
+        index_store(&dir)
+            .write_root_document(REGISTRY, REPO, local_root_pinning_both_tags(false, true).as_bytes())
+            .await
+            .unwrap();
+
+        let text = resolve_remote_expecting_not_found(&dir, RootAnswer::Serves(root_without_the_resolved_tag())).await;
+
+        assert!(
+            text.contains("is not in the index at"),
+            "the outcome is still not-found: {text}"
+        );
+        assert_eq!(
+            local_tag_names(&dir),
+            [TAG, SIBLING_TAG],
+            "a durable pin is never dropped by a resolve"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_root_that_cannot_prove_the_tag_gone_mutates_nothing_and_the_outcome_stays_not_found() {
+        for (label, answer) in [
+            ("transport failure", RootAnswer::Transport),
+            (
+                "root lists the tag",
+                RootAnswer::Serves(root_listing_the_resolved_tag()),
+            ),
+            ("no root document", RootAnswer::Absent),
+        ] {
+            let dir = TempDir::new().unwrap();
+            index_store(&dir)
+                .write_root_document(REGISTRY, REPO, local_root_pinning_both_tags(true, true).as_bytes())
+                .await
+                .unwrap();
+            let before = std::fs::read(index_store(&dir).root_document_path(REGISTRY, REPO)).unwrap();
+
+            let text = resolve_remote_expecting_not_found(&dir, answer).await;
+
+            assert!(
+                text.contains("is not in the index at"),
+                "{label}: the outcome stays not-found, never the read failure: {text}"
+            );
+            assert_eq!(
+                std::fs::read(index_store(&dir).root_document_path(REGISTRY, REPO)).unwrap(),
+                before,
+                "{label}: a root that cannot prove the tag gone leaves the local copy byte-identical"
+            );
+        }
     }
 
     // ── authoritative-stop on a clean miss (no silent fallthrough) ─────────

@@ -27,6 +27,8 @@ pub enum Index {
         resolves to. The local copy is the set of snapshots you asked for, never a mirror of a \
         floating remote: `ocx index sync <REGISTRY>` is the same work over a registry's whole \
         catalog, and is equally explicit.\n\n\
+        A merge never deletes a durable pin. It does drop an ephemeral local row the source's root \
+        no longer lists.\n\n\
         If any package fails to refresh, the whole command fails; packages that refresh \
         successfully keep their updated tags.\n\n\
         Details: <https://ocx.sh/docs/reference/command-line#index-update>")]
@@ -41,10 +43,11 @@ pub enum Index {
         registry's repository listing), never from the local copy, which is the set you already \
         have. Each package is refreshed as if named bare, so it adopts every tag the source lists \
         and keeps any tag only the local copy holds.\n\n\
-        It is a union of snapshots, never a replica: a merge never deletes, so a package that has \
-        disappeared upstream keeps the tags this machine already recorded. `ocx index regenerate` \
-        is the only command that drops anything, and only a catalog entry whose root document is \
-        already gone; it cannot retract a package, for which the answer is a fresh index home.\n\n\
+        It is a union of snapshots, never a replica: a merge never deletes a durable pin (only an \
+        ephemeral row the source no longer lists), so a package that has disappeared upstream keeps \
+        the tags this machine already recorded. `ocx index regenerate` \
+        is the only command that removes a durable entry or a catalog entry, and only a catalog \
+        entry whose root document is already gone; it cannot retract a package, for which the answer is a fresh index home.\n\n\
         Every `<REGISTRY>` is enumerated before any is refused, so one unreachable source does not \
         cost the others their snapshot; the command still fails afterwards, reporting each failure. \
         A source that answers but serves no catalog document at all is a failure too, never an \

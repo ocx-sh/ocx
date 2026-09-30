@@ -15,7 +15,7 @@
 //!
 //! ```compile_fail,E0277
 //! use std::path::Path;
-//! use ocx_oci::client::{OciTransport, ProgressFn};
+//! use ocx_oci::client::{DeleteOutcome, ManifestPresence, OciTransport, ProgressFn};
 //! use ocx_oci::client::error::ClientError;
 //! use ocx_oci::{Descriptor, Digest, Manifest, Reference, RegistryOperation};
 //!
@@ -37,6 +37,8 @@
 //!     async fn push_manifest_raw(&self, _: &Reference, _: Vec<u8>, _: &str) -> Answer<String> { todo!() }
 //!     async fn push_blob(&self, _: &Reference, _: Vec<u8>, _: &Digest, _: ProgressFn) -> Answer<String> { todo!() }
 //!     async fn push_blob_from_path(&self, _: &Reference, _: &Path, _: &Digest, _: ProgressFn) -> Answer<String> { todo!() }
+//!     async fn delete_manifest(&self, _: &Reference) -> Answer<DeleteOutcome> { todo!() }
+//!     async fn probe_manifest(&self, _: &Reference) -> Answer<ManifestPresence> { todo!() }
 //!     async fn push_referrer_manifest(&self, _: &Reference, _: &Digest, _: &[u8], _: &str) -> Answer<Descriptor> { todo!() }
 //!     async fn list_referrers(&self, _: &Reference, _: &Digest, _: Option<&str>) -> Answer<Vec<Descriptor>> { todo!() }
 //!     fn box_clone(&self) -> Box<dyn OciTransport> { todo!() }

@@ -3,7 +3,7 @@
 """`ocx package push --tags-file` -> `ocx package announce --tags-file`
 integration (design register C2, cross-track contract #2).
 
-`push --tags-file` writes a comma-joined, `indexbot`-compatible tag file
+`push --tags-file` writes a one-tag-per-line, `indexbot`-compatible tag file
 (the pushed primary tag plus any cascade tags, deduped on append); this
 proves that file can be fed straight into `announce --tags-file` and unions
 correctly with whatever is already committed.
@@ -40,7 +40,7 @@ def test_push_tags_file_feeds_announce_tags_file_union(
     make_package(ocx, unique_repo, "0.9.0", tmp_path, cascade=False)
 
     # The cascading push under test: writes the pushed tag + cascade tags
-    # (e.g. "1.2.3,1.2,1,latest") to `tags_file`.
+    # (e.g. "1.2.3", "1.2", "1", "latest", one per line) to `tags_file`.
     make_package(
         ocx,
         unique_repo,
@@ -50,10 +50,11 @@ def test_push_tags_file_feeds_announce_tags_file_union(
         extra_push_args=["--tags-file", str(tags_file)],
     )
 
-    file_tags = [tag for tag in tags_file.read_text().split(",") if tag]
+    file_tags = [tag for tag in tags_file.read_text().splitlines() if tag]
     assert "1.2.3" in file_tags, f"the pushed primary tag must be in the tags file: {file_tags}"
     assert "latest" in file_tags, f"a cascading push must record the latest tag: {file_tags}"
-    assert "\n" not in tags_file.read_text(), "the format is comma-joined, not newline-joined"
+    assert "," not in tags_file.read_text(), "the format is one tag per line, not comma-joined"
+    assert tags_file.read_text().endswith("\n"), "every line, the last included, is newline-terminated"
 
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
@@ -113,7 +114,7 @@ def test_push_reports_keep_tags_and_keeps_them_out_of_the_tags_file(
     for tag in keep_tags:
         assert tag.startswith("__ocx.keep.sha256-"), f"a keep tag names the manifest digest, got {tag}"
 
-    file_tags = [tag for tag in tags_file.read_text().split(",") if tag]
+    file_tags = [tag for tag in tags_file.read_text().splitlines() if tag]
     assert "1.0.0" in file_tags, f"the pushed primary tag must be in the tags file: {file_tags}"
     for tag in keep_tags:
         assert tag not in file_tags, (

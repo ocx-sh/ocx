@@ -21,6 +21,8 @@ Scope:
   `name` is a disagreement too. The check needs no `[registries."<domain>"]`
   entry, which the `--out` rows here are what say.
 
+* **Snapshot removal** — vanished rows, empty tags files and canonical observation.
+
 Every run points at a fresh per-test `fake_forge` and the compose registry, the
 same as `test_announce.py`.
 """
@@ -42,6 +44,8 @@ from announce_helpers import (
 )
 from fake_forge import FakeForge
 
+from src.helpers import make_package
+from src.registry import delete_manifest, fetch_manifest_digest
 from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_announce")
@@ -138,24 +142,16 @@ def test_refresh_publishes_a_description_for_a_package_with_no_versions(
     assert second["desc_status"] == "unchanged"
 
 
-def test_a_selection_that_names_no_tag_at_all_still_exits_64(
+def test_an_empty_tags_file_changes_nothing_and_exits_0(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """The half of the old refusal that stays: `--tags-file` is the publisher
-    naming which versions the index should carry, so resolving to nothing means
-    the invocation asked for nothing — and accepting it would retract the whole
-    curated set on the strength of an empty variable.
+    """`--tags-file` lists the tags a run acts on, so an empty file acts on
+    none: the run succeeds, writes nothing and never reaches the index. That is
+    what lets a pipeline whose upstream step found nothing to announce call
+    announce unconditionally.
 
-    This row and `--refresh` above start from the same committed root and differ
-    only in which selection they carry, which is exactly the distinction
-    ocx#487 draws.
-
-    Scope: the empty **file** is the reachable empty set. `--tags ''` is not the
-    same input — clap's comma delimiter turns it into a list of one empty tag
-    name, which the observe loop refuses at exit 79 (`tag  does not resolve`),
-    both before this change and after. `TagSelection::Replace`'s own empty-set
-    refusal is pinned by the unit test `empty_curated_set_is_an_error`, which is
-    where it can be reached at all.
+    The output directory staying absent proves no forge work ran. `--tags ''`
+    is a different input (one malformed tag name, exit 64), pinned below.
     """
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
@@ -163,6 +159,7 @@ def test_a_selection_that_names_no_tag_at_all_still_exits_64(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
     empty_tags_file = tmp_path / "tags.txt"
     empty_tags_file.write_text("")
+    out_dir = tmp_path / "out"
 
     result = announce(
         ocx,
@@ -170,15 +167,15 @@ def test_a_selection_that_names_no_tag_at_all_still_exits_64(
         "--tags-file",
         str(empty_tags_file),
         "--out",
-        str(tmp_path / "out"),
+        str(out_dir),
         package,
         check=False,
     )
 
-    assert result.returncode == 64, (
-        "an empty --tags-file over an empty committed root names no version, which is a "
-        f"usage error; got {result.returncode}: {result.stderr}"
+    assert result.returncode == 0, (
+        f"an empty --tags-file names no version and is a no-op; got {result.returncode}: {result.stderr}"
     )
+    assert not out_dir.exists(), f"a no-op must not write --out; found {sorted(out_dir.rglob('*'))}"
 
 
 # ── ocx#477: the root's name is checked against the identifier ──────────────
@@ -265,30 +262,231 @@ def test_a_matching_name_needs_no_registries_entry_to_get_past_the_check(
     )
 
 
-def test_an_empty_tags_value_names_one_tag_that_does_not_resolve(
+def test_an_empty_tags_value_names_one_malformed_tag(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`--tags ''` is not the empty selection the row above covers.
+    """`--tags ''` is not the empty `--tags-file` the no-op row above covers.
 
-    That row's docstring draws the distinction and nothing held it. clap's
-    comma delimiter splits the value into a list of one *empty tag name*, so
-    the selection is non-empty, reaches the observe loop, and is refused there
-    for a tag that does not resolve — a different exit from the usage error an
-    empty `--tags-file` gets, off two inputs that look alike on a command line.
+    clap's comma delimiter splits the value into a list of one *empty tag
+    name*, so the selection is non-empty, reaches the observe loop, and is
+    refused there as a tag outside the OCI grammar (exit 64) — where an empty
+    `--tags-file` names nothing and succeeds, off two inputs that look alike on
+    a command line.
     """
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_canonical_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    out_dir = tmp_path / "out"
+
+    result = announce(ocx, fake_forge, "--tags", "", "--out", str(out_dir), package, check=False)
+
+    assert result.returncode == 64, (
+        "an empty --tags value names one malformed tag, which is a usage error — not the "
+        f"no-op an empty --tags-file gets; got {result.returncode}: {result.stderr}"
+    )
+    assert "is not a valid OCI tag" in result.stderr, (
+        f"the 64 must be the empty tag's refusal, not another one; stderr: {result.stderr}"
+    )
+    assert not out_dir.exists(), f"a refused run must write nothing; found {sorted(out_dir.rglob('*'))}"
+
+
+# ── snapshot removal: a tag the registry no longer serves ───────────────────
+
+#: A stamp earlier than the pinned announce clock, so a row the run rewrote would
+#: show a different `observed` and a row it carried would not.
+EARLIER_STAMP = "2026-07-01T00:00:00Z"
+
+
+def seed_two_vanished_tags(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> tuple[str, dict[str, dict]]:
+    """Publish `1.0.0`, `2.0.0`, `3.0.0`, delete the first two from the registry, and
+    seed a committed root holding all three: `1.0.0` ephemeral, `2.0.0` and
+    `3.0.0` durable. Returns the package and the seeded rows by tag.
+
+    The deletion is real: the precondition asserts the registry answers not-found
+    for both, so a run that keeps or removes them is reacting to the registry and
+    not to a fixture that never had them.
+    """
+    digests: dict[str, str] = {}
+    for tag in ("1.0.0", "2.0.0", "3.0.0"):
+        make_package(ocx, unique_repo, tag, tmp_path, cascade=False)
+        digests[tag] = fetch_manifest_digest(ocx.registry, unique_repo, tag)
+    for tag in ("1.0.0", "2.0.0"):
+        delete_manifest(ocx.registry, unique_repo, digests[tag])
+        with pytest.raises(RuntimeError):
+            fetch_manifest_digest(ocx.registry, unique_repo, tag)
+
+    rows = {
+        "1.0.0": {"content": digests["1.0.0"], "observed": EARLIER_STAMP, "ephemeral": True},
+        "2.0.0": {"content": digests["2.0.0"], "observed": EARLIER_STAMP},
+        "3.0.0": {"content": digests["3.0.0"], "observed": EARLIER_STAMP},
+    }
+    package = f"acme/{unique_repo}"
+    seed_canonical_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}", tags=rows)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    return package, rows
+
+
+def test_refresh_removes_a_vanished_ephemeral_row_and_reports_a_vanished_durable_one(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--refresh` only re-observes: it removes a vanished row when the row was
+    marked ephemeral, and for a durable row it says so and leaves the row alone.
+
+    `3.0.0` is the control. It is present, durable and unmoved, so its row must
+    come out byte-identical — including the old `observed` stamp — which is what
+    separates "removed the two gone rows" from "rewrote the whole tag map".
+    """
+    package, rows = seed_two_vanished_tags(ocx, fake_forge, unique_repo, tmp_path)
+    out_dir = tmp_path / "out"
+
+    report = announce_json(ocx, fake_forge, "--refresh", "--out", str(out_dir), package)
+
+    assert report["status"] == "updated"
+    assert report["removed"] == ["1.0.0"], "only the ephemeral row is removed by a refresh"
+    assert report["durable_missing"] == ["2.0.0"], "a durable row a refresh finds gone is reported, not removed"
+    written = json.loads((out_dir / "p" / f"{package}.json").read_bytes())
+    assert written["tags"] == {"2.0.0": rows["2.0.0"], "3.0.0": rows["3.0.0"]}
+
+
+def test_naming_a_vanished_durable_tag_removes_it_and_touches_no_other_row(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """Naming a tag is the one gesture that removes a durable row. The ephemeral
+    `1.0.0` is just as gone but the file does not list it, so it stays: a
+    `--tags-file` acts on exactly the tags it names.
+    """
+    package, rows = seed_two_vanished_tags(ocx, fake_forge, unique_repo, tmp_path)
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("2.0.0\n")
+    out_dir = tmp_path / "out"
+
+    report = announce_json(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package)
+
+    assert report["removed"] == ["2.0.0"]
+    assert report["durable_missing"] == []
+    written = json.loads((out_dir / "p" / f"{package}.json").read_bytes())
+    assert written["tags"] == {"1.0.0": rows["1.0.0"], "3.0.0": rows["3.0.0"]}
+
+
+def test_ephemeral_beside_refresh_is_a_usage_error(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--ephemeral` marks the rows a run adds and a refresh adds none, so the
+    pair says nothing coherent. Exit 64, before any registry or forge work."""
+    result = announce(
+        ocx,
+        fake_forge,
+        "--ephemeral",
+        "--refresh",
+        "--out",
+        str(tmp_path / "out"),
+        f"acme/{unique_repo}",
+        check=False,
+    )
+
+    assert result.returncode == 64, f"expected a usage error (64), got {result.returncode}: {result.stderr}"
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_tags_file_naming_a_tag_neither_registry_nor_index_holds_writes_nothing(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A typo in a tags file must not pass for a vanished tag: with no row to
+    remove and nothing at the registry, the run has nothing it could do with the
+    name, so it refuses (exit 79, not-found) and leaves the output untouched."""
+    package = f"acme/{unique_repo}"
+    seed_canonical_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("9.9.9\n")
+    out_dir = tmp_path / "out"
+
+    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package, check=False)
+
+    assert result.returncode == 79, f"expected NotFound (79), got {result.returncode}: {result.stderr}"
+    assert "9.9.9" in result.stderr, f"the refusal must name the tag it could not resolve: {result.stderr}"
+    assert not out_dir.exists(), f"a refused run must write nothing; found {sorted(out_dir.rglob('*'))}"
+
+
+def test_a_tag_outside_the_oci_grammar_exits_64_and_writes_nothing(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A malformed tag in a tags file never reaches a manifest URL: the registry
+    read refuses it before any request, so the run exits 64 and writes no root."""
+    package = f"acme/{unique_repo}"
+    seed_canonical_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("9.9.9#x\n")
+    out_dir = tmp_path / "out"
+
+    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package, check=False)
+
+    assert result.returncode == 64, f"expected a usage error (64), got {result.returncode}: {result.stderr}"
+    assert "is not a valid OCI tag" in result.stderr, f"the 64 must be the tag refusal: {result.stderr}"
+    assert not out_dir.exists(), f"a refused run must write nothing; found {sorted(out_dir.rglob('*'))}"
+
+
+def test_a_fragment_on_a_published_tag_exits_64_instead_of_recording_that_tag(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A URL drops its `#fragment`, so `1.0#x` would fetch `manifests/1.0` and record
+    the published `1.0` under the malformed name; the read refuses it first."""
+    make_package(ocx, unique_repo, "1.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    seed_canonical_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("1.0#x\n")
+    out_dir = tmp_path / "out"
+
+    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package, check=False)
+
+    assert result.returncode == 64, f"expected a usage error (64), got {result.returncode}: {result.stderr}"
+    assert "is not a valid OCI tag" in result.stderr, f"the 64 must be the tag refusal: {result.stderr}"
+    assert not out_dir.exists(), f"a refused run must write nothing; found {sorted(out_dir.rglob('*'))}"
+
+
+def test_tags_are_observed_at_the_canonical_registry_when_a_mirror_is_configured(
+    ocx: OcxRunner, mirror_registry: str, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """The registry that says whether a tag exists is the one the index's root
+    names, never a registry-role mirror standing in for it.
+
+    The mirror here is a live registry that holds nothing for this repository, so
+    a run that read through it would find `1.0.0` gone, then see it present on the
+    canonical follow-up probe and fail as a race (exit 75); the canonical registry
+    holds `1.0.0`, and the row carries the digest it served. The package is pushed before the mirror entry is written,
+    or the push itself would follow the mirror.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    served = fetch_manifest_digest(ocx.registry, unique_repo, "1.0.0")
+    package = f"acme/{unique_repo}"
+    seed_canonical_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    hosts = [registry_host(ocx.registry), registry_host(mirror_registry), "127.0.0.1"]
+    configure_trusted_hosts(ocx, ocx.registry, hosts)
+    with (Path(ocx.env["OCX_HOME"]) / "config.toml").open("a") as config:
+        config.write(f'\n[mirrors."{ocx.registry}"]\nregistry = "http://{mirror_registry}"\n')
+    out_dir = tmp_path / "out"
 
     result = announce(
-        ocx, fake_forge, "--tags", "", "--out", str(tmp_path / "out"), package, check=False
+        ocx,
+        fake_forge,
+        "--tags",
+        "1.0.0",
+        "--out",
+        str(out_dir),
+        package,
+        check=False,
+        # The mirror is plain HTTP, like the canonical registry; without it the config is refused (78).
+        extra_env={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},{mirror_registry}"},
     )
 
-    assert result.returncode == 79, (
-        "an empty --tags value names one unresolvable tag, which is a not-found — not the "
-        f"usage error an empty --tags-file gets; got {result.returncode}: {result.stderr}"
+    assert result.returncode == 0, (
+        f"the tag lives at the canonical registry, so the run must succeed; got {result.returncode}: {result.stderr}"
     )
-    assert "tag  does not resolve" in result.stderr, (
-        f"the 79 must be the empty tag's not-found, not another one; stderr: {result.stderr}"
-    )
+    written = json.loads((out_dir / "p" / f"{package}.json").read_bytes())
+    assert written["tags"]["1.0.0"]["content"] == served

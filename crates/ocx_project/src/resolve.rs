@@ -618,6 +618,9 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::InvalidEncoding(_)
         | ClientError::Digest(_)
         | ClientError::ReferrersUnsupported { .. }
+        | ClientError::DeleteUnsupported { .. }
+        | ClientError::DeleteNeedsTag(_)
+        | ClientError::InvalidTag(_)
         | ClientError::Internal(_) => ClientFailure::Other,
     }
 }
@@ -749,6 +752,18 @@ mod classify_tests {
         assert_other(ClientError::NotAManifest(Box::new(std::io::Error::other(
             "unexpected content type 'text/html'",
         ))));
+    }
+
+    /// A tag delete never runs inside the resolve loop, but the bucket is the decision: a refused
+    /// verb or a malformed delete request is terminal, so it must never enter the retry budget.
+    #[test]
+    fn a_tag_delete_refusal_and_a_delete_usage_error_are_both_other() {
+        assert_other(ClientError::DeleteUnsupported {
+            registry: "registry.test".to_string(),
+            status: 405,
+        });
+        assert_other(ClientError::DeleteNeedsTag("registry.test/repo".to_string()));
+        assert_other(ClientError::InvalidTag("registry.test/repo:a/b".to_string()));
     }
 
     #[test]

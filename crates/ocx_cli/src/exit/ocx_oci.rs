@@ -64,6 +64,8 @@ impl ClassifyExitCode for ClientError {
             Self::RegistryTransient(_) => ExitCode::TempFail,
             Self::ShortBlobRead { .. } => ExitCode::TempFail,
             Self::ReferrersUnsupported { .. } => ExitCode::ReferrersUnsupported,
+            Self::DeleteUnsupported { .. } => ExitCode::RegistryDeleteUnsupported,
+            Self::DeleteNeedsTag(_) | Self::InvalidTag(_) => ExitCode::UsageError,
             Self::DigestMismatch { .. }
             | Self::UnsafeDestination(_)
             | Self::UnfollowedRedirect(_)
@@ -294,6 +296,57 @@ mod tests {
             .classify(),
             Some(ExitCode::TempFail)
         );
+    }
+
+    /// A registry that will not delete tags is an operator's fix, so it gets its own code: 69 and 75
+    /// both read as "retry", and a retry never helps here. Reached through the library-error chain
+    /// walker as well, the way a raised error arrives.
+    #[test]
+    fn a_registry_that_will_not_delete_tags_exits_87() {
+        let error = ClientError::DeleteUnsupported {
+            registry: "registry.test".to_string(),
+            status: 405,
+        };
+        assert_eq!(error.classify(), Some(ExitCode::RegistryDeleteUnsupported));
+        assert_eq!(
+            crate::exit::classify_library_error(&error as &(dyn std::error::Error + 'static)),
+            ExitCode::RegistryDeleteUnsupported
+        );
+    }
+
+    #[test]
+    fn a_tag_outside_the_oci_grammar_is_a_usage_error() {
+        let error = ClientError::InvalidTag("registry.test/owner/tool:a/../b".to_string());
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+        assert_eq!(
+            crate::exit::classify_library_error(&error as &(dyn std::error::Error + 'static)),
+            ExitCode::UsageError
+        );
+    }
+
+    #[test]
+    fn a_tag_delete_without_exactly_one_tag_is_a_usage_error() {
+        let error = ClientError::DeleteNeedsTag("registry.test/owner/tool".to_string());
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+        assert_eq!(
+            crate::exit::classify_library_error(&error as &(dyn std::error::Error + 'static)),
+            ExitCode::UsageError
+        );
+    }
+
+    /// The refusal keeps its code behind mirror routing, like every other client failure.
+    #[test]
+    fn a_mirrored_delete_refusal_still_exits_87() {
+        let mirrored = ClientError::Mirrored {
+            origin: "ghcr.io".to_string(),
+            mirror: "artifactory.example.com".to_string(),
+            physical: "artifactory.example.com/ghcr-remote/owner/tool:1.0".to_string(),
+            source: Box::new(ClientError::DeleteUnsupported {
+                registry: "ghcr.io".to_string(),
+                status: 405,
+            }),
+        };
+        assert_eq!(mirrored.classify(), Some(ExitCode::RegistryDeleteUnsupported));
     }
 
     #[test]

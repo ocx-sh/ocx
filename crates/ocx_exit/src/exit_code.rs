@@ -35,8 +35,9 @@ pub enum ExitCode {
     NotFound = 79,
     /// Authentication failure: registry 401 or 403, missing credentials.
     AuthError = 80,
-    /// A deliberate local policy (offline, frozen) refused a network or resolution operation;
-    /// loosen the flag or pre-populate the local index. A refusal, not a fault like `Unavailable`.
+    /// A deliberate local policy (offline, frozen, the prune safeguard against deleting a
+    /// durable tag) refused an operation; loosen the flag, pre-populate the local index, or pass
+    /// `--force` to prune. A refusal, not a fault like `Unavailable`.
     PolicyBlocked = 81,
     /// A managed shell-integration block carries user edits and was left untouched
     /// (`ocx self setup` without `--force`).
@@ -55,6 +56,10 @@ pub enum ExitCode {
     /// capability the transport needs (job-token push disabled, publisher not allowlisted);
     /// the credential is valid and an administrator, not the caller, must act.
     ForgeCapabilityUnavailable = 86,
+    /// The registry does not delete tags (405, 400 `UNSUPPORTED`, or 400 `DIGEST_INVALID` from a
+    /// registry that deletes by digest only); an operator must enable deletion or use another
+    /// registry, so a retry never helps.
+    RegistryDeleteUnsupported = 87,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -178,6 +183,12 @@ mod tests {
         // "Exit codes — full mapping". 85 was taken by UnsupportedKeyBackend,
         // so 86 is the first free slot.
         assert_eq!(ExitCode::ForgeCapabilityUnavailable as u8, 86);
+    }
+
+    #[test]
+    fn exit_code_registry_delete_unsupported_is_87() {
+        // Tool-specific; 86 was taken by ForgeCapabilityUnavailable, so 87 is the next free slot.
+        assert_eq!(ExitCode::RegistryDeleteUnsupported as u8, 87);
     }
 
     #[test]

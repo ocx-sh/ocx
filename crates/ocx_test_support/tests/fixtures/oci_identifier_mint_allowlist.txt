@@ -29,6 +29,8 @@ ocx_cli/src/command/config_push.rs execute 1
 ocx_cli/src/command/package_copy.rs resolve_target 2
 ocx_cli/src/command/package_description_push.rs execute 1
 ocx_cli/src/command/package_push.rs execute 1
+# A tag delete is a write: prune locates it through the served root's pointer itself.
+ocx_cli/src/command/package_prune.rs execute 1
 ocx_package_manager/src/tasks/patch_publish.rs push_patch_descriptor 1
 
 # Locations that are not packages: the managed-config artifact and the patch

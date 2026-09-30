@@ -16,6 +16,7 @@ pub mod install_info;
 pub mod install_status;
 pub mod libc_lint;
 pub mod metadata;
+pub mod prune;
 pub mod resolved_package;
 pub mod tag;
 pub mod version;

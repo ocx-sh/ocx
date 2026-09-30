@@ -260,6 +260,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
             PackageCmd::Deps(_) => "package deps",
             PackageCmd::Env(_) => "package env",
             PackageCmd::Inspect(_) => "package inspect",
+            PackageCmd::Prune(_) => "package prune",
             PackageCmd::Install(_) => "package install",
             PackageCmd::Pull(_) => "package pull",
             PackageCmd::Push(_) => "package push",

@@ -22,6 +22,7 @@ pub enum ErrorCategory {
     ReferrersUnsupported,
     UnsupportedKeyBackend,
     ForgeCapabilityUnavailable,
+    RegistryDeleteUnsupported,
     IoError,
     Internal,
 }
@@ -47,6 +48,7 @@ impl ErrorCategory {
             ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
             ExitCode::UnsupportedKeyBackend => Self::UnsupportedKeyBackend,
             ExitCode::ForgeCapabilityUnavailable => Self::ForgeCapabilityUnavailable,
+            ExitCode::RegistryDeleteUnsupported => Self::RegistryDeleteUnsupported,
         }
     }
 }
@@ -83,6 +85,10 @@ mod tests {
                 ErrorCategory::ForgeCapabilityUnavailable,
                 "\"forge_capability_unavailable\"",
             ),
+            (
+                ErrorCategory::RegistryDeleteUnsupported,
+                "\"registry_delete_unsupported\"",
+            ),
             (ErrorCategory::IoError, "\"io_error\""),
             (ErrorCategory::Internal, "\"internal\""),
         ];
@@ -91,7 +97,7 @@ mod tests {
         // is an array literal, so `len()` is a compile-time constant.
         assert_eq!(
             cases.len(),
-            14,
+            15,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
         for (variant, expected) in cases {
@@ -131,6 +137,22 @@ mod tests {
     }
 
     #[test]
+    fn error_category_round_trips_87() {
+        // Same two halves as the 86 test: the arm must be the right one, and the wire slug must be
+        // the dedicated one rather than a fold into `internal`.
+        assert_eq!(
+            ErrorCategory::from_exit_code(ExitCode::RegistryDeleteUnsupported),
+            ErrorCategory::RegistryDeleteUnsupported,
+            "exit 87 must classify as its own category, never a fold into another"
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCategory::RegistryDeleteUnsupported).expect("ErrorCategory serializes"),
+            "\"registry_delete_unsupported\"",
+            "envelope error.kind must be the dedicated category, never \"internal\""
+        );
+    }
+
+    #[test]
     fn error_category_total_over_exit_codes() {
         // Totality itself is the compiler's job: `from_exit_code` is an in-crate
         // match with no wildcard, so an unclassified `ExitCode` variant is an
@@ -164,6 +186,10 @@ mod tests {
                 ExitCode::ForgeCapabilityUnavailable,
                 ErrorCategory::ForgeCapabilityUnavailable,
             ),
+            (
+                ExitCode::RegistryDeleteUnsupported,
+                ErrorCategory::RegistryDeleteUnsupported,
+            ),
         ];
         // What this count pins, exactly: a row deleted from the table above.
         // It cannot force a row for a *new* `ExitCode` variant -- `cases` is an
@@ -171,7 +197,7 @@ mod tests {
         // the wildcard-free match's job, not this assertion's.
         assert_eq!(
             cases.len(),
-            17,
+            18,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
         for (code, expected) in cases {

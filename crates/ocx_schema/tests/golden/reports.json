@@ -81,6 +81,9 @@
     "PackageInspect": {
       "$ref": "#/$defs/PackageInspect"
     },
+    "PackagePrune": {
+      "$ref": "#/$defs/PruneOutcome"
+    },
     "PackageReceipt": {
       "$ref": "#/$defs/PackageReceipt"
     },
@@ -442,6 +445,20 @@
             "type": "string"
           },
           "description": "Tags dropped from the curated set because they are reserved.\n\nThe OCX-internal `__ocx` namespace (which carries the keep tag) and the\nfrozen legacy `<algorithm>.<hex>` keep tags. Neither names a version, so\nannounce drops them and reports them here rather than failing the run.\nAlways an array, empty rather than absent."
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags whose rows this run removed from the index because the registry no\nlonger has them. Always an array, empty rather than absent."
+        },
+        "durable_missing": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Durable tags the registry no longer has, found by `--refresh` or\n`--tags-from-registry` and kept in the index; name them with `--tags` or\n`--tags-file` to remove them. Always an array, empty rather than absent."
         }
       },
       "required": [
@@ -458,7 +475,9 @@
         "fork",
         "written_paths",
         "capability_checks",
-        "reserved_tags_dropped"
+        "reserved_tags_dropped",
+        "removed",
+        "durable_missing"
       ],
       "description": "Result of a successful `ocx package announce`.\n\nPlain format: a one-row table (`Package`, `Status`, `Pull Request`, `Fork`,\n`Written Paths`); a dash marks a field the mode did not produce, and\n`Written Paths` is a count, not the list. Every other key is JSON-only; the\ncommand warns about dropped reserved tags on stderr when there are any.\n\nJSON format: an object with one key per field below, in that order; every\nvalue vocabulary is closed as its field states."
     },
@@ -3132,6 +3151,210 @@
         "digests"
       ],
       "description": "One repository resolved to two or more distinct digests on the interface\nprojection."
+    },
+    "PruneOutcome": {
+      "type": "object",
+      "properties": {
+        "package": {
+          "$ref": "#/$defs/OciIdentifier"
+        },
+        "repository": {
+          "$ref": "#/$defs/OciIdentifier"
+        },
+        "selection": {
+          "$ref": "#/$defs/PruneSelection"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PruneIndexReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PruneTag"
+          }
+        }
+      },
+      "required": [
+        "package",
+        "repository",
+        "selection",
+        "force",
+        "dry_run",
+        "index",
+        "tags"
+      ],
+      "description": "What a run did, in processing order; printed whether or not the run failed."
+    },
+    "PruneSelection": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "tags"
+          ],
+          "description": "Exactly these tags, deduplicated, in input order."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "prerelease": {
+              "$ref": "#/$defs/PackageVersion",
+              "description": "A pre-release without a build, e.g. `0.5.0-canary`."
+            },
+            "keep_builds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 1,
+              "description": "Keep the newest this many builds and the rolling tag; at least 1."
+            }
+          },
+          "required": [
+            "prerelease",
+            "keep_builds"
+          ],
+          "description": "Every build of one pre-release, plus its rolling tag."
+        }
+      ],
+      "description": "Which tags a run considers."
+    },
+    "PruneIndexReport": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "root_sha256": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "url",
+        "root_sha256"
+      ],
+      "description": "The index a run read, as reported."
+    },
+    "PruneTag": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The root row's content, else the digest the registry served, else `null`."
+        },
+        "action": {
+          "$ref": "#/$defs/PruneAction"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PruneReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "tag",
+        "digest",
+        "action",
+        "reason"
+      ],
+      "description": "One row of the report."
+    },
+    "PruneAction": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "deleted",
+          "description": "This run deleted it."
+        },
+        {
+          "type": "string",
+          "const": "absent",
+          "description": "Already gone from the registry."
+        },
+        {
+          "type": "string",
+          "const": "would_delete",
+          "description": "A dry run would delete it."
+        },
+        {
+          "type": "string",
+          "const": "kept",
+          "description": "Selected, then kept by `--keep-builds`."
+        },
+        {
+          "type": "string",
+          "const": "refused",
+          "description": "The safeguard refused it."
+        },
+        {
+          "type": "string",
+          "const": "not_attempted",
+          "description": "Never reached: an earlier refusal or error stopped the run."
+        }
+      ],
+      "description": "The final state of one selected tag."
+    },
+    "PruneReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "newest",
+          "description": "One of the newest `--keep-builds` builds."
+        },
+        {
+          "type": "string",
+          "const": "rolling",
+          "description": "The pre-release's own tag, kept under `--keep-builds`."
+        },
+        {
+          "type": "string",
+          "const": "durable",
+          "description": "The index lists it without the ephemeral marker."
+        },
+        {
+          "type": "string",
+          "const": "not_in_index",
+          "description": "The registry has it but the index does not list it."
+        }
+      ],
+      "description": "Why a tag was kept or refused."
     },
     "PackageReceipt": {
       "type": "object",

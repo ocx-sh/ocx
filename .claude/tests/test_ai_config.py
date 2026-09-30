@@ -2079,6 +2079,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "package_pull": "package pull",
         "package_receipt": "package receipt",
         "package_push": "package push",
+        "package_prune": "package prune",
         "package_sbom": "package sbom",
         "package_announce": "package announce",
         "package_claim": "package claim",

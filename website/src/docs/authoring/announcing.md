@@ -94,14 +94,14 @@ unconditionally — see [Who reviews it, and what happens after](#announcing-rev
 
 An announce run re-observes a set of registry tags and rebuilds the entry from what it finds.
 Which tags make up that set is the one required choice, and the four modes differ in whether
-they *replace* the committed set or *add* to it:
+they *replace* the committed set or act only on the tags they are given:
 
 | Mode | Effect on the committed set |
 |---|---|
 | `--tags 1.2.0,latest` | **Replaces** it. A committed tag not named here is dropped |
-| `--tags-file <path>` | **Adds** the file's tags (comma- or newline-separated). Never removes one |
-| `--tags-from-registry` | **Adds** every tag the registry repository currently holds. Never removes one |
-| `--refresh` | Changes nothing about *which* tags are curated; re-observes them all, picking up a digest that moved under a rolling tag like `latest` |
+| `--tags-file <path>` | **Adds, updates or removes** the file's tags (comma- or newline-separated). A listed tag the registry no longer has is removed; a row the file does not list is left as it is |
+| `--tags-from-registry` | **Adds** every tag the registry repository currently holds. Removes an ephemeral row whose tag is gone, and reports a durable one |
+| `--refresh` | Adds no tag; re-observes them all, picking up a digest that moved under a rolling tag like `latest`. Removes an ephemeral row whose tag is gone, and reports a durable one |
 
 `--tags-file` is the mode a release pipeline wants, because
 [`ocx package push --tags-file <path>`][cmd-package-push] writes that file as it pushes: the
@@ -136,6 +136,32 @@ one that should no longer be installed, and `--unyank <tag>` clears the marker. 
 publisher signal, not a delete: resolving a yanked tag is refused by default and
 [`OCX_ALLOW_YANKED`][env-ocx-allow-yanked] opts back in, while a resolve already pinned to the
 digest never needs that opt-in, because immutable content cannot itself be yanked.
+
+### Snapshot tags {#announcing-snapshots}
+
+A snapshot build is a tag meant to disappear: a canary, or the build of an open change request.
+The index should list it while it exists and stop listing it once the registry drops it. A
+durable row must never vanish unseen, so the index has to tell the two kinds apart.
+
+`--ephemeral` marks each row the run *adds* with `"ephemeral": true`. The marker never changes
+on a row already in the index, and it has no effect on removals. Push ephemeral builds with
+`--no-keep-tag`, or [prune][cmd-package-prune] frees no storage: the keep tag pins the manifest
+after the tag itself is gone.
+
+Removal follows the registry. Announce reads the canonical registry, never a mirror or a cache,
+and a given tag it reports as `MANIFEST_UNKNOWN` is gone.
+
+| Row in the committed entry | Reached by | Result |
+|---|---|---|
+| Ephemeral | any mode | Removed |
+| Durable | `--tags`, `--tags-file` | Removed, because you named it. [Review](#announcing-review) still applies on a governed index |
+| Durable | `--refresh`, `--tags-from-registry` | Kept and listed in `durable_missing`, exit 0 |
+| None | any mode | Exit 79, so a typo stays an error |
+
+Schedule `--refresh` to converge the index, never `--tags-from-registry`. A snapshot that was
+pushed but not yet announced with `--ephemeral` becomes a durable row under
+`--tags-from-registry`, and every later prune of it is refused. The whole loop, with CI
+examples, is in [Snapshot tracks][ug-snapshot-tracks].
 
 ## Choosing a posture {#announcing-postures}
 
@@ -401,6 +427,16 @@ route to which lane. Getting the owner list right at claim time is what makes yo
 pipeline unattended later. A self-hosted index sets its own rules — check with whoever runs
 it.
 
+Removing a row has its own lane. On a bot-governed index, the bot merges the removal of an
+[ephemeral row](#announcing-snapshots) once it confirms `MANIFEST_UNKNOWN` from the canonical
+registry. If the tag is still present, or the bot cannot check, a person reviews it.
+
+The removal of a durable row always goes to a person, whichever identity announced it. Adding or
+changing the `ephemeral` marker on an existing row is reviewed too.
+
+With `--out`, or on an index no bot governs, nothing reviews the change. A durable tag you name
+is then removed on your word. A durable row you did not name is never touched.
+
 Re-running a claim is always safe, before or after its request merges. Nothing new to say
 reports `status: unchanged` and opens no request; a genuine change — a new `--owner`, a moved
 description — adds itself to the committed entry and reports `updated`. Neither path ever
@@ -493,6 +529,7 @@ back into an install.
 [winget-submit]: https://learn.microsoft.com/en-us/windows/package-manager/package/repository
 
 <!-- commands -->
+[cmd-package-prune]: ../reference/command-line.md#package-prune
 [cmd-package-claim]: ../reference/command-line.md#package-claim
 [cmd-package-announce]: ../reference/command-line.md#package-announce
 [cmd-package-push]: ../reference/command-line.md#package-push
@@ -512,6 +549,7 @@ back into an install.
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
 
 <!-- internal -->
+[ug-snapshot-tracks]: ../user-guide/snapshot-tracks.md
 [in-depth-indices]: ../in-depth/indices.md
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 [in-depth-indices-status]: ../in-depth/indices.md#public-index-status

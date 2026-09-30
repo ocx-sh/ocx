@@ -293,7 +293,8 @@ pub fn parse_tags_file(bytes: &[u8]) -> Vec<String> {
 }
 
 /// Appends `tags` onto `existing`, deduping (first occurrence wins) while
-/// preserving order, and returns the comma-joined content to write back.
+/// preserving order, and returns the content to write back: one tag per line,
+/// each newline-terminated, and empty when there are no tags.
 pub fn merge_tags_file(existing: &[String], tags: &[String]) -> String {
     let mut merged = existing.to_vec();
     for tag in tags {
@@ -301,7 +302,26 @@ pub fn merge_tags_file(existing: &[String], tags: &[String]) -> String {
             merged.push(tag.clone());
         }
     }
-    merged.join(",")
+    merged.iter().map(|tag| format!("{tag}\n")).collect()
+}
+
+/// Appends `tags` onto the tags-file at `path` (created if absent), deduping against what is
+/// already there. Written even when there is nothing to add, so an unconditional
+/// `announce --tags-file` finds a file.
+///
+/// The file is replaced by rename, so a reader never sees a half-written list.
+pub async fn append_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    // Bounded, not a bare `fs::read`, or `--tags-file /dev/zero` reads until memory runs out.
+    let existing = crate::options::tags::read_tags_file_if_present(path).await?;
+    let merged = merge_tags_file(&existing, tags);
+    let target = path.to_path_buf();
+    tokio::task::spawn_blocking(move || ocx_util::fs::write_bytes_atomic(&target, merged.as_bytes()))
+        .await
+        .context("tags file writer panicked")?
+        .map_err(|error| ocx_util::error::FileError::new(path, error))
+        .with_context(|| format!("writing tags file {}", path.display()))
 }
 
 /// Export resolved env entries into a CI system's persistence channel; `--export-file` is refused for GitHub.
@@ -402,8 +422,9 @@ pub const fn not_eval_safe_advisory(is_json: bool, stdout_is_terminal: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, not_eval_safe_advisory,
-        parse_tags_file, resolve_ci_arg, resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
+        append_tags_file, emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file,
+        not_eval_safe_advisory, parse_tags_file, resolve_ci_arg, resolve_receipt_path, resolve_shell_arg,
+        resolved_lazy_mode,
     };
     use crate::error::UsageError;
     use ocx_oci::layer_ref::LayerRef;
@@ -649,6 +670,56 @@ mod tests {
 
     // ── announce tag-file wire format (design register C2) ──────────────────
 
+    #[tokio::test]
+    async fn append_tags_file_creates_merges_and_dedupes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("announce.txt");
+        let tags = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+        append_tags_file(&path, &tags(&["3.28.1", "3.28", "3"]))
+            .await
+            .expect("first append succeeds");
+        append_tags_file(&path, &tags(&["3.28.2", "3.28"]))
+            .await
+            .expect("second append succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "3.28.1\n3.28\n3\n3.28.2\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_tags_file_writes_an_empty_file_and_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("announce.txt");
+
+        append_tags_file(&path, &[]).await.expect("an empty write succeeds");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("announce.txt")]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_tags_file_writes_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("announce.txt");
+
+        append_tags_file(&path, &["3.28".to_string()])
+            .await
+            .expect("append succeeds");
+
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     #[test]
     fn parse_tags_file_splits_on_commas_and_newlines_and_trims() {
         let tags = parse_tags_file(b"3.28.1,3.28,3\nlatest\r\n , 1.0.0 ,");
@@ -672,14 +743,28 @@ mod tests {
     #[test]
     fn merge_tags_file_pushes_the_pushed_tag_and_cascade() {
         let merged = merge_tags_file(&[], &["3.28.1".to_string(), "3.28".to_string(), "3".to_string()]);
-        assert_eq!(merged, "3.28.1,3.28,3");
+        assert_eq!(merged, "3.28.1\n3.28\n3\n");
     }
 
     #[test]
     fn merge_tags_file_dedupes_overlapping_appends_preserving_order() {
         let existing = parse_tags_file(b"3.28.1,3.28,3,latest");
         let merged = merge_tags_file(&existing, &["3.28.2".to_string(), "latest".to_string()]);
-        assert_eq!(merged, "3.28.1,3.28,3,latest,3.28.2");
+        assert_eq!(merged, "3.28.1\n3.28\n3\nlatest\n3.28.2\n");
+    }
+
+    #[test]
+    fn merge_tags_file_of_nothing_is_an_empty_file() {
+        assert_eq!(merge_tags_file(&[], &[]), "");
+    }
+
+    #[test]
+    fn merge_tags_file_reads_an_old_comma_file_and_rewrites_it_as_lines() {
+        let existing = parse_tags_file(b"3.28.1,3.28,3");
+        assert_eq!(existing, ["3.28.1", "3.28", "3"]);
+        let merged = merge_tags_file(&existing, &[]);
+        assert_eq!(merged, "3.28.1\n3.28\n3\n");
+        assert_eq!(parse_tags_file(merged.as_bytes()), existing);
     }
 
     // ── cascade exit codes ──────────────────────────────────────────────────

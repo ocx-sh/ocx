@@ -71,24 +71,38 @@ pub struct PackageAnnounce {
     )]
     tags: Vec<String>,
 
-    /// Add the tags listed in this file to the already-committed curated set.
-    /// The file holds comma- or newline-separated tag names. Never removes a
-    /// committed tag; use `--tags` for that.
+    /// Add, update or remove the tags listed in this file: a listed tag the
+    /// registry no longer has is removed from the index. Rows the file does not
+    /// list are left as they are.
+    ///
+    /// The file holds comma- or newline-separated tag names. An empty file
+    /// changes nothing.
     #[clap(long = "tags-file", value_name = "PATH", conflicts_with_all = ["refresh", "tags_from_registry"])]
     tags_file: Option<PathBuf>,
 
-    /// Add every tag the package's registry repository currently holds to the
-    /// already-committed curated set. Use it to announce versions that were
-    /// published before the package was in the index, or that an earlier
-    /// announce missed. Never removes a committed tag, and a yanked tag stays
+    /// Add every tag the registry holds; remove ephemeral rows whose tag is
+    /// gone, and report durable ones.
+    ///
+    /// Use it to announce versions that were published before the package was
+    /// in the index, or that an earlier announce missed. A yanked tag stays
     /// yanked.
     #[clap(long = "tags-from-registry", conflicts_with = "refresh")]
     tags_from_registry: bool,
 
-    /// Re-observe every already-committed tag, picking up a digest that moved
-    /// (e.g. `latest`) without changing which tags are curated.
+    /// Re-observe every committed tag; remove ephemeral rows whose tag is gone,
+    /// and report durable ones.
+    ///
+    /// Also picks up a digest that moved (e.g. `latest`).
     #[clap(long = "refresh")]
     refresh: bool,
+
+    /// Mark the tags this run adds as removable without review.
+    ///
+    /// A tag already in the index keeps the marker it has. Push ephemeral
+    /// builds with `--no-keep-tag`, or prune frees no storage. A keep tag pins
+    /// the manifest past the tag's deletion.
+    #[clap(long = "ephemeral", conflicts_with = "refresh")]
+    ephemeral: bool,
 
     /// Where the request is written, and how it gets there.
     #[command(flatten)]
@@ -168,6 +182,8 @@ impl PackageAnnounce {
             // The client's own plain-HTTP allowance, so the pre-flight picks the dial scheme, and hence the
             // proxy variable, the client will actually use.
             insecure_hosts: context.insecure_hosts().to_vec(),
+            ephemeral: self.ephemeral,
+            run_url: run_url(|key| ocx_util::env::var(key)),
         };
 
         // Before the forge is built, so a missing or too-old git exits 69 with zero forge calls; gated on
@@ -209,6 +225,19 @@ impl PackageAnnounce {
                 outcome.reserved_tags_dropped.join(", ")
             ));
         }
+        // The plain table has no column for these, so stderr is the only place a plain run reports them.
+        if !outcome.removed.is_empty() {
+            context.ui().warn(format!(
+                "gone from the registry, removed from the index: {}",
+                outcome.removed.join(", ")
+            ));
+        }
+        if !outcome.durable_missing.is_empty() {
+            context.ui().warn(format!(
+                "gone from the registry, kept in the index; name them with --tags or --tags-file to remove them: {}",
+                outcome.durable_missing.join(", ")
+            ));
+        }
 
         context.api().report(&AnnounceReport::from_outcome(
             outcome,
@@ -228,6 +257,26 @@ impl PackageAnnounce {
             (None, None) => AnnounceTarget::Direct,
         }
     }
+}
+
+/// The URL of the CI run making this announce: GitLab's job URL, else the GitHub Actions run URL
+/// assembled from its three parts, else none. A blank variable counts as unset.
+fn run_url(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let read = |key: &str| {
+        var(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(job) = read("CI_JOB_URL") {
+        return Some(job);
+    }
+    let server = read("GITHUB_SERVER_URL")?;
+    let repository = read("GITHUB_REPOSITORY")?;
+    let run_id = read("GITHUB_RUN_ID")?;
+    Some(format!(
+        "{}/{repository}/actions/runs/{run_id}",
+        server.trim_end_matches('/')
+    ))
 }
 
 #[cfg(test)]
@@ -620,6 +669,133 @@ mod tests {
                 "{selection:?} alone must be a valid selection"
             );
         }
+    }
+
+    #[test]
+    fn ephemeral_with_refresh_is_a_usage_error() {
+        let error =
+            PackageAnnounce::try_parse_from(["announce", "--refresh", "--ephemeral", "--out", "d", "acme/widget"])
+                .err()
+                .expect("--ephemeral beside --refresh must not parse");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        let args = PackageAnnounce::try_parse_from([
+            "announce",
+            "--tags-file",
+            "t",
+            "--ephemeral",
+            "--out",
+            "d",
+            "acme/widget",
+        ])
+        .expect("--ephemeral beside --tags-file parses");
+        assert!(args.ephemeral);
+    }
+
+    /// `--ephemeral` describes the rows a run adds, so it rides beside every
+    /// selection that adds rows and is refused only beside `--refresh`, which
+    /// adds none. Looping over all four keeps a selection left out of the
+    /// conflict declaration from going unseen.
+    #[test]
+    fn ephemeral_composes_with_every_selection_except_refresh() {
+        for selection in &TAG_SELECTION_ARGV {
+            let mut argv = vec!["announce", "--ephemeral", "--out", "d"];
+            argv.extend_from_slice(selection);
+            argv.push("acme/widget");
+            let parsed = PackageAnnounce::try_parse_from(&argv);
+            if selection.contains(&"--refresh") {
+                assert_eq!(
+                    parsed
+                        .err()
+                        .expect("--ephemeral beside --refresh must not parse")
+                        .kind(),
+                    ErrorKind::ArgumentConflict,
+                    "{selection:?} with --ephemeral must be a conflict"
+                );
+            } else {
+                assert!(
+                    parsed.expect("--ephemeral beside an adding selection parses").ephemeral,
+                    "{selection:?} with --ephemeral must set the flag"
+                );
+            }
+        }
+    }
+
+    /// Every one of the four help texts is rendered by `ocx package announce
+    /// --help`, worded as the user contract. Each needle is a whole sentence, so
+    /// a reworded clause reds its own row.
+    #[test]
+    fn announce_help_states_how_each_tag_flag_treats_a_vanished_tag() {
+        let help = rendered_long_help(["package", "announce"]);
+        for sentence in [
+            "Add, update or remove the tags listed in this file: a listed tag the registry no \
+             longer has is removed from the index. Rows the file does not list are left as \
+             they are.",
+            "Add every tag the registry holds; remove ephemeral rows whose tag is gone, and \
+             report durable ones.",
+            "Re-observe every committed tag; remove ephemeral rows whose tag is gone, and \
+             report durable ones.",
+            "Mark the tags this run adds as removable without review.",
+        ] {
+            assert!(
+                help.contains(sentence),
+                "ocx package announce --help must state {sentence:?}; rendered help: {help}"
+            );
+        }
+    }
+
+    /// The `--ephemeral` long help says when to disable the keep tag: an
+    /// ephemeral build that keeps its keep tag leaves the registry holding the
+    /// manifest, so pruning frees nothing.
+    #[test]
+    fn ephemeral_help_says_to_push_with_no_keep_tag() {
+        let help = rendered_long_help(["package", "announce"]);
+        assert!(
+            help.contains("Push ephemeral builds with `--no-keep-tag`, or prune frees no storage."),
+            "the --ephemeral long help must carry the keep-tag guidance; rendered help: {help}"
+        );
+    }
+
+    /// An empty `--tags-file` is documented as a no-op, so the promise is in the
+    /// same rendered text a user reads.
+    #[test]
+    fn tags_file_help_says_an_empty_file_changes_nothing() {
+        let help = rendered_long_help(["package", "announce"]);
+        assert!(
+            help.contains("An empty file changes nothing."),
+            "the --tags-file long help must state the empty-file behaviour; rendered help: {help}"
+        );
+    }
+
+    #[test]
+    fn run_url_prefers_gitlab_then_assembles_github_then_none() {
+        let from = |pairs: &'static [(&'static str, &'static str)]| {
+            super::run_url(move |key| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).to_string())
+            })
+        };
+        const GITHUB: &[(&str, &str)] = &[
+            ("GITHUB_SERVER_URL", "https://github.com/"),
+            ("GITHUB_REPOSITORY", "acme/widget"),
+            ("GITHUB_RUN_ID", "42"),
+        ];
+        assert_eq!(
+            from(&[
+                ("CI_JOB_URL", "https://gitlab.com/acme/widget/-/jobs/7"),
+                ("GITHUB_RUN_ID", "42")
+            ])
+            .as_deref(),
+            Some("https://gitlab.com/acme/widget/-/jobs/7")
+        );
+        assert_eq!(from(&[("CI_JOB_URL", "  ")]), None, "a blank job URL counts as unset");
+        assert_eq!(
+            from(GITHUB).as_deref(),
+            Some("https://github.com/acme/widget/actions/runs/42")
+        );
+        assert_eq!(from(&GITHUB[..2]), None, "a GitHub run URL needs all three parts");
+        assert_eq!(from(&[]), None);
     }
 
     #[test]

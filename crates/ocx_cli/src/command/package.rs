@@ -57,6 +57,8 @@ pub enum Package {
     Inspect(super::package_inspect::PackageInspect),
     /// Install packages from a local or remote index (no `ocx.toml` touched).
     Install(super::install::Install),
+    // No doc comment: see `Announce` above; `PackagePrune`'s `long_about` is the help.
+    Prune(super::package_prune::PackagePrune),
     /// Downloads packages into the local object store without creating install symlinks.
     Pull(super::package_pull::PackagePull),
     /// Publish a package's layers and metadata to a registry.
@@ -115,6 +117,7 @@ impl Package {
             Package::Env(env) => env.execute(context).await,
             Package::Inspect(inspect) => inspect.execute(context).await,
             Package::Install(install) => install.execute(context).await,
+            Package::Prune(prune) => prune.execute(context).await,
             Package::Pull(pull) => pull.execute(context).await,
             Package::Push(deploy) => deploy.execute(context).await,
             Package::Receipt(receipt) => receipt.execute(context).await,
