@@ -53,7 +53,7 @@ impl Lock {
 
         let new_lock = match guard.previous_lock().cloned() {
             // Clean: carry every pin forward; advancing a moved tag here would silently do `ocx update`'s job.
-            Some(prev) if prev.metadata.declaration_hash == staged.config().declaration_hash_cached() => {
+            Some(prev) if prev.is_current(staged.config()) => {
                 resolve_lock_touched(
                     staged.config(), // candidate
                     staged.config(), // pre-mutation snapshot (lock-only: identical to candidate)
@@ -88,6 +88,8 @@ impl Lock {
         };
         let scope = context.toolchain_render_scope(&config_path).await?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
+        // Cloned before the commit consumes `staged`; the eager pull binds the new lock to it.
+        let config = staged.config().clone();
         let commit = render_manager
             .commit_and_render(
                 guard,
@@ -106,7 +108,7 @@ impl Lock {
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
         // After the commit: a failed download leaves the lock committed.
-        materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
+        materialize_lock(&context, &new_lock, &config, eager, platform.clone()).await?;
 
         let project_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         if !gitattributes_has_merge_union(project_dir).await {

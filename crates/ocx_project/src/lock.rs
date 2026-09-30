@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::error::{ProjectError, ProjectErrorKind};
-use ocx_oci::{Digest, PackageRef, Platform};
+use ocx_oci::{Digest, PackageRef, PinnedPackageRef, Platform, Repository, Selection};
 
 /// The `ocx.lock` beside `config_path`, whatever the config's name.
 ///
@@ -92,7 +92,7 @@ pub struct LockMetadata {
 /// Only `lock_version` `3` is accepted, every tool's `repository` must be bare
 /// and every platform key canonical.
 // The version check runs before the full parse, so a foreign version never surfaces as a shape error.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectLock {
     /// Lock metadata header (version, declaration hash, generator, etc.).
@@ -112,7 +112,7 @@ pub struct ProjectLock {
 /// platform leaf. `platforms` records one leaf digest per shipped platform,
 /// keyed by the canonical platform string; a platform the publisher does not
 /// ship has no key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockedTool {
     /// Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).
@@ -121,11 +121,313 @@ pub struct LockedTool {
     /// `[tools]` table; otherwise the named `[group.*]` key.
     pub group: String,
     /// Bare registry/repo coordinates shared by every platform leaf.
-    pub repository: PackageRef,
+    #[schemars(with = "PackageRef")]
+    pub repository: Repository,
     /// Available-only per-platform leaf digests, keyed by the canonical
     /// platform string (`os/arch[/variant][+feature,...]` or `any`).
     // `BTreeMap<String, _>`: byte-stable output without `Ord` on `Platform`.
     pub platforms: BTreeMap<String, Digest>,
+}
+
+impl LockedTool {
+    /// The leaf digest this entry pins for `platform`, via
+    /// [`crate::resolve::lookup_host_leaf`].
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectErrorKind::NoHostLeaf`] when no leaf fits the host;
+    /// [`ProjectErrorKind::AmbiguousHostLeaf`] when two tie. Kept distinct: the remedies differ.
+    pub fn host_leaf(&self, platform: &Platform) -> Result<Digest, super::Error> {
+        match super::resolve::lookup_host_leaf(&self.platforms, platform) {
+            Selection::Found((leaf, _key)) => Ok(leaf.clone()),
+            Selection::None => Err(ProjectError::new(
+                PathBuf::new(),
+                ProjectErrorKind::NoHostLeaf {
+                    name: self.name.clone(),
+                    platform: platform.to_string(),
+                },
+            )
+            .into()),
+            Selection::Ambiguous(candidates) => Err(ProjectError::new(
+                PathBuf::new(),
+                ProjectErrorKind::AmbiguousHostLeaf {
+                    name: self.name.clone(),
+                    platform: platform.to_string(),
+                    candidates: candidates.into_iter().map(|(_, key)| key.to_string()).collect(),
+                },
+            )
+            .into()),
+        }
+    }
+}
+
+/// On-disk mirror of [`ProjectLock`], parsed before the bare-repository check.
+// `Repository`'s own `Deserialize` would surface a tagged value as `TomlParse`
+// instead of the typed `LockRepositoryNotBare` (exit 78).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProjectLock {
+    metadata: LockMetadata,
+    #[serde(default, rename = "tool")]
+    tools: Vec<RawLockedTool>,
+}
+
+/// On-disk mirror of [`LockedTool`], with `repository` still untyped.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLockedTool {
+    name: String,
+    group: String,
+    repository: PackageRef,
+    platforms: BTreeMap<String, Digest>,
+}
+
+impl RawProjectLock {
+    /// # Errors
+    ///
+    /// [`ProjectErrorKind::LockRepositoryNotBare`] for a tagged or digested `repository`.
+    fn into_lock(self, path: &Path) -> Result<ProjectLock, super::Error> {
+        let tools = self
+            .tools
+            .into_iter()
+            .map(|raw| {
+                if raw.repository.tag().is_some() || raw.repository.digest().is_some() {
+                    return Err(ProjectError::new(
+                        path.to_path_buf(),
+                        ProjectErrorKind::LockRepositoryNotBare {
+                            value: raw.repository.to_string(),
+                        },
+                    )
+                    .into());
+                }
+                Ok(LockedTool {
+                    name: raw.name,
+                    group: raw.group,
+                    repository: Repository::from(&raw.repository),
+                    platforms: raw.platforms,
+                })
+            })
+            .collect::<Result<Vec<_>, super::Error>>()?;
+        Ok(ProjectLock {
+            metadata: self.metadata,
+            tools,
+        })
+    }
+}
+
+/// A [`ProjectLock`] joined to the `ocx.toml` it was locked from, by
+/// [`ProjectLock::bind`].
+#[derive(Debug, Clone)]
+pub enum Binding {
+    /// Every lock entry paired with its declaration, in lock order.
+    Current(Vec<BoundTool>),
+    /// The lock no longer describes the declarations.
+    Stale(Box<LockDrift>),
+}
+
+/// Why a [`ProjectLock`] no longer binds to its `ocx.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockDrift {
+    /// `ocx.toml` changed since the lock was written.
+    DeclarationHash {
+        previous_hash: String,
+        current_hash: String,
+    },
+    /// One entry's declaration is gone or names another repository, under an
+    /// unchanged hash. `declared` is `None` when `ocx.toml` no longer declares it.
+    Entry {
+        group: String,
+        name: String,
+        locked: Repository,
+        declared: Option<Repository>,
+    },
+}
+
+impl std::fmt::Display for LockDrift {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeclarationHash {
+                previous_hash,
+                current_hash,
+            } => write!(f, "declaration_hash {current_hash} != locked {previous_hash}"),
+            Self::Entry {
+                group,
+                name,
+                locked,
+                declared: Some(declared),
+            } => write!(
+                f,
+                "binding '{name}' in group '{group}' is locked from {locked} but declared as {declared}"
+            ),
+            Self::Entry {
+                group,
+                name,
+                locked,
+                declared: None,
+            } => write!(
+                f,
+                "binding '{name}' in group '{group}' is locked from {locked} but no longer declared"
+            ),
+        }
+    }
+}
+
+/// One [`LockedTool`] paired with the identifier `ocx.toml` declares for its
+/// `(group, name)`. Only [`ProjectLock::bind`] builds one, so a tag carried onto
+/// a lock digest always comes from the declaration the lock was made from.
+#[derive(Debug, Clone)]
+pub struct BoundTool {
+    locked: LockedTool,
+    declared: PackageRef,
+}
+
+impl BoundTool {
+    pub fn locked(&self) -> &LockedTool {
+        &self.locked
+    }
+
+    /// The full declaration, a declared digest included.
+    pub fn declared(&self) -> &PackageRef {
+        &self.declared
+    }
+
+    /// The declaration's tag; `None` for a digest-only declaration.
+    pub fn advisory_tag(&self) -> Option<&str> {
+        self.declared.tag()
+    }
+
+    /// `registry/repository[:tag]@<leaf>` for the host leaf of `platform`; a
+    /// declared digest yields to the lock's leaf.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectErrorKind::NoHostLeaf`] when no leaf fits the host;
+    /// [`ProjectErrorKind::AmbiguousHostLeaf`] when two tie. Kept distinct: the remedies differ.
+    pub fn host_leaf_identifier(&self, platform: &Platform) -> Result<PinnedPackageRef, super::Error> {
+        tagged_host_leaf(&self.locked, &self.declared, platform)
+    }
+}
+
+/// `declared` with its digest replaced by the lock's host leaf.
+fn tagged_host_leaf(
+    locked: &LockedTool,
+    declared: &PackageRef,
+    platform: &Platform,
+) -> Result<PinnedPackageRef, super::Error> {
+    // `declarations` admits only a declaration naming the lock's repository.
+    Ok(PinnedPackageRef::pin(declared, locked.host_leaf(platform)?))
+}
+
+/// One entry per distinct content (registry, repository, digest), in input
+/// order: a later tag on content already kept is dropped, so the first tag wins.
+pub fn first_per_content<T>(entries: impl IntoIterator<Item = (T, PinnedPackageRef)>) -> Vec<(T, PinnedPackageRef)> {
+    let mut kept: Vec<(T, PinnedPackageRef)> = Vec::new();
+    for (item, identifier) in entries {
+        // ponytail: O(n²) over a handful of tools; a HashSet buys nothing at this scale.
+        if !kept.iter().any(|(_, known)| known.eq_content(&identifier)) {
+            kept.push((item, identifier));
+        }
+    }
+    kept
+}
+
+impl ProjectLock {
+    /// Join every entry to its `ocx.toml` declaration by `(group, name)`. Pure;
+    /// never errors — a lock that cannot be joined is [`Binding::Stale`].
+    pub fn bind(&self, config: &crate::ProjectConfig) -> Binding {
+        match self.declarations(config) {
+            Ok(pairs) => Binding::Current(
+                pairs
+                    .into_iter()
+                    .map(|(locked, declared)| BoundTool {
+                        locked: locked.clone(),
+                        declared,
+                    })
+                    .collect(),
+            ),
+            Err(drift) => Binding::Stale(drift),
+        }
+    }
+
+    /// [`Self::bind`], refusing a stale lock.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectErrorKind::LockOutOfSync`] naming the drift.
+    pub fn bind_current(&self, config: &crate::ProjectConfig) -> Result<Vec<BoundTool>, super::Error> {
+        match self.bind(config) {
+            Binding::Current(bound) => Ok(bound),
+            Binding::Stale(drift) => {
+                Err(ProjectError::new(PathBuf::new(), ProjectErrorKind::LockOutOfSync { drift }).into())
+            }
+        }
+    }
+
+    /// Whether this lock binds to `config`: [`Self::bind`] would answer
+    /// [`Binding::Current`]. The one currency test; allocation-free, as it runs every prompt.
+    #[must_use]
+    pub fn is_current(&self, config: &crate::ProjectConfig) -> bool {
+        self.metadata.declaration_hash == config.declaration_hash_cached()
+            && self.tools.iter().all(|tool| declaration_of(config, tool).is_some())
+    }
+
+    /// Each entry, in lock order, with its declaration; the first drift otherwise.
+    fn declarations(&self, config: &crate::ProjectConfig) -> Result<Vec<(&LockedTool, PackageRef)>, Box<LockDrift>> {
+        let current_hash = config.declaration_hash_cached();
+        if self.metadata.declaration_hash != current_hash {
+            return Err(Box::new(LockDrift::DeclarationHash {
+                previous_hash: self.metadata.declaration_hash.clone(),
+                current_hash: current_hash.to_string(),
+            }));
+        }
+        self.tools
+            .iter()
+            .map(|tool| match declaration_of(config, tool) {
+                Some(declared) => Ok((tool, declared.clone())),
+                None => Err(Box::new(LockDrift::Entry {
+                    group: tool.group.clone(),
+                    name: tool.name.clone(),
+                    locked: tool.repository.clone(),
+                    declared: super::resolve::declared_identifier(config, &tool.group, &tool.name)
+                        .map(Repository::from),
+                })),
+            })
+            .collect()
+    }
+
+    /// Every entry with its host identifier for `platform`, for callers that
+    /// never refuse a stale lock: tagged from `config` while the lock binds to
+    /// it, untagged otherwise, so a new tag never pairs with an old digest.
+    /// `config` is `None` when the declarations could not be read.
+    pub fn lenient_host_identifiers(
+        &self,
+        config: Option<&crate::ProjectConfig>,
+        platform: &Platform,
+    ) -> Vec<(&LockedTool, Result<PinnedPackageRef, super::Error>)> {
+        match config.and_then(|config| self.declarations(config).ok()) {
+            Some(pairs) => pairs
+                .into_iter()
+                .map(|(tool, declared)| (tool, tagged_host_leaf(tool, &declared, platform)))
+                .collect(),
+            None => self
+                .tools
+                .iter()
+                .map(|tool| {
+                    (
+                        tool,
+                        tool.host_leaf(platform).map(|leaf| tool.repository.pin_untagged(leaf)),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `tool`'s declaration, when it names the repository `tool` was locked from.
+fn declaration_of<'c>(config: &'c crate::ProjectConfig, tool: &LockedTool) -> Option<&'c PackageRef> {
+    super::resolve::declared_identifier(config, &tool.group, &tool.name).filter(|declared| {
+        declared.registry() == tool.repository.registry() && declared.repository() == tool.repository.repository()
+    })
 }
 
 /// Content equality ignoring `name`/`group`: `repository` and the full
@@ -224,8 +526,9 @@ impl ProjectLock {
             .into());
         }
 
-        let lock: ProjectLock =
+        let raw: RawProjectLock =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
+        let lock = raw.into_lock(&path)?;
 
         // `toml::from_str` already rejects duplicate platform keys and malformed digests.
         lock.validate(&path)?;
@@ -233,9 +536,9 @@ impl ProjectLock {
         Ok(lock)
     }
 
-    /// V3 invariants beyond parsing: hash version, bare `repository`, canonical
-    /// platform keys. Runs on write too, or a hand-assembled lock is saved in a
-    /// shape every later load rejects.
+    /// V3 invariants beyond parsing: hash version and canonical platform keys
+    /// (`repository` is bare by type). Runs on write too, or a hand-assembled
+    /// lock is saved in a shape every later load rejects.
     fn validate(&self, path: &Path) -> Result<(), super::Error> {
         // A hash from another algorithm version would compare wrong, so refuse it.
         if self.metadata.declaration_hash_version != super::hash::DECLARATION_HASH_VERSION {
@@ -249,15 +552,6 @@ impl ProjectLock {
         }
 
         for tool in &self.tools {
-            if tool.repository.tag().is_some() || tool.repository.digest().is_some() {
-                return Err(ProjectError::new(
-                    path.to_path_buf(),
-                    ProjectErrorKind::LockRepositoryNotBare {
-                        value: tool.repository.to_string(),
-                    },
-                )
-                .into());
-            }
             validate_canonical_platform_keys(&tool.platforms)
                 .map_err(|kind| ProjectError::new(path.to_path_buf(), kind))?;
         }
@@ -373,19 +667,13 @@ pub enum LockCurrency {
         path: PathBuf,
     },
 
-    /// `ocx.lock` exists but its stored `declaration_hash` no longer matches
-    /// the current `ocx.toml`.
-    #[error("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`")]
+    /// `ocx.lock` exists but does not bind to `ocx.toml`: a moved
+    /// `declaration_hash`, or an entry whose repository is not the declared one.
+    #[error("ocx.lock is stale (it does not match ocx.toml); run `ocx lock`")]
     Stale {
         /// The stale lock.
         lock_path: PathBuf,
     },
-}
-
-/// Whether `lock` still describes `config`, via the cached hash (a hot path).
-#[must_use]
-pub fn is_stale(lock: &ProjectLock, config: &crate::ProjectConfig) -> bool {
-    lock.metadata.declaration_hash != config.declaration_hash_cached()
 }
 
 #[cfg(test)]
@@ -398,7 +686,7 @@ mod tests {
     //! Determinism is a permanent contract.
     use super::*;
     use crate::error::ProjectErrorKind;
-    use ocx_oci::{Digest, PackageRef};
+    use ocx_oci::Digest;
 
     /// Assert an [`Error`] carries a specific [`ProjectErrorKind`]
     /// pattern. Uses `let else` on the inner kind (not exhaustive
@@ -441,10 +729,9 @@ mod tests {
         Digest::Sha256(sha256_of(byte))
     }
 
-    /// Construct a bare `registry/repo` [`PackageRef`] (no tag, no digest) —
-    /// the `repository` coordinate shape.
-    fn bare_repo(registry: &str, repo: &str) -> PackageRef {
-        PackageRef::new_registry(repo, registry)
+    /// Construct the bare `registry/repo` [`Repository`] coordinate.
+    fn bare_repo(registry: &str, repo: &str) -> Repository {
+        Repository::new(registry, repo)
     }
 
     /// Build a [`LockedTool`] pinning `default/<name>` to one
@@ -516,40 +803,28 @@ repository = "ocx.sh/cmake"
 
     // --- The staleness gate --------------------------------------------------
 
-    /// Finding 11 — the gate both hot paths route through, which had **no**
-    /// unit coverage before the dedup made that visible.
-    ///
-    /// Inverting the comparison in `is_stale` reds nothing in the unit suite
-    /// without this test: `ocx pull`'s prologue and the per-prompt reconciler
-    /// were each covered only at the acceptance tier, so the one predicate they
-    /// share could have been silently reversed by either of the two edits that
-    /// used to be needed to change it.
-    ///
-    /// Both answers, on a config the test owns, because "stale" and "current"
-    /// are the same call with different data — a test that only ever saw one
-    /// could not tell the predicate from a constant.
-    ///
-    /// Red state: flip `!=` to `==` in [`super::is_stale`].
+    /// The hash half of the one currency predicate, both answers on a config
+    /// the test owns: a test that only saw one could not tell it from a constant.
     #[tokio::test]
     async fn f011_the_staleness_gate_answers_both_ways_on_one_config() {
         use crate::ProjectConfig;
 
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("ocx.toml");
-        std::fs::write(&config_path, "[tools]\n").expect("write ocx.toml");
+        std::fs::write(&config_path, "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("write ocx.toml");
         let config = ProjectConfig::from_path(&config_path).await.expect("parse ocx.toml");
 
         let mut lock = ProjectLock::from_toml_str(&v3_lock_toml()).expect("parse lock");
 
         lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
         assert!(
-            !is_stale(&lock, &config),
+            lock.is_current(&config),
             "a lock whose recorded hash is the config's own is current"
         );
 
         lock.metadata.declaration_hash = format!("sha256:{}", sha256_of('e'));
         assert!(
-            is_stale(&lock, &config),
+            !lock.is_current(&config),
             "a lock recording a different hash is stale: `ocx.toml` moved on without it"
         );
     }
@@ -656,7 +931,6 @@ generated_at = "2026-04-19T00:00:00Z"
         assert_eq!(cmake.group, "default");
         assert_eq!(cmake.repository.registry(), "ocx.sh");
         assert_eq!(cmake.repository.repository(), "cmake");
-        assert!(cmake.repository.tag().is_none() && cmake.repository.digest().is_none());
         assert_eq!(cmake.platforms.get("linux/amd64"), Some(&digest_of('1')));
         assert_eq!(cmake.platforms.get("darwin/arm64"), Some(&digest_of('2')));
         assert!(
@@ -1048,35 +1322,6 @@ repository = "ocx.sh/cmake"
                 .unwrap_or_else(|e| panic!("case {index}: a reparsed lock must re-serialize, got {e}"));
             assert_eq!(serialized, reserialized, "case {index}: round-trip must be byte-stable");
         }
-    }
-
-    /// (b) A tagged `repository` is unreachable via any producer in this
-    /// codebase (`build_lock`, `build_platforms_map`), but nothing at the
-    /// type level stops a library caller from hand-assembling a `LockedTool`
-    /// with one. Must reject at write, not just at load.
-    #[test]
-    fn write_rejects_tagged_repository() {
-        let mut platforms = BTreeMap::new();
-        platforms.insert("linux/amd64".to_string(), digest_of('1'));
-        let lock = ProjectLock {
-            metadata: sample_metadata(),
-            tools: vec![LockedTool {
-                name: "cmake".to_string(),
-                group: "default".to_string(),
-                repository: bare_repo("ocx.sh", "cmake").clone_with_tag("3.28"),
-                platforms,
-            }],
-        };
-        let err = lock
-            .to_toml_string()
-            .expect_err("a tagged repository must reject at write, not just at load");
-        let crate::Error::Project(pe) = err else {
-            panic!("expected a project-tier error, got {err:?}");
-        };
-        let ProjectErrorKind::LockRepositoryNotBare { value } = &pe.kind else {
-            panic!("expected LockRepositoryNotBare, got {:?}", pe.kind);
-        };
-        assert_eq!(value, "ocx.sh/cmake:3.28");
     }
 
     /// (c) `LockMetadata.declaration_hash_version` is a plain `u8` — nothing
@@ -1502,11 +1747,6 @@ repository = "ocx.sh/cmake"
         let tool = &reloaded.tools[0];
         assert_eq!(tool.repository.registry(), "ocx.sh");
         assert_eq!(tool.repository.repository(), "cmake");
-        assert!(tool.repository.tag().is_none(), "repository must be bare (no tag)");
-        assert!(
-            tool.repository.digest().is_none(),
-            "repository must be bare (no digest)"
-        );
         assert_eq!(tool.platforms.get("linux/amd64"), Some(&leaf));
     }
 
@@ -1838,5 +2078,356 @@ repository = "ocx.sh/cmake"
 
         // Real I/O error (Err) → Io
         assert_kind!(io_err, ProjectErrorKind::Io(_));
+    }
+
+    // --- The typed repository keeps the lock bytes -------------------------
+
+    /// Regression pin: real `ocx lock` output (a frozen copy of this
+    /// repository's own `ocx.lock`) round-trips byte-identical through the typed
+    /// `Repository` field. Frozen so a toolchain bump never re-keys this test.
+    #[test]
+    fn c001_the_repository_s_own_lock_round_trips_byte_identical() {
+        let original = include_str!("testdata/repo.ocx.lock");
+        let lock = ProjectLock::from_toml_str(original).expect("the repository's own lock loads");
+        assert!(!lock.tools.is_empty(), "the fixture must exercise real tool entries");
+        assert_eq!(lock.to_toml_string().expect("serialize"), original);
+    }
+
+    /// A hand-edited tagged or digested `repository` is the typed
+    /// `LockRepositoryNotBare` (exit 78) at load, never a serde `TomlParse`.
+    #[test]
+    fn c001_a_tagged_lock_repository_loads_as_lock_repository_not_bare() {
+        for repository in [
+            "ocx.sh/cmake:3.28".to_string(),
+            format!("ocx.sh/cmake@sha256:{}", sha256_of('9')),
+        ] {
+            let toml_str = v3_lock_toml().replace(
+                r#"repository = "ocx.sh/cmake""#,
+                &format!(r#"repository = "{repository}""#),
+            );
+            assert!(toml_str.contains(&repository), "the fixture edit must land");
+            let err = ProjectLock::from_toml_str(&toml_str).expect_err("a non-bare repository must reject");
+            assert_kind!(err, ProjectErrorKind::LockRepositoryNotBare { .. });
+        }
+    }
+
+    // --- Binding the lock to its declarations -------------------------------
+
+    fn host() -> Platform {
+        "linux/amd64".parse().expect("valid platform")
+    }
+
+    /// A config and a lock whose recorded hash is that config's own, so the
+    /// hash half of the staleness test answers "current".
+    fn locked_from(config_toml: &str, tools: Vec<LockedTool>) -> (crate::ProjectConfig, ProjectLock) {
+        let config = crate::ProjectConfig::from_toml_str(config_toml).expect("parse ocx.toml");
+        let mut metadata = sample_metadata();
+        metadata.declaration_hash = config.declaration_hash_cached().to_owned();
+        (config, ProjectLock { metadata, tools })
+    }
+
+    fn bound(lock: &ProjectLock, config: &crate::ProjectConfig) -> Vec<BoundTool> {
+        assert!(lock.is_current(config), "a lock locked from this config is current");
+        match lock.bind(config) {
+            Binding::Current(bound) => bound,
+            Binding::Stale(drift) => panic!("a lock locked from this config must bind as Current: {drift}"),
+        }
+    }
+
+    /// `shellcheck` in two groups under two tags, and a lock deliberately not
+    /// in `(group, name)` order: a join by name alone or a re-sorted result
+    /// pairs a tag with the wrong entry.
+    const TWO_GROUPS_TOML: &str = r#"
+[tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.11"
+"#;
+
+    fn two_groups_lock_tools() -> Vec<LockedTool> {
+        vec![
+            locked_tool("shellcheck", "ci", "ocx.sh", "shellcheck", '2'),
+            locked_tool("cmake", "default", "ocx.sh", "cmake", '1'),
+            locked_tool("shellcheck", "default", "ocx.sh", "shellcheck", '3'),
+        ]
+    }
+
+    /// The tag `TWO_GROUPS_TOML` declares for `(group, name)`.
+    fn declared_tag(group: &str, name: &str) -> &'static str {
+        match (group, name) {
+            ("default", "shellcheck") => "0.10",
+            ("ci", "shellcheck") => "0.11",
+            ("default", "cmake") => "3.28",
+            other => panic!("no declaration for {other:?}"),
+        }
+    }
+
+    /// One `BoundTool` per lock entry, in lock order, each joined to the
+    /// declaration of its own `(group, name)`.
+    #[test]
+    fn c003_bind_pairs_each_entry_with_its_own_group_declaration_in_lock_order() {
+        let (config, lock) = locked_from(TWO_GROUPS_TOML, two_groups_lock_tools());
+        let bound = bound(&lock, &config);
+
+        assert_eq!(bound.len(), lock.tools.len(), "exactly one BoundTool per lock entry");
+        for (bound, entry) in bound.iter().zip(&lock.tools) {
+            assert_eq!(bound.locked(), entry, "BoundTools follow lock order");
+            let tag = declared_tag(&entry.group, &entry.name);
+            assert_eq!(bound.advisory_tag(), Some(tag), "{}/{}", entry.group, entry.name);
+            assert_eq!(
+                bound.declared().to_string(),
+                format!("ocx.sh/{}:{tag}", entry.name),
+                "declared() is the full declaration"
+            );
+        }
+    }
+
+    /// `ocx.toml` moved on without a relock.
+    #[test]
+    fn c003_bind_is_stale_when_the_declaration_hash_moved() {
+        let (config, mut lock) = locked_from(TWO_GROUPS_TOML, two_groups_lock_tools());
+        lock.metadata.declaration_hash = format!("sha256:{}", sha256_of('e'));
+        assert!(!lock.is_current(&config), "a moved hash is not current");
+        let Binding::Stale(drift) = lock.bind(&config) else {
+            panic!("a moved hash must bind as Stale");
+        };
+        assert!(matches!(*drift, LockDrift::DeclarationHash { .. }), "{drift}");
+    }
+
+    /// An entry whose `(group, name)` the config does not declare, even
+    /// with a fresh hash. The same name declared in another group does not count.
+    #[test]
+    fn c003_bind_is_stale_when_a_lock_entry_has_no_declaration() {
+        let (config, lock) = locked_from(
+            "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n\n[group.ci.tools]\nninja = \"ocx.sh/ninja:1.12\"\n",
+            vec![
+                locked_tool("cmake", "default", "ocx.sh", "cmake", '1'),
+                locked_tool("ninja", "default", "ocx.sh", "ninja", '2'),
+            ],
+        );
+        assert!(!lock.is_current(&config), "an undeclared entry is not current");
+        let Binding::Stale(drift) = lock.bind(&config) else {
+            panic!("an undeclared entry must bind as Stale");
+        };
+        assert_eq!(
+            *drift,
+            LockDrift::Entry {
+                group: "default".into(),
+                name: "ninja".into(),
+                locked: Repository::new("ocx.sh", "ninja"),
+                declared: None,
+            }
+        );
+    }
+
+    /// A per-entry desync the hash cannot see: the declaration names a
+    /// different repository (or registry) than the entry was locked from.
+    #[test]
+    fn c003_bind_is_stale_when_the_declared_repository_is_not_the_locked_one() {
+        for (registry, repo) in [("ocx.sh", "kitware/cmake"), ("ghcr.io", "cmake")] {
+            let (config, lock) = locked_from(
+                "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+                vec![locked_tool("cmake", "default", registry, repo, '1')],
+            );
+            assert!(
+                !lock.is_current(&config),
+                "{registry}/{repo} under a matching hash is not current"
+            );
+            let Binding::Stale(drift) = lock.bind(&config) else {
+                panic!("{registry}/{repo} locked against a declared ocx.sh/cmake must bind as Stale");
+            };
+            assert_eq!(
+                *drift,
+                LockDrift::Entry {
+                    group: "default".into(),
+                    name: "cmake".into(),
+                    locked: Repository::new(registry, repo),
+                    declared: Some(Repository::new("ocx.sh", "cmake")),
+                }
+            );
+        }
+    }
+
+    /// `registry/repo:tag@<host leaf>`.
+    #[test]
+    fn c004_host_leaf_identifier_carries_the_declared_tag_onto_the_lock_leaf() {
+        let (config, lock) = locked_from(
+            "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+            vec![locked_tool("cmake", "default", "ocx.sh", "cmake", '1')],
+        );
+        let identifier = bound(&lock, &config)[0]
+            .host_leaf_identifier(&host())
+            .expect("host leaf");
+        assert_eq!(
+            identifier.to_string(),
+            format!("ocx.sh/cmake:3.28@sha256:{}", sha256_of('1'))
+        );
+    }
+
+    /// A digest-only declaration has no tag to carry; the lock leaf wins
+    /// over the declared digest.
+    #[test]
+    fn c004_a_digest_only_declaration_binds_untagged_and_yields_to_the_lock_leaf() {
+        let declared_digest = sha256_of('f');
+        let (config, lock) = locked_from(
+            &format!("[tools]\ncmake = \"ocx.sh/cmake@sha256:{declared_digest}\"\n"),
+            vec![locked_tool("cmake", "default", "ocx.sh", "cmake", '1')],
+        );
+        let bound = bound(&lock, &config);
+        assert_eq!(bound[0].advisory_tag(), None);
+        assert_eq!(
+            bound[0].declared().to_string(),
+            format!("ocx.sh/cmake@sha256:{declared_digest}"),
+            "declared() keeps the declared digest"
+        );
+        let identifier = bound[0].host_leaf_identifier(&host()).expect("host leaf");
+        assert_eq!(
+            identifier.to_string(),
+            format!("ocx.sh/cmake@sha256:{}", sha256_of('1'))
+        );
+    }
+
+    /// A declaration pinning both a tag and a digest keeps the tag and
+    /// takes the lock's platform leaf, never the declared (index) digest.
+    #[test]
+    fn c004_a_declared_digest_is_ignored_in_favour_of_the_lock_leaf() {
+        let (config, lock) = locked_from(
+            &format!("[tools]\ncmake = \"ocx.sh/cmake:3.28@sha256:{}\"\n", sha256_of('f')),
+            vec![locked_tool("cmake", "default", "ocx.sh", "cmake", '1')],
+        );
+        let identifier = bound(&lock, &config)[0]
+            .host_leaf_identifier(&host())
+            .expect("host leaf");
+        assert_eq!(
+            identifier.to_string(),
+            format!("ocx.sh/cmake:3.28@sha256:{}", sha256_of('1'))
+        );
+    }
+
+    /// No leaf for the host stays `NoHostLeaf`.
+    #[test]
+    fn c004_host_leaf_identifier_keeps_no_host_leaf() {
+        let (config, lock) = locked_from(
+            "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+            vec![locked_tool("cmake", "default", "ocx.sh", "cmake", '1')],
+        );
+        let windows: Platform = "windows/amd64".parse().expect("valid platform");
+        let err = bound(&lock, &config)[0]
+            .host_leaf_identifier(&windows)
+            .expect_err("no windows leaf");
+        assert_kind!(err, ProjectErrorKind::NoHostLeaf { .. });
+    }
+
+    /// Two equally good leaves stay `AmbiguousHostLeaf`, a remedy
+    /// distinct from `NoHostLeaf`.
+    #[test]
+    fn c004_host_leaf_identifier_keeps_ambiguous_host_leaf() {
+        let mut tool = locked_tool("cmake", "default", "ocx.sh", "cmake", '1');
+        tool.platforms.clear();
+        tool.platforms
+            .insert("linux/amd64+libc.glibc".to_string(), digest_of('4'));
+        tool.platforms
+            .insert("linux/amd64+libc.musl".to_string(), digest_of('5'));
+        let (config, lock) = locked_from("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n", vec![tool]);
+        let dual_libc: Platform = "linux/amd64+libc.glibc,libc.musl".parse().expect("valid platform");
+        let err = bound(&lock, &config)[0]
+            .host_leaf_identifier(&dual_libc)
+            .expect_err("two leaves tie");
+        assert_kind!(err, ProjectErrorKind::AmbiguousHostLeaf { .. });
+    }
+
+    // --- Lenient fallback -----------------------------------------------------
+
+    fn assert_untagged_in_lock_order(
+        lock: &ProjectLock,
+        pairs: &[(&LockedTool, Result<PinnedPackageRef, crate::Error>)],
+    ) {
+        assert_eq!(pairs.len(), lock.tools.len(), "one identifier per lock entry");
+        for ((tool, identifier), entry) in pairs.iter().zip(&lock.tools) {
+            assert_eq!(*tool, entry, "pairs follow lock order");
+            let identifier = identifier.as_ref().expect("host leaf");
+            assert_eq!(
+                identifier.tag(),
+                None,
+                "{}/{}: no tag without a current binding",
+                entry.group,
+                entry.name
+            );
+            assert_eq!(
+                identifier.to_string(),
+                format!("{}@{}", entry.repository, entry.platforms["linux/amd64"])
+            );
+        }
+    }
+
+    /// Regression pin: no readable declarations → untagged, as today.
+    #[test]
+    fn c004_lenient_host_identifiers_are_untagged_without_a_config() {
+        let (_config, lock) = locked_from(TWO_GROUPS_TOML, two_groups_lock_tools());
+        assert_untagged_in_lock_order(&lock, &lock.lenient_host_identifiers(None, &host()));
+    }
+
+    /// A stale lock never pairs a (possibly new) declared tag with its old digest.
+    #[test]
+    fn c004_lenient_host_identifiers_are_untagged_for_a_stale_lock() {
+        let (config, mut lock) = locked_from(TWO_GROUPS_TOML, two_groups_lock_tools());
+        lock.metadata.declaration_hash = format!("sha256:{}", sha256_of('e'));
+        assert_untagged_in_lock_order(&lock, &lock.lenient_host_identifiers(Some(&config), &host()));
+    }
+
+    /// A current lock carries each entry's own declared tag, paired with
+    /// that entry — a misaligned zip would hand `ci/shellcheck` another tag.
+    #[test]
+    fn c004_lenient_host_identifiers_carry_each_entry_s_tag_for_a_current_lock() {
+        let (config, lock) = locked_from(TWO_GROUPS_TOML, two_groups_lock_tools());
+        let pairs = lock.lenient_host_identifiers(Some(&config), &host());
+        assert_eq!(pairs.len(), lock.tools.len(), "one identifier per lock entry");
+        for ((tool, identifier), entry) in pairs.iter().zip(&lock.tools) {
+            assert_eq!(*tool, entry, "pairs follow lock order");
+            let identifier = identifier.as_ref().expect("host leaf");
+            assert_eq!(
+                identifier.to_string(),
+                format!(
+                    "{}:{}@{}",
+                    entry.repository,
+                    declared_tag(&entry.group, &entry.name),
+                    entry.platforms["linux/amd64"]
+                ),
+            );
+        }
+    }
+
+    /// One content declared under two tags is one entry. `ocx.lock` orders
+    /// entries by `(group, name)`, so `ci/jdk` precedes `default/java` and its
+    /// tag wins.
+    #[test]
+    fn one_content_under_two_tags_keeps_the_first_entry_in_lock_order() {
+        let (config, lock) = locked_from(
+            "[tools]\njava = \"ocx.sh/java:21\"\n\n[group.ci.tools]\njdk = \"ocx.sh/java:21.0\"\n",
+            vec![
+                locked_tool("java", "default", "ocx.sh", "java", 'a'),
+                locked_tool("jdk", "ci", "ocx.sh", "java", 'a'),
+            ],
+        );
+        let lock = ProjectLock::from_toml_str(&lock.to_toml_string().expect("serialize")).expect("parse");
+        let entries = bound(&lock, &config)
+            .into_iter()
+            .map(|tool| {
+                let identifier = tool.host_leaf_identifier(&host()).expect("host leaf");
+                (tool.locked().name.clone(), identifier)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2, "both bindings bind");
+
+        let kept = first_per_content(entries);
+
+        assert_eq!(kept.len(), 1, "one content, one entry: {kept:?}");
+        assert_eq!(kept[0].0, "jdk");
+        assert_eq!(
+            kept[0].1.to_string(),
+            format!("ocx.sh/java:21.0@sha256:{}", sha256_of('a'))
+        );
     }
 }

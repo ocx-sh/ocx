@@ -347,6 +347,13 @@ mod tests {
                     path.segments[0].ident = syn::Ident::new(SELF_TY, path.segments[0].ident.span());
                 }
             }
+            // A variant renamed in place; its code is still compared against the frozen row.
+            if path.segments.len() == 2
+                && path.segments[0].ident == "ProjectErrorKind"
+                && path.segments[1].ident == "LockOutOfSync"
+            {
+                path.segments[1].ident = syn::Ident::new("StaleLockOnPartial", path.segments[1].ident.span());
+            }
             // The chain walker was renamed where it moved.
             if let Some(last) = path.segments.last_mut()
                 && last.ident == "classify_error"

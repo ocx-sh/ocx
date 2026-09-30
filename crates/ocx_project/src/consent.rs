@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ProjectError, ProjectErrorKind};
 use crate::lock::ProjectLock;
 use ocx_config::shell::{ShellConsent, consent_path_matches};
-use ocx_oci::PackageRef;
+use ocx_oci::Repository;
 use ocx_shell::shell::coexistence::Observation;
 use ocx_shell::shell::reconcile::ScopeId;
 use ocx_store::file_structure::StateStore;
@@ -180,13 +180,10 @@ pub enum Reason {
 /// (`adr_lock_records_physical_address.md`); the `[mirrors]` residual is
 /// answered by `[[trust.policy]]` plus signature verification.
 #[must_use]
-pub fn source_of(identifier: &PackageRef) -> String {
-    // Every `PackageRef` here carries an explicit registry: no default fallback.
-    format!(
-        "{}/{}",
-        identifier.registry().to_ascii_lowercase(),
-        identifier.first_path_segment()
-    )
+pub fn source_of(repository: &Repository) -> String {
+    let path = repository.repository();
+    let org = path.split('/').next().unwrap_or(path);
+    format!("{}/{org}", repository.registry().to_ascii_lowercase())
 }
 
 /// The `<registry>/<org>` set `lock`'s tools **claim**; it authorizes nothing
@@ -210,7 +207,7 @@ pub fn verified_sources(
 ) -> Option<BTreeSet<String>> {
     let mut verified = BTreeSet::new();
     for tool in &lock.tools {
-        let leaf = match crate::compose::host_leaf_identifier(tool, platform) {
+        let leaf = match tool.host_leaf(platform) {
             Ok(leaf) => leaf,
             Err(error) => {
                 log::debug!(
@@ -220,16 +217,7 @@ pub fn verified_sources(
                 return None;
             }
         };
-        let pinned = match ocx_oci::PinnedPackageRef::try_from(leaf) {
-            Ok(pinned) => pinned,
-            Err(error) => {
-                log::debug!(
-                    "Unpinned host leaf for locked binding '{}'; clause 2 cannot corroborate this lock: {error}",
-                    tool.name
-                );
-                return None;
-            }
-        };
+        let pinned = tool.repository.pin_untagged(leaf);
         let origins = store.package_dir(&pinned).recorded_origins();
         if origins.is_empty() {
             log::debug!(
@@ -252,7 +240,7 @@ fn source_of_origin(origin: &str) -> Option<String> {
     if registry.is_empty() || repository.is_empty() {
         return None;
     }
-    Some(source_of(&PackageRef::new_registry(repository, registry)))
+    Some(source_of(&Repository::new(registry, repository)))
 }
 
 /// The one project identity: canonicalize the config file, then its parent.
@@ -598,8 +586,8 @@ mod tests {
         }
     }
 
-    fn identifier(registry: &str, repository: &str) -> PackageRef {
-        PackageRef::new_registry(repository, registry)
+    fn identifier(registry: &str, repository: &str) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(repository, registry)
     }
 
     // ── clause-2 corroboration fixtures ──────────────────────────────────────
@@ -639,7 +627,7 @@ mod tests {
             tools: vec![LockedTool {
                 name: "cmake".into(),
                 group: "default".into(),
-                repository: identifier(registry, path),
+                repository: ocx_oci::Repository::new(registry, path),
                 platforms: BTreeMap::from([(host().to_string(), leaf_digest())]),
             }],
         }
@@ -696,28 +684,28 @@ mod tests {
     #[test]
     fn c026_source_is_registry_and_first_path_segment_of_the_logical_coordinate() {
         assert_eq!(
-            source_of(&identifier("ghcr.io", "acme/tools/cmake")),
+            source_of(&Repository::new("ghcr.io", "acme/tools/cmake")),
             "ghcr.io/acme",
             "the repository truncates to its first segment"
         );
         assert_eq!(
-            source_of(&identifier("ocx.sh", "cmake")),
+            source_of(&Repository::new("ocx.sh", "cmake")),
             "ocx.sh/cmake",
             "the default registry is spelled explicitly and a single-segment repo is its own org"
         );
         assert_eq!(
-            source_of(&identifier("GHCR.IO", "Acme/tool")),
+            source_of(&Repository::new("GHCR.IO", "Acme/tool")),
             "ghcr.io/Acme",
             "the host lowercases; the repository path does not"
         );
         assert_eq!(
-            source_of(&identifier("localhost:5000", "acme/tool")),
+            source_of(&Repository::new("localhost:5000", "acme/tool")),
             "localhost:5000/acme",
             "the port is part of the source and is preserved"
         );
         assert_ne!(
-            source_of(&identifier("localhost:5000", "acme/tool")),
-            source_of(&identifier("localhost", "acme/tool")),
+            source_of(&Repository::new("localhost:5000", "acme/tool")),
+            source_of(&Repository::new("localhost", "acme/tool")),
             "a ported registry is a distinct source from the bare host"
         );
     }
@@ -746,19 +734,19 @@ mod tests {
                 LockedTool {
                     name: "cmake".into(),
                     group: "default".into(),
-                    repository: identifier("ghcr.io", "acme/tools/cmake"),
+                    repository: ocx_oci::Repository::new("ghcr.io", "acme/tools/cmake"),
                     platforms: BTreeMap::new(),
                 },
                 LockedTool {
                     name: "ninja".into(),
                     group: "default".into(),
-                    repository: identifier("ghcr.io", "acme/ninja"),
+                    repository: ocx_oci::Repository::new("ghcr.io", "acme/ninja"),
                     platforms: BTreeMap::new(),
                 },
                 LockedTool {
                     name: "uv".into(),
                     group: "ci".into(),
-                    repository: identifier("ocx.sh", "uv"),
+                    repository: ocx_oci::Repository::new("ocx.sh", "uv"),
                     platforms: BTreeMap::new(),
                 },
             ],

@@ -346,7 +346,7 @@ async fn lock_refusal(project: &ProjectIdentity, lock: Option<&ocx_project::Proj
         return Some(ocx_project::LockCurrency::Missing { path: lock_path }.to_string());
     };
     let config = ocx_project::ProjectConfig::from_path(&project.config_path).await.ok()?;
-    ocx_project::lock::is_stale(lock, &config).then(|| ocx_project::LockCurrency::Stale { lock_path }.to_string())
+    (!lock.is_current(&config)).then(|| ocx_project::LockCurrency::Stale { lock_path }.to_string())
 }
 
 /// Whether the CWD walk, not an explicit selector, decided the project; `OCX_PROJECT=""` counts as unset.
@@ -754,7 +754,7 @@ mod tests {
     /// forgotten). The third — a lock that composes — is what keeps the other
     /// two from being a constant.
     ///
-    /// Red state: return `None` unconditionally, or drop the `is_stale` call so
+    /// Red state: return `None` unconditionally, or drop the `is_current` call so
     /// only absence refuses; either reds one of the three below.
     ///
     /// EC-REC-008 — the probe half of the lock-refusal split.
@@ -797,6 +797,40 @@ mod tests {
             lock_refusal(&identity, Some(&lock)).await,
             None,
             "a lock that still describes its ocx.toml composes, and must not be reported as a refusal"
+        );
+    }
+
+    /// A fresh hash does not make an entry naming another repository current:
+    /// `compose` refuses it, so the probe must too.
+    #[tokio::test]
+    async fn the_lock_probe_refuses_an_entry_naming_another_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().to_path_buf();
+        let config_path = dir.join(PROJECT_FILE);
+        std::fs::write(&config_path, "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("write ocx.toml");
+        let identity = ProjectIdentity {
+            config_path: config_path.clone(),
+            dir,
+            key: "0123456789abcdef".to_owned(),
+        };
+        let config = ocx_project::ProjectConfig::from_path(&config_path)
+            .await
+            .expect("parse ocx.toml");
+        let lock = ocx_project::ProjectLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"{hash}\"\n\
+             generated_by = \"ocx 0.5.8\"\ngenerated_at = \"2026-08-27T00:00:00Z\"\n\n\
+             [[tool]]\nname = \"cmake\"\ngroup = \"default\"\nrepository = \"ghcr.io/cmake\"\n\n\
+             [tool.platforms]\n\"linux/amd64\" = \"sha256:{leaf}\"\n",
+            hash = config.declaration_hash_cached(),
+            leaf = "1".repeat(64),
+        ))
+        .expect("parse lock");
+
+        let refusal = lock_refusal(&identity, Some(&lock)).await;
+        assert!(
+            refusal.as_deref().is_some_and(|text| text.contains("run `ocx lock`")),
+            "a lock entry naming another repository refuses composition: {refusal:?}"
         );
     }
 

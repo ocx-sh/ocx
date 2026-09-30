@@ -380,16 +380,13 @@ pub enum ProjectErrorKind {
     )]
     InvalidGroupName { name: String },
 
-    /// Carry-forward refused: the predecessor lock's hash does not match the
-    /// **pre-mutation** `ocx.toml`. The remedy stays tier-neutral (`--global`
+    /// The lock no longer describes `ocx.toml`: a moved hash, or one entry out
+    /// of step under an unchanged hash. The remedy stays tier-neutral (`--global`
     /// for the global toolchain): this layer does not know the tier.
     #[error(
-        "lock is out of sync with ocx.toml (declaration_hash {current_hash} != locked {previous_hash}); run `ocx lock` to reconcile (add `--global` for the global toolchain)"
+        "lock is out of sync with ocx.toml ({drift}); run `ocx lock` to reconcile (add `--global` for the global toolchain)"
     )]
-    StaleLockOnPartial {
-        previous_hash: String,
-        current_hash: String,
-    },
+    LockOutOfSync { drift: Box<crate::lock::LockDrift> },
 
     /// `--offline` or `--frozen` refused to resolve an unpinned tag missing from
     /// the local index; not retried. `policy` is `"offline"` or `"frozen"`.
@@ -494,7 +491,7 @@ mod tests {
 
     // ── Whole-file model: fail-closed remedy message contract (spec §4.1) ────
 
-    /// `StaleLockOnPartial` (the `add`/`remove` drift gate, exit 65) must name
+    /// `LockOutOfSync` (the `add`/`remove` drift gate, exit 65) must name
     /// the user remedy `ocx lock`, name no internal function, and stay
     /// tier-neutral (spec §4.1): because the error layer has no tier context, a
     /// `ocx --global add/remove` user must be steered to add `--global` rather
@@ -502,10 +499,12 @@ mod tests {
     /// toolchain. The pre-mutation hash mismatch on a mutator directs the user
     /// to reconcile the whole file first.
     #[test]
-    fn stale_lock_on_partial_names_ocx_lock_remedy() {
-        let kind = ProjectErrorKind::StaleLockOnPartial {
-            previous_hash: "sha256:aaa".to_string(),
-            current_hash: "sha256:bbb".to_string(),
+    fn lock_out_of_sync_names_ocx_lock_remedy() {
+        let kind = ProjectErrorKind::LockOutOfSync {
+            drift: Box::new(crate::lock::LockDrift::DeclarationHash {
+                previous_hash: "sha256:aaa".to_string(),
+                current_hash: "sha256:bbb".to_string(),
+            }),
         };
         let rendered = kind.to_string();
         assert!(

@@ -117,7 +117,7 @@ impl MutationGuard {
     ///
     /// # Errors
     ///
-    /// [`ProjectErrorKind::StaleLockOnPartial`] when `new_lock` does not match the
+    /// [`ProjectErrorKind::LockOutOfSync`] when `new_lock` does not match the
     /// candidate; [`ProjectLock::save`]'s error; or
     /// [`ProjectErrorKind::ManifestEditParse`] / [`ProjectErrorKind::ManifestEditDiverged`]
     /// after rollback. A rollback failure logs at ERROR and never masks it.
@@ -127,9 +127,11 @@ impl MutationGuard {
         if new_lock.metadata.declaration_hash != candidate_hash {
             return Err(ProjectError::new(
                 self.config_path.clone(),
-                ProjectErrorKind::StaleLockOnPartial {
-                    previous_hash: new_lock.metadata.declaration_hash.clone(),
-                    current_hash: candidate_hash.to_string(),
+                ProjectErrorKind::LockOutOfSync {
+                    drift: Box::new(crate::lock::LockDrift::DeclarationHash {
+                        previous_hash: new_lock.metadata.declaration_hash.clone(),
+                        current_hash: candidate_hash.to_string(),
+                    }),
                 },
             )
             .into());

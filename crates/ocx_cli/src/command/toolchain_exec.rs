@@ -349,7 +349,7 @@ fn attribute_to_selected_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_oci::{Digest, PackageRef, Platform};
+    use ocx_oci::{Digest, Platform};
     use ocx_project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
     use std::collections::BTreeMap;
 
@@ -430,16 +430,24 @@ mod tests {
             LockedTool {
                 name: name.into(),
                 group: "default".into(),
-                repository: PackageRef::new_registry(name, "ocx.sh"),
+                repository: ocx_oci::Repository::new("ocx.sh", name),
                 platforms,
             }
         }
 
-        let lock = lock_v3(vec![
+        let mut lock = lock_v3(vec![
             leaf("cmake", "linux/amd64", 'a'),
             leaf("winonly", "windows/amd64", 'b'),
         ]);
-        let config = ProjectConfig::from_parts(BTreeMap::new(), BTreeMap::new());
+        // Declarations matching the lock, so it binds current.
+        let declared = ["cmake", "winonly"].map(|name| {
+            (
+                name.to_owned(),
+                ocx_oci::PackageRef::new_registry(name, "ocx.sh").clone_with_tag("1.0"),
+            )
+        });
+        let config = ProjectConfig::from_parts(BTreeMap::from(declared), BTreeMap::new());
+        lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
         let host: Platform = "linux/amd64".parse().expect("valid host");
         let groups = vec!["default".to_owned()];
 

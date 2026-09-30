@@ -8,9 +8,9 @@ use std::path::Path;
 
 use crate::DEFAULT_GROUP;
 use crate::config::ProjectConfig;
-use crate::lock::{LockedTool, ProjectLock, locked_tool_content_equal};
+use crate::lock::{BoundTool, ProjectLock, locked_tool_content_equal};
 use ocx_oci::package_ref::error::IdentifierErrorKind;
-use ocx_oci::{PackageRef, Platform, Selection};
+use ocx_oci::{PackageRef, Platform};
 use ocx_package::metadata::env::entry::Entry;
 
 use super::error::{ProjectError, ProjectErrorKind};
@@ -60,8 +60,9 @@ pub struct ResolvedTool {
 /// so a caller narrows to named tools first, or a sibling with no host leaf aborts the run.
 #[derive(Debug, Clone)]
 pub enum ToolSource {
-    /// A lock entry; its host leaf resolves only if it survives name filtering.
-    Locked(LockedTool),
+    /// A lock entry bound to its declaration; its host leaf resolves only if it
+    /// survives name filtering.
+    Locked(BoundTool),
     /// A positional `name=identifier`, resolved verbatim.
     Explicit(PackageRef),
 }
@@ -140,9 +141,14 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
 /// The selection half of [`compose_tool_set`]: group entries stay unresolved so
 /// a caller can filter by name before resolving host leaves.
 /// Detects but does not report a cross-group duplicate: every caller must run
-/// [`check_duplicate_selection`] over the surviving set. `config` is unused.
+/// [`check_duplicate_selection`] over the surviving set.
+///
+/// # Errors
+///
+/// [`ProjectErrorKind::LockMissing`] when a group is selected without a lock;
+/// [`ProjectErrorKind::LockOutOfSync`] when the lock no longer binds to `config`.
 pub fn select_tool_set(
-    _config: &ProjectConfig,
+    config: &ProjectConfig,
     lock: Option<&ProjectLock>,
     groups: &[String],
     positionals: &[PositionalPackage],
@@ -151,6 +157,19 @@ pub fn select_tool_set(
     // Every push to `selected` pairs with an insert here, or the map goes stale.
     let mut binding_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
+    let bound: Vec<BoundTool> = match lock {
+        _ if groups.is_empty() => Vec::new(),
+        // The CLI reports `LockMissing` before calling; reaching here is a broken contract.
+        None => {
+            return Err(super::Error::Project(ProjectError::new(
+                std::path::PathBuf::new(),
+                ProjectErrorKind::LockMissing,
+            )));
+        }
+        // Callers refuse a stale hash first; this catches a per-entry desync the hash cannot see.
+        Some(lock_ref) => lock_ref.bind_current(config)?,
+    };
+
     let mut seen_groups: Vec<&str> = Vec::with_capacity(groups.len());
     for raw in groups {
         if seen_groups.contains(&raw.as_str()) {
@@ -158,15 +177,8 @@ pub fn select_tool_set(
         }
         seen_groups.push(raw.as_str());
 
-        let Some(lock_ref) = lock else {
-            // The CLI reports `LockMissing` before calling; reaching here is a broken contract.
-            return Err(super::Error::Project(ProjectError::new(
-                std::path::PathBuf::new(),
-                ProjectErrorKind::LockMissing,
-            )));
-        };
-
-        for entry in &lock_ref.tools {
+        for bound_tool in &bound {
+            let entry = bound_tool.locked();
             if entry.group != *raw {
                 continue;
             }
@@ -180,7 +192,7 @@ pub fn select_tool_set(
                     let ToolSource::Locked(existing_tool) = &existing.source else {
                         unreachable!("a Group-origin selection always carries a Locked source");
                     };
-                    if locked_tool_content_equal(existing_tool, entry) {
+                    if locked_tool_content_equal(existing_tool.locked(), entry) {
                         continue;
                     }
                     conflicting = true;
@@ -190,7 +202,7 @@ pub fn select_tool_set(
             selected.push(SelectedTool {
                 binding: entry.name.clone(),
                 origin: Origin::Group(raw.clone()),
-                source: ToolSource::Locked(entry.clone()),
+                source: ToolSource::Locked(bound_tool.clone()),
             });
             // The index stays on the first occurrence, or a third group compares
             // against the wrong sibling.
@@ -267,7 +279,7 @@ pub fn check_duplicate_selection(selected: &[SelectedTool]) -> Result<(), super:
 ///
 /// # Errors
 ///
-/// [`host_leaf_identifier`]'s, for a locked entry.
+/// [`BoundTool::host_leaf_identifier`]'s, for a locked entry.
 pub fn resolve_selected_tools(
     selected: &[SelectedTool],
     platform: &Platform,
@@ -276,7 +288,7 @@ pub fn resolve_selected_tools(
         .iter()
         .map(|tool| {
             let identifier = match &tool.source {
-                ToolSource::Locked(locked) => host_leaf_identifier(locked, platform)?,
+                ToolSource::Locked(bound) => bound.host_leaf_identifier(platform)?.into(),
                 ToolSource::Explicit(identifier) => identifier.clone(),
             };
             Ok(ResolvedTool {
@@ -288,8 +300,8 @@ pub fn resolve_selected_tools(
         .collect()
 }
 
-/// Compose the final tool set: select, check duplicates, resolve. `config` is
-/// unused. Duplicates compare [`LockedTool`] content, not resolved leaves; the
+/// Compose the final tool set: select, check duplicates, resolve. Duplicates
+/// compare [`LockedTool`](crate::LockedTool) content, not resolved leaves; the
 /// two agree for real locks, where one manifest yields one `platforms` map.
 pub fn compose_tool_set(
     config: &ProjectConfig,
@@ -303,34 +315,6 @@ pub fn compose_tool_set(
     resolve_selected_tools(&selected, current_platform)
 }
 
-/// Resolve a locked tool to its host-platform pull [`PackageRef`] via
-/// [`crate::resolve::lookup_host_leaf`].
-///
-/// # Errors
-///
-/// [`ProjectErrorKind::NoHostLeaf`] when no leaf fits the host;
-/// [`ProjectErrorKind::AmbiguousHostLeaf`] when two tie. Kept distinct: the remedies differ.
-pub fn host_leaf_identifier(tool: &LockedTool, current_platform: &Platform) -> Result<PackageRef, super::Error> {
-    match super::resolve::lookup_host_leaf(&tool.platforms, current_platform) {
-        Selection::Found((leaf, _key)) => Ok(tool.repository.clone_with_digest(leaf.clone())),
-        Selection::None => Err(super::Error::Project(ProjectError::new(
-            std::path::PathBuf::new(),
-            ProjectErrorKind::NoHostLeaf {
-                name: tool.name.clone(),
-                platform: current_platform.to_string(),
-            },
-        ))),
-        Selection::Ambiguous(candidates) => Err(super::Error::Project(ProjectError::new(
-            std::path::PathBuf::new(),
-            ProjectErrorKind::AmbiguousHostLeaf {
-                name: tool.name.clone(),
-                platform: current_platform.to_string(),
-                candidates: candidates.into_iter().map(|(_, key)| key.to_string()).collect(),
-            },
-        ))),
-    }
-}
-
 fn is_valid_binding(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -342,7 +326,7 @@ fn is_valid_binding(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::lock::{LockMetadata, LockVersion, LockedTool, ProjectLock};
-    use ocx_oci::{Digest, PackageRef};
+    use ocx_oci::Digest;
     use std::collections::BTreeMap;
 
     fn sha(c: char) -> String {
@@ -372,6 +356,29 @@ mod tests {
         ProjectConfig::from_parts(BTreeMap::new(), BTreeMap::new())
     }
 
+    const DECLARED_TAG: &str = "1.0";
+
+    /// `tools` locked from an `ocx.toml` declaring each one as
+    /// `<repository>:DECLARED_TAG` under its own `(group, name)`, so the lock binds current.
+    fn current_lock(tools: Vec<LockedTool>) -> (ProjectConfig, ProjectLock) {
+        let mut default_tools = BTreeMap::new();
+        let mut groups: BTreeMap<String, BTreeMap<String, PackageRef>> = BTreeMap::new();
+        for tool in &tools {
+            let declared = PackageRef::new_registry(tool.repository.repository(), tool.repository.registry())
+                .clone_with_tag(DECLARED_TAG);
+            let group_tools = if tool.group == DEFAULT_GROUP {
+                &mut default_tools
+            } else {
+                groups.entry(tool.group.clone()).or_default()
+            };
+            group_tools.insert(tool.name.clone(), declared);
+        }
+        let config = ProjectConfig::from_parts(default_tools, groups);
+        let mut lock = lock_with(tools);
+        lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
+        (config, lock)
+    }
+
     /// A [`LockedTool`] with a single `linux/amd64` leaf keyed by the host
     /// platform's canonical grammar key. `c` selects the leaf digest byte so
     /// distinct content can be expressed without tags (the lock carries no
@@ -382,7 +389,7 @@ mod tests {
         LockedTool {
             name: name.into(),
             group: group.into(),
-            repository: PackageRef::new_registry(repo, reg),
+            repository: ocx_oci::Repository::new(reg, repo),
             platforms,
         }
     }
@@ -398,7 +405,7 @@ mod tests {
         LockedTool {
             name: name.into(),
             group: group.into(),
-            repository: PackageRef::new_registry(repo, reg),
+            repository: ocx_oci::Repository::new(reg, repo),
             platforms,
         }
     }
@@ -447,31 +454,34 @@ mod tests {
 
     #[test]
     fn compose_default_group_returns_lock_entries() {
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("cmake", "default", "ocx.sh", "cmake", 'a'),
             locked("ninja", "default", "ocx.sh", "ninja", 'b'),
         ]);
-        let out = compose_tool_set(&cfg(), Some(&lock), &["default".into()], &[], &host()).expect("ok");
+        let out = compose_tool_set(&config, Some(&lock), &["default".into()], &[], &host()).expect("ok");
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|r| r.binding == "cmake"));
         assert!(out.iter().any(|r| r.binding == "ninja"));
         for r in &out {
             assert_eq!(r.origin, Origin::Group("default".into()));
-            // V2 entries resolve to a digest-pinned identifier (host leaf),
-            // never a tag.
+            // The host-leaf digest from the lock, with the tag `ocx.toml` declares.
             assert!(
                 r.identifier.digest().is_some(),
                 "group entry must resolve to the host-leaf digest"
             );
-            assert!(r.identifier.tag().is_none(), "V2 host-leaf identifier carries no tag");
+            assert_eq!(
+                r.identifier.tag(),
+                Some(DECLARED_TAG),
+                "the declared tag rides on the lock leaf"
+            );
         }
     }
 
     #[test]
     fn compose_dedups_repeated_group_names() {
-        let lock = lock_with(vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')]);
+        let (config, lock) = current_lock(vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')]);
         let out = compose_tool_set(
-            &cfg(),
+            &config,
             Some(&lock),
             &["default".into(), "default".into(), "default".into()],
             &[],
@@ -483,12 +493,12 @@ mod tests {
 
     #[test]
     fn compose_unions_multiple_groups() {
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("cmake", "default", "ocx.sh", "cmake", 'a'),
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'b'),
             locked("shfmt", "ci", "ocx.sh", "shfmt", 'c'),
         ]);
-        let out = compose_tool_set(&cfg(), Some(&lock), &["default".into(), "ci".into()], &[], &host()).expect("ok");
+        let out = compose_tool_set(&config, Some(&lock), &["default".into(), "ci".into()], &[], &host()).expect("ok");
         assert_eq!(out.len(), 3);
     }
 
@@ -496,12 +506,12 @@ mod tests {
     fn compose_errors_on_duplicate_binding_across_groups_with_different_content() {
         // Same binding in two groups with DIFFERENT leaf digests (distinct
         // content) → error.
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
             locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
         ]);
         let err =
-            compose_tool_set(&cfg(), Some(&lock), &["ci".into(), "lint".into()], &[], &host()).expect_err("conflict");
+            compose_tool_set(&config, Some(&lock), &["ci".into(), "lint".into()], &[], &host()).expect_err("conflict");
         let crate::Error::Project(pe) = err else {
             panic!("expected a project-tier error, got {err:?}");
         };
@@ -518,13 +528,13 @@ mod tests {
     /// this, `ocx exec cmake` fails over a `shellcheck` it never named.
     #[test]
     fn select_keeps_both_entries_for_a_conflicting_binding() {
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
             locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
             locked("cmake", "ci", "ocx.sh", "cmake", 'c'),
         ]);
-        let selected =
-            select_tool_set(&cfg(), Some(&lock), &["ci".into(), "lint".into()], &[]).expect("selection must not error");
+        let selected = select_tool_set(&config, Some(&lock), &["ci".into(), "lint".into()], &[])
+            .expect("selection must not error");
 
         let shellcheck: Vec<_> = selected.iter().filter(|tool| tool.binding == "shellcheck").collect();
         assert_eq!(shellcheck.len(), 2, "both conflicting entries must survive selection");
@@ -543,13 +553,13 @@ mod tests {
     /// disagrees, so the reported pair does not drift off the group walk order.
     #[test]
     fn check_duplicate_selection_reports_the_first_seen_group_pair() {
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
             locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
             locked("shellcheck", "release", "ocx.sh", "shellcheck", 'c'),
         ]);
         let selected = select_tool_set(
-            &cfg(),
+            &config,
             Some(&lock),
             &["ci".into(), "lint".into(), "release".into()],
             &[],
@@ -573,13 +583,13 @@ mod tests {
     /// instead of leaving a stale twin for the check to trip over.
     #[test]
     fn positional_override_collapses_a_conflicting_binding() {
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
             locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'b'),
         ]);
         let positional = parse_positional("shellcheck=ocx.sh/shellcheck:0.11", "ocx.sh").expect("parses");
         let selected = select_tool_set(
-            &cfg(),
+            &config,
             Some(&lock),
             &["ci".into(), "lint".into()],
             std::slice::from_ref(&positional),
@@ -595,11 +605,11 @@ mod tests {
     fn compose_collapses_duplicate_binding_with_identical_content() {
         // Two groups define the same binding name with the *same* host leaf
         // digest — collapse silently to one entry, no error.
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'a'),
             locked("shellcheck", "lint", "ocx.sh", "shellcheck", 'a'),
         ]);
-        let out = compose_tool_set(&cfg(), Some(&lock), &["ci".into(), "lint".into()], &[], &host()).expect("ok");
+        let out = compose_tool_set(&config, Some(&lock), &["ci".into(), "lint".into()], &[], &host()).expect("ok");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].binding, "shellcheck");
         // First-seen group wins for origin attribution.
@@ -621,9 +631,9 @@ mod tests {
     /// for `windows/amd64` must error.
     #[test]
     fn compose_errors_when_host_leaf_absent() {
-        let lock = lock_with(vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')]);
+        let (config, lock) = current_lock(vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')]);
         let windows: Platform = "windows/amd64".parse().expect("valid platform");
-        let err = compose_tool_set(&cfg(), Some(&lock), &["default".into()], &[], &windows)
+        let err = compose_tool_set(&config, Some(&lock), &["default".into()], &[], &windows)
             .expect_err("absent host leaf must error before any network call");
         let crate::Error::Project(_) = err else {
             panic!("expected a project-tier error, got {err:?}");
@@ -637,14 +647,14 @@ mod tests {
     #[test]
     fn named_subset_skips_unnamed_sibling_without_host_leaf() {
         // default group: cmake (linux leaf) + winonly (windows-only leaf).
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("cmake", "default", "ocx.sh", "cmake", 'a'),
             locked_windows_only("winonly", "default", "ocx.sh", "winonly", 'b'),
         ]);
         let host = host(); // linux/amd64
 
         // Selection is resolution-free: BOTH entries returned, no NoHostLeaf.
-        let selected = select_tool_set(&cfg(), Some(&lock), &["default".into()], &[])
+        let selected = select_tool_set(&config, Some(&lock), &["default".into()], &[])
             .expect("select must not resolve host leaves");
         assert_eq!(selected.len(), 2);
 
@@ -674,10 +684,10 @@ mod tests {
     fn compose_positional_overrides_group_entry_by_inferred_binding() {
         // default ships a cmake host leaf; positional `cmake:3.29` infers
         // binding `cmake` and overrides.
-        let lock = lock_with(vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')]);
+        let (config, lock) = current_lock(vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')]);
         let pos = parse_positional("cmake:3.29", "ocx.sh").expect("ok");
         let out = compose_tool_set(
-            &cfg(),
+            &config,
             Some(&lock),
             &["default".into()],
             std::slice::from_ref(&pos),
@@ -695,10 +705,10 @@ mod tests {
         // default ships a dotnet host leaf; positional
         // `dotnet=ocx.sh/microsoft-dotnet-sdk:10` overrides via name= prefix
         // (binding does NOT match repo basename).
-        let lock = lock_with(vec![locked("dotnet", "default", "ocx.sh", "microsoft-dotnet-sdk", 'a')]);
+        let (config, lock) = current_lock(vec![locked("dotnet", "default", "ocx.sh", "microsoft-dotnet-sdk", 'a')]);
         let pos = parse_positional("dotnet=ocx.sh/microsoft-dotnet-sdk:10", "ocx.sh").expect("ok");
         let out = compose_tool_set(
-            &cfg(),
+            &config,
             Some(&lock),
             &["default".into()],
             std::slice::from_ref(&pos),
@@ -716,10 +726,10 @@ mod tests {
         // default ships a terraform host leaf; positional
         // `opentofu=ocx.sh/opentofu:1.7` has a different binding name so both
         // entries are kept.
-        let lock = lock_with(vec![locked("terraform", "default", "ocx.sh", "opentofu", 'a')]);
+        let (config, lock) = current_lock(vec![locked("terraform", "default", "ocx.sh", "opentofu", 'a')]);
         let pos = parse_positional("opentofu=ocx.sh/opentofu:1.7", "ocx.sh").expect("ok");
         let out = compose_tool_set(
-            &cfg(),
+            &config,
             Some(&lock),
             &["default".into()],
             std::slice::from_ref(&pos),
@@ -750,12 +760,11 @@ mod tests {
     /// (from ci) must appear before `cmake` (from default) in the output.
     #[test]
     fn compose_preserves_group_selection_order() {
-        let lock = lock_with(vec![
+        let (config, lock) = current_lock(vec![
             locked("cmake", "default", "ocx.sh", "cmake", 'a'),
             locked("shellcheck", "ci", "ocx.sh", "shellcheck", 'b'),
         ]);
-        let cfg = cfg();
-        let out = compose_tool_set(&cfg, Some(&lock), &["ci".into(), "default".into()], &[], &host()).expect("ok");
+        let out = compose_tool_set(&config, Some(&lock), &["ci".into(), "default".into()], &[], &host()).expect("ok");
         assert_eq!(out.len(), 2);
         // ci group (shellcheck) must come first because ci was selected first.
         assert_eq!(out[0].binding, "shellcheck", "ci group must be first; got {out:?}");
@@ -834,5 +843,93 @@ mod tests {
             vec!["default", "ci", "lint", "release"],
             "only `all`: must expand to default + alphabetical named groups; got {result:?}"
         );
+    }
+
+    // ── compose: a locked tool carries its declared tag ─────────────────
+
+    /// A config and a lock whose recorded hash is that config's own.
+    fn locked_from(config_toml: &str, tools: Vec<LockedTool>) -> (ProjectConfig, ProjectLock) {
+        let config = ProjectConfig::from_toml_str(config_toml).expect("parse ocx.toml");
+        let mut lock = lock_with(tools);
+        lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
+        (config, lock)
+    }
+
+    /// A tag-anchored patch rule matches only an identifier that still carries
+    /// the tag, so the lock digest must arrive with the declared tag attached.
+    #[test]
+    fn c005_compose_carries_the_declared_tag_onto_each_group_s_lock_leaf() {
+        let (config, lock) = locked_from(
+            "[tools]\nshellcheck = \"ocx.sh/shellcheck:0.10\"\n\n[group.ci.tools]\nshfmt = \"ocx.sh/shfmt:3.8\"\n",
+            vec![
+                locked("shfmt", "ci", "ocx.sh", "shfmt", 'b'),
+                locked("shellcheck", "default", "ocx.sh", "shellcheck", 'a'),
+            ],
+        );
+        let out = compose_tool_set(&config, Some(&lock), &["default".into(), "ci".into()], &[], &host())
+            .expect("a current lock composes");
+        let identifier_of = |binding: &str| {
+            out.iter()
+                .find(|tool| tool.binding == binding)
+                .unwrap_or_else(|| panic!("{binding} composed"))
+                .identifier
+                .to_string()
+        };
+        assert_eq!(
+            identifier_of("shellcheck"),
+            format!("ocx.sh/shellcheck:0.10@sha256:{}", sha('a'))
+        );
+        assert_eq!(identifier_of("shfmt"), format!("ocx.sh/shfmt:3.8@sha256:{}", sha('b')));
+    }
+
+    /// The narrowed path (`select_tool_set` then `resolve_selected_tools`) that
+    /// `ocx exec <name>` takes carries the same tag as the whole-set compose.
+    #[test]
+    fn c005_resolving_a_selection_carries_the_declared_tag() {
+        let (config, lock) = locked_from(
+            "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+            vec![locked("cmake", "default", "ocx.sh", "cmake", 'a')],
+        );
+        let selected = select_tool_set(&config, Some(&lock), &["default".into()], &[]).expect("selection");
+        let resolved = resolve_selected_tools(&selected, &host()).expect("host leaf");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].origin, Origin::Group("default".into()));
+        assert_eq!(
+            resolved[0].identifier.to_string(),
+            format!("ocx.sh/cmake:3.28@sha256:{}", sha('a'))
+        );
+    }
+
+    /// A lock entry locked from another repository than `ocx.toml` declares,
+    /// under a fresh hash: the selection refuses rather than pairing the
+    /// declared tag with a digest from the wrong repository, and names the binding.
+    #[test]
+    fn c003_selecting_a_group_refuses_a_per_entry_repository_desync() {
+        let (config, lock) = locked_from(
+            "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+            vec![locked("cmake", "default", "ghcr.io", "cmake", 'a')],
+        );
+        let err = select_tool_set(&config, Some(&lock), &["default".into()], &[])
+            .expect_err("a desynced entry must not select");
+        let crate::Error::Project(pe) = &err else {
+            panic!("expected a project-tier error, got {err:?}");
+        };
+        let ProjectErrorKind::LockOutOfSync { drift } = &pe.kind else {
+            panic!("expected LockOutOfSync, got {:?}", pe.kind);
+        };
+        assert_eq!(
+            drift.as_ref(),
+            &crate::lock::LockDrift::Entry {
+                group: "default".into(),
+                name: "cmake".into(),
+                locked: ocx_oci::Repository::new("ghcr.io", "cmake"),
+                declared: Some(ocx_oci::Repository::new("ocx.sh", "cmake")),
+            }
+        );
+        let rendered = err.to_string();
+        for needle in ["'cmake'", "'default'", "ghcr.io/cmake", "ocx.sh/cmake"] {
+            assert!(rendered.contains(needle), "{needle} missing from {rendered:?}");
+        }
+        assert!(!rendered.contains("declaration_hash"), "{rendered:?}");
     }
 }

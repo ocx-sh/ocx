@@ -168,10 +168,10 @@ times, and a regression whose cost scaled with locked-tool count was invisible t
 this gate by construction — the docstring even defended the shape, on the grounds
 that an ``[env]``-only project "is the only kind a latency gate can build
 hermetically". It is not. Consent reads the lock for its **source set** and the
-store for its **record**, and a record is a plain file: ``shell_matrix``'s
-``lock_tool``, ``declaration_hash_of`` and ``record_origin`` build the whole
-thing with no registry, no package and no network. :data:`WALL_PROJECT_TOOLS`
-tools now go in.
+store for its **record**, and a record is a plain file: the tools are published
+into the arena's blob cache, locked by an offline ``ocx lock`` and given an
+origin marker (``shell_matrix.record_origin``), with no registry and no network.
+:data:`WALL_PROJECT_TOOLS` tools now go in.
 
 Half a fix would have been worse than none, because ``verified_sources``
 ``return``s at the **first** tool the store cannot corroborate: an arena that
@@ -2559,44 +2559,46 @@ def _write_wall_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> 
     * ``[env]`` — :data:`WALL_PROJECT_ENTRIES` path entries, the surgery the
       fixed-point gates read.
     * a lock **from ``ocx lock``**, never hand-written: the composer refuses a
-      lock whose ``declaration_hash`` does not match the ``ocx.toml`` beside it,
-      and a mismatched hash degrades the reconcile to "emitting nothing" with the
-      arena still looking correct.
-    * :data:`WALL_PROJECT_TOOLS` **locked tools**, spliced into that lock with its
-      generated ``declaration_hash`` carried across verbatim
-      (:func:`shell_matrix.declaration_hash_of`), each with a corroborating
-      origin marker. An offline ``ocx lock`` cannot resolve a tool — that is the
-      whole reason the tools are not declared in the ``ocx.toml`` — but consent
-      reads the lock for its **source set**, not for anything it has to fetch, so
-      the source set is exactly what a fixture can supply. This is what makes the
-      measured ``verified_sources`` loop iterate at all.
+      lock that does not bind to the ``ocx.toml`` beside it — a moved
+      ``declaration_hash``, or an entry ``ocx.toml`` does not declare — and a
+      refused lock degrades the reconcile to "emitting nothing" with the arena
+      still looking correct.
+    * :data:`WALL_PROJECT_TOOLS` **declared tools**, digest-pinned, each
+      published into the arena's blob cache (:func:`_publish_tool`) so the
+      offline ``ocx lock`` resolves it, and each with a corroborating origin
+      marker. Until 2026-09-30 they were spliced into the generated lock
+      undeclared; ``ocx lock`` never writes such a lock, and the per-entry
+      binding check refuses it. This is what makes the measured
+      ``verified_sources`` loop iterate at all.
 
-    Nothing here needs a registry, a package or the network. What it needs is the
-    store's *record*, and that record is a plain file.
+    Nothing here needs a registry or the network: every byte the resolver reads
+    is put in the blob cache here. The payloads go in after the lock, as in
+    :func:`_write_bin_project`, whose docstring says why the order is forced.
     """
+    ocx_home = Path(env["OCX_HOME"])
+    registry, _, org = WALL_TOOL_NAMESPACE.partition("/")
+    declarations = []
+    packages = []
+    for index in range(1, WALL_PROJECT_TOOLS + 1):
+        # A distinct digest per tool (the metadata differs), so each lands in its
+        # own CAS shard and costs its own `read_dir` — one shared digest would
+        # collapse N tools into one directory read and hide the scaling this
+        # arena exists to expose.
+        key = f"{WALL_TOOL_ENV_PREFIX}{index}"
+        digest = _publish_tool(ocx_home, registry, _tool_metadata(key))
+        declarations.append(f'"t{index}" = "{WALL_TOOL_NAMESPACE}/t{index}@{digest}"')
+        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=f"{registry}/{org}/t{index}")
+        packages.append((marker.parents[2], key))
+
     entries = "\n".join(
         f'P{index} = {{ type = "path", value = "bin{index}" }}' for index in range(1, WALL_PROJECT_ENTRIES + 1)
     )
-    matrix.write_project(project, entries)
+    matrix.write_project(project, entries, tools_block="[tools]\n" + "\n".join(declarations) + "\n")
     locked = matrix.run_lock(ocx, project, dict(env))
     if locked.returncode != 0:
         raise RuntimeError(f"`ocx lock` failed in the wall arena ({locked.returncode})\n{locked.stderr}")
-    declaration = matrix.declaration_hash_of(project / "ocx.lock")
-
-    ocx_home = Path(env["OCX_HOME"])
-    registry, _, org = WALL_TOOL_NAMESPACE.partition("/")
-    blocks = []
-    for index in range(1, WALL_PROJECT_TOOLS + 1):
-        # A distinct digest per tool, so each lands in its own CAS shard and each
-        # costs its own `read_dir` — one shared digest would collapse N tools
-        # into one directory read and hide the scaling this arena exists to
-        # expose.
-        digest = "sha256:" + hashlib.sha256(f"ocx-latency-tool-{index}".encode()).hexdigest()
-        repository = f"{WALL_TOOL_NAMESPACE}/t{index}"
-        blocks.append(matrix.lock_tool(f"t{index}", repository, digest=digest))
-        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=f"{registry}/{org}/t{index}")
-        _materialize_tool(marker.parents[2], f"{WALL_TOOL_ENV_PREFIX}{index}")
-    matrix.write_lock(project, "\n".join(blocks), declaration_hash=declaration)
+    for package, key in packages:
+        _materialize_tool(package, key)
 
 
 def _write_global_toolchain(ocx_home: Path) -> None:
@@ -2837,17 +2839,12 @@ def _publish_tool(ocx_home: Path, registry: str, metadata: Mapping[str, object])
 def _write_bin_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> dict[str, Any]:
     """Fill ``project`` with the **`bin`-mode** project D-V5's row is timed in.
 
-    Three differences from :func:`_write_wall_project`, and each one is what
-    makes the row measure `bin` mode rather than nothing:
+    Declared and locked exactly as :func:`_write_wall_project` does it; what
+    differs is what makes the row measure `bin` mode rather than nothing:
 
     * ``activate = "bin"`` in ``ocx.toml`` (C-012) — the mode under test.
-    * The tools are **declared** in ``[tools]``, digest-pinned, rather than
-      spliced into a generated lock. The `env` arena splices because an offline
-      ``ocx lock`` cannot resolve a tool it has never seen; here every tool's
-      manifest chain is already in the arena's blob cache
-      (:func:`_publish_tool`), so ``ocx --offline lock`` resolves each one,
-      writes the lock **itself**, and — this is the point —
-      ``project::mutation`` re-renders the toolchain behind it (D-V8, C-054).
+    * The ``ocx --offline lock`` that writes the lock also has
+      ``project::mutation`` re-render the toolchain behind it (D-V8, C-054).
     * That render is what writes the **render stamp**, and the stamp is what
       `bin` mode gates on (C-061). It is deliberately **not** forged: a
       hand-written `render_stamp.json` that happened to match would make the row
@@ -3129,6 +3126,7 @@ def measure_reentry(
 
 
 def measure_clause_two(
+    ocx: Path,
     *,
     cwd: Path,
     env: Mapping[str, str],
@@ -3157,7 +3155,7 @@ def measure_clause_two(
     iterates :data:`WALL_PROJECT_TOOLS` times rather than one.
 
     ``locked_tools`` is counted from the lock **on disk**, not from the constant,
-    so a splice that silently wrote fewer tools than it meant to reds rather than
+    so an arena that silently locked fewer tools than it meant to reds rather than
     passing against its own intention.
 
     Returns ``{"locked_tools": n, "corroborated_tools": n or 0}``. The second is
@@ -3166,6 +3164,11 @@ def measure_clause_two(
     """
     child = {key: value for key, value in env.items() if key != "OCX_CONSENT_PATHS"}
     child["OCX_CONSENT_NAMESPACES"] = WALL_TOOL_NAMESPACE
+    # The arena's `ocx lock` stamped consent for this lock's source set, and
+    # clause 1 grants ahead of clause 2 — so the stamp goes first, or the probe
+    # reads the stamp and never reaches `verified_sources`. Safe: this runs last.
+    key = matrix.project_key(ocx, cwd, dict(env))
+    (matrix.stamp_dir(Path(env["OCX_HOME"]), key) / "consent.json").unlink()
     result = subprocess.run(
         list(reconcile),
         cwd=str(cwd),
@@ -3296,7 +3299,7 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         )
         # Last, and inside the arena: it swaps the grant, so it must not run
         # before anything that is timed or read under the paths grant.
-        consent = measure_clause_two(cwd=project, env=env, reconcile=reconcile)
+        consent = measure_clause_two(ocx, cwd=project, env=env, reconcile=reconcile)
 
     report = evaluate(
         floor_samples=wall["floor"],

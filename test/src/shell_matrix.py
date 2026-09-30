@@ -303,23 +303,6 @@ def write_lock(project_dir: Path, tools: str = EMPTY_LOCK_TOOLS, *, declaration_
     return lock
 
 
-def declaration_hash_of(lock_path: Path) -> str:
-    """The ``declaration_hash`` ``ocx lock`` recorded for the ``ocx.toml`` beside it.
-
-    Read back, never recomputed. The composer refuses a lock whose hash does not
-    match its declaration, and the refusal is *silent*: the reconcile degrades to
-    emitting nothing while the fixture on disk still looks correct. So a test
-    that needs to **edit** a generated lock — add tools the offline `ocx lock`
-    could not resolve, say — carries the generated hash across verbatim instead
-    of inventing one, and the declaration it was computed over stays untouched.
-    """
-    text = lock_path.read_text(encoding="utf-8")
-    match = re.search(r'^declaration_hash\s*=\s*"([^"]+)"', text, re.MULTILINE)
-    if match is None:
-        raise AssertionError(f"no declaration_hash in '{lock_path}':\n{text}")
-    return match.group(1)
-
-
 def record_origin(ocx_home: Path, *, registry: str, digest: str, origin: str) -> Path:
     """Write the pull-origin marker clause 2's evidence is quantified over.
 

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{ProjectConfig, ProjectLock, declaration_hash};
+use crate::{ProjectConfig, ProjectLock};
 
 /// Return type of [`load_project_state`].
 pub struct ProjectState {
@@ -14,8 +14,8 @@ pub struct ProjectState {
     pub lock: ProjectLock,
     pub config_path: PathBuf,
     pub lock_path: PathBuf,
-    /// The lock's declaration hash differs from the config; the caller
-    /// decides warn or error.
+    /// The lock does not bind to the config ([`ProjectLock::is_current`]);
+    /// the caller decides warn or error.
     pub stale: bool,
 }
 
@@ -49,8 +49,7 @@ pub async fn load_project_state(
         return Ok(Err(MissingState::LockMissing { lock_path }));
     };
 
-    let current_hash = declaration_hash(&config);
-    let stale = lock.metadata.declaration_hash != current_hash;
+    let stale = !lock.is_current(&config);
 
     Ok(Ok(ProjectState {
         config,
@@ -64,6 +63,7 @@ pub async fn load_project_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::declaration_hash;
 
     /// Minimal `ocx.toml` with no bindings — its declaration hash is
     /// stable, which lets tests construct matching lock metadata

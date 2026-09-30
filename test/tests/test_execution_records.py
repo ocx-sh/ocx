@@ -613,10 +613,10 @@ def test_launcher_shim_frame_emits_a_record_and_names_the_pull_only_once(
     )
     assert record["packages"], "a shim record carries the resolved closure it composed"
 
-    # The DIGEST-pinned spelling, not the `repo:tag` one: a shim is baked with
-    # the pinned identifier the lock resolved, and the pull it triggers is
-    # addressed by that digest with no tag resolve at all. Asserted against the
-    # record's own root digest so the two halves of one record must agree.
+    # The DIGEST-pinned spelling, not the `repo:tag` one: the pull a shim
+    # triggers is addressed by its baked digest with no tag resolve, so a shim
+    # frame records no tag provenance even though the shim is baked tagged.
+    # Asserted against the record's own root digest so both halves agree.
     assert record["resolution"]["autoInstalled"] == [
         f"{ocx.registry}/{pkg.repo}@sha256:{_root_digest(record)}"
     ], (

@@ -57,7 +57,25 @@ for the row shape and ordering rules.
 
 The `match` field is a flat glob. `*` matches any character including `/`, `:`, and `@`,
 so `*` matches every package and `ocx.sh/java:*` matches any version of the JDK hosted at
-`ocx.sh`.
+`ocx.sh`. A bare `*:*` also matches a digest-pinned, untagged identifier, because the
+digest's `sha256:` segment carries its own colon — as does an explicit registry port
+(`localhost:5000/repo`).
+
+The identifier matched is the one you declared: `repo:tag` from the command line,
+`ocx.toml` or the global toolchain, with the resolved digest attached. A digest-only
+reference has no tag, so tag-anchored rules skip it; match on the repository
+(`ocx.sh/java*`, which also matches `ocx.sh/javafx`) to cover both. A digest in a pattern
+matches the platform-specific manifest digest, not the multi-platform index digest.
+
+When one package is declared under two tags, the tag of the first binding in selection
+order is the one matched. Selection order is the groups in the order you select them
+(`all` puts `default` first), then bindings sorted by name. `ocx direnv export` and the
+global toolchain ignore the selection order and take the first binding in lock order
+(groups, then bindings, by name).
+
+Tags are advisory here — a companion that must always apply should match on the repository
+(or a digest) rather than a tag. When the lock is stale, `ocx direnv export` and the global
+toolchain match patch rules without the declared tag until `ocx lock` runs.
 
 Rules are evaluated in order and unioned: a Java install matched by both rules above gets
 both companions composed in.

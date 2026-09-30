@@ -24,7 +24,7 @@ from src.runner import OcxRunner, registry_dir
 pytestmark = pytest.mark.command("remove")
 
 EXIT_SUCCESS = 0
-# StaleLockOnPartial → DataError (65) per error.rs ClassifyExitCode
+# LockOutOfSync → DataError (65) per error.rs ClassifyExitCode
 EXIT_DATA_ERROR = 65
 # BindingNotFound → NotFound (79) per error.rs ClassifyExitCode
 EXIT_NOT_FOUND = 79

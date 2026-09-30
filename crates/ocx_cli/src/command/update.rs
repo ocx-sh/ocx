@@ -134,6 +134,8 @@ impl Update {
         };
         let scope = context.toolchain_render_scope(guard.config_path()).await?;
         let platform = conventions::platform_or_default(self.platform.platform.clone());
+        // Cloned before the commit consumes `staged`; the eager pull binds the new lock to it.
+        let config = staged.config().clone();
         let commit = render_manager
             .commit_and_render(
                 guard,
@@ -152,7 +154,7 @@ impl Update {
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
         // After the commit, so a failure here never rolls back the lock.
-        materialize_lock(&context, &new_lock, eager, platform).await?;
+        materialize_lock(&context, &new_lock, &config, eager, platform).await?;
 
         self.emit(&context, report)?;
 

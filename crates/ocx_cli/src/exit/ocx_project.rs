@@ -82,7 +82,7 @@ impl ClassifyExitCode for ProjectError {
                 ProjectErrorKind::InvalidGroupName { .. } => ExitCode::UsageError,
                 ProjectErrorKind::InvalidBindingName { .. } => ExitCode::UsageError,
                 // Must match `LockCurrency::Stale` (65), or scripts see two codes for one condition.
-                ProjectErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
+                ProjectErrorKind::LockOutOfSync { .. } => ExitCode::DataError,
                 ProjectErrorKind::DuplicatePlatformKey { .. } => ExitCode::DataError,
                 ProjectErrorKind::NoncanonicalPlatformKey { .. } => ExitCode::DataError,
                 ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked,

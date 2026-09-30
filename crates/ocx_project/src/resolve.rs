@@ -12,12 +12,12 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use super::error::{ProjectError, ProjectErrorKind};
-use super::lock::validate_canonical_platform_keys;
+use super::lock::{LockDrift, validate_canonical_platform_keys};
 use super::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
 use crate::hash::DECLARATION_HASH_VERSION;
 use ocx_index::{Index, IndexOperation};
 use ocx_oci::client::error::ClientError;
-use ocx_oci::{Digest, PackageRef, Platform, Selection, select_best};
+use ocx_oci::{Digest, PackageRef, Platform, Repository, Selection, select_best};
 
 /// Default per-tool timeout wrapping the entire retry chain.
 pub const DEFAULT_PER_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -112,7 +112,7 @@ async fn resolve_work(
 /// freshness anchor. Swapped, every clean `add` fails closed.
 ///
 /// # Errors
-/// [`ProjectErrorKind::StaleLockOnPartial`] on a drifted or incoherent
+/// [`ProjectErrorKind::LockOutOfSync`] on a drifted or incoherent
 /// predecessor, plus [`resolve_lock`]'s failures for the touched bindings.
 pub async fn resolve_lock_touched(
     candidate: &ProjectConfig,
@@ -128,9 +128,11 @@ pub async fn resolve_lock_touched(
     if previous.metadata.declaration_hash != pre_hash {
         return Err(ProjectError::new(
             PathBuf::new(),
-            ProjectErrorKind::StaleLockOnPartial {
-                previous_hash: previous.metadata.declaration_hash.clone(),
-                current_hash: pre_hash.to_string(),
+            ProjectErrorKind::LockOutOfSync {
+                drift: Box::new(LockDrift::DeclarationHash {
+                    previous_hash: previous.metadata.declaration_hash.clone(),
+                    current_hash: pre_hash.to_string(),
+                }),
             },
         )
         .into());
@@ -154,7 +156,7 @@ pub async fn resolve_lock_touched(
                 ProjectError::new(PathBuf::new(), ProjectErrorKind::ToolNotInConfig { name: name.clone() }).into(),
             );
         };
-        work.push((group.clone(), name.clone(), identifier));
+        work.push((group.clone(), name.clone(), identifier.clone()));
     }
 
     let index = Arc::new(index.clone());
@@ -194,21 +196,25 @@ fn merge_carry_forward(
 /// with a matching bare `repository`.
 ///
 /// # Errors
-/// [`ProjectErrorKind::StaleLockOnPartial`] on any mismatch.
+/// [`ProjectErrorKind::LockOutOfSync`] on any mismatch.
 fn validate_predecessor_coherence(
     candidate: &ProjectConfig,
     previous: &ProjectLock,
     touched: &[(String, String)],
 ) -> Result<(), super::Error> {
-    let stale = || {
+    let refuse = |drift: LockDrift| -> super::Error {
         ProjectError::new(
             PathBuf::new(),
-            ProjectErrorKind::StaleLockOnPartial {
-                previous_hash: previous.metadata.declaration_hash.clone(),
-                current_hash: candidate.declaration_hash_cached().to_string(),
-            },
+            ProjectErrorKind::LockOutOfSync { drift: Box::new(drift) },
         )
         .into()
+    };
+    // A missing or duplicate carried key has no single entry to name.
+    let stale = || {
+        refuse(LockDrift::DeclarationHash {
+            previous_hash: previous.metadata.declaration_hash.clone(),
+            current_hash: candidate.declaration_hash_cached().to_string(),
+        })
     };
 
     let touched_keys: HashSet<(&str, &str)> = touched.iter().map(|(g, n)| (g.as_str(), n.as_str())).collect();
@@ -233,8 +239,14 @@ fn validate_predecessor_coherence(
         let Some(tool) = carried.get(&key) else {
             return Err(stale());
         };
-        if tool.repository != declared.without_specifiers() {
-            return Err(stale());
+        let declared = Repository::from(&declared);
+        if tool.repository != declared {
+            return Err(refuse(LockDrift::Entry {
+                group: group.clone(),
+                name: name.clone(),
+                locked: tool.repository.clone(),
+                declared: Some(declared),
+            }));
         }
     }
 
@@ -300,11 +312,11 @@ fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(
 }
 
 /// The identifier `ocx.toml` declares for `(group, name)`; `None` once undeclared.
-fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Option<PackageRef> {
+pub(crate) fn declared_identifier<'c>(config: &'c ProjectConfig, group: &str, name: &str) -> Option<&'c PackageRef> {
     if group == super::internal::DEFAULT_GROUP {
-        config.tools.get(name).cloned()
+        config.tools.get(name)
     } else {
-        config.groups.get(group).and_then(|g| g.tools.get(name)).cloned()
+        config.groups.get(group).and_then(|g| g.tools.get(name))
     }
 }
 
@@ -337,7 +349,7 @@ async fn resolve_one(
     Ok(LockedTool {
         name,
         group,
-        repository: identifier.without_specifiers(),
+        repository: Repository::from(&identifier),
         platforms,
     })
 }
@@ -1200,7 +1212,7 @@ mod tests {
     }
 
     /// Extract a [`LockedTool`]'s `(repository, platforms)` pair.
-    fn resolved_platforms(tool: &LockedTool) -> (&PackageRef, &BTreeMap<String, Digest>) {
+    fn resolved_platforms(tool: &LockedTool) -> (&Repository, &BTreeMap<String, Digest>) {
         (&tool.repository, &tool.platforms)
     }
 
@@ -1257,8 +1269,6 @@ mod tests {
             "bare repository keeps the registry"
         );
         assert_eq!(repository.repository(), TOOL_REPO, "bare repository keeps the repo");
-        assert!(repository.tag().is_none(), "repository must be bare (no tag)");
-        assert!(repository.digest().is_none(), "repository must be bare (no digest)");
 
         assert_eq!(platforms.len(), 2, "one leaf per advertised child; got {platforms:?}");
         assert_eq!(
@@ -1733,7 +1743,7 @@ gamma = "{r}/gamma:1"
         LockedTool {
             name: name.to_string(),
             group: "default".to_string(),
-            repository: PackageRef::new_registry(name, TEST_REGISTRY),
+            repository: ocx_oci::Repository::new(TEST_REGISTRY, name),
             platforms,
         }
     }
@@ -1878,7 +1888,7 @@ delta = "{r}/delta:1"
         // it carries verbatim through the PanicMock; reuse locked_tool_fixture's
         // shape but with the right repo coordinates.
         let cmake = LockedTool {
-            repository: PackageRef::new_registry(TOOL_REPO, TEST_REGISTRY),
+            repository: ocx_oci::Repository::new(TEST_REGISTRY, TOOL_REPO),
             platforms: {
                 let mut p = BTreeMap::new();
                 p.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
@@ -1923,7 +1933,7 @@ delta = "{r}/delta:1"
         );
     }
 
-    /// Spec §8.1 — a drifted pre-mutation hash fails `StaleLockOnPartial`
+    /// Spec §8.1 — a drifted pre-mutation hash fails `LockOutOfSync`
     /// BEFORE any resolve (exit 65); the PanicMock proves the gate short-
     /// circuits ahead of registry contact.
     #[tokio::test]
@@ -1945,10 +1955,11 @@ delta = "{r}/delta:1"
         let mut found = false;
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
         while let Some(c) = cause {
-            if let Some(ProjectErrorKind::StaleLockOnPartial {
-                previous_hash,
-                current_hash,
-            }) = c.downcast_ref::<ProjectErrorKind>()
+            if let Some(ProjectErrorKind::LockOutOfSync { drift }) = c.downcast_ref::<ProjectErrorKind>()
+                && let LockDrift::DeclarationHash {
+                    previous_hash,
+                    current_hash,
+                } = drift.as_ref()
             {
                 assert_eq!(
                     previous_hash,
@@ -1965,7 +1976,7 @@ delta = "{r}/delta:1"
             }
             cause = c.source();
         }
-        assert!(found, "error chain must contain StaleLockOnPartial; chain: {err:#}");
+        assert!(found, "error chain must contain LockOutOfSync; chain: {err:#}");
     }
 
     /// Spec §8.1 — `merge_carry_forward` (exercised via `resolve_lock_touched`
@@ -2026,11 +2037,11 @@ gamma = "{r}/gamma:1"
     // hand-edited lock with the right metadata hash but a missing / extra /
     // wrong-repository entry would otherwise pass the gate, then be laundered by
     // the carry-forward under a freshly stamped candidate hash. These specs pin
-    // the structural-coherence gate (StaleLockOnPartial/65) and prove it fires
+    // the structural-coherence gate (LockOutOfSync/65) and prove it fires
     // BEFORE any registry contact (PanicMock).
 
     /// Spec — Block 2(a): a predecessor missing a declared (untouched) binding
-    /// must fail `StaleLockOnPartial` BEFORE any resolve. The candidate declares
+    /// must fail `LockOutOfSync` BEFORE any resolve. The candidate declares
     /// three tools but the predecessor lock only carries two; `gamma` is
     /// uncovered (not touched, not carried), so the carry-forward would silently
     /// drop a declared binding — refuse instead.
@@ -2055,14 +2066,14 @@ gamma = "{r}/gamma:1"
             .expect_err("a predecessor missing a declared binding must be rejected before any resolve");
 
         assert!(
-            chain_contains_stale_lock_on_partial(&err),
-            "error chain must contain StaleLockOnPartial; chain: {err:#}"
+            chain_contains_lock_out_of_sync(&err),
+            "error chain must contain LockOutOfSync; chain: {err:#}"
         );
     }
 
     /// Spec — Block 2(b): a carried entry whose bare `repository` differs from
     /// the candidate's declared identifier for that `(group, name)` must fail
-    /// `StaleLockOnPartial` BEFORE any resolve. The lock pins `beta` to a
+    /// `LockOutOfSync` BEFORE any resolve. The lock pins `beta` to a
     /// different repository than `ocx.toml` declares — the lock no longer
     /// describes the config, so carrying it forward would launder a wrong pin.
     #[tokio::test]
@@ -2072,7 +2083,7 @@ gamma = "{r}/gamma:1"
         // `beta`'s carried entry points at a DIFFERENT repository than the
         // candidate declares (`registry.test/beta`). A corrupt/hand-edited lock.
         let mut beta_wrong = locked_tool_fixture("beta", "b");
-        beta_wrong.repository = PackageRef::new_registry("wrong-repo", TEST_REGISTRY);
+        beta_wrong.repository = Repository::new(TEST_REGISTRY, "wrong-repo");
         let previous = predecessor_lock(
             &config,
             vec![
@@ -2090,13 +2101,17 @@ gamma = "{r}/gamma:1"
             .expect_err("a carried entry whose repository diverges from the declaration must be rejected");
 
         assert!(
-            chain_contains_stale_lock_on_partial(&err),
-            "error chain must contain StaleLockOnPartial; chain: {err:#}"
+            chain_contains_lock_out_of_sync(&err),
+            "error chain must contain LockOutOfSync; chain: {err:#}"
         );
+        let rendered = format!("{err:#}");
+        for needle in ["'beta'", "wrong-repo", &format!("{TEST_REGISTRY}/beta")] {
+            assert!(rendered.contains(needle), "{needle} missing from {rendered:?}");
+        }
     }
 
     /// Spec — Block 2: a predecessor carrying a DUPLICATE `(group, name)` entry
-    /// must fail `StaleLockOnPartial` BEFORE any resolve. Each declared binding
+    /// must fail `LockOutOfSync` BEFORE any resolve. Each declared binding
     /// must be covered by exactly one carried entry; two entries for the same
     /// key is a corrupt lock.
     #[tokio::test]
@@ -2121,19 +2136,19 @@ gamma = "{r}/gamma:1"
             .expect_err("a duplicate carried entry must be rejected before any resolve");
 
         assert!(
-            chain_contains_stale_lock_on_partial(&err),
-            "error chain must contain StaleLockOnPartial; chain: {err:#}"
+            chain_contains_lock_out_of_sync(&err),
+            "error chain must contain LockOutOfSync; chain: {err:#}"
         );
     }
 
     /// Walk `err`'s source chain and report whether it carries a
-    /// [`ProjectErrorKind::StaleLockOnPartial`].
-    fn chain_contains_stale_lock_on_partial(err: &super::super::Error) -> bool {
+    /// [`ProjectErrorKind::LockOutOfSync`].
+    fn chain_contains_lock_out_of_sync(err: &super::super::Error) -> bool {
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(err);
         while let Some(c) = cause {
             if matches!(
                 c.downcast_ref::<ProjectErrorKind>(),
-                Some(ProjectErrorKind::StaleLockOnPartial { .. })
+                Some(ProjectErrorKind::LockOutOfSync { .. })
             ) {
                 return true;
             }

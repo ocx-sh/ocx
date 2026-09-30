@@ -5,9 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
-use ocx_project::{
-    DEFAULT_GROUP, MissingState, expand_all_keyword, host_leaf_identifier, lazy_mode_for_tool, load_project_state,
-};
+use ocx_project::{DEFAULT_GROUP, MissingState, expand_all_keyword, lazy_mode_for_tool, load_project_state};
 use ocx_shell::shell;
 
 use crate::conventions::emit_lines;
@@ -76,7 +74,7 @@ impl DirenvExport {
 
         // Warn and use the stale digests, unlike `ocx exec`'s 65, so the shell stays usable until a re-lock.
         if project.stale {
-            eprintln!("# ocx: ocx.lock is stale (ocx.toml changed since last `ocx lock`); using stale digests");
+            eprintln!("# ocx: ocx.lock is stale (it does not match ocx.toml); using stale digests");
         }
 
         // An unknown `-g` is an `.envrc` typo and fails (64) rather than silently exporting nothing.
@@ -89,11 +87,16 @@ impl DirenvExport {
         let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
 
         // Each tool's `lazy-mode` comes from the same ladder `ocx env`/`ocx exec` apply; a tool with no
-        // host leaf is dropped with a note.
+        // host leaf is dropped with a note. A stale lock exports untagged, never a new tag on an old digest.
         let mut names: Vec<String> = Vec::new();
         let mut requests: Vec<ComposeRequest> = Vec::new();
-        for tool in project.lock.tools.iter().filter(|tool| expanded.contains(&tool.group)) {
-            let Ok(identifier) = host_leaf_identifier(tool, &platform) else {
+        for (tool, identifier) in project
+            .lock
+            .lenient_host_identifiers(Some(&project.config), &platform)
+            .into_iter()
+            .filter(|(tool, _)| expanded.contains(&tool.group))
+        {
+            let Ok(identifier) = identifier else {
                 eprintln!("# ocx: {} ships no build for this platform; skipping", tool.name);
                 continue;
             };
@@ -104,7 +107,10 @@ impl DirenvExport {
                 self.lazy_mode.mode(),
             );
             names.push(tool.name.clone());
-            requests.push(ComposeRequest { identifier, mode });
+            requests.push(ComposeRequest {
+                identifier: identifier.into(),
+                mode,
+            });
         }
 
         // Probe offline first, so a present tool resolves with no registry contact and a missing one is

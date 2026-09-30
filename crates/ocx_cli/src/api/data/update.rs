@@ -84,7 +84,7 @@ pub struct UpdateReport {
 /// The compared value of one pin: the pull identifier, not the bare digest.
 // A digest compare reports "unchanged" for a binding whose repository moved to a mirror.
 fn pull_identifier(tool: &LockedTool, leaf: &ocx_oci::Digest) -> PackageRef {
-    tool.repository.clone_with_digest(leaf.clone())
+    tool.repository.pin_untagged(leaf.clone()).into()
 }
 
 /// Flatten a lock into `(group, name, platform) -> pull identifier`.
@@ -310,7 +310,7 @@ mod tests {
         LockedTool {
             name: name.to_string(),
             group: DEFAULT_GROUP.to_string(),
-            repository: PackageRef::new_registry(repo, "ocx.sh"),
+            repository: ocx_oci::Repository::new("ocx.sh", repo),
             platforms: leaves
                 .iter()
                 .map(|(key, byte)| ((*key).to_string(), digest_of(*byte)))

@@ -909,8 +909,7 @@ pub(crate) fn link_target(
     platform: &ocx_oci::Platform,
 ) -> Option<PathBuf> {
     // An ambiguous lock is skipped like a missing one: one unavailable tool must not fail the render.
-    let identifier = ocx_project::compose::host_leaf_identifier(tool, platform).ok()?;
-    let pinned = ocx_oci::PinnedPackageRef::try_from(identifier).ok()?;
+    let pinned = tool.repository.pin_untagged(tool.host_leaf(platform).ok()?);
     Some(file_structure.packages.path(&pinned))
 }
 
@@ -1817,7 +1816,7 @@ mod tests {
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
+            repository: ocx_oci::Repository::new(REGISTRY, repository),
             platforms: platforms
                 .iter()
                 .map(|(key, seed)| ((*key).to_string(), digest_of(*seed)))
@@ -1846,9 +1845,10 @@ mod tests {
     /// the way the contract says the renderer derives it — through the shared
     /// `select_best` helper (RUL-31), never by an exact key lookup.
     fn expected_link_target(file_structure: &FileStructure, tool: &LockedTool) -> PathBuf {
-        let identifier = ocx_project::compose::host_leaf_identifier(tool, &platform())
+        let leaf = tool
+            .host_leaf(&platform())
             .expect("the fixture lock ships a leaf compatible with the fixture platform");
-        let pinned = ocx_oci::PinnedPackageRef::try_from(identifier).expect("a resolved host leaf is digest-bearing");
+        let pinned = tool.repository.pin_untagged(leaf);
         file_structure.packages.path(&pinned)
     }
 
@@ -5757,17 +5757,14 @@ mod tests {
             &[("windows/amd64", 'w')],
         );
         let expected_exact = {
-            let identifier = ocx_project::compose::host_leaf_identifier(&exact, &host).expect("exact resolves");
-            tree.file_structure
-                .packages
-                .path(&ocx_oci::PinnedPackageRef::try_from(identifier).expect("digest-bearing"))
+            let leaf = exact.host_leaf(&host).expect("exact resolves");
+            tree.file_structure.packages.path(&exact.repository.pin_untagged(leaf))
         };
         let expected_compatible = {
-            let identifier =
-                ocx_project::compose::host_leaf_identifier(&compatible, &host).expect("compatible resolves");
+            let leaf = compatible.host_leaf(&host).expect("compatible resolves");
             tree.file_structure
                 .packages
-                .path(&ocx_oci::PinnedPackageRef::try_from(identifier).expect("digest-bearing"))
+                .path(&compatible.repository.pin_untagged(leaf))
         };
         let lock = lock_of(vec![exact, compatible, incompatible]);
         let scope = tree.scope();
