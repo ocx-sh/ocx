@@ -3,13 +3,12 @@
 
 //! Unified flat glob matcher for patch descriptor `match` patterns.
 //!
-//! Unlike [`glob::Pattern`], `*` spans **any** run of characters including `/`,
-//! `:` and `@`, because the target is a canonical OCI identifier
-//! (`ghcr.io/acme/cli:v1@sha256:…`) and `ghcr.io/*` must match a whole registry.
-//! `?` matches one character, `[set]` / `[!set]` a bracket class, anything else
-//! itself; matching is case-sensitive, `**` behaves as `*`, and the empty pattern
-//! matches only the empty string. An untagged identifier matches `*:*` only via
-//! a digest's `sha256:` colon or an explicit registry port (`localhost:5000/repo`).
+//! Unlike [`glob::Pattern`], `*` spans **any** run including `/`, `:` and `@`, so
+//! `ghcr.io/*` matches a whole registry; hence `ocx.sh/*:*` also matches digest
+//! references (the `:` in `sha256:`) and `*:*` a registry port (`localhost:5000/java`).
+//! `?` is one character, `[set]` / `[!set]` a class; case-sensitive, `**` is `*`, the
+//! empty pattern matches only `""`. `PatchDescriptor::collect_companions` picks the
+//! identifier forms a pattern is matched against.
 
 /// Returns `true` if `text` matches the flat glob `pattern` (`O(n·m)` worst case).
 pub fn glob_match(pattern: &str, text: &str) -> bool {

@@ -81,10 +81,15 @@ impl fmt::Display for PatchDescriptorVersion {
 // The tier default is `ResolvedPatchConfig::required`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PatchRule {
-    /// Flat glob pattern matched over the base identifier's canonical
-    /// form (`registry/repository:tag[@digest]`).
+    /// Flat glob pattern matched over the base identifier's forms
+    /// (`registry/repository`, `registry/repository:tag`,
+    /// `registry/repository@digest`).
     ///
-    /// `*` spans any run of characters including `/`, `:`, `@`.
+    /// A bare `registry/repository` matches every tag and digest of it;
+    /// `registry/repository:<tag-glob>` matches by tag (an untagged, undigested
+    /// reference counts as `latest`); `registry/repository@<digest-glob>` matches
+    /// by digest, whatever its advisory tag. `*` spans any run of characters
+    /// including `/`, `:`, `@`, so `*` alone matches everything.
     // Full semantics: `crate::patch::matcher`.
     #[serde(rename = "match")]
     pub match_pattern: String,
@@ -220,20 +225,28 @@ impl PatchDescriptor {
     /// deduplicated by identifier (the **first** matching rule wins `required`;
     /// `tier_required_default` applies where a rule has `required: None`).
     ///
-    /// Each pattern is matched against both the canonical form and the
-    /// digest-excluded tag form.
+    /// A pattern matches if it matches any of the base's forms: the bare
+    /// `registry/repo`, `registry/repo:tag` (an untagged, undigested base counts
+    /// as `:latest`), `registry/repo@digest`, or the canonical string.
     pub fn collect_companions(&self, base_identifier: &PackageRef, tier_required_default: bool) -> Vec<CompanionEntry> {
         use crate::patch::matcher::glob_match;
 
-        let base_str = base_identifier.to_string();
-        // Match the tag form too, or a `required` overlay matched at install (tag-form base)
-        // is silently dropped at exec (tag + digest).
-        let base_tag_form = base_identifier.without_digest().to_string();
+        let repo = base_identifier.without_specifiers().to_string();
+        let digest = base_identifier.digest();
+        let mut forms = vec![repo.clone(), base_identifier.to_string()];
+        match base_identifier.tag() {
+            Some(tag) => forms.push(format!("{repo}:{tag}")),
+            None if digest.is_none() => forms.push(format!("{repo}:latest")),
+            None => {}
+        }
+        if let Some(digest) = digest {
+            forms.push(format!("{repo}@{digest}"));
+        }
 
         let mut result: Vec<CompanionEntry> = Vec::new();
 
         for rule in &self.rules {
-            if !glob_match(&rule.match_pattern, &base_str) && !glob_match(&rule.match_pattern, &base_tag_form) {
+            if !forms.iter().any(|form| glob_match(&rule.match_pattern, form)) {
                 continue;
             }
 
@@ -475,6 +488,44 @@ mod tests {
             1,
             "discovery (digest-less) and compose (digest-bearing) must match identically"
         );
+    }
+
+    /// Every cell of the documented rule-by-reference matching table.
+    #[test]
+    fn collect_companions_matching_table() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let bases = [
+            "ocx.sh/java:21".to_string(),
+            "ocx.sh/java".to_string(),
+            format!("ocx.sh/java@{digest}"),
+            format!("ocx.sh/java:21@{digest}"),
+        ];
+        // One expected verdict per base, in `bases` order.
+        let table: [(String, [bool; 4]); 7] = [
+            ("ocx.sh/java".into(), [true, true, true, true]),
+            ("ocx.sh/java:*".into(), [true, true, false, true]),
+            ("ocx.sh/java:latest".into(), [false, true, false, false]),
+            ("ocx.sh/java:21*".into(), [true, false, false, true]),
+            ("ocx.sh/java@*".into(), [false, false, true, true]),
+            (format!("ocx.sh/java@{digest}"), [false, false, true, true]),
+            ("*".into(), [true, true, true, true]),
+        ];
+        for (pattern, expected) in &table {
+            let descriptor = PatchDescriptor::from_json_bytes(
+                serde_json::json!({
+                    "version": 1,
+                    "rules": [{ "match": pattern, "packages": ["internal.company.com/companion:1"] }]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .expect("must parse");
+            for (base, want) in bases.iter().zip(expected) {
+                let base_ref = PackageRef::parse(base).expect("valid identifier");
+                let got = !descriptor.collect_companions(&base_ref, true).is_empty();
+                assert_eq!(got, *want, "rule `{pattern}` against `{base}`");
+            }
+        }
     }
 
     /// When the same identifier appears in two rules, the first rule wins its

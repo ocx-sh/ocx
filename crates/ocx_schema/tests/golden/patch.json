@@ -33,7 +33,7 @@
       "type": "object",
       "properties": {
         "match": {
-          "description": "Flat glob pattern matched over the base identifier's canonical\nform (`registry/repository:tag[@digest]`).\n\n`*` spans any run of characters including `/`, `:`, `@`.",
+          "description": "Flat glob pattern matched over the base identifier's forms\n(`registry/repository`, `registry/repository:tag`,\n`registry/repository@digest`).\n\nA bare `registry/repository` matches every tag and digest of it;\n`registry/repository:<tag-glob>` matches by tag (an untagged, undigested\nreference counts as `latest`); `registry/repository@<digest-glob>` matches\nby digest, whatever its advisory tag. `*` spans any run of characters\nincluding `/`, `:`, `@`, so `*` alone matches everything.",
           "type": "string"
         },
         "packages": {

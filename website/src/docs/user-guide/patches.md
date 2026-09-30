@@ -55,17 +55,49 @@ for the row shape and ordering rules.
 }
 ```
 
-The `match` field is a flat glob. `*` matches any character including `/`, `:`, and `@`,
-so `*` matches every package and `ocx.sh/java:*` matches any version of the JDK hosted at
-`ocx.sh`. A bare `*:*` also matches a digest-pinned, untagged identifier, because the
-digest's `sha256:` segment carries its own colon — as does an explicit registry port
-(`localhost:5000/repo`).
+The `match` field is a flat glob with three shapes:
 
-The identifier matched is the one you declared: `repo:tag` from the command line,
-`ocx.toml` or the global toolchain, with the resolved digest attached. A digest-only
-reference has no tag, so tag-anchored rules skip it; match on the repository
-(`ocx.sh/java*`, which also matches `ocx.sh/javafx`) to cover both. A digest in a pattern
-matches the platform-specific manifest digest, not the multi-platform index digest.
+- **`registry/repo`** (no tag, no digest) matches every tag and digest of that repository.
+- **`registry/repo:<tag-glob>`** matches by tag. A reference with no tag and no digest counts
+  as `latest`; a digest-only reference has no tag.
+- **`registry/repo@<digest-glob>`** matches by digest, whatever advisory tag the reference
+  carries. `registry/repo@*` matches any digest-pinned reference.
+
+`*` matches any character including `/`, `:`, and `@`, so `*` alone matches every package.
+`ocx.sh/java:*` matches any version of the JDK hosted at `ocx.sh`, including a reference
+with no tag. A glob such as `ocx.sh/java*` also matches `ocx.sh/javafx`.
+
+| Rule | `ocx.sh/java:21` | `ocx.sh/java` | `ocx.sh/java@sha256:H` | `ocx.sh/java:21@sha256:H` |
+|---|---|---|---|---|
+| `ocx.sh/java` | match | match | match | match |
+| `ocx.sh/java:*` | match | match | no | match |
+| `ocx.sh/java:latest` | no | match | no | no |
+| `ocx.sh/java:21*` | match | no | no | match |
+| `ocx.sh/java@*` | no | no | match | match |
+| `ocx.sh/java@sha256:H` | no | no | match | match |
+
+The columns are the forms a reference takes:
+
+- `ocx.sh/java:21`: `ocx package install ocx.sh/java:21`.
+- `ocx.sh/java`: `ocx package install ocx.sh/java`, with no tag.
+- `ocx.sh/java@sha256:H`: a digest-only `ocx.toml` entry, with its resolved digest.
+- `ocx.sh/java:21@sha256:H`: a tagged `ocx.toml` entry, with its resolved digest.
+
+`H` is a concrete digest. A digest in a pattern matches the platform-specific manifest digest,
+not the multi-platform index digest.
+
+A bare `ocx.toml` entry such as `java = "ocx.sh/java"` counts as `:latest`, so it takes the
+fourth form: `ocx.sh/java:latest@sha256:H`.
+
+`ocx package install ocx.sh/java:21` discovers on the reference as you typed it: the first two
+forms. `ocx package install ocx.sh/java@sha256:H` matches the third. The lock-driven commands
+(`ocx lock`, `ocx add`, `ocx update`, `ocx pull`) and composing the environment at `exec` or `env`
+match the pinned reference with its digest: the last two forms. That is why an `ocx.sh/java@*` rule
+matches at exec but not when you install `ocx.sh/java:21` by tag.
+
+A registry-wide glob such as `ocx.sh/*:*` also matches digest references, because the `:` in
+`sha256:` satisfies it. `*:*` can match a registry port as well (`localhost:5000/java`), so scope
+a rule to a registry host unless matching everything is the intent.
 
 When one package is declared under two tags, the tag of the first binding in selection
 order is the one matched. Selection order is the groups in the order you select them
@@ -73,8 +105,8 @@ order is the one matched. Selection order is the groups in the order you select 
 global toolchain ignore the selection order and take the first binding in lock order
 (groups, then bindings, by name).
 
-Tags are advisory here — a companion that must always apply should match on the repository
-(or a digest) rather than a tag. When the lock is stale, `ocx direnv export` and the global
+Tags are advisory here — a companion that must always apply should match on the bare
+repository (or a digest) rather than a tag. When the lock is stale, `ocx direnv export` and the global
 toolchain match patch rules without the declared tag until `ocx lock` runs.
 
 Rules are evaluated in order and unioned: a Java install matched by both rules above gets
