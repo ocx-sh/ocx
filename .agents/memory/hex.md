@@ -103,6 +103,19 @@ research-axes:
 
 ## Memory
 
+- **Plan (hex-plan xhigh, 2026-09-29, done — review approved at 6b2163a23): `.claude/artifacts/plan_snapshot_lifecycle.md`** (
+  7 in-grant WPs / 3 waves; next is `/hex-finalize`). No active plan. Out of grant: fork push (ocx-sh/rust-oci-client, blocks CI),
+  ocx-indexbot, ocx-sh/index schema, ocx-mirror. Codex quota exhausted at plan review; copilot substitute ran.
+- **ADR (hex-architect xhigh, 2026-09-29): `.claude/artifacts/adr_snapshot_lifecycle.md` (Proposed)** +
+  `system_design_snapshot_lifecycle.md`, from `.agents/discussions/snapshot-lifecycle.md`. Research:
+  `.claude/artifacts/research_snapshot_{registry_delete,index_format,deletion_security,ux_prior_art,multistage_promotion}.md`,
+  `discover_snapshot_lifecycle.md`. Owner redesign (slim: prune registry-only + safeguard, announce sole index writer, not a linter) + rulings A–C applied; 2 open Qs left.
+  Axis worth a Preferences hint: multi-stage promotion / release engineering.
+- **Discussion handed off (hex-discuss, 2026-09-29): `.agents/discussions/snapshot-lifecycle.md`
+  → architect.** First-class snapshot lifecycle: announce-time ephemeral marker, `ocx package prune`
+  (retain N per channel / whole-channel teardown via GitLab `environment:on_stop`), index removal of
+  marked tags only, no tombstones. Research: `.agents/research/snapshot-lifecycle-{codebase-recon,prior-art}.md`.
+  `Next: /hex-architect .agents/discussions/snapshot-lifecycle.md` (floor: high).
 - Retro candidate (project-context): "One build at a time host-wide; fan out edit workers freely (31 GB host OOM-rebooted)" — ledger hex-execute-parallel-build-oom, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (project-context): "Shared-checkout commits race prek's stash of all unstaged files" — ledger project-prek-stash-shared-checkout, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (project-context): "Build/verify time dominates loops (2,409 tool-busy min mined)" — ledger project-slow-builds, .agents/retro/reports/2026-09-28.md.
