@@ -2165,6 +2165,120 @@ def test_patch_test_composes_env_locally_without_publishing(
     assert len(report["companions"]) >= 1, "patch test report must list at least one companion"
 
 
+def test_package_test_composes_matching_patch_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx package test` composes the tier's companions onto the bundle under test.
+
+    The descriptor is published for the `-i` repository only, so the companion
+    reaches the child env solely through per-package discovery on the locally
+    built (never pushed) bundle, exactly as an install of that identifier would.
+    The rule names `<registry>/<repo>:<tag>`, so it matches only when the bundle
+    keeps the identifier's repository and tag.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    companion_repo = _unique_repo("package_test_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PACKAGE_TEST_PATCH_VAR", "composed-value")
+
+    descriptor_path = tmp_path / "package_test_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": base_pkg.fq, "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    pkg_dir = tmp_path / "package-test-bundle-src"
+    (pkg_dir / "bin").mkdir(parents=True)
+    (pkg_dir / "bin" / "hello").write_text("#!/bin/sh\necho hello\n")
+    metadata_in = tmp_path / "package-test-bundle-input.json"
+    metadata_in.write_text(json.dumps({"type": "bundle", "version": 1, "env": []}))
+    bundle = tmp_path / "package-test-bundle.tar.xz"
+    ocx.plain(
+        "package", "create",
+        "-m", str(metadata_in),
+        "-o", str(bundle),
+        "-p", current_platform(),
+        str(pkg_dir),
+    )
+
+    result = ocx.plain(
+        "package", "test",
+        "-i", base_pkg.short,
+        str(bundle),
+        "--clean",
+        "--",
+        "sh", "-c", 'printf %s "$PACKAGE_TEST_PATCH_VAR"',
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"package test must succeed; got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert result.stdout == "composed-value", (
+        "the companion's env var must reach the command under test; "
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr}"
+    )
+
+
+def test_package_test_composes_only_the_companion_of_a_matching_rule(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A rule naming another repository adds nothing to the bundle under test: the run
+    succeeds and that companion's env var is absent. A second rule in the same descriptor
+    matches the bundle, so the matched companion's presence proves discovery ran.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    companion_repo = _unique_repo("package_test_unmatched_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PACKAGE_TEST_UNMATCHED_VAR", "must-not-appear")
+    matched_repo = _unique_repo("package_test_matched_companion")
+    _make_companion(ocx, matched_repo, "1.0.0", tmp_path, "PACKAGE_TEST_MATCHED_VAR", "matched")
+    other_repo = _unique_repo("package_test_other_base")
+
+    descriptor_path = tmp_path / "package_test_unmatched_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[
+            {"match": f"{registry}/{other_repo}:1.0.0", "packages": [f"{registry}/{companion_repo}:1.0.0"]},
+            {"match": base_pkg.fq, "packages": [f"{registry}/{matched_repo}:1.0.0"]},
+        ],
+    )
+    _write_config(ocx, registry, required=True)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    pkg_dir = tmp_path / "package-test-bundle-src"
+    (pkg_dir / "bin").mkdir(parents=True)
+    (pkg_dir / "bin" / "hello").write_text("#!/bin/sh\necho hello\n")
+    metadata_in = tmp_path / "package-test-bundle-input.json"
+    metadata_in.write_text(json.dumps({"type": "bundle", "version": 1, "env": []}))
+    bundle = tmp_path / "package-test-bundle.tar.xz"
+    ocx.plain(
+        "package", "create",
+        "-m", str(metadata_in),
+        "-o", str(bundle),
+        "-p", current_platform(),
+        str(pkg_dir),
+    )
+
+    result = ocx.plain(
+        "package", "test",
+        "-i", base_pkg.short,
+        str(bundle),
+        "--clean",
+        "--",
+        "sh", "-c",
+        'printf "%s|%s" "${PACKAGE_TEST_MATCHED_VAR-absent}" "${PACKAGE_TEST_UNMATCHED_VAR-absent}"',
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"package test must succeed with an unmatched rule beside a matching one; got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert result.stdout == "matched|absent", (
+        "the matching rule's companion must be composed and the other repository's rule must not "
+        "contribute its companion; "
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr}"
+    )
+
+
 def _local_companion_archive(
     ocx: OcxRunner, tmp_path: Path, repo: str, tag: str, env_key: str, env_value: str
 ) -> Path:

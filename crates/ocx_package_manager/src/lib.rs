@@ -185,11 +185,11 @@ mod install_info_identifier_tests {
         write_minimal_package_root(&root_b, &hex_b).await;
 
         let info_a = manager
-            .install_info_from_package_root(&root_a)
+            .install_info_from_package_root(&root_a, None)
             .await
             .expect("package root A must succeed");
         let info_b = manager
-            .install_info_from_package_root(&root_b)
+            .install_info_from_package_root(&root_b, None)
             .await
             .expect("package root B must succeed");
 
@@ -206,6 +206,26 @@ mod install_info_identifier_tests {
             info_b.identifier().repository().starts_with("file-url-mode/"),
             "synthetic repository must start with 'file-url-mode/'"
         );
+    }
+
+    /// An explicit identity is pinned to the root's digest and keeps its tag.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn explicit_identity_is_pinned_with_its_tag() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+        let root = tmp.path().join("pkg");
+        let hex = "d".repeat(64);
+        write_minimal_package_root(&root, &hex).await;
+        let identity = ocx_oci::PackageRef::parse("ocx.sh/acme/tool:1.2.3").expect("valid identifier");
+
+        let info = manager
+            .install_info_from_package_root(&root, Some(&identity))
+            .await
+            .expect("package root must succeed");
+
+        assert_eq!(info.identifier().repository(), "acme/tool");
+        assert_eq!(info.identifier().tag(), Some("1.2.3"));
+        assert_eq!(info.identifier().digest().hex(), hex);
     }
 
     /// Two distinct content digests that share the first 16 hex characters
@@ -236,11 +256,11 @@ mod install_info_identifier_tests {
         write_minimal_package_root(&root_b, &hex_b).await;
 
         let info_a = manager
-            .install_info_from_package_root(&root_a)
+            .install_info_from_package_root(&root_a, None)
             .await
             .expect("package root A must succeed");
         let info_b = manager
-            .install_info_from_package_root(&root_b)
+            .install_info_from_package_root(&root_b, None)
             .await
             .expect("package root B must succeed");
 
@@ -272,11 +292,11 @@ mod install_info_identifier_tests {
         write_minimal_package_root(&root, &"c".repeat(64)).await;
 
         let info_first = manager
-            .install_info_from_package_root(&root)
+            .install_info_from_package_root(&root, None)
             .await
             .expect("first call must succeed");
         let info_second = manager
-            .install_info_from_package_root(&root)
+            .install_info_from_package_root(&root, None)
             .await
             .expect("second call must succeed");
 
@@ -559,14 +579,13 @@ impl PackageManager {
         self.client.is_none()
     }
 
-    /// Builds an [`InstallInfo`] for an already-installed package whose
-    /// on-disk **package root** is known. Used by `ocx launcher exec <pkg-root>`
-    /// to bypass identifier resolution and read the installed metadata
-    /// directly.
+    /// Builds an [`InstallInfo`] from a known **package root**, skipping identifier
+    /// resolution (`ocx launcher exec <pkg-root>`, `ocx package test`). Reads
+    /// `metadata.json`, `resolve.json` and `digest`; `${installPath}` resolves against
+    /// `info.dir().content()`.
     ///
-    /// Reads `metadata.json`, `resolve.json`, and the `digest` file from
-    /// `pkg_root`. The returned [`InstallInfo`] holds `pkg_root` itself; env
-    /// resolution interpolates `${installPath}` against `info.dir().content()`.
+    /// `identity` names the package when it has one, pinned to the root's digest with
+    /// its tag kept; `None` mints a digest-only `file-url-mode/<hex>` placeholder.
     ///
     /// # Errors
     ///
@@ -575,6 +594,7 @@ impl PackageManager {
     pub async fn install_info_from_package_root(
         &self,
         pkg_root: &std::path::Path,
+        identity: Option<&ocx_oci::PackageRef>,
     ) -> crate::Result<ocx_package::install_info::InstallInfo> {
         use ocx_package::install_info::InstallInfo;
         use ocx_package::metadata::ValidMetadata;
@@ -600,14 +620,19 @@ impl PackageManager {
         let metadata: ocx_package::metadata::Metadata = ValidMetadata::try_from(metadata_result?)?.into();
         let resolved = resolved_result?;
 
-        // A PinnedIdentifier from the sibling `digest` file, used only for dedup
-        // in resolve_env. The synthetic repository is internal-only (never
-        // persisted, never compared with real ones), so it carries the full digest
+        // A PinnedIdentifier from the sibling `digest` file, used for dedup in
+        // resolve_env. Without an `identity` the synthetic repository is internal-only
+        // (never persisted, never compared with real ones), so it carries the full digest
         // hex and two distinct pkg-roots can never collide on `(registry, repository)`.
         let digest_path = objects.digest_file_for_content(pkg_root)?;
         let digest = read_digest_file(&digest_path).await?;
-        let repo_name = format!("file-url-mode/{}", digest.hex());
-        let base_id = ocx_oci::PackageRef::new_registry(repo_name, &self.default_registry).clone_with_digest(digest);
+        let base_id = match identity {
+            Some(identity) => identity.clone_with_digest(digest),
+            None => {
+                let repo_name = format!("file-url-mode/{}", digest.hex());
+                ocx_oci::PackageRef::new_registry(repo_name, &self.default_registry).clone_with_digest(digest)
+            }
+        };
         let pinned = ocx_oci::PinnedPackageRef::try_from(base_id)?;
 
         Ok(InstallInfo::new(
@@ -634,7 +659,7 @@ impl PackageManager {
         scope: crate::tasks::resolve::EnvScope,
         platform: &ocx_oci::Platform,
     ) -> crate::Result<Vec<ocx_package::metadata::env::entry::Entry>> {
-        let info = self.install_info_from_package_root(pkg_root).await?;
+        let info = self.install_info_from_package_root(pkg_root, None).await?;
         self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope, platform)
             .await
     }
