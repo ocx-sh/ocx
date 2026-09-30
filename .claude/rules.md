@@ -156,6 +156,7 @@ Exempt from overlap detection (intended broad coupling):
 | `code-docs.md` + `rust-quality.md` | `**/*.rs` |
 | `code-docs.md` + `python-quality.md` | `**/*.py` |
 | `code-docs.md` + `typescript-quality.md` | `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` |
+| `code-docs.md` + `bazel-quality.md` | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/MODULE.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel` |
 
 ## Skills by task topic
 
