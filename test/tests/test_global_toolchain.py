@@ -40,7 +40,7 @@ from src.shell_eval import run_after_sourcing
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64  # --global + --project conflict
-EXIT_DATA = 65  # StaleLockOnPartial → DataError (whole-file drift on a mutator)
+EXIT_DATA = 65  # LockOutOfSync → DataError (whole-file drift on a mutator)
 
 
 # ---------------------------------------------------------------------------

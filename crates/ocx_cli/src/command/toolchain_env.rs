@@ -323,15 +323,16 @@ pub(crate) async fn resolve_global_pinned_env(
     let global_lock_path = lock_path_for(&global_config);
 
     // An unreadable global config yields empty env, never a failure of the login exporter.
-    let (no_patches, mut project_env, pinned) = match ocx_project::ProjectConfig::from_path(&global_config).await {
+    let parsed_config = ocx_project::ProjectConfig::from_path(&global_config).await;
+    let (no_patches, mut project_env, pinned) = match &parsed_config {
         Ok(config) => {
             // Against the config's groups, not the lock's: an env-only group has no lock entry.
-            let mut env_groups = expand_all_keyword(groups, &config);
+            let mut env_groups = expand_all_keyword(groups, config);
             if env_groups.is_empty() {
                 env_groups = vec![DEFAULT_GROUP.to_owned()];
             }
-            let env = ocx_project::project_env_entries(&config, &global_config, &env_groups);
-            let pinned = ocx_package_manager::pinned_for_project(pinned_cli, &config);
+            let env = ocx_project::project_env_entries(config, &global_config, &env_groups);
+            let pinned = ocx_package_manager::pinned_for_project(pinned_cli, config);
             (config.no_patches_repositories(), env, pinned)
         }
         Err(_) => (
@@ -377,15 +378,15 @@ pub(crate) async fn resolve_global_pinned_env(
                     groups: selected_groups.clone(),
                 })
             });
-        for tool in &lock.tools {
+        // A stale lock or an unparseable `ocx.toml` still emits its tools, untagged.
+        for (tool, identifier) in lock.lenient_host_identifiers(parsed_config.as_ref().ok(), target) {
             if !selected_groups.iter().any(|g| g == &tool.group) {
                 continue;
             }
             // An absent or ambiguous host leaf is skipped: the login exporter cannot disambiguate.
-            let ocx_oci::Selection::Found((leaf, _key)) = ocx_project::lookup_host_leaf(&tool.platforms, target) else {
+            let Ok(identifier) = identifier else {
                 continue;
             };
-            let identifier: ocx_oci::PackageRef = tool.repository.clone_with_digest(leaf.clone());
             match manager.find(&identifier, target.clone()).await {
                 Ok(info) => infos.push(Arc::new(info)),
                 Err(_) => continue,
@@ -499,7 +500,7 @@ mod tests {
     // ── selected_groups_global ────────────────────────────────────────────────
 
     fn lock_with_groups(groups: &[&str]) -> ProjectLock {
-        use ocx_oci::{Digest, PackageRef};
+        use ocx_oci::Digest;
         use ocx_project::{LockMetadata, LockVersion, LockedTool};
         let tools = groups
             .iter()
@@ -513,7 +514,7 @@ mod tests {
                 LockedTool {
                     name: format!("tool{i}"),
                     group: (*group).to_owned(),
-                    repository: PackageRef::new_registry(format!("tool{i}"), "ocx.sh"),
+                    repository: ocx_oci::Repository::new("ocx.sh", format!("tool{i}")),
                     platforms,
                 }
             })
@@ -575,15 +576,17 @@ mod tests {
     /// A `$OCX_HOME` carrying the two things the global resolver reads: a
     /// declared `[env]`, so it always has a contribution and never
     /// short-circuits to `Ok(None)`, and a one-tool `ocx.lock`, so it has a
-    /// toolchain lane to choose between.
+    /// toolchain lane to choose between. The file declares the lock's tool, so the lock is current.
     fn global_home(config_body: &str) -> tempfile::TempDir {
         let home = tempfile::TempDir::new().expect("tempdir");
+        let config_body = format!("{config_body}[tools]\ntool0 = \"ocx.sh/tool0:1.0\"\n");
+        let config = ocx_project::ProjectConfig::from_toml_str(&config_body).expect("the fixture ocx.toml parses");
+        let mut lock = lock_with_groups(&["default"]);
+        lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
         std::fs::write(home.path().join("ocx.toml"), config_body).expect("write ocx.toml");
         std::fs::write(
             home.path().join("ocx.lock"),
-            lock_with_groups(&["default"])
-                .to_toml_string()
-                .expect("the fixture lock serializes"),
+            lock.to_toml_string().expect("the fixture lock serializes"),
         )
         .expect("write ocx.lock");
         home

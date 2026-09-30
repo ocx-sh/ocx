@@ -185,7 +185,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     // Deliberately inert: registration happens only at lock-write sites (module doc).
     let _ = context.file_structure().root();
 
-    if ocx_project::lock::is_stale(&lock, &config) {
+    if !lock.is_current(&config) {
         return Err(ocx_project::LockCurrency::Stale { lock_path }.into());
     }
 
@@ -288,6 +288,7 @@ pub async fn record_activation_consent_over(
 
 /// Pulls every binding in `lock` for `platform` into the object store; a no-op unless `eager`.
 ///
+/// Each binding carries its `config` tag while `lock` binds to `config`, and none once stale.
 /// Never touches `symlinks/`, which would add a redundant GC root. An unshipped platform
 /// surfaces `NoHostLeaf` (exit 78), and a failure does not roll back the manifest or lock.
 ///
@@ -297,34 +298,28 @@ pub async fn record_activation_consent_over(
 pub async fn materialize_lock(
     context: &crate::app::Context,
     lock: &ocx_project::ProjectLock,
+    config: &ProjectConfig,
     eager: bool,
     platform: ocx_oci::Platform,
 ) -> anyhow::Result<()> {
     if !eager {
         return Ok(());
     }
-    let mut identifiers: Vec<ocx_oci::PackageRef> = Vec::new();
-    for tool in &lock.tools {
-        let identifier = host_materialize_identifier(tool, &platform)?;
-        // ponytail: O(n) dedup over a handful of tools; a HashSet buys nothing at this scale.
-        if !identifiers.contains(&identifier) {
-            identifiers.push(identifier);
-        }
-    }
+    let host = lock
+        .lenient_host_identifiers(Some(config), &platform)
+        .into_iter()
+        .map(|(tool, identifier)| identifier.map(|identifier| (tool, identifier)))
+        .collect::<Result<Vec<_>, _>>()?;
+    // One pull per distinct content; a second tag on the same leaf rides the first.
+    let identifiers: Vec<ocx_oci::PackageRef> = ocx_project::first_per_content(host)
+        .into_iter()
+        .map(|(_, identifier)| identifier.into())
+        .collect();
     context
         .manager()
         .pull_all(&identifiers, platform, context.concurrency())
         .await?;
     Ok(())
-}
-
-/// Resolves a locked tool to its host-platform pull [`ocx_oci::PackageRef`] through
-/// [`ocx_project::host_leaf_identifier`], so the absent-host-leaf error classifies as it does elsewhere.
-fn host_materialize_identifier(
-    tool: &ocx_project::LockedTool,
-    host: &ocx_oci::Platform,
-) -> anyhow::Result<ocx_oci::PackageRef> {
-    ocx_project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)
 }
 
 /// Rejects an empty comma segment in `--group` (`-g ci,,lint`) as a usage error (exit 64).

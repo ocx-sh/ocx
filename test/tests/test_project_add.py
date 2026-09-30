@@ -26,7 +26,7 @@ pytestmark = pytest.mark.command("add")
 EXIT_SUCCESS = 0
 # BindingAlreadyExists → UsageError (64) per error.rs ClassifyExitCode
 EXIT_USAGE_ERROR = 64
-# StaleLockOnPartial → DataError (65) per error.rs ClassifyExitCode
+# LockOutOfSync → DataError (65) per error.rs ClassifyExitCode
 EXIT_DATA_ERROR = 65
 # LockUpgradeRequired → ConfigError (78) per error.rs ClassifyExitCode
 EXIT_CONFIG = 78

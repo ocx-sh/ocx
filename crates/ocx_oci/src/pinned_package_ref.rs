@@ -13,6 +13,11 @@ use super::{Digest, PackageRef};
 pub struct PinnedPackageRef(PackageRef);
 
 impl PinnedPackageRef {
+    /// `identifier` pinned to `digest`; infallible because the digest is supplied here.
+    pub fn pin(identifier: &PackageRef, digest: Digest) -> Self {
+        Self(identifier.clone_with_digest(digest))
+    }
+
     pub fn digest(&self) -> Digest {
         self.0.digest().expect("PinnedPackageRef always has a digest")
     }

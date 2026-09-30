@@ -12,31 +12,13 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_package_manager::InspectOptions;
 use ocx_project::{
-    DEFAULT_GROUP, Origin, ProjectConfig, SelectedTool, ToolSource, check_duplicate_selection, expand_all_keyword,
-    resolve_selected_tools, select_tool_set,
+    DEFAULT_GROUP, SelectedTool, ToolSource, check_duplicate_selection, expand_all_keyword, resolve_selected_tools,
+    select_tool_set,
 };
 
 use crate::api::data::package_inspect::{InspectReport, PackageInspect};
 use crate::app::project_context::{filter_by_names, load_project_with_lock};
 use crate::{conventions, options};
-
-/// The identifier `ocx.toml` declares for `tool`; the lock records only the bare repository, which
-/// would drop the declared tag. The lock fallback is unreachable under a current lock.
-fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> ocx_oci::PackageRef {
-    let declared = match &tool.origin {
-        Origin::Group(group) if group == DEFAULT_GROUP => config.tools.get(&tool.binding),
-        Origin::Group(group) => config
-            .groups
-            .get(group)
-            .and_then(|group| group.tools.get(&tool.binding)),
-        Origin::Explicit => None,
-    };
-    match (declared, &tool.source) {
-        (Some(identifier), _) => identifier.clone(),
-        (None, ToolSource::Locked(locked)) => locked.repository.clone(),
-        (None, ToolSource::Explicit(identifier)) => identifier.clone(),
-    }
-}
 
 /// Inspect what the project toolchain resolves to, without installing.
 ///
@@ -113,7 +95,10 @@ impl Inspect {
 
         let declared: Vec<ocx_oci::PackageRef> = filtered
             .iter()
-            .map(|tool| declared_identifier(&ctx.config, tool))
+            .map(|tool| match &tool.source {
+                ToolSource::Locked(bound) => bound.declared().clone(),
+                ToolSource::Explicit(identifier) => identifier.clone(),
+            })
             .collect();
 
         // `-p` selects a platform only where a platform is selected at all.
@@ -142,8 +127,8 @@ impl Inspect {
         Ok(conventions::inspect_exit_code(&report))
     }
 
-    /// The `--resolve`/`--closure` path: each binding's declared identifier carrying the resolved leaf
-    /// digest, so the report pins `registry/repo:tag@digest` as `ocx package inspect` does.
+    /// The `--resolve`/`--closure` path: each binding resolves to `registry/repo:tag@<leaf>`, as
+    /// `ocx package inspect` pins it.
     async fn resolved_packages(
         &self,
         context: &crate::app::Context,
@@ -152,14 +137,7 @@ impl Inspect {
         platform: &ocx_oci::Platform,
     ) -> anyhow::Result<Vec<PackageInspect>> {
         let resolved = resolve_selected_tools(selected, platform)?;
-        let identifiers: Vec<ocx_oci::PackageRef> = resolved
-            .iter()
-            .zip(declared)
-            .map(|(tool, declared)| match tool.identifier.digest() {
-                Some(digest) => declared.clone_with_digest(digest),
-                None => tool.identifier.clone(),
-            })
-            .collect();
+        let identifiers: Vec<ocx_oci::PackageRef> = resolved.iter().map(|tool| tool.identifier.clone()).collect();
 
         let options = InspectOptions {
             resolve: self.resolve,
@@ -189,8 +167,8 @@ fn locked_packages(selected: &[SelectedTool], declared: &[ocx_oci::PackageRef]) 
         .iter()
         .zip(declared)
         .map(|(tool, declared)| match &tool.source {
-            ToolSource::Locked(locked) => {
-                PackageInspect::locked(tool.binding.clone(), declared.clone(), &locked.platforms)
+            ToolSource::Locked(bound) => {
+                PackageInspect::locked(tool.binding.clone(), declared.clone(), &bound.locked().platforms)
             }
             // Unreachable: `inspect` passes no positionals, so every selection is lock-backed.
             ToolSource::Explicit(_) => PackageInspect::locked(

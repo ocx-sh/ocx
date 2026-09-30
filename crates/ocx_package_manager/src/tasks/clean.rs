@@ -37,17 +37,13 @@ pub struct CleanResult {
 /// The roots a locked tool pins: its per-platform leaves that are present on
 /// this machine, so never-pulled platforms are not rooted.
 async fn collect_tool_roots(
-    repository: &ocx_oci::PackageRef,
+    repository: &ocx_oci::Repository,
     platforms: &std::collections::BTreeMap<String, ocx_oci::Digest>,
     file_structure: &FileStructure,
 ) -> Vec<ocx_oci::PinnedPackageRef> {
     let mut roots = Vec::new();
     for leaf in platforms.values() {
-        let child_id = repository.clone_with_digest(leaf.clone());
-        let child_pinned = match ocx_oci::PinnedPackageRef::try_from(child_id) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let child_pinned = repository.pin_untagged(leaf.clone());
         if leaf_present_in_any_tier(file_structure, &child_pinned).await {
             roots.push(child_pinned);
         }

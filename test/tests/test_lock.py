@@ -433,6 +433,43 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
     assert after_b, "the newly declared tool 'b' must be locked"
 
 
+def test_lock_reresolves_an_entry_naming_another_repository(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A lock entry hand-edited to another repository under an unchanged
+    ``declaration_hash`` is not current, so ``ocx lock`` re-resolves it
+    instead of refusing: every other command names ``ocx lock`` as the fix.
+    """
+    short = uuid4().hex[:8]
+    declared = f"t_{short}_declared"
+    other = f"t_{short}_other"
+    make_package(ocx, declared, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, other, "1.0.0", tmp_path, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{declared}:1.0.0"
+""",
+    )
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    lock_path = project / "ocx.lock"
+    locked = f'repository = "{ocx.registry}/{declared}"'
+    lock_text = lock_path.read_text()
+    assert locked in lock_text, lock_text
+    lock_path.write_text(lock_text.replace(locked, f'repository = "{ocx.registry}/{other}"'))
+
+    result = _run_lock(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx lock must repair the entry; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert locked in _read_lock_text(project), "the entry names the declared repository again"
+
+
 # ---------------------------------------------------------------------------
 # 3. Tag change rewrites only that entry
 # ---------------------------------------------------------------------------

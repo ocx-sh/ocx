@@ -8,8 +8,8 @@
 //! (`ghcr.io/acme/cli:v1@sha256:…`) and `ghcr.io/*` must match a whole registry.
 //! `?` matches one character, `[set]` / `[!set]` a bracket class, anything else
 //! itself; matching is case-sensitive, `**` behaves as `*`, and the empty pattern
-//! matches only the empty string. An untagged identifier does not match `*:*` by
-//! design.
+//! matches only the empty string. An untagged identifier matches `*:*` only via
+//! a digest's `sha256:` colon or an explicit registry port (`localhost:5000/repo`).
 
 /// Returns `true` if `text` matches the flat glob `pattern` (`O(n·m)` worst case).
 pub fn glob_match(pattern: &str, text: &str) -> bool {

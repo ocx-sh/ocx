@@ -595,7 +595,7 @@ async fn project_home(config: &Config, project_dir: &Path) -> Result<file_struct
 /// # Errors
 ///
 /// [`LockCurrency::Missing`] (reachable under a `paths` grant), or [`LockCurrency::Stale`] when
-/// the lock disagrees with `ocx.toml`.
+/// the lock no longer binds to `ocx.toml`.
 fn current_lock(
     lock: Option<ProjectLock>,
     config: &ocx_project::ProjectConfig,
@@ -607,7 +607,7 @@ fn current_lock(
         }
         .into());
     };
-    if ocx_project::lock::is_stale(&lock, config) {
+    if !lock.is_current(config) {
         return Err(LockCurrency::Stale {
             lock_path: lock_path.to_path_buf(),
         }
@@ -1144,7 +1144,7 @@ mod consent_evidence_tests {
             tools: vec![LockedTool {
                 name: "cmake".into(),
                 group: "default".into(),
-                repository: identifier(registry, path),
+                repository: ocx_oci::Repository::new(registry, path),
                 platforms: BTreeMap::from([(host().to_string(), leaf_digest())]),
             }],
         }
@@ -2493,7 +2493,7 @@ mod bin_mode_entry_tests {
             tools: vec![LockedTool {
                 name: "cmake".into(),
                 group: DEFAULT_GROUP.into(),
-                repository: identifier(),
+                repository: ocx_oci::Repository::from(&identifier()),
                 platforms: BTreeMap::from([(host().to_string(), ocx_oci::Digest::Sha256(hex.to_owned()))]),
             }],
         }
@@ -3880,5 +3880,35 @@ mod session_composition_tests {
         let path = resulting_path(&desired_entries(&outcome));
         position(&path, &outcome.session.install_bin);
         position(&path, &outcome.session.global_bin);
+    }
+}
+
+#[cfg(test)]
+mod current_lock_tests {
+    use std::path::Path;
+
+    use super::{SessionError, current_lock};
+
+    /// A hash-matching lock whose entry names another repository must take the
+    /// refusal path; as a library error it exits 65 into the hook's discarded stderr.
+    #[test]
+    fn a_repository_desync_under_a_matching_hash_is_a_lock_refusal() {
+        let config = ocx_project::ProjectConfig::from_toml_str("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n")
+            .expect("parse ocx.toml");
+        let lock = ocx_project::ProjectLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\ndeclaration_hash = \"{hash}\"\n\
+             generated_by = \"ocx test\"\ngenerated_at = \"2026-01-01T00:00:00Z\"\n\n\
+             [[tool]]\nname = \"cmake\"\ngroup = \"default\"\nrepository = \"ghcr.io/cmake\"\n\n\
+             [tool.platforms]\n\"linux/amd64\" = \"sha256:{leaf}\"\n",
+            hash = config.declaration_hash_cached(),
+            leaf = "a".repeat(64),
+        ))
+        .expect("parse ocx.lock");
+
+        let result = current_lock(Some(lock), &config, Path::new("ocx.lock"));
+        assert!(
+            matches!(result, Err(SessionError::Lock(ocx_project::LockCurrency::Stale { .. }))),
+            "{result:?}"
+        );
     }
 }

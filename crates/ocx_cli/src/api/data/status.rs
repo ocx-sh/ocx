@@ -83,8 +83,9 @@ pub struct LockStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     error: Option<String>,
-    /// `true` when the lock's stored `declaration_hash` matches the current
-    /// config's. `false` means `ocx.toml` changed since the last `ocx lock`.
+    /// `true` when the lock binds to `ocx.toml`: its stored `declaration_hash`
+    /// matches and every entry names its declared repository. `false` is the
+    /// lock `ocx pull` and `ocx exec` refuse.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     current: Option<bool>,
@@ -200,7 +201,7 @@ impl StatusReport {
             Some(lock) => LockStatus {
                 present: true,
                 error: None,
-                current: Some(lock.metadata.declaration_hash == config_hash),
+                current: Some(lock.is_current(config)),
                 lock_version: Some(lock.metadata.lock_version as u8),
                 declaration_hash: Some(lock.metadata.declaration_hash.clone()),
                 declaration_hash_expected: config_hash,
@@ -369,7 +370,7 @@ impl Printable for StatusReport {
             (false, _, _) => "lock: absent (run `ocx lock`)".to_owned(),
             (true, Some(error), _) => format!("lock: unreadable ({error})"),
             (true, _, Some(true)) => "lock: current".to_owned(),
-            (true, _, _) => "lock: stale (ocx.toml changed since `ocx lock`)".to_owned(),
+            (true, _, _) => "lock: stale (does not match ocx.toml; run `ocx lock`)".to_owned(),
         };
         sections.push(Node::leaf(lock_label));
 
@@ -453,6 +454,31 @@ mod tests {
         assert!(
             !json.contains("\"separator\""),
             "an undeclared separator must not be invented: {json}"
+        );
+    }
+
+    /// `ocx pull` refuses a lock entry naming another repository under a fresh
+    /// hash, so status must not call that lock current.
+    #[test]
+    fn a_lock_entry_naming_another_repository_is_not_current() {
+        let config = ProjectConfig::from_toml_str("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("parse ocx.toml");
+        let lock = ProjectLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"{hash}\"\n\
+             generated_by = \"ocx 0.5.8\"\ngenerated_at = \"2026-08-27T00:00:00Z\"\n\n\
+             [[tool]]\nname = \"cmake\"\ngroup = \"default\"\nrepository = \"ghcr.io/cmake\"\n\n\
+             [tool.platforms]\n\"linux/amd64\" = \"sha256:{leaf}\"\n",
+            hash = config.declaration_hash_cached(),
+            leaf = "1".repeat(64),
+        ))
+        .expect("parse lock");
+
+        let report = StatusReport::new(std::path::Path::new("/project"), &config, Ok(Some(&lock)));
+        assert_eq!(report.lock.current, Some(false));
+        assert_eq!(
+            report.lock.declaration_hash.as_deref(),
+            Some(report.lock.declaration_hash_expected.as_str()),
+            "the fixture's hash matches; only the repository drifts"
         );
     }
 }

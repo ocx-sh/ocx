@@ -49,7 +49,7 @@ pytestmark = pytest.mark.command("update")
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64        # clap unknown-arg / unknown group or name → EX_USAGE
-EXIT_DATA = 65         # scoped update on a drifted ocx.toml (StaleLockOnPartial)
+EXIT_DATA = 65         # scoped update on a drifted ocx.toml (LockOutOfSync)
 EXIT_CONFIG = 78       # scoped update with no predecessor ocx.lock
 EXIT_POLICY_BLOCKED = 81
 

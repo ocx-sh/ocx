@@ -1976,7 +1976,7 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 |------|---------|
 | 0 | Success (or empty group filter — nothing to pull). |
 | 64 | Missing `ocx.toml`, unknown `--group` name, empty comma segment, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
-| 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`). |
+| 65 | `ocx.lock` is stale (declaration_hash mismatch, or a lock entry whose repository no longer matches its `ocx.toml` declaration — run `ocx lock`). |
 | 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. Also: an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`). |
 | 78 | No leaf digest for the host (or requested `--platform`) at the locked version (and no `"any"` fallback key in `[tool.platforms]`) — the publisher does not ship that platform. |
 

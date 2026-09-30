@@ -665,9 +665,10 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
         },
         Scope::Launcher => ScopeBlock::Launcher,
         // A shim composes the package tier (`EnvScope::package_tier`); `frame.command` names the shim.
+        // The baked tag is first-writer-wins per shim digest, so it is not what was requested.
         Scope::LauncherShim { requested } => ScopeBlock::Package {
             clean_env: inputs.clean_env,
-            requested: vec![requested.to_string()],
+            requested: vec![requested.strip_advisory().to_string()],
         },
     }
 }
@@ -697,8 +698,16 @@ fn resolution_block(inputs: &RecordInputs<'_>) -> Resolution {
         insecure_registries: insecure,
         mirrors: composed.then(|| mirror_endpoints(&inputs.config.mirrors)),
         managed_config: composed.then(|| managed_config(inputs)).flatten(),
-        auto_installed: (!inputs.auto_installed.is_empty())
-            .then(|| inputs.auto_installed.iter().map(ToString::to_string).collect()),
+        auto_installed: (!inputs.auto_installed.is_empty()).then(|| {
+            inputs
+                .auto_installed
+                .iter()
+                .map(|identifier| match PinnedPackageRef::try_from(identifier.clone()) {
+                    Ok(pinned) => recorded_identity(&pinned, &inputs.scope).to_string(),
+                    Err(_) => identifier.to_string(),
+                })
+                .collect()
+        }),
     }
 }
 
@@ -787,7 +796,7 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     }
     // Only a root is reachable as a directory, so a dependency-owned executable omits the purl.
     if let Some(info) = owning_root(inputs)
-        && let Some(purl) = package_url(info.identifier(), info.platform())
+        && let Some(purl) = package_url(&recorded_identity(info.identifier(), &inputs.scope), info.platform())
     {
         block.insert("sh.ocx.package".to_string(), purl);
     }
@@ -929,7 +938,8 @@ fn project(
     let mut annotations = BTreeMap::from([("sh.ocx.role".to_string(), Value::from(placement.role))]);
     let digest = digest_map(&identifier.digest());
 
-    let Some(uri) = package_url(identifier, placement.platform) else {
+    let recorded = recorded_identity(identifier, &inputs.scope);
+    let Some(uri) = package_url(&recorded, placement.platform) else {
         // A placeholder's name, registry and repository are local artefacts: stay digest-only.
         annotations.insert("sh.ocx.identity".to_string(), Value::from("synthetic"));
         return Some(ResourceDescriptor {
@@ -957,7 +967,7 @@ fn project(
     if let Some(names) = admitted.entrypoints.get(&identifier.strip_advisory()) {
         annotations.insert("sh.ocx.entrypoints".to_string(), Value::from(names.clone()));
     }
-    if identifier.tag().is_some() {
+    if recorded.tag().is_some() {
         // A surviving tag means a floating tag was resolved; with `resolution.autoInstalled`, the drift signal.
         annotations.insert("sh.ocx.resolved-from".to_string(), Value::from("tag"));
     }
@@ -968,6 +978,16 @@ fn project(
         digest,
         annotations,
     })
+}
+
+/// `identifier` as the record reports it. The tag a lock-bound root or a baked shim
+/// carries is advisory, for patch matching: the digest was not reached through it.
+fn recorded_identity(identifier: &PinnedPackageRef, scope: &Scope) -> PinnedPackageRef {
+    if matches!(scope, Scope::LauncherShim { .. }) || binding_for(identifier, scope).is_some() {
+        identifier.strip_advisory()
+    } else {
+        identifier.clone()
+    }
 }
 
 /// The binding a project-tier package was selected under, if the frame has any.
@@ -1517,6 +1537,141 @@ mod tests {
                 .and_then(Value::as_str),
             Some("tag"),
         );
+    }
+
+    /// The `tag` qualifier of a rendered purl, parsed rather than substring-matched.
+    fn purl_tag(purl: &str) -> Option<String> {
+        packageurl::PackageUrl::from_str(purl)
+            .expect("rendered purl must parse")
+            .qualifiers()
+            .iter()
+            .find(|(key, _)| *key == "tag")
+            .map(|(_, value)| value.to_string())
+    }
+
+    /// A project frame whose `cmake` root came from the lock bound to its
+    /// `ocx.toml` tag, and whose `ninja` root is a positional `ninja:1.12`,
+    /// outside `Scope::Project.bindings`. Both were materialised this run.
+    fn lock_bound_and_positional_frame() -> Frame {
+        let mut frame = Frame::project();
+        let cmake = pinned("ocx/cmake", "index.ocx.sh", Some("3.28"), LEAF_HEX);
+        let ninja = pinned("ocx/ninja", "index.ocx.sh", Some("1.12"), NINJA_HEX);
+        frame.packages = vec![
+            install(cmake.clone(), "/home/ci/.ocx/packages/cmake", Vec::new()),
+            install(ninja.clone(), "/home/ci/.ocx/packages/ninja", Vec::new()),
+        ];
+        frame.auto_installed = vec![PackageRef::from(cmake), PackageRef::from(ninja)];
+        frame
+    }
+
+    /// A lock-resolved digest was not reached through a tag, so the advisory tag
+    /// a binding carries for patch matching must not surface as provenance: the
+    /// record stays byte-identical to a tagless lock pin.
+    #[test]
+    fn c008_a_lock_bound_tag_is_not_recorded_as_resolved_from_a_tag() {
+        let frame = lock_bound_and_positional_frame();
+        let inputs = frame.inputs(project_scope());
+        let descriptors = descriptors(&inputs);
+        let cmake = descriptors
+            .iter()
+            .find(|descriptor| descriptor.name == "cmake")
+            .expect("cmake descriptor");
+
+        assert!(
+            !cmake.annotations.contains_key("sh.ocx.resolved-from"),
+            "a lock digest is not resolved from a tag: {:?}",
+            cmake.annotations
+        );
+        assert_eq!(
+            purl_tag(cmake.uri.as_deref().expect("purl")),
+            None,
+            "no purl tag for a lock-bound root"
+        );
+        assert_eq!(
+            resolution_block(&inputs)
+                .auto_installed
+                .expect("materialised")
+                .first()
+                .map(String::as_str),
+            Some(format!("index.ocx.sh/ocx/cmake@sha256:{LEAF_HEX}").as_str()),
+            "autoInstalled names the lock-bound root without its advisory tag"
+        );
+    }
+
+    /// The executable block's package purl follows the descriptor: the lock-bound
+    /// root that owns the resolved launcher carries no `tag` qualifier either.
+    #[test]
+    fn c008_the_executable_purl_of_a_lock_bound_root_carries_no_tag() {
+        let frame = lock_bound_and_positional_frame();
+        let block = executable_block(&frame.inputs(project_scope()));
+        let purl = block.get("sh.ocx.package").expect("cmake owns the executable");
+        assert_eq!(purl_tag(purl), None, "{purl}");
+    }
+
+    /// A positional `name=repo:tag` was resolved through its tag, so it keeps
+    /// the marker, the purl qualifier and its tagged `autoInstalled` entry.
+    #[test]
+    fn c008_a_positional_tag_keeps_its_resolved_from_provenance() {
+        let frame = lock_bound_and_positional_frame();
+        let inputs = frame.inputs(project_scope());
+        let descriptors = descriptors(&inputs);
+        let ninja = descriptors
+            .iter()
+            .find(|descriptor| descriptor.name == "ninja")
+            .expect("ninja descriptor");
+
+        assert_eq!(
+            ninja.annotations.get("sh.ocx.resolved-from").and_then(Value::as_str),
+            Some("tag")
+        );
+        assert_eq!(purl_tag(ninja.uri.as_deref().expect("purl")).as_deref(), Some("1.12"));
+        assert_eq!(
+            resolution_block(&inputs)
+                .auto_installed
+                .expect("materialised")
+                .get(1)
+                .map(String::as_str),
+            Some(format!("index.ocx.sh/ocx/ninja:1.12@sha256:{NINJA_HEX}").as_str()),
+        );
+    }
+
+    /// A shim pulls by its baked digest, never by the tag baked beside it, so the
+    /// shim frame records no tag provenance, whether the shim was baked from a
+    /// lock-bound tool or from a package-tier tagged positional.
+    #[test]
+    fn c008_a_baked_shim_tag_is_not_recorded_as_resolved_from_a_tag() {
+        let frame = lock_bound_and_positional_frame();
+        for (index, name, tag, hex) in [(0, "cmake", "3.28", LEAF_HEX), (1, "ninja", "1.12", NINJA_HEX)] {
+            let inputs = frame.inputs(Scope::LauncherShim {
+                requested: pinned(&format!("ocx/{name}"), "index.ocx.sh", Some(tag), hex),
+            });
+            let descriptors = descriptors(&inputs);
+            let descriptor = descriptors
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+                .expect("descriptor");
+            let untagged = format!("index.ocx.sh/ocx/{name}@sha256:{hex}");
+
+            assert!(
+                !descriptor.annotations.contains_key("sh.ocx.resolved-from"),
+                "{name}: {:?}",
+                descriptor.annotations
+            );
+            assert_eq!(purl_tag(descriptor.uri.as_deref().expect("purl")), None, "{name}");
+            assert_eq!(
+                resolution_block(&inputs)
+                    .auto_installed
+                    .expect("materialised")
+                    .get(index)
+                    .map(String::as_str),
+                Some(untagged.as_str()),
+                "{name}"
+            );
+            match scope_block(&inputs) {
+                ScopeBlock::Package { requested, .. } => assert_eq!(requested, vec![untagged], "{name}"),
+                other => panic!("a shim frame records the package scope, got {other:?}"),
+            }
+        }
     }
 
     // ── sh.ocx.kind — launcher versus leaf binary ───────────────────────

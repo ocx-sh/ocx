@@ -251,7 +251,7 @@ mod seam {
     /// refuses the same files with 65.
     ///
     /// Partial companion of `test/tests/test_status.py::test_status_reports_drift_instead_of_refusing`,
-    /// not a port: the sibling's 65 is checked through `is_stale` and a hand-built
+    /// not a port: the sibling's 65 is checked through `is_current` and a hand-built
     /// error, not the gate `ocx pull` runs, so the acceptance case stays.
     #[tokio::test]
     async fn status_reports_drift_instead_of_refusing() {
@@ -274,7 +274,7 @@ mod seam {
             .expect("ocx.lock parses")
             .expect("ocx.lock present");
         assert!(
-            ocx_project::lock::is_stale(&on_disk, &config),
+            !on_disk.is_current(&config),
             "the staleness gate must fire for a sibling command"
         );
         let refusal = ProjectContextError::from(LockCurrency::Stale { lock_path });

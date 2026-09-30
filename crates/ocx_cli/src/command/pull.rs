@@ -67,24 +67,23 @@ impl Pull {
 
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         let render_groups = render_groups(&self.groups, &ctx);
-        let selected: Vec<&ocx_project::LockedTool> = if self.groups.is_empty() {
-            ctx.lock.tools.iter().collect()
+        // The hash gate passed; a per-entry desync it cannot see refuses the same way.
+        let bound = ctx.lock.bind_current(&ctx.config)?;
+        let selected: Vec<&ocx_project::BoundTool> = if self.groups.is_empty() {
+            bound.iter().collect()
         } else {
             let expanded = expand_all_keyword(&self.groups, &ctx.config);
-            ctx.lock
-                .tools
+            bound
                 .iter()
-                .filter(|t| expanded.iter().any(|g| g == &t.group))
+                .filter(|t| expanded.iter().any(|g| g == &t.locked().group))
                 .collect()
         };
-        let mut pinned: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
-        for tool in &selected {
-            let id = host_pull_pinned(tool, &platform)?;
-            // ponytail: O(n) dedup over tools — tiny.
-            if !pinned.contains(&id) {
-                pinned.push(id);
-            }
-        }
+        let host = selected
+            .iter()
+            .map(|tool| Ok((*tool, tool.host_leaf_identifier(&platform)?)))
+            .collect::<Result<Vec<_>, ocx_project::Error>>()?;
+        let pull_set = ocx_project::first_per_content(host);
+        let pinned: Vec<ocx_oci::PinnedPackageRef> = pull_set.iter().map(|(_, id)| id.clone()).collect();
 
         // After the staleness gate, so a stale lock exits 65 before any preview prints.
         if self.dry_run {
@@ -95,11 +94,11 @@ impl Pull {
         let identifiers: Vec<ocx_oci::PackageRef> = pinned.iter().cloned().map(Into::into).collect();
 
         let mut modes: Vec<ocx_project::lazy::LazyMode> = Vec::with_capacity(identifiers.len());
-        for (tool, identifier) in selected.iter().zip(identifiers.iter()) {
+        for ((tool, _), identifier) in pull_set.iter().zip(identifiers.iter()) {
             modes.push(lazy_mode_for_tool(
                 &ctx.config,
                 identifier,
-                Some(tool.group.as_str()),
+                Some(tool.locked().group.as_str()),
                 self.lazy_mode.mode(),
             ));
         }
@@ -125,7 +124,7 @@ impl Pull {
                     continue;
                 };
                 api::data::warmed_paths::WarmedPath {
-                    package: identifier.to_string(),
+                    package: report_key(identifier),
                     path: info.dir().root().to_path_buf(),
                     kind: api::data::path_kind::PathKind::Package,
                 }
@@ -146,7 +145,7 @@ impl Pull {
                 advisories.extend(prepared.advisories);
                 // The shim directory: this run did not create the package directory.
                 api::data::warmed_paths::WarmedPath {
-                    package: identifier.to_string(),
+                    package: report_key(identifier),
                     path: prepared.shim.root().to_path_buf(),
                     kind: api::data::path_kind::PathKind::Shim,
                 }
@@ -175,22 +174,9 @@ impl Pull {
     }
 }
 
-/// Resolves a locked tool to its host-platform pinned pull identifier.
-///
-/// # Errors
-///
-/// `ProjectErrorKind::NoHostLeaf` (exit 78) when the lock has no leaf for `host`.
-fn host_pull_pinned(
-    tool: &ocx_project::LockedTool,
-    host: &ocx_oci::Platform,
-) -> anyhow::Result<ocx_oci::PinnedPackageRef> {
-    let id = ocx_project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)?;
-    ocx_oci::PinnedPackageRef::try_from(id).map_err(|e| {
-        anyhow::anyhow!(
-            "locked leaf for binding '{}' is not a valid pinned identifier: {e}",
-            tool.name
-        )
-    })
+/// The report key: the pulled identifier without its advisory tag, as documented for `--format json`.
+fn report_key(identifier: &ocx_oci::PackageRef) -> String {
+    identifier.without_tag().to_string()
 }
 
 /// The groups this render covers: `-g` expanded, else every lock group plus the default group
@@ -315,7 +301,7 @@ async fn run_dry_run(
         .zip(slots)
         .map(|(id, slot)| {
             let (status, path) = slot.expect("all slots filled on success");
-            DryRunEntry::new(id.clone(), status, path)
+            DryRunEntry::new(id.strip_advisory(), status, path)
         })
         .collect();
     let report = PullDryRun::new(entries);
@@ -415,5 +401,49 @@ mod tests {
                 path.join(" ")
             );
         }
+    }
+
+    /// The refusal `ocx pull` relies on for a per-entry desync the hash gate misses: the
+    /// lock's `cmake` came from `ghcr.io/cmake` while `ocx.toml` declares
+    /// `ocx.sh/cmake`. Exit 65, the same as a moved hash, naming the binding.
+    #[test]
+    fn bind_current_refuses_a_repository_desync_with_exit_65() {
+        let config = ocx_project::ProjectConfig::from_toml_str("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n")
+            .expect("parse ocx.toml");
+        let lock = ocx_project::ProjectLock::from_toml_str(&format!(
+            r#"[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "{hash}"
+generated_by = "ocx test"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ghcr.io/cmake"
+
+[tool.platforms]
+"linux/amd64" = "sha256:{leaf}"
+"#,
+            hash = config.declaration_hash_cached(),
+            leaf = "a".repeat(64),
+        ))
+        .expect("parse ocx.lock");
+
+        let err = anyhow::Error::from(lock.bind_current(&config).expect_err("a desynced entry must refuse"));
+        assert_eq!(crate::exit::classify_error(err.as_ref()), ocx_exit::ExitCode::DataError);
+        let rendered = format!("{err:#}");
+        for needle in ["'cmake'", "ghcr.io/cmake", "ocx.sh/cmake"] {
+            assert!(rendered.contains(needle), "{needle} missing from {rendered:?}");
+        }
+    }
+
+    /// Report keys stay `registry/repository@sha256:...`; the tag only selects patches.
+    #[test]
+    fn report_key_drops_the_advisory_tag() {
+        let digest = "a".repeat(64);
+        let tagged = ocx_oci::PackageRef::parse(&format!("ocx.sh/cmake:3.28@sha256:{digest}")).expect("parse");
+        assert_eq!(report_key(&tagged), format!("ocx.sh/cmake@sha256:{digest}"));
     }
 }

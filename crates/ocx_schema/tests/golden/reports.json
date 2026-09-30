@@ -5870,7 +5870,7 @@
         },
         "current": {
           "type": "boolean",
-          "description": "`true` when the lock's stored `declaration_hash` matches the current\nconfig's. `false` means `ocx.toml` changed since the last `ocx lock`."
+          "description": "`true` when the lock binds to `ocx.toml`: its stored `declaration_hash`\nmatches and every entry names its declared repository. `false` is the\nlock `ocx pull` and `ocx exec` refuse."
         },
         "lock_version": {
           "type": "integer",

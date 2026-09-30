@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::PackageRef;
+use super::{Digest, PackageRef, PinnedPackageRef};
 
 /// A parsed OCI repository reference: `registry/repository` without tag or digest.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -28,6 +28,13 @@ impl Repository {
     /// Returns the repository path within the registry, e.g. `"cmake"` or `"myorg/tool"`.
     pub fn repository(&self) -> &str {
         &self.repository
+    }
+
+    /// `registry/repository@digest` with no advisory tag, for content-addressed
+    /// uses where a tag must not ride along.
+    pub fn pin_untagged(&self, digest: Digest) -> PinnedPackageRef {
+        let untagged = PackageRef::new_registry(self.repository.clone(), self.registry.clone());
+        PinnedPackageRef::pin(&untagged, digest)
     }
 }
 
@@ -163,6 +170,15 @@ mod tests {
         set.insert(a.clone());
         assert!(!set.insert(b));
         assert!(set.insert(c));
+    }
+
+    #[test]
+    fn c002_pin_untagged_renders_repository_at_digest_without_tag() {
+        let digest = Digest::Sha256("a".repeat(64));
+        let pinned = Repository::new("ghcr.io", "myorg/tool").pin_untagged(digest.clone());
+        assert_eq!(pinned.to_string(), format!("ghcr.io/myorg/tool@{digest}"));
+        assert_eq!(pinned.tag(), None);
+        assert_eq!(pinned.digest(), digest);
     }
 
     #[test]

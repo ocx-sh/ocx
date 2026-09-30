@@ -123,7 +123,7 @@ impl Add {
             let pinned = ocx_package_manager::pinned_for_project(None, staged.config());
             guard.rollback();
             record_activation_consent(&config_path, &existing, None).await;
-            materialize_lock(&context, &existing, eager, platform.clone()).await?;
+            materialize_lock(&context, &existing, staged.config(), eager, platform.clone()).await?;
             render_and_warn(&context, &render_manager, &existing, pinned, &scope, &platform).await;
             report_lock(&context, &existing, &platform)?;
             return Ok(ExitCode::SUCCESS);
@@ -155,6 +155,8 @@ impl Add {
             }
         };
 
+        // Cloned before the commit consumes `staged`; the eager pull binds the new lock to it.
+        let config = staged.config().clone();
         // Through `commit_and_render`, never `MutationGuard::commit`, or the toolchain tree keeps
         // describing the previous lock.
         let commit = render_manager
@@ -175,7 +177,7 @@ impl Add {
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
         // After the commit: a failed download leaves the binding declared.
-        materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
+        materialize_lock(&context, &new_lock, &config, eager, platform.clone()).await?;
 
         report_lock(&context, &new_lock, &platform)?;
 
@@ -349,7 +351,7 @@ mod tests {
         ocx_project::LockedTool {
             name: name.to_owned(),
             group: group.to_owned(),
-            repository: identifier(text),
+            repository: ocx_oci::Repository::from(&identifier(text)),
             platforms: std::collections::BTreeMap::new(),
         }
     }

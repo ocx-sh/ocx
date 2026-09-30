@@ -47,8 +47,8 @@ pub struct ComposeOutput {
     /// The composed env entries in emit order.
     pub entries: Vec<Entry>,
 
-    /// Deduped, tag-stripped identifiers admitted by the surface gate, deps before their root;
-    /// the patch overlay applies only to these.
+    /// Identifiers admitted by the surface gate, one per content (the first tag wins), deps
+    /// before their root; the patch overlay applies only to these.
     pub admitted: Vec<ocx_oci::PinnedPackageRef>,
 
     /// Declared `binaries` claims of each admitted identifier that cross the surface
@@ -1156,7 +1156,11 @@ mod tests {
 
     /// Build a minimal `InstallInfo` with an empty env and the given resolved closure.
     fn make_install_info(repo: &str, hex_char: char, resolved: ResolvedPackage) -> InstallInfo {
-        let id = pinned(repo, hex_char);
+        make_install_info_for(pinned(repo, hex_char), resolved)
+    }
+
+    /// [`make_install_info`] for a caller-built identifier, e.g. a tagged one.
+    fn make_install_info_for(id: PinnedPackageRef, resolved: ResolvedPackage) -> InstallInfo {
         let metadata = metadata::Metadata::Bundle(bundle::Bundle {
             binaries: None,
             version: bundle::Version::V1,
@@ -1539,6 +1543,33 @@ mod tests {
             "shared dep's entrypoints claim must be admitted exactly once across roots: {:?}",
             out.admitted_entrypoints
         );
+    }
+
+    /// One content selected under two tags is one admitted root, carrying the
+    /// tag of whichever came first in selection order.
+    #[tokio::test]
+    async fn compose_one_content_under_two_tags_admits_the_first_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let tagged = |tag: &str| {
+            let id = PackageRef::new_registry("java", REGISTRY)
+                .clone_with_tag(tag)
+                .clone_with_digest(sha256('a'));
+            PinnedPackageRef::try_from(id).unwrap()
+        };
+        let first = Arc::new(make_install_info_for(tagged("21.0"), ResolvedPackage::new()));
+        let second = Arc::new(make_install_info_for(tagged("21"), ResolvedPackage::new()));
+
+        let out = compose(
+            &[first, second],
+            &store,
+            false,
+            &crate::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.admitted, vec![tagged("21.0")]);
     }
 
     // ─ Repo-conflict (same repo, different digest — fatal) ─────────────────────
@@ -6269,7 +6300,7 @@ mod wp15_following_lane_spec_tests {
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
+            repository: ocx_oci::Repository::new(REGISTRY, repository),
             platforms: BTreeMap::from([(PLATFORM_KEY.to_string(), digest_of(seed))]),
         }
     }
@@ -6281,7 +6312,7 @@ mod wp15_following_lane_spec_tests {
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
+            repository: ocx_oci::Repository::new(REGISTRY, repository),
             platforms: BTreeMap::from([("windows/arm64".to_string(), digest_of(seed))]),
         }
     }
@@ -6349,10 +6380,10 @@ mod wp15_following_lane_spec_tests {
         /// renderer and the heal derive it — through the shared `select_best`
         /// helper, never by an exact key lookup.
         fn digest_root(&self, tool: &LockedTool) -> PathBuf {
-            let identifier = ocx_project::compose::host_leaf_identifier(tool, &platform())
+            let leaf = tool
+                .host_leaf(&platform())
                 .expect("the fixture lock ships a leaf compatible with the fixture platform");
-            let pinned =
-                ocx_oci::PinnedPackageRef::try_from(identifier).expect("a resolved host leaf is digest-bearing");
+            let pinned = tool.repository.pin_untagged(leaf);
             self.file_structure.packages.path(&pinned)
         }
 
@@ -7193,10 +7224,9 @@ mod wp15_following_lane_spec_tests {
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
         let digest_root = tree.seed_digest_root(&tool);
 
-        let identifier = ocx_oci::PinnedPackageRef::try_from(
-            ocx_project::compose::host_leaf_identifier(&tool, &platform()).expect("a compatible leaf"),
-        )
-        .expect("a resolved host leaf is digest-bearing");
+        let identifier = tool
+            .repository
+            .pin_untagged(tool.host_leaf(&platform()).expect("a compatible leaf"));
 
         let mut builder = metadata_env::EnvBuilder::new();
         builder.add_var(Var {
@@ -7284,10 +7314,9 @@ mod wp15_following_lane_spec_tests {
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
         let digest_root = tree.seed_digest_root(&tool);
 
-        let identifier = ocx_oci::PinnedPackageRef::try_from(
-            ocx_project::compose::host_leaf_identifier(&tool, &platform()).expect("a compatible leaf"),
-        )
-        .expect("a resolved host leaf is digest-bearing");
+        let identifier = tool
+            .repository
+            .pin_untagged(tool.host_leaf(&platform()).expect("a compatible leaf"));
 
         let metadata: metadata::Metadata = serde_json::from_str(
             &serde_json::json!({

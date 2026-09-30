@@ -1381,8 +1381,7 @@ mod tests {
         arms.push(("ledger_absent_setup_never_ran", never_set_up));
 
         let mut lock_refused = base(None);
-        lock_refused.lock_refusal =
-            Some("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`".to_owned());
+        lock_refused.lock_refusal = Some("ocx.lock is stale (it does not match ocx.toml); run `ocx lock`".to_owned());
         if let Some(ledger) = lock_refused.ledger.as_mut() {
             ledger.scopes.project = None;
         }
@@ -1819,7 +1818,7 @@ mod tests {
     /// EC-REC-008 — the renderer half of the lock-refusal split.
     #[test]
     fn f097_a_lock_that_refuses_composition_is_not_a_scope_that_is_merely_pending() {
-        let refusal = "ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`";
+        let refusal = "ocx.lock is stale (it does not match ocx.toml); run `ocx lock`";
 
         let mut refused = base(None);
         refused.lock_refusal = Some(refusal.to_owned());

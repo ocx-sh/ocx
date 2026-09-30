@@ -29,10 +29,12 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
 
+from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import (
     make_package,
     make_package_with_entrypoints,
@@ -165,6 +167,25 @@ def _publish_descriptor_at_base(
     )
     assert result.returncode == 0, (
         f"patch publish at base {base_fq} failed:\n{result.stderr}"
+    )
+
+
+def _publish_descriptor_global(ocx: OcxRunner, descriptor_path: Path) -> None:
+    """Publish descriptor to the reserved `global` repository.
+
+    The lock-tag scenario tests use this instead of `_publish_descriptor_at_base`:
+    project commands (`ocx lock`/`pull`/`exec`) do not yet fetch a per-package
+    descriptor, only the global one (ocx-sh/ocx#550).
+    """
+    result = ocx.run(
+        "patch", "publish",
+        "--descriptor", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"--global patch publish failed:\n{result.stderr}"
     )
 
 
@@ -4002,3 +4023,604 @@ def test_global_descriptor_publishes_at_the_bare_registry_root(
             f"descriptor applies to all);\ngot keys: {[e['key'] for e in entries]}"
         )
         assert entry["value"] == "bare-corp-ca"
+
+
+# Scenario 8: tag-scoped rules for tools resolved from ocx.lock (advisory tag).
+# ocx.lock stores the bare digest with no tag, so a tag-scoped rule needs the
+# advisory tag rejoined from ocx.toml before it matches. A companion reaches a
+# project tool only via a prior `ocx package install` of the tagged ref, the
+# one place discovery still runs (ocx-sh/ocx#550).
+
+
+def test_tag_scoped_rule_matches_project_tool_from_lock(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a tag-scoped rule (`<registry>/<repo>:*`) matches a project tool
+    declared `<registry>/<repo>:<tag>` in `ocx.toml`, once resolved through
+    `ocx.lock` -- both `ocx exec -- env` and `ocx env` must carry the
+    companion. The rule is published in the global descriptor because
+    project commands don't fetch a per-package descriptor yet (ocx-sh/ocx#550).
+    The companion reaches the project only because a prior `ocx package
+    install` of the TAGGED ref ran discovery and pinned it -- `ocx lock`/
+    `pull`/`exec` never run discovery themselves (ocx-sh/ocx#550).
+    """
+    companion_repo = _unique_repo("lock_tag_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "LOCK_TAG_CA", "/etc/ssl/lock-tag-ca.pem")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "lock_tag_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    # Install the TAGGED ref -> discovery matches the tag-scoped rule and pins
+    # the companion in patch state before any project command runs.
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    project = tmp_path / "s001_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    pull = _run_in(ocx, project, "pull")
+    assert pull.returncode == 0, f"ocx pull must succeed:\n{pull.stderr}"
+
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "LOCK_TAG_CA=/etc/ssl/lock-tag-ca.pem" in exec_result.stdout, (
+        "a tag-scoped rule must match the lock-resolved tool's declared tag "
+        f"(advisory tag rejoin); got env dump:\n{exec_result.stdout}"
+    )
+
+    env_result = _run_in(ocx, project, "--format", "json", "env")
+    assert env_result.returncode == 0, (
+        f"ocx env must succeed; rc={env_result.returncode}\nstderr: {env_result.stderr}"
+    )
+    env_entries = json.loads(env_result.stdout)["entries"]
+    assert _entry_by_key(env_entries, "LOCK_TAG_CA") is not None, (
+        "the tag-scoped companion must also appear in `ocx env`'s composed "
+        f"entries; got keys: {[e['key'] for e in env_entries]}"
+    )
+
+
+def test_tag_scoped_rule_required_missing_companion_fails_closed_from_lock(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a `required=true` tag-scoped rule whose companion is unavailable
+    fails closed for a project tool resolved from `ocx.lock`, mirroring
+    the OCI-tier `test_required_true_missing_companion_fails_closed`. The
+    rule publishes to the global descriptor (ocx-sh/ocx#550). The seed
+    install runs under `required=false` so the missing companion does not
+    abort the SEED; it matches but stays unpinned. The tier then flips to
+    `required=true` before `ocx exec`, pinning failure to the project-tier
+    compose step, not discovery.
+    """
+    nonexistent_companion = f"{registry}/nonexistent-companion-{uuid4().hex[:8]}:latest"
+    descriptor_path = tmp_path / "lock_tag_required_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [nonexistent_companion]}],
+    )
+    # make_package's index update records "no descriptor" once [patches] is
+    # configured, so the package must exist before the config is written.
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    _write_config(ocx, registry, required=False)
+
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    # Seed install under required=false: the rule matches but the companion
+    # doesn't exist, so discovery warns and skips rather than failing the install.
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    # Flip the tier to required=true (same patch registry path -- `_write_config`
+    # reuses the uuid suffix already recorded on `ocx`) before the project reads it.
+    _write_config(ocx, registry, required=True)
+
+    project = tmp_path / "s002_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    result = _run_in(ocx, project, "exec", "--", "env")
+    assert result.returncode == 79, (
+        "a required tag-scoped rule whose companion is matched but unpinned "
+        "must fail closed for a lock-resolved tool (C7) with the NotFound "
+        f"exit the missing companion itself classifies as; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a digest-only declaration (`<registry>/<repo>@sha256:<digest>`) resolved
+    through `ocx.lock` is untagged, so a tag-anchored rule (`<repo>:*`) skips it
+    while a bare repository-prefix rule (`<repo>*`) still matches through the
+    digest's own colon (matcher.rs's `*:*` caveat). Existing matcher behaviour,
+    untouched by the lock advisory-tag fix. A TAGGED install pins both
+    companions, so the tag-anchored one is absent only because the matcher
+    skips the untagged declaration; both rules publish to the global
+    descriptor (ocx-sh/ocx#550).
+    """
+    tag_companion_repo = _unique_repo("digest_tag_companion")
+    tag_companion_fq = f"{registry}/{tag_companion_repo}:1.0.0"
+    _make_companion(ocx, tag_companion_repo, "1.0.0", tmp_path, "DIGEST_TAG_CA", "tag-anchor-value")
+
+    repo_companion_repo = _unique_repo("digest_repo_companion")
+    repo_companion_fq = f"{registry}/{repo_companion_repo}:1.0.0"
+    _make_companion(ocx, repo_companion_repo, "1.0.0", tmp_path, "DIGEST_REPO_CA", "repo-prefix-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    digest = fetch_platform_manifest_digest(ocx.registry, base_pkg.repo, base_pkg.tag)
+
+    descriptor_path = tmp_path / "digest_only_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[
+            {"match": f"{registry}/{unique_repo}:*", "packages": [tag_companion_fq]},
+            {"match": f"{registry}/{unique_repo}*", "packages": [repo_companion_fq]},
+        ],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    digest_only_ref = f"{registry}/{unique_repo}@{digest}"
+
+    # The tagged install pins both companions in patch state.
+    for ref in (base_pkg.short, digest_only_ref):
+        install = ocx.plain("package", "install", ref)
+        assert install.returncode == 0, f"ocx package install {ref} must succeed:\n{install.stderr}"
+
+    project = tmp_path / "s003_project"
+    project.mkdir()
+    _write_project_toml(project, digest_only_ref, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "DIGEST_TAG_CA=tag-anchor-value" not in exec_result.stdout, (
+        "a tag-anchored rule must NOT match a digest-only (untagged) "
+        f"declaration resolved from ocx.lock; got env dump:\n{exec_result.stdout}"
+    )
+    assert "DIGEST_REPO_CA=repo-prefix-value" in exec_result.stdout, (
+        "a bare repository-prefix rule (no colon anchor) must still match a "
+        f"digest-only declaration resolved from ocx.lock; got env dump:\n{exec_result.stdout}"
+    )
+
+    env_result = _run_in(ocx, project, "--format", "json", "env")
+    assert env_result.returncode == 0, (
+        f"ocx env must succeed; rc={env_result.returncode}\nstderr: {env_result.stderr}"
+    )
+    env_entries = json.loads(env_result.stdout)["entries"]
+    assert _entry_by_key(env_entries, "DIGEST_TAG_CA") is None, (
+        "the tag-anchored rule's companion must also be absent from `ocx env`'s "
+        f"composed entries; got keys: {[e['key'] for e in env_entries]}"
+    )
+    assert _entry_by_key(env_entries, "DIGEST_REPO_CA") is not None, (
+        "the repository-prefix rule's companion must also appear in `ocx env`'s "
+        f"composed entries; got keys: {[e['key'] for e in env_entries]}"
+    )
+
+
+def test_fresh_home_pull_writes_no_tag_entry_for_base_repo(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """the base package and lock are prepared in the `ocx` fixture's own
+    home, but `ocx pull` runs from a SECOND, genuinely fresh `$OCX_HOME`
+    (pattern: `test_index_ocx_sh.py`'s `clean_home` runners). In the clean
+    home, `ocx pull` succeeds and the base repository's index carries no
+    `1.0.0` tag entry, while the seeding home's root proves the path read --
+    a digest-pinned lock resolve grows no tag pointer (`chained_index.rs`
+    only grows the tag store for a tag with no digest). A genuinely fresh `$OCX_HOME` has never run `ocx package
+    install`, so no companion has ever been pinned there and asserting on
+    one would be vacuous -- this test carries no companion assertion.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    project = tmp_path / "c006_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    clean_home = tmp_path / "c006_clean_home"
+    clean_home.mkdir()
+    clean_home_runner = OcxRunner(ocx.binary, clean_home, ocx.registry)
+
+    pull = _run_in(clean_home_runner, project, "pull")
+    assert pull.returncode == 0, f"ocx pull must succeed:\n{pull.stderr}"
+
+    def candidate(home: Path) -> Path:
+        return home / "symlinks" / registry_dir(registry) / unique_repo / "candidates" / "1.0.0"
+
+    assert_not_exists(candidate(clean_home_runner.ocx_home))
+    # Path control: an install in the seeding home creates the candidate at this exact path.
+    ocx.plain("package", "install", base_pkg.short)
+    assert_symlink_exists(candidate(ocx.ocx_home))
+
+    def index_tags(home: Path) -> dict[str, object] | None:
+        root = home / "index" / registry_dir(registry) / "p" / f"{unique_repo}.json"
+        return json.loads(root.read_text(encoding="utf-8")).get("tags", {}) if root.is_file() else None
+
+    # Path and shape control: the seeding home's tag resolve wrote `1.0.0` at this exact path.
+    seeded_tags = index_tags(ocx.ocx_home)
+    assert seeded_tags is not None and "1.0.0" in seeded_tags, f"seeding home tags: {seeded_tags}"
+    # The clean home may write no root at all; absent reads as no tag entry.
+    clean_tags = index_tags(clean_home_runner.ocx_home) or {}
+    assert "1.0.0" not in clean_tags, (
+        "a lock-resolved (digest-pinned) pull must never commit a tag "
+        f"pointer for the base repository; got tags: {sorted(clean_tags)}"
+    )
+
+
+def test_tag_scoped_rule_matches_global_toolchain_tool_from_lock(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a tag-scoped rule matches a global-toolchain tool
+    (`ocx --global add <registry>/<repo>:<tag>`) resolved from the global
+    lock -- `ocx --global env` must carry the companion. The rule is
+    published in the global descriptor because project commands don't fetch
+    a per-package descriptor yet (ocx-sh/ocx#550). The companion reaches the
+    global toolchain only because a prior `ocx package install` of the
+    TAGGED ref ran discovery and pinned it -- `ocx --global add`/`env` never
+    run discovery themselves (ocx-sh/ocx#550).
+    """
+    companion_repo = _unique_repo("global_lock_tag_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(
+        ocx, companion_repo, "1.0.0", tmp_path, "GLOBAL_LOCK_TAG_CA", "/etc/ssl/global-lock-tag-ca.pem"
+    )
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "global_lock_tag_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    # Install the TAGGED ref -> discovery matches the tag-scoped rule and pins
+    # the companion in patch state before `--global add` ever runs.
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    add = ocx.run("--global", "add", base_pkg.fq, format=None, check=False)
+    assert add.returncode == 0, (
+        f"ocx --global add must succeed; rc={add.returncode}\nstderr: {add.stderr}"
+    )
+
+    result = ocx.run("--global", "env", format="json", check=False)
+    assert result.returncode == 0, (
+        f"ocx --global env must succeed; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    entries = json.loads(result.stdout)["entries"]
+    assert _entry_by_key(entries, "GLOBAL_LOCK_TAG_CA") is not None, (
+        "a tag-scoped rule must match a global-toolchain tool resolved from "
+        f"the global lock; got keys: {[e['key'] for e in entries]}"
+    )
+
+
+def test_stale_project_lock_tag_edit_exec_exits_65(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """editing a locked project tool's TAG in `ocx.toml` (to a
+    second, already-published tag) mismatches the lock's declaration_hash
+    exactly like any other declaration edit -- `ocx exec` exits 65. Existing
+    staleness behaviour, untouched by the lock advisory-tag fix.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=True)
+
+    project = tmp_path / "s006a_project"
+    project.mkdir()
+    tag1_fq = f"{registry}/{unique_repo}:1.0.0"
+    tag2_fq = f"{registry}/{unique_repo}:2.0.0"
+    _write_project_toml(project, tag1_fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    # A valid declaration (the tag is published), but one that mismatches
+    # the recorded declaration_hash.
+    _write_project_toml(project, tag2_fq, opt_out=False)
+
+    result = _run_in(ocx, project, "exec", "--", "env")
+    assert result.returncode == 65, (
+        f"ocx exec must exit 65 on a stale lock after a tag edit; "
+        f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
+def test_stale_project_lock_tag_edit_direnv_export_no_tag_scoped_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """the same stale-tag-edit lock as
+    `test_stale_project_lock_tag_edit_exec_exits_65`, read through the LENIENT `ocx
+    direnv export` path -- exits 0, and its output does NOT carry the
+    tag-scoped companion var (a stale lock falls back to a tagless digest,
+    which no tag-anchored rule matches). Existing staleness behaviour,
+    untouched by the lock advisory-tag fix. The rule publishes to the
+    global descriptor (ocx-sh/ocx#550); the companion is pinned by a prior
+    `ocx package install` of the TAGGED ref, so the absence below is the
+    staleness fallback suppressing a real, reachable companion.
+    """
+    companion_repo = _unique_repo("s006b_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "S006B_CA", "/etc/ssl/s006b-ca.pem")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "s006b_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    project = tmp_path / "s006b_project"
+    project.mkdir()
+    tag1_fq = f"{registry}/{unique_repo}:1.0.0"
+    tag2_fq = f"{registry}/{unique_repo}:2.0.0"
+    _write_project_toml(project, tag1_fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    pull = _run_in(ocx, project, "pull")
+    assert pull.returncode == 0, f"ocx pull must succeed:\n{pull.stderr}"
+
+    baseline = _run_in(ocx, project, "direnv", "export")
+    assert baseline.returncode == 0, (
+        f"ocx direnv export must succeed against the current lock:\n{baseline.stderr}"
+    )
+    assert "S006B_CA" in baseline.stdout, (
+        "the tag-scoped companion must be present via direnv export while the "
+        f"lock is current; got:\n{baseline.stdout}"
+    )
+
+    _write_project_toml(project, tag2_fq, opt_out=False)
+
+    result = _run_in(ocx, project, "direnv", "export")
+    assert result.returncode == 0, (
+        f"ocx direnv export must not fail on a stale lock; "
+        f"rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "S006B_CA" not in result.stdout, (
+        "a stale-lock lenient read must never surface a tag-scoped "
+        f"companion; got:\n{result.stdout}"
+    )
+    # Positive control: the export is not empty -- the base's own tagless
+    # fallback env still composes, so the absence above is the companion
+    # being suppressed, not `direnv export` emitting nothing at all.
+    home_key = unique_repo.upper().replace("-", "_").replace("/", "_") + "_HOME"
+    assert home_key in result.stdout, (
+        "the base's own env must still be exported through the tagless "
+        f"fallback despite the stale lock; got:\n{result.stdout}"
+    )
+
+
+def test_stale_global_lock_tag_edit_env_tolerant_no_tag_scoped_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """the global toolchain has no staleness gate on reads -- a
+    hand-drifted `$OCX_HOME/ocx.toml` tag edit still emits the tool's env
+    (exit 0), and the tag-scoped companion is absent because a drifted
+    global lock falls back to a tagless digest. Existing staleness
+    behaviour, untouched by the lock advisory-tag fix. The rule publishes
+    to the global descriptor (ocx-sh/ocx#550); the companion is pinned by
+    a prior `ocx package install` of the TAGGED ref, so the absence below
+    is the staleness fallback suppressing a real, reachable companion.
+    """
+    companion_repo = _unique_repo("s006c_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "S006C_CA", "/etc/ssl/s006c-ca.pem")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "s006c_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    tag1_fq = f"{registry}/{unique_repo}:1.0.0"
+    tag2_fq = f"{registry}/{unique_repo}:2.0.0"
+    add = ocx.run("--global", "add", tag1_fq, format=None, check=False)
+    assert add.returncode == 0, (
+        f"ocx --global add must succeed; rc={add.returncode}\nstderr: {add.stderr}"
+    )
+
+    baseline = ocx.run("--global", "env", format="json", check=False)
+    assert baseline.returncode == 0, (
+        f"ocx --global env must succeed while the lock is current:\n{baseline.stderr}"
+    )
+    baseline_entries = json.loads(baseline.stdout)["entries"]
+    assert _entry_by_key(baseline_entries, "S006C_CA") is not None, (
+        "the tag-scoped companion must be present via `ocx --global env` while "
+        f"the declared tag matches the lock; got keys: {[e['key'] for e in baseline_entries]}"
+    )
+
+    # Hand-drift the global ocx.toml's declared tag WITHOUT relocking.
+    global_toml = ocx.ocx_home / "ocx.toml"
+    original = global_toml.read_text()
+    drifted = original.replace(tag1_fq, tag2_fq)
+    assert drifted != original, "the tag edit must actually change the file"
+    global_toml.write_text(drifted)
+
+    result = ocx.run("--global", "env", format="json", check=False)
+    assert result.returncode == 0, (
+        "the global toolchain env exporter has no staleness gate on reads; "
+        f"rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    entries = json.loads(result.stdout)["entries"]
+    assert _entry_by_key(entries, "S006C_CA") is None, (
+        "a drifted global lock must never surface a tag-scoped companion; "
+        f"got keys: {[e['key'] for e in entries]}"
+    )
+    # Positive control: the locked tool's own env still composes -- the
+    # absence above is the companion being suppressed, not the exporter
+    # emitting nothing under the drifted config.
+    home_key = unique_repo.upper().replace("-", "_").replace("/", "_") + "_HOME"
+    assert _entry_by_key(entries, home_key) is not None, (
+        "the global toolchain's locked tool must still export its own env "
+        f"despite the drifted declared tag; got keys: {[e['key'] for e in entries]}"
+    )
+
+
+def test_stale_global_lock_unparseable_ocx_toml_env_tolerant_no_tag_scoped_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """the global toolchain also has no staleness gate when `ocx.toml` is
+    outright unparseable -- with a lock still present, `ocx --global env`
+    still emits the locked tool's own env (exit 0, lenient fallback), and
+    the tag-scoped companion is absent: no declaration survives an
+    unparseable config, so resolution falls back to the tagless digest
+    (matcher.rs's own `*:*` caveat only lets a digest or a registry port's
+    colon satisfy it, not a bare-repo `:*` anchor). The rule publishes to
+    the global descriptor (ocx-sh/ocx#550); the companion, pinned by a
+    prior tagged install, is absent below via that same fallback.
+    """
+    companion_repo = _unique_repo("s006c2_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "S006C2_CA", "/etc/ssl/s006c2-ca.pem")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "s006c2_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    tag1_fq = f"{registry}/{unique_repo}:1.0.0"
+    add = ocx.run("--global", "add", tag1_fq, format=None, check=False)
+    assert add.returncode == 0, (
+        f"ocx --global add must succeed; rc={add.returncode}\nstderr: {add.stderr}"
+    )
+
+    baseline = ocx.run("--global", "env", format="json", check=False)
+    assert baseline.returncode == 0, (
+        f"ocx --global env must succeed while ocx.toml is parseable:\n{baseline.stderr}"
+    )
+    baseline_entries = json.loads(baseline.stdout)["entries"]
+    assert _entry_by_key(baseline_entries, "S006C2_CA") is not None, (
+        "the tag-scoped companion must be present via `ocx --global env` before "
+        f"ocx.toml is corrupted; got keys: {[e['key'] for e in baseline_entries]}"
+    )
+
+    # Corrupt the global ocx.toml into unparseable TOML WITHOUT touching the
+    # lock `--global add` just wrote.
+    global_toml = ocx.ocx_home / "ocx.toml"
+    global_toml.write_text("this is not [ valid toml at all\n")
+
+    result = ocx.run("--global", "env", format="json", check=False)
+    assert result.returncode == 0, (
+        "the global toolchain env exporter has no staleness gate on an "
+        f"unparseable ocx.toml; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    entries = json.loads(result.stdout)["entries"]
+    assert _entry_by_key(entries, "S006C2_CA") is None, (
+        "an unparseable global ocx.toml must never surface a tag-scoped "
+        f"companion; got keys: {[e['key'] for e in entries]}"
+    )
+    home_key = unique_repo.upper().replace("-", "_").replace("/", "_") + "_HOME"
+    assert _entry_by_key(entries, home_key) is not None, (
+        "the locked tool's own env must still export despite the "
+        f"unparseable global ocx.toml; got keys: {[e['key'] for e in entries]}"
+    )
+
+
+def test_execution_record_for_lock_resolved_tool_has_no_tag_annotation_or_qualifier(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """an `ocx exec` execution record for a tool resolved from
+    `ocx.lock` carries NO `sh.ocx.resolved-from` annotation and NO purl
+    `tag` qualifier on its root entry -- the advisory tag exists only to
+    rejoin patch-match identifiers and must never leak into execution-record
+    identity. Existing record shape, untouched by the lock advisory-tag fix.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    project = tmp_path / "s007_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    # `ocx lock` materializes eagerly into its own home, so an exec there
+    # installs nothing and `autoInstalled` below would be empty; a fresh home
+    # makes this exec the one that pulls the tool.
+    clean_home = tmp_path / "s007_clean_home"
+    clean_home.mkdir()
+    clean_home_runner = OcxRunner(ocx.binary, clean_home, ocx.registry)
+
+    sink = tmp_path / "s007_records"
+    sink.mkdir()
+    result = _run_in(clean_home_runner, project, "exec", "--records-dir", str(sink), "--", "env")
+    assert result.returncode == 0, (
+        f"ocx exec must succeed; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+
+    record_files = sorted(
+        path for path in sink.iterdir() if path.is_file() and not path.name.startswith(".tmp")
+    )
+    assert len(record_files) == 1, f"expected exactly one execution record; got {record_files}"
+    record = json.loads(record_files[0].read_text().strip())
+
+    root_entries = [
+        entry
+        for entry in record["packages"]
+        if entry.get("annotations", {}).get("sh.ocx.role") == "root"
+    ]
+    assert len(root_entries) == 1, f"expected exactly one root package entry: {record['packages']}"
+    root_entry = root_entries[0]
+
+    assert "sh.ocx.resolved-from" not in root_entry.get("annotations", {}), (
+        "a lock-resolved tool's execution record must carry NO "
+        f"sh.ocx.resolved-from annotation; got {root_entry.get('annotations')}"
+    )
+    uri = root_entry.get("uri", "")
+    assert uri.startswith("pkg:"), f"root entry uri must be a purl; got uri={uri!r}"
+    qualifiers = parse_qs(urlsplit(uri).query)
+    assert "tag" not in qualifiers, (
+        "a lock-resolved tool's execution record purl must carry no `tag` "
+        f"qualifier; got uri={uri!r}"
+    )
+
+    # `resolution.autoInstalled` is filled from the same pull-request
+    # identifiers, so a lock-origin tool's entry there must also be tagless.
+    auto_installed = record.get("resolution", {}).get("autoInstalled") or []
+    matching = [entry for entry in auto_installed if entry.startswith(f"{registry}/{unique_repo}")]
+    assert matching, (
+        "the lock-resolved tool must appear in resolution.autoInstalled (it was "
+        f"materialized by this exec, not previously pulled); got {auto_installed}"
+    )
+    for entry in matching:
+        before_digest = entry[len(f"{registry}/") :].split("@", 1)[0]
+        assert ":" not in before_digest, (
+            "a lock-resolved tool's resolution.autoInstalled identifier must be "
+            f"tagless (repo@digest, no repo:tag@digest); got {entry!r}"
+        )
