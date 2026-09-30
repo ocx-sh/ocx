@@ -29,7 +29,7 @@
   "crates/ocx_package_manager/src/composer.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_package_manager/src/composer.rs::rustdoc::private_intra_doc_links": 1,
   "crates/ocx_package_manager/src/launcher/generate.rs::rustdoc::private_intra_doc_links": 1,
-  "crates/ocx_package_manager/src/lib.rs::rustdoc::broken_intra_doc_links": 3,
+  "crates/ocx_package_manager/src/lib.rs::rustdoc::broken_intra_doc_links": 2,
   "crates/ocx_package_manager/src/patch/matcher.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_package_manager/src/patch/persistence.rs::rustdoc::private_intra_doc_links": 1,
   "crates/ocx_package_manager/src/record/execution_record.rs::rustdoc::private_intra_doc_links": 1,

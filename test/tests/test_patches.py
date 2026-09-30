@@ -176,12 +176,7 @@ def _publish_descriptor_at_base(
 
 
 def _publish_descriptor_global(ocx: OcxRunner, descriptor_path: Path) -> None:
-    """Publish descriptor to the reserved `global` repository.
-
-    The lock-tag scenario tests use this instead of `_publish_descriptor_at_base`:
-    project commands (`ocx lock`/`pull`/`exec`) do not yet fetch a per-package
-    descriptor, only the global one (ocx-sh/ocx#550).
-    """
+    """Publish descriptor to the reserved `global` repository."""
     result = ocx.run(
         "patch", "publish",
         "--descriptor", str(descriptor_path),
@@ -735,6 +730,38 @@ def test_exec_skips_a_pinned_optional_companion_that_is_not_installed(
     assert not companion_path.exists(), "a compose must not pull an optional companion"
 
 
+def test_env_no_pull_never_resolves_an_unpinned_required_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx env --no-pull` never reaches the registry: an unpinned required companion fails
+    the compose with not-found (exit 79) and no pin is written.
+    """
+    companion_repo = _unique_repo("no_pull_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "NO_PULL_CA", "resolved-live")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "no_pull_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}],
+    )
+    _write_config(ocx, registry, required=True)
+    _publish_descriptor_global(ocx, descriptor_path)
+    project = tmp_path / "no_pull_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    assert _run_in(ocx, project, "lock").returncode == 0, "setup: ocx lock must succeed"
+    assert _run_in(ocx, project, "pull").returncode == 0, "setup: ocx pull must succeed"
+    pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion_repo}.json"
+    pin_path.unlink()
+
+    result = _run_in(ocx, project, "env", "--no-pull")
+    assert result.returncode == 79, (
+        f"--no-pull must fail closed on an unpinned required companion with 79; got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not pin_path.exists(), "--no-pull must not resolve and pin a companion"
+
+
 def test_offline_exec_never_resolves_an_unpinned_required_companion(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -787,6 +814,51 @@ def test_install_under_a_snapshot_ignores_a_required_rule_added_after_the_freeze
     )
     assert _patch_state(ocx) == before, (
         "install under a snapshot must neither re-record a descriptor nor write a companion pin"
+    )
+
+
+def test_lock_under_a_snapshot_ignores_a_post_freeze_rule(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx lock` under `OCX_PATCH_SNAPSHOT` reads the frozen descriptor: a required rule published
+    after the freeze is not seen, nothing is probed or re-recorded, and no pin is written.
+    """
+    frozen = _make_companion(ocx, _unique_repo("lock_frozen"), "1.0.0", tmp_path / "a", "LOCK_FROZEN", "frozen")
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [frozen.fq]}])
+    _write_config(ocx, registry, required=True)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"setup: ocx lock must succeed:\n{lock.stderr}"
+    snapshot_path = _freeze_snapshot(ocx)
+    assert frozen.fq in json.loads(snapshot_path.read_text())["companions"], (
+        "setup: the freeze must pin the companion the lock discovered"
+    )
+
+    late = _make_companion(ocx, _unique_repo("lock_late"), "1.0.0", tmp_path / "b", "LOCK_LATE", "late")
+    _write_descriptor(
+        descriptor_path, rules=[{"match": "*", "packages": [frozen.fq]}, {"match": "*", "packages": [late.fq], "required": True}]
+    )
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    before = _patch_state(ocx)
+
+    result = subprocess.run(
+        [str(ocx.binary), "lock"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_PATCH_SNAPSHOT": str(snapshot_path)},
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"lock under a snapshot must ignore the post-freeze rule; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    assert _patch_state(ocx) == before, (
+        "lock under a snapshot must neither re-record a descriptor nor write a companion pin"
     )
 
 
@@ -4704,9 +4776,7 @@ def test_global_descriptor_publishes_at_the_bare_registry_root(
 
 # Scenario 8: tag-scoped rules for tools resolved from ocx.lock (advisory tag).
 # ocx.lock stores the bare digest with no tag, so a tag-scoped rule needs the
-# advisory tag rejoined from ocx.toml before it matches. A companion reaches a
-# project tool only via a prior `ocx package install` of the tagged ref, the
-# one place discovery still runs (ocx-sh/ocx#550).
+# advisory tag rejoined from ocx.toml before it matches.
 
 
 def test_tag_scoped_rule_matches_project_tool_from_lock(
@@ -4715,11 +4785,8 @@ def test_tag_scoped_rule_matches_project_tool_from_lock(
     """a tag-scoped rule (`<registry>/<repo>:*`) matches a project tool
     declared `<registry>/<repo>:<tag>` in `ocx.toml`, once resolved through
     `ocx.lock` -- both `ocx exec -- env` and `ocx env` must carry the
-    companion. The rule is published in the global descriptor because
-    project commands don't fetch a per-package descriptor yet (ocx-sh/ocx#550).
-    The companion reaches the project only because a prior `ocx package
-    install` of the TAGGED ref ran discovery and pinned it -- `ocx lock`/
-    `pull`/`exec` never run discovery themselves (ocx-sh/ocx#550).
+    companion. The rule is published in the global descriptor; no install of the
+    base precedes `ocx lock`, which must pin the companion itself.
     """
     companion_repo = _unique_repo("lock_tag_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -4734,16 +4801,14 @@ def test_tag_scoped_rule_matches_project_tool_from_lock(
     _write_config(ocx, registry)
     _publish_descriptor_global(ocx, descriptor_path)
 
-    # Install the TAGGED ref -> discovery matches the tag-scoped rule and pins
-    # the companion in patch state before any project command runs.
-    install = ocx.plain("package", "install", base_pkg.short)
-    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
-
     project = tmp_path / "s001_project"
     project.mkdir()
     _write_project_toml(project, base_pkg.fq, opt_out=False)
     lock = _run_in(ocx, project, "lock")
     assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    assert _companion_pin(ocx, registry, companion_repo).get("1.0.0", "").startswith("sha256:"), (
+        "ocx lock must pin the companion itself, with no install of the base before it"
+    )
     pull = _run_in(ocx, project, "pull")
     assert pull.returncode == 0, f"ocx pull must succeed:\n{pull.stderr}"
 
@@ -4773,11 +4838,9 @@ def test_tag_scoped_rule_required_missing_companion_fails_closed_from_lock(
     """a `required=true` tag-scoped rule whose companion is unavailable
     fails closed for a project tool resolved from `ocx.lock`, mirroring
     the OCI-tier `test_required_true_missing_companion_fails_closed`. The
-    rule publishes to the global descriptor (ocx-sh/ocx#550). The seed
-    install runs under `required=false` so the missing companion does not
-    abort the SEED; it matches but stays unpinned. The tier then flips to
-    `required=true` before `ocx exec`, pinning failure to the project-tier
-    compose step, not discovery.
+    seed install runs under `required=false` so the missing companion does
+    not abort the SEED; it matches but stays unpinned. The tier then flips to
+    `required=true`: `ocx lock` and `ocx exec` both exit 79.
     """
     nonexistent_companion = f"{registry}/nonexistent-companion-{uuid4().hex[:8]}:latest"
     descriptor_path = tmp_path / "lock_tag_required_descriptor.json"
@@ -4804,8 +4867,15 @@ def test_tag_scoped_rule_required_missing_companion_fails_closed_from_lock(
     project = tmp_path / "s002_project"
     project.mkdir()
     _write_project_toml(project, base_pkg.fq, opt_out=False)
+    companion_name = nonexistent_companion.split("/", 1)[1].split(":", 1)[0]
     lock = _run_in(ocx, project, "lock")
-    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    assert lock.returncode == 79, f"ocx lock must fail closed (79); rc={lock.returncode}\n{lock.stderr}"
+    assert companion_name in lock.stderr, (
+        f"ocx lock must name the missing companion {companion_name}; stderr: {lock.stderr}"
+    )
+    assert "required companion" in lock.stderr, (
+        f"the error must say a required companion failed; stderr: {lock.stderr}"
+    )
 
     result = _run_in(ocx, project, "exec", "--", "env")
     assert result.returncode == 79, (
@@ -4813,6 +4883,122 @@ def test_tag_scoped_rule_required_missing_companion_fails_closed_from_lock(
         "must fail closed for a lock-resolved tool (C7) with the NotFound "
         f"exit the missing companion itself classifies as; got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert companion_name in result.stderr, (
+        f"ocx exec must name the missing companion {companion_name}; stderr: {result.stderr}"
+    )
+    assert "required companion" in result.stderr, (
+        f"the error must say a required companion failed; stderr: {result.stderr}"
+    )
+
+
+def test_lock_alone_pins_companion_for_offline_exec(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx lock` pins the companion of its tools itself: an offline `ocx exec` right
+    after it composes the companion, so no online exec has to discover it first.
+    """
+    companion_repo = _unique_repo("lock_only_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "LOCK_ONLY_CA", "lock-only-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "lock_only_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    project = tmp_path / "lock_only_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    assert _companion_pin(ocx, registry, companion_repo), "ocx lock itself must pin the companion"
+
+    exec_result = _run_in(ocx, project, "--offline", "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"offline ocx exec must succeed after lock; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "LOCK_ONLY_CA=lock-only-value" in exec_result.stdout.splitlines(), (
+        f"ocx lock must have pinned and installed the companion; got env dump:\n{exec_result.stdout}"
+    )
+
+
+def test_pull_pins_companion_for_offline_exec(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx pull` pins the companion of a tool locked before any `[patches]` tier existed:
+    an offline `ocx exec` right after it composes the companion.
+    """
+    companion_repo = _unique_repo("pull_only_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PULL_ONLY_CA", "pull-only-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "pull_only_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    # No tier yet, so the lock pins no companion.
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    descriptor_path = tmp_path / "pull_only_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    pull = _run_in(ocx, project, "pull")
+    assert pull.returncode == 0, f"ocx pull must succeed:\n{pull.stderr}"
+
+    exec_result = _run_in(ocx, project, "--offline", "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"offline ocx exec must succeed after pull; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PULL_ONLY_CA=pull-only-value" in exec_result.stdout.splitlines(), (
+        f"ocx pull must have pinned and installed the companion; got env dump:\n{exec_result.stdout}"
+    )
+
+
+def test_exec_discovers_required_companion_for_tool_locked_before_patch_tier(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A tool locked and pulled before a `[patches]` tier existed gets the tier's
+    required companion from the first online `ocx exec`, with no lock or pull in between.
+    """
+    companion_repo = _unique_repo("exec_late_tier_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "LATE_TIER_CA", "late-tier-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "late_tier_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    descriptor_path = tmp_path / "late_tier_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[
+            {
+                "match": f"{registry}/{unique_repo}:*",
+                "packages": [f"{registry}/{companion_repo}:1.0.0"],
+                "required": True,
+            }
+        ],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "LATE_TIER_CA=late-tier-value" in exec_result.stdout.splitlines(), (
+        f"exec must discover the required companion of a tier added after the lock; got env dump:\n{exec_result.stdout}"
     )
 
 
@@ -5023,6 +5209,266 @@ def test_package_pull_revalidates_a_republished_descriptor(
     assert _companion_pin(ocx, registry, second_repo), "the second pull must pin the republished rule's companion"
 
 
+def test_lock_and_exec_install_per_package_companion_for_digest_only_declaration(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a per-package descriptor's companion reaches a digest-only `ocx.toml` tool
+    through `ocx lock` + `ocx exec` alone: project commands run patch discovery, so
+    no `ocx package install` of the base is needed first.
+    """
+    companion_repo = _unique_repo("proj_digest_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_DIGEST_CA", "proj-digest-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    digest = fetch_platform_manifest_digest(ocx.registry, base_pkg.repo, base_pkg.tag)
+    descriptor_path = tmp_path / "proj_digest_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    project = tmp_path / "p550a_project"
+    project.mkdir()
+    _write_project_toml(project, f"{registry}/{unique_repo}@{digest}", opt_out=False)
+
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_DIGEST_CA=proj-digest-value" in exec_result.stdout
+
+
+def test_lock_and_exec_install_per_package_companion_for_tagged_declaration(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """as above for a tagged declaration, with a tag-scoped rule in the per-package descriptor."""
+    companion_repo = _unique_repo("proj_tagged_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_TAGGED_CA", "proj-tagged-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "proj_tagged_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    project = tmp_path / "p550b_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_TAGGED_CA=proj-tagged-value" in exec_result.stdout
+
+
+def test_lock_and_exec_install_global_rule_companion_for_digest_only_declaration(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a global descriptor's `<registry>/<repo>*` rule installs its companion for a
+    digest-only `ocx.toml` tool through `ocx lock` + `ocx exec` alone.
+    """
+    companion_repo = _unique_repo("proj_global_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_GLOBAL_CA", "proj-global-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    digest = fetch_platform_manifest_digest(ocx.registry, base_pkg.repo, base_pkg.tag)
+    descriptor_path = tmp_path / "proj_global_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    project = tmp_path / "p550c_project"
+    project.mkdir()
+    _write_project_toml(project, f"{registry}/{unique_repo}@{digest}", opt_out=False)
+
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_GLOBAL_CA=proj-global-value" in exec_result.stdout
+
+
+def test_clean_keeps_companion_of_lock_only_tool(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx clean` keeps the companion of a tool that only `ocx.toml` + `ocx.lock` hold:
+    the project lock is a base for the patch GC roots, so a later offline `ocx exec`
+    still composes the companion.
+    """
+    companion_repo = _unique_repo("proj_clean_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_CLEAN_CA", "proj-clean-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "proj_clean_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    project = tmp_path / "p550d_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_CLEAN_CA=proj-clean-value" in exec_result.stdout
+
+    clean = _run_in(ocx, project, "clean")
+    assert clean.returncode == 0, f"ocx clean must succeed:\n{clean.stderr}"
+
+    # Offline, or `exec` would re-install a collected companion and mask the collection.
+    exec_result = _run_in(ocx, project, "--offline", "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"offline ocx exec must succeed after clean; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_CLEAN_CA=proj-clean-value" in exec_result.stdout, (
+        f"ocx clean must keep the companion of a lock-only tool; got env dump:\n{exec_result.stdout}"
+    )
+
+
+def test_clean_keeps_companion_of_digest_glob_rule_for_lock_only_tool(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx clean` roots a lock-only tool's companion under the digest-bearing identity
+    `ocx lock` discovered it with, so a required `<repo>@*` rule's companion survives
+    and a later offline `ocx exec` composes it instead of exiting 79.
+    """
+    companion_repo = _unique_repo("proj_clean_digest_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_DIGEST_GLOB_CA", "proj-digest-glob-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "proj_clean_digest_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}@*", "packages": [companion_fq], "required": True}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    project = tmp_path / "p550e_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+    assert _companion_pin(ocx, registry, companion_repo), "ocx lock must pin the digest-rule companion"
+
+    clean = _run_in(ocx, project, "clean")
+    assert clean.returncode == 0, f"ocx clean must succeed:\n{clean.stderr}"
+
+    # Offline, or `exec` would re-install a collected companion and mask the collection.
+    exec_result = _run_in(ocx, project, "--offline", "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"offline ocx exec must succeed after clean; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_DIGEST_GLOB_CA=proj-digest-glob-value" in exec_result.stdout, (
+        f"ocx clean must keep a digest-rule companion of a lock-only tool; got env dump:\n{exec_result.stdout}"
+    )
+
+
+def test_patch_sync_pins_digest_glob_rule_companion_for_lock_only_tool(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx patch sync` discovers a lock-only tool's companions under the digest-bearing
+    identity `ocx lock` uses, so a required `<repo>@*` rule published after the lock is
+    pinned and installed, and a later offline `ocx exec` composes it.
+    """
+    companion_repo = _unique_repo("proj_sync_digest_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_SYNC_DIGEST_CA", "proj-sync-digest-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "p550g_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    # Locked before any patch tier exists, so only `patch sync` can pin the companion.
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    descriptor_path = tmp_path / "proj_sync_digest_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}@*", "packages": [companion_fq], "required": True}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    sync = _run_in(ocx, project, "patch", "sync")
+    assert sync.returncode == 0, f"ocx patch sync must succeed:\n{sync.stderr}"
+    assert _companion_pin(ocx, registry, companion_repo), "patch sync must pin the digest-rule companion"
+
+    exec_result = _run_in(ocx, project, "--offline", "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"offline ocx exec must succeed after patch sync; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "PROJ_SYNC_DIGEST_CA=proj-sync-digest-value" in exec_result.stdout, (
+        f"patch sync must install a digest-rule companion of a lock-only tool; got env dump:\n{exec_result.stdout}"
+    )
+
+
+def test_clean_force_drops_project_lock_companion_roots(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx clean --force` ignores project locks, so the companion only a lock-only tool
+    holds loses its root and is collected with it.
+    """
+    companion_repo = _unique_repo("proj_force_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "PROJ_FORCE_CA", "proj-force-value")
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "proj_force_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{unique_repo}:*", "packages": [companion_fq]}],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    project = tmp_path / "p550f_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    algorithm, _, hex_digest = fetch_platform_manifest_digest(ocx.registry, companion_repo, "1.0.0").partition(":")
+    companion_dir = (
+        ocx.ocx_home / "packages" / registry_dir(registry) / algorithm / hex_digest[:2] / hex_digest[2:32]
+    )
+    assert companion_dir.is_dir(), f"precondition: ocx lock must install the companion at {companion_dir}"
+
+    clean = _run_in(ocx, project, "clean")
+    assert clean.returncode == 0, f"ocx clean must succeed:\n{clean.stderr}"
+    assert companion_dir.is_dir(), "precondition: plain ocx clean keeps the project-lock companion"
+
+    clean = _run_in(ocx, project, "clean", "--force")
+    assert clean.returncode == 0, f"ocx clean --force must succeed:\n{clean.stderr}"
+    assert not companion_dir.exists(), (
+        f"ocx clean --force must collect a companion only a project lock holds: {companion_dir}"
+    )
+
+
 def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -5121,9 +5567,6 @@ def test_bare_repo_rule_matches_a_tagged_declaration(
     )
     _write_config(ocx, registry)
     _publish_descriptor_global(ocx, descriptor_path)
-
-    install = ocx.plain("package", "install", base_pkg.short)
-    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
 
     project = tmp_path / "tagged_declaration_project"
     project.mkdir()

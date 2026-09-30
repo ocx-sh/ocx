@@ -561,7 +561,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`, or a transient registry failure (connect failure, timeout, 429/502/503/504) survived the resolve retries. Retry with backoff. |
 | 78 | `ocx.lock` uses an unsupported version — V1 and V2 locks are rejected; regenerate with `ocx lock`. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a package. |
-| 79 | Tag not found in the registry. |
+| 79 | Tag not found in the registry, or a `required` patch companion could not be found. Any other failure to install a required companion exits with its cause's code (75, 80, and so on). `ocx.lock` is already written at that point. |
 | 80 | Authentication failure against the registry. |
 
 #### Binding names {#add-binding-names}
@@ -581,7 +581,7 @@ Both bindings now coexist under their own keys — `ocx exec gh`, `ocx exec glab
 
 Removes unreferenced objects from the local object store.
 
-An object is unreferenced when nothing points to it — no candidate or current symlink, no other installed package depends on it, and no registered project's `ocx.lock` pins it. Projects are registered in the `$OCX_HOME/projects/` ledger (a flat directory of symlinks, one per project; created automatically when `ocx lock` or `ocx add` writes a lockfile). This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
+An object is unreferenced when nothing points to it — no candidate or current symlink, no other installed package depends on it, and no registered project's `ocx.lock` pins it. A registered project's lock also holds the [patch companions][patches-user-guide] of its tools. Projects are registered in the `$OCX_HOME/projects/` ledger (a flat directory of symlinks, one per project; created automatically when `ocx lock` or `ocx add` writes a lockfile). This happens after [`uninstall`](#uninstall) (without `--purge`) or when symlinks are removed manually. When a package with [dependencies][ug-dependencies] is removed, its dependencies may become unreferenced and are cleaned up in the same pass.
 
 ::: danger
 Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
@@ -600,7 +600,7 @@ ocx clean [OPTIONS]
 | Name | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--dry-run` | — | Show what would be removed without making any changes. | false |
-| `--force` | — | Bypass the `$OCX_HOME/projects/` ledger and collect packages held only by other projects' `ocx.lock` files. Live install symlinks are still honoured. | false |
+| `--force` | — | Bypass the `$OCX_HOME/projects/` ledger and collect packages held only by other projects' `ocx.lock` files, including the patch companions of those projects' tools. Live install symlinks are still honoured. | false |
 | `--help` | `-h` | Print help information. | — |
 
 **JSON output schema** (`--format json`)
@@ -1846,7 +1846,7 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient registry failure (connect failure, timeout, 429/502/503/504) survived the resolve retries — rerunning may succeed. |
 | 78 | Existing `ocx.lock` is malformed (parse error) or uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a package. |
-| 79 | Tag unresolvable during resolution (package not found in registry after retries). |
+| 79 | Tag unresolvable during resolution (package not found in registry after retries), or a `required` patch companion could not be found. Any other failure to install a required companion exits with its cause's code (75, 80, and so on). `ocx.lock` is already written at that point. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
@@ -1920,6 +1920,7 @@ Plain format renders one five-column table — `Binding | Group | Platform | Fro
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
 | 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a package, or a scoped update with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
+| 79 | A `required` patch companion could not be found. Any other failure to install a required companion exits with its cause's code (75, 80, and so on). `ocx.lock` is already written at that point. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
@@ -1979,6 +1980,7 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 | 65 | `ocx.lock` is stale (declaration_hash mismatch, or a lock entry whose repository no longer matches its `ocx.toml` declaration — run `ocx lock`). |
 | 78 | `ocx.toml` present but `ocx.lock` is missing — run `ocx lock` first. Also: an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`). |
 | 78 | No leaf digest for the host (or requested `--platform`) at the locked version (and no `"any"` fallback key in `[tool.platforms]`) — the publisher does not ship that platform. |
+| 79 | A `required` patch companion of a pulled package could not be found. Any other failure to install one exits with its cause's code. |
 
 **Lock mtime touch**
 
@@ -5736,12 +5738,13 @@ full root-flag reference.
 | 0 | Snapshot written successfully. |
 | 65 | An existing snapshot on the read path carries a format version this `ocx` does not read — re-run this command to rewrite it. |
 | 74 | I/O error writing the snapshot file. |
-| 78 | No `ocx.lock` found for the project tier (run `ocx lock` first). |
+| 78 | No `ocx.lock` found for the project tier (run `ocx lock` first), or a project's `ocx.toml` exists but cannot be read. |
 
 #### `patch sync` {#patch-sync}
 
-Re-fetches every patch descriptor for all installed packages and the global descriptor. Installs
-any newly-referenced companion packages. Requires network access.
+Re-fetches every patch descriptor for all installed packages, the tools locked in every known
+project's `ocx.lock`, and the global descriptor. Installs any newly-referenced companion
+packages. Requires network access.
 
 This command also picks up patches for packages installed before the `[patches]` tier was
 configured. All states are re-checked regardless of what was previously recorded. Running

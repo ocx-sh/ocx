@@ -183,6 +183,19 @@ impl ProjectRegistry {
     /// [`ProjectRegistryErrorKind::Io`] on a non-`NotFound` enumeration failure
     /// or an unrecoverable `Unknown` root; fail-closed, never GC with zero roots.
     pub async fn live_projects(&self) -> Result<Vec<PathBuf>, Error> {
+        self.list_live(true).await
+    }
+
+    /// [`Self::live_projects`] without the prune, for readers that must not write the ledger.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::live_projects`].
+    pub async fn live_projects_read_only(&self) -> Result<Vec<PathBuf>, Error> {
+        self.list_live(false).await
+    }
+
+    async fn list_live(&self, prune: bool) -> Result<Vec<PathBuf>, Error> {
         let projects_dir = self.projects_dir.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, Error> {
@@ -247,6 +260,7 @@ impl ProjectRegistry {
                                 );
                                 live.push((file_name, root));
                             }
+                            ProbeResult::Dead if !prune => {}
                             ProbeResult::Dead => {
                                 // Another project departed, the benign case: debug, never WARN.
                                 log::debug!("Project registry: pruning departed link '{}'.", entry_path.display());
@@ -543,6 +557,25 @@ mod tests {
         assert!(live.is_empty(), "broken link must not be a live root: {live:?}");
         let link = home.path().join("projects").join(link_name(&project));
         assert!(!symlink::is_link(&link), "broken link must be pruned");
+    }
+
+    /// `ocx patch freeze` and `ocx patch sync` read the ledger: a broken link is skipped, never pruned.
+    #[tokio::test]
+    async fn live_projects_read_only_keeps_broken_link() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
+        registry.register(&project).await.expect("register");
+        std::fs::remove_dir_all(&project).expect("remove project dir");
+
+        let live = registry
+            .live_projects_read_only()
+            .await
+            .expect("live_projects_read_only");
+
+        assert!(live.is_empty(), "broken link must not be a live root: {live:?}");
+        let link = home.path().join("projects").join(link_name(&project));
+        assert!(symlink::is_link(&link), "a read-only listing must not prune");
     }
 
     /// C1.1: a link whose target directory exists but has no `ocx.lock` is

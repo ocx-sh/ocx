@@ -53,7 +53,8 @@ impl PackageManager {
     /// recovers, a deleted lock-pinned package does not.
     pub async fn purge_unrooted(&self, identifiers: &[ocx_oci::PinnedPackageRef]) -> crate::Result<PurgeUnrooted> {
         let ocx_home = self.file_structure().root().to_path_buf();
-        let project_roots = match collect_project_roots(&ocx_home, self.file_structure()).await? {
+        let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
+        let project_roots = match collect_project_roots(&ocx_home, self.file_structure(), &host_platform).await? {
             CollectedRoots::Roots(roots) => roots,
             CollectedRoots::RetainAll => {
                 return Ok(PurgeUnrooted {
@@ -66,11 +67,14 @@ impl PackageManager {
 
         // `RecordedAndSnapshot`, as in `clean`, or a freeze's companion pins are purged once
         // `ocx patch sync` advances the record.
-        let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let patch_roots = self
-            .resolve_site_patch_roots(&host_platform, PatchRootScope::RecordedAndSnapshot)
+            .resolve_site_patch_roots(
+                &host_platform,
+                PatchRootScope::RecordedAndSnapshot,
+                &project_roots.patch_bases,
+            )
             .await?;
-        let gc = GarbageCollector::build(self.file_structure(), &project_roots, &patch_roots).await?;
+        let gc = GarbageCollector::build(self.file_structure(), &project_roots.digests, &patch_roots).await?;
         let reachable = gc.reachable();
 
         let mut seeds: Vec<PathBuf> = Vec::new();
@@ -328,7 +332,7 @@ repository = "localhost:5000/cmake"
 
         assert!(
             matches!(
-                collect_project_roots(home.path(), &file_structure).await,
+                collect_project_roots(home.path(), &file_structure, &ocx_oci::Platform::any()).await,
                 Ok(CollectedRoots::RetainAll)
             ),
             "precondition: this fixture must actually produce RetainAll, or the \

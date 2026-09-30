@@ -157,4 +157,15 @@ pub enum PatchError {
         /// The manifest digest the snapshot pins it at.
         digest: ocx_oci::Digest,
     },
+
+    /// A registered project's `ocx.toml` could not be read or parsed, so `ocx patch freeze`
+    /// cannot tell which companions that project's tagged bases discover.
+    #[error("cannot freeze patches: project config '{path}' is unreadable")]
+    ProjectConfigUnreadable {
+        /// The `ocx.toml` that failed.
+        path: std::path::PathBuf,
+        /// The read or parse failure.
+        #[source]
+        source: Box<ocx_project::Error>,
+    },
 }

@@ -407,8 +407,8 @@ lookup. Install, pull and lock record no companion pin and no descriptor state. 
 the snapshot omits is absent even when a pin for it is recorded, and a required one fails
 with exit `79`. A pinned descriptor or companion missing from the local store is fetched by
 its digest; under [`--offline`][arg-offline] it is not, and a required one fails with exit
-`79`. `ocx patch sync`, which refreshes the installed packages and the global descriptor, is
-refused with exit `78`.
+`79`. `ocx patch sync`, which refreshes the installed packages, the tools locked in every
+known project's `ocx.lock` and the global descriptor, is refused with exit `78`.
 `ocx patch freeze` reads the recorded state, not this snapshot. Pins are per
 `repository:tag`, so one repository named at two tags freezes as two independent companions.
 Write the snapshot with `ocx patch freeze` (see [`command-line.md`][cmd-ref]); a file whose

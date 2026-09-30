@@ -1851,6 +1851,15 @@ mod tests {
             pattern: "Self::SnapshotDescriptorMissing { .. }",
             value: "Some(ExitCode::NotFound)",
         },
+        // `ocx patch freeze` over a project whose `ocx.toml` cannot be read is a config fault.
+        NewArm {
+            target: "PatchError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::ProjectConfigUnreadable { .. }",
+            value: "Some(ExitCode::ConfigError)",
+        },
         // A registry that will not delete tags needs an operator, so it gets
         // its own code rather than 69 or 75, which both invite a retry.
         NewArm {

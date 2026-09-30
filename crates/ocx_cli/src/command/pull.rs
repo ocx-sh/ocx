@@ -110,7 +110,7 @@ impl Pull {
             .collect();
         let info = context
             .manager()
-            .pull_all(&eager, platform.clone(), context.concurrency(), true)
+            .pull_all(&eager, platform.clone(), context.concurrency(), false)
             .await?;
         // Keyed, not positional: nothing guarantees `pull_all` returns exactly one entry per input.
         let eager_paths: std::collections::HashMap<&ocx_oci::PackageRef, &_> = eager.iter().zip(info.iter()).collect();

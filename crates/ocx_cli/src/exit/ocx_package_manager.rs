@@ -34,6 +34,7 @@ impl ClassifyExitCode for PatchError {
             Self::DescriptorVanished { .. } => Some(ExitCode::NotFound),
             Self::SnapshotActive => Some(ExitCode::ConfigError),
             Self::SnapshotDescriptorMissing { .. } => Some(ExitCode::NotFound),
+            Self::ProjectConfigUnreadable { .. } => Some(ExitCode::ConfigError),
             Self::InvalidDescriptorJson { .. }
             | Self::UnsupportedVersion { .. }
             | Self::UnsupportedSnapshotVersion { .. }

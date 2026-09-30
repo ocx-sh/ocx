@@ -1118,6 +1118,8 @@ impl PackageManager {
     ///
     /// `platform` picks a multi-platform companion's child so the pin matches its install path
     /// (callers pass the host); `scope` picks which pins count ([`PatchRootScope`]).
+    /// `project_bases` joins the installed bases: project installs link nothing under `symlinks/`,
+    /// so their lock entries are bases only through it, identified for the same `platform`.
     ///
     /// # Errors
     ///
@@ -1126,6 +1128,7 @@ impl PackageManager {
         &self,
         platform: &ocx_oci::Platform,
         scope: PatchRootScope,
+        project_bases: &[ocx_oci::PackageRef],
     ) -> crate::Result<SitePatchRoots> {
         let Some(patches) = self.patches() else {
             return Ok(SitePatchRoots::default());
@@ -1138,7 +1141,10 @@ impl PackageManager {
         // Same reader as `find_companion_local_at`, so GC roots and compose derive from one answer.
         let local_index = companion_manifest_index(self);
 
-        let installed_base_ids = super::patch_sync::enumerate_installed_bases(self).await?;
+        let installed_base_ids = super::patch_sync::union_bases(
+            super::patch_sync::enumerate_installed_bases(self).await?,
+            project_bases.iter().cloned(),
+        );
         let _ = symlink_root;
 
         let mut companion_set: Vec<ocx_oci::PackageRef> = Vec::new();
@@ -5791,7 +5797,7 @@ mod phase5a_spec_tests {
 
         // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
         let roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -5888,7 +5894,7 @@ mod phase5a_spec_tests {
             .with_patch_snapshot(Some(snapshot));
 
         let gc_roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::RecordedAndSnapshot)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::RecordedAndSnapshot, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
         assert!(
@@ -5908,7 +5914,7 @@ mod phase5a_spec_tests {
         );
 
         let freeze_roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
         assert_eq!(
@@ -5971,7 +5977,7 @@ mod phase5a_spec_tests {
             .with_patch_snapshot(Some(snapshot));
 
         let gc_roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::RecordedAndSnapshot)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::RecordedAndSnapshot, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
         for digest in [&frozen_manifest_digest, &frozen_layer_digest] {
@@ -5986,7 +5992,7 @@ mod phase5a_spec_tests {
         }
 
         let freeze_roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
         assert!(
@@ -6049,7 +6055,7 @@ mod phase5a_spec_tests {
 
         // Call the stub — must fail with unimplemented!() until Phase 5A is complete.
         let roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed even under ChainMode::Remote");
 
@@ -6082,7 +6088,7 @@ mod phase5a_spec_tests {
         seed_installed_base_symlink(&dir, &base_id);
 
         let roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots with patches=None must return Ok(empty)");
 
@@ -6201,7 +6207,7 @@ mod phase5a_spec_tests {
         }
 
         let roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -6319,7 +6325,7 @@ mod phase5a_spec_tests {
         }
 
         let roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
 
@@ -6656,7 +6662,7 @@ mod phase5b_spec_tests {
 
         // ── Freeze: live roots → snapshot ─────────────────────────────────────
         let roots = manager
-            .resolve_site_patch_roots(&ocx_oci::Platform::any(), super::PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), super::PatchRootScope::Recorded, &[])
             .await
             .expect("resolve_site_patch_roots must succeed");
         assert_eq!(

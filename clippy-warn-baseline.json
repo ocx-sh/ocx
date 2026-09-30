@@ -20,7 +20,6 @@
   "crates/ocx_oci/src/client/transport.rs::unreachable_pub": 1,
   "crates/ocx_package/src/metadata/template/scope.rs::unreachable_pub": 2,
   "crates/ocx_package_manager/src/launch/child_process.rs::unreachable_pub": 2,
-  "crates/ocx_package_manager/src/tasks/clean.rs::unreachable_pub": 2,
   "crates/ocx_package_manager/src/tasks/common.rs::unreachable_pub": 18,
   "crates/ocx_package_manager/src/tasks/garbage_collection.rs::unreachable_pub": 8,
   "crates/ocx_package_manager/src/tasks/garbage_collection/project_roots.rs::unreachable_pub": 1,

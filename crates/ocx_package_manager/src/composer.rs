@@ -30,6 +30,7 @@ use ocx_store::{
 
 use super::tasks::common;
 use super::tasks::common::ClosureNode;
+use super::tasks::patch_discovery::PatchDiscoveryMode;
 use super::tasks::render_toolchain::HealOutcome;
 use super::{
     Arrival, LazyAdvisory, PackageManager,
@@ -865,8 +866,10 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// [`Error::FindFailed`](super::error::Error::FindFailed) for an eager request, or
-    /// [`Error::ResolveFailed`](super::error::Error::ResolveFailed) when a shim tree cannot be generated.
+    /// [`Error::FindFailed`](super::error::Error::FindFailed) for an eager request,
+    /// [`Error::DiscoverFailed`](super::error::Error::DiscoverFailed) when an installed one's patch
+    /// discovery fails fatally, or [`Error::ResolveFailed`](super::error::Error::ResolveFailed) when a
+    /// shim tree cannot be generated.
     pub async fn compose_roots(
         &self,
         requests: &[ComposeRequest],
@@ -891,6 +894,9 @@ impl PackageManager {
             Materialization::Install => {
                 let found = self
                     .find_or_install_all(&identifiers, platform.clone(), concurrency)
+                    .await?;
+                // Lazy: no network in steady state, so a per-prompt `ocx exec` only fetches a never-looked descriptor.
+                self.discover_patches_all(&identifiers, platform, PatchDiscoveryMode::Lazy, concurrency)
                     .await?;
                 for ((index, identifier), found) in eager.iter().zip(found) {
                     if found.arrival == Arrival::Pulled {
