@@ -29,7 +29,7 @@ This was first designed on `feature/patches` (2026-03-22). Since then two things
 
 2. **The OCI registry mirror feature shipped** (`adr_oci_registry_mirror.md`). Read-path pulls now route through `MirrorMap` (`crates/ocx_lib/src/oci/client/mirror_map.rs`). The old ADR predates it.
 
-**The reframe (requester's direction, adopted):** *A patch is nothing but a **site-loaded package*** — a regular OCX package, installed from an operator-controlled tier, whose **interface environment is composed into the execution environment** of the package it patches. There is no new artifact-composition algebra; patches reuse the existing two-env composer. The only genuinely new machinery is (a) **discovering** which site packages apply to a given base identifier, and (b) an **update path** that refreshes those site packages **independently of the base package**, offline.
+**The reframe (requester's direction, adopted):** *A patch is nothing but a **site-loaded package*** — a regular OCX package, installed from an operator-controlled tier, whose **environment is composed as part of the package it patches**, on the surface that package is read through. There is no new artifact-composition algebra; patches reuse the existing two-env composer. The only genuinely new machinery is (a) **discovering** which site packages apply to a given base identifier, and (b) an **update path** that refreshes those site packages **independently of the base package**, offline.
 
 ### What already exists (do not rebuild)
 
@@ -52,11 +52,11 @@ The load-bearing requirements (C-numbers used throughout):
 
 | # | Requirement |
 |---|---|
-| **C1** | **Compositional load.** A site package's *interface* environment composes into the *root execution environment*, overriding the publisher's values for the same key (infra intent wins). |
-| **C2** | **Entry-point tiering.** Entry points run in their own composed environment (`self_view=true`) and must inherit the root's patches; entry-point-owned packages may carry their own patches. |
-| **C3** | **Visibility tiering.** A patch composes as part of the target it patches: its env is read on the surface that target is admitted through, exactly as if the target had declared it. A root target is admitted on the active surface, so a companion's `private` var reaches that root's own launchers and `--self` and never its consumers; a dependency target is admitted only through its interface, so its companion contributes interface vars alone. A patch for a dependency that reaches the root only on the *private* surface therefore loads **only** into the private surface. |
+| **C1** | **Compositional load.** A site package's environment composes as part of each package it patches, after all publisher env, overriding the publisher's values for the same key (infra intent wins). |
+| **C2** | **Entry-point tiering.** Entry points run in their own composed environment (`self_view=true`) and must inherit the root's patches, including a companion's `private` vars; entry-point-owned packages may carry their own patches. |
+| **C3** | **Visibility tiering.** A patch composes as part of the target it patches: its env is read on the surface that target is admitted through, exactly as if the target had declared it. A root target is admitted on the active surface, so a companion's `private` var reaches that root's own launchers and `--self` and never its consumers; a dependency target is admitted only through its interface, so its companion contributes interface vars alone. A patch for a dependency that reaches the root only on the *private* surface is composed only when that dependency is admitted (the private view), and contributes its interface vars. |
 | **C4** | **Site policy floats; identity does not.** Patches are an **ambient site tier** (the execution-env twin of `[mirrors]`), not lockfile content. The active policy refreshes **independently of base-package installs** and works offline once synced. Reproducibility of *tools* (the lock) and of *site policy* are orthogonal domains — patch identity is deliberately **not** folded into base-package identity. (Validated by Nix `impureEnvVars`, Cargo `config.toml` source-replacement, Spack site scope, Lmod `SitePackage.lua`, containerd `hosts.toml` — see Industry Context.) |
-| **C5** | **Loading guarantee.** Every applicable patch is *always* loaded when its target loads — including patches for transitive deps, including encapsulated entry-point deps needing the patch on their private surface. No silent skips. |
+| **C5** | **Loading guarantee.** Every applicable patch is *always* loaded when its target loads — including patches for transitive deps, including encapsulated entry-point deps, whose patch loads into the launcher environment through their interface. No silent skips. |
 | **C6** | **CAS persistence + GC.** Patch descriptors and companion packages persist in the blob/layer CAS so the offline contract holds (zip `OCX_HOME` → unzip elsewhere → reinstall → identical patched env), and GC must keep them reachable. |
 | **C7** | **Operator enforcement + fail-closed.** A security patch (corp CA, truststore) must be enforceable by the *operator* (not silently suppressible by a user) and must **fail closed** when unavailable — a tool that runs without its CA overlay would do TLS to untrusted endpoints, strictly worse than refusing to launch. (K8s mutating+validating-webhook pattern.) |
 | **C8** | **Opt-in determinism.** A consumer may freeze the *whole site tier* (companion digests) into a snapshot for reproducible CI — **without** per-package lock pinning. (Spack inline policy / Nix `flake.lock` narHash pattern.) |
@@ -94,10 +94,10 @@ At install, after building the base package's declared-dependency TC (`pull.rs:4
 
 ### Option B — Compose-time site overlay ("site layer") **(RECOMMENDED)**
 
-Keep base-package TCs **pure** (publisher-declared deps only). Maintain a **separate, independently-synced site layer** that is **derived, not cached**: the companion packages are **ordinary installed packages** (in `packages/`, hardlinked from `layers/`, blobs in `blobs/` — no new store), discovery state is the existing **tag store** (`tags/`), and the descriptor is a **persisted blob** (`blobs/`). At compose time the composer, **for each TC entry it already visits** (and for the root), re-derives the matched companions from the persisted descriptor blob + unified match and emits their interface env **gated by the same surface boolean** the TC entry resolved to. No ledger.
+Keep base-package TCs **pure** (publisher-declared deps only). Maintain a **separate, independently-synced site layer** that is **derived, not cached**: the companion packages are **ordinary installed packages** (in `packages/`, hardlinked from `layers/`, blobs in `blobs/` — no new store), discovery state is the existing **tag store** (`tags/`), and the descriptor is a **persisted blob** (`blobs/`). At compose time the composer, **for each TC entry it already visits** (and for the root), re-derives the matched companions from the persisted descriptor blob + unified match and emits their env **on the surface the TC entry was admitted through**. No ledger.
 
-- **C1** ✓ companion interface vars appended after the base's own vars → infra overrides publisher by append-order (Constant replaces, Path prepends).
-- **C3** ✓ companion env emitted under the *visited TC entry's* `want` (`has_interface()`/`has_private()`); a private-only dep's patch lands only on the private surface, for free.
+- **C1** ✓ companion vars appended after the base's own vars → infra overrides publisher by append-order (Constant replaces, Path prepends).
+- **C3** ✓ companion env emitted on the surface mask of the *visited TC entry* (a root: the active surface; a dependency: its interface); a private-only dep's patch is composed only when that dep is admitted, and never adds a `private` var.
 - **C4** ✓ the site layer is re-synced independently (`ocx patch sync`); base `resolve.json` is never touched; companion packages are their own CAS installs addressed by their own digest.
 - **C5** ✓ the composer visits *every* TC entry + root on the active surface; each visit does a site-layer lookup → no patch skipped, including private entry-point deps under `self_view=true`.
 - **C6** ✓ descriptor persisted as a real CAS blob; companions are normal packages; both GC-anchored (see GC section).
@@ -153,11 +153,13 @@ The `SitePatchSet` itself resolves entirely from local state (`[patches]` config
 
 **Why "the visited entry's surface gates the block" is the whole of C3.** The composer already computed, per root, whether identifier `I` reaches the interface or private surface (`composer.rs:122`). The patch is *for* `I`, so its block is emitted iff `I` was admitted — a private-only dep's patch is therefore present only under `self_view=true` and absent from the default interface env. No new visibility algebra: the gate reuses the boolean the composer already has; the projection reuses `Visibility` masks the composer already composes with.
 
+**Overlay is execution-time (C3 note).** The overlay is built from `[patches]` config, tag state and descriptor blobs, which the metadata-only paths do not read. `ocx package inspect --closure`, `ocx inspect --closure`, the name sets a toolchain render derives for `PATH`, and the lazy preparation of a deferred package (`prepare_lazy`) therefore describe the declared closure and do not model companions. A companion appears when an environment is composed to run something: `exec`, `env` and the generated launchers.
+
 ### Entry-point inheritance (C2)
 
 Entry-point launchers call `manager.resolve_env(&[pkg], self_view=true)` (`crates/ocx_cli/src/command/launcher/exec.rs:54`) — there is **no separate entry-point environment**; the launcher composes the owning package with the private surface. Therefore:
 - Root patches are inherited by entry points automatically: same `compose`, `self_view=true` visits the full TC, overlay applies.
-- A dep that is private to the package but patched gets its patch on the private surface inside the entry point (C3 + C5 together).
+- A dep that is private to the package but patched is admitted inside the entry point, and its patch contributes its interface vars there (C3 + C5 together).
 - "Entry-point-owned patches" = patches whose descriptor targets the entry-point-owning package's identifier; they are in that package's TC, so they overlay like any other.
 
 No per-entry-point patch config is introduced (the launcher model has no per-entry env to attach it to). If future need arises, it is additive.
@@ -379,7 +381,7 @@ Mapping to issues #112–#117. **Shrinks** vs the old graph plan are marked ↓;
 
 ### Phase 4 — `SitePatchResolver` + compose-time overlay + display (#115) ↓
 - ✚ `SitePatchResolver` at the `PackageManager`/`Context` layer → `SitePatchSet` (from `[patches]` config + tag store + descriptor blobs). `resolve_env` builds it and threads it into the overlay.
-- Add the **Phase-2 overlay**: extend `compose(roots, store, self_view, &site_patches)` (or run Phase 2 in `resolve_env` after `compose` returns the admitted set). Phase 1 records the admitted-identifier set per active surface; Phase 2 appends, globally last, each matched companion's vars on its part-of-target mask (gate = target admitted; projection = the target's surface — `self_view` for a root, interface for a dependency). `site_patches.for(I)` is a pure lookup — **no config/I-O inside `compose`**. Global (root) descriptor overlays every root's interface surface, before package-specific. Covers root + entry-point (`self_view=true`) paths.
+- Add the **Phase-2 overlay**: extend `compose(roots, store, self_view, &site_patches)` (or run Phase 2 in `resolve_env` after `compose` returns the admitted set). Phase 1 records the admitted-identifier set per active surface; Phase 2 appends, globally last, each matched companion's vars on its part-of-target mask (gate = target admitted; projection = the target's surface — `self_view` for a root, interface for a dependency). `site_patches.for(I)` is a pure lookup — **no config/I-O inside `compose`**. The global (root) descriptor applies to every admitted target, before package-specific. Covers root + entry-point (`self_view=true`) paths.
 - `ocx env`/`ocx deps` `[patch]` annotations + `--show-patches`.
 - **`ConstantTracker` rework dropped** (append-order last-wins). Large shrink.
 

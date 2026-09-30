@@ -206,6 +206,26 @@ The `--self` flag on `package env`, `package exec`, `package test`, and `package
 
 Generated launchers force `self_view = true` internally; they do not expose `--self` to callers.
 
+### Patch Companions {#visibility-surfaces-companions}
+
+A [patch companion][patches-how-part-of-target] is composed as part of each package it matches, on the surface that package is admitted through. A companion env var is read exactly as if the matched package had declared it:
+
+| Companion var | Interface surface | Private surface |
+|---|---|---|
+| `private` | no | yes, when the matched package is a root of the composition |
+| `interface` | yes | no |
+| `public` | yes | yes, when the matched package is a root of the composition |
+
+A matched package that is only a dependency of the composed package is admitted through its interface alone. Its companion contributes its `interface` and `public` vars wherever that dependency's interface surface reaches. Its `private` vars never load.
+
+A catch-all rule matches roots and dependencies alike. Under `--self` and in launchers it composes the union of the private and interface sides, each entry once. The consumer view takes the interface side only.
+
+A companion's own dependencies are admitted as if the matched package declared them. Its private dependencies load only on the private side.
+
+`${installPath}`, `${deps.*}` and `${self.env.*}` in a companion's values resolve against the companion. [Integrations](#integrations-interface-surface) reach the interface surface only.
+
+A companion whose closure names a repository at a different digest than the base or an earlier companion is refused. A `required` companion fails the command with exit 65, and an optional one is skipped with a warning. A companion's own entrypoint launchers are never put on `PATH`.
+
 ## Self-Referencing Values {#self-referencing}
 
 A package's `env` values can reference each other, not just `${installPath}`. `${self.env.KEY}` resolves to the resolved value of this package's own earlier-declared `KEY` var, so a computed path or value is named once and reused instead of repeated in every `value` template that needs it — the same reuse an earlier [GitHub Actions][github-actions-docs] step's output, or a [Bazel][bazel-rules] `--define`, gives a workflow, applied to one package's own metadata.
@@ -284,7 +304,7 @@ A [patch companion][patches-how] declaring `integrations` contributes them exact
 
 This is what makes a site-wide `com.microsoft.vscode` proxy or CA-bundle setting expressible: site policy publishes it once as a companion instead of every package author restating it.
 
-The [interface-surface rule](#integrations-interface-surface) applies unchanged and is not evaluated per contributor — under `--self` the array is empty regardless of who declared what. Declining a companion is the existing [`no-patches`][patches-no-patches-guide] opt-out, which drops an optional companion whole (its `env` along with its integrations); a required companion is required on the same terms its `env` already is.
+The [interface-surface rule](#integrations-interface-surface) applies to companions and is not evaluated per contributor — under `--self` the array is empty regardless of who declared what. A companion's `env` follows the [surfaces of the package it matched](#visibility-surfaces-companions); its `integrations` do not, and stay interface-only. Declining a companion is the existing [`no-patches`][patches-no-patches-guide] opt-out, which drops an optional companion whole (its `env` along with its integrations); a required companion is required on the same terms its `env` already is.
 
 ### Absent from `--shell` and `--ci` {#integrations-shell-ci}
 
@@ -342,7 +362,7 @@ Project and group `[env]` entries materialize as ordinary env entries and are **
 |---|---|---|
 | 1 (lowest) | Ambient inherited env | Minus the shell reconciler's own contribution ([above](#strict-isolation-exec)); skipped entirely under [`--clean`][cmd-run] |
 | 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
-| 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
+| 3 | Patch-companion overlay | [`[patches]`][config-patches] — each companion var on the surfaces of the package it matched ([Patch Companions](#visibility-surfaces-companions)); applied after all package env, before stages 4-6 |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend; `list` entries append |
 | 5 | Group [`[group.<name>.env]`][config-project-env] | In `-g` selection order — a group listed later wins |
 | 6 (highest) | [`--env NAME` or `--env KEY[:TYPE[:SEP]]=VALUE`][cmd-run] | Repeatable; `constant` (default) replaces, `path` prepends, `list` appends; a relative `path` value anchors to the current directory, not the project root stages 4-5 use. The bare `NAME` form carries the invoking process's own value of `NAME` in at this stage, and contributes nothing when `NAME` is unset there |
@@ -432,6 +452,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 <!-- internal -->
 [user-guide-global]: ../user-guide.md#global-toolchain
 [patches-how]: ../user-guide/patches.md#patches-how
+[patches-how-part-of-target]: ../user-guide/patches.md#patches-how-part-of-target
 [in-depth-project-composition]: ../in-depth/project.md#running-composition-order
 [patches-no-patches-guide]: ../user-guide/patches.md#patches-no-patches
 [env-default-registry]: ./environment.md#ocx-default-registry

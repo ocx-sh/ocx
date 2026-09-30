@@ -725,10 +725,9 @@ simpler and more predictable end state is that a companion has no exceptional
 rules at all.
 
 `integrations_cross(self_view)` is called at exactly two sites:
-`composer::compose` (`composer.rs:234`), which evaluates it fresh from the
-surface's own `self_view` for the base roots, and
-`resolve_env_with_attribution` (`resolve.rs:845`), which evaluates it once for
-the whole companion overlay. Neither `compose_gated`'s dep/root collection
+`composer::compose`, which evaluates it fresh from the surface's own
+`self_view` for the base roots, and `build_site_patch_set`, which evaluates it
+once for the whole companion overlay. Neither `compose_gated`'s dep/root collection
 loops nor `compose_companion` call it again — both receive the already-computed
 boolean as a plain parameter and gate their own collection with it. It is a
 property of the carrier (interface-surface-only, at every depth — §4.1), not
@@ -736,34 +735,29 @@ of who declared the payload, so `ocx env --self` carries no integrations
 from base or companion alike.
 
 That parity does **not** come from the same mechanism `env` uses to reach it.
-`env`'s two-axis `Visibility` carrier explains why a *package's own*
-dependency crosses or does not cross under `self_view` — but a patch companion
-is not a dependency edge. `resolve.rs`'s companion overlay is an unconditional
-post-composition append of the companion's already-composed interface
-projection onto the base's env; the append loop carries no `self_view` term of
-its own, so a companion's `env` sits outside the surface algebra before
-`integrations_cross` ever runs. `integrations_cross` is the only rule the
-two carriers share, and it is **contributor-blind**: the same predicate fires
-whether the contributor is the base package or the companion, which is what
-makes a companion-specific branch unnecessary — not, as this ADR originally
-argued, an appeal to `env`'s own visibility algebra.
+A companion's `env` follows the surface mask of the target it patches
+(`adr_infrastructure_patches.md` C3), a rule of the `env` carrier alone.
+`integrations_cross` is the only rule the two carriers share, and it is
+**contributor-blind**: the same predicate fires whether the contributor is the
+base package or the companion, which is what makes a companion-specific branch
+unnecessary. It never derives from the companion's surface mask.
 
 **Implementation: the gate is threaded into the caller, not applied after the
 fact.** `integrations_cross(self_view)` is not a filter run over an
 already-resolved set — it is threaded INTO `build_site_patch_set` and
 `composer::compose_companion`, so a companion's `integrations` payload is
 never resolved at all when the surface in play would discard it. Both
-`compose` and `compose_companion` route through the private
-`composer::compose_gated(roots, store, self_view, collect_integrations)`
-(`composer.rs:282-287`) — the one function that actually collects
-`admitted_integrations`, at the dep loop (`composer.rs:445-460`) and the
-root loop (`composer.rs:517-529`), each gated by a plain
+`compose` and `compose_companion(companion, store, axes, collect_integrations,
+emitted)` route through the private
+`composer::compose_gated(roots, store, axes, collect_integrations, paths, role,
+seen)` — the one function that actually collects `admitted_integrations`, in
+its dep loop and its root loop, each gated by a plain
 `if collect_integrations { … }` rather than a second call to
 `integrations_cross`. The suppression input changes only what is COMPUTED,
-never what the surface CONTAINS when the gate is on: `compose_companion` pins
-`self_view = false` and passes `collect_integrations` straight through
-unevaluated, so with the gate on, its output is byte-identical to what
-`compose` alone would produce for the same single root. This matters beyond
+never what the surface CONTAINS when the gate is on: `compose_companion`
+receives the surface `axes` of its targets and passes `collect_integrations`
+straight through, never derived from `axes`, so an absent dependency
+directory cannot fail a surface that carries no integrations. This matters beyond
 avoiding wasted work: resolution asserts that every `${deps.*}` token names a
 dependency whose content directory actually exists, and without the gate
 threaded in, a `required` companion whose integrations reference a
@@ -781,10 +775,19 @@ matched against several bases, or one that happens to declare a namespace a
 base dependency already contributed under the same identifier, collapses onto
 the seeded row instead of appearing twice.
 
-`admitted_binaries` / `admitted_entrypoints` stay discarded, and that is not an
-inconsistency: both are PATH-shaped claims about executables the companion
-overlay never puts on PATH, so admitting them would advertise binaries no
-consumer can reach.
+**Claims (2026-10-01).** A companion's own `binaries` claim is admitted, and so
+are the `binaries` and `entrypoints` claims of its dependencies: they name
+executables that reach `PATH` like any dependency's. The companion's own
+`entrypoints` claim is not admitted, because its launchers are never put on
+`PATH` — they run the companion's environment, not its target's
+(`RootRole::Graft`). This reverses the earlier "both stay discarded" rule, which
+held while a companion put nothing on `PATH`.
+
+**Update (2026-10-01).** A companion's `env` now follows the surface of the
+target it patches (`adr_infrastructure_patches.md` C3, part-of-target rule).
+Integrations are unchanged: the `integrations_cross(self_view)` gate is still
+evaluated once by the outer composition and threaded in, and a companion's
+integrations stay interface-surface-only.
 
 **Reversal (2026-08-10).** The original decision discarded a companion's
 payloads, reasoning that a `system_required` companion is installed by site
@@ -1685,3 +1688,4 @@ ordering was a grammar-design preference, not a disambiguation requirement.
 | 2026-08-10 | orchestrator | **C-017 reversed — patch companions contribute `integrations`.** The owner rejected the discard: patches are just packages loaded into the environment, so no carrier gets a companion-specific rule. The original policy-injection rationale forbade the inert carrier (JSON nobody must read) while permitting `env` (which changes every process in the shell), and the actor it guarded against already owns `PATH`, the patch set and the `[managed]` tier. Amended: D14, C-017, S-013. Attribution is the companion's own `PinnedIdentifier`; emit-once rides the existing `emitted_companions` set; the `integrations_cross(self_view)` gate is applied **once** at the composition, so `--self` stays empty for every contributor. `admitted_binaries`/`admitted_entrypoints` stay discarded — PATH-shaped claims the overlay never puts on PATH. No opt-out ships: `no-patches` already drops an optional companion whole, a required one is required on the same terms its `env` is, and a site admin declines by not declaring. |
 | 2026-08-10 | architect | **Pass-through reversed.** The owner replaced D7's "every other `${…}` is emitted byte-identical" with the claim-all rule; [`adr_interpolation_token_grammar.md`](./adr_interpolation_token_grammar.md) / [#303](https://github.com/ocx-sh/ocx/issues/303) landed it as `339383af`. A payload is not exempt from the closed grammar — same scanner, same refusal, exit 65, `$${` the only escape. Amended: the new **Amendment** section; D7, D10, D21, D22; C-007 (split into container + publish-token gates, `first_unknown_placeholder` deleted rather than not-called), C-008 (`AllowedTokens { deps: true, self_env: false }`; `${self.env.KEY}` refused), C-009b (the escape shipped in #303, not here), C-019 (`UnknownPlaceholder`→`UnknownToken`, `UnknownDependencyField`→`UnknownField`, `DisallowedToken` / `UnknownModifier` now reachable), C-020; §3.1 (`${…}` reclassified from payload *content* to container *syntax*), §5.1/§5.2/§5.3/§5.4, S-001, S-014 + new S-014b/S-014c, E-06b/E-07/E-16/E-16d/E-16e/E-17, §8(d) (D-c shipped, and *why* the scoring inverted), R-3 + new R-8, one Constitution deviation added, §11 step 0. Every worked example carrying a foreign token converted to the doubled form. §5.3's discriminating test was **void** (it asserted payload-accepts / env-rejects; both now reject) and is replaced by bare-refused / doubled-accepted on both surfaces. D22's OQ-3 follow-up is **closed** — `:posix` is how a Windows-hosted VS Code setting gets forward slashes. |
 | 2026-08-11 | orchestrator | **Both names reversed before the feature ever published — the field is `integrations`, its composed payload key is `payload`.** The owner's objection to `customizations`: the name is borrowed from `devcontainer.json`, where the same key *merges* across features, so it imports an expectation this field refuses — a name that needs a refutation paragraph is doing negative work. `extensions` was rejected as the replacement (it implies OCX dispatches on the field, which it never does; it collides with the VS Code `extensions` list *inside* the payloads; and it is the natural word for a future thing that genuinely extends OCX). D5's `value` → `payload` for the same class of reason: `value` pairs with a `key` that this row does not have, and carries no information. `config` was rejected — `config` is a live CLI noun (`ocx config push`, `config.toml`, the `[managed]` tier) and the OCI image config blob `inspect` already prints, so it would mean three things in one tool's output; it also overclaims a shape OCX does not enforce. Timing was the deciding factor: nothing had published, so the wire break cost nothing. Renamed across 56 files, the module (`metadata/integrations.rs`), `MAX_INTEGRATION_NAMESPACE_BYTES` / `MAX_INTEGRATIONS_BYTES` / `INTEGRATION_TOKENS`, `Integrations` / `IntegrationEntry` / `IntegrationAttribution` / `NamespaceAttribution`, `integrations_cross`, `admitted_integrations`, the `Bundle.integrations` wire key, the availability hint ("N integration namespaces"), every error variant, the acceptance suite, the manual rig, and the docs. |
+| 2026-10-01 | architect | **C-017 claims reversed with part-of-target.** A companion's own `binaries` claim and its dependencies' `binaries`/`entrypoints` claims are admitted; its own `entrypoints` claim and launchers stay off `PATH`. `compose_companion` takes the target surface `axes`; `compose_gated` takes `role` and `seen`. |

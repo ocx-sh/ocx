@@ -5836,7 +5836,9 @@ Composes a patch descriptor onto a base package in a scratch environment without
 publishing or modifying `$OCX_HOME`. Use this to verify a descriptor before publishing.
 
 Without a trailing command, prints the composed environment so you can inspect the
-entries contributed by the matched companions. With `-- <COMMAND>`, runs the command in
+entries contributed by the matched companions. By default this is the surface the base's
+consumers see; with `--self` it is the base's private surface, the one its own entrypoint
+launchers see, which is where a companion's `private` vars land. With `-- <COMMAND>`, runs the command in
 the composed environment. With `--script`, runs a [Starlark test script][authoring-testing-scripted]
 against the composed environment.
 
@@ -5863,6 +5865,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | `--descriptor <FILE>` | | Path to the patch descriptor JSON file. Required. |
 | `--companion-archive <PATH>` | | Local archive for a companion package; avoids a registry round-trip. Repeatable for multiple companions. There is no `-i` flag to name the companion — the archive's metadata sidecar (`<archive-stem>-metadata.json`, the same naming [`ocx package test`][cmd-package-test]'s `--metadata` flag defaults to) must carry an `identifier` field matching one of the descriptor's companion entries exactly: registry, repository, and tag. A bare identifier (no registry) qualifies against your configured default registry, not the `[patches]` registry. |
 | `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
+| `--self` | | Compose the base's private surface, the one its own launchers see, instead of the surface its consumers see. |
 | `--registry <HOST/PATH>` | | Patch registry to compose against, e.g. `registry.corp.example/ocx-patches`. Overrides the configured [`[patches]`][config-patches] tier, so you can preview a descriptor against a new patch registry without a config block. Defaults to the configured registry. |
 | `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
 | `--env <NAME\|KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env NAME`, with no `=` and no `:TYPE`, passes the value through: the invoking process's own `NAME` becomes a `constant` entry, exactly as `--env NAME="$NAME"` would, so a calling script names what may travel instead of spelling every value out. A `NAME` the invoking process does not set contributes nothing and is not an error; a `NAME` set to the empty string forwards the empty string. A `TYPE` written without a value (`--env FOO:path`) is rejected -- only the plain bare form passes a value through. So are a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, and an `OCX_*`/`__OCX_*` key in either form. All exit 64. See the `PATH` override warning under [`ocx exec`](#exec). | — |
@@ -5875,7 +5878,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | 0 | Environment printed, or the trailing command/script exited 0. |
 | *(child's exit code)* | With a trailing command, the child's exit code is forwarded unchanged — a command that exits 7 makes `patch test` exit 7. |
 | 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before testing; a `--companion-archive` metadata sidecar has no `identifier` field; or its `identifier` does not match a companion the descriptor names for the base (naming the nearest entry it found). |
-| 65 | Descriptor JSON is malformed or the version is unsupported; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]). |
+| 65 | Descriptor JSON is malformed or the version is unsupported; two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]); or a required companion's closure names a repository the environment already carries at a different digest (an optional one is skipped with a warning). |
 | 74 | An I/O error reading `--descriptor` — missing file, permission denied, or a directory. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one. |
 | 81 | `--offline` blocked resolving the base or a required companion. |
 | *other* | A required companion could not be resolved; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
@@ -5888,6 +5891,9 @@ Shows which companion, and which descriptor rule, contributes each patched env v
 package. Resolves `<BASE-ID>` directly against the configured [`[patches]`][config-patches]
 registry — an OCI-tier diagnostic that never consults `ocx.toml`. Use this to trace a companion
 overlay back to the rule that admitted it, without reading through the full composed environment.
+
+By default it traces the surface the base's consumers see. With `--self` it traces the private
+surface, the one the base's own entrypoint launchers see, where a companion's `private` vars land.
 
 A base with no applicable patch (no `[patches]` tier configured, or no descriptor rule matches
 the base) prints a clean "no patches apply" result and exits `0` — not an error.
@@ -5907,6 +5913,7 @@ ocx patch why [OPTIONS] <BASE-ID>
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--platform <PLATFORM>` | `-p` | Target platform for resolving the base. Single-valued: passing more than one exits 64. Defaults to the host platform. |
+| `--self` | | Trace the base's private surface, the one its own launchers see, instead of the surface its consumers see. |
 | `-h`, `--help` | | Print help information. |
 
 Output follows the root [`--format`][arg-format] flag like every other command — there is no
@@ -5940,6 +5947,7 @@ ocx --format json patch why java:21
 | Code | Meaning |
 |------|---------|
 | 0 | Result printed — including a base with no applicable patch. |
+| 65 | A required companion's closure names a repository the environment already carries at a different digest (an optional one is skipped with a warning). |
 | 69 | Registry unreachable while resolving the base. |
 | 79 | Base identifier not found in the registry. |
 
