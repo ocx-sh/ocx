@@ -4144,12 +4144,10 @@ def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
 ) -> None:
     """a digest-only declaration (`<registry>/<repo>@sha256:<digest>`) resolved
     through `ocx.lock` is untagged, so a tag-anchored rule (`<repo>:*`) skips it
-    while a bare repository-prefix rule (`<repo>*`) still matches through the
-    digest's own colon (matcher.rs's `*:*` caveat). Existing matcher behaviour,
-    untouched by the lock advisory-tag fix. A TAGGED install pins both
-    companions, so the tag-anchored one is absent only because the matcher
-    skips the untagged declaration; both rules publish to the global
-    descriptor (ocx-sh/ocx#550).
+    while a bare repository rule (`<repo>`) matches every tag and digest of it.
+    A TAGGED install pins both companions, so the tag-anchored one is absent only
+    because the matcher skips the untagged declaration; both rules publish to the
+    global descriptor (ocx-sh/ocx#550).
     """
     tag_companion_repo = _unique_repo("digest_tag_companion")
     tag_companion_fq = f"{registry}/{tag_companion_repo}:1.0.0"
@@ -4167,7 +4165,7 @@ def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
         descriptor_path,
         rules=[
             {"match": f"{registry}/{unique_repo}:*", "packages": [tag_companion_fq]},
-            {"match": f"{registry}/{unique_repo}*", "packages": [repo_companion_fq]},
+            {"match": f"{registry}/{unique_repo}", "packages": [repo_companion_fq]},
         ],
     )
     _write_config(ocx, registry)
@@ -4195,7 +4193,7 @@ def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
         f"declaration resolved from ocx.lock; got env dump:\n{exec_result.stdout}"
     )
     assert "DIGEST_REPO_CA=repo-prefix-value" in exec_result.stdout, (
-        "a bare repository-prefix rule (no colon anchor) must still match a "
+        "a bare repository rule must match a "
         f"digest-only declaration resolved from ocx.lock; got env dump:\n{exec_result.stdout}"
     )
 
@@ -4209,8 +4207,55 @@ def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
         f"composed entries; got keys: {[e['key'] for e in env_entries]}"
     )
     assert _entry_by_key(env_entries, "DIGEST_REPO_CA") is not None, (
-        "the repository-prefix rule's companion must also appear in `ocx env`'s "
+        "the bare repository rule's companion must also appear in `ocx env`'s "
         f"composed entries; got keys: {[e['key'] for e in env_entries]}"
+    )
+
+
+def test_bare_repo_rule_matches_a_tagged_declaration(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """a tagged declaration (`<repo>:<tag>`) resolved through `ocx.lock` carries
+    the tag and the resolved digest, so a bare repository rule (`<repo>`) matches
+    it while a `:latest` rule does not.
+    """
+    companions = {}
+    for label, var in (("bare", "TAGGED_BARE_CA"), ("latest", "TAGGED_LATEST_CA")):
+        repo = _unique_repo(f"tagged_{label}_companion")
+        _make_companion(ocx, repo, "1.0.0", tmp_path, var, f"{label}-value")
+        companions[label] = f"{registry}/{repo}:1.0.0"
+
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    descriptor_path = tmp_path / "tagged_declaration_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[
+            {"match": f"{registry}/{unique_repo}", "packages": [companions["bare"]]},
+            {"match": f"{registry}/{unique_repo}:latest", "packages": [companions["latest"]]},
+        ],
+    )
+    _write_config(ocx, registry)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+    install = ocx.plain("package", "install", base_pkg.short)
+    assert install.returncode == 0, f"ocx package install must succeed:\n{install.stderr}"
+
+    project = tmp_path / "tagged_declaration_project"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    exec_result = _run_in(ocx, project, "exec", "--", "env")
+    assert exec_result.returncode == 0, (
+        f"ocx exec -- env must succeed; rc={exec_result.returncode}\nstderr: {exec_result.stderr}"
+    )
+    assert "TAGGED_BARE_CA=bare-value" in exec_result.stdout, (
+        f"a bare repository rule must match a tagged declaration; got env dump:\n{exec_result.stdout}"
+    )
+    assert "TAGGED_LATEST_CA" not in exec_result.stdout, (
+        f"a `<repo>:latest` rule must not match a `:1.0.0` declaration; got env dump:\n{exec_result.stdout}"
     )
 
 
