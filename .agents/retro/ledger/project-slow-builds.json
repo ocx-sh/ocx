@@ -1,6 +1,6 @@
 {
   "artifact": "project",
-  "cost_min": 2408.9,
+  "cost_min": 2431.4,
   "entries": [
     "20260829T221951Z-4797daa4.json",
     "20260830T033305Z-c7bdca3b.json",
@@ -101,16 +101,18 @@
     "20260919T092842Z-7fa494d3.json",
     "20260920T143944Z-918167fa.json",
     "20260921T132719Z-802a471e.json",
-    "20260923T134706Z-7af3dddd.json"
+    "20260923T134706Z-7af3dddd.json",
+    "20260929T222114Z-984e2945.json",
+    "20260930T021104Z-e5279329.json"
   ],
   "first_seen": "2026-08-29T22:19:51Z",
   "fixed": null,
-  "folded_at": "2026-09-28T21:50:08Z",
-  "folds": 1,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 2,
   "id": "project-slow-builds",
   "kind": "slow",
-  "last_seen": "2026-09-23T13:47:06Z",
-  "occurrences": 100,
+  "last_seen": "2026-09-30T02:11:04Z",
+  "occurrences": 102,
   "scope": "project",
   "severity": null,
   "status": "deferred",

@@ -1,0 +1,24 @@
+{
+  "artifact": "hex-state",
+  "cost_min": 0,
+  "entries": [
+    "20260929T074939Z-e91acfc8.json",
+    "20260929T155203Z-99157aeb.json"
+  ],
+  "first_seen": "2026-09-29T07:49:39Z",
+  "fixed": null,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 1,
+  "id": "hex-state-gitignored-discussion-block",
+  "kind": "pitfall",
+  "last_seen": "2026-09-29T15:52:03Z",
+  "occurrences": 2,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "hex-state edit block fires on every gitignored active discussion, including other sessions' topics",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-state@sha256:cfe8ddfa6b23b29211de2f67ab1baa8951fcb2a463894f4899f37259a07caf03"
+  ]
+}

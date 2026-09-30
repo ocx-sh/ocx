@@ -2,20 +2,23 @@
   "artifact": "project",
   "cost_min": 0,
   "entries": [
-    "20260928T204502Z-c639d254.json"
+    "20260928T204502Z-c639d254.json",
+    "20260928T224703Z-4fa2548b.json"
   ],
   "first_seen": "2026-09-28T20:50:00Z",
   "fixed": null,
-  "folded_at": "2026-09-28T21:50:08Z",
-  "folds": 1,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 2,
   "id": "project-prek-stash-shared-checkout",
   "kind": "pitfall",
-  "last_seen": "2026-09-28T20:50:00Z",
-  "occurrences": 1,
+  "last_seen": "2026-09-28T22:47:03Z",
+  "occurrences": 2,
   "scope": "project",
   "severity": "medium",
   "status": "deferred",
   "title": "prek pre-commit stashes all unstaged files; clobber risk for parallel editors in one checkout",
   "v": 1,
-  "versions": []
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:3fe60f56dec0be1646ab10d76bf222dc51b0ddcf413ba09314e3f80deec21fcd"
+  ]
 }

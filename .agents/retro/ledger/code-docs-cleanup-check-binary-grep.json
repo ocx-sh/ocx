@@ -1,0 +1,32 @@
+{
+  "artifact": "code-docs",
+  "cost_min": 0,
+  "entries": [
+    "20260928T224611Z-31c0c47c.json",
+    "20260928T224706Z-41604740.json",
+    "20260928T225214Z-17a1a190.json",
+    "20260928T225358Z-159276ec.json",
+    "20260928T225529Z-f2b12693.json",
+    "20260928T225751Z-be35ffab.json",
+    "20260928T225841Z-a713d5ed.json",
+    "20260928T225858Z-53c44a6c.json",
+    "20260928T230645Z-fb552970.json"
+  ],
+  "first_seen": "2026-09-28T22:46:11Z",
+  "fixed": null,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 1,
+  "id": "code-docs-cleanup-check-binary-grep",
+  "kind": "defect",
+  "last_seen": "2026-09-28T23:06:45Z",
+  "occurrences": 9,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "cleanup_check.py names_test crashes on git grep \"Binary file X matches\" lines (no -I)",
+  "v": 1,
+  "versions": [
+    "ghcr.io/ocx-sh/lore/code-docs-cleanup@sha256:4b312606567dab8769e98fcf9770072bc425e6f2e9d1b71a3638e9c60bcaed18",
+    "ghcr.io/ocx-sh/lore/code-docs@sha256:9ee9c2e3c6198cfd5926ab48b793bcbc874ecfe751b434d65c0c5bd22d576141"
+  ]
+}

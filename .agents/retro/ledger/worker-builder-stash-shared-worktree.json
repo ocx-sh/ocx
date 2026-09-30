@@ -1,0 +1,23 @@
+{
+  "artifact": "worker-builder",
+  "cost_min": 0,
+  "entries": [
+    "20260929T222511Z-6301612e.json"
+  ],
+  "first_seen": "2026-09-29T22:25:11Z",
+  "fixed": null,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 1,
+  "id": "worker-builder-stash-shared-worktree",
+  "kind": "pitfall",
+  "last_seen": "2026-09-29T22:25:11Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "worker-builder ran bare git stash/pop in a worktree shared with another writer",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

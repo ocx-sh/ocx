@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260929T164551Z-4926c7b5.json"
+  ],
+  "first_seen": "2026-09-29T16:45:51Z",
+  "fixed": null,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 1,
+  "id": "project-disk-full-fmt-truncation",
+  "kind": "pitfall",
+  "last_seen": "2026-09-29T16:45:51Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "high",
+  "status": "deferred",
+  "title": "host disk at 0 bytes during a WP build; cargo fmt silently truncated source files",
+  "v": 1,
+  "versions": []
+}

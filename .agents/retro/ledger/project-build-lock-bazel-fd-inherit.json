@@ -1,0 +1,30 @@
+{
+  "artifact": "project",
+  "cost_min": 54.0,
+  "entries": [
+    "20260929T170937Z-7c5b791e.json",
+    "20260929T173926Z-80038ace.json",
+    "20260929T181404Z-96171a39.json",
+    "20260929T215938Z-37694578.json",
+    "20260929T222414Z-569512ce.json",
+    "20260929T223713Z-324f5bf3.json",
+    "20260929T230758Z-2ba29e98.json",
+    "20260929T232923Z-92e7f671.json"
+  ],
+  "first_seen": "2026-09-29T17:09:37Z",
+  "fixed": null,
+  "folded_at": "2026-09-30T10:10:51Z",
+  "folds": 1,
+  "id": "project-build-lock-bazel-fd-inherit",
+  "kind": "pitfall",
+  "last_seen": "2026-09-29T23:29:23Z",
+  "occurrences": 8,
+  "scope": "project",
+  "severity": "high",
+  "status": "deferred",
+  "title": "bazel server started under flock inherits the build.lock fd and holds the host-wide lock for its lifetime",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-plan@sha256:1ac257e1ed69ee077b1da175f1a9502e071507ce9a8b103c41750467f9c4214c"
+  ]
+}

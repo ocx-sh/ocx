@@ -125,6 +125,9 @@ research-axes:
 - Retro candidate (project-context): "worker-researcher lacks Write; cannot persist its research artifact" — ledger worker-researcher-no-write-tool, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (checklist-item): "Proxied grep/find/cat results are not evidence; decide via /usr/sbin/git and rtk proxy grep" — ledger project-shell-read-failures, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (project-context): "rm/pkill denials retried; decide the allowed cleanup path" — ledger project-rm-denied, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (checklist-item): "worker-builder must not git stash in a worktree shared with another writer" — ledger worker-builder-stash-shared-worktree, .agents/retro/reports/2026-09-30.md.
+- Retro candidate (project-context): "Take .agents/build.lock with flock -o; a bazel server inherits the fd and wedges the lock" — ledger project-build-lock-bazel-fd-inherit, .agents/retro/reports/2026-09-30.md.
+- Retro candidate (project-context): "Free-disk preflight before a build wave; cargo fmt truncated files at 0 bytes free" — ledger project-disk-full-fmt-truncation, .agents/retro/reports/2026-09-30.md.
 
 - **Plan (hex/patch-lock-advisory-tag, 2026-09-29, review): `.claude/artifacts/plan_patch_lock_advisory_tag.md`** — tag-scoped patch rules vs `ocx.lock`; WP1+WP2 merged, L2 fixed; hex-review (high) round-2 findings applied (one lock-currency predicate); next `/hex-review`.
 - **Plan (hex/code-docs-cleanup, 2026-09-28, plan-approved): `.claude/artifacts/plan_code_docs_cleanup.md`** —
