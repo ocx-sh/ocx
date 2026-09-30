@@ -67,24 +67,42 @@ pub struct ComposeOutput {
 // ── Surface algebra ──────────────────────────────────────────────────────────
 // `inspect::project_surface` must call these too, never re-derive them, or `ocx env` and inspect disagree.
 
-/// Whether a transitive dependency is admitted to a surface; roots are always admitted by the caller.
-pub(crate) fn dep_admitted(effective: metadata::visibility::Visibility, self_view: bool) -> bool {
+/// The axes a single-surface composition emits: `--self` is the private axis, the consumer view
+/// the interface axis.
+pub(crate) fn surface_axes(self_view: bool) -> Visibility {
     if self_view {
-        effective.has_private()
+        Visibility::PRIVATE
     } else {
-        effective.has_interface()
+        Visibility::INTERFACE
     }
+}
+
+/// Whether `visibility` reaches any axis of `axes`.
+fn on_axes(visibility: Visibility, axes: Visibility) -> bool {
+    (visibility.has_private() && axes.has_private()) || (visibility.has_interface() && axes.has_interface())
+}
+
+/// Whether a transitive dependency is admitted to a surface; roots are always admitted by the caller.
+pub(crate) fn dep_admitted(effective: Visibility, self_view: bool) -> bool {
+    dep_admitted_on(effective, surface_axes(self_view))
+}
+
+/// [`dep_admitted`] over a set of surface axes: admitted when its effective visibility reaches any.
+fn dep_admitted_on(effective: Visibility, axes: Visibility) -> bool {
+    on_axes(effective, axes)
 }
 
 /// Whether one carrier crosses onto a surface: a root's on the surface's axis, a dependency's only
 /// on its interface side, on either surface.
-pub(crate) fn carrier_crosses(carrier: metadata::visibility::Visibility, is_root: bool, self_view: bool) -> bool {
+pub(crate) fn carrier_crosses(carrier: Visibility, is_root: bool, self_view: bool) -> bool {
+    carrier_crosses_on(carrier, is_root, surface_axes(self_view))
+}
+
+/// [`carrier_crosses`] over a set of surface axes: a root's carrier on any of them, a dependency's
+/// only on its interface side.
+fn carrier_crosses_on(carrier: Visibility, is_root: bool, axes: Visibility) -> bool {
     if is_root {
-        if self_view {
-            carrier.has_private()
-        } else {
-            carrier.has_interface()
-        }
+        on_axes(carrier, axes)
     } else {
         carrier.has_interface()
     }
@@ -109,7 +127,14 @@ pub(crate) async fn compose(
     self_view: bool,
     paths: &ComposePaths,
 ) -> crate::Result<ComposeOutput> {
-    compose_gated(roots, store, self_view, integrations_cross(self_view), paths).await
+    compose_gated(
+        roots,
+        store,
+        surface_axes(self_view),
+        integrations_cross(self_view),
+        paths,
+    )
+    .await
 }
 
 /// Compose one patch companion as a standalone root, always on the interface surface;
@@ -127,21 +152,22 @@ pub(crate) async fn compose_companion(
     compose_gated(
         std::slice::from_ref(companion),
         store,
-        /* self_view = */ false,
-        // Never derived from the pinned `self_view`: an absent dep dir would fail a surface that carries no integrations.
+        Visibility::INTERFACE,
+        // Never derived from the pinned surface: an absent dep dir would fail a surface that carries no integrations.
         collect_integrations,
         &crate::composer::ComposePaths::digest_only(),
     )
     .await
 }
 
-/// The composition itself, with the integrations carrier gated by an explicit input.
+/// The composition itself over the surface axes `axes`, with the integrations carrier gated by an
+/// explicit input.
 ///
 /// Every emitted package path goes through `paths`, so "digest or link" is answered in one place.
 async fn compose_gated(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
-    self_view: bool,
+    axes: Visibility,
     collect_integrations: bool,
     paths: &ComposePaths,
 ) -> crate::Result<ComposeOutput> {
@@ -150,7 +176,7 @@ async fn compose_gated(
         check_entrypoints(roots, store).await?;
     }
 
-    check_repo_digest_conflicts(roots, self_view)?;
+    check_repo_digest_conflicts(roots, axes)?;
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
@@ -178,7 +204,7 @@ async fn compose_gated(
                 continue;
             }
 
-            if !dep_admitted(tc_entry.visibility, self_view) {
+            if !dep_admitted_on(tc_entry.visibility, axes) {
                 continue;
             }
 
@@ -226,12 +252,12 @@ async fn compose_gated(
             let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), PathLane::Digest);
             let dep_content = dep_pkg.content();
 
-            if carrier_crosses(Binaries::IMPLICIT_VISIBILITY, false, self_view)
+            if carrier_crosses_on(Binaries::IMPLICIT_VISIBILITY, false, axes)
                 && let Some(binaries) = meta.binaries()
             {
                 admitted_binaries.extend(binaries.iter().map(|name| (dep_id.clone(), name.clone())));
             }
-            if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, false, self_view)
+            if carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, false, axes)
                 && let Some(entrypoints) = meta.entrypoints()
             {
                 admitted_entrypoints.extend(entrypoints.names().map(|name| (dep_id.clone(), name.clone())));
@@ -257,7 +283,7 @@ async fn compose_gated(
                 &dep_pkg,
                 &dep_content,
                 &dep_dep_contexts,
-                self_view,
+                axes,
                 content_state,
                 &mut entries,
             )?;
@@ -269,12 +295,12 @@ async fn compose_gated(
             // Tag-bearing, as for deps.
             admitted.push(root.identifier().clone());
 
-            if carrier_crosses(Binaries::IMPLICIT_VISIBILITY, true, self_view)
+            if carrier_crosses_on(Binaries::IMPLICIT_VISIBILITY, true, axes)
                 && let Some(binaries) = root.metadata().binaries()
             {
                 admitted_binaries.extend(binaries.iter().map(|name| (root.identifier().clone(), name.clone())));
             }
-            if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view)
+            if carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes)
                 && let Some(entrypoints) = root.metadata().entrypoints()
             {
                 admitted_entrypoints.extend(
@@ -303,14 +329,14 @@ async fn compose_gated(
             }
 
             // First, so it resolves last (consumers prepend): `entrypoints/` > `bin/` > `shims/`.
-            emit_shim_slot(root, self_view, &mut entries);
+            emit_shim_slot(root, axes, &mut entries);
 
             emit_root_path_block(
                 root.metadata(),
                 &root_pkg,
                 &root_content,
                 &root_dep_contexts,
-                self_view,
+                axes,
                 content_state,
                 &mut entries,
             )?;
@@ -418,7 +444,7 @@ fn emit_package_vars(
     content: &Path,
     dep_contexts: &HashMap<DependencyName, DependencyContext>,
     is_root: bool,
-    self_view: bool,
+    axes: Visibility,
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
@@ -431,7 +457,7 @@ fn emit_package_vars(
     let mut declared_before: SelfEnvScope<Entry> = SelfEnvScope::new();
 
     for var in env {
-        let crosses = carrier_crosses(var.visibility, is_root, self_view);
+        let crosses = carrier_crosses_on(var.visibility, is_root, axes);
         // A non-crossing var skips emit assertions, so a value nobody emits cannot fail the composition.
         let resolved = if crosses {
             resolver.resolve(var, &declared_before)?
@@ -457,7 +483,7 @@ fn emit_dep_path_block(
     dep_pkg: &PackageDir,
     dep_content: &Path,
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
-    self_view: bool,
+    axes: Visibility,
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
@@ -466,13 +492,13 @@ fn emit_dep_path_block(
         dep_content,
         dep_dep_contexts,
         /* is_root = */ false,
-        self_view,
+        axes,
         content_state,
         entries,
     )?;
 
     // The same gate as the claim list, so a claim never contradicts `PATH`.
-    if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, false, self_view)
+    if carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, false, axes)
         && let Some(eps) = dep_metadata.entrypoints()
         && !eps.is_empty()
     {
@@ -489,7 +515,7 @@ fn emit_root_path_block(
     root_dir: &PackageDir,
     root_content: &Path,
     root_dep_contexts: &HashMap<DependencyName, DependencyContext>,
-    self_view: bool,
+    axes: Visibility,
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
@@ -498,13 +524,13 @@ fn emit_root_path_block(
         root_content,
         root_dep_contexts,
         /* is_root = */ true,
-        self_view,
+        axes,
         content_state,
         entries,
     )?;
 
     // The same gate as the root's `admitted_entrypoints` claim.
-    if carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view)
+    if carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes)
         && let Some(eps) = root_metadata.entrypoints()
         && !eps.is_empty()
     {
@@ -514,14 +540,14 @@ fn emit_root_path_block(
     Ok(())
 }
 
-/// Refuse a composition whose surface-projected union closure holds one `registry/repo` at two or
+/// Refuse a composition whose closure projected onto `axes` holds one `registry/repo` at two or
 /// more digests; two tags on one digest are fine.
 ///
 /// # Errors
 ///
 /// [`DependencyError::Conflict`] for the first conflicting repository.
-pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) -> Result<(), DependencyError> {
-    if let Some(conflict) = collect_repo_digest_conflicts(roots, self_view).into_iter().next() {
+pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) -> Result<(), DependencyError> {
+    if let Some(conflict) = collect_repo_digest_conflicts(roots, axes).into_iter().next() {
         return Err(DependencyError::Conflict {
             repository: conflict.repository,
             identifiers: conflict.identifiers,
@@ -532,7 +558,7 @@ pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) 
 
 /// Warn for every conflict [`check_repo_digest_conflicts`] would refuse; `deps` uses it so the tree stays inspectable.
 pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) {
-    for conflict in collect_repo_digest_conflicts(roots, self_view) {
+    for conflict in collect_repo_digest_conflicts(roots, surface_axes(self_view)) {
         tracing::warn!(
             "conflicting versions for {}: {}",
             conflict.repository,
@@ -553,18 +579,13 @@ pub(crate) struct DigestConflict {
     pub identifiers: Vec<ocx_oci::PinnedPackageRef>,
 }
 
-/// Collects version conflicts across the surface-projected union closure, sorted by repository.
-pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) -> Vec<DigestConflict> {
+/// Collects version conflicts across the union closure projected onto `axes`, sorted by repository.
+pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) -> Vec<DigestConflict> {
     let mut by_repository: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
     for root in roots {
         record_repo_identifier(root.identifier(), &mut by_repository);
         for dep in &root.resolved().dependencies {
-            let on_surface = if self_view {
-                dep.visibility.has_private()
-            } else {
-                dep.visibility.has_interface()
-            };
-            if !on_surface {
+            if !dep_admitted_on(dep.visibility, axes) {
                 continue;
             }
             record_repo_identifier(&dep.identifier, &mut by_repository);
@@ -781,8 +802,8 @@ fn synth_shim_path_for(shim: &ShimDir) -> Entry {
 /// Push a deferred root's shim slot, the lowest-precedence entry of its block; absent under `--self`.
 ///
 /// Pushed first because consumers prepend: once materialized, the real `bin/` then shadows the shim.
-fn emit_shim_slot(root: &InstallInfo, self_view: bool, entries: &mut Vec<Entry>) {
-    if !carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view) {
+fn emit_shim_slot(root: &InstallInfo, axes: Visibility, entries: &mut Vec<Entry>) {
+    if !carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes) {
         return;
     }
     if let Some(deferred) = root.deferred() {
@@ -1142,9 +1163,9 @@ mod tests {
     use ocx_store::file_structure::{FileStructure, PackageStore};
 
     use super::{
-        ContentState, DependencyError, DigestConflict, check_entrypoints, check_repo_digest_conflicts,
-        collect_repo_digest_conflicts, compose, compose_companion, emit_dep_path_block, emit_root_path_block,
-        integrations_cross,
+        ContentState, DependencyError, DigestConflict, carrier_crosses, carrier_crosses_on, check_entrypoints,
+        check_repo_digest_conflicts, collect_repo_digest_conflicts, compose, compose_companion, dep_admitted,
+        dep_admitted_on, emit_dep_path_block, emit_root_path_block, integrations_cross, surface_axes,
     };
 
     const REGISTRY: &str = "example.com";
@@ -3093,7 +3114,7 @@ mod tests {
             },
         ));
 
-        let conflicts = collect_repo_digest_conflicts(&[a, b], false);
+        let conflicts = collect_repo_digest_conflicts(&[a, b], surface_axes(false));
         assert!(
             conflicts.is_empty(),
             "sealed dep with conflicting digests must not be reported on the interface surface; got {conflicts:?}"
@@ -3129,7 +3150,7 @@ mod tests {
             },
         ));
 
-        let conflicts = collect_repo_digest_conflicts(&[a, b], false);
+        let conflicts = collect_repo_digest_conflicts(&[a, b], surface_axes(false));
         assert!(
             conflicts.is_empty(),
             "private-only dep under B must not collide with public dep under A on the interface surface; got {conflicts:?}"
@@ -3168,7 +3189,7 @@ mod tests {
             },
         ));
 
-        let conflicts = collect_repo_digest_conflicts(&[a, b], false);
+        let conflicts = collect_repo_digest_conflicts(&[a, b], surface_axes(false));
         assert_eq!(
             conflicts,
             vec![DigestConflict {
@@ -3210,12 +3231,12 @@ mod tests {
 
         // Default (interface) surface: private-only deps gated out.
         assert!(
-            collect_repo_digest_conflicts(&[a.clone(), b.clone()], false).is_empty(),
+            collect_repo_digest_conflicts(&[a.clone(), b.clone()], surface_axes(false)).is_empty(),
             "private deps must not collide on the interface surface"
         );
         // `--self` surface: private deps participate, conflict is reported.
         assert_eq!(
-            collect_repo_digest_conflicts(&[a, b], true),
+            collect_repo_digest_conflicts(&[a, b], surface_axes(true)),
             vec![DigestConflict {
                 repository: expected_repo,
                 identifiers: vec![d_v1.clone(), d_v2.clone()],
@@ -3233,10 +3254,10 @@ mod tests {
         let two = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
 
         assert!(
-            collect_repo_digest_conflicts(&[one.clone(), two.clone()], false).is_empty(),
+            collect_repo_digest_conflicts(&[one.clone(), two.clone()], surface_axes(false)).is_empty(),
             "two references to the same digest must not be reported as a conflict"
         );
-        assert!(check_repo_digest_conflicts(&[one, two], false).is_ok());
+        assert!(check_repo_digest_conflicts(&[one, two], surface_axes(false)).is_ok());
     }
 
     /// Two explicit roots for the same repository at different digests are a
@@ -3252,7 +3273,7 @@ mod tests {
         let a = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
         let b = Arc::new(make_install_info("d", '2', ResolvedPackage::new()));
 
-        match check_repo_digest_conflicts(&[a, b], false) {
+        match check_repo_digest_conflicts(&[a, b], surface_axes(false)) {
             Err(DependencyError::Conflict {
                 repository,
                 identifiers,
@@ -3417,7 +3438,7 @@ mod tests {
             &dep_pkg,
             &dep_content,
             &dep_dep_contexts,
-            false,
+            surface_axes(false),
             ContentState::Materialized,
             &mut entries,
         )
@@ -3497,7 +3518,7 @@ mod tests {
             &dep_pkg,
             &dep_content,
             &dep_dep_contexts,
-            false,
+            surface_axes(false),
             ContentState::Materialized,
             &mut entries,
         )
@@ -3576,7 +3597,7 @@ mod tests {
             &root_dir,
             &root_content,
             &root_dep_contexts,
-            false, // consumer surface (default exec)
+            surface_axes(false), // consumer surface (default exec)
             ContentState::Materialized,
             &mut entries,
         )
@@ -3649,7 +3670,7 @@ mod tests {
             &root_dir,
             &root_content,
             &root_dep_contexts,
-            true, // --self surface
+            surface_axes(true), // --self surface
             ContentState::Materialized,
             &mut entries,
         )
@@ -4143,7 +4164,7 @@ mod tests {
             &root_dir,
             content,
             dep_contexts,
-            self_view,
+            surface_axes(self_view),
             ContentState::Materialized,
             &mut entries,
         )?;
@@ -4163,7 +4184,7 @@ mod tests {
             &dep_pkg,
             content,
             &dep_contexts,
-            self_view,
+            surface_axes(self_view),
             ContentState::Materialized,
             &mut entries,
         )?;
@@ -4593,6 +4614,71 @@ mod tests {
         assert!(!integrations_cross(/* self_view = */ true));
     }
 
+    // ── Surface mask ≡ bool surface ──────────────────────────────
+
+    /// The single-axis mask of a surface admits and crosses exactly what the bool surface does,
+    /// over every visibility × depth × surface; the expected column is the bool rule spelled out.
+    #[test]
+    fn surface_mask_matches_bool_surface_for_every_visibility() {
+        let visibilities = [
+            Visibility::SEALED,
+            Visibility::PRIVATE,
+            Visibility::INTERFACE,
+            Visibility::PUBLIC,
+        ];
+        for visibility in visibilities {
+            for self_view in [false, true] {
+                let axes = surface_axes(self_view);
+                let on_surface = if self_view {
+                    visibility.has_private()
+                } else {
+                    visibility.has_interface()
+                };
+                assert_eq!(
+                    dep_admitted(visibility, self_view),
+                    on_surface,
+                    "{visibility:?} {self_view}"
+                );
+                assert_eq!(
+                    dep_admitted_on(visibility, axes),
+                    on_surface,
+                    "{visibility:?} {self_view}"
+                );
+                for is_root in [false, true] {
+                    let expected = if is_root {
+                        on_surface
+                    } else {
+                        visibility.has_interface()
+                    };
+                    assert_eq!(
+                        carrier_crosses(visibility, is_root, self_view),
+                        expected,
+                        "{visibility:?} root={is_root} {self_view}"
+                    );
+                    assert_eq!(
+                        carrier_crosses_on(visibility, is_root, axes),
+                        expected,
+                        "{visibility:?} root={is_root} {self_view}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A two-axis mask is the union of its surfaces: a root carrier or dependency on either axis passes.
+    #[test]
+    fn a_public_mask_is_the_union_of_both_surfaces() {
+        for visibility in [Visibility::PRIVATE, Visibility::INTERFACE, Visibility::PUBLIC] {
+            assert!(dep_admitted_on(visibility, Visibility::PUBLIC), "{visibility:?}");
+            assert!(
+                carrier_crosses_on(visibility, true, Visibility::PUBLIC),
+                "{visibility:?}"
+            );
+        }
+        assert!(!dep_admitted_on(Visibility::SEALED, Visibility::PUBLIC));
+        assert!(!carrier_crosses_on(Visibility::PRIVATE, false, Visibility::PUBLIC));
+    }
+
     // ── The companion projection's integrations gate ──────────
 
     /// A companion projection composed with integrations SUPPRESSED must not
@@ -4947,7 +5033,7 @@ mod tests {
         .with_deferred(DeferredComposition::new(shim.clone(), Vec::new()));
 
         let mut entries = Vec::new();
-        emit_shim_slot(&root, false, &mut entries);
+        emit_shim_slot(&root, surface_axes(false), &mut entries);
 
         assert_eq!(
             path_values(&entries),
@@ -4971,7 +5057,7 @@ mod tests {
         );
 
         let mut entries = Vec::new();
-        emit_shim_slot(&root, false, &mut entries);
+        emit_shim_slot(&root, surface_axes(false), &mut entries);
 
         assert!(
             entries.is_empty(),
@@ -4996,7 +5082,7 @@ mod tests {
         .with_deferred(DeferredComposition::new(shim, Vec::new()));
 
         let mut entries = Vec::new();
-        emit_shim_slot(&root, true, &mut entries);
+        emit_shim_slot(&root, surface_axes(true), &mut entries);
 
         assert!(
             entries.is_empty(),
@@ -5025,13 +5111,13 @@ mod tests {
             .with_deferred(DeferredComposition::new(shim.clone(), Vec::new()));
 
         let mut entries = Vec::new();
-        emit_shim_slot(&root, false, &mut entries);
+        emit_shim_slot(&root, surface_axes(false), &mut entries);
         emit_root_path_block(
             root.metadata(),
             root.dir(),
             &root.dir().content(),
             &std::collections::HashMap::new(),
-            false,
+            surface_axes(false),
             ContentState::Deferred,
             &mut entries,
         )
@@ -5436,7 +5522,7 @@ mod tests {
 
         let roots = vec![deferred_root("a", 'a', '1'), deferred_root("b", 'b', '2')];
 
-        let error = check_repo_digest_conflicts(&roots, false)
+        let error = check_repo_digest_conflicts(&roots, surface_axes(false))
             .expect_err("two deferred tools pinning one repository at two digests is fatal");
 
         let DependencyError::Conflict {
