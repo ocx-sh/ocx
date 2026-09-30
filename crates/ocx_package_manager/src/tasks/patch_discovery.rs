@@ -21,6 +21,7 @@ use ocx_util::fs::LockedJsonFile;
 
 use super::super::{PackageManager, error::PackageError, error::PackageErrorKind};
 use super::install::finalize_indexed_errors;
+use super::resolve::descriptor_source_key;
 use crate::{concurrency, concurrency::Concurrency};
 
 // ── Safety limits ─────────────────────────────────────────────────────────────
@@ -69,18 +70,6 @@ impl PatchTagMap {
         locked.write(&map).await.map_err(Into::into)
     }
 
-    /// Atomically records `tag` → `digest` only if `tag` has no entry yet; returns whether it wrote.
-    pub async fn write_tag_if_absent(path: &std::path::Path, tag: &str, digest: &str) -> crate::Result<bool> {
-        let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(path).await?;
-        let mut map = locked.read().await?.unwrap_or_default();
-        if map.contains_key(tag) {
-            return Ok(false);
-        }
-        map.insert(tag.to_string(), digest.to_string());
-        locked.write(&map).await?;
-        Ok(true)
-    }
-
     /// Reads the discovery state for the given tag-store path.
     pub async fn read(tags_path: &std::path::Path) -> crate::Result<PatchDiscoveryState> {
         let Some(mut locked) = LockedJsonFile::<BTreeMap<String, String>>::open_shared(tags_path).await? else {
@@ -114,7 +103,7 @@ impl PatchTagMap {
 /// Whether a discovery pass may skip already-recorded states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchDiscoveryMode {
-    /// Compose time: fetch only on `NeverLooked`.
+    /// Compose time: fetch only on `NeverLooked`, and never resolve an unpinned optional companion.
     Lazy,
     /// Explicit network commands: [`Lazy`](Self::Lazy), plus a manifest-digest probe of each recorded source that refetches on drift.
     Revalidate,
@@ -176,7 +165,7 @@ impl PackageManager {
             return Ok(());
         }
 
-        let revalidated = if mode == PatchDiscoveryMode::Revalidate {
+        let revalidated = if mode == PatchDiscoveryMode::Revalidate && !reads_snapshot(self, mode) {
             let mut seen: HashSet<PackageRef> = HashSet::new();
             let mut ids: Vec<PackageRef> = Vec::new();
             // The first base naming a descriptor carries its failure.
@@ -274,7 +263,7 @@ impl PackageManager {
             return Ok(0);
         }
 
-        if mode != PatchDiscoveryMode::Revalidate {
+        if mode != PatchDiscoveryMode::Revalidate || reads_snapshot(self, mode) {
             return discover_from(self, base_id, platform, mode, scope, None).await;
         }
         let ids = descriptor_ids(patches, base_id, scope);
@@ -289,7 +278,7 @@ impl PackageManager {
         Ok(installed)
     }
 
-    /// Installs a companion into the object store, pinned in patch state, never in the local index.
+    /// Installs a companion into the object store at its patch-tier pin, never touching the local index.
     ///
     /// Never calls `discover_and_install_patches_with_mode`, or discovery recurses into companions.
     pub async fn install_companion(
@@ -298,27 +287,47 @@ impl PackageManager {
         platform: ocx_oci::Platform,
         mode: PatchDiscoveryMode,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        // Both paths pull through this, or even a `tag@digest` pull writes a dispatch object into the index.
-        let store_only = self.read_only_view();
-
         // `Sync` skips the pin: it exists to see the tag move.
-        if mode != PatchDiscoveryMode::Sync
-            && let Some(digest) = self
-                .companion_pin(companion_id)
+        let pin = if mode == PatchDiscoveryMode::Sync {
+            None
+        } else {
+            self.companion_pin(companion_id)
                 .await
                 .map_err(PackageErrorKind::Internal)?
-        {
-            log::debug!(
-                "patch companion: '{}' resolved from its recorded pin ({digest})",
-                companion_id
-            );
-            let installed = store_only
-                .pull(&companion_id.clone_with_digest(digest.clone()), platform)
-                .await?;
-            self.backfill_companion_pin(companion_id, &digest).await?;
-            return Ok(installed);
+        };
+        if let Some(digest) = &pin {
+            log::debug!("patch companion: '{companion_id}' resolved from its pin ({digest})");
+            // Lazy only: a compose must not re-verify over the network, but install and pull re-verify and repair.
+            if mode == PatchDiscoveryMode::Lazy
+                && let Some(installed) = self
+                    .find_companion_local_at(companion_id, digest, &platform)
+                    .await
+                    .map_err(PackageErrorKind::Internal)?
+            {
+                return Ok(installed);
+            }
         }
+        self.fetch_companion(companion_id, pin, platform).await
+    }
 
+    /// Pulls a companion not installed locally: at `pin`, else by resolving its tag and recording the pin.
+    ///
+    /// Under a patch snapshot an unpinned companion is `NotFound`: the freeze omitted it, and resolving
+    /// would pin what the frozen build never saw.
+    pub(super) async fn fetch_companion(
+        &self,
+        companion_id: &PackageRef,
+        pin: Option<ocx_oci::Digest>,
+        platform: ocx_oci::Platform,
+    ) -> Result<InstallInfo, PackageErrorKind> {
+        // Both paths pull through this, or even a `tag@digest` pull writes a dispatch object into the index.
+        let store_only = self.read_only_view();
+        if let Some(digest) = pin {
+            return store_only.pull(&companion_id.clone_with_digest(digest), platform).await;
+        }
+        if self.patch_snapshot().is_some() {
+            return Err(PackageErrorKind::NotFound);
+        }
         // Here, not by the resolver, whose refusal names `ocx index update`, which never writes a companion pin.
         if self.is_offline() {
             return Err(PackageErrorKind::PatchDiscovery(
@@ -350,33 +359,6 @@ impl PackageManager {
         .await
         .map_err(PackageErrorKind::Internal)?;
         Ok(installed)
-    }
-
-    /// Records a snapshot-supplied companion pin the patch tier lacks, or freeze and GC read an empty record.
-    ///
-    /// Fill-in only: the record is the live binding only `ocx patch sync` may advance.
-    async fn backfill_companion_pin(
-        &self,
-        companion_id: &PackageRef,
-        digest: &ocx_oci::Digest,
-    ) -> Result<(), PackageErrorKind> {
-        if self.patch_snapshot().is_none() {
-            return Ok(());
-        }
-        let recorded = PatchTagMap::write_tag_if_absent(
-            &self.file_structure().patch_companion_path(companion_id),
-            companion_id.tag_or_latest(),
-            &digest.to_string(),
-        )
-        .await
-        .map_err(PackageErrorKind::Internal)?;
-        if recorded {
-            log::debug!(
-                "patch companion: recorded '{}' at the snapshot's pin ({digest}) — the patch tier had none",
-                companion_id
-            );
-        }
-        Ok(())
     }
 }
 
@@ -634,6 +616,7 @@ async fn discover_from(
     let Some(patches) = manager.patches() else {
         return Ok(0);
     };
+    let snapshot = manager.patch_snapshot().filter(|_| reads_snapshot(manager, mode));
     let file_structure = manager.file_structure();
 
     let mut descriptors: Vec<PatchDescriptor> = Vec::new();
@@ -641,6 +624,16 @@ async fn discover_from(
     let mut pending_tag_writes: Vec<PendingDescriptorCommit> = Vec::new();
 
     for descriptor_id in descriptor_ids(patches, base_id, scope) {
+        // The snapshot's descriptor at its frozen digest: no probe, no tag resolve, and the live tag store stays untouched.
+        if let Some(snapshot) = snapshot {
+            if let Some(manifest_digest) = snapshot.descriptors.get(&descriptor_source_key(&descriptor_id)) {
+                let descriptor = load_snapshot_descriptor(manager, &descriptor_id, manifest_digest)
+                    .await
+                    .map_err(PackageErrorKind::Internal)?;
+                descriptors.push(descriptor);
+            }
+            continue;
+        }
         if let Some(descriptor) = revalidated.and_then(|revalidated| revalidated.descriptors.get(&descriptor_id)) {
             descriptors.extend(descriptor.clone());
             continue;
@@ -712,6 +705,28 @@ async fn discover_from(
                 );
             }
             let companion_id = companion.identifier.clone();
+            // Compose must not reach the network for a companion it may go without; install, pull and sync pin it.
+            // A snapshot leaves an optional companion it omits out, as compose does.
+            if !companion.required && (mode == PatchDiscoveryMode::Lazy || snapshot.is_some()) {
+                let Some(pin) = manager
+                    .companion_pin(&companion_id)
+                    .await
+                    .map_err(PackageErrorKind::Internal)?
+                else {
+                    log::debug!("patch discovery: optional companion '{companion_id}' is unpinned; skipping");
+                    continue;
+                };
+                if mode == PatchDiscoveryMode::Lazy
+                    && manager
+                        .find_companion_local_at(&companion_id, &pin, platform)
+                        .await
+                        .map_err(PackageErrorKind::Internal)?
+                        .is_none()
+                {
+                    log::debug!("patch discovery: optional companion '{companion_id}' is not installed; skipping");
+                    continue;
+                }
+            }
             match manager.install_companion(&companion_id, platform.clone(), mode).await {
                 Ok(_) => {
                     installed_count += 1;
@@ -724,15 +739,9 @@ async fn discover_from(
                             companion: companion_id,
                             source: Box::new(kind),
                         });
-                    } else if matches!(
-                        kind,
-                        PackageErrorKind::PatchDiscovery(crate::patch::PatchError::PolicyBlocked { .. })
-                    ) {
-                        // Debug, not warn: the steady state of every offline build.
-                        log::debug!(
-                            "patch discovery: optional companion '{}' is unpinned and offline mode may not resolve it; skipping",
-                            companion_id
-                        );
+                    } else if mode == PatchDiscoveryMode::Lazy {
+                        // Debug, not warn: a compose goes without an optional companion by design.
+                        log::debug!("patch discovery: optional companion '{companion_id}' skipped: {kind}");
                     } else {
                         log::warn!(
                             "patch discovery: optional companion '{}' failed (skipping): {}",
@@ -749,6 +758,11 @@ async fn discover_from(
         .await
         .map_err(PackageErrorKind::Internal)?;
     Ok(installed_count)
+}
+
+/// Whether discovery reads the active patch snapshot instead of the live tier: every mode but `Sync`.
+fn reads_snapshot(manager: &PackageManager, mode: PatchDiscoveryMode) -> bool {
+    mode != PatchDiscoveryMode::Sync && manager.patch_snapshot().is_some()
 }
 
 /// Records each deferred descriptor advance.
@@ -857,6 +871,51 @@ async fn fetch_and_persist_descriptor(
             Ok(Some(descriptor))
         }
     }
+}
+
+/// The descriptor a patch snapshot pins: from the CAS, else fetched at `manifest_digest` and
+/// persisted. Never resolves a tag and never writes descriptor state or a pin.
+///
+/// # Errors
+///
+/// [`PatchError::SnapshotDescriptorMissing`](crate::patch::PatchError::SnapshotDescriptorMissing)
+/// when absent offline, `NotFound` when the registry lacks that digest, and any fetch or
+/// verification failure.
+pub(super) async fn load_snapshot_descriptor(
+    manager: &PackageManager,
+    descriptor_id: &PackageRef,
+    manifest_digest: &ocx_oci::Digest,
+) -> Result<PatchDescriptor, crate::Error> {
+    let blob_store = &manager.file_structure().blobs;
+    let registry = descriptor_id.registry();
+    let manifest_path = blob_store.data(registry, manifest_digest);
+    let present = tokio::fs::try_exists(&manifest_path)
+        .await
+        .map_err(|error| crate::error::file_error(&manifest_path, error))?;
+    if present {
+        return load_descriptor_from_cas(blob_store, registry, manifest_digest).await;
+    }
+    let Some(client) = manager.client() else {
+        return Err(crate::patch::PatchError::SnapshotDescriptorMissing {
+            identifier: Box::new(descriptor_id.clone()),
+            digest: manifest_digest.clone(),
+        }
+        .into());
+    };
+    log::debug!("patch discovery: fetching snapshot descriptor '{descriptor_id}' at {manifest_digest}");
+    let fetched = fetch_patch_descriptor_blobs(client, &descriptor_id.clone_with_digest(manifest_digest.clone()))
+        .await?
+        .ok_or_else(|| crate::Error::package(descriptor_id.clone(), PackageErrorKind::NotFound))?;
+    let (descriptor, _) = persist_patch_descriptor(
+        blob_store,
+        registry,
+        fetched.manifest_digest,
+        &fetched.manifest_bytes,
+        fetched.layer_digest,
+        &fetched.layer_bytes,
+    )
+    .await?;
+    Ok(descriptor)
 }
 
 /// Loads a persisted `PatchDescriptor` from the CAS, re-verifying both blobs' digests.
@@ -1268,51 +1327,6 @@ mod tests {
             map.get("latest").map(String::as_str),
             Some("sha256:1234"),
             "write_no_descriptor must preserve the 'latest' key"
-        );
-    }
-
-    /// `write_tag_if_absent` fills a gap and never overwrites a recorded value.
-    ///
-    /// The two halves are the whole contract of a companion-pin backfill: a
-    /// machine with no record of its own gets one, and a machine whose record a
-    /// sync already advanced keeps the advanced digest (a frozen install must
-    /// not roll it back).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn patch_tag_map_write_tag_if_absent_fills_a_gap_but_never_overwrites() {
-        let dir = TempDir::new().unwrap();
-        let path = tags_path(&dir, "patches.corp.com", "certs/ca-bundle");
-        let first = format!("sha256:{}", "1".repeat(64));
-        let second = format!("sha256:{}", "2".repeat(64));
-
-        assert!(
-            PatchTagMap::write_tag_if_absent(&path, "1.0", &first)
-                .await
-                .expect("the first write must succeed"),
-            "an absent tag must be recorded, and the write reported"
-        );
-        assert_eq!(
-            PatchTagMap::read_tag(&path, "1.0").await.unwrap().as_deref(),
-            Some(first.as_str())
-        );
-
-        assert!(
-            !PatchTagMap::write_tag_if_absent(&path, "1.0", &second)
-                .await
-                .expect("the second write must succeed"),
-            "a recorded tag must be left alone, and the no-op reported"
-        );
-        assert_eq!(
-            PatchTagMap::read_tag(&path, "1.0").await.unwrap().as_deref(),
-            Some(first.as_str()),
-            "the recorded digest is the live binding; only a sync may advance it"
-        );
-
-        // Unrelated keys in the same map are untouched by either call.
-        PatchTagMap::write_tag(&path, "2.0", &second).await.unwrap();
-        PatchTagMap::write_tag_if_absent(&path, "1.0", &second).await.unwrap();
-        assert_eq!(
-            PatchTagMap::read_tag(&path, "2.0").await.unwrap().as_deref(),
-            Some(second.as_str())
         );
     }
 
@@ -1884,6 +1898,100 @@ mod tests {
             fetches, 3,
             "global, cmake and ninja once each in the pre-pass, never again per base"
         );
+    }
+
+    /// A snapshot-pinned descriptor absent from the CAS is fetched at its frozen digest and persisted,
+    /// writing no descriptor state; offline it is `SnapshotDescriptorMissing`, never an I/O error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_snapshot_descriptor_missing_from_the_cas_is_fetched_at_its_digest() {
+        let layer_bytes = serde_json::json!({"version": 1, "rules": [{"match": "*", "packages": []}]})
+            .to_string()
+            .into_bytes();
+        let layer_digest = ocx_oci::Algorithm::Sha256.hash(&layer_bytes);
+        let manifest_bytes = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": "application/vnd.sh.ocx.patch.v1",
+            "config": {
+                "mediaType": "application/vnd.oci.empty.v1+json",
+                "digest": "sha256:44136fa355ba77b9ad7b35f2cca4bb730ad02e2e8dc7f2af7a1b3e7c0ef5c6a7",
+                "size": 2
+            },
+            "layers": [{"mediaType": "application/vnd.sh.ocx.patch.descriptor.v1+json",
+                "digest": layer_digest.to_string(), "size": layer_bytes.len()}]
+        })
+        .to_string()
+        .into_bytes();
+        let manifest_digest = ocx_oci::Algorithm::Sha256.hash(&manifest_bytes);
+
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = make_stub_manager(tmp.path(), &data, true);
+        let descriptor_id = global_descriptor_id(manager.patches().unwrap());
+        {
+            let mut inner = data.write();
+            inner.manifests.insert(
+                format!("patches.corp.com/global:__ocx.patch@{manifest_digest}"),
+                (manifest_bytes.clone(), manifest_digest.to_string()),
+            );
+            inner.blobs.insert(layer_digest.to_string(), layer_bytes.clone());
+        }
+
+        let offline = make_offline_manager(tmp.path());
+        let error = load_snapshot_descriptor(&offline, &descriptor_id, &manifest_digest)
+            .await
+            .expect_err("offline cannot fetch");
+        assert!(
+            matches!(
+                &error,
+                crate::Error::Patch(patch) if matches!(**patch, crate::patch::PatchError::SnapshotDescriptorMissing { .. })
+            ),
+            "got: {error:?}"
+        );
+
+        load_snapshot_descriptor(&manager, &descriptor_id, &manifest_digest)
+            .await
+            .expect("fetched at the frozen digest");
+        let blobs = &manager.file_structure().blobs;
+        assert!(
+            blobs
+                .read_blob("patches.corp.com", &manifest_digest)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let tags_path = manager.file_structure().patch_descriptor_path(&descriptor_id);
+        assert_eq!(
+            PatchTagMap::read(&tags_path).await.unwrap(),
+            PatchDiscoveryState::NeverLooked,
+            "a snapshot fetch writes no descriptor state"
+        );
+        assert_eq!(probe_count(&data), 0, "a snapshot fetch resolves no tag");
+    }
+
+    /// Under a patch snapshot, Revalidate reads the frozen descriptors and probes none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_under_a_patch_snapshot_probes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager =
+            make_stub_manager(tmp.path(), &data, true).with_patch_snapshot(Some(crate::patch::PatchSnapshot {
+                version: crate::patch::snapshot::SnapshotVersion::CURRENT,
+                companions: BTreeMap::new(),
+                descriptors: BTreeMap::new(),
+            }));
+        let bases = three_bases_two_repositories(&manager).await;
+
+        manager
+            .discover_patches_all(
+                &bases,
+                &ocx_oci::Platform::any(),
+                PatchDiscoveryMode::Revalidate,
+                Concurrency::cores(),
+            )
+            .await
+            .expect("a snapshot pinning no descriptor composes nothing");
+        assert_eq!(probe_count(&data), 0, "a snapshot is read from the CAS, never probed");
     }
 
     // ── RequiredCompanionFailed error variant ─────────────────────────────────

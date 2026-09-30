@@ -32,6 +32,8 @@ impl ClassifyExitCode for PatchError {
             Self::BlobWriteFailed { .. } => Some(ExitCode::IoError),
             Self::PolicyBlocked { .. } => Some(ExitCode::PolicyBlocked),
             Self::DescriptorVanished { .. } => Some(ExitCode::NotFound),
+            Self::SnapshotActive => Some(ExitCode::ConfigError),
+            Self::SnapshotDescriptorMissing { .. } => Some(ExitCode::NotFound),
             Self::InvalidDescriptorJson { .. }
             | Self::UnsupportedVersion { .. }
             | Self::UnsupportedSnapshotVersion { .. }

@@ -468,24 +468,15 @@ def test_frozen_install_composes_a_pinned_companion(
 
 
 # No xdist group: the `[patches]` tier is a registry path of this test's own.
-def test_snapshot_install_records_the_pin_it_adopted(
+def test_snapshot_install_writes_no_pin_record(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
-    """A snapshot-driven companion install fills the patch-tier record in.
+    """A snapshot-driven companion install never writes the patch-tier record.
 
-    A machine that only ever installs under `OCX_PATCH_SNAPSHOT` — a cold CI
-    runner with a committed `patches.snapshot.json` — resolves every companion
-    from the snapshot, so nothing writes the record. But the record is what
-    BOTH `ocx patch freeze` and record-scoped GC read: a freeze there would
-    replace the good snapshot with an empty companion map, and `ocx clean`
-    would collect the very package the next snapshot build composes.
-
-    The install records the pin it adopted, so the machine's live state matches
-    what is actually installed. Deleting the record reproduces the cold runner.
-    The recorded digest is the snapshot's — the platform manifest, where a
-    discovery-written record holds the image index above it — so the assertion
-    compares against the snapshot, and the decisive check is that a re-freeze
-    reproduces that same snapshot byte for byte.
+    Under `OCX_PATCH_SNAPSHOT` the snapshot is the whole answer and only
+    `ocx patch sync` advances the record; an install that recorded the pin it
+    adopted would move live state from a frozen build. Deleting the record
+    reproduces a cold runner that has only a committed snapshot.
     """
     companion_repo = _unique_repo("snapshot_record")
     companion = _make_companion(
@@ -502,10 +493,7 @@ def test_snapshot_install_records_the_pin_it_adopted(
     assert freeze.returncode == 0, f"setup: patch freeze must succeed:\n{freeze.stderr}"
     snapshot_path = ocx.ocx_home / "patches.snapshot.json"
     snapshot = json.loads(snapshot_path.read_text())
-    # The companions map is keyed by the tag-bearing identifier — one
-    # repository can be named at two tags, and each is its own companion.
-    pinned_digest = snapshot["companions"].get(companion.fq)
-    assert pinned_digest is not None, (
+    assert snapshot["companions"].get(companion.fq) is not None, (
         f"setup: the freeze must have pinned the companion; got {snapshot}"
     )
 
@@ -525,19 +513,22 @@ def test_snapshot_install_records_the_pin_it_adopted(
         f"a snapshot-pinned companion must install; rc={install.returncode}\n"
         f"stderr: {install.stderr}"
     )
-    assert pin_path.exists(), (
-        "the pin adopted from the snapshot must be recorded, or freeze and GC cannot see it"
-    )
-    assert json.loads(pin_path.read_text()) == {companion.tag: pinned_digest}, (
-        f"the recorded pin must name the digest the snapshot pinned; got {pin_path.read_text()}"
-    )
+    assert not pin_path.exists(), "an install under a snapshot must not record the pin it adopted"
 
-    refreeze = ocx.run("--global", "patch", "freeze", format="json", check=False)
-    assert refreeze.returncode == 0, f"patch freeze must succeed:\n{refreeze.stderr}"
-    assert json.loads(snapshot_path.read_text()) == snapshot, (
-        "a re-freeze on a machine that only ever installed from the snapshot must reproduce "
-        f"the same snapshot, not overwrite it with an empty companion map; got "
-        f"{snapshot_path.read_text()}"
+    # With no record left, only the snapshot's pin can select the companion.
+    env = _run(
+        ocx,
+        "--format",
+        "json",
+        "package",
+        "env",
+        base.short,
+        extra_env={"OCX_PATCH_SNAPSHOT": str(snapshot_path)},
+    )
+    assert env.returncode == 0, f"package env under the snapshot must succeed; rc={env.returncode}\n{env.stderr}"
+    entry = _entry_by_key(json.loads(env.stdout)["entries"], "RECORDED_CA")
+    assert entry is not None and entry["value"] == "/certs/recorded/ca.pem", (
+        f"the snapshot-pinned companion must compose with no record behind it; got {entry}"
     )
 
 

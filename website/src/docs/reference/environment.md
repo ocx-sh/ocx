@@ -401,11 +401,21 @@ Path to a snapshot file (`patches.snapshot.json`) that pins companion package di
 export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
 ```
 
-When set, the compose overlay prefers the snapshot's pinned companion digests over live tag
-lookups, enabling reproducible builds without a network round-trip. Pins are per
+When set, every command except `ocx patch sync` and `ocx patch freeze` uses only the
+snapshot's pinned companion and descriptor digests, so builds reproduce without a live tag
+lookup. Install, pull and lock record no companion pin and no descriptor state. A companion
+the snapshot omits is absent even when a pin for it is recorded, and a required one fails
+with exit `79`. A pinned descriptor or companion missing from the local store is fetched by
+its digest; under [`--offline`][arg-offline] it is not, and a required one fails with exit
+`79`. `ocx patch sync`, which refreshes the installed packages and the global descriptor, is
+refused with exit `78`.
+`ocx patch freeze` reads the recorded state, not this snapshot. Pins are per
 `repository:tag`, so one repository named at two tags freezes as two independent companions.
 Write the snapshot with `ocx patch freeze` (see [`command-line.md`][cmd-ref]); a file whose
 format version this `ocx` does not read is refused (exit `65`) with that same remedy.
+
+[`ocx clean`][cmd-clean] roots the snapshot's companions only while this variable is set: run
+without it, clean keeps only recorded pins and collects a companion only the snapshot pins.
 
 Adopting a snapshot is a deliberate opt-in: this variable is the only selector, and it is
 independent of [`OCX_FROZEN`](#ocx-frozen) / [`--frozen`][arg-frozen], which scope to the package
@@ -1195,6 +1205,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-shell-allow]: command-line.md#shell-allow
 [cmd-shell-revoke]: command-line.md#shell-revoke
 [cmd-pull]: command-line.md#pull
+[cmd-clean]: command-line.md#clean
 [cmd-shell-state]: command-line.md#shell-state
 [cmd-package-sign]: command-line.md#package-sign
 [cmd-package-attest]: command-line.md#package-attest

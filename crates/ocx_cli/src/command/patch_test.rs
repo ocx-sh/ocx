@@ -131,7 +131,7 @@ fn build_scratch_manager(
         // falls back to the scratch root's empty `index/`, so the
         // digest-addressed dispatch object the pinned companion pull just
         // persisted into the context's real home is invisible to
-        // `find_companion_local`'s platform-selection step, which then reports
+        // `find_companion_local_at`'s platform-selection step, which then reports
         // the required companion as not found (exit 79).
         .with_index(context.local_index().index_store().clone())
 }

@@ -715,7 +715,10 @@ impl PackageManager {
         Ok((entries, compose_count, provenance, attribution))
     }
 
-    /// The [`SitePatchSet`] for `admitted` from local state only, or `None` with no `[patches]`.
+    /// The [`SitePatchSet`] for `admitted`, or `None` with no `[patches]`.
+    ///
+    /// Reads local state, except that an unpinned or uninstalled required companion resolves live
+    /// and is pinned; never under `--offline` or an active patch snapshot.
     ///
     /// `collect_integrations` is forwarded because projection runs at `self_view = false` and
     /// cannot derive it; without it a companion naming an uninstalled dependency would fail a
@@ -732,23 +735,15 @@ impl PackageManager {
         };
 
         let file_structure = self.file_structure();
-        let blob_store = &file_structure.blobs;
         let package_store = &file_structure.packages;
 
-        // SECURITY: the CAS path is namespaced only by the operator-controlled registry host and
-        // SHA-256 addressed, bounding path injection; descriptors carry no signature check.
+        // SECURITY: descriptors load from the local CAS, namespaced by the operator-controlled
+        // registry host and SHA-256 addressed, bounding path injection; they carry no signature
+        // check. Network reaches: a snapshot-pinned descriptor fetched at its frozen digest, and a
+        // required companion's live resolve below.
         let global_id = super::patch_discovery::global_descriptor_id(patches);
         let global_tags_path = file_structure.patch_descriptor_path(&global_id);
-        let global_descriptor_result = load_descriptor_frozen_or_live(
-            blob_store,
-            // The descriptor id's bare-host registry, where `fetch_and_persist_descriptor` persists;
-            // the path-prefixed `patches.registry` would look in the wrong directory.
-            global_id.registry(),
-            &global_id,
-            &global_tags_path,
-            self.patch_snapshot(),
-        )
-        .await?;
+        let global_descriptor_result = load_descriptor_frozen_or_live(self, &global_id, &global_tags_path).await?;
 
         // A corrupt global descriptor is tampering, never "no patch": fail closed when required.
         let global_descriptor = match global_descriptor_result {
@@ -771,7 +766,6 @@ impl PackageManager {
 
         // Loads run concurrently (core-bounded) into slots by admitted index, so emission order,
         // error determinism and the projection cache never depend on completion order.
-        let snapshot: Arc<Option<crate::patch::PatchSnapshot>> = Arc::new(self.patch_snapshot().cloned());
         let system_required = patches.system_required;
         let load_semaphore = crate::concurrency::Concurrency::cores().semaphore();
         let mut descriptor_load_tasks: JoinSet<(usize, crate::Result<DescriptorLoadResult>)> = JoinSet::new();
@@ -786,22 +780,11 @@ impl PackageManager {
             }
             let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
             let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
-            // Bare-host registry, as for the global descriptor.
-            let registry = pkg_specific_id.registry().to_string();
-            let blob_store = blob_store.clone();
-            let snapshot = snapshot.clone();
+            let manager = self.clone();
             let semaphore = load_semaphore.clone();
             descriptor_load_tasks.spawn(async move {
                 let _permit = crate::concurrency::acquire_permit(&semaphore).await;
-                let snapshot_ref: Option<&crate::patch::PatchSnapshot> = (*snapshot).as_ref();
-                let result = load_descriptor_frozen_or_live(
-                    &blob_store,
-                    &registry,
-                    &pkg_specific_id,
-                    &pkg_tags_path,
-                    snapshot_ref,
-                )
-                .await;
+                let result = load_descriptor_frozen_or_live(&manager, &pkg_specific_id, &pkg_tags_path).await;
                 (index, result)
             });
         }
@@ -925,25 +908,45 @@ impl PackageManager {
 
                 // Composes at the patch-tier pin (snapshot, else recorded); a pin with no installed
                 // package yields `None` and the required gate fires as normal.
-                let companion_install_info = match self.find_companion_local(companion_id, platform).await {
-                    Ok(Some(info)) => info,
-                    Ok(None) => {
-                        companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
-                        if companion_entry.required {
-                            // Install-time discovery should have installed it: fail closed.
-                            return Err(crate::Error::from(
-                                crate::error::PackageErrorKind::RequiredCompanionFailed {
-                                    companion: companion_id.clone(),
-                                    source: Box::new(crate::error::PackageErrorKind::NotFound),
-                                },
-                            ));
+                let local = async {
+                    let Some(pin) = self.companion_pin(companion_id).await? else {
+                        return Ok((None, None));
+                    };
+                    let installed = self.find_companion_local_at(companion_id, &pin, platform).await?;
+                    Ok::<_, crate::Error>((Some(pin), installed))
+                }
+                .await;
+                let companion_install_info = match local {
+                    Ok((_, Some(info))) => info,
+                    Ok((pin, None)) => {
+                        // A required companion is fetched, so a base install-time discovery never saw still composes:
+                        // at its pin, else (no snapshot) resolved live. An optional one waits for install or sync,
+                        // and offline never reaches the network.
+                        let live = if !companion_entry.required || self.is_offline() {
+                            Err(crate::error::PackageErrorKind::NotFound)
+                        } else {
+                            self.fetch_companion(companion_id, pin, platform.clone()).await
+                        };
+                        match live {
+                            Ok(info) => info,
+                            Err(kind) => {
+                                companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
+                                if companion_entry.required {
+                                    return Err(crate::Error::from(
+                                        crate::error::PackageErrorKind::RequiredCompanionFailed {
+                                            companion: companion_id.clone(),
+                                            source: Box::new(kind),
+                                        },
+                                    ));
+                                }
+                                log::debug!(
+                                    "site-patch-set: optional companion '{}' not installed for '{}': {kind}; skipping",
+                                    companion_id,
+                                    admitted_id
+                                );
+                                continue;
+                            }
                         }
-                        log::debug!(
-                            "site-patch-set: optional companion '{}' not installed for '{}'; skipping",
-                            companion_id,
-                            admitted_id
-                        );
-                        continue;
                     }
                     Err(error) => {
                         // A lookup error is not "not installed" and could mask a missing required
@@ -1008,8 +1011,8 @@ impl PackageManager {
         Ok(Some(patch_set))
     }
 
-    /// The digest a companion composes at: the active [`PatchSnapshot`](crate::patch::PatchSnapshot)
-    /// pin, else the recorded pin; `Ok(None)` = unpinned, which callers treat as not installed.
+    /// The digest a companion composes at: under an active [`PatchSnapshot`](crate::patch::PatchSnapshot)
+    /// its pin alone, else the recorded pin; `Ok(None)` = unpinned, which callers treat as not installed.
     ///
     /// The snapshot key ([`crate::patch::snapshot::companion_key`], shared with the freeze writer)
     /// pins a repository at a tag, matching the record's per-tag granularity.
@@ -1017,12 +1020,12 @@ impl PackageManager {
         &self,
         companion_id: &ocx_oci::PackageRef,
     ) -> crate::Result<Option<ocx_oci::Digest>> {
-        if let Some(snapshot) = self.patch_snapshot()
-            && let Some(pinned_digest) = snapshot
+        // No fallback to the record: a companion the freeze omitted must stay absent, or the build drifts.
+        if let Some(snapshot) = self.patch_snapshot() {
+            return Ok(snapshot
                 .companions
                 .get(&crate::patch::snapshot::companion_key(companion_id))
-        {
-            return Ok(Some(pinned_digest.clone()));
+                .cloned());
         }
         self.companion_pin_recorded(companion_id).await
     }
@@ -1052,21 +1055,18 @@ impl PackageManager {
         }
     }
 
-    /// A companion's installed `InstallInfo` from its patch-tier pin and the package store,
-    /// network-free; `Ok(None)` when unpinned or not installed locally.
+    /// A companion's installed `InstallInfo` at `top_digest`, its patch-tier pin, from the package store,
+    /// network-free; `Ok(None)` when not installed locally.
     ///
     /// Never asks the local index for a pin: a same-repository package-tier tag pointer is
     /// somebody else's answer. `platform` is the one composed FOR (the caller's `-p`).
-    async fn find_companion_local(
+    pub(super) async fn find_companion_local_at(
         &self,
         companion_id: &ocx_oci::PackageRef,
+        top_digest: &ocx_oci::Digest,
         platform: &ocx_oci::Platform,
     ) -> crate::Result<Option<InstallInfo>> {
         use super::common::find_in_store;
-
-        let Some(top_digest) = self.companion_pin(companion_id).await? else {
-            return Ok(None);
-        };
 
         let local_index = companion_manifest_index(self);
 
@@ -1104,7 +1104,7 @@ impl PackageManager {
 
         // Uncached manifest: the pin may already be the platform digest (single-platform, or
         // `ocx patch test --companion-archive`); `find_in_store` decides, absent = `None`.
-        let pinned_id = match ocx_oci::PinnedPackageRef::try_from(companion_id.clone_with_digest(top_digest)) {
+        let pinned_id = match ocx_oci::PinnedPackageRef::try_from(companion_id.clone_with_digest(top_digest.clone())) {
             Ok(id) => id,
             Err(_) => return Ok(None),
         };
@@ -1135,7 +1135,7 @@ impl PackageManager {
         let blob_store = &file_structure.blobs;
         let symlink_root = file_structure.symlinks.root().to_path_buf();
 
-        // Same reader as `find_companion_local`, so GC roots and compose derive from one answer.
+        // Same reader as `find_companion_local_at`, so GC roots and compose derive from one answer.
         let local_index = companion_manifest_index(self);
 
         let installed_base_ids = super::patch_sync::enumerate_installed_bases(self).await?;
@@ -1335,33 +1335,50 @@ pub(super) async fn load_descriptor_for_id(
 /// Test call sites pass this to `resolve_env` so the companion selection they
 /// exercise is the one production performs on the same host.
 #[cfg(test)]
+impl PackageManager {
+    /// [`find_companion_local_at`](Self::find_companion_local_at) at the companion's own pin; `Ok(None)` when unpinned.
+    async fn find_companion_local(
+        &self,
+        companion_id: &ocx_oci::PackageRef,
+        platform: &ocx_oci::Platform,
+    ) -> crate::Result<Option<InstallInfo>> {
+        let Some(top_digest) = self.companion_pin(companion_id).await? else {
+            return Ok(None);
+        };
+        self.find_companion_local_at(companion_id, &top_digest, platform).await
+    }
+}
+
+#[cfg(test)]
 fn host_platform() -> ocx_oci::Platform {
     ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any)
 }
 
 /// Load a descriptor, frozen under an active snapshot: its manifest digest comes from the
-/// snapshot's per-source pin ([`descriptor_source_key`]) and loads from the CAS, bypassing the
-/// live tag store. A source absent from the snapshot is `NotPresent`, so a post-freeze
-/// `ocx patch sync` cannot change what a frozen build composes. No snapshot: the tier floats.
+/// snapshot's per-source pin ([`descriptor_source_key`]), from the CAS or fetched at that digest,
+/// bypassing the live tag store. A source absent from the snapshot is `NotPresent`, so a
+/// post-freeze `ocx patch sync` cannot change what a frozen build composes. No snapshot: the tier
+/// floats, read offline from recorded state.
 async fn load_descriptor_frozen_or_live(
-    blob_store: &ocx_store::file_structure::BlobStore,
-    registry: &str,
+    manager: &PackageManager,
     descriptor_id: &ocx_oci::PackageRef,
     tags_path: &std::path::Path,
-    snapshot: Option<&crate::patch::PatchSnapshot>,
 ) -> crate::Result<DescriptorLoadResult> {
-    use super::patch_discovery::load_descriptor_from_cas;
-
-    let Some(snapshot) = snapshot else {
-        return load_descriptor_for_id(blob_store, registry, tags_path).await;
+    // The descriptor id's bare-host registry, where `fetch_and_persist_descriptor` persists;
+    // the path-prefixed `patches.registry` would look in the wrong directory.
+    let registry = descriptor_id.registry();
+    let Some(snapshot) = manager.patch_snapshot() else {
+        return load_descriptor_for_id(&manager.file_structure().blobs, registry, tags_path).await;
     };
 
     match snapshot.descriptors.get(&descriptor_source_key(descriptor_id)) {
-        Some(manifest_digest) => match load_descriptor_from_cas(blob_store, registry, manifest_digest).await {
-            Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(manifest_digest.clone(), descriptor)),
-            // Carry the digest so a required tier fails closed instead of dropping the overlay.
-            Err(error) => Ok(DescriptorLoadResult::Corrupt(error, Some(manifest_digest.clone()))),
-        },
+        Some(manifest_digest) => {
+            match super::patch_discovery::load_snapshot_descriptor(manager, descriptor_id, manifest_digest).await {
+                Ok(descriptor) => Ok(DescriptorLoadResult::Loaded(manifest_digest.clone(), descriptor)),
+                // Carry the digest so a required tier fails closed instead of dropping the overlay.
+                Err(error) => Ok(DescriptorLoadResult::Corrupt(error, Some(manifest_digest.clone()))),
+            }
+        }
         None => Ok(DescriptorLoadResult::NotPresent),
     }
 }
@@ -1522,7 +1539,7 @@ pub(super) async fn collect_candidates_from_dir(
 /// Canonical `registry/repository` key of a patch descriptor source. `ocx patch freeze` and
 /// [`PackageManager::build_site_patch_set`] must derive it from the same descriptor ids, or a
 /// frozen build looks up keys the freeze never wrote.
-fn descriptor_source_key(descriptor_id: &ocx_oci::PackageRef) -> String {
+pub(super) fn descriptor_source_key(descriptor_id: &ocx_oci::PackageRef) -> String {
     format!("{}/{}", descriptor_id.registry(), descriptor_id.repository())
 }
 
@@ -1604,7 +1621,7 @@ async fn seed_snapshot_descriptor_digests(
     push_descriptor_blob_digests(blob_store, descriptor_id.registry(), pinned, descriptor_digests).await;
 }
 
-/// The local-only, network-free reader compose (`find_companion_local`) and GC/freeze
+/// The local-only, network-free reader compose (`find_companion_local_at`) and GC/freeze
 /// (`resolve_site_patch_roots`) resolve a recorded pin through.
 ///
 /// `read_only_view` stops blob-store recovery self-healing into `o/`, which would re-create
@@ -1622,7 +1639,7 @@ fn companion_manifest_index(manager: &PackageManager) -> ocx_index::Index {
 }
 
 /// Resolve a companion top digest to the pinned identifier the package store keys by, as
-/// `find_companion_local` does; `None` if unresolvable locally.
+/// `find_companion_local_at` does; `None` if unresolvable locally.
 ///
 /// Keeps `companion_id`'s advisory tag: freeze keys its snapshot per tag, so a tagless pin
 /// collapses a repository frozen at two tags into one companion.
@@ -5012,6 +5029,52 @@ mod phase4_spec_tests {
             ResolvedPackage::new(),
             ocx_store::file_structure::PackageDir { dir: root_pkg_path },
         ))
+    }
+
+    /// A pinned companion already installed answers `install_companion` from the store: a pull
+    /// would re-verify its signatures over the network on every compose.
+    ///
+    /// The manager has no client and a source-less index, so any pull fails; success proves none ran.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pinned_installed_companion_installs_without_a_pull() {
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        seed_installed_global_companion(&manager, &patch_config, true).await;
+        let companion_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+
+        let installed = manager
+            .install_companion(
+                &companion_id,
+                super::host_platform(),
+                super::super::patch_discovery::PatchDiscoveryMode::Lazy,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("an installed, pinned companion must need no pull; got: {error}"));
+        assert_eq!(installed.identifier().digest().to_string(), sha256('c').to_string());
+    }
+
+    /// Install and pull re-verify and repair a pinned, installed companion: the store shortcut is
+    /// compose-only. The manager cannot pull, so reaching the pull fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_pulls_a_pinned_installed_companion() {
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        seed_installed_global_companion(&manager, &patch_config, true).await;
+        let companion_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+
+        let result = manager
+            .install_companion(
+                &companion_id,
+                super::host_platform(),
+                super::super::patch_discovery::PatchDiscoveryMode::Revalidate,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "Revalidate must pull the pinned companion, never answer from the store"
+        );
     }
 
     /// Regression (Codex no-ship): the companion overlay must resolve companions

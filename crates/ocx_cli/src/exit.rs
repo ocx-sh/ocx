@@ -1833,6 +1833,24 @@ mod tests {
             pattern: "Self::DescriptorVanished { .. }",
             value: "Some(ExitCode::NotFound)",
         },
+        // `ocx patch sync` under OCX_PATCH_SNAPSHOT: two settings that contradict each other.
+        NewArm {
+            target: "PatchError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::SnapshotActive",
+            value: "Some(ExitCode::ConfigError)",
+        },
+        // A snapshot-pinned descriptor absent offline: the same 79 as a missing required companion.
+        NewArm {
+            target: "PatchError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::SnapshotDescriptorMissing { .. }",
+            value: "Some(ExitCode::NotFound)",
+        },
         // A registry that will not delete tags needs an operator, so it gets
         // its own code rather than 69 or 75, which both invite a retry.
         NewArm {

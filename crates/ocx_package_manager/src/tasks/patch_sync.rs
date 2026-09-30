@@ -125,8 +125,12 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// `OfflineMode` when offline, and `RequiredCompanionFailed` from any base; other discovery errors only warn.
+    /// `SnapshotActive` under a patch snapshot, `OfflineMode` when offline, and `RequiredCompanionFailed` from any
+    /// base; other discovery errors only warn.
     pub async fn sync_patches(&self, platforms: &[ocx_oci::Platform]) -> crate::Result<PatchSyncReport> {
+        if self.patch_snapshot().is_some() {
+            return Err(crate::patch::PatchError::SnapshotActive.into());
+        }
         let _client = self.require_client()?;
 
         let Some(patches) = self.patches() else {

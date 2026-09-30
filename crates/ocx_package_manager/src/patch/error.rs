@@ -141,4 +141,20 @@ pub enum PatchError {
         /// The companion whose tag could not be resolved.
         identifier: Box<ocx_oci::PackageRef>,
     },
+
+    /// `ocx patch sync` advances the pins an active patch snapshot freezes, so the two conflict.
+    #[error("`ocx patch sync` cannot advance pins while OCX_PATCH_SNAPSHOT is set; unset it to advance pins")]
+    SnapshotActive,
+
+    /// A descriptor the active patch snapshot pins is not in the local store, and `--offline`
+    /// forbids fetching it by its frozen digest.
+    #[error(
+        "patch descriptor '{identifier}' pinned by the patch snapshot at {digest} is not in the local store; run without --offline to fetch it"
+    )]
+    SnapshotDescriptorMissing {
+        /// The descriptor source the snapshot pins.
+        identifier: Box<ocx_oci::PackageRef>,
+        /// The manifest digest the snapshot pins it at.
+        digest: ocx_oci::Digest,
+    },
 }

@@ -353,16 +353,34 @@ descriptor that names one repository at two tags freezes both versions independe
 The file is derived state, not something to hand-edit: it records a format version, and a
 version this `ocx` does not read is refused (exit [`65`][exit-codes]) with the remedy to
 re-run `ocx patch freeze`. Re-freezing is offline and takes no longer than the first run.
+`ocx patch freeze` reads what this machine has recorded, never an active snapshot.
 
-Point [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] at the file to make all composition
-prefer the pinned digests:
+Point [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] at the file to make commands use only
+the pinned digests:
 
 ```sh
 export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
 ```
 
-With the snapshot in place, `ocx exec` uses the frozen companion digests and skips live tag
-lookups even offline. To return to floating (live) tags, unset the variable.
+With the snapshot in place, every command except `ocx patch sync` and `ocx patch freeze`
+uses only the snapshot's descriptors and pinned digests and never looks up a live tag.
+`ocx package install`, `ocx package pull`, `ocx pull` and `ocx lock` write no companion pin
+and no descriptor state. A companion the snapshot omits stays out even when this machine
+has a pin for it; a required one fails with exit [`79`][exit-codes]. `ocx patch sync` is
+refused (exit `78`) because it advances pins. To return to floating (live) tags, unset the
+variable.
+
+On a fresh machine that has only the snapshot, a pinned descriptor or companion missing
+from the local store is fetched by its frozen digest, never by tag, and nothing is
+recorded. Under [`--offline`][arg-offline] nothing is fetched: a missing descriptor or
+companion that is required fails with exit `79`.
+
+`ocx clean` roots the companions a snapshot pins only while `OCX_PATCH_SNAPSHOT` is set.
+Without it, clean keeps only recorded pins, so a companion that only the snapshot pins is
+collected, and the next run fetches it again by digest (or fails offline). Keep the
+variable exported when you run `ocx clean`. Running `ocx patch sync` first, with the
+variable unset, protects those companions only while the live tags still name the frozen
+digests.
 
 Freezing the patch tier is a deliberate opt-in and is independent of
 [`--frozen`][arg-frozen], which scopes to the package tier: patches float by design, so a
@@ -468,25 +486,33 @@ reference for the full forwarding mechanics.
 
 ## Working offline {#patches-offline}
 
-Composing the environment never touches the network: `ocx exec`, `ocx package exec`, and `ocx env`
-always resolve companions from whatever is already installed locally, snapshot or not.
-`--offline` only affects whether OCX can *discover and install* companions in the first
-place, at `ocx package install` or `ocx patch sync` time — it changes nothing about how an
-already-resolved toolchain composes its environment. That means the enforcement rule above
-applies exactly the same whether or not `--offline` is set.
+Composing the environment resolves companions from whatever is already installed locally. The one
+exception is a **required** companion that has no recorded pin yet, for example a base installed
+before its rule existed: `ocx exec`, `ocx package exec` and `ocx env` resolve it live and record the
+pin. An unpinned optional companion is skipped with no network call; `ocx package install`,
+`ocx package pull`, `ocx pull`, `ocx lock`, `ocx add`, `ocx update` and `ocx patch sync` pick it up.
+
+That live resolve never happens under `--offline` or with a patch snapshot (`OCX_PATCH_SNAPSHOT`).
+There, an unpinned required companion fails the command with exit 79 instead. The enforcement rule
+above applies the same whether or not `--offline` is set.
 
 ```sh
 export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
-ocx --offline run -- cmake --version
+ocx --offline exec -- cmake --version
 ```
 
 With a snapshot in place, the pinned digests are resolved from the local object store and no
-network access is needed — the command above works even for `required` companions.
+network access is needed. The command above works for `required` companions only when each
+pinned descriptor and companion is already in the local store; one that is missing fails
+with exit 79 instead of being fetched.
 
-Without a snapshot, `ocx --offline run` still applies whatever companions are already
+`ocx env --no-pull` never reaches a registry either, for patch companions included: it
+composes from what is installed, and a required companion that is not fails with exit 79.
+
+Without a snapshot, `ocx --offline exec` still applies whatever companions are already
 installed locally: an optional (`required = false`) companion that is not yet installed is
-skipped with a warning, but a **required** companion that is not yet installed fails closed
-and aborts the run — the same posture as running online. `--offline` never turns a required
+skipped silently (a debug log line), but a **required** companion that is not yet installed fails
+closed and aborts the run — the same posture as running online. `--offline` never turns a required
 companion into an optional one. Run `ocx patch sync` while you still have network access (or
 let the lazy install-time hook do it during `ocx package install`) so every required
 companion is already in the local store before you disconnect.
@@ -505,9 +531,11 @@ resolvable, and [`--frozen`][arg-frozen] — which freezes that index — does n
 companion at all. Patches float by design.
 
 A companion's pin only ever advances on [`ocx patch sync`][cmd-patch-sync], including for
-a rolling tag the descriptor keeps naming. Composition reads the pin; it never writes one
-back. When a descriptor changes or a new companion should be picked up, sync while online,
-then run `ocx patch freeze` again to capture the result for the next reproducible build.
+a rolling tag the descriptor keeps naming. Composition reads the pin. It records one only when a
+required companion has none, and never advances an existing pin. Under a patch snapshot no
+command records a pin, including install, pull and lock. When a descriptor changes or a new
+companion should be picked up, sync while online, then run `ocx patch freeze` again to capture the
+result for the next reproducible build.
 
 ## Configuration {#patches-config}
 
@@ -589,6 +617,7 @@ For the full field reference, see the [`[patches]` configuration section][config
 [cmd-package-test]: ../reference/command-line.md#package-test
 [cmd-lock]: ../reference/command-line.md#lock
 [cmd-global-flag]: ../reference/command-line.md#global-flag
+[arg-offline]: ../reference/command-line.md#arg-offline
 [arg-frozen]: ../reference/command-line.md#arg-frozen
 [exit-codes]: ../reference/command-line.md#exit-codes
 
