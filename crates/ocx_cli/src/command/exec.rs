@@ -125,9 +125,8 @@ impl Exec {
         let install_infos = composed.roots;
         // What this invocation pulled: half of the record's drift signal.
         let auto_installed = composed.pulled;
-        // `Package` scope: this tier never reads `ocx.toml`. The only call site that captures the
-        // companions the site tier overlaid.
-        let (mut entries, _, patch_companions, admitted) = manager
+        // `Package` scope: this tier never reads `ocx.toml`.
+        let (mut entries, _, _, admitted) = manager
             .resolve_env_with_attribution(
                 &install_infos,
                 self.self_view,
@@ -171,7 +170,6 @@ impl Exec {
             RecordInputs {
                 packages: &install_infos,
                 admitted: &admitted,
-                patch_companions: &patch_companions,
                 executable: &resolved,
                 store_root: context.file_structure().packages.root(),
                 shim_root: context.file_structure().shims.root(),

@@ -187,7 +187,7 @@ impl ToolchainExec {
             toolchain: Some(Box::new(toolchain)),
         };
         // Never the self view: dropping each package's own `entrypoints/` from PATH is a strictly worse toolchain.
-        let (mut entries, _, patch_companions, admitted) = manager
+        let (mut entries, _, _, admitted) = manager
             .resolve_env_with_attribution(&install_infos, false, scope, &host)
             .await?;
 
@@ -246,7 +246,6 @@ impl ToolchainExec {
             RecordInputs {
                 packages: &install_infos,
                 admitted: &admitted,
-                patch_companions: &patch_companions,
                 executable: &executable,
                 store_root: context.file_structure().packages.root(),
                 shim_root: context.file_structure().shims.root(),

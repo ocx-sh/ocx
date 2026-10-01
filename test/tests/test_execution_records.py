@@ -2428,7 +2428,7 @@ def test_a_patched_invocation_records_its_companion_and_snapshot(
         f"a companion is digest-complete like every other entry; got {companion['digest']}"
     )
     assert companion["annotations"]["sh.ocx.visibility"] == "interface", (
-        "the overlay composes a companion's interface surface and nothing else; "
+        "without --self a companion composes on its target's interface surface; "
         f"got {companion['annotations']}"
     )
     # The claim is placement, not a count: every companion follows everything
@@ -2475,4 +2475,82 @@ def test_a_patched_invocation_records_its_companion_and_snapshot(
     assert _companion_entry(frozen_record, companion_repo)["digest"] == companion["digest"], (
         "the freeze pinned what was already composed, so the companion digest is "
         "unchanged — the snapshot key is the only difference between the two runs"
+    )
+
+
+def test_a_self_view_records_the_companion_private_and_its_dependencies(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Under ``--self`` a companion of a root composes on the root's private surface.
+
+    The record names the surface the companion was composed on, not a fixed
+    one, and names the companion's own dependency after it: the dependency
+    reached the environment too, so an auditor must see it.
+    """
+    dependency = make_package(ocx, f"{unique_repo}_cdep", "1.0.0", tmp_path / "cdep")
+    dependency_digest = fetch_platform_manifest_digest(
+        ocx.registry, dependency.repo, dependency.tag
+    )
+    companion_repo = f"{unique_repo}_companion"
+    companion = make_package(
+        ocx,
+        companion_repo,
+        "1.0.0",
+        tmp_path / "companion",
+        bins=[],
+        dependencies=[
+            {"identifier": f"{dependency.fq}@{dependency_digest}", "visibility": "public"}
+        ],
+    )
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path / "base", cascade=True)
+    _write_home_config(
+        ocx, f'[patches]\nregistry = "{ocx.registry}/{companion_repo}_patches"\nrequired = false\n'
+    )
+    descriptor = tmp_path / "self_descriptor.json"
+    descriptor.write_text(
+        json.dumps({"version": 1, "rules": [{"match": "*", "packages": [companion.fq]}]})
+    )
+    publish = ocx.run(
+        "patch", "publish", "--descriptor", str(descriptor), base.fq,
+        format=None, check=False,
+    )
+    assert publish.returncode == EXIT_SUCCESS, (
+        f"patch publish must succeed; rc={publish.returncode}\nstderr:\n{publish.stderr}"
+    )
+
+    install = ocx.run("package", "install", base.short, format=None, check=False)
+    assert install.returncode == EXIT_SUCCESS, (
+        f"install must discover and fetch the companion; rc={install.returncode}\n"
+        f"stderr:\n{install.stderr}"
+    )
+
+    sink = _sink(tmp_path, "patched-self")
+    result = ocx.run(
+        "package", "exec", "--self", "--records-dir", str(sink),
+        base.short, "--", "hello",
+        format=None, check=False,
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"the patched --self exec must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    record = _one_record(sink)
+    entry = _companion_entry(record, companion_repo)
+    assert entry["annotations"]["sh.ocx.visibility"] == "private", (
+        "a companion of a root composes on that root's private surface under --self; "
+        f"got {entry['annotations']}"
+    )
+    names = [item["name"] for item in record["packages"]]
+    recorded = [
+        item for item in _entries_with_role(record, "dependency")
+        if item["name"] == dependency.repo
+    ]
+    assert recorded, (
+        f"the companion's dependency is recorded as a dependency; got {names}"
+    )
+    assert names.index(dependency.repo) > names.index(companion_repo), (
+        f"a companion's dependencies follow the companions; got {names}"
+    )
+    assert recorded[0]["annotations"]["sh.ocx.visibility"] == "public", (
+        f"the dependency keeps its declared edge visibility; got {recorded[0]['annotations']}"
     )

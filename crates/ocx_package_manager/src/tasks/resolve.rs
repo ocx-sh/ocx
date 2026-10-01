@@ -13,6 +13,7 @@ use ocx_index::{IndexOperation, SelectResult};
 use ocx_package::{
     install_info::InstallInfo, metadata::binary::BinaryName, metadata::entrypoint::EntrypointName,
     metadata::env::entry::Entry, metadata::integrations::IntegrationEntry, metadata::visibility::Visibility,
+    resolved_package::ResolvedDependency,
 };
 
 use super::super::PackageManager;
@@ -377,6 +378,16 @@ pub struct AdmittedClaims {
     pub binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)>,
     pub entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)>,
     pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
+    /// Every patch companion composed, once, in overlay order.
+    pub companions: Vec<CompanionProjection>,
+}
+
+/// One patch companion as composed: the surface it projected on and its resolved dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompanionProjection {
+    pub pinned: ocx_oci::PinnedPackageRef,
+    pub surface: Visibility,
+    pub dependencies: Vec<ResolvedDependency>,
 }
 
 /// The physical transport identifier for `pinned`: the index's registry when a source
@@ -654,6 +665,7 @@ impl PackageManager {
             binaries: out.admitted_binaries,
             entrypoints: out.admitted_entrypoints,
             integrations: out.admitted_integrations,
+            companions: Vec::new(),
         };
         // Reserved keys are gated here, not in `Env::apply_entries`, which `emit_lines` bypasses.
         // Per region: a whole-vector `retain` would shift the `compose_count`/`provenance` indices.
@@ -686,6 +698,7 @@ impl PackageManager {
                     }
                     attribution.binaries.extend(overlay.claims.binaries);
                     attribution.entrypoints.extend(overlay.claims.entrypoints);
+                    attribution.companions.extend(overlay.claims.companions);
                     // Empty when the gate is off; nothing was collected upstream.
                     for (identifier, entry) in overlay.claims.integrations {
                         if seen_integrations.insert((identifier.strip_advisory(), entry.namespace.clone())) {
@@ -764,20 +777,8 @@ impl PackageManager {
         // Keyed by full `registry/repo:tag`: a catch-all companion is projected and emitted once,
         // under the first matching base. Fail-closed checks still run on every base.
         let mut companion_projection_cache: HashMap<ocx_oci::PackageRef, CompanionOutcome> = HashMap::new();
-        // Shared across companions and seeded with the base, so a package reached twice emits once, in
-        // its first position (#306); an entry comparison would miss a root the base emits on its link.
-        let mut emitted: HashSet<ocx_oci::PinnedPackageRef> =
-            admitted.iter().map(ocx_oci::PinnedPackageRef::strip_advisory).collect();
         let roots: HashSet<ocx_oci::PinnedPackageRef> =
             packages.iter().map(|root| root.identifier().strip_advisory()).collect();
-        // Every package the env carries, judged from `resolved()` rather than what was emitted:
-        // `emitted` skips a dependency reached twice, a conflict check must not. Accepted companion
-        // roots sit apart: one repository at two tags is two companions, never a conflict.
-        let mut accepted: Vec<ocx_oci::PinnedPackageRef> =
-            composer::surface_closure(packages, composer::surface_axes(self_view))
-                .cloned()
-                .collect();
-        let mut accepted_companions: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
 
         let mut patch_set: SitePatchSet = SitePatchSet::new();
         // First pass: the matched companions per admitted target, and each companion's surface.
@@ -893,11 +894,7 @@ impl PackageManager {
 
             // A dependency is admitted onto this surface through its interface alone, so that is
             // all its companions may add; a leaked private var would reach every consumer.
-            let target_axes = if roots.contains(&admitted_id.strip_advisory()) {
-                composer::surface_axes(self_view)
-            } else {
-                Visibility::INTERFACE
-            };
+            let target_axes = composer::target_axes(roots.contains(&admitted_id.strip_advisory()), self_view);
             for companion_entry in &companions {
                 companion_axes
                     .entry(companion_entry.identifier.clone())
@@ -906,6 +903,27 @@ impl PackageManager {
             }
             matched.push((admitted_id, companions));
         }
+
+        if matched.is_empty() {
+            return Ok(Some(patch_set));
+        }
+
+        // Shared across companions and seeded with the base, so a package reached twice emits once, in
+        // its first position (#306); an entry comparison would miss a root the base emits on its link.
+        let mut emitted: composer::Emitted = admitted
+            .iter()
+            .map(|identifier| {
+                let key = identifier.strip_advisory();
+                let axes = composer::target_axes(roots.contains(&key), self_view);
+                (key, axes)
+            })
+            .collect();
+        // Every package the env carries, judged from `resolved()` rather than what was emitted:
+        // `emitted` skips a dependency reached twice, a conflict check must not. Accepted companion
+        // roots sit apart: one repository at two tags is two companions, never a conflict.
+        let mut accepted =
+            composer::RepositoryDigests::new(composer::surface_closure(packages, composer::surface_axes(self_view)));
+        let mut accepted_companions = composer::RepositoryDigests::default();
 
         // Second pass: every match is known, so each companion projects once on its full surface.
         for (admitted_id, companions) in matched {
@@ -1016,13 +1034,9 @@ impl PackageManager {
                 let companion_deps: Vec<ocx_oci::PinnedPackageRef> =
                     composer::admitted_dependencies(&companion_arc, axes).cloned().collect();
                 // Every pair on the surface but two companion roots; a conflict fails the later one.
-                let conflict = composer::refuse_digest_conflicts(
-                    accepted
-                        .iter()
-                        .chain(&companion_deps)
-                        .chain(std::iter::once(companion_pinned)),
-                )
-                .and_then(|()| composer::refuse_digest_conflicts(accepted_companions.iter().chain(&companion_deps)));
+                let conflict = accepted
+                    .refuse(companion_deps.iter().chain(std::iter::once(companion_pinned)))
+                    .and_then(|()| accepted_companions.refuse(&companion_deps));
                 let projection = match conflict {
                     Ok(()) => {
                         composer::compose_companion(
@@ -1038,8 +1052,8 @@ impl PackageManager {
                 };
                 match projection {
                     Ok(out) => {
-                        accepted.extend(companion_deps);
-                        accepted_companions.push(companion_pinned.clone());
+                        accepted.extend(&companion_deps);
+                        accepted_companions.extend(std::iter::once(companion_pinned));
                         // A cache miss proves no earlier base emitted it; empty output is still `Projected`.
                         let pinned = companion_arc.identifier().clone();
                         companion_overlay
@@ -1049,6 +1063,11 @@ impl PackageManager {
                         companion_overlay.claims.binaries.extend(out.admitted_binaries);
                         companion_overlay.claims.entrypoints.extend(out.admitted_entrypoints);
                         companion_overlay.claims.integrations.extend(out.admitted_integrations);
+                        companion_overlay.claims.companions.push(CompanionProjection {
+                            pinned: pinned.clone(),
+                            surface: axes,
+                            dependencies: companion_arc.resolved().dependencies.clone(),
+                        });
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Projected);
                     }
                     Err(error) => {
@@ -1061,22 +1080,14 @@ impl PackageManager {
                                 },
                             ));
                         }
-                        log::warn!(
-                            "site-patch-set: failed to compose optional companion '{}' for '{}': {error}; skipping",
-                            companion_id,
-                            admitted_id
-                        );
+                        log::warn!("skipping optional companion '{companion_id}' for '{admitted_id}': {error}");
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                     }
                 }
             }
 
-            // A companion with claims but no env still contributes.
-            if !companion_overlay.entries.is_empty()
-                || !companion_overlay.claims.binaries.is_empty()
-                || !companion_overlay.claims.entrypoints.is_empty()
-                || !companion_overlay.claims.integrations.is_empty()
-            {
+            // Every projection claims its companion, so a companion contributing nothing else still lands.
+            if !companion_overlay.claims.companions.is_empty() {
                 patch_set.insert(admitted_id.clone(), companion_overlay);
             }
         }
@@ -2067,8 +2078,9 @@ mod spec_tests {
 }
 
 // Site-overlay invariants: a patch beats a root var; a private dep and its patches appear
-// only at self_view=true; a companion's private env never surfaces; no `[patches]` leaves
-// compose output unchanged; admitted visit order, dedup and the offline build hold.
+// only at self_view=true; a companion composes on its targets' surfaces, so its private env
+// reaches only a root target under `--self`; no `[patches]` leaves compose output unchanged;
+// admitted visit order, dedup and the offline build hold.
 
 #[cfg(test)]
 mod phase4_spec_tests {
@@ -5498,8 +5510,8 @@ mod phase4_spec_tests {
         );
     }
 
-    /// A companion that an earlier companion already reached as a dependency is still emitted
-    /// itself, so its row arrives at the merge twice and only the merge-site key keeps it once.
+    /// A companion that an earlier companion already reached as a dependency contributes its
+    /// integrations row once: the dependency reach collected it.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_companion_an_earlier_companion_reaches_contributes_its_row_once() {
         let dir = TempDir::new().unwrap();
@@ -5527,6 +5539,78 @@ mod phase4_spec_tests {
             "a companion reached earlier as a dependency must contribute its row once; rows: {:?}",
             attribution.integrations
         );
+    }
+
+    /// A companion an earlier companion reached as a dependency emitted its interface side there:
+    /// its own composition adds no second var or claim, only its private vars under `--self`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_an_earlier_companion_reaches_is_emitted_and_claimed_once() {
+        for self_view in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let config = test_patch_config();
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let digest = sha256('e');
+            let second = PackageRef::new_registry("proxy-config", PATCH_REGISTRY).clone_with_tag("latest");
+            let second_pinned = PinnedPackageRef::try_from(second.clone_with_digest(digest.clone())).unwrap();
+            seed_package_with_metadata(
+                &manager.file_structure().packages,
+                &second_pinned,
+                &ResolvedPackage::new(),
+                &serde_json::json!({
+                    "type": "bundle",
+                    "version": 1,
+                    "binaries": ["proxytool"],
+                    "env": [constant_var("PROXY_PUBLIC", "public"), constant_var("PROXY_PRIVATE", "private")],
+                }),
+            );
+            seed_companion_pin(manager.file_structure(), &second, &digest);
+            let first = seed_companion_with_var(
+                &manager,
+                "ca-bundle",
+                'c',
+                &tc_reaching(&with_advisory_tag(&second_pinned, "1")),
+                "CA_VAR",
+            );
+            seed_global_descriptor(&manager, &config, &[&first, &second]).await;
+            let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+            let (entries, _, _, attribution) = manager
+                .resolve_env_with_attribution(
+                    &[root],
+                    self_view,
+                    super::EnvScope::package_tier(),
+                    &super::host_platform(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                attribution.companions.len(),
+                2,
+                "self_view={self_view}: premise, both companions project; claims: {:?}",
+                attribution.companions
+            );
+            assert_eq!(
+                count_key(&entries, "PROXY_PUBLIC"),
+                1,
+                "self_view={self_view}: entries {entries:?}"
+            );
+            assert_eq!(
+                count_key(&entries, "PROXY_PRIVATE"),
+                usize::from(self_view),
+                "self_view={self_view}: the private var reaches only a private projection; entries {entries:?}"
+            );
+            let proxytool_claims = attribution
+                .binaries
+                .iter()
+                .filter(|(owner, name)| owner.digest() == digest && name.as_str() == "proxytool")
+                .count();
+            assert_eq!(
+                proxytool_claims, 1,
+                "self_view={self_view}: claims {:?}",
+                attribution.binaries
+            );
+        }
     }
 
     // ── A dependency shared with the base or another companion emits once ──
@@ -5920,6 +6004,91 @@ mod phase4_spec_tests {
         );
     }
 
+    /// A conflict the base reaches only through a private edge exists on its private surface alone:
+    /// refused under `--self`, no conflict on the interface surface.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conflict_through_a_base_private_dependency_is_refused_under_self_only() {
+        for self_view in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let config = ResolvedPatchConfig {
+                required: true,
+                ..test_patch_config()
+            };
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let (base_dep, companion_dep) = seed_conflicting_dep(&manager);
+            let companion = seed_companion_with_env(
+                &manager,
+                "ca-bundle",
+                'c',
+                &tc_reaching(&companion_dep),
+                serde_json::json!([constant_var("COMPANION_VAR", "public")]),
+            );
+            seed_global_descriptor(&manager, &config, &[&companion]).await;
+            let private_edge = ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: base_dep,
+                    visibility: Visibility::PRIVATE,
+                }],
+            };
+            let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', private_edge));
+
+            let result = manager
+                .resolve_env(
+                    &[root],
+                    self_view,
+                    super::EnvScope::package_tier(),
+                    &super::host_platform(),
+                )
+                .await;
+
+            if self_view {
+                let error = result.expect_err("the private surface carries both digests");
+                assert!(is_companion_digest_conflict(&error), "got: {error:?}");
+            } else {
+                let entries = result.expect("the interface surface never carries the base's private dependency");
+                assert_eq!(count_key(&entries, "COMPANION_VAR"), 1, "entries: {entries:?}");
+            }
+        }
+    }
+
+    /// A companion whose own root is another digest of a repository the base reaches conflicts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_root_at_another_digest_of_a_base_dependency_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let config = ResolvedPatchConfig {
+            required: true,
+            ..test_patch_config()
+        };
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let base_ca_bundle = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(sha256('9')),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &manager.file_structure().packages,
+            &base_ca_bundle,
+            &ResolvedPackage::new(),
+            "BASE_CA_VAR",
+            "base",
+            Visibility::INTERFACE,
+        );
+        let companion = seed_companion_with_var(&manager, "ca-bundle", 'c', &ResolvedPackage::new(), "CA_VAR");
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(
+            dir.path(),
+            "rootpkg",
+            'r',
+            tc_reaching(&base_ca_bundle),
+        ));
+
+        let error = manager
+            .resolve_env(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .expect_err("the env would carry ca-bundle at two digests");
+
+        assert!(is_companion_digest_conflict(&error), "got: {error:?}");
+    }
+
     // ── A companion's launchers stay off PATH; its dependencies' are claimed ──
 
     /// A companion's `entrypoints/` would launch the companion's own env, not its target's: it
@@ -5939,6 +6108,7 @@ mod phase4_spec_tests {
             &serde_json::json!({
                 "type": "bundle",
                 "version": 1,
+                "binaries": ["ctool"],
                 "entrypoints": { "patched-tool": {} },
                 "env": [constant_var("COMPANION_VAR", "public")],
             }),
@@ -5974,6 +6144,14 @@ mod phase4_spec_tests {
                 .any(|(owner, _)| owner.digest() == digest),
             "no entrypoint claim names the companion; claims: {:?}",
             attribution.entrypoints
+        );
+        assert!(
+            attribution
+                .binaries
+                .iter()
+                .any(|(owner, name)| owner.digest() == digest && name.as_str() == "ctool"),
+            "the companion's own binaries stay claimed; claims: {:?}",
+            attribution.binaries
         );
     }
 
@@ -6031,6 +6209,96 @@ mod phase4_spec_tests {
         );
     }
 
+    // ── Each composed companion is claimed with its surface and dependencies ─
+
+    /// A companion is claimed once with the surface it projected on — its root target's surface,
+    /// the interface under a dependency target, their union when it matched both — and with its
+    /// resolved dependencies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_companion_is_claimed_with_its_surface_and_dependencies() {
+        for (self_view, root_reaches_dep, surface) in [
+            (false, false, Visibility::INTERFACE),
+            (true, false, Visibility::PRIVATE),
+            (true, true, Visibility::PUBLIC),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let config = test_patch_config();
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let store = manager.file_structure().packages.clone();
+            let companion_dep = pinned("companiondep", 'd');
+            seed_package_with_constant_var(
+                &store,
+                &companion_dep,
+                &ResolvedPackage::new(),
+                "COMPANION_DEP_VAR",
+                "dep",
+                Visibility::INTERFACE,
+            );
+            let companion = seed_companion_with_var(&manager, "ca-bundle", 'c', &tc_reaching(&companion_dep), "CA_VAR");
+            seed_global_descriptor(&manager, &config, &[&companion]).await;
+            let target_dep = pinned("targetdep", 't');
+            seed_package_with_constant_var(
+                &store,
+                &target_dep,
+                &ResolvedPackage::new(),
+                "TARGET_DEP_VAR",
+                "target",
+                Visibility::PUBLIC,
+            );
+            let root_resolved = if root_reaches_dep {
+                tc_reaching(&target_dep)
+            } else {
+                ResolvedPackage::new()
+            };
+            let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', root_resolved));
+
+            let (_, _, _, attribution) = manager
+                .resolve_env_with_attribution(
+                    &[root],
+                    self_view,
+                    super::EnvScope::package_tier(),
+                    &super::host_platform(),
+                )
+                .await
+                .unwrap();
+
+            let expected = super::CompanionProjection {
+                pinned: PinnedPackageRef::try_from(companion.clone_with_digest(sha256('c'))).unwrap(),
+                surface,
+                dependencies: tc_reaching(&companion_dep).dependencies,
+            };
+            assert_eq!(
+                attribution.companions,
+                vec![expected],
+                "self_view={self_view}, root_reaches_dep={root_reaches_dep}"
+            );
+        }
+    }
+
+    /// A companion contributing integrations and no env is claimed like any other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_integrations_only_companion_is_claimed() {
+        let dir = TempDir::new().unwrap();
+        let config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let (companion, companion_pinned) = seed_companion_with_tc(&manager, "ca-bundle", 'c', &ResolvedPackage::new());
+        seed_global_descriptor(&manager, &config, &[&companion]).await;
+        let root = Arc::new(make_install_info(dir.path(), "rootpkg", 'r', ResolvedPackage::new()));
+
+        let (_, _, _, attribution) = manager
+            .resolve_env_with_attribution(&[root], false, super::EnvScope::package_tier(), &super::host_platform())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            integration_rows(&attribution, &companion_pinned, "vendor.companion"),
+            1,
+            "positive control: the companion's integration composed"
+        );
+        let claimed: Vec<&PinnedPackageRef> = attribution.companions.iter().map(|c| &c.pinned).collect();
+        assert_eq!(claimed, vec![&companion_pinned]);
+    }
+
     // ── A companion composes as part of its target ───────────────────────────
 
     /// Install a companion carrying the env entries `env` (a metadata `env` array) over the
@@ -6085,6 +6353,140 @@ mod phase4_spec_tests {
 
     fn count_key(entries: &[metadata_env::entry::Entry], key: &str) -> usize {
         entries.iter().filter(|entry| entry.key == key).count()
+    }
+
+    /// A companion's private dependency reaches only a private projection: absent from the
+    /// interface surface and from a dependency target, present under a root target with `--self`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companions_private_dependency_reaches_a_private_projection_only() {
+        for (rule, self_view, reaches) in [
+            ("*plantuml*", false, false),
+            ("*jre*", true, false),
+            ("*plantuml*", true, true),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let config = test_patch_config();
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let store = manager.file_structure().packages.clone();
+            let secret = pinned("secretdep", 'e');
+            seed_package_with_metadata(
+                &store,
+                &secret,
+                &ResolvedPackage::new(),
+                &serde_json::json!({
+                    "type": "bundle",
+                    "version": 1,
+                    "entrypoints": { "secret-launch": {} },
+                    "env": [constant_var("SECRET_VAR", "public")],
+                }),
+            );
+            let companion = seed_companion_with_env(
+                &manager,
+                "secret-patch",
+                'c',
+                &ResolvedPackage {
+                    dependencies: vec![ResolvedDependency {
+                        identifier: secret.clone(),
+                        visibility: Visibility::PRIVATE,
+                    }],
+                },
+                serde_json::json!([constant_var("COMPANION_VAR", "public")]),
+            );
+            seed_global_descriptor_matching(&manager, &config, rule, &[&companion]).await;
+            let root = seed_plantuml_with_private_jre(&dir, &store);
+
+            let (entries, _, _, attribution) = manager
+                .resolve_env_with_attribution(
+                    &[root],
+                    self_view,
+                    super::EnvScope::package_tier(),
+                    &super::host_platform(),
+                )
+                .await
+                .unwrap();
+
+            let case = format!("rule={rule} self_view={self_view}");
+            assert_eq!(
+                count_key(&entries, "COMPANION_VAR"),
+                1,
+                "{case}: premise; entries {entries:?}"
+            );
+            assert_eq!(
+                count_key(&entries, "SECRET_VAR"),
+                usize::from(reaches),
+                "{case}: entries {entries:?}"
+            );
+            let launchers = store.package_dir(&secret).entrypoints();
+            assert_eq!(
+                entries
+                    .iter()
+                    .any(|e| e.key == "PATH" && std::path::Path::new(&e.value) == launchers),
+                reaches,
+                "{case}: entries {entries:?}"
+            );
+            assert_eq!(
+                attribution
+                    .entrypoints
+                    .iter()
+                    .any(|(owner, _)| owner.digest() == secret.digest()),
+                reaches,
+                "{case}: claims {:?}",
+                attribution.entrypoints
+            );
+        }
+    }
+
+    /// A companion matching a root under `--self` and a dependency composes once on the union of
+    /// both surfaces, whichever target the composition reaches first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_matching_a_root_and_a_dependency_composes_once_on_the_union() {
+        for graphviz_first in [true, false] {
+            let dir = TempDir::new().unwrap();
+            let config = test_patch_config();
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let store = manager.file_structure().packages.clone();
+            let plantjre = pinned("plantjre", 'j');
+            seed_package_with_constant_var(
+                &store,
+                &plantjre,
+                &ResolvedPackage::new(),
+                "PLANTJRE_VAR",
+                "plantjre",
+                Visibility::PUBLIC,
+            );
+            let companion = seed_companion_with_env(
+                &manager,
+                "plant-patch",
+                'c',
+                &ResolvedPackage::new(),
+                serde_json::json!([
+                    constant_var("C_PRIVATE", "private"),
+                    constant_var("C_PUBLIC", "public"),
+                    constant_var("C_INTERFACE", "interface"),
+                ]),
+            );
+            seed_global_descriptor_matching(&manager, &config, "*plant*", &[&companion]).await;
+            let graphviz = Arc::new(make_install_info(dir.path(), "graphviz", 'g', tc_reaching(&plantjre)));
+            let plantuml = Arc::new(make_install_info(dir.path(), "plantuml", 'p', ResolvedPackage::new()));
+            let roots = if graphviz_first {
+                vec![graphviz, plantuml]
+            } else {
+                vec![plantuml, graphviz]
+            };
+
+            let entries = manager
+                .resolve_env(&roots, true, super::EnvScope::package_tier(), &super::host_platform())
+                .await
+                .unwrap();
+
+            for key in ["C_PRIVATE", "C_PUBLIC", "C_INTERFACE"] {
+                assert_eq!(
+                    count_key(&entries, key),
+                    1,
+                    "graphviz_first={graphviz_first}: {key}; entries {entries:?}"
+                );
+            }
+        }
     }
 
     /// A companion patching a root's own entrypoint: its `private` var reaches the root's private
@@ -6213,6 +6615,70 @@ mod phase4_spec_tests {
             patch_start + provenance.len(),
             "the overlay stays one trailing region; entries: {entries:?}, patch_start: {patch_start}"
         );
+    }
+
+    /// A root emitted on its private side still has its interface side owed: a companion reaching
+    /// it through a public edge adds the interface-only var, and neither side is emitted twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_reaching_its_root_target_adds_only_the_side_the_root_left_out() {
+        for (self_view, expected_private) in [(true, 1), (false, 0)] {
+            let dir = TempDir::new().unwrap();
+            let config = test_patch_config();
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let store = manager.file_structure().packages.clone();
+            let root_id = pinned("xroot", 'a');
+            seed_package_with_metadata(
+                &store,
+                &root_id,
+                &ResolvedPackage::new(),
+                &serde_json::json!({
+                    "type": "bundle",
+                    "version": 1,
+                    "env": [constant_var("X_IFACE", "interface"), constant_var("X_PRIV", "private")],
+                }),
+            );
+            let root_dir = store.path(&root_id);
+            let root = Arc::new(InstallInfo::new(
+                root_id.clone(),
+                serde_json::from_str::<ocx_package::metadata::Metadata>(
+                    &std::fs::read_to_string(root_dir.join("metadata.json")).unwrap(),
+                )
+                .unwrap(),
+                ResolvedPackage::new(),
+                ocx_store::file_structure::PackageDir { dir: root_dir },
+            ));
+            let companion = seed_companion_with_env(
+                &manager,
+                "x-patch",
+                'c',
+                &tc_reaching(&root_id),
+                serde_json::json!([constant_var("C_PUBLIC", "public")]),
+            );
+            seed_global_descriptor_matching(&manager, &config, "*xroot*", &[&companion]).await;
+
+            let entries = manager
+                .resolve_env(
+                    &[root],
+                    self_view,
+                    super::EnvScope::package_tier(),
+                    &super::host_platform(),
+                )
+                .await
+                .unwrap();
+
+            let case = format!("self_view={self_view}");
+            assert_eq!(
+                count_key(&entries, "C_PUBLIC"),
+                1,
+                "{case}: premise; entries {entries:?}"
+            );
+            assert_eq!(count_key(&entries, "X_IFACE"), 1, "{case}: entries {entries:?}");
+            assert_eq!(
+                count_key(&entries, "X_PRIV"),
+                expected_private,
+                "{case}: entries {entries:?}"
+            );
+        }
     }
 
     /// A leaf root's own launcher sees its private surface, where an interface-only companion var
