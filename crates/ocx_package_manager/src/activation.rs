@@ -399,8 +399,9 @@ async fn project_entries(
             groups: groups.clone(),
         })
     });
+    let no_patches = config.no_patches_repositories();
     let scope = crate::EnvScope::Project {
-        no_patches: config.no_patches_repositories(),
+        no_patches: no_patches.clone(),
         env,
         toolchain,
     };
@@ -408,7 +409,33 @@ async fn project_entries(
         .resolve_env_with_attribution(&roots.roots, false, scope, input.target)
         .await?;
     reconcile_list_separators(entries.iter_mut())?;
+    // The global tier's map is folded in by the caller, the one place both scopes are known.
+    entries.extend(manager.launch_identity_entry(&roots.roots, &no_patches, None));
     Ok((entries, env_withheld))
+}
+
+/// Folds the global tier's launch identities into the project's entry, which replaces the global
+/// one on the shell: without the fold, a global tool's launcher loses its name inside the project.
+fn fold_global_launch_identities(global: &[Entry], project: &mut [Entry]) {
+    use ocx_package::launch::LaunchIdentities;
+
+    let key = ocx_config::env::keys::OCX_LAUNCH_IDENTITIES;
+    let Some(global_value) = global.iter().rev().find(|entry| entry.key == key) else {
+        return;
+    };
+    let Some(project_entry) = project.iter_mut().find(|entry| entry.key == key) else {
+        return;
+    };
+    match LaunchIdentities::decode(&project_entry.value) {
+        Ok(mut own) => {
+            own.inherit(&global_value.value);
+            if let Some(value) = own.encode() {
+                project_entry.value = value;
+            }
+        }
+        // This process's own encoding; the project's map alone still names its tools.
+        Err(error) => log::debug!("launch identities were not merged: {error}"),
+    }
 }
 
 /// Compose both scopes and decide the project slot.
@@ -511,7 +538,8 @@ async fn project_contribution(
 
         ActivateMode::Env => {
             let lock = current_lock(lock, &config, lock_path)?;
-            let (entries, env_withheld) = project_entries(input, consent, project, &config, lock, home).await?;
+            let (mut entries, env_withheld) = project_entries(input, consent, project, &config, lock, home).await?;
+            fold_global_launch_identities(&outcome.global, &mut entries);
             outcome.project = entries;
             if env_withheld {
                 outcome.messages.push(format!(
@@ -1669,6 +1697,92 @@ mod session_path_tests {
             !segments.contains(&tool_bin),
             "and drops the composed one; got {segments:#?}"
         );
+    }
+
+    // ── Launch identities ─────────────────────
+
+    const DIGEST_GLOBAL: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_PROJECT: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn identities_entry(value: String) -> Entry {
+        Entry {
+            key: ocx_config::env::keys::OCX_LAUNCH_IDENTITIES.to_owned(),
+            value,
+            kind: ModifierKind::Constant,
+            separator: None,
+        }
+    }
+
+    /// The project's map replaces the global one on the shell, so it must carry both.
+    #[test]
+    fn the_project_launch_identities_keep_the_global_tools_names() {
+        let global = vec![identities_entry(format!(
+            r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}},"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"]}}}}"#
+        ))];
+        let mut project = vec![
+            path_entry("/work/acme/bin"),
+            identities_entry(format!(
+                r#"{{"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"],"no_patches":true}}}}"#
+            )),
+        ];
+
+        super::fold_global_launch_identities(&global, &mut project);
+
+        assert_eq!(
+            project[1].value,
+            format!(
+                r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}},"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"],"no_patches":true}}}}"#
+            ),
+            "the project's own entry, and its opt-out, win for a digest both scopes name"
+        );
+    }
+
+    /// The project scope owns its launch identities: leaving it unsets the key with no global
+    /// tier, and sets the global map back with one.
+    #[test]
+    fn leaving_the_project_retires_its_launch_identities() {
+        let global_value = format!(r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}}}}"#);
+        let project_value = format!(r#"{{"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"]}}}}"#);
+        let key = ocx_config::env::keys::OCX_LAUNCH_IDENTITIES.to_owned();
+
+        for global in [Vec::new(), vec![identities_entry(global_value.clone())]] {
+            let mut before = Env::clean();
+            before.set("PATH", "/usr/bin");
+
+            let inside = outcome(
+                session(),
+                global.clone(),
+                vec![identities_entry(project_value.clone())],
+                None,
+            );
+            let ledger = next_ledger(&Ledger::empty(), "fp-1", &inside, &before);
+            let mut current = before.clone();
+            current.apply_entries(&desired_entries(&inside));
+            assert_eq!(current.get(&key), Some(std::ffi::OsStr::new(&project_value)));
+
+            let mut outside = outcome(session(), global.clone(), Vec::new(), None);
+            outside.slot = None;
+            outside.resolved = false;
+            let plan = plan_for(&ledger, &outside, &[Path::new(OCX_HOME)], &current);
+
+            let set: Vec<&str> = plan
+                .sets
+                .iter()
+                .filter(|entry| entry.key == key)
+                .map(|entry| entry.value.as_str())
+                .collect();
+            if global.is_empty() {
+                assert_eq!(
+                    plan.restores,
+                    vec![(key.clone(), None)],
+                    "no global map: the key is unset"
+                );
+                assert!(set.is_empty());
+            } else {
+                assert!(plan.restores.is_empty());
+                assert_eq!(set, [global_value.as_str()], "the global map replaces the project's");
+            }
+        }
     }
 
     // ── The deletion authority's scope ─────────────────────

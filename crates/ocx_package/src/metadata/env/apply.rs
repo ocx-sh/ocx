@@ -755,8 +755,7 @@ mod tests {
         view
     }
 
-    const IDENTITIES: &str =
-        r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":["ocx.sh/plantuml:1"]}"#;
+    const IDENTITIES: &str = r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"names":["ocx.sh/plantuml:1"]}}"#;
 
     fn identities() -> crate::launch::LaunchIdentities {
         let guard = ocx_util::env::overrides::lock();

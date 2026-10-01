@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1832,11 +1833,13 @@ def test_no_patches_opt_out_honored_across_launcher_in_run(
     )
 
 
+@pytest.mark.parametrize("carrier", ["patches", "identities"])
 def test_launcher_identity_opt_out_respects_system_required(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, carrier: str
 ) -> None:
-    """A forwarded opt-out matches the launcher's forwarded name, and suppresses a
-    non-system-required companion but never a system-required one.
+    """A forwarded opt-out, whether `ocx exec`'s `OCX_PATCHES` list or an exported
+    identity's marker, suppresses a non-system-required companion but never a
+    system-required one.
 
     `system_required` needs a SYSTEM-scope config this harness cannot write, so this
     drives `ocx launcher exec` directly with hand-set `OCX_PATCHES` and
@@ -1862,14 +1865,17 @@ def test_launcher_identity_opt_out_respects_system_required(
                 "path_template": "{registry}/{repository}",
                 "required": True,
                 "system_required": system_required,
-                "no_patches": [base_name],
+                "no_patches": [base_name] if carrier == "patches" else [],
             }
         )
+        identity: dict[str, object] = {"names": [base_pkg.fq]}
+        if carrier == "identities":
+            identity["no_patches"] = True
         env = {
             **ocx.env,
             "OCX_NO_CONFIG": "1",
             "OCX_PATCHES": wire,
-            "OCX_LAUNCH_IDENTITIES": json.dumps({base_digest: [base_pkg.fq]}),
+            "OCX_LAUNCH_IDENTITIES": json.dumps({base_digest: identity}),
         }
         return subprocess.run(
             [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
@@ -3144,6 +3150,89 @@ def test_tag_scoped_rule_reaches_a_deferred_tools_launcher_through_its_shim(
         "a tag-scoped rule must reach the launcher a shim hands off to; got env dump:\n"
         f"{result.stdout}"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="evaluates the POSIX `--shell=sh` export")
+@pytest.mark.parametrize("tier", ["project", "package"])
+def test_tag_scoped_rule_reaches_a_launcher_run_from_an_exported_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, tier: str
+) -> None:
+    """`ocx env --shell` and `ocx package env --shell` export the names they composed, so
+    a launcher run from that `PATH`, with no ocx parent, still matches a
+    `registry/repository:*` rule."""
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    companion_fq = _publish_private_companion(ocx, tmp_path, registry, f"exported_launch_companion_{tier}")
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": _tag_glob(base_pkg), "packages": [companion_fq]}])
+
+    workdir = tmp_path / f"exported_{tier}"
+    workdir.mkdir()
+    if tier == "project":
+        _write_project_toml(workdir, base_pkg.fq, opt_out=False)
+        lock = _run_in(ocx, workdir, "lock")
+        assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+        exporter = [str(ocx.binary), "env", "--shell=sh"]
+    else:
+        ocx.plain("package", "install", base_pkg.short)
+        exporter = [str(ocx.binary), "package", "env", base_pkg.short, "--shell=sh"]
+
+    result = subprocess.run(
+        ["sh", "-c", f'eval "$({shlex.join(exporter)})" && showenv'],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_BINARY_PIN": str(ocx.binary)},
+        check=False,
+    )
+    assert result.returncode == 0, f"the exported showenv must run; stderr: {result.stderr}"
+    assert "JDK_JAVA_OPTIONS=-Dpatched=1" in result.stdout.splitlines(), (
+        f"a tag-scoped rule must reach a launcher run from the {tier} export; got env dump:\n{result.stdout}"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="evaluates the POSIX `--shell=sh` export")
+def test_a_project_opt_out_reaches_a_launcher_run_from_an_exported_path(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """The export marks an opted-out tool, so its launcher skips the patch tier as under
+    `ocx exec`: neither a `registry/repository:*` rule nor a `*` rule reaches it."""
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    catch_all_repo = _unique_repo("exported_opt_out_catch_all")
+    _make_companion(ocx, catch_all_repo, "1.0.0", tmp_path, "OPTED_CATCH_ALL_VAR", "everywhere")
+    anchored_repo = _unique_repo("exported_opt_out_anchored")
+    _make_companion(ocx, anchored_repo, "1.0.0", tmp_path, "OPTED_ANCHORED_VAR", "anchored")
+    _publish_global_rules(
+        ocx,
+        tmp_path,
+        registry,
+        [
+            {"match": "*", "packages": [f"{registry}/{catch_all_repo}:1.0.0"]},
+            {"match": _tag_glob(base_pkg), "packages": [f"{registry}/{anchored_repo}:1.0.0"]},
+        ],
+    )
+    ocx.plain("package", "install", base_pkg.short)
+
+    project = tmp_path / "exported_opt_out"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=True)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    exporter = shlex.join([str(ocx.binary), "env", "--shell=sh"])
+    result = subprocess.run(
+        ["sh", "-c", f'eval "$({exporter})" && showenv'],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_BINARY_PIN": str(ocx.binary)},
+        check=False,
+    )
+    assert result.returncode == 0, f"the exported showenv must run; stderr: {result.stderr}"
+    leaked = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith(("OPTED_CATCH_ALL_VAR=", "OPTED_ANCHORED_VAR="))
+    ]
+    assert not leaked, f"an opted-out tool's launcher must skip the patch tier; got: {leaked}"
 
 
 def test_a_launcher_run_by_absolute_path_matches_only_catch_all_rules(

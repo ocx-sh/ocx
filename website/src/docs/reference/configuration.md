@@ -694,10 +694,11 @@ A fourth surface reaches the opt-out indirectly: a binary spawned by `ocx exec` 
 ocx through its own generated launcher (`ocx launcher exec`). `ocx exec` forwards the opt-out
 to that child process over [`OCX_PATCHES`][env-ocx-patches]. The launcher matches it against
 the package names `ocx exec` forwards in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities],
-since its package directory carries no `registry/repository` of its own.
+since its package directory carries no `registry/repository` of its own. A launcher run from
+the `PATH` that `ocx env`, `ocx direnv export` or the shell hook exported honors it too: the
+export marks the opted-out package in `OCX_LAUNCH_IDENTITIES`.
 
-A **direct** launcher invocation — one not spawned by an `ocx exec` that forwarded the
-opt-out, for example a generated launcher run standalone, or reached through the OCI-tier
+Any other launcher invocation — run by absolute path, or reached through the OCI-tier
 [`ocx package exec`][cmd-package-exec] — has no forwarded opt-out to decode and does not
 honor `no-patches`. It composes the same companion overlay [`ocx package env`][cmd-package-env]
 would for the same base.
