@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_config::env;
+use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::env::entry::Entry;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
 use ocx_package_manager::launch::{self, Launch};
@@ -202,18 +203,9 @@ impl ToolchainExec {
         } else {
             reconcile::inherited_env()
         };
-        // Opted-out bases also go by digest: a generated launcher's base has a synthetic identifier.
-        let mut forwarded_no_patches = no_patches.clone();
-        for info in &install_infos {
-            let id = info.identifier().as_identifier();
-            let repo_key = format!("{}/{}", id.registry(), id.repository());
-            if no_patches.contains(&repo_key) {
-                forwarded_no_patches.insert(info.identifier().digest().to_string());
-            }
-        }
         let mut forwarded_config = context.config_view().clone();
         if let Some(patches) = forwarded_config.patches.as_mut() {
-            patches.no_patches = forwarded_no_patches;
+            patches.no_patches = no_patches;
         }
         // A child cannot re-derive the flag tier, so without this a launcher's re-entry records elsewhere or nowhere.
         forwarded_config.records = records.forwarded();
@@ -224,6 +216,7 @@ impl ToolchainExec {
             ChildEnv {
                 composed: &entries,
                 forwarded: &project_env,
+                identities: Some(&LaunchIdentities::from_infos(&install_infos)),
             },
             &forwarded_config,
         );

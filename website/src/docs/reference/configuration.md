@@ -692,9 +692,9 @@ each of which reads the project config and composes the environment itself.
 
 A fourth surface reaches the opt-out indirectly: a binary spawned by `ocx exec` that re-enters
 ocx through its own generated launcher (`ocx launcher exec`). `ocx exec` forwards the opt-out
-to that child process over [`OCX_PATCHES`][env-ocx-patches] — including, for each opted-out
-base actually resolved that run, its content digest, since a launcher resolves its base via a
-synthetic content-addressed identifier with no real `registry/repository` to match against.
+to that child process over [`OCX_PATCHES`][env-ocx-patches]. The launcher matches it against
+the package names `ocx exec` forwards in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities],
+since its package directory carries no `registry/repository` of its own.
 
 A **direct** launcher invocation — one not spawned by an `ocx exec` that forwarded the
 opt-out, for example a generated launcher run standalone, or reached through the OCI-tier
@@ -2167,6 +2167,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-mirrors]: ./environment.md#ocx-mirrors
 [env-log]: ./environment.md#ocx-log
 [env-ocx-patches]: ./environment.md#ocx-patches
+[env-ocx-launch-identities]: ./environment.md#ocx-launch-identities
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [env-ocx-extra-ca-certs]: ./environment.md#ocx-extra-ca-certs
 [env-external-ca-certificates]: ./environment.md#external-ca-certificates

@@ -13,13 +13,14 @@ use crate::error::UsageError;
 use clap::Parser;
 use ocx_config::env;
 use ocx_package::install_info::InstallInfo;
+use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::Metadata;
 use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, forwarded_env, reconcile_list_separators};
 use ocx_package::metadata::template::{TemplateResolver, Usage};
 use ocx_package_manager::AdmittedClaims;
 use ocx_package_manager::launch::{self, ExemptionReason, Launch};
 use ocx_package_manager::record::{RecordInputs, Scope};
-use ocx_store::file_structure::PackageDir;
+use ocx_store::file_structure::{PackageDir, read_digest_file};
 use ocx_util::prelude::SerdeExt;
 
 /// Entry point from generated launchers. Validates the package root, then
@@ -58,8 +59,33 @@ impl LauncherExec {
         };
         let package_dir = PackageDir::with_root(validated);
 
+        // Read only under a `[patches]` tier, the one case a composing parent writes it. With no name
+        // for this digest the launcher keeps a synthetic id, where only catch-all rules match.
+        let identities = match context.config_view().patches {
+            Some(_) => Some(
+                LaunchIdentities::from_env()
+                    .map_err(anyhow::Error::new)?
+                    .unwrap_or_default(),
+            ),
+            None => None,
+        };
+        let names = match &identities {
+            Some(identities) => {
+                let digest = read_digest_file(&package_dir.digest_file())
+                    .await
+                    .map_err(ocx_package_manager::Error::from)?;
+                let names = identities.identities_for(&digest);
+                if names.is_empty() {
+                    log::debug!("no launch identity forwarded for {digest}; only catch-all patch rules match");
+                }
+                names
+            }
+            None => Vec::new(),
+        };
         // A launcher always composes its package's self view (public + private surface).
-        let info = manager.install_info_from_package_root(package_dir.root(), None).await?;
+        let info = manager
+            .install_info_from_package_root(package_dir.root(), &names)
+            .await?;
         // Scoped to this re-entry, never grafted onto the global manager tier, so it cannot leak into
         // nested `ocx` commands.
         let no_patches = ocx_config::patch::patches_from_env()
@@ -77,8 +103,8 @@ impl LauncherExec {
                 &packages,
                 true,
                 ocx_package_manager::EnvScope::Project {
-                    // The synthetic `file-url-mode/<digest>` id leaves only the digest leg of the opt-out;
-                    // `ocx exec` forwards each opted-out base's digest for it.
+                    // Opt-out keys match the forwarded launch identities; a launch with none falls back
+                    // to the synthetic id, where only `*` rules apply.
                     no_patches,
                     env: project_env.clone(),
                     // No link lane: a `<group>/<entry>` link could compose a different package than the
@@ -139,6 +165,7 @@ impl LauncherExec {
             ChildEnv {
                 composed: &entries,
                 forwarded: &project_env,
+                identities: None,
             },
             command,
             &argv,

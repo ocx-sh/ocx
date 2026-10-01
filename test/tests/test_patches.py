@@ -29,6 +29,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
@@ -38,10 +39,12 @@ import pytest
 from src import static_index
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import (
+    assert_shim_dir_exists,
     make_package,
     make_package_with_entrypoints,
     push_managed_config,
     resolved_metadata_path,
+    write_ocx_toml,
 )
 from src.registry import (
     delete_manifest,
@@ -1778,24 +1781,12 @@ def test_patch_companion_integrations_appear_once_across_several_bases(
 def test_no_patches_opt_out_honored_across_launcher_in_run(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
-    """AF1 (adr_patch_env_resolution_uniformity.md): a project `no-patches = true`
-    opt-out is honored across the generated entrypoint launcher when a tool runs
-    through `ocx run`.
+    """A project `no-patches = true` opt-out is honored across the generated
+    entrypoint launcher when a tool runs through `ocx exec`.
 
-    A GLOBAL descriptor (`match: "*"`) is used deliberately: it is the only descriptor
-    kind that re-derives at the launcher, because the launcher's synthetic
-    `file-url-mode/<digest>` base id matches a catch-all rule but never a per-base
-    descriptor. The entrypoint `showenv` dispatches to the system `env` dumper so the
-    test reads the launchered tool's real process env.
-
-    `ocx run` composes the PARENT env with the opt-out honored (companion excluded),
-    then resolves `showenv` to the base's generated launcher; the launcher re-enters
-    `ocx launcher exec`, which re-derives the base's env from the forwarded
-    `OCX_PATCHES` (`no_patches` carrying both the project's `registry/repository`
-    opt-out keys AND the opted-out base's content digest). Because the launcher's own
-    base identity is a synthetic content-addressed id (no real `registry/repository`),
-    it is the DIGEST leg of the opt-out that matches here and suppresses the
-    re-injected companion (`adr_patch_env_resolution_uniformity.md` AF1 resolution).
+    A catch-all global descriptor would re-inject the companion at the launcher, whose
+    package directory carries no name. `ocx exec` forwards the tool's name, so the
+    forwarded `registry/repository` opt-out matches it there.
     """
     companion_repo = _unique_repo("run_launch_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -1841,54 +1832,28 @@ def test_no_patches_opt_out_honored_across_launcher_in_run(
     )
 
 
-def test_launcher_digest_matched_opt_out_respects_system_required(
+def test_launcher_identity_opt_out_respects_system_required(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
-    """C7 invariant across the launcher's DIGEST-matched opt-out leg: a
-    forwarded `no_patches` entry keyed by the base's content digest suppresses a
-    NON-system-required companion but NEVER a SYSTEM-required one.
+    """A forwarded opt-out matches the launcher's forwarded name, and suppresses a
+    non-system-required companion but never a system-required one.
 
-    Drives `ocx launcher exec` directly with a hand-set `OCX_PATCHES` wire whose
-    `no_patches` entry is the installed base's REAL content digest (read from the
-    on-disk `digest` sidecar file next to the package root — the same string form
-    `Digest::to_string()` produces, e.g. `sha256:<hex>`), proving the producer
-    (`run.rs`) and resolver (`resolve.rs`) agree on the digest string form.
-    `system_required` cannot be reached through `ocx run` in this harness (only a
-    SYSTEM-scope `/etc/ocx/config.toml` sets it, which acceptance tests cannot
-    write), so this drives the launcher directly with `OCX_NO_CONFIG=1` — the
-    harness the AF1 fork sanctions for this case.
-
-    - `system_required = false` + digest opted out -> companion ABSENT.
-    - `system_required = true`  + digest opted out -> companion PRESENT
-      (enforcement beats opt-out — the digest-matching leg must not weaken C7).
+    `system_required` needs a SYSTEM-scope config this harness cannot write, so this
+    drives `ocx launcher exec` directly with hand-set `OCX_PATCHES` and
+    `OCX_LAUNCH_IDENTITIES`, keyed by the digest the package directory records.
     """
-    companion_repo = _unique_repo("digest_sysreq_companion")
+    companion_repo = _unique_repo("identity_sysreq_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
-    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DIGEST_SYSREQ_CA", "digest-sysreq-ca-value")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "IDENTITY_SYSREQ_CA", "identity-sysreq-ca-value")
 
-    base_pkg = make_package_with_entrypoints(
-        ocx,
-        unique_repo,
-        tmp_path,
-        entrypoints={"showenv": {"command": "env"}},
-    )
-    descriptor_path = tmp_path / "digest_sysreq_descriptor.json"
-    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
-    _write_config(ocx, registry, required=False)
-    publish = ocx.run(
-        "patch", "publish", "--descriptor", str(descriptor_path), "--global",
-        format=None, check=False,
-    )
-    assert publish.returncode == 0, f"global patch publish must succeed:\n{publish.stderr}"
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": "*", "packages": [companion_fq]}])
     ocx.plain("package", "install", base_pkg.short)
 
-    which = ocx.json("package", "which", base_pkg.short)
-    pkg_root = Path(which[base_pkg.short]["path"])
-    # The real content digest the launcher's `install_info_from_package_root`
-    # derives for this base — read verbatim from the on-disk sidecar so the test
-    # proves string-form agreement instead of re-deriving it independently.
+    pkg_root = Path(ocx.json("package", "which", base_pkg.short)[base_pkg.short]["path"])
     base_digest = (pkg_root / "digest").read_text().strip()
     assert base_digest.startswith("sha256:"), f"unexpected digest sidecar content: {base_digest!r}"
+    base_name = base_pkg.fq.rpartition(":")[0]
 
     def _launcher_env_dump(*, system_required: bool) -> subprocess.CompletedProcess[str]:
         wire = json.dumps(
@@ -1897,10 +1862,15 @@ def test_launcher_digest_matched_opt_out_respects_system_required(
                 "path_template": "{registry}/{repository}",
                 "required": True,
                 "system_required": system_required,
-                "no_patches": [base_digest],
+                "no_patches": [base_name],
             }
         )
-        env = {**ocx.env, "OCX_NO_CONFIG": "1", "OCX_PATCHES": wire}
+        env = {
+            **ocx.env,
+            "OCX_NO_CONFIG": "1",
+            "OCX_PATCHES": wire,
+            "OCX_LAUNCH_IDENTITIES": json.dumps({base_digest: [base_pkg.fq]}),
+        }
         return subprocess.run(
             [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
             capture_output=True,
@@ -1909,24 +1879,17 @@ def test_launcher_digest_matched_opt_out_respects_system_required(
         )
 
     non_enforced = _launcher_env_dump(system_required=False)
-    assert non_enforced.returncode == 0, (
-        f"launcher exec must succeed (non-system-required); rc={non_enforced.returncode}\n"
-        f"stderr: {non_enforced.stderr}"
-    )
-    assert "DIGEST_SYSREQ_CA" not in non_enforced.stdout, (
-        "a forwarded no_patches entry keyed by content digest must suppress a "
-        f"NON-system-required companion; got env dump:\n{non_enforced.stdout}"
+    assert non_enforced.returncode == 0, f"launcher exec must succeed; stderr: {non_enforced.stderr}"
+    assert "IDENTITY_SYSREQ_CA" not in non_enforced.stdout, (
+        "an opt-out of the forwarded name must suppress a non-system-required companion; "
+        f"got env dump:\n{non_enforced.stdout}"
     )
 
     enforced = _launcher_env_dump(system_required=True)
-    assert enforced.returncode == 0, (
-        f"launcher exec must succeed (system-required); rc={enforced.returncode}\n"
-        f"stderr: {enforced.stderr}"
-    )
-    assert "DIGEST_SYSREQ_CA=digest-sysreq-ca-value" in enforced.stdout, (
-        "a SYSTEM-required tier must overlay its companion EVEN when the base's digest "
-        "is opted out (C7 enforcement beats opt-out — the digest-matching leg must not "
-        f"weaken it); got env dump:\n{enforced.stdout}"
+    assert enforced.returncode == 0, f"launcher exec must succeed; stderr: {enforced.stderr}"
+    assert "IDENTITY_SYSREQ_CA=identity-sysreq-ca-value" in enforced.stdout, (
+        "a system-required tier must overlay its companion even when the forwarded name "
+        f"is opted out; got env dump:\n{enforced.stdout}"
     )
 
 
@@ -3032,20 +2995,13 @@ def test_patch_on_private_dep_only_under_self(
         )
 
 
-def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
-) -> None:
-    """A companion composes as part of its target: its ``private`` var reaches the
-    target's own entrypoint launcher and ``ocx package env --self``, and never the
-    consumer view ``ocx package env``.
+def _publish_private_companion(ocx: OcxRunner, tmp_path: Path, registry: str, label: str) -> str:
+    """Publish an `any` companion whose one var is `private`, and return its fully qualified id.
 
-    The shape of a package whose entrypoint runs through a private runtime
-    dependency, patched with a launcher-only option. The rule is a catch-all
-    because the launcher re-derives against a synthetic base id only such a rule
-    matches.
+    A private var reaches only its target's `--self` surface, and so its entrypoint launcher,
+    never a consumer view: its presence in a launcher's env proves the launcher matched it.
     """
-    companion_repo = _unique_repo("part_of_target_companion")
-    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    companion_repo = _unique_repo(label)
     make_package(
         ocx,
         companion_repo,
@@ -3056,24 +3012,48 @@ def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
         cascade=True,
         platform="any",
     )
-    descriptor_path = tmp_path / "part_of_target_descriptor.json"
-    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
-    _write_config(ocx, registry, required=False)
-    publish = ocx.run(
-        "patch", "publish", "--descriptor", str(descriptor_path), "--global",
-        format=None, check=False,
-    )
-    assert publish.returncode == 0, f"global patch publish must succeed:\n{publish.stderr}"
+    return f"{registry}/{companion_repo}:1.0.0"
 
-    runtime = make_package(ocx, _unique_repo("part_of_target_runtime"), "1.0.0", tmp_path, cascade=True)
-    base_pkg = make_package_with_entrypoints(
-        ocx,
-        unique_repo,
-        tmp_path,
-        entrypoints={"showenv": {"command": "env"}},
-        dependencies=[_dep_entry(ocx, runtime, visibility="private")],
+
+def _make_showenv_package(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs: object) -> PackageInfo:
+    """A package whose entrypoint `showenv` dumps the launcher's process env through `env`."""
+    return make_package_with_entrypoints(
+        ocx, repo, tmp_path, entrypoints={"showenv": {"command": "env"}}, file_prefix=repo, **kwargs
     )
+
+
+def _tag_glob(pkg: PackageInfo) -> str:
+    """The `registry/repository:*` rule that matches `pkg` under any tag, and never untagged."""
+    return f"{pkg.fq.rpartition(':')[0]}:*"
+
+
+def _publish_global_rules(ocx: OcxRunner, tmp_path: Path, registry: str, rules: list[dict]) -> None:
+    descriptor_path = tmp_path / f"descriptor_{uuid4().hex[:8]}.json"
+    _write_descriptor(descriptor_path, rules=rules)
+    _write_config(ocx, registry, required=False)
+    _publish_descriptor_global(ocx, descriptor_path)
+
+
+def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A companion composes as part of its target: its ``private`` var reaches the
+    target's own entrypoint launcher and ``ocx package env --self``, and never the
+    consumer view ``ocx package env``.
+
+    The rule is anchored on the target's repository and tag, which the launcher's
+    package directory does not carry: it matches there only through the names
+    ``ocx package exec`` forwards. A sibling package's launcher must not match it.
+    """
+    runtime = make_package(ocx, _unique_repo("part_of_target_runtime"), "1.0.0", tmp_path, cascade=True)
+    base_pkg = _make_showenv_package(
+        ocx, unique_repo, tmp_path, dependencies=[_dep_entry(ocx, runtime, visibility="private")]
+    )
+    sibling = _make_showenv_package(ocx, _unique_repo("part_of_target_sibling"), tmp_path)
+    companion_fq = _publish_private_companion(ocx, tmp_path, registry, "part_of_target_companion")
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": _tag_glob(base_pkg), "packages": [companion_fq]}])
     ocx.plain("package", "install", base_pkg.short)
+    ocx.plain("package", "install", sibling.short)
 
     self_entries = ocx.json("package", "env", "--self", base_pkg.short)["entries"]
     assert _entry_by_key(self_entries, "JDK_JAVA_OPTIONS") is not None, (
@@ -3090,10 +3070,146 @@ def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
         f"{launched.stdout}"
     )
 
+    other = ocx.run("package", "exec", sibling.short, "--", "showenv", format=None, check=False)
+    assert other.returncode == 0, f"the sibling launcher must run; stderr: {other.stderr}"
+    assert "JDK_JAVA_OPTIONS" not in other.stdout, (
+        "a rule anchored on one repository must not reach another package's launcher; "
+        f"got env dump:\n{other.stdout}"
+    )
+
     consumer_entries = _env_entries(ocx, base_pkg.short)
     assert _entry_by_key(consumer_entries, "JDK_JAVA_OPTIONS") is None, (
         "a private companion var must never reach the consumer view; got keys: "
         f"{[e['key'] for e in consumer_entries]}"
+    )
+
+
+def test_tag_scoped_rule_reaches_a_project_tools_launcher(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Project `ocx exec` forwards the tag its `ocx.toml` binding declares, so a
+    `registry/repository:*` rule reaches the tool's entrypoint launcher too."""
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    companion_fq = _publish_private_companion(ocx, tmp_path, registry, "project_launch_companion")
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": _tag_glob(base_pkg), "packages": [companion_fq]}])
+
+    project = tmp_path / "project_launch"
+    project.mkdir()
+    _write_project_toml(project, base_pkg.fq, opt_out=False)
+    lock = _run_in(ocx, project, "lock")
+    assert lock.returncode == 0, f"ocx lock must succeed:\n{lock.stderr}"
+
+    result = _run_in(ocx, project, "exec", "--", "showenv")
+    assert result.returncode == 0, f"ocx exec -- showenv must succeed; stderr: {result.stderr}"
+    assert "JDK_JAVA_OPTIONS=-Dpatched=1" in result.stdout.splitlines(), (
+        "a tag-scoped rule must reach the launcher of a tool bound in ocx.toml; got env dump:\n"
+        f"{result.stdout}"
+    )
+
+
+def test_tag_scoped_rule_reaches_a_deferred_tools_launcher_through_its_shim(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A lazily composed tool runs shim, then launcher: the shim forwards its pinned
+    tagged identity, so the second hop matches the same rule the first did.
+
+    The tagged ref is installed after the shim exists, only to pin the companion: the
+    rule is optional, and the shim's own install pins none.
+    """
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    companion_fq = _publish_private_companion(ocx, tmp_path, registry, "shim_launch_companion")
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": _tag_glob(base_pkg), "packages": [companion_fq]}])
+
+    project = tmp_path / "shim_launch"
+    project.mkdir()
+    write_ocx_toml(project, f'lazy-mode = "always"\n\n[tools]\ntool = "{base_pkg.fq}"\n')
+    lock = _run_in(ocx, project, "lock", "--no-pull")
+    assert lock.returncode == 0, f"ocx lock --no-pull must succeed:\n{lock.stderr}"
+    composed = _run_in(ocx, project, "env")
+    assert composed.returncode == 0, f"ocx env must succeed:\n{composed.stderr}"
+    shim_bin = assert_shim_dir_exists(ocx, base_pkg.repo, "the cold tool composes as a shim")
+    ocx.plain("package", "install", base_pkg.short)
+
+    shim = shim_bin / ("showenv.exe" if sys.platform == "win32" else "showenv")
+    result = subprocess.run(
+        [str(shim)],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_BINARY_PIN": str(ocx.binary)},
+        check=False,
+    )
+    assert result.returncode == 0, f"the shim must run; stderr: {result.stderr}"
+    assert "JDK_JAVA_OPTIONS=-Dpatched=1" in result.stdout.splitlines(), (
+        "a tag-scoped rule must reach the launcher a shim hands off to; got env dump:\n"
+        f"{result.stdout}"
+    )
+
+
+def test_a_launcher_run_by_absolute_path_matches_only_catch_all_rules(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Without a composing parent no name is forwarded: the launcher keeps a synthetic
+    identity, which a `*` rule matches and a repository-anchored rule does not."""
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    catch_all_repo = _unique_repo("absolute_catch_all")
+    _make_companion(ocx, catch_all_repo, "1.0.0", tmp_path, "CATCH_ALL_VAR", "everywhere")
+    anchored_repo = _unique_repo("absolute_anchored")
+    _make_companion(ocx, anchored_repo, "1.0.0", tmp_path, "ANCHORED_VAR", "anchored")
+    _publish_global_rules(
+        ocx,
+        tmp_path,
+        registry,
+        [
+            {"match": "*", "packages": [f"{registry}/{catch_all_repo}:1.0.0"]},
+            {"match": _tag_glob(base_pkg), "packages": [f"{registry}/{anchored_repo}:1.0.0"]},
+        ],
+    )
+    ocx.plain("package", "install", base_pkg.short)
+
+    pkg_root = Path(ocx.json("package", "which", base_pkg.short)[base_pkg.short]["path"])
+    launcher = pkg_root / "entrypoints" / ("showenv.exe" if sys.platform == "win32" else "showenv")
+    result = subprocess.run(
+        [str(launcher)],
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_BINARY_PIN": str(ocx.binary)},
+        check=False,
+    )
+    assert result.returncode == 0, f"the launcher must run; stderr: {result.stderr}"
+    lines = result.stdout.splitlines()
+    assert "CATCH_ALL_VAR=everywhere" in lines, f"a `*` rule still matches; got env dump:\n{result.stdout}"
+    assert not any(line.startswith("ANCHORED_VAR=") for line in lines), (
+        f"an anchored rule needs a forwarded name; got env dump:\n{result.stdout}"
+    )
+
+
+def test_package_test_forwards_its_identifier_to_the_bundles_launcher(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx package test` forwards the identifier it composed under, so the bundle's own
+    entrypoint launcher matches a `registry/repository:*` rule too.
+
+    The companion's var is `private`: it reaches only the target's launcher, never the
+    consumer view the command itself composes, so its presence proves the launcher matched.
+    """
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    companion_fq = _publish_private_companion(ocx, tmp_path, registry, "package_test_launch_companion")
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": _tag_glob(base_pkg), "packages": [companion_fq]}])
+
+    pkg_dir = tmp_path / "package-test-launch-src"
+    pkg_dir.mkdir()
+    metadata_in = tmp_path / "package-test-launch-input.json"
+    metadata_in.write_text(
+        json.dumps({"type": "bundle", "version": 1, "env": [], "entrypoints": {"showenv": {"command": "env"}}})
+    )
+    bundle = tmp_path / "package-test-launch.tar.xz"
+    ocx.plain("package", "create", "-m", str(metadata_in), "-o", str(bundle), "-p", current_platform(), str(pkg_dir))
+
+    result = ocx.plain("package", "test", "-i", base_pkg.short, str(bundle), "--", "showenv", check=False)
+    assert result.returncode == 0, f"package test must run the launcher; stderr: {result.stderr}"
+    assert "JDK_JAVA_OPTIONS=-Dpatched=1" in result.stdout.splitlines(), (
+        f"a tag-scoped rule must reach the bundle's own launcher; got env dump:\n{result.stdout}"
     )
 
 

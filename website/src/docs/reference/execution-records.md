@@ -234,7 +234,7 @@ An entrypoint launcher re-enters OCX (`ocx exec cmake -- cmake …` resolves `cm
 | | Outer frame (`exec` / `package exec`) | Inner frame (`launcher exec`) |
 |---|---|---|
 | `frame.command` | `exec` or `package exec` | `launcher exec` |
-| `frame.identity` | `complete` | `degraded`, always |
+| `frame.identity` | `complete` | `complete` when the parent forwarded the package name, otherwise `degraded` |
 | `executable["sh.ocx.kind"]` | `launcher` — the resolved path is the launcher shim | `binary` — the actual leaf executable |
 | `packages[0].digest.sha256` | same content digest as the inner frame | same content digest as the outer frame |
 
@@ -242,7 +242,9 @@ The join key is the package's content digest, identical in both records — no m
 
 A package with no declared entry points resolves straight to its real binary on the composed `PATH`, so it produces exactly one record with `sh.ocx.kind: "binary"` — the split only happens when a launcher is in the chain.
 
-The inner frame's `frame.identity` is `degraded` **unconditionally** — including the ordinary case where an outer `exec` or `package exec` frame pairs with it a few milliseconds earlier. This is not a fallback for an unparented launcher; it is structural. The launcher frame's identifier is a synthetic content digest minted at the launcher, because package directories are content-shared and never persist their own registry or repository. Having an outer frame does not change that: the inner frame still cannot name what it ran, only which digest it ran. A consumer whose policy assumes "degraded means no ocx parent" will fire on every ordinary entrypoint invocation, not only the unusual direct one.
+The inner frame can name its package only when the parent forwarded the name in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. OCX writes that variable only while a [`[patches]`][config-patches] tier is in effect. With a forwarded name, the frame is `complete`. Its package descriptor carries the real name and a purl without a `tag` qualifier, as a shim frame does.
+
+Without one, the identifier is a synthetic content digest minted at the launcher, because package directories are content-shared and never persist their own registry or repository. The frame is then `degraded`, even when an outer `exec` or `package exec` frame pairs with it a few milliseconds earlier. On a host without a patch tier, a consumer whose policy assumes "degraded means no ocx parent" fires on every ordinary entrypoint invocation.
 
 Every degraded frame carries `frame.identityNote`, a sentence stating the limitation in-band, so a consumer reading one record in isolation — without this page open — still learns why the name is missing. The package descriptor carries the matching signal: `sh.ocx.identity: "synthetic"` in its `annotations`, and no `uri` at all, since a purl cannot be built without a repository:
 
@@ -283,7 +285,7 @@ A deferred package's first invocation therefore produces two records too, for a 
 | `packages[].annotations["sh.ocx.composition"]` | `deferred`, on the package that composed but never materialized | absent — the package is real by the time this frame writes |
 | `resolution.autoInstalled` | absent for this package — the outer frame only composed it | present — this frame performed the pull |
 
-The join key is the same content digest used everywhere else in this record. Unlike [`ocx launcher exec`][cmd-launcher-exec]'s synthetic, digest-only identity — a package directory is content-shared and cannot recover its own registry or repository — a shim's generated launcher carries [the pinned identifier it was built for][in-depth-lazy-loading-materialize] as an argument, and `ocx launcher shim` reads that identifier directly. Its frame identity is `complete`, not `degraded`: the one re-entry frame that still knows its own logical name. `executable["sh.ocx.provenance"]` still reads `ocx-package` for a shim target — the generated shim directory is a store-adjacent namespace OCX created, not an externally supplied command.
+The join key is the same content digest used everywhere else in this record. Unlike an [`ocx launcher exec`][cmd-launcher-exec] frame with no forwarded name — a package directory is content-shared and cannot recover its own registry or repository — a shim's generated launcher carries [the pinned identifier it was built for][in-depth-lazy-loading-materialize] as an argument, and `ocx launcher shim` reads that identifier directly. Its frame identity is always `complete`, not `degraded`: it needs no parent to know its own logical name. `executable["sh.ocx.provenance"]` still reads `ocx-package` for a shim target — the generated shim directory is a store-adjacent namespace OCX created, not an externally supplied command.
 
 A later invocation of the same binary resolves straight to its now-real `entrypoints/`, which outranks the shim on `PATH` from then on, and produces exactly one record with no `sh.ocx.composition` key at all — the same shape as any package that was never deferred.
 
@@ -440,6 +442,8 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 [env-ocx-no-verify]: ./environment.md#ocx-no-verify
 [env-ocx-insecure-registries]: ./environment.md#ocx-insecure-registries
 [env-ocx-patch-snapshot]: ./environment.md#ocx-patch-snapshot
+[env-ocx-launch-identities]: ./environment.md#ocx-launch-identities
+[config-patches]: ./configuration.md#keys-patches
 
 <!-- user guide -->
 [patches-how]: ../user-guide/patches.md#patches-how

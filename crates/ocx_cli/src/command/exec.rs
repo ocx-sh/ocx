@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_config::env;
+use ocx_package::launch::LaunchIdentities;
 use ocx_package_manager::RootSet;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
 use ocx_package_manager::launch::{self, Launch};
@@ -154,6 +155,7 @@ impl Exec {
             ChildEnv {
                 composed: &entries,
                 forwarded: &env_overrides,
+                identities: Some(&LaunchIdentities::from_infos(&install_infos)),
             },
             &forwarded_config,
         );

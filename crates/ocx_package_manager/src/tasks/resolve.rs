@@ -785,75 +785,97 @@ impl PackageManager {
         let mut matched: Vec<(&ocx_oci::PinnedPackageRef, Vec<crate::patch::CompanionEntry>)> = Vec::new();
         let mut companion_axes: HashMap<ocx_oci::PackageRef, Visibility> = HashMap::new();
 
-        // Loads run concurrently (core-bounded) into slots by admitted index, so emission order,
-        // error determinism and the projection cache never depend on completion order.
+        // A launcher's package also matches under every name its composing parent forwarded, each
+        // pinned to the package's digest so a tagless one never reads as `:latest`.
+        let aliases: HashMap<ocx_oci::PinnedPackageRef, &[ocx_oci::PackageRef]> = packages
+            .iter()
+            .map(|root| (root.identifier().strip_advisory(), root.aliases()))
+            .collect();
+
+        // Loads run concurrently (core-bounded) into slots by (admitted, identity) index, so emission
+        // order, error determinism and the projection cache never depend on completion order.
         let system_required = patches.system_required;
         let load_semaphore = crate::concurrency::Concurrency::cores().semaphore();
-        let mut descriptor_load_tasks: JoinSet<(usize, crate::Result<DescriptorLoadResult>)> = JoinSet::new();
+        let mut descriptor_load_tasks: JoinSet<(usize, usize, crate::Result<DescriptorLoadResult>)> = JoinSet::new();
+        // Empty for an opted-out target.
+        let mut identities_by_admitted: Vec<Vec<ocx_oci::PackageRef>> = Vec::with_capacity(admitted.len());
         for (index, admitted_id) in admitted.iter().enumerate() {
-            let base_id = admitted_id.as_identifier();
-            let repo_key = format!("{}/{}", base_id.registry(), base_id.repository());
-            let digest_key = admitted_id.digest().to_string();
-            // Opt-out matches `registry/repository` or the digest: a generated launcher's
-            // `file-url-mode/<digest>` identifier has no real repository. System-required wins.
-            if (no_patches.contains(&repo_key) || no_patches.contains(&digest_key)) && !system_required {
+            let identities: Vec<ocx_oci::PackageRef> = std::iter::once(admitted_id.as_identifier().clone())
+                .chain(
+                    aliases
+                        .get(&admitted_id.strip_advisory())
+                        .into_iter()
+                        .flat_map(|names| names.iter())
+                        .map(|name| name.clone_with_digest(admitted_id.digest())),
+                )
+                .collect();
+            let opted_out = identities
+                .iter()
+                .any(|identity| no_patches.contains(&format!("{}/{}", identity.registry(), identity.repository())));
+            // System-required wins over an opt-out.
+            if opted_out && !system_required {
+                identities_by_admitted.push(Vec::new());
                 continue;
             }
-            let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, base_id);
-            let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
-            let manager = self.clone();
-            let semaphore = load_semaphore.clone();
-            descriptor_load_tasks.spawn(async move {
-                let _permit = crate::concurrency::acquire_permit(&semaphore).await;
-                let result = load_descriptor_frozen_or_live(&manager, &pkg_specific_id, &pkg_tags_path).await;
-                (index, result)
-            });
+            for (identity_index, identity) in identities.iter().enumerate() {
+                let pkg_specific_id = super::patch_discovery::patch_descriptor_id(patches, identity);
+                let pkg_tags_path = file_structure.patch_descriptor_path(&pkg_specific_id);
+                let manager = self.clone();
+                let semaphore = load_semaphore.clone();
+                descriptor_load_tasks.spawn(async move {
+                    let _permit = crate::concurrency::acquire_permit(&semaphore).await;
+                    let result = load_descriptor_frozen_or_live(&manager, &pkg_specific_id, &pkg_tags_path).await;
+                    (index, identity_index, result)
+                });
+            }
+            identities_by_admitted.push(identities);
         }
-        let mut preloaded_descriptors: Vec<Option<crate::Result<DescriptorLoadResult>>> = Vec::new();
-        preloaded_descriptors.resize_with(admitted.len(), || None);
+        let mut preloaded_descriptors: Vec<Vec<Option<crate::Result<DescriptorLoadResult>>>> = identities_by_admitted
+            .iter()
+            .map(|identities| identities.iter().map(|_| None).collect())
+            .collect();
         while let Some(join_result) = descriptor_load_tasks.join_next().await {
-            let (index, result) = match join_result {
+            let (index, identity_index, result) = match join_result {
                 Ok(value) => value,
                 Err(join_error) if join_error.is_panic() => std::panic::resume_unwind(join_error.into_panic()),
                 Err(join_error) => panic!("descriptor load task aborted: {join_error}"),
             };
-            preloaded_descriptors[index] = Some(result);
+            preloaded_descriptors[index][identity_index] = Some(result);
         }
 
         for (index, admitted_id) in admitted.iter().enumerate() {
-            // `None`: opted out above.
-            let Some(pkg_descriptor_result) = preloaded_descriptors[index].take() else {
-                continue;
-            };
-            let base_id = admitted_id.as_identifier();
-            // Propagate a load error in admitted order (deterministic failure).
-            let pkg_descriptor_result = pkg_descriptor_result?;
-
-            let pkg_descriptor = match pkg_descriptor_result {
-                DescriptorLoadResult::NotPresent => None,
-                DescriptorLoadResult::Loaded(_manifest_digest, descriptor) => Some(descriptor),
-                DescriptorLoadResult::Corrupt(error, _manifest_digest) => {
-                    if patches.required {
-                        return Err(error);
+            let mut companions: Vec<crate::patch::CompanionEntry> = Vec::new();
+            let loaded = std::mem::take(&mut preloaded_descriptors[index]);
+            for (identity, pkg_descriptor_result) in
+                identities_by_admitted[index].iter().zip(loaded.into_iter().flatten())
+            {
+                // Propagate a load error in admitted order (deterministic failure).
+                let pkg_descriptor = match pkg_descriptor_result? {
+                    DescriptorLoadResult::NotPresent => None,
+                    DescriptorLoadResult::Loaded(_manifest_digest, descriptor) => Some(descriptor),
+                    DescriptorLoadResult::Corrupt(error, _manifest_digest) => {
+                        if patches.required {
+                            return Err(error);
+                        }
+                        log::warn!(
+                            "site-patch-set: pkg-specific descriptor for '{identity}' corrupt (tier required=false): {error}; skipping"
+                        );
+                        None
                     }
-                    log::warn!(
-                        "site-patch-set: pkg-specific descriptor for '{}' corrupt (tier required=false): {error}; skipping",
-                        admitted_id
-                    );
-                    None
+                };
+                if global_descriptor.is_none() && pkg_descriptor.is_none() {
+                    continue;
                 }
-            };
-
-            if global_descriptor.is_none() && pkg_descriptor.is_none() {
-                continue;
+                union_companions(
+                    &mut companions,
+                    merge_companions(
+                        identity,
+                        patches.required,
+                        global_descriptor.as_ref(),
+                        pkg_descriptor.as_ref(),
+                    ),
+                );
             }
-
-            let companions = merge_companions(
-                base_id,
-                patches.required,
-                global_descriptor.as_ref(),
-                pkg_descriptor.as_ref(),
-            );
 
             if companions.is_empty() {
                 continue;
@@ -1499,6 +1521,17 @@ fn merge_companions(
         .into_iter()
         .filter_map(|id| companion_map.remove(&id))
         .collect()
+}
+
+/// Folds `more` into `into` by companion identity: the first position and rule are kept, and a
+/// companion any identity requires stays required.
+fn union_companions(into: &mut Vec<crate::patch::CompanionEntry>, more: Vec<crate::patch::CompanionEntry>) {
+    for entry in more {
+        match into.iter_mut().find(|existing| existing.identifier == entry.identifier) {
+            Some(existing) => existing.required |= entry.required,
+            None => into.push(entry),
+        }
+    }
 }
 
 /// Restore an installed base's real registry hostname from its root document.
@@ -5074,18 +5107,28 @@ mod phase4_spec_tests {
         rule_match: &str,
         companion_tag_ids: &[&PackageRef],
     ) {
+        let packages: Vec<String> = companion_tag_ids.iter().map(|id| id.to_string()).collect();
+        seed_global_descriptor_rules(
+            manager,
+            patch_config,
+            serde_json::json!([{ "match": rule_match, "packages": packages }]),
+        )
+        .await;
+    }
+
+    /// [`seed_global_descriptor`] with a verbatim `rules` array.
+    pub(super) async fn seed_global_descriptor_rules(
+        manager: &PackageManager,
+        patch_config: &ocx_config::patch::ResolvedPatchConfig,
+        rules: serde_json::Value,
+    ) {
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use ocx_oci::Algorithm;
 
         let blob_store = manager.file_structure().blobs.clone();
         let tag_store = manager.file_structure().clone();
 
-        let packages: Vec<String> = companion_tag_ids.iter().map(|id| id.to_string()).collect();
-        let descriptor_json = serde_json::json!({
-            "version": 1,
-            "rules": [{ "match": rule_match, "packages": packages }]
-        })
-        .to_string();
+        let descriptor_json = serde_json::json!({ "version": 1, "rules": rules }).to_string();
         let layer_bytes = descriptor_json.as_bytes();
         let layer_digest = Algorithm::Sha256.hash(layer_bytes);
         let manifest_json = serde_json::json!({
@@ -6676,6 +6719,61 @@ mod phase4_spec_tests {
             assert_eq!(
                 count_key(&entries, "X_PRIV"),
                 expected_private,
+                "{case}: entries {entries:?}"
+            );
+        }
+    }
+
+    /// One companion that two rules match composes once, on the union of what they matched:
+    /// both rules on the root (its private side only), or one on the root and one on its
+    /// dependency (both sides).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_companion_two_rules_match_composes_once_on_the_union() {
+        let root_rule = format!("{REGISTRY}/plantuml");
+        for (rules, expected_interface) in [
+            ([root_rule.as_str(), "*plantuml*"], 0),
+            ([root_rule.as_str(), "*jre*"], 1),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let config = test_patch_config();
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let store = manager.file_structure().packages.clone();
+            let companion = seed_companion_with_env(
+                &manager,
+                "plant-patch",
+                'c',
+                &ResolvedPackage::new(),
+                serde_json::json!([
+                    constant_var("C_PRIVATE", "private"),
+                    constant_var("C_INTERFACE", "interface"),
+                    constant_var("C_PUBLIC", "public"),
+                ]),
+            );
+            seed_global_descriptor_rules(
+                &manager,
+                &config,
+                serde_json::json!(
+                    rules
+                        .iter()
+                        .map(|rule| serde_json::json!({ "match": rule, "packages": [companion.to_string()] }))
+                        .collect::<Vec<_>>()
+                ),
+            )
+            .await;
+            let root = seed_plantuml_with_private_jre(&dir, &store);
+
+            let (entries, _, _, attribution) = manager
+                .resolve_env_with_attribution(&[root], true, super::EnvScope::package_tier(), &super::host_platform())
+                .await
+                .unwrap();
+
+            let case = format!("rules={rules:?}");
+            assert_eq!(attribution.companions.len(), 1, "{case}: {:?}", attribution.companions);
+            assert_eq!(count_key(&entries, "C_PRIVATE"), 1, "{case}: entries {entries:?}");
+            assert_eq!(count_key(&entries, "C_PUBLIC"), 1, "{case}: entries {entries:?}");
+            assert_eq!(
+                count_key(&entries, "C_INTERFACE"),
+                expected_interface,
                 "{case}: entries {entries:?}"
             );
         }
@@ -8781,6 +8879,182 @@ mod c036_reserved_key_gate {
             assert!(
                 entries.iter().any(|e| e.key == key),
                 "'{key}' is outside the reserved namespace and must survive; entries: {entries:?}"
+            );
+        }
+    }
+}
+
+/// A launcher matches patch rules under every name its composing parent forwarded.
+#[cfg(test)]
+mod launch_identity_tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use ocx_config::patch::ResolvedPatchConfig;
+    use ocx_oci::{PackageRef, PinnedPackageRef};
+    use ocx_package::install_info::InstallInfo;
+    use ocx_package::metadata::visibility::Visibility;
+    use ocx_package::resolved_package::ResolvedPackage;
+
+    use super::{
+        phase4_spec_tests::{
+            seed_companion_pin, seed_global_descriptor_rules, seed_package_with_constant_var, seed_root_arc,
+        },
+        phase5a_spec_tests::{make_manager, sha256},
+    };
+    use crate::PackageManager;
+
+    const PATCH_REGISTRY: &str = "patches.example.com";
+
+    fn patch_config(system_required: bool) -> ResolvedPatchConfig {
+        ResolvedPatchConfig {
+            system_required,
+            no_patches: BTreeSet::new(),
+            registry: PATCH_REGISTRY.to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        }
+    }
+
+    /// Seeds an installed companion carrying one `PUBLIC` var and returns its tag id.
+    fn seed_companion(manager: &PackageManager, name: &str, hex: char, key: &str) -> PackageRef {
+        let digest = sha256(hex);
+        let tag_id = PackageRef::new_registry(name, PATCH_REGISTRY).clone_with_tag("latest");
+        let pinned_id = PinnedPackageRef::pin(&PackageRef::new_registry(name, PATCH_REGISTRY), digest.clone());
+        seed_package_with_constant_var(
+            &manager.file_structure().packages,
+            &pinned_id,
+            &ResolvedPackage::new(),
+            key,
+            name,
+            Visibility::INTERFACE,
+        );
+        seed_companion_pin(manager.file_structure(), &tag_id, &digest);
+        tag_id
+    }
+
+    /// The `example.com/rootpkg` root, also forwarded as `example.com/aliaspkg:1`.
+    fn aliased_root(manager: &PackageManager) -> Arc<InstallInfo> {
+        let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'a');
+        let alias = PackageRef::parse("example.com/aliaspkg:1").unwrap();
+        Arc::new((*root).clone().with_aliases(vec![alias]))
+    }
+
+    async fn resolve(
+        manager: &PackageManager,
+        root: Arc<InstallInfo>,
+        no_patches: BTreeSet<String>,
+    ) -> Vec<ocx_package::metadata::env::entry::Entry> {
+        manager
+            .resolve_env(
+                &[root],
+                false,
+                super::EnvScope::Project {
+                    no_patches,
+                    env: Vec::new(),
+                    toolchain: None,
+                },
+                &super::host_platform(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn count(entries: &[ocx_package::metadata::env::entry::Entry], key: &str) -> usize {
+        entries.iter().filter(|entry| entry.key == key).count()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_identity_matches_its_own_rule_and_a_shared_companion_composes_once() {
+        let dir = TempDir::new().unwrap();
+        let config = patch_config(false);
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let shared = seed_companion(&manager, "shared", 'b', "SHARED_VAR");
+        let aliased = seed_companion(&manager, "aliased", 'c', "ALIAS_VAR");
+        seed_global_descriptor_rules(
+            &manager,
+            &config,
+            serde_json::json!([
+                { "match": "example.com/rootpkg", "packages": [shared.to_string()] },
+                { "match": "example.com/aliaspkg:*", "packages": [shared.to_string(), aliased.to_string()] },
+            ]),
+        )
+        .await;
+
+        let entries = resolve(&manager, aliased_root(&manager), BTreeSet::new()).await;
+
+        assert_eq!(count(&entries, "SHARED_VAR"), 1, "{entries:?}");
+        assert_eq!(count(&entries, "ALIAS_VAR"), 1, "{entries:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tagless_identity_does_not_match_a_tag_glob() {
+        let dir = TempDir::new().unwrap();
+        let config = patch_config(false);
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let companion = seed_companion(&manager, "tagged", 'b', "TAGGED_VAR");
+        seed_global_descriptor_rules(
+            &manager,
+            &config,
+            serde_json::json!([{ "match": "example.com/rootpkg:*", "packages": [companion.to_string()] }]),
+        )
+        .await;
+        let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'a');
+
+        let entries = resolve(&manager, root, BTreeSet::new()).await;
+
+        assert_eq!(count(&entries, "TAGGED_VAR"), 0, "{entries:?}");
+    }
+
+    /// A tagless alias names the launcher's digest, not `:latest`, so a tag glob skips it as it
+    /// skips the digest-pinned primary.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tagless_alias_does_not_match_a_tag_glob() {
+        let dir = TempDir::new().unwrap();
+        let config = patch_config(false);
+        let manager = make_manager(&dir).with_patches(Some(config.clone()));
+        let companion = seed_companion(&manager, "tagged", 'b', "TAGGED_VAR");
+        seed_global_descriptor_rules(
+            &manager,
+            &config,
+            serde_json::json!([{ "match": "example.com/aliaspkg:*", "packages": [companion.to_string()] }]),
+        )
+        .await;
+        let root = seed_root_arc(&manager.file_structure().packages.clone(), "rootpkg", 'a');
+        let root = Arc::new(
+            (*root)
+                .clone()
+                .with_aliases(vec![PackageRef::parse("example.com/aliaspkg").unwrap()]),
+        );
+
+        let entries = resolve(&manager, root, BTreeSet::new()).await;
+
+        assert_eq!(count(&entries, "TAGGED_VAR"), 0, "{entries:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opting_out_either_identity_suppresses_the_overlay_unless_system_required() {
+        for (system_required, expected) in [(false, 0), (true, 1)] {
+            let dir = TempDir::new().unwrap();
+            let config = patch_config(system_required);
+            let manager = make_manager(&dir).with_patches(Some(config.clone()));
+            let companion = seed_companion(&manager, "everywhere", 'b', "EVERYWHERE_VAR");
+            seed_global_descriptor_rules(
+                &manager,
+                &config,
+                serde_json::json!([{ "match": "*", "packages": [companion.to_string()] }]),
+            )
+            .await;
+
+            let opted_out = ["example.com/aliaspkg".to_string()].into_iter().collect();
+            let entries = resolve(&manager, aliased_root(&manager), opted_out).await;
+
+            assert_eq!(
+                count(&entries, "EVERYWHERE_VAR"),
+                expected,
+                "system_required={system_required}: {entries:?}"
             );
         }
     }

@@ -597,7 +597,7 @@ impl ExecutionRecord {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 binary: inputs.config.self_exe.clone(),
             },
-            frame: frame_for(&inputs.scope),
+            frame: frame_for(&inputs.scope, inputs.packages),
             process: super::environment::process(pid, inputs.executable),
             host: super::environment::host(),
             os: super::environment::operating_system(),
@@ -620,10 +620,14 @@ impl ExecutionRecord {
 
 /// Which command opened the frame, derived from [`Scope`] so a frame cannot claim
 /// identity its scope cannot have.
-fn frame_for(scope: &Scope) -> Frame {
+fn frame_for(scope: &Scope, packages: &[Arc<InstallInfo>]) -> Frame {
     let (command, identity) = match scope {
         Scope::Project { .. } => (FrameCommand::Exec, FrameIdentity::Complete),
         Scope::Package { .. } => (FrameCommand::PackageExec, FrameIdentity::Complete),
+        // Complete only when the composing parent forwarded this package's name.
+        Scope::Launcher if packages.iter().all(|info| has_logical_identity(info.identifier())) => {
+            (FrameCommand::LauncherExec, FrameIdentity::Complete)
+        }
         Scope::Launcher => (FrameCommand::LauncherExec, FrameIdentity::Degraded),
         // Complete, unlike `launcher exec`: a shim is baked with the tool's pinned identifier.
         Scope::LauncherShim { .. } => (FrameCommand::LauncherShim, FrameIdentity::Complete),
@@ -993,10 +997,11 @@ fn project(
     })
 }
 
-/// `identifier` as the record reports it. The tag a lock-bound root or a baked shim
-/// carries is advisory, for patch matching: the digest was not reached through it.
+/// `identifier` as the record reports it. The tag a lock-bound root, a baked shim or a
+/// forwarded launcher name carries is advisory, for patch matching: the digest was not
+/// reached through it.
 fn recorded_identity(identifier: &PinnedPackageRef, scope: &Scope) -> PinnedPackageRef {
-    if matches!(scope, Scope::LauncherShim { .. }) || binding_for(identifier, scope).is_some() {
+    if matches!(scope, Scope::LauncherShim { .. } | Scope::Launcher) || binding_for(identifier, scope).is_some() {
         identifier.strip_advisory()
     } else {
         identifier.clone()
@@ -1815,15 +1820,15 @@ mod tests {
 
     #[test]
     fn frame_is_derived_from_the_scope() {
-        assert_eq!(frame_for(&project_scope()).command, FrameCommand::Exec);
-        assert_eq!(frame_for(&project_scope()).identity, FrameIdentity::Complete);
-        assert!(frame_for(&project_scope()).identity_note.is_none());
+        assert_eq!(frame_for(&project_scope(), &[]).command, FrameCommand::Exec);
+        assert_eq!(frame_for(&project_scope(), &[]).identity, FrameIdentity::Complete);
+        assert!(frame_for(&project_scope(), &[]).identity_note.is_none());
 
         let package = Scope::Package { requested: Vec::new() };
-        assert_eq!(frame_for(&package).command, FrameCommand::PackageExec);
-        assert_eq!(frame_for(&package).identity, FrameIdentity::Complete);
+        assert_eq!(frame_for(&package, &[]).command, FrameCommand::PackageExec);
+        assert_eq!(frame_for(&package, &[]).identity, FrameIdentity::Complete);
 
-        let launcher = frame_for(&Scope::Launcher);
+        let launcher = frame_for(&Scope::Launcher, &Frame::launcher().packages);
         assert_eq!(launcher.command, FrameCommand::LauncherExec);
         assert_eq!(launcher.identity, FrameIdentity::Degraded);
         assert!(
@@ -2325,6 +2330,27 @@ mod tests {
         );
     }
 
+    /// A launcher handed its parent's names records the real package, tagless like a shim frame.
+    #[test]
+    fn a_named_launcher_frame_records_the_package_without_its_tag() {
+        let mut frame = Frame::launcher();
+        let named = pinned("cmake", "ocx.sh", Some("3.28"), LEAF_HEX);
+        frame.packages = vec![install(named, "/home/ci/.ocx/packages/cmake", Vec::new())];
+        let inputs = frame.inputs(Scope::Launcher);
+        let descriptors = descriptors(&inputs);
+
+        let root = &descriptors[0];
+        assert_eq!(root.name, "cmake");
+        assert_eq!(
+            purl_tag(root.uri.as_deref().expect("a named launcher has a purl")),
+            None
+        );
+        assert!(!root.annotations.contains_key("sh.ocx.resolved-from"));
+        let header = frame_for(&inputs.scope, inputs.packages);
+        assert_eq!(header.identity, FrameIdentity::Complete);
+        assert!(header.identity_note.is_none());
+    }
+
     #[test]
     fn scope_projects_its_tier_specific_block() {
         let frame = Frame::project();
@@ -2379,7 +2405,7 @@ mod tests {
                 version: "0.4.1".to_string(),
                 binary: PathBuf::from("/home/ci/.ocx/bin/ocx"),
             },
-            frame: frame_for(&inputs.scope),
+            frame: frame_for(&inputs.scope, inputs.packages),
             process: Process {
                 pid: 48123,
                 parent: Some(ParentProcess { pid: 47990 }),

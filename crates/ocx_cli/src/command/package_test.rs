@@ -16,6 +16,7 @@ use ocx_util::fs as ocx_fs;
 use crate::api::data::script_run::{AssertionRecord, ScriptRunReport, ScriptStatus};
 use crate::error::UsageError;
 use crate::{conventions, options};
+use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
 use ocx_shell::shell::reconcile;
 
@@ -292,7 +293,7 @@ impl PackageTest {
 
         // Step 5: Bridge to env composition via install_info_from_package_root.
         let info_via_root = manager
-            .install_info_from_package_root(&dest_path, Some(&identifier))
+            .install_info_from_package_root(&dest_path, std::slice::from_ref(&identifier))
             .await
             .context("loading install info from materialized package root")?;
         // Overrides are the caller's own contribution; the OCI tier reads no
@@ -300,9 +301,10 @@ impl PackageTest {
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let mut env_overrides = self.env.entries(&cwd)?;
+        let packages = [Arc::new(info_via_root)];
         let mut entries = manager
             .resolve_env(
-                &[Arc::new(info_via_root)],
+                &packages,
                 self.self_view,
                 // Cloned, not moved: the same overrides are ALSO the forwarded
                 // slice below, and a handful of entries is cheaper than the
@@ -333,6 +335,7 @@ impl PackageTest {
             ChildEnv {
                 composed: &entries,
                 forwarded: &env_overrides,
+                identities: Some(&LaunchIdentities::from_infos(&packages)),
             },
             context.config_view(),
         );

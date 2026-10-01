@@ -544,11 +544,9 @@ export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_templa
 ```
 
 `no_patches` carries the forwarded project [per-package opt-out][patches-no-patches-scope]:
-[`ocx exec`][cmd-run] injects the opted-out `registry/repository` keys plus, for each opted-out
-base actually resolved that run, its content digest — a generated launcher resolves its own
-base via a synthetic content-addressed identifier with no real `registry/repository`, so the
-digest is what a launcher's re-entry (`ocx launcher exec`) matches against. This lets a binary
-launched through `ocx exec` honor the project's `no-patches` opt-out even after it re-enters ocx
+[`ocx exec`][cmd-run] injects the opted-out `registry/repository` keys. A generated launcher
+matches them against the names in [`OCX_LAUNCH_IDENTITIES`](#ocx-launch-identities), so a binary
+launched through `ocx exec` keeps the project's `no-patches` opt-out after it re-enters ocx
 through its own launcher. An empty (or absent) `no_patches` array is the byte-identical
 equivalent of no opt-out being forwarded at all.
 
@@ -584,6 +582,29 @@ A malformed `OCX_ENV` value — invalid JSON, or an entry with an unrecognized k
 A stale `OCX_ENV` inherited from a parent shell is removed before a child's own project/group `[env]` is applied, so it cannot leak into an unrelated invocation.
 
 **`OCX_*` and `__OCX_*` keys cannot be set from `ocx.toml`.** The project [`[env]`][config-project-env] table and every `[group.<name>.env]` reject any key starting `OCX_` or `__OCX_` at parse (exit 78); the [`ocx exec --env`][cmd-run] flag rejects the same keys at flag-parse (exit 64). Without this, a checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other variable in this reference and reconfigure how `ocx` itself resolves for every contributor who clones the repository — this is the same forwarding mechanism `OCX_ENV` uses above, closed at the source rather than only on decode.
+
+### `OCX_LAUNCH_IDENTITIES` {#ocx-launch-identities}
+
+Set by OCX, never by you. A JSON object that maps each content digest a composition resolved
+to the `registry/repository[:tag]` names it was resolved under.
+
+```sh
+# Managed by OCX; not set manually.
+export OCX_LAUNCH_IDENTITIES='{"sha256:3f7a2b9c…":["ocx.sh/java:21"]}'
+```
+
+A generated [entrypoint launcher][entrypoints-ref] finds its package by directory. That
+directory is shared by every name that resolves to the same digest, so only the parent knows
+which name it used. The launcher reads this variable and matches [patch rules][patches-user-guide]
+and the forwarded `no_patches` opt-out against every name listed for its digest.
+
+[`ocx exec`][cmd-run], [`ocx package exec`][cmd-package-exec] and a lazy tool's shim write it,
+and only while a [`[patches]`][config-patches] tier is in effect. A launcher with no name for
+its digest falls back to a synthetic identity, which only a `*` rule matches.
+
+A malformed value is a hard startup error with exit code 78, the same as a malformed
+[`OCX_PATCHES`](#ocx-patches). Like every `OCX_*` key, it cannot be set from `ocx.toml` or
+through `--env`.
 
 ### `OCX_MANAGED_CONFIG` {#ocx-managed-config}
 

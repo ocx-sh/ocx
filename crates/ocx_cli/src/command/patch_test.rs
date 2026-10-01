@@ -244,6 +244,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         ChildEnv {
             composed: &composition.entries,
             forwarded: &env_overrides,
+            identities: None,
         },
         context.config_view(),
     );

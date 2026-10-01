@@ -185,11 +185,11 @@ mod install_info_identifier_tests {
         write_minimal_package_root(&root_b, &hex_b).await;
 
         let info_a = manager
-            .install_info_from_package_root(&root_a, None)
+            .install_info_from_package_root(&root_a, &[])
             .await
             .expect("package root A must succeed");
         let info_b = manager
-            .install_info_from_package_root(&root_b, None)
+            .install_info_from_package_root(&root_b, &[])
             .await
             .expect("package root B must succeed");
 
@@ -219,7 +219,7 @@ mod install_info_identifier_tests {
         let identity = ocx_oci::PackageRef::parse("ocx.sh/acme/tool:1.2.3").expect("valid identifier");
 
         let info = manager
-            .install_info_from_package_root(&root, Some(&identity))
+            .install_info_from_package_root(&root, std::slice::from_ref(&identity))
             .await
             .expect("package root must succeed");
 
@@ -256,11 +256,11 @@ mod install_info_identifier_tests {
         write_minimal_package_root(&root_b, &hex_b).await;
 
         let info_a = manager
-            .install_info_from_package_root(&root_a, None)
+            .install_info_from_package_root(&root_a, &[])
             .await
             .expect("package root A must succeed");
         let info_b = manager
-            .install_info_from_package_root(&root_b, None)
+            .install_info_from_package_root(&root_b, &[])
             .await
             .expect("package root B must succeed");
 
@@ -281,6 +281,27 @@ mod install_info_identifier_tests {
         );
     }
 
+    /// The first name is the identifier, pinned to the root's own digest; the rest are aliases.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn further_names_become_aliases() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+        let root = tmp.path().join("pkg");
+        let hex = "d".repeat(64);
+        write_minimal_package_root(&root, &hex).await;
+        let names = ["example.com/mirror/plantuml:2", "ocx.sh/plantuml:1"]
+            .map(|name| ocx_oci::PackageRef::parse(name).expect("valid identifier"));
+
+        let info = manager.install_info_from_package_root(&root, &names).await.unwrap();
+
+        assert_eq!(
+            info.identifier().to_string(),
+            format!("example.com/mirror/plantuml:2@sha256:{hex}")
+        );
+        let aliases: Vec<String> = info.aliases().iter().map(ToString::to_string).collect();
+        assert_eq!(aliases, ["ocx.sh/plantuml:1"]);
+    }
+
     /// Calling `install_info_from_package_root` twice on the same root must
     /// yield the same repository component (idempotency).
     #[tokio::test(flavor = "multi_thread")]
@@ -292,11 +313,11 @@ mod install_info_identifier_tests {
         write_minimal_package_root(&root, &"c".repeat(64)).await;
 
         let info_first = manager
-            .install_info_from_package_root(&root, None)
+            .install_info_from_package_root(&root, &[])
             .await
             .expect("first call must succeed");
         let info_second = manager
-            .install_info_from_package_root(&root, None)
+            .install_info_from_package_root(&root, &[])
             .await
             .expect("second call must succeed");
 
@@ -584,8 +605,9 @@ impl PackageManager {
     /// `metadata.json`, `resolve.json` and `digest`; `${installPath}` resolves against
     /// `info.dir().content()`.
     ///
-    /// `identity` names the package when it has one, pinned to the root's digest with
-    /// its tag kept; `None` mints a digest-only `file-url-mode/<hex>` placeholder.
+    /// `names` are what the package is known by: the first, pinned to the root's digest with
+    /// its tag kept, is its identifier, the rest aliases patch rules also match. None mints a
+    /// digest-only `file-url-mode/<hex>` placeholder.
     ///
     /// # Errors
     ///
@@ -594,7 +616,7 @@ impl PackageManager {
     pub async fn install_info_from_package_root(
         &self,
         pkg_root: &std::path::Path,
-        identity: Option<&ocx_oci::PackageRef>,
+        names: &[ocx_oci::PackageRef],
     ) -> crate::Result<ocx_package::install_info::InstallInfo> {
         use ocx_package::install_info::InstallInfo;
         use ocx_package::metadata::ValidMetadata;
@@ -621,12 +643,12 @@ impl PackageManager {
         let resolved = resolved_result?;
 
         // A PinnedIdentifier from the sibling `digest` file, used for dedup in
-        // resolve_env. Without an `identity` the synthetic repository is internal-only
+        // resolve_env. Without a name the synthetic repository is internal-only
         // (never persisted, never compared with real ones), so it carries the full digest
         // hex and two distinct pkg-roots can never collide on `(registry, repository)`.
         let digest_path = objects.digest_file_for_content(pkg_root)?;
         let digest = read_digest_file(&digest_path).await?;
-        let base_id = match identity {
+        let base_id = match names.first() {
             Some(identity) => identity.clone_with_digest(digest),
             None => {
                 let repo_name = format!("file-url-mode/{}", digest.hex());
@@ -642,7 +664,8 @@ impl PackageManager {
             ocx_store::file_structure::PackageDir {
                 dir: pkg_root.to_path_buf(),
             },
-        ))
+        )
+        .with_aliases(names.iter().skip(1).cloned().collect()))
     }
 
     /// Resolves environment entries for a package known only by its on-disk
@@ -659,7 +682,7 @@ impl PackageManager {
         scope: crate::tasks::resolve::EnvScope,
         platform: &ocx_oci::Platform,
     ) -> crate::Result<Vec<ocx_package::metadata::env::entry::Entry>> {
-        let info = self.install_info_from_package_root(pkg_root, None).await?;
+        let info = self.install_info_from_package_root(pkg_root, &[]).await?;
         self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope, platform)
             .await
     }

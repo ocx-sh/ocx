@@ -61,6 +61,10 @@ pub struct InstallInfo {
     /// The registry the content is fetched from, before `[mirrors]` rewrites;
     /// unlike [`identifier`](Self::identifier)'s logical registry.
     transport_registry: Option<String>,
+
+    /// Further names a forwarding composition resolved this digest under; patch rules
+    /// match them alongside [`identifier`](Self::identifier).
+    aliases: Vec<ocx_oci::PackageRef>,
 }
 
 impl InstallInfo {
@@ -78,6 +82,7 @@ impl InstallInfo {
             platform: None,
             deferred: None,
             transport_registry: None,
+            aliases: Vec::new(),
         }
     }
 
@@ -102,6 +107,16 @@ impl InstallInfo {
     pub fn with_transport_registry(mut self, registry: impl Into<String>) -> Self {
         self.transport_registry = Some(registry.into());
         self
+    }
+
+    #[must_use]
+    pub fn with_aliases(mut self, aliases: Vec<ocx_oci::PackageRef>) -> Self {
+        self.aliases = aliases;
+        self
+    }
+
+    pub fn aliases(&self) -> &[ocx_oci::PackageRef] {
+        &self.aliases
     }
 
     pub fn platform(&self) -> Option<&ocx_oci::Platform> {
