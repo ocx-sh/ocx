@@ -83,9 +83,11 @@ opted-out bases' canonical `registry/repository` keys. It also forwards the name
 each package under in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], and the launcher
 matches the opt-out against those names. [`ocx env`][cmd-env-root] and
 [`ocx direnv export`][cmd-direnv-export] read the same project config and honor the opt-out
-directly in the environment they compose — they have no child launcher to forward it to.
+directly in the environment they compose. They, and the shell hook, also mark the opted-out
+package in the `OCX_LAUNCH_IDENTITIES` they export, so a launcher run from that `PATH` skips the
+patch tier for it.
 
-A launcher invoked outside this chain — standalone, or re-entered through the OCI-tier
+A launcher invoked outside these chains — by absolute path, or re-entered through the OCI-tier
 [`ocx package exec`][cmd-package-exec] — decodes no forwarded opt-out from its environment and
 composes the companion overlay as if `no-patches` were never set. A
 [system-required][config-patches-scopes] tier is unaffected either way: enforcement is not

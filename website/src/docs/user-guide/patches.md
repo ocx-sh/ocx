@@ -190,9 +190,11 @@ A generated launcher finds its package by directory, and one directory serves ev
 resolves to its digest. The command that composed the environment passes the names it used in
 [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], and the launcher matches rules against
 each of them. So `ocx.sh/java:*` reaches the JDK's launchers when the JDK runs through
-`ocx exec`, `ocx package exec` or a lazy tool's shim. A launcher run by its absolute path has no
-such parent and matches only `*` rules. A digest-only composition passes a name without a tag,
-which tag-anchored rules skip as they do everywhere else.
+`ocx exec`, `ocx package exec`, `ocx package test` or a lazy tool's shim. It also reaches them from a `PATH` that
+`ocx env --shell`, `ocx direnv export` or the shell hook composed, since those exports carry the
+names too. A launcher run by its absolute path, or from a `PATH` no ocx command composed, matches
+only `*` rules. A digest-only composition passes a name without a tag, which tag-anchored rules
+skip as they do everywhere else.
 
 ### Execution time only {#patches-how-execution-time}
 
@@ -595,9 +597,11 @@ after reading the project config.
 A binary that `ocx exec` launches can still reach the opt-out one hop further: if that binary
 re-enters ocx through its own generated launcher, `ocx exec` forwards the opt-out to the child
 process over [`OCX_PATCHES`][env-ocx-patches], so the launcher honors the same suppression
-its parent did. A **direct** launcher invocation — one not spawned by an opt-out-forwarding
-`ocx exec`, including a package run through [`ocx package exec`][cmd-package-exec] — has no
-opt-out to decode and composes the companion overlay as if `no-patches` were never set.
+its parent did. `ocx env`, `ocx direnv export` and the shell hook mark the opted-out package in
+[`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], so a launcher run from the `PATH` they
+export honors it too. Any other launcher invocation — by absolute path, or through
+[`ocx package exec`][cmd-package-exec] — has no opt-out to decode and composes the companion
+overlay as if `no-patches` were never set.
 
 :::info Why not everywhere?
 The opt-out lives in a project's `ocx.toml`. OCI-tier commands (`ocx package install`,

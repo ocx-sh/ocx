@@ -225,15 +225,19 @@ impl ToolchainEnv {
                 self.pinned.pinned(),
             )
             .await?;
+            let no_patches = ctx.config.no_patches_repositories();
             let scope = ocx_package_manager::EnvScope::Project {
-                no_patches: ctx.config.no_patches_repositories(),
+                no_patches: no_patches.clone(),
                 env: project_env,
                 toolchain: Some(Box::new(toolchain)),
             };
             // `composing`, not `manager`: under `--no-pull` a required companion miss must not resolve live.
-            composing
+            let (mut entries, patch_start, provenance, attribution) = composing
                 .resolve_env_with_attribution(&infos, false, scope, &target)
-                .await?
+                .await?;
+            let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+            entries.extend(manager.launch_identity_entry(&infos, &no_patches, inherited.as_deref()));
+            (entries, patch_start, provenance, attribution)
         };
 
         // Settle `list` separators before any emit branch reads `entries`.
@@ -401,16 +405,17 @@ pub(crate) async fn resolve_global_pinned_env(
 
     // `offline_view` keeps the patch tier, so companion overlays still apply.
     let scope = ocx_package_manager::EnvScope::Project {
-        no_patches,
+        no_patches: no_patches.clone(),
         env: project_env,
         // `None` only without a global lock, which is the digest lane.
         toolchain,
     };
-    Ok(Some(
-        manager
-            .resolve_env_with_attribution(&infos, false, scope, target)
-            .await?,
-    ))
+    let (mut entries, patch_start, provenance, attribution) = manager
+        .resolve_env_with_attribution(&infos, false, scope, target)
+        .await?;
+    let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+    entries.extend(manager.launch_identity_entry(&infos, &no_patches, inherited.as_deref()));
+    Ok(Some((entries, patch_start, provenance, attribution)))
 }
 
 /// Resolve raw `-g` values to the global tier's tool groups: empty is `default`, `all` adds every lock group.

@@ -186,14 +186,17 @@ impl DirenvExport {
             None,
         )
         .await?;
+        let no_patches = project.config.no_patches_repositories();
         let scope = ocx_package_manager::EnvScope::Project {
-            no_patches: project.config.no_patches_repositories(),
+            no_patches: no_patches.clone(),
             env: project_env,
             toolchain: Some(Box::new(toolchain)),
         };
         let (mut entries, _, _) = offline
             .resolve_env_with_patch_boundary(&composed.roots, false, scope, &platform)
             .await?;
+        let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+        entries.extend(offline.launch_identity_entry(&composed.roots, &no_patches, inherited.as_deref()));
 
         // A package's explicit separator must be what `None`-separator contributors (`[env]`, `--env`)
         // inherit, not the fold's default; nothing is forwarded, so one pass suffices.

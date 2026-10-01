@@ -87,11 +87,12 @@ impl LauncherExec {
             .install_info_from_package_root(package_dir.root(), &names)
             .await?;
         // Scoped to this re-entry, never grafted onto the global manager tier, so it cannot leak into
-        // nested `ocx` commands.
-        let no_patches = ocx_config::patch::patches_from_env()
+        // nested `ocx` commands. An exported environment carries its opt-out on the identities.
+        let mut no_patches = ocx_config::patch::patches_from_env()
             .map_err(anyhow::Error::new)?
             .map(|forwarded| forwarded.no_patches)
             .unwrap_or_default();
+        no_patches.extend(identities.iter().flat_map(LaunchIdentities::opted_out_repositories));
         // The parent's `[env]` and `--env` via `OCX_ENV`: without them the package's own entries would
         // silently revert the project's overrides. Fails closed on the whole payload, never one entry.
         let project_env = forwarded_env().map_err(anyhow::Error::new)?;

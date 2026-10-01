@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 //! The package names a composing ocx forwards to the entrypoint launchers it spawns, as
-//! [`keys::OCX_LAUNCH_IDENTITIES`].
+//! [`keys::OCX_LAUNCH_IDENTITIES`], with the project's `no-patches` opt-out per package.
 //!
 //! A package directory is keyed by digest and shared by every repository that resolves to
 //! it, so only the composing process knows which name a launch used.
@@ -16,17 +16,34 @@ use ocx_oci::{Digest, IdentifierError, PackageRef};
 use ocx_util::env::var;
 
 use crate::install_info::InstallInfo;
+use crate::metadata::env::entry::Entry;
+use crate::metadata::env::modifier::ModifierKind;
 
 /// Digest-keyed `registry/repository[:tag]` names; a value never carries a digest, so an entry
 /// cannot point one package's bytes at another's name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LaunchIdentities(BTreeMap<Digest, BTreeSet<PackageRef>>);
+pub struct LaunchIdentities(BTreeMap<Digest, Launch>);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Launch {
+    names: BTreeSet<PackageRef>,
+    /// The composing project opted this package out of the patch tier.
+    no_patches: bool,
+}
+
+/// One digest's value in the wire form.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WireLaunch {
+    names: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_patches: bool,
+}
 
 /// Failure modes of decoding [`keys::OCX_LAUNCH_IDENTITIES`]; each rejects the whole map.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LaunchIdentityError {
-    /// The value was present but not a JSON object of string arrays.
+    /// The value was present but not a JSON object of `{"names": [...]}` objects.
     #[error("malformed OCX_LAUNCH_IDENTITIES env value")]
     MalformedJson {
         #[source]
@@ -58,24 +75,46 @@ impl LaunchIdentities {
     /// The names of every package in a composed closure: each root and its dependencies,
     /// tag kept, digest stripped.
     pub fn from_infos(infos: &[Arc<InstallInfo>]) -> Self {
-        let mut map: BTreeMap<Digest, BTreeSet<PackageRef>> = BTreeMap::new();
+        let mut map: BTreeMap<Digest, Launch> = BTreeMap::new();
         let closure = infos.iter().flat_map(|info| {
             std::iter::once(info.identifier()).chain(info.resolved().dependencies.iter().map(|dep| &dep.identifier))
         });
         for identifier in closure {
             map.entry(identifier.digest())
                 .or_default()
+                .names
                 .insert(identifier.without_digest());
         }
         Self(map)
+    }
+
+    /// Marks every package a name of which is in `no_patches` (canonical `registry/repository`).
+    #[must_use]
+    pub fn with_opt_out(mut self, no_patches: &BTreeSet<String>) -> Self {
+        for launch in self.0.values_mut() {
+            launch.no_patches |= launch
+                .names
+                .iter()
+                .any(|name| no_patches.contains(&repository_key(name)));
+        }
+        self
     }
 
     /// The names forwarded for `digest`, sorted; empty when none were.
     pub fn identities_for(&self, digest: &Digest) -> Vec<PackageRef> {
         self.0
             .get(digest)
-            .map(|names| names.iter().cloned().collect())
+            .map(|launch| launch.names.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// The `no-patches` keys of every marked package, for the launcher's opt-out set.
+    pub fn opted_out_repositories(&self) -> BTreeSet<String> {
+        self.0
+            .values()
+            .filter(|launch| launch.no_patches)
+            .flat_map(|launch| launch.names.iter().map(repository_key))
+            .collect()
     }
 
     /// Serializes to the [`keys::OCX_LAUNCH_IDENTITIES`] wire form; `None` when empty.
@@ -83,10 +122,19 @@ impl LaunchIdentities {
         if self.0.is_empty() {
             return None;
         }
-        let wire: BTreeMap<String, Vec<String>> = self
+        let wire: BTreeMap<String, WireLaunch> = self
             .0
             .iter()
-            .map(|(digest, names)| (digest.to_string(), names.iter().map(ToString::to_string).collect()))
+            .map(|(digest, launch)| {
+                let names = launch.names.iter().map(ToString::to_string).collect();
+                (
+                    digest.to_string(),
+                    WireLaunch {
+                        names,
+                        no_patches: launch.no_patches,
+                    },
+                )
+            })
             .collect();
         match serde_json::to_string(&wire) {
             Ok(json) => Some(json),
@@ -104,16 +152,22 @@ impl LaunchIdentities {
     /// [`LaunchIdentityError`] for a malformed value: a corrupt map must not degrade to
     /// "no identity" silently.
     pub fn from_env() -> Result<Option<Self>, LaunchIdentityError> {
-        let Some(raw) = var(keys::OCX_LAUNCH_IDENTITIES) else {
-            return Ok(None);
-        };
-        if raw.is_empty() {
-            return Ok(None);
+        match var(keys::OCX_LAUNCH_IDENTITIES) {
+            Some(raw) if !raw.is_empty() => Self::decode(&raw).map(Some),
+            _ => Ok(None),
         }
-        let wire = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&raw)
+    }
+
+    /// Parses the [`keys::OCX_LAUNCH_IDENTITIES`] wire form.
+    ///
+    /// # Errors
+    ///
+    /// [`LaunchIdentityError`] when `raw` is not a well-formed map.
+    pub fn decode(raw: &str) -> Result<Self, LaunchIdentityError> {
+        let wire = serde_json::from_str::<BTreeMap<String, WireLaunch>>(raw)
             .map_err(|source| LaunchIdentityError::MalformedJson { source })?;
         let mut map = BTreeMap::new();
-        for (key, names) in wire {
+        for (key, WireLaunch { names, no_patches }) in wire {
             let digest = Digest::try_from(key.as_str()).map_err(|source| LaunchIdentityError::InvalidDigest {
                 key: key.clone(),
                 source,
@@ -129,10 +183,46 @@ impl LaunchIdentities {
                 }
                 parsed.insert(identity);
             }
-            map.insert(digest, parsed);
+            map.insert(
+                digest,
+                Launch {
+                    names: parsed,
+                    no_patches,
+                },
+            );
         }
-        Ok(Some(Self(map)))
+        Ok(Self(map))
     }
+
+    /// Folds an inherited wire value in: a digest this map holds keeps its own entry, so the
+    /// innermost export decides a package's names and opt-out.
+    ///
+    /// A malformed `raw` is dropped with a debug log: this map replaces it either way.
+    pub fn inherit(&mut self, raw: &str) {
+        match Self::decode(raw) {
+            Ok(inherited) => {
+                for (digest, launch) in inherited.0 {
+                    self.0.entry(digest).or_insert(launch);
+                }
+            }
+            Err(error) => log::debug!("inherited launch identities dropped: {error}"),
+        }
+    }
+
+    /// The constant [`Entry`] an exported environment carries; `None` when empty.
+    pub fn to_entry(&self) -> Option<Entry> {
+        Some(Entry {
+            key: keys::OCX_LAUNCH_IDENTITIES.to_owned(),
+            value: self.encode()?,
+            kind: ModifierKind::Constant,
+            separator: None,
+        })
+    }
+}
+
+/// The `no-patches` key form: canonical `registry/repository`, tag and digest dropped.
+fn repository_key(name: &PackageRef) -> String {
+    format!("{}/{}", name.registry(), name.repository())
 }
 
 #[cfg(test)]
@@ -231,7 +321,7 @@ mod tests {
         assert_eq!(
             encoded,
             format!(
-                r#"{{"{DIGEST_A}":["ocx.sh/plantuml:1.2024","ocx.sh/plantuml-alias:2"],"{DIGEST_B}":["example.com/jre"]}}"#
+                r#"{{"{DIGEST_A}":{{"names":["ocx.sh/plantuml:1.2024","ocx.sh/plantuml-alias:2"]}},"{DIGEST_B}":{{"names":["example.com/jre"]}}}}"#
             )
         );
 
@@ -243,6 +333,55 @@ mod tests {
     #[test]
     fn an_empty_map_encodes_to_nothing() {
         assert_eq!(LaunchIdentities::default().encode(), None);
+        assert!(LaunchIdentities::default().to_entry().is_none());
+    }
+
+    #[test]
+    fn an_inherited_map_fills_only_the_digests_this_one_lacks() {
+        let inherited = LaunchIdentities::from_infos(&[
+            info(pinned("ocx.sh/plantuml:1", DIGEST_A), vec![]),
+            info(pinned("ocx.sh/jre:21", DIGEST_B), vec![]),
+        ])
+        .with_opt_out(&BTreeSet::from(["ocx.sh/jre".to_owned()]));
+        let mut own = LaunchIdentities::from_infos(&[info(pinned("ocx.sh/jre-alias:21", DIGEST_B), vec![])]);
+        own.inherit(&inherited.encode().unwrap());
+
+        assert_eq!(names(&own, DIGEST_A), ["ocx.sh/plantuml:1"]);
+        assert_eq!(names(&own, DIGEST_B), ["ocx.sh/jre-alias:21"], "the own names win");
+        assert!(own.opted_out_repositories().is_empty(), "and so does the own opt-out");
+
+        let entry = own.to_entry().expect("a non-empty map is an entry");
+        assert_eq!(entry.key, keys::OCX_LAUNCH_IDENTITIES);
+        assert_eq!(entry.kind, ModifierKind::Constant);
+        assert_eq!(LaunchIdentities::decode(&entry.value).unwrap(), own);
+
+        let before = own.clone();
+        own.inherit("not json");
+        assert_eq!(own, before, "a malformed inherited value changes nothing");
+    }
+
+    #[test]
+    fn an_opt_out_marks_the_package_under_every_name_and_round_trips() {
+        let identities = LaunchIdentities::from_infos(&[
+            info(
+                pinned("ocx.sh/plantuml:1", DIGEST_A),
+                vec![pinned("ocx.sh/jre:21", DIGEST_B)],
+            ),
+            info(pinned("ocx.sh/plantuml-alias:2", DIGEST_A), vec![]),
+        ])
+        .with_opt_out(&BTreeSet::from(["ocx.sh/plantuml".to_owned()]));
+        assert_eq!(
+            identities.opted_out_repositories(),
+            BTreeSet::from(["ocx.sh/plantuml".to_owned(), "ocx.sh/plantuml-alias".to_owned()])
+        );
+
+        let encoded = identities.encode().unwrap();
+        assert!(
+            encoded.contains(r#"["ocx.sh/plantuml:1","ocx.sh/plantuml-alias:2"],"no_patches":true"#),
+            "{encoded}"
+        );
+        assert!(encoded.contains(r#"{"names":["ocx.sh/jre:21"]}"#), "{encoded}");
+        assert_eq!(LaunchIdentities::decode(&encoded).unwrap(), identities);
     }
 
     #[test]
@@ -269,13 +408,17 @@ mod tests {
         let cases = [
             ("not json {{{", "json"),
             (r#"{"sha256:aa":"ocx.sh/a"}"#, "json"),
-            (r#"{"not-a-digest":["ocx.sh/a"]}"#, "digest"),
             (
-                r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":["no-registry:1"]}"#,
+                r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":["ocx.sh/a"]}"#,
+                "json",
+            ),
+            (r#"{"not-a-digest":{"names":["ocx.sh/a"]}}"#, "digest"),
+            (
+                r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"names":["no-registry:1"]}}"#,
                 "identity",
             ),
             (
-                r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":["ocx.sh/a@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}"#,
+                r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"names":["ocx.sh/a@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}}"#,
                 "pinned",
             ),
         ];

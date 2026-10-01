@@ -302,6 +302,61 @@ mod install_info_identifier_tests {
         assert_eq!(aliases, ["ocx.sh/plantuml:1"]);
     }
 
+    /// An exported environment names its packages for their launchers only under a patch tier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_launch_identity_entry_is_written_only_under_a_patch_tier() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+        let root = tmp.path().join("pkg");
+        let hex = "c".repeat(64);
+        write_minimal_package_root(&root, &hex).await;
+        let identities = ocx_package::launch::LaunchIdentities::decode(&format!(
+            r#"{{"sha256:{hex}":{{"names":["ocx.sh/plantuml:1"]}}}}"#
+        ))
+        .unwrap();
+        let infos = vec![std::sync::Arc::new(
+            manager
+                .install_info_from_package_root(&root, &[ocx_oci::PackageRef::parse("ocx.sh/plantuml:1").unwrap()])
+                .await
+                .unwrap(),
+        )];
+        let opt_out = std::collections::BTreeSet::from(["ocx.sh/plantuml".to_owned()]);
+
+        assert!(manager.launch_identity_entry(&infos, &opt_out, None).is_none());
+
+        let patched = manager.with_patches(Some(ocx_config::patch::ResolvedPatchConfig {
+            system_required: false,
+            no_patches: std::collections::BTreeSet::new(),
+            registry: "patches.example.com".to_owned(),
+            path_template: "{registry}/{repository}".to_owned(),
+            required: false,
+        }));
+        let entry = patched
+            .launch_identity_entry(&infos, &std::collections::BTreeSet::new(), None)
+            .expect("a patch tier writes the key");
+        assert_eq!(entry.key, ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+        assert_eq!(
+            ocx_package::launch::LaunchIdentities::decode(&entry.value).unwrap(),
+            identities
+        );
+
+        // The opt-out is marked, and an inherited map keeps only the digests this one lacks.
+        let inherited = format!(
+            r#"{{"sha256:{hex}":{{"names":["ocx.sh/other:1"]}},"sha256:{}":{{"names":["ocx.sh/jre:21"]}}}}"#,
+            "e".repeat(64)
+        );
+        let entry = patched
+            .launch_identity_entry(&infos, &opt_out, Some(&inherited))
+            .expect("a patch tier writes the key");
+        assert_eq!(
+            entry.value,
+            format!(
+                r#"{{"sha256:{hex}":{{"names":["ocx.sh/plantuml:1"],"no_patches":true}},"sha256:{}":{{"names":["ocx.sh/jre:21"]}}}}"#,
+                "e".repeat(64)
+            )
+        );
+    }
+
     /// Calling `install_info_from_package_root` twice on the same root must
     /// yield the same repository component (idempotency).
     #[tokio::test(flavor = "multi_thread")]
@@ -598,6 +653,30 @@ impl PackageManager {
 
     pub fn is_offline(&self) -> bool {
         self.client.is_none()
+    }
+
+    /// The [`keys::OCX_LAUNCH_IDENTITIES`] entry an exported environment carries, so a launcher
+    /// run from its `PATH` matches patch rules by the names `infos` composed under.
+    ///
+    /// Packages in `no_patches` are marked, so their launchers skip the patch tier; `inherited`,
+    /// an enclosing environment's value, keeps the digests `infos` lack.
+    ///
+    /// `None` without a patch tier: an environment without patches never sees the key.
+    ///
+    /// [`keys::OCX_LAUNCH_IDENTITIES`]: ocx_config::env::keys::OCX_LAUNCH_IDENTITIES
+    #[must_use]
+    pub fn launch_identity_entry(
+        &self,
+        infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
+        no_patches: &std::collections::BTreeSet<String>,
+        inherited: Option<&str>,
+    ) -> Option<ocx_package::metadata::env::entry::Entry> {
+        self.patches.as_ref()?;
+        let mut identities = ocx_package::launch::LaunchIdentities::from_infos(infos).with_opt_out(no_patches);
+        if let Some(raw) = inherited {
+            identities.inherit(raw);
+        }
+        identities.to_entry()
     }
 
     /// Builds an [`InstallInfo`] from a known **package root**, skipping identifier

@@ -265,7 +265,7 @@ Every degraded frame carries `frame.identityNote`, a sentence stating the limita
 }
 ```
 
-A user who runs a generated launcher straight from `PATH`, with no ocx parent at all, produces exactly this shape too — only the content digest identifies what ran, never a name.
+A launcher run from a `PATH` that no ocx command composed produces this shape too, where only the content digest identifies what ran. One run from a `PATH` that [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] or the shell hook composed names its package, because those exports carry the same variable while a patch tier is in effect.
 
 [`ocx launcher exec`][cmd-launcher-exec] takes no `--records-*` flags of its own. It inherits the active sink purely through the forwarded `OCX_RECORDS_DIR` / `OCX_RECORDS_NAME` environment variables set by the parent invocation, the same mechanism that forwards every other resolution-affecting setting into a launcher re-entry.
 
@@ -417,6 +417,8 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 [cmd-exec]: ./command-line.md#exec
 [cmd-package-exec]: ./command-line.md#package-exec
 [cmd-package-env]: ./command-line.md#package-env
+[cmd-env-root]: ./command-line.md#env-root
+[cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-launcher-exec]: ./command-line.md#launcher-exec
 [cmd-package-test]: ./command-line.md#package-test
 [cmd-patch-test]: ./command-line.md#patch-test

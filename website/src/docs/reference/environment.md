@@ -586,25 +586,34 @@ A stale `OCX_ENV` inherited from a parent shell is removed before a child's own 
 ### `OCX_LAUNCH_IDENTITIES` {#ocx-launch-identities}
 
 Set by OCX, never by you. A JSON object that maps each content digest a composition resolved
-to the `registry/repository[:tag]` names it was resolved under.
+to the `registry/repository[:tag]` names it was resolved under, and marks a package the project
+opted out with [`no-patches`][patches-user-guide].
 
 ```sh
 # Managed by OCX; not set manually.
-export OCX_LAUNCH_IDENTITIES='{"sha256:3f7a2b9c…":["ocx.sh/java:21"]}'
+export OCX_LAUNCH_IDENTITIES='{"sha256:3f7a2b9c…":{"names":["ocx.sh/java:21"],"no_patches":true}}'
 ```
 
 A generated [entrypoint launcher][entrypoints-ref] finds its package by directory. That
 directory is shared by every name that resolves to the same digest, so only the parent knows
 which name it used. The launcher reads this variable and matches [patch rules][patches-user-guide]
-and the forwarded `no_patches` opt-out against every name listed for its digest.
+and the forwarded `no_patches` opt-out against every name listed for its digest. A marked
+package's launcher skips the patch tier, as it does under `ocx exec`; a system-required tier
+still applies.
 
-[`ocx exec`][cmd-run], [`ocx package exec`][cmd-package-exec] and a lazy tool's shim write it,
-and only while a [`[patches]`][config-patches] tier is in effect. A launcher with no name for
-its digest falls back to a synthetic identity, which only a `*` rule matches.
+[`ocx exec`][cmd-run], [`ocx package exec`][cmd-package-exec],
+[`ocx package test`][cmd-package-test] and a lazy tool's shim write it for the process they
+spawn. [`ocx env`][cmd-env-root], [`ocx package env`][cmd-package-env],
+[`ocx direnv export`][cmd-direnv-export] and the per-prompt shell hook export it, so a launcher
+run from the `PATH` they composed still knows its name. An export keeps an inherited value's
+entries for the packages it did not compose. When you leave a project, the hook puts back the
+value the project replaced. Every writer sets it only while a [`[patches]`][config-patches]
+tier is in effect. A launcher with no name for its digest falls back to a synthetic identity,
+which only a `*` rule matches.
 
-A malformed value is a hard startup error with exit code 78, the same as a malformed
-[`OCX_PATCHES`](#ocx-patches). Like every `OCX_*` key, it cannot be set from `ocx.toml` or
-through `--env`.
+While a `[patches]` tier is in effect, a malformed value is a hard startup error for the
+launcher with exit code 78, the same as a malformed [`OCX_PATCHES`](#ocx-patches). Like every
+`OCX_*` key, it cannot be set from `ocx.toml` or through `--env`.
 
 ### `OCX_MANAGED_CONFIG` {#ocx-managed-config}
 
@@ -1234,6 +1243,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-package-install]: command-line.md#package-install
 [cmd-package-pull]: command-line.md#package-pull
 [cmd-package-exec]: command-line.md#package-exec
+[cmd-package-test]: command-line.md#package-test
 [cmd-package-env]: command-line.md#package-env
 [cmd-env-root]: command-line.md#env-root
 [cmd-trust-policy]: configuration.md#keys-trust

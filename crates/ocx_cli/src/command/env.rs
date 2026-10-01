@@ -179,6 +179,8 @@ impl Env {
                 &platform,
             )
             .await?;
+        let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+        entries.extend(manager.launch_identity_entry(&info, &std::collections::BTreeSet::new(), inherited.as_deref()));
         // Before any of the three output branches reads `entries`.
         reconcile_list_separators(entries.iter_mut())?;
         if let Some(provider) = ci {
