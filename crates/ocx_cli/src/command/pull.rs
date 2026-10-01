@@ -80,9 +80,18 @@ impl Pull {
         };
         let host = selected
             .iter()
-            .map(|tool| Ok((*tool, tool.host_leaf_identifier(&platform)?)))
+            .map(|tool| {
+                let pinned = tool.host_leaf_identifier(&platform)?;
+                let mode = lazy_mode_for_tool(
+                    &ctx.config,
+                    &pinned.clone().into(),
+                    Some(tool.locked().group.as_str()),
+                    self.lazy_mode.mode(),
+                );
+                Ok((mode, pinned))
+            })
             .collect::<Result<Vec<_>, ocx_project::Error>>()?;
-        let pull_set = ocx_project::first_per_content(host);
+        let pull_set = ocx_project::eager_per_content(host);
         let pinned: Vec<ocx_oci::PinnedPackageRef> = pull_set.iter().map(|(_, id)| id.clone()).collect();
 
         // After the staleness gate, so a stale lock exits 65 before any preview prints.
@@ -92,16 +101,7 @@ impl Pull {
         }
 
         let identifiers: Vec<ocx_oci::PackageRef> = pinned.iter().cloned().map(Into::into).collect();
-
-        let mut modes: Vec<ocx_project::lazy::LazyMode> = Vec::with_capacity(identifiers.len());
-        for ((tool, _), identifier) in pull_set.iter().zip(identifiers.iter()) {
-            modes.push(lazy_mode_for_tool(
-                &ctx.config,
-                identifier,
-                Some(tool.locked().group.as_str()),
-                self.lazy_mode.mode(),
-            ));
-        }
+        let modes: Vec<ocx_project::lazy::LazyMode> = pull_set.iter().map(|(mode, _)| *mode).collect();
         let eager: Vec<ocx_oci::PackageRef> = identifiers
             .iter()
             .zip(modes.iter())

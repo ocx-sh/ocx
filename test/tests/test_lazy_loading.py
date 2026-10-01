@@ -1385,6 +1385,32 @@ def test_c015_pull_serializes_the_advisories_it_warns_about(
     )
 
 
+def test_pull_materializes_a_package_any_selected_group_wants_eager(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """ocx-sh/ocx#543: one package bound in a deferring group and an eager one is pulled eagerly.
+
+    The lock sorts by `(group, name)`, so the deferring group `aaa` comes before
+    `default`: a pull that kept the first binding's lazy-mode would leave a shim.
+    """
+    pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
+    )
+    body = (
+        f'[tools]\nhello = "{pkg.fq}"\n\n'
+        f'[group.aaa]\nlazy-mode = "always"\n\n[group.aaa.tools]\nhi = "{pkg.fq}"\n'
+    )
+    project = _lazy_project(ocx, tmp_path, body)
+    assert not _is_materialized(ocx, project, pkg), "precondition: the store starts cold"
+
+    result = _run(ocx, project, "--format", "json", "pull")
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    rows = {key: value for key, value in json.loads(result.stdout).items() if key != "advisories"}
+    assert [row["kind"] for row in rows.values()] == ["package"], f"one eager row expected; got {rows}"
+    assert _is_materialized(ocx, project, pkg), "the default group's eager binding must be pre-warmed"
+
+
 def test_sequence_8_offline_regenerates_a_collected_shim_when_the_metadata_is_local(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

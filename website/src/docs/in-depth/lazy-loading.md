@@ -36,6 +36,8 @@ Under `always`, OCX writes a small generated launcher per declared name into a s
 
 Each tier is independently optional; an absent tier means *inherit from the next one down*, never *this tier said `never`*. Setting `lazy-mode = "always"` at the toolchain level and `lazy-mode = "never"` on one package's own entry composes that one package eagerly while every other declared package defers — the package-tier entry is a decision, not a gap.
 
+When one package is selected under several groups, `ocx pull` materializes it eagerly if any of those groups resolves to `never`.
+
 ## First invocation {#deferred-tools-materialize}
 
 A shim's generated launcher is a small script, deliberately similar to the one an [entry point][entrypoints-ref] writes:
