@@ -120,8 +120,10 @@ tasks:
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
       # The bump changes every workspace crate's version, so crate_universe's
       # (gitignored) Cargo.bazel.lock.json digest goes stale and every
-      # `bazel query` in the verify below exits 7 until it is repinned.
-      - CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates
+      # `bazel query` in the verify below exits 7 until it is repinned. The
+      # splice temp goes outside $HOME: cargo-bazel refuses a workspace with a
+      # Cargo config in a parent dir, and ~/.cargo/config.toml is one.
+      - mkdir -p /var/tmp/ocx-splice && CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
       - task: changelog:validate
       # NOCACHE=1 reaches `bazel:test:accept` (CLI vars are global), which runs

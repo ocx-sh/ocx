@@ -139,7 +139,7 @@ tasks:
       - cmd: >-
           test -s Cargo.bazel.lock.json || {
           echo 'bazel: Cargo.bazel.lock.json is absent - it is gitignored, because crate_universe records the generating machine output base (DX-23). Repinning once.' >&2;
-          CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates; }
+          mkdir -p /var/tmp/ocx-splice && CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice; }
       - cmd: >-
           test -s Cargo.bazel.lock.json || {
           echo 'bazel: the repin left Cargo.bazel.lock.json absent, so nothing below this can query. Its exit code settles nothing - measured, bazel fetch --repo=@crates exits 0 as a no-op once @crates is in the repo contents cache. If a splice did run and fail, its cause is printed above; the measured one on this host is cargo-bazel refusing while a Cargo config file sits in a parent directory of the splice workspace (~/.cargo/config.toml, splice temp under $HOME). Remove that file, or put the splice temp outside $HOME and repin by hand: CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice (measured 18 s, 892 KB written).' >&2;
