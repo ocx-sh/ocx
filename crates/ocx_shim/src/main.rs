@@ -323,6 +323,10 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
+    // `UpdateProcThreadAttribute` stores this pointer, not the value: it must outlive both `CreateProcessW` calls, or
+    // the child is born outside the job (or the spawn fails on a stale handle).
+    let job_handle = [job];
+
     // SAFETY: all-zero is the documented initial state of `STARTUPINFOEXW`.
     let mut startup_ex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -389,10 +393,8 @@ fn run() -> Result<i32, ShimError> {
                     }
                 }
                 if ok && want_job_list {
-                    let job_handle = [job];
-                    // SAFETY: the list is initialised for `attr_count` entries. Win32 requires `job_handle` to stay
-                    // alive until the list is deleted, but it drops at this block's end, before `CreateProcessW`
-                    // reads it: open bug ocx-sh/ocx#542.
+                    // SAFETY: the list is initialised for `attr_count` entries, and the function-scoped `job_handle`
+                    // outlives `CreateProcessW`.
                     let r = unsafe {
                         UpdateProcThreadAttribute(
                             attr_list_ptr,
@@ -425,7 +427,7 @@ fn run() -> Result<i32, ShimError> {
     }
 
     // SAFETY: `app_name_ptr` is NULL or a NUL-terminated buffer, `command_line_w` is mutable and NUL-terminated, and
-    // `startup_ex`'s attribute list is backed by `attr_list_buf`; all outlive the call.
+    // `startup_ex`'s attribute list is backed by `attr_list_buf`, `unique_handles` and `job_handle`; all outlive it.
     let mut created = unsafe {
         CreateProcessW(
             app_name_ptr,
