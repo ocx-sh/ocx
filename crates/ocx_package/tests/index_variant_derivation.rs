@@ -36,12 +36,16 @@ fn json_fixtures(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// The root vectors `ocx-sh/indexbot`'s `tests/golden/serializer/README.md`
+/// names as projection vectors: recorded `variants` == derivation over `tags`.
+const PROJECTION_VECTORS: &[&str] = &["with-variants.json"];
+
 /// Cross-language parity for the `variants` **derivation**, not just its bytes.
 ///
 /// The round-trip test above proves the serializer reproduces whatever the
 /// vector says; it would pass just as happily if the Python bot and this crate
-/// disagreed about which tags name a variant. This one closes that gap: every
-/// vendored vector's recorded `variants` must equal what
+/// disagreed about which tags name a variant. This one closes that gap: each
+/// projection vector's recorded `variants` must equal what
 /// [`ocx_package::version::variant_names`] derives from that same vector's
 /// own `tags`. The two implementations are pinned to each other through bytes
 /// neither of them produced in this process.
@@ -56,7 +60,21 @@ fn recorded_variants_match_this_crates_derivation_over_the_same_tags() {
     let root_dir = fixtures_dir().join("root");
     let mut vectors_with_variants = 0;
 
-    for path in json_fixtures(&root_dir) {
+    // Only the vectors upstream designates as projection vectors promise that
+    // `variants` equals the derivation; the rest are serializer vectors, and
+    // `with-ephemeral.json` records no `variants` beside variant-shaped tags.
+    let projection_vectors: Vec<PathBuf> = json_fixtures(&root_dir)
+        .into_iter()
+        .filter(|path| PROJECTION_VECTORS.iter().any(|name| path.ends_with(name)))
+        .collect();
+    assert_eq!(
+        projection_vectors.len(),
+        PROJECTION_VECTORS.len(),
+        "every named projection vector must exist under {}",
+        root_dir.display()
+    );
+
+    for path in projection_vectors {
         let bytes = std::fs::read(&path).expect("read root fixture");
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse root fixture");
         let tags: Vec<&str> = value["tags"]

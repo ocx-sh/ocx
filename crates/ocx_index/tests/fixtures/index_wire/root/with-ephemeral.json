@@ -1,0 +1,34 @@
+{
+  "name": "ocx.sh/acme/widget",
+  "repository": "oci://ghcr.io/ocx-contrib/widget",
+  "owners": [
+    {
+      "login": "alice",
+      "id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-07-24",
+  "desc": null,
+  "tags": {
+    "1.0.0": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-07-24T00:00:00Z"
+    },
+    "snapshot-20260930.1": {
+      "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "observed": "2026-09-30T00:00:00Z",
+      "ephemeral": true
+    },
+    "snapshot-20260930.2": {
+      "content": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "observed": "2026-09-30T01:00:00Z",
+      "yanked": {
+        "reason": "broken build",
+        "at": "2026-09-30T02:00:00Z"
+      },
+      "ephemeral": true
+    }
+  }
+}
