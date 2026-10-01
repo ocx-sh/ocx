@@ -35,8 +35,8 @@ pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};
 pub use lock::{
-    Binding, BoundTool, LockCurrency, LockDrift, LockMetadata, LockVersion, LockedTool, ProjectLock, first_per_content,
-    locked_tool_content_equal,
+    Binding, BoundTool, LockCurrency, LockDrift, LockMetadata, LockVersion, LockedTool, ProjectLock, eager_per_content,
+    first_per_content, locked_tool_content_equal,
 };
 pub use mutate::{
     add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding_in_memory, set_activate,

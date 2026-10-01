@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::error::{ProjectError, ProjectErrorKind};
+use super::lazy::LazyMode;
 use ocx_oci::{Digest, PackageRef, PinnedPackageRef, Platform, Repository, Selection};
 
 /// The `ocx.lock` beside `config_path`, whatever the config's name.
@@ -321,11 +322,34 @@ fn tagged_host_leaf(
 /// One entry per distinct content (registry, repository, digest), in input
 /// order: a later tag on content already kept is dropped, so the first tag wins.
 pub fn first_per_content<T>(entries: impl IntoIterator<Item = (T, PinnedPackageRef)>) -> Vec<(T, PinnedPackageRef)> {
+    merge_per_content(entries, |_, _| {})
+}
+
+/// [`first_per_content`], except the kept entry is eager if any entry of its content is.
+///
+/// Order-independent on purpose: first-wins would let lock order (group names) decide
+/// whether a tool another group wants eager gets pre-warmed at all.
+pub fn eager_per_content(
+    entries: impl IntoIterator<Item = (LazyMode, PinnedPackageRef)>,
+) -> Vec<(LazyMode, PinnedPackageRef)> {
+    merge_per_content(entries, |kept, mode| {
+        if mode == LazyMode::Never {
+            *kept = mode;
+        }
+    })
+}
+
+/// One entry per distinct content, in input order; `merge` folds each later item into the kept one.
+fn merge_per_content<T>(
+    entries: impl IntoIterator<Item = (T, PinnedPackageRef)>,
+    mut merge: impl FnMut(&mut T, T),
+) -> Vec<(T, PinnedPackageRef)> {
     let mut kept: Vec<(T, PinnedPackageRef)> = Vec::new();
     for (item, identifier) in entries {
         // ponytail: O(n²) over a handful of tools; a HashSet buys nothing at this scale.
-        if !kept.iter().any(|(_, known)| known.eq_content(&identifier)) {
-            kept.push((item, identifier));
+        match kept.iter_mut().find(|(_, known)| known.eq_content(&identifier)) {
+            Some((kept_item, _)) => merge(kept_item, item),
+            None => kept.push((item, identifier)),
         }
     }
     kept
@@ -2429,5 +2453,31 @@ shellcheck = "ocx.sh/shellcheck:0.11"
             kept[0].1.to_string(),
             format!("ocx.sh/java:21.0@sha256:{}", sha256_of('a'))
         );
+    }
+
+    /// One content bound under two groups is eager when either group wants it eager,
+    /// whichever comes first; the first binding's identifier (and tag) is the one kept.
+    #[test]
+    fn eager_per_content_is_eager_when_any_binding_is_eager() {
+        use super::LazyMode::{Always, Never};
+        let pin = |reference: &str| {
+            PinnedPackageRef::try_from(PackageRef::parse(reference).expect("parse")).expect("digest present")
+        };
+        let java_21 = pin(&format!("ocx.sh/java:21@sha256:{}", "a".repeat(64)));
+        let java_lts = pin(&format!("ocx.sh/java:lts@sha256:{}", "a".repeat(64)));
+        let cmake = pin(&format!("ocx.sh/cmake:3.28@sha256:{}", "b".repeat(64)));
+
+        for (first, second) in [(Always, Never), (Never, Always)] {
+            let merged = eager_per_content([
+                (first, java_21.clone()),
+                (Always, cmake.clone()),
+                (second, java_lts.clone()),
+            ]);
+            assert_eq!(
+                merged,
+                vec![(Never, java_21.clone()), (Always, cmake.clone())],
+                "order {first:?}, {second:?}"
+            );
+        }
     }
 }
