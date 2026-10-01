@@ -10,7 +10,7 @@ use crate::app::build_info::Provenance;
 ///
 /// Plain format: colored logo with key-value pairs alongside.
 ///
-/// JSON format: flat object with version + registry + platforms + libc +
+/// JSON format: flat object with version + registry + platforms + features + libc +
 /// shell + home plus optional `channel`, `commit`, `build`, `ci` build-provenance
 /// blocks. The build-provenance fields are absent on local `cargo build`
 /// without git, matching `ocx version --format json` behaviour.
@@ -18,7 +18,11 @@ use crate::app::build_info::Provenance;
 pub struct About {
     pub version: String,
     pub registry: String,
+    /// Host platform as ocx matches it, features included (`linux/amd64+libc.glibc`).
     pub platforms: Vec<String>,
+    /// The host's full `os.features` (a superset of `libc`); a package is
+    /// runnable when its offered features are a subset of these.
+    pub features: Vec<String>,
     /// Detected host libc `os.features` tags (e.g. `["libc.glibc"]`,
     /// `["libc.glibc","libc.musl"]`), empty when none detected (non-Linux,
     /// NixOS, failed probe). Reflects the same host detection the
@@ -28,13 +32,16 @@ pub struct About {
     pub home: String,
     #[serde(flatten)]
     pub provenance: Provenance,
+    /// Platforms as bare `os/arch`: the plain output shows the libc on its own row.
+    #[serde(skip)]
+    pub plain_platforms: Vec<String>,
 }
 
 impl About {
     pub fn new(
         version: String,
         registry: String,
-        platforms: Vec<String>,
+        host_platform: &ocx_oci::Platform,
         libc: Vec<String>,
         shell: Option<String>,
         home: String,
@@ -42,11 +49,13 @@ impl About {
         Self {
             version,
             registry,
-            platforms,
+            platforms: vec![host_platform.to_string()],
+            features: host_platform.os_features().to_vec(),
             libc,
             shell,
             home,
             provenance: Provenance::current(),
+            plain_platforms: vec![host_platform.segments().join("/")],
         }
     }
 
@@ -69,7 +78,7 @@ impl Printable for About {
             println!("Channel:   {channel}");
         }
         println!("Registry:  {}", self.registry);
-        println!("Platforms: {}", self.platforms.join(", "));
+        println!("Platforms: {}", self.plain_platforms.join(", "));
         if !self.libc.is_empty() {
             println!("Libc:      {}", self.libc.join(", "));
         }
@@ -88,10 +97,12 @@ mod tests {
             version: "1.0.0".to_owned(),
             registry: "registry.example.com".to_owned(),
             platforms: vec!["linux/amd64".to_owned()],
+            features: Vec::new(),
             libc: Vec::new(),
             shell: None,
             home: "/home/user/.ocx".to_owned(),
             provenance,
+            plain_platforms: vec!["linux/amd64".to_owned()],
         }
     }
 
@@ -131,6 +142,26 @@ mod tests {
             value.get("libc").and_then(|v| v.as_array()),
             Some(&Vec::new()),
             "undetected libc must serialize as an empty array"
+        );
+    }
+
+    /// `features` serializes as an array; the bare plain-only platforms never reach JSON.
+    #[test]
+    fn features_field_serialized_and_plain_platforms_skipped() {
+        let mut about = make_about_with_provenance(Provenance {
+            channel: None,
+            commit: None,
+            build: None,
+            ci: None,
+        });
+        about.platforms = vec!["linux/amd64+libc.glibc,libc.musl".to_owned()];
+        about.features = vec!["libc.glibc".to_owned(), "libc.musl".to_owned()];
+        let value = serde_json::to_value(&about).unwrap();
+        assert_eq!(value["platforms"][0], "linux/amd64+libc.glibc,libc.musl");
+        assert_eq!(value["features"], serde_json::json!(["libc.glibc", "libc.musl"]));
+        assert!(
+            value.get("plain_platforms").is_none(),
+            "plain-only field leaked: {value}"
         );
     }
 

@@ -163,7 +163,7 @@ Libc       libc.glibc
 ...
 ```
 
-When the host provides more than one libc family, the `Libc` row lists each one (e.g. `Libc       libc.glibc, libc.musl`). On a host where libc detection failed, the `Libc` row is absent — the host still resolves as the bare `os/arch` platform with no declared features, so install matches only manifests declaring no `os_features` of their own. For machine-readable output use `ocx --format json about`, which includes a `libc` array (empty when undetected).
+When the host provides more than one libc family, the `Libc` row lists each one (e.g. `Libc       libc.glibc, libc.musl`). On a host where libc detection failed, the `Libc` row is absent — the host still resolves as the bare `os/arch` platform with no declared features, so install matches only manifests declaring no `os_features` of their own. For machine-readable output use `ocx --format json about`, which includes a `libc` array (empty when undetected) and a `features` array of every host `os.features` tag.
 
 ## WebAssembly {#wasm}
 
