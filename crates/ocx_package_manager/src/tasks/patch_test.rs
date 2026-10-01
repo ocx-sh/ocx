@@ -96,8 +96,8 @@ impl PackageManager {
     ///    [`crate::patch::persist_patch_descriptor`].
     /// 2. Write the global `LookedHasDescriptor` patch tag (so any matching
     ///    rule applies) via [`super::patch_discovery::PatchTagMap::write_has_descriptor`].
-    /// 3. Run [`PackageManager::resolve_env`] over `base` (`self_view = false`) so
-    ///    the seeded descriptor's companions are composed. A required companion
+    /// 3. Run [`PackageManager::resolve_env`] over `base` on the surface `self_view`
+    ///    selects, so the seeded descriptor's companions are composed. A required companion
     ///    that cannot be resolved surfaces as
     ///    [`PackageErrorKind::RequiredCompanionFailed`] (C7 fail-closed).
     /// 4. Return the matched companions + composed entries.
@@ -129,6 +129,7 @@ impl PackageManager {
         base: &Arc<InstallInfo>,
         descriptor_bytes: &[u8],
         patches: &ResolvedPatchConfig,
+        self_view: bool,
         env_overrides: Vec<Entry>,
         platform: &ocx_oci::Platform,
     ) -> Result<PatchTestComposition, PackageErrorKind> {
@@ -187,8 +188,8 @@ impl PackageManager {
 
         // ── Step 3: Compose the overlay onto the base via the unchanged hot path. ──
         //
-        // `resolve_env_with_patch_boundary` (self_view=false) composes the base's
-        // interface surface and overlays the seeded global descriptor's companions,
+        // `resolve_env_with_patch_boundary` composes the base's surface `self_view`
+        // selects and overlays the seeded global descriptor's companions,
         // returning the overlay boundary + per-entry provenance so the CLI report
         // can trace each overlay var to its rule + companion. A `required` companion
         // that cannot be resolved in the scratch store surfaces as
@@ -201,7 +202,7 @@ impl PackageManager {
         let (entries, patch_start, provenance) = self
             .resolve_env_with_patch_boundary(
                 std::slice::from_ref(base),
-                false,
+                self_view,
                 crate::EnvScope::Package { env: env_overrides },
                 platform,
             )
@@ -552,7 +553,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let composition = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, false, Vec::new(), &host_platform())
             .await
             .expect("seed-and-compose must succeed when the required companion is present");
 
@@ -605,6 +606,51 @@ mod tests {
             "overlay entry traces to the ca-bundle companion; got {}",
             prov.companion
         );
+    }
+
+    /// A companion's private var reaches the preview on the base's private surface only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_private_companion_var_is_previewed_on_the_self_view_only() {
+        for (self_view, expected) in [(false, false), (true, true)] {
+            let dir = TempDir::new().unwrap();
+            let patches = patch_config(true);
+            let manager = make_scratch_manager(dir.path(), patches.clone());
+            let store = manager.file_structure().packages.clone();
+            let companion_digest = sha256('c');
+            let companion_tag_id = PackageRef::new_registry("launcher-opts", PATCH_REGISTRY).clone_with_tag("latest");
+            let companion_pinned = PinnedPackageRef::try_from(
+                PackageRef::new_registry("launcher-opts", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+            )
+            .unwrap();
+            seed_package_with_constant_var(
+                &store,
+                &companion_pinned,
+                "JDK_JAVA_OPTIONS",
+                "-Xmx2g",
+                Visibility::PRIVATE,
+            );
+            seed_companion_pin(manager.file_structure(), &companion_tag_id, &companion_digest);
+            let base = make_base(dir.path(), &store, "plantuml", 'r');
+
+            let composition = manager
+                .seed_and_compose_patch_test(
+                    &base,
+                    &catch_all_descriptor(&companion_tag_id),
+                    &patches,
+                    self_view,
+                    Vec::new(),
+                    &host_platform(),
+                )
+                .await
+                .expect("seed-and-compose must succeed when the required companion is present");
+
+            assert_eq!(
+                composition.entries.iter().any(|entry| entry.key == "JDK_JAVA_OPTIONS"),
+                expected,
+                "self_view={self_view}: entries {:?}",
+                composition.entries
+            );
+        }
     }
 
     // ── Target 4b: path-prefixed patch registry (github issue #286 / B1) ──────────
@@ -665,7 +711,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let composition = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, false, Vec::new(), &host_platform())
             .await
             .expect("seed-and-compose must succeed with a path-prefixed patch registry");
 
@@ -717,7 +763,7 @@ mod tests {
         let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, false, Vec::new(), &host_platform())
             .await
             .expect("an optional companion that is absent must still seed and compose");
 
@@ -770,7 +816,7 @@ mod tests {
         std::fs::write(&poisoned, b"not the manifest these bytes are addressed by").unwrap();
 
         let result = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, false, Vec::new(), &host_platform())
             .await;
 
         assert!(
@@ -806,7 +852,7 @@ mod tests {
 
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         let result = manager
-            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
+            .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, false, Vec::new(), &host_platform())
             .await;
 
         assert!(

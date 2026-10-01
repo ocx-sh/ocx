@@ -53,7 +53,8 @@ pub enum PatchGroup {
         Compose a patch descriptor onto a base locally, without publishing.\n\n\
         Reads a descriptor JSON file and composes its matched companions onto the given base \
         identifier in a scratch store, then either runs a test script, runs a trailing command in \
-        the composed environment, or prints the composed environment. Lets a maintainer verify a \
+        the composed environment, or prints the composed environment. Composes the surface a \
+        consumer of the base sees, or the base's own with `--self`. Lets a maintainer verify a \
         descriptor before publishing it.\n\n\
         Required companion packages must be resolvable (installed locally or pulled from the \
         registry); an unresolvable required companion fails the command.")]
@@ -65,7 +66,9 @@ pub enum PatchGroup {
     /// Resolves the base identifier directly and lists every env var the
     /// configured patch registry overlays onto it, naming the descriptor rule
     /// glob that matched and the companion identifier that produced the var.
-    /// A base with no applicable patch reports an empty result, not an error.
+    /// Traces the surface a consumer of the base sees, or the base's own with
+    /// `--self`. A base with no applicable patch reports an empty result, not
+    /// an error; a companion that applies but adds no var is named instead.
     Why(super::patch_why::PatchWhyArgs),
 }
 

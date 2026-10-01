@@ -50,7 +50,7 @@ pub struct PatchTestReport {
     pub base: String,
     /// Companion identifiers that matched the base under the descriptor's rules.
     pub companions: Vec<String>,
-    /// Composed environment entries (base interface surface + companion overlay).
+    /// Composed env entries: the base's interface surface (private under `--self`), then the companion overlay.
     pub entries: Vec<PatchTestEntry>,
 }
 

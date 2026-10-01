@@ -19,6 +19,14 @@ pub struct PatchWhyArgs {
     #[clap(flatten)]
     platform: options::PlatformOption,
 
+    /// Use the base's own surface, the one its launchers see, instead of its consumers'
+    ///
+    /// Without `--self`, the result is the interface surface a consumer of the base composes:
+    /// `public` and `interface` variables. With `--self`, it is the surface the base's own
+    /// launchers compose: `public` and `private` variables.
+    #[clap(long = "self", default_value_t = false)]
+    self_view: bool,
+
     /// Base identifier to trace patch provenance for.
     #[clap(value_name = "BASE-ID", required = true)]
     base: options::Identifier,
@@ -36,11 +44,11 @@ impl PatchWhyArgs {
         let info: Vec<Arc<InstallInfo>> = info.into_iter().map(|found| Arc::new(found.info)).collect();
 
         // The base's `platform`, not the host, or a companion with no host leaf goes untraced under `-p`.
-        let (entries, patch_start, provenance) = manager
-            .resolve_env_with_patch_boundary(&info, false, EnvScope::package_tier(), &platform)
+        let (entries, patch_start, provenance, claims) = manager
+            .resolve_env_with_attribution(&info, self.self_view, EnvScope::package_tier(), &platform)
             .await?;
 
-        // `provenance` aligns with `entries[patch_start..]`; an empty overlay means no patches apply, not an error.
+        // `provenance` aligns with `entries[patch_start..]`; an empty overlay is not an error.
         let why_entries: Vec<api::data::patch_why::PatchWhyEntry> = entries[patch_start..]
             .iter()
             .zip(provenance.iter())
@@ -53,8 +61,14 @@ impl PatchWhyArgs {
             })
             .collect();
 
+        let companions = claims
+            .companions
+            .iter()
+            .map(|companion| companion.pinned.to_string())
+            .collect();
         context.api().report(&api::data::patch_why::PatchWhyReport::new(
             base_id.to_string(),
+            companions,
             why_entries,
         ))?;
 

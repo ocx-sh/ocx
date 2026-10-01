@@ -26,6 +26,7 @@ covers. ADR reference: adr_infrastructure_patches.md
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -6063,6 +6064,16 @@ def test_execution_record_for_lock_resolved_tool_has_no_tag_annotation_or_qualif
         )
 
 
+def _assert_conflict_refused(stderr: str, repository: str, digests: set[str]) -> None:
+    """The conflict line names the repository and exactly the two digests the env would carry."""
+    marker = "conflicting versions for"
+    conflicts = [line.split(marker, 1)[1] for line in stderr.splitlines() if marker in line]
+    assert conflicts, f"the refusal states the conflict; stderr: {stderr}"
+    assert conflicts[0].lstrip().startswith(f"{repository}:"), f"the conflict names {repository}; got: {conflicts[0]}"
+    named = set(re.findall(r"sha256:[0-9a-f]{64}", conflicts[0]))
+    assert named == digests, f"the conflict lists exactly {digests}; got: {named}"
+
+
 def test_companion_reaching_another_version_of_a_base_dependency_is_refused(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -6111,9 +6122,11 @@ def test_companion_reaching_another_version_of_a_base_dependency_is_refused(
     assert [e["value"] for e in entries if e["key"] == "CONFLICT_VAR"] == ["1.0.0"], (
         f"only the base's version reaches the env; got entries: {entries}"
     )
-    assert "conflicting versions for" in optional.stderr, (
-        f"skipping the companion warns with the conflict; stderr: {optional.stderr}"
-    )
+    conflict_digests = {
+        fetch_platform_manifest_digest(ocx.registry, dep.repo, dep.tag) for dep in (base_dep, companion_dep)
+    }
+    _assert_conflict_refused(optional.stderr, f"{registry}/{dep_repo}", conflict_digests)
+    assert companion_repo in optional.stderr, f"the warning names the skipped companion; stderr: {optional.stderr}"
 
     _write_config(ocx, registry, required=True)
     required = ocx.run("package", "env", base_pkg.short, check=False)
@@ -6121,7 +6134,7 @@ def test_companion_reaching_another_version_of_a_base_dependency_is_refused(
         f"a required conflicting companion fails with exit 65; rc={required.returncode}\n"
         f"stderr: {required.stderr}"
     )
-    assert "conflicting versions for" in required.stderr, f"stderr: {required.stderr}"
+    _assert_conflict_refused(required.stderr, f"{registry}/{dep_repo}", conflict_digests)
 
 
 def test_companion_conflicting_with_an_earlier_companion_is_refused(
@@ -6132,12 +6145,14 @@ def test_companion_conflicting_with_an_earlier_companion_is_refused(
     """
     dep_repo = _unique_repo("conflict_dep")
     companion_fqs = []
+    conflict_digests = set()
     for label, version in (("first", "1.0.0"), ("second", "2.0.0")):
         dep = make_package(
             ocx, dep_repo, version, tmp_path,
             env=[{"key": "CONFLICT_VAR", "type": "constant", "value": version, "visibility": "public"}],
             cascade=True,
         )
+        conflict_digests.add(fetch_platform_manifest_digest(ocx.registry, dep.repo, dep.tag))
         # Host platform, not `any`: an `any` bundle refuses a digest-pinned dependency.
         companion_repo = _unique_repo(label)
         make_package(
@@ -6169,6 +6184,7 @@ def test_companion_conflicting_with_an_earlier_companion_is_refused(
         f"a required conflicting companion fails with exit 65; rc={required.returncode}\n"
         f"stderr: {required.stderr}"
     )
+    _assert_conflict_refused(required.stderr, f"{registry}/{dep_repo}", conflict_digests)
 
 
 def test_companion_launchers_stay_off_path_and_its_dependency_launchers_are_claimed(
@@ -6209,9 +6225,56 @@ def test_companion_launchers_stay_off_path_and_its_dependency_launchers_are_clai
         e["value"] for e in entries
         if e["key"] == "PATH" and Path(e["value"]).name == "entrypoints"
     ]
-    assert len(launcher_dirs) == 1, (
+    dep_root = Path(ocx.json("package", "which", dep.short)[dep.short]["path"])
+    assert [Path(d).resolve() for d in launcher_dirs] == [(dep_root / "entrypoints").resolve()], (
         f"only the dependency's launchers reach PATH, never the companion's; got: {launcher_dirs}"
     )
     claimed = {claim["name"] for claim in report.get("entrypoints", [])}
     assert "deplaunch" in claimed, f"the dependency's launcher on PATH is claimed; got: {claimed}"
     assert "companionlaunch" not in claimed, f"the companion's launcher is unclaimed; got: {claimed}"
+
+
+def test_patch_test_and_why_preview_the_private_surface_under_self(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A companion's private var belongs to its target's own launchers, so ``patch test``
+    and ``patch why`` show it under ``--self`` and leave it out of the consumer view.
+    """
+    companion_repo = _unique_repo("private_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    make_package(
+        ocx, companion_repo, "1.0.0", tmp_path, bins=[], platform="any",
+        env=[{"key": "PRIVATE_PREVIEW_VAR", "type": "constant", "value": "-Xmx2g", "visibility": "private"}],
+    )
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    descriptor_path = tmp_path / "private_preview_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+
+    previews = {}
+    for flags in ([], ["--self"]):
+        result = ocx.run(
+            "patch", "test", *flags, "--descriptor", str(descriptor_path), base_pkg.short,
+            format="json", check=False,
+        )
+        assert result.returncode == 0, f"patch test {flags} must succeed; stderr: {result.stderr}"
+        previews[bool(flags)] = _entry_by_key(json.loads(result.stdout)["entries"], "PRIVATE_PREVIEW_VAR")
+    assert previews[False] is None, f"the consumer view leaves the private var out; got: {previews[False]}"
+    assert previews[True] is not None and previews[True]["value"] == "-Xmx2g", (
+        f"--self previews the private var; got: {previews[True]}"
+    )
+
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+    ocx.plain("package", "install", base_pkg.short)
+    traced = {
+        bool(flags): [entry["variable"] for entry in ocx.json("patch", "why", *flags, base_pkg.short)]
+        for flags in ([], ["--self"])
+    }
+    assert "PRIVATE_PREVIEW_VAR" not in traced[False], f"the consumer view traces no private var; got: {traced[False]}"
+    assert "PRIVATE_PREVIEW_VAR" in traced[True], f"--self traces the private var; got: {traced[True]}"
+
+    # A companion that matched but adds nothing to this surface still applies.
+    consumer_trace = ocx.plain("patch", "why", base_pkg.short)
+    shown = consumer_trace.stdout + consumer_trace.stderr
+    assert "no patches apply" not in shown, f"a matched companion is not 'no patches'; got: {shown}"
+    assert companion_repo in shown, f"the consumer view names the matched companion; got: {shown}"

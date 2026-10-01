@@ -1384,7 +1384,7 @@
           ]
         }
       ],
-      "description": "Origin of a resolved environment variable entry, shown under `--show-patches`.\n\nA package-native entry has no `source` object at all. A companion patch\noverlay entry carries `{\"kind\": \"patch\", \"rule\": \"<glob>\", \"companion\":\n\"<companion-id>\"}`, exactly these three keys: `rule` is the descriptor rule\nglob that admitted the companion for the base, and `companion` is the\ncompanion identifier whose interface projection produced the entry."
+      "description": "Origin of a resolved environment variable entry, shown under `--show-patches`.\n\nA package-native entry has no `source` object at all. A companion patch\noverlay entry carries `{\"kind\": \"patch\", \"rule\": \"<glob>\", \"companion\":\n\"<companion-id>\"}`, exactly these three keys: `rule` is the descriptor rule\nglob that admitted the companion for the base, and `companion` is the\nidentifier of the companion that produced the entry."
     },
     "BinaryAttribution": {
       "type": "object",
@@ -3470,7 +3470,7 @@
           "items": {
             "$ref": "#/$defs/PatchTestEntry"
           },
-          "description": "Composed environment entries (base interface surface + companion overlay)."
+          "description": "Composed env entries: the base's interface surface (private under `--self`), then the companion overlay."
         }
       },
       "required": [
@@ -3532,7 +3532,7 @@
         "rule",
         "companion"
       ],
-      "description": "A single env var an infrastructure-patch companion contributes to a base.\n\n`variable` is the env var name, `rule` is the descriptor rule `match` glob\nthat admitted the companion for the base, and `companion` is the companion\nidentifier whose interface projection produced the var."
+      "description": "A single env var an infrastructure-patch companion contributes to a base.\n\n`variable` is the env var name, `rule` is the descriptor rule `match` glob\nthat admitted the companion for the base, and `companion` is the identifier\nof the companion that produced the var."
     },
     "LocatedPaths": {
       "type": "object",
