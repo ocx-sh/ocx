@@ -81,7 +81,8 @@ pub enum ClientError {
     /// a declined mid-upload handoff, the hop limit, or a missing or unparseable `Location`.
     #[error("registry answered with a redirect the transport did not follow: {0}")]
     UnfollowedRedirect(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// A failure that may not repeat: connect or timeout, or a 429 / 502 / 503 / 504.
+    /// A failure that may not repeat: connect or timeout, or a status [`crate::transport_policy::is_transient_status`]
+    /// accepts.
     ///
     /// Kept apart from [`ClientError::Registry`], which answers the same way on a rerun.
     #[error("transient registry failure: {0}")]

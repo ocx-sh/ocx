@@ -148,6 +148,8 @@ ocx_console = { workspace = true, features = ["__testing"] }
 ocx_oci = { workspace = true, features = ["__testing"] }
 ocx_store = { workspace = true, features = ["__testing"] }
 ocx_util = { workspace = true, features = ["__testing"] }
+# `pki` — a real refused-certificate `reqwest::Error` for the forge transport row.
+ocx_test_support.workspace = true
 # The relocated classification tests fabricate the two foreign error values the
 # ladder matches on: `toml::de::Error` (a `ConfigError` source) and a
 # `reqwest::Error` (a `ForgeError::Transport` source). Neither has a public

@@ -187,7 +187,7 @@ def test_a_proxied_pull_reaches_a_registry_the_host_cannot_resolve(
 # ---------------------------------------------------------------------------
 
 
-def test_no_proxy_sends_the_pull_direct_and_the_refusal_is_unavailable(
+def test_no_proxy_sends_the_pull_direct_and_the_refusal_is_temp_fail(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
@@ -197,8 +197,8 @@ def test_no_proxy_sends_the_pull_direct_and_the_refusal_is_unavailable(
     """Plan row B / ocx-sh/ocx#407: naming the destination in `NO_PROXY`
     routes it direct, where the destination is genuinely unresolvable
     (RFC 6761 `.invalid`) — the SSRF pre-flight's `Resolution` failure must
-    classify as exit 69 (Unavailable), not the pre-fix 78 (ConfigError) that
-    `oci/index/error.rs` gave every `SsrfError` variant alike.
+    classify as exit 75 (TempFail), as a DNS failure at connect time does, not
+    the 78 (ConfigError) a forbidden target gets.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -237,8 +237,8 @@ def test_no_proxy_sends_the_pull_direct_and_the_refusal_is_unavailable(
         },
     )
 
-    assert result.returncode == 69, (
-        f"expected exit 69 (Unavailable), got rc={result.returncode}\n{result.stderr}"
+    assert result.returncode == 75, (
+        f"expected exit 75 (TempFail), got rc={result.returncode}\n{result.stderr}"
     )
     assert "failed to resolve host no-such-registry.invalid" in result.stderr
 

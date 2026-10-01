@@ -230,7 +230,8 @@ pub enum Error {
     /// status, or a `file://` refusal.
     ///
     /// `status` is the HTTP status when one was received, read by the retry
-    /// classifier (`adr_index_sync_performance.md#d-010`); every arm still exits 69.
+    /// classifier (`adr_index_sync_performance.md#d-010`). Exits 75 when
+    /// [`Error::is_transient_transport`], else 69.
     #[error("index request to {url} failed")]
     IndexHttpFailed {
         url: String,
@@ -275,6 +276,23 @@ pub enum Error {
     /// empty catalog, so `index sync` fails instead of exiting 0 having refreshed nothing.
     #[error("index source '{index_source}' serves no catalog document at {url}")]
     CatalogDocumentAbsent { index_source: String, url: String },
+}
+
+impl Error {
+    /// Whether this is an [`Error::IndexHttpFailed`] a rerun may clear: a transient status, or a
+    /// refused or timed-out connect.
+    ///
+    /// The source is downcast directly, never walked: a refused certificate arrives wrapped in
+    /// `UntrustedCertificateHint`, and a `file://` refusal or the size cap carries no `reqwest` error.
+    pub fn is_transient_transport(&self) -> bool {
+        let Self::IndexHttpFailed { status, source, .. } = self else {
+            return false;
+        };
+        status.is_some_and(ocx_oci::transport_policy::is_transient_status)
+            || source
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(ocx_oci::transport_policy::is_transient_transport_error)
+    }
 }
 
 #[cfg(test)]

@@ -258,11 +258,12 @@ pub enum PruneError {
     Registry(#[from] ClientError),
 }
 
-// Only a transport failure is worth a retry; a malformed root stays malformed.
+// Only a transient transport failure is worth a retry; a refused certificate or a malformed root is not.
 fn transport_hint(source: &ocx_index::error::Error) -> &'static str {
-    match ocx_index::error::coalesced_cause(source) {
-        ocx_index::error::Error::IndexHttpFailed { .. } => ": the index locates the registry; retry",
-        _ => "",
+    if ocx_index::error::coalesced_cause(source).is_transient_transport() {
+        ": the index locates the registry; retry"
+    } else {
+        ""
     }
 }
 

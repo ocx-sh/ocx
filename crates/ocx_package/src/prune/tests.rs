@@ -1516,3 +1516,25 @@ async fn a_forced_run_without_an_index_deletes_from_the_package_repository() {
         vec![package().clone_with_tag("snap").canonical_reference().to_string()]
     );
 }
+
+#[test]
+fn an_unreadable_root_says_retry_only_when_a_rerun_may_succeed() {
+    let message = |status| {
+        PruneError::RootUnreadable {
+            package: INDEX_REPOSITORY.to_string(),
+            url: INDEX_URL.to_string(),
+            source: ocx_index::error::Error::IndexHttpFailed {
+                url: root_url(),
+                status: Some(status),
+                source: format!("unexpected status {status}").into(),
+            },
+        }
+        .to_string()
+    };
+    assert!(
+        message(503).ends_with(": the index locates the registry; retry"),
+        "{}",
+        message(503)
+    );
+    assert!(!message(403).contains("retry"), "{}", message(403));
+}

@@ -770,13 +770,20 @@ mod tests {
             url: "https://index.example".to_string(),
             source,
         };
-        let unreachable = unreadable(ocx_index::error::Error::IndexHttpFailed {
-            url: "https://index.example/p/acme/tool.json".to_string(),
-            status: None,
-            source: "connection refused".into(),
-        });
-        assert_eq!(unreachable.classify(), Some(ExitCode::Unavailable));
-        assert_eq!(crate::exit::classify_library_error(&unreachable), ExitCode::Unavailable);
+        let failed = |status| {
+            unreadable(ocx_index::error::Error::IndexHttpFailed {
+                url: "https://index.example/p/acme/tool.json".to_string(),
+                status: Some(status),
+                source: format!("unexpected status {status}").into(),
+            })
+        };
+        let terminal = failed(500);
+        assert_eq!(terminal.classify(), Some(ExitCode::Unavailable));
+        assert_eq!(crate::exit::classify_library_error(&terminal), ExitCode::Unavailable);
+
+        let transient = failed(503);
+        assert_eq!(transient.classify(), Some(ExitCode::TempFail));
+        assert_eq!(crate::exit::classify_library_error(&transient), ExitCode::TempFail);
 
         let forbidden = unreadable(prune_ssrf_error());
         assert_eq!(forbidden.classify(), Some(ExitCode::ConfigError));

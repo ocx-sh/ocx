@@ -15,6 +15,13 @@ pub fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
 }
 
+/// Statuses that exit 75 (a rerun may succeed) rather than 69, shared by every transport's classifier.
+///
+/// Narrower than [`is_retryable_status`]: a `500` repeats on rerun.
+pub fn is_transient_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 502 | 503 | 504)
+}
+
 /// Whether a status may carry a `Retry-After` the ladder honours.
 pub fn honours_retry_after(status: u16) -> bool {
     matches!(status, 429 | 503)
@@ -27,6 +34,13 @@ pub fn honours_retry_after(status: u16) -> bool {
 /// and fails a whole 512-wide sync (`h2_wire_tests`).
 pub fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
     !error.is_builder() && !is_tls_certificate_refusal(error)
+}
+
+/// Whether a `reqwest` failure exits 75 rather than 69: a refused or timed-out connect, never a refused certificate.
+///
+/// Narrower than [`is_retryable_transport_error`], as [`is_transient_status`] is than [`is_retryable_status`].
+pub fn is_transient_transport_error(error: &reqwest::Error) -> bool {
+    (error.is_connect() || error.is_timeout()) && !is_tls_certificate_refusal(error)
 }
 
 /// Whether a failed request died on the TLS verifier refusing the peer's certificate.
@@ -386,6 +400,84 @@ mod tests {
         assert!(
             is_retryable_transport_error(&refused),
             "a refused connect is the common transient case D-010 exists for"
+        );
+    }
+
+    #[test]
+    fn the_transient_status_set_is_narrower_than_the_retryable_one() {
+        for status in [408, 429, 502, 503, 504] {
+            assert!(is_transient_status(status), "{status} exits 75");
+        }
+        for status in [500, 501, 505, 400, 401, 403, 404] {
+            assert!(!is_transient_status(status), "{status} answers the same on a rerun");
+        }
+    }
+
+    /// Exits 75 only for a refused or timed-out connect; every other failure,
+    /// including a wire error the ladder still retries, exits 69.
+    #[tokio::test]
+    async fn only_a_refused_or_timed_out_connect_is_a_transient_transport_error() {
+        use ocx_test_support::net::serve_hangup;
+        use ocx_test_support::pki::{TestPki, serve_https};
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds");
+
+        let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("bind a free port")
+            .port();
+        // Never accepted: the kernel completes the handshake, nothing answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a silent listener");
+        let silent_addr = silent.local_addr().expect("local addr");
+        let hangup_addr = serve_hangup().await;
+        let pki = TestPki::mint();
+        let tls_addr = serve_https(&pki).await;
+
+        let fail =
+            |request: reqwest::RequestBuilder| async move { request.send().await.expect_err("the request must fail") };
+        let cases = [
+            (
+                "refused connect",
+                fail(client.get(format!("http://127.0.0.1:{closed_port}/"))).await,
+                true,
+            ),
+            // Per request: a client-wide timeout could fire on a loaded host's TLS row too.
+            (
+                "timeout",
+                fail(
+                    client
+                        .get(format!("http://{silent_addr}/"))
+                        .timeout(Duration::from_millis(200)),
+                )
+                .await,
+                true,
+            ),
+            (
+                "hang-up after connect",
+                fail(client.get(format!("http://{hangup_addr}/"))).await,
+                false,
+            ),
+            ("builder", fail(client.get("http://[not-a-url")).await, false),
+            (
+                "refused certificate",
+                fail(client.get(format!("https://{tls_addr}/"))).await,
+                false,
+            ),
+        ];
+        for (what, error, transient) in &cases {
+            assert_eq!(is_transient_transport_error(error), *transient, "{what}: {error:?}");
+        }
+        assert!(cases[1].1.is_timeout(), "precondition: {:?}", cases[1].1);
+        assert!(
+            is_retryable_transport_error(&cases[2].1),
+            "precondition: the ladder retries a hang-up, the exit code does not"
+        );
+        assert!(
+            cases[4].1.is_connect(),
+            "precondition: a refused certificate is a connect error"
         );
     }
 

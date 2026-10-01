@@ -1736,7 +1736,7 @@ def dead_endpoint() -> Iterator[str]:
     (`crates/ocx_index/src/ocx_index.rs`) runs
     `oci::ssrf::resolve_and_validate` on the physical host BEFORE the mirror
     seam in `Client::transport_reference`, so a `.invalid` name would die in
-    DNS (`SsrfError::Resolution` -> exit 69) and never reach the seam under
+    DNS (`SsrfError::Resolution` -> exit 75) and never reach the seam under
     test. `127.0.0.1` resolves with no DNS at all and is admitted by an
     explicit `trusted_hosts` entry, which leaves the TCP connection as the
     only thing that can still stop the physical fetch.

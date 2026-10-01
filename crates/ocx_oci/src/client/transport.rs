@@ -1453,8 +1453,8 @@ mod tests {
             (400, ocx_exit::ExitCode::ReferrersUnsupported),
             (405, ocx_exit::ExitCode::ReferrersUnsupported),
             (422, ocx_exit::ExitCode::ReferrersUnsupported),
-            // A fault. `registry_error`'s transient arm is the literal list
-            // 429|502|503|504, so a 500 lands in the `Registry` catch-all with
+            // A fault. `registry_error`'s transient arm is `is_transient_status`,
+            // which excludes 500, so a 500 lands in the `Registry` catch-all with
             // every parse error — reporting it as 84 would tell a CI wrapper to
             // stop retrying a sign that would have succeeded.
             (500, ocx_exit::ExitCode::Unavailable),

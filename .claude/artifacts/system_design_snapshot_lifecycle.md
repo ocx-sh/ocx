@@ -49,7 +49,7 @@ prune(pkg, selection, force, tags_file, dry_run)
   parse argv                                              -> 64
   --offline                                               -> 81
   if config [registries."<ns>"] index:
-      root = OcxIndex::fetch_root_uncached(pkg)          -> unreachable: 69 ("the index locates the registry; retry")
+      root = OcxIndex::fetch_root_uncached(pkg)          -> transient: 75 ("the index locates the registry; retry"); other: 69
       root none                                           -> 79
       repo = guarded_physical(root.repository, pkg.registry, trusted, insecure, proxy_rules)   -> 78
   else: root = none; repo = pkg as a physical repository (ordinary client host guard)

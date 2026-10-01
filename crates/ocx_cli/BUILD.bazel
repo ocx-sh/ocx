@@ -174,7 +174,9 @@ rust_test(
     ],
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
-    deps = all_crate_deps(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ocx_test_support",
+    ],
 )
 
 # The in-process CLI seam's tests (`app::seam::run`, ADR C-SEAM) and every port

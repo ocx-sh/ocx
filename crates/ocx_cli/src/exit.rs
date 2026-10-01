@@ -1279,6 +1279,7 @@ mod tests {
         // raised before the step that would have rejected the row counts
         // intent rather than work done.
         let mut compared = 0usize;
+        let mut moved: BTreeSet<&str> = BTreeSet::new();
         for row in rows {
             let declared = row["type"].as_str().expect("every row names a type");
             let source = row["source"].as_str().expect("every row names its source");
@@ -1321,6 +1322,14 @@ mod tests {
             // second value can only come from a fold the collapse check above
             // already refuses, so a set of any other shape is reported rather
             // than tolerated.
+            let moved_to = MOVED.iter().find(|row| row.baseline_source == source).map(|row| {
+                let canonical = |value| {
+                    canonical_row(written, value, &target)
+                        .unwrap_or_else(|error| panic!("`{value}` in MOVED is not a parseable value: {error}"))
+                        .1
+                };
+                (canonical(row.was), canonical(row.now))
+            });
             compared += 1;
             match index.get(&(
                 target.clone(),
@@ -1333,12 +1342,26 @@ mod tests {
                     source.to_owned(),
                     format!("{target}/{trait_name}::{func} match #{match_id}: pattern `{pattern}` is gone ({source})"),
                 )),
+                Some(values)
+                    if moved_to
+                        .as_ref()
+                        .is_some_and(|(was, now)| *was == want && values.len() == 1 && values.contains(now)) =>
+                {
+                    moved.insert(source);
+                }
                 Some(values) if values.len() != 1 || !values.contains(&want) => drifted.push(format!(
                     "{target}/{trait_name}::{func} match #{match_id}: `{pattern}` was `{want}`, is now \
                      {values:?} ({source})"
                 )),
                 Some(_) => {}
             }
+        }
+        for row in MOVED.iter().filter(|row| !moved.contains(row.baseline_source)) {
+            drifted.push(format!(
+                "{}: MOVED records `{}` -> `{}`, which the baseline and the tree do not both say — \
+                 a move undone or misrecorded",
+                row.baseline_source, row.was, row.now
+            ));
         }
         // A row the parser cannot read is compared against nothing, so it would
         // otherwise be a silent hole in a 370-row table.
@@ -1710,8 +1733,8 @@ mod tests {
         Resolves(Option<ExitCode>),
     }
 
-    /// An arm for a variant that **did not exist** at `7adaea62` and stands in
-    /// for nothing — a refusal the tree grew afterwards.
+    /// An arm for a variant that **did not exist** at `7adaea62`, or a guarded
+    /// arm split off a baselined one, standing in for nothing.
     ///
     /// The freeze pins the codes the tool shipped with; it has nothing to say
     /// about a variant minted since, and `STANDS_IN_FOR` is the wrong shape for
@@ -1960,6 +1983,47 @@ mod tests {
             match_id: 0,
             pattern: "Self::ObserveRaced { .. }",
             value: "Some(ExitCode::TempFail)",
+        },
+        // #556 — transient transport failures split off arms that keep 69 for
+        // the terminal causes.
+        NewArm {
+            target: "ForgeError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::Transport { source, .. } if is_transient_transport_error(source)",
+            value: "Some(ExitCode::TempFail)",
+        },
+        NewArm {
+            target: "OciIndexError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::IndexHttpFailed { .. } if self.is_transient_transport()",
+            value: "ExitCode::TempFail",
+        },
+    ];
+
+    /// A baseline arm whose code moved **in place** by decision: the pattern
+    /// survives, its value does not — an interface break this table records.
+    ///
+    /// Both halves are checked: `was` must be the baseline's value and `now`
+    /// the tree's, and a row whose arm still carries `was` reds, so a move
+    /// cannot outlive its undoing.
+    struct Moved {
+        /// The baseline row, named by its `source` field verbatim.
+        baseline_source: &'static str,
+        was: &'static str,
+        now: &'static str,
+    }
+
+    const MOVED: &[Moved] = &[
+        // #556 — a host the SSRF pre-flight cannot resolve exits 75, as a DNS
+        // failure at connect time already did.
+        Moved {
+            baseline_source: "crates/ocx_lib/src/oci/ssrf.rs:85",
+            was: "ExitCode::Unavailable",
+            now: "ExitCode::TempFail",
         },
     ];
 
@@ -2622,6 +2686,16 @@ mod tests {
                 match_id: 0,
                 pattern: "Self::InternalFile(_, _)",
                 baseline_source: "crates/ocx_lib/src/error.rs:366",
+                claim: Claim::SameDelegation,
+            },
+            // #556 widened the `== 429` arm to the registry's transient set; 429 keeps 75.
+            StandsInFor {
+                target: "ForgeError",
+                trait_name: "ClassifyExitCode",
+                func: "classify",
+                match_id: 0,
+                pattern: "Self::Status { status, .. } if is_transient_status(*status)",
+                baseline_source: "crates/ocx_lib/src/forge/error.rs:378",
                 claim: Claim::SameDelegation,
             },
         ]

@@ -47,7 +47,8 @@ impl ClassifyExitCode for SsrfError {
         Some(match self {
             // Sigstore maps this to 64 in `From<SsrfError> for UrlRejection` (`ocx_oci/src/endpoint.rs`); change both together.
             Self::ForbiddenTarget { .. } => ExitCode::ConfigError,
-            Self::Resolution { .. } => ExitCode::Unavailable,
+            // A DNS failure at connect time is already 75; no portable split of NXDOMAIN from a flaky resolver.
+            Self::Resolution { .. } => ExitCode::TempFail,
         })
     }
 }
@@ -421,12 +422,12 @@ mod tests {
     // ── moved from ocx_oci::ssrf with the impl ──
 
     #[test]
-    fn resolution_failure_classifies_to_unavailable() {
+    fn resolution_failure_classifies_to_temp_fail() {
         let error = SsrfError::Resolution {
             host: "registry.invalid".to_string(),
             source: std::io::Error::other("dns lookup failed"),
         };
-        assert_eq!(error.classify(), Some(ExitCode::Unavailable));
+        assert_eq!(error.classify(), Some(ExitCode::TempFail));
     }
 
     // ── moved from ocx_oci::auth::error with the impl ──
@@ -487,9 +488,8 @@ mod tests {
     ///
     /// 64 tells the operator their `--fulcio-url` is malformed. A name that
     /// fails to resolve is the same class of failure as any unreachable
-    /// service -- the flag was fine, the network was not -- and the registry
-    /// guard now says 69 for it too, so the two answers agree. The other two
-    /// rows are the paired positives: a refused address and a bad scheme are
+    /// service -- the flag was fine, the network was not. The other two rows
+    /// are the paired positives: a refused address and a bad scheme are
     /// genuine usage errors and keep 64.
     ///
     /// Discriminates: build the rejection from a fixed `UsageError` and the

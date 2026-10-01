@@ -91,11 +91,12 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
         }
         // Stays transient, or `push_blob`'s retry stops on common refused-connection/DNS causes; an `https` connect
         // proves the host is not plain-HTTP-allowed, so the hint names it unchecked.
-        RequestError(request) if request.is_connect() => match https_allowance_name(request.url()) {
-            Some(host) => ClientError::RegistryTransient(Box::new(PlainHttpAllowanceHint { host, source: e })),
-            None => ClientError::RegistryTransient(Box::new(e)),
-        },
-        RequestError(request) if request.is_timeout() => ClientError::RegistryTransient(Box::new(e)),
+        RequestError(request) if transport_policy::is_transient_transport_error(request) => {
+            match https_allowance_name(request.url()).filter(|_| request.is_connect()) {
+                Some(host) => ClientError::RegistryTransient(Box::new(PlainHttpAllowanceHint { host, source: e })),
+                None => ClientError::RegistryTransient(Box::new(e)),
+            }
+        }
         CrossHostRefused { .. } | InsecureAuthRealm { .. } => ClientError::UnsafeDestination(Box::new(e)),
         // Redirect-policy refusals (https -> http, hop limit) must arrive as errors: `attempt.stop()` returns the 3xx
         // as `Ok`, reporting an unwritten layer as uploaded.
@@ -105,11 +106,9 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
         // A 3xx no client acted on (a declined mid-upload handoff, an unfollowable redirect); a rerun walks
         // the same chain.
         ServerError { code: 301..=308, .. } => ClientError::UnfollowedRedirect(Box::new(e)),
-        // Only these four: a 500 repeats on rerun, and a 408 is caught by `is_timeout` above.
-        ServerError {
-            code: 429 | 502 | 503 | 504,
-            ..
-        } => ClientError::RegistryTransient(Box::new(e)),
+        ServerError { code, .. } if transport_policy::is_transient_status(*code) => {
+            ClientError::RegistryTransient(Box::new(e))
+        }
         // On an envelope, auth wins over rate-limit: retrying a denial risks an account lockout.
         RegistryError { envelope, .. } => {
             let has = |wanted: OciErrorCode| envelope.errors.iter().any(|err| err.code == wanted);
@@ -1719,14 +1718,14 @@ mod tests {
         );
     }
 
-    /// Bug 15: a token-endpoint 5xx / 429 (tagged `ServerError` in the patched
+    /// Bug 15: a token-endpoint 5xx / 408 / 429 (tagged `ServerError` in the patched
     /// `authenticate`) is never a credentials failure — it is transient
     /// (`RegistryTransient` → 75). An unparseable token body is neither: it
     /// falls to the catch-all `Registry` (69), which is what proves the
     /// catch-all still exists after the classification table grew.
     #[test]
     fn token_service_faults_are_never_authentication() {
-        for code in [503u16, 429] {
+        for code in [503u16, 429, 408] {
             let mapped = registry_error(server_error(code));
             assert!(
                 matches!(mapped, ClientError::RegistryTransient(_)),

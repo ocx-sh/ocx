@@ -4568,11 +4568,10 @@ mod transport_wire_tests {
         );
     }
 
-    /// C-024: the status rides the variant structurally, and the exit code is
-    /// unchanged at 69 — both halves, because the second is the non-regression
-    /// promise the plan makes about the CLI surface.
+    /// The status rides the variant structurally, where both the retry ladder
+    /// and the exit classifier read it.
     #[tokio::test]
-    async fn a_failing_status_lands_on_the_variant_and_still_exits_69() {
+    async fn a_failing_status_lands_on_the_variant() {
         let endpoint = StubIndexEndpoint::start(vec![status(503)]).await;
         let transport = ReqwestIndexTransport::with_hardening(
             &quick_bounds(),

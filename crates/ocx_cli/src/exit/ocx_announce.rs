@@ -8,6 +8,7 @@ use ocx_exit::ExitCode;
 use ocx_announce::announce::AnnounceError;
 use ocx_announce::claim::ClaimError;
 use ocx_announce::forge::{ForgeError, is_server_fault};
+use ocx_oci::transport_policy::{is_transient_status, is_transient_transport_error};
 
 use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
 
@@ -46,8 +47,10 @@ impl ClassifyExitCode for ForgeError {
         match self {
             Self::Status { status, .. } if *status == 401 || *status == 403 => Some(ExitCode::AuthError),
             Self::PushAccessDenied { .. } => Some(ExitCode::AuthError),
-            Self::Status { status, .. } if *status == 429 => Some(ExitCode::TempFail),
+            // 75 means a rerun may succeed, 69 that it will not; the registry's own split.
+            Self::Status { status, .. } if is_transient_status(*status) => Some(ExitCode::TempFail),
             Self::Status { status, .. } if is_server_fault(*status) => Some(ExitCode::Unavailable),
+            Self::Transport { source, .. } if is_transient_transport_error(source) => Some(ExitCode::TempFail),
             Self::Transport { .. } => Some(ExitCode::Unavailable),
             // All three are races a rerun clears.
             Self::NonFastForward { .. } | Self::StaleLease { .. } | Self::MergeRequestUnconfirmed { .. } => {
@@ -630,19 +633,22 @@ mod tests {
         assert_eq!(error.classify(), Some(ExitCode::AuthError));
     }
 
+    /// A rerun may succeed: the registry's transient status set.
     #[test]
-    fn status_429_maps_to_temp_fail() {
-        let error = ForgeError::Status {
-            url: "https://api.github.com/repos/x/y/git/blobs".to_string(),
-            status: 429,
-            detail: String::new(),
-        };
-        assert_eq!(error.classify(), Some(ExitCode::TempFail));
+    fn transient_statuses_map_to_temp_fail() {
+        for status in [408, 429, 502, 503, 504] {
+            let error = ForgeError::Status {
+                url: "https://api.github.com/repos/x/y/git/blobs".to_string(),
+                status,
+                detail: String::new(),
+            };
+            assert_eq!(error.classify(), Some(ExitCode::TempFail), "HTTP {status}");
+        }
     }
 
     #[test]
-    fn server_error_statuses_map_to_unavailable() {
-        for status in [500, 502, 503, 599] {
+    fn terminal_server_error_statuses_map_to_unavailable() {
+        for status in [500, 501, 505, 599] {
             let error = ForgeError::Status {
                 url: "https://api.github.com/repos/x/y/forks".to_string(),
                 status,
@@ -651,7 +657,7 @@ mod tests {
             assert_eq!(
                 error.classify(),
                 Some(ExitCode::Unavailable),
-                "HTTP {status} is a forge-side incident, retryable"
+                "HTTP {status} answers the same on a rerun"
             );
         }
     }
@@ -670,11 +676,80 @@ mod tests {
         }
     }
 
+    /// A request that cannot even be built fails the same way every time.
     #[test]
-    fn transport_failure_maps_to_unavailable() {
+    fn builder_transport_failure_maps_to_unavailable() {
         let error = ForgeError::Transport {
             url: "https://api.github.com/user".to_string(),
             source: transport_error(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::Unavailable));
+    }
+
+    /// A peer that accepts and drops: the retry ladder retries it, the exit code calls it terminal.
+    #[tokio::test]
+    async fn hangup_after_connect_transport_failure_maps_to_unavailable() {
+        let addr = ocx_test_support::net::serve_hangup().await;
+        let source = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds")
+            .get(format!("http://{addr}/user"))
+            .send()
+            .await
+            .expect_err("a dropped connection fails");
+        assert!(
+            ocx_oci::transport_policy::is_retryable_transport_error(&source),
+            "precondition: the ladder retries a hang-up, got {source:?}"
+        );
+        let error = ForgeError::Transport {
+            url: "https://api.github.com/user".to_string(),
+            source,
+        };
+        assert_eq!(error.classify(), Some(ExitCode::Unavailable));
+    }
+
+    #[tokio::test]
+    async fn refused_connect_transport_failure_maps_to_temp_fail() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("bind a free loopback port")
+            .port();
+        let source = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds")
+            .get(format!("http://127.0.0.1:{port}/user"))
+            .send()
+            .await
+            .expect_err("a connect to a closed port fails");
+        assert!(source.is_connect(), "precondition: a connect failure, got {source:?}");
+        let error = ForgeError::Transport {
+            url: "https://api.github.com/user".to_string(),
+            source,
+        };
+        assert_eq!(error.classify(), Some(ExitCode::TempFail));
+    }
+
+    /// A verifier's verdict is the same on every dial, though the error is a connect error.
+    #[tokio::test]
+    async fn refused_certificate_transport_failure_maps_to_unavailable() {
+        use ocx_test_support::pki::{TestPki, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let source = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds")
+            .get(format!("https://{addr}/user"))
+            .send()
+            .await
+            .expect_err("the default root set does not know the minted root");
+        assert!(source.is_connect(), "precondition: a connect failure, got {source:?}");
+        let error = ForgeError::Transport {
+            url: "https://api.github.com/user".to_string(),
+            source,
         };
         assert_eq!(error.classify(), Some(ExitCode::Unavailable));
     }

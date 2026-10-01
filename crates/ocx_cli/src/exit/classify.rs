@@ -1072,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn announce_ssrf_resolution_failure_maps_to_unavailable() {
+    fn announce_ssrf_resolution_failure_maps_to_temp_fail() {
         use ocx_announce::announce::AnnounceError;
         use ocx_oci::ssrf::SsrfError;
 
@@ -1083,7 +1083,7 @@ mod tests {
                 source: std::io::Error::other("dns lookup failed"),
             },
         };
-        assert_eq!(classify(err), ExitCode::Unavailable);
+        assert_eq!(classify(err), ExitCode::TempFail);
     }
 
     /// `AnnounceError::Observe`'s `#[source]` field is `Box<ClientError>` (a
@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn announce_forge_transport_failure_maps_to_unavailable() {
+    fn announce_forge_builder_failure_maps_to_unavailable() {
         use ocx_announce::announce::AnnounceError;
         use ocx_announce::forge::ForgeError;
 
