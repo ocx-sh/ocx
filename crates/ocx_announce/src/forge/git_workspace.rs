@@ -107,7 +107,7 @@ pub fn credential_scope(remote: &str) -> Result<CredentialScope, ForgeError> {
 ///
 /// Returns [`ForgeError::MergeRequestUnconfirmed`] when the schedule runs out, including
 /// under forge 5xx answers: the ref is already written, so the recovery is a rerun (75),
-/// not the `Unavailable` (69) a [`ForgeError::Status`] classifies to. Every other
+/// not the `Unavailable` (69) a terminal [`ForgeError::Status`] 5xx classifies to. Every other
 /// `probe` error propagates unchanged.
 pub async fn confirm_merge_request<Probe, Fut>(probe: Probe) -> Result<PullRequest, ForgeError>
 where
@@ -873,7 +873,8 @@ mod tests {
     ///
     /// The 5xx rows are the finding: by the time the poll runs the ref is
     /// written, so `Unavailable` (69) — "the forge is down, the run never
-    /// happened" — is the one thing a CI wrapper must not be told. `429` and the
+    /// happened", a terminal 5xx's code — is the one thing a CI wrapper must
+    /// not be told. `429` and the
     /// non-5xx rows are the boundary either side of it: a rate limit is the
     /// caller's to see (it already carries 75 of its own), and a 401 mid-poll
     /// means the credential died, which the operator must hear.
@@ -898,8 +899,8 @@ mod tests {
     /// `MergeRequestUnconfirmed`, and every neighbouring status still propagates.
     ///
     /// The push has already landed when this poll runs, so the two errors say
-    /// opposite things to a CI wrapper: `Status{5xx}` classifies to `Unavailable`
-    /// (69) and means "the forge is down, nothing happened", while
+    /// opposite things to a CI wrapper: a terminal `Status{5xx}` classifies to
+    /// `Unavailable` (69) and means "the forge is down, nothing happened", while
     /// `MergeRequestUnconfirmed` classifies to `TempFail` (75) and means "the
     /// branch is published, rerun to pick up the request". Answering 69 tells a
     /// pipeline not to rerun the one case where rerunning is the whole recovery.

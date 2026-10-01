@@ -500,7 +500,8 @@ def test_a_repository_pointer_at_a_forbidden_host_exits_78(
         assert _tags(ocx.registry, unique_repo) == [BUILD_1], f"{flags}: nothing is deleted anywhere"
 
 
-def test_an_unreachable_index_exits_69_with_and_without_force(ocx: OcxRunner, unique_repo: str) -> None:
+def test_an_unreachable_index_exits_75_with_and_without_force(ocx: OcxRunner, unique_repo: str) -> None:
+    """A refused connect may clear on a rerun, so it is 75 (retry), not 69."""
     dead = "127.0.0.1:1"
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(f'[registries."ocx.sh"]\nindex = "http://{dead}"\n')
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{dead}"
@@ -508,7 +509,7 @@ def test_an_unreachable_index_exits_69_with_and_without_force(ocx: OcxRunner, un
     for flags in ([], ["--force"]):
         result = _prune(ocx, *flags, f"ocx.sh/{unique_repo}/pkg", BUILD_1)
 
-        assert result.returncode == 69, f"{flags}: {result.stderr}"
+        assert result.returncode == 75, f"{flags}: {result.stderr}"
         assert "the index locates the registry; retry" in result.stderr, flags
 
 

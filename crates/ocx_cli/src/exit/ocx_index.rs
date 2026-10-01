@@ -37,6 +37,7 @@ impl ClassifyExitCode for OciIndexError {
             | Self::MalformedCatalogKey { .. }
             | Self::InvalidImageIndex(_)
             | Self::MalformedIndexDocument { .. } => ExitCode::DataError,
+            Self::IndexHttpFailed { .. } if self.is_transient_transport() => ExitCode::TempFail,
             Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. } => ExitCode::Unavailable,
             Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
             Self::Ssrf { source, .. } => return source.classify(),
@@ -84,20 +85,12 @@ mod tests {
         assert_eq!(crate::exit::classify_library_error(&error), ExitCode::TempFail);
     }
 
-    /// Plan row 12: an SSRF *resolution* failure classifies to `Unavailable`
-    /// (69), not `ConfigError` (78).
-    ///
-    /// A host that does not resolve was never reached, so no `trusted_hosts`
-    /// entry can fix it — that is the "registry unreachable" class every other
-    /// transport failure already reports. The verdict `SsrfError::classify`
-    /// already carries must survive the wrap instead of being flattened to one
-    /// code for both variants.
-    ///
-    /// Paired positive: `ssrf_refusal_classifies_as_config_error` directly
-    /// above pins `ForbiddenTarget` on `ConfigError` (78), so this pair fails
-    /// on a fix that merely swaps one blanket code for another.
+    /// An SSRF *resolution* failure classifies to `TempFail` (75), not
+    /// `ConfigError` (78): no `trusted_hosts` entry fixes a host that does not
+    /// resolve, and a DNS failure at connect time is already 75, so the same
+    /// host must not exit 69 or 75 depending on which check hit first.
     #[test]
-    fn ssrf_resolution_classifies_as_unavailable() {
+    fn ssrf_resolution_classifies_as_temp_fail() {
         let error = OciIndexError::Ssrf {
             source: ocx_oci::ssrf::PhysicalDialRefused {
                 namespace: "ocx.sh".to_string(),
@@ -107,7 +100,101 @@ mod tests {
                 },
             },
         };
-        assert_eq!(error.classify(), Some(ExitCode::Unavailable));
+        assert_eq!(error.classify(), Some(ExitCode::TempFail));
+    }
+
+    fn index_http_failed(
+        status: Option<u16>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> OciIndexError {
+        OciIndexError::IndexHttpFailed {
+            url: "https://index.ocx.sh/p/acme/tool.json".to_string(),
+            status,
+            source: source.into(),
+        }
+    }
+
+    /// A connect to a port the OS just handed back: refused, with no network.
+    async fn refused_connect() -> reqwest::Error {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("bind a free loopback port")
+            .port();
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds")
+            .get(format!("http://127.0.0.1:{port}/p/acme/tool.json"))
+            .send()
+            .await
+            .expect_err("a connect to a closed port fails");
+        assert!(error.is_connect(), "precondition: a connect failure, got {error:?}");
+        error
+    }
+
+    /// A peer that accepts and drops: the retry ladder retries it, the exit code calls it terminal.
+    async fn hangup_after_connect() -> reqwest::Error {
+        let addr = ocx_test_support::net::serve_hangup().await;
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds")
+            .get(format!("http://{addr}/p/acme/tool.json"))
+            .send()
+            .await
+            .expect_err("a dropped connection fails");
+        assert!(
+            ocx_oci::transport_policy::is_retryable_transport_error(&error),
+            "precondition: the ladder retries a hang-up, got {error:?}"
+        );
+        error
+    }
+
+    /// A rerun may succeed: a refused connect, or a 408/429/502/503/504 answer.
+    #[tokio::test]
+    async fn transient_index_failures_classify_as_temp_fail() {
+        for status in [408, 429, 502, 503, 504] {
+            let error = index_http_failed(Some(status), format!("unexpected status {status}"));
+            assert_eq!(error.classify(), Some(ExitCode::TempFail), "HTTP {status}");
+        }
+        assert_eq!(
+            index_http_failed(None, refused_connect().await).classify(),
+            Some(ExitCode::TempFail),
+            "a refused connect"
+        );
+    }
+
+    /// A rerun answers the same: a terminal status, a hang-up after connect, a
+    /// refused certificate, a `file://` refusal or the cap — each stays `Unavailable` (69).
+    #[tokio::test]
+    async fn terminal_index_failures_classify_as_unavailable() {
+        for status in [403, 500, 501] {
+            let error = index_http_failed(Some(status), format!("unexpected status {status}"));
+            assert_eq!(error.classify(), Some(ExitCode::Unavailable), "HTTP {status}");
+        }
+        // The hint wraps only a refused certificate; wrapping a connect error
+        // proves the wrapper alone decides, whatever it carries.
+        let hinted = ocx_oci::transport_policy::UntrustedCertificateHint::for_url(None, refused_connect().await);
+        let hangup = hangup_after_connect().await;
+        let cases: Vec<(&str, OciIndexError)> = vec![
+            ("hang-up after connect", index_http_failed(None, hangup)),
+            ("refused certificate", index_http_failed(None, hinted)),
+            (
+                "file-transport refusal",
+                index_http_failed(
+                    None,
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+                ),
+            ),
+            ("network refused", index_http_failed(None, "network access refused")),
+            (
+                "oversize body",
+                index_http_failed(Some(200), "response body exceeds the cap"),
+            ),
+        ];
+        for (what, error) in cases {
+            assert_eq!(error.classify(), Some(ExitCode::Unavailable), "{what}");
+        }
     }
 
     // recovered from ocx_index::error
@@ -130,7 +217,8 @@ mod tests {
         use ocx_util::singleflight;
 
         // One case per exit-code class a source walk realistically produces:
-        // a rejected credential, malformed publisher data, an unreachable index.
+        // a rejected credential, malformed publisher data, an index that refuses
+        // and one that is briefly down.
         // E1: a source walk now carries the index tier's own error, so the
         // cases are built at that type. The client case goes through the tier's
         // `OciClient` variant, which reconstructs as `ocx_lib::Error::OciClient`
@@ -151,10 +239,18 @@ mod tests {
             (
                 OciIndexError::IndexHttpFailed {
                     url: "https://index.ocx.sh/c/index.json".to_string(),
-                    status: None,
-                    source: Box::new(std::io::Error::other("connection reset")),
+                    status: Some(403),
+                    source: "unexpected status 403".into(),
                 },
                 ExitCode::Unavailable,
+            ),
+            (
+                OciIndexError::IndexHttpFailed {
+                    url: "https://index.ocx.sh/c/index.json".to_string(),
+                    status: Some(503),
+                    source: "unexpected status 503".into(),
+                },
+                ExitCode::TempFail,
             ),
         ];
 

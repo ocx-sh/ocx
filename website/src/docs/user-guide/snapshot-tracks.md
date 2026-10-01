@@ -156,7 +156,7 @@ Run the jobs of one track one at a time. [GitLab CI][gitlab-ci] has [`resource_g
 
 Both examples split the push from the announce. A retried announce job reuses the pushed `tags.txt`, so it never pushes a second build. Registry credentials need push and delete rights on the repository. Set them with [`OCX_AUTH_<REGISTRY>_TYPE`][env-auth-type], `_USER` and `_TOKEN`. The index credential is [`OCX_ANNOUNCE_TOKEN`][env-announce-token].
 
-Retry exit 75, and exit 69 from prune's index read, which asks you to retry. Never retry exit 87.
+Retry exit 75. Never retry exit 69 or 87.
 
 ### GitLab CI {#snapshot-tracks-ci-gitlab}
 
@@ -168,7 +168,7 @@ variables:
   OCX_AUTH_registry_gitlab_example_com_TYPE: basic
 
 .retry: &retry
-  retry: { max: 2, exit_codes: [69, 75] }
+  retry: { max: 2, exit_codes: [75] }
 
 canary-push:
   rules: [{ if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH }]

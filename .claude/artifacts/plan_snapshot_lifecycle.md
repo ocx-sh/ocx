@@ -92,7 +92,7 @@ Question → decision. "ADR" = the ADR's own recommendation or text adopted.
 | DEC-24 | C-008 unit test needs a `Context` constructor that does not exist (~30 fields) | No new seam: `canonical_index_source` is one call of `build_index_sources` with an empty mirrors map; WP6's S-018 acceptance test (prune with a `[mirrors]` index entry reads the configured URL) is its proof. |
 | DEC-25 | Cross-model gate per WP (plan § WP2/WP3/WP6 steps) or once (tier `xhigh` Phase 6) | Once, in the end-of-run `L2` batch over the whole feature branch diff (one-shot); WP2, WP3 and WP6 each still get an opus security or adversarial seat at `L1`. |
 | DEC-26 | WP2 security review: a registry that answers 404 to hide a repository the caller may not modify makes a refused DELETE read as `AlreadyAbsent` | Prune runs its confirm probe after `AlreadyAbsent` too (not only after `Deleted`); a tag still `Present` there → 75. `delete_tag` itself keeps DEC-21. |
-| DEC-27 | C-030 "a failed run prints the document" when routing fails before a repository is known (index unreachable 69, pointer refused 78, no root 79) | Narrowed to every run that entered the safeguard: routing failures print only the error envelope (the repository and root digest are unknown; inventing them breaks "report actual results"). |
+| DEC-27 | C-030 "a failed run prints the document" when routing fails before a repository is known (index unreachable 75/69, pointer refused 78, no root 79) | Narrowed to every run that entered the safeguard: routing failures print only the error envelope (the repository and root digest are unknown; inventing them breaks "report actual results"). |
 | DEC-28 | A failed prune under `--format json` emits the report document and the error envelope | Both on stdout, document first, then the standard envelope the CLI emits for every error; consumers pick by key (`tags` vs `error`). |
 | DEC-29 | Prune's registry client (WP6 post-stub review) | With an index: a client pinned to the SSRF guard for the package namespace (the list `guard_repository_pointer` checked). Without an index the host comes from the command line, as for `push`: the ordinary client. |
 | DEC-30 | `--tags ''` (one empty tag name) | Stays 79 as today's test asserts; DEC-11's no-op covers only an empty `--tags-file`. Superseded by DEC-37. |
@@ -176,13 +176,13 @@ Signatures are the contract; names may be adjusted by the implementing WP only i
   (`crates/ocx_package/src/cascade/graph/tests.rs:189`) is updated.
 - **C-007** `OcxIndex::fetch_root_uncached(&self, repository) -> Result<Option<(Digest, IndexRoot)>, Error>`: one GET
   of the root (after the existing format-version check), no memo, never commits locally; the `Digest` is the sha256
-  of the served bytes. Root absent → `Ok(None)`; transport failure → `Err` (classifies 69).
+  of the served bytes. Root absent → `Ok(None)`; transport failure → `Err` (classifies 75 when transient, else 69).
 - **C-008** Context helper `canonical_index_source(namespace) -> Result<Option<OcxIndex>>`: calls the existing
   `build_index_sources` with an empty `mirrors_index` map (DEC-7) and returns the namespace's source; `None` when the
   namespace has no index. Offline is refused before this is reached (C-029).
 - **C-009** `OcxIndex::guard_repository_pointer(&self, &IndexRoot) -> Result<OciIdentifier>`: parses the root's
   `repository` pointer and runs the existing SSRF `guard_destination` with the namespace's trusted/insecure hosts
-  (78 on a forbidden target; a DNS failure stays 69). `physical_identifier` is refactored to call it (DEC-6).
+  (78 on a forbidden target; a DNS failure is 75 since ocx#556). `physical_identifier` is refactored to call it (DEC-6).
 
 ### Tags files and push help (`ocx_cli`) — WP4
 
@@ -244,8 +244,9 @@ Signatures are the contract; names may be adjusted by the implementing WP only i
   `--keep-builds <N>`, `--force`, `--tags-file <PATH>`, `--dry-run`, `--format json`. 64 on: neither TAG nor
   `--prerelease`, or both; `--prerelease` not a pre-release without a build; `--keep-builds` without `--prerelease`
   or `< 1`; a digest as TAG.
-- **C-024** Routing: namespace with an index → `fetch_root_uncached` (always, `--force` or not): unreachable → 69
-  with hint "the index locates the registry; retry"; no root → 79; `repository` pointer →
+- **C-024** Routing: namespace with an index → `fetch_root_uncached` (always, `--force` or not): transiently
+  unreachable → 75 with hint "the index locates the registry; retry", any other read failure → 69 (amended
+  2026-10-01, ocx#556); no root → 79; `repository` pointer →
   `guard_repository_pointer` (78, zero DELETEs). Namespace with no index → `<PACKAGE>` is the repository.
 - **C-025** Selection: explicit → deduplicated, input order. Structural → canonical `list_tags`, every tag parsing as
   the same variant/core/pre-release **with** a build, plus the rolling tag **if the listing holds it**;
@@ -319,7 +320,7 @@ Signatures are the contract; names may be adjusted by the implementing WP only i
 | S-017 | Prune with argv errors (both TAG and `--prerelease`; `--keep-builds 0`; `--prerelease 0.5.0`; a digest TAG) | 64 each | — |
 | S-018 | Prune with `[mirrors]` configured for the index host | The root is read from the configured index URL, never the mirror | — |
 | S-019 | Prune where the root's `repository` pointer names a forbidden host | 78; zero DELETEs | — |
-| S-020 | Prune while the index is unreachable (with and without `--force`) | 69 both; hint "the index locates the registry; retry" | — |
+| S-020 | Prune while the index is unreachable (with and without `--force`) | 75 both (69 until ocx#556); hint "the index locates the registry; retry" | — |
 | S-021 | Prune a package the index has no root for | 79 | — |
 
 ## Parallelization

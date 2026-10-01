@@ -132,7 +132,9 @@ Why this scope is safe: a pre-release with a build cascades only into its own pr
 **Locating the registry.** For a namespace with a configured index (`[registries."<ns>"] index`), prune always
 reads the package's root, `--force` or not: the root's `repository` pointer names the registry repository, checked
 by the same `guarded_physical` host guard announce uses (`pipeline.rs:221`, SSRF refusal 78). A root that cannot be
-read is 69, with the hint "the index locates the registry; retry" (`--force` does not skip this read). A package the
+read transiently (refused or timed-out connect, 408/429/502/503/504) is 75, with the hint "the index locates the registry;
+retry"; any other unreadable root is 69 with no retry hint (amended 2026-10-01, ocx#556). `--force` does not skip this
+read. A package the
 index does not know is 79. A namespace with no index uses `<PACKAGE>` itself as the repository.
 
 The root read is canonical and read-only: the configured index URL, never a `[mirrors]` index entry, with caching
@@ -179,7 +181,8 @@ the family; the rows it left behind are removed by `announce --refresh` (schedul
 tag pins the digest past the tag's deletion.
 
 **Registries without tag DELETE.** A 405, or a 400 `UNSUPPORTED`, is exit 87 (`RegistryDeleteUnsupported`, new),
-arriving on the first DELETE, before anything was deleted. CI retries 69 and 75; 87 must never be retried.
+arriving on the first DELETE, before anything was deleted. CI retries 75; 69 and 87 must never be retried (amended
+2026-10-01, ocx#556 — 69 was retried only because a transient index read used to exit 69).
 
 **Residual race.** DELETE is not conditional. Without `--keep-builds`, prune deletes the rolling tag, and a push to
 the same track that runs concurrently may cascade into it at the same moment. Serialize each track's jobs: GitLab
@@ -410,7 +413,7 @@ identical, and `o/sha256/c07e….json` and `o/sha256/51be….json` are deleted i
 variables: { PKG: ocx.acme.example/acme/tool, REG: registry.gitlab.example.com/acme/tool,
              FORGE: --index-repo gitlab.example.com/platform/ocx-index --forge gitlab,
              OCX_AUTH_registry_gitlab_example_com_TYPE: basic }
-.retry: &retry { retry: { max: 2, exit_codes: [69, 75] } }
+.retry: &retry { retry: { max: 2, exit_codes: [75] } }
 canary-push:
   rules: [{ if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH }]
   resource_group: snapshot-canary
@@ -468,9 +471,9 @@ credential is `OCX_ANNOUNCE_TOKEN`. The GitHub Actions equivalent is in the syst
 |---|---|---|
 | 0 | | deleted, nothing selected, everything already `absent`, or a `--dry-run` whose real run would pass |
 | 64 | CLI | neither TAG nor `--prerelease`, or both; `--prerelease` not a pre-release without a build; `--keep-builds` without `--prerelease` or below 1; a digest as TAG; announce `--ephemeral` with `--refresh` |
-| 69 | registry / index | registry unreachable; index root unreachable (hint: the index locates the registry, retry; `--force` does not skip it) |
+| 69 | registry / index | a registry or index-root failure a rerun will not change (refused certificate, 500); `--force` does not skip the root read |
 | 74 | local | `--tags-file` write failed, after the deletes it lists |
-| 75 | registry / index | 429/503; a tag still present after the confirmation retries; a selected tag the served index does not list yet (`not_in_index`) |
+| 75 | registry / index | refused or timed-out connect, 408/429/502/503/504 (index root read: hint "the index locates the registry; retry"); a tag still present after the confirmation retries; a selected tag the served index does not list yet (`not_in_index`) |
 | 78 | config | SSRF refusal on the registry host (`guarded_physical`) |
 | 79 | index / announce | the index has no root for the package (prune); a named tag absent from registry and index (announce, unchanged) |
 | 80 | registry | 401 or 403 (`AuthError`), including a token without `delete` |
@@ -572,3 +575,4 @@ reference for all three, and the snapshot-tracks how-to (with the reason and wha
 | 2026-09-29 | Owner redesign: low-level prune, absence-driven announce, bot as removal authority |
 | 2026-09-29 | Final fix pass: rulings A, B, C and the S5 amendment to R6; root-based routing for prune; one tags file (newline format, `cascade repair` appends); scheduled `--refresh`; dry run runs the safeguard; per-track serialization; stale-branch rule without a three-way carry |
 | 2026-09-30 | Execution amendments: prune appends only tags the served root lists (plan DEC-40); no `--tags` escape hatch for a vanished repository (DEC-16); the local-copy drop follows the configured source (DEC-15, DEC-43) |
+| 2026-10-01 | Amendment (ocx#556): a transient index-root read exits 75, not 69 — index and forge transport failures follow the registry's 75/69 split, and the "69 is retryable for prune" exception is gone. CI retries 75; 69 and 87 never |

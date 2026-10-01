@@ -35,8 +35,9 @@ use crate::options;
     to append each gone tag the index lists, then publish the removal with \
     `ocx package announce --tags-file PATH`.\n\n\
     Exits 0 when every selected tag is gone or kept; 64 on a usage error; 69 when the index or \
-    registry is unreachable; 74 when the tags file cannot be written; 75 when a tag is not in the \
-    index yet or is still present after its delete; 78 when the index points at a forbidden host; \
+    registry fails in a way a rerun will not change; 74 when the tags file cannot be written; 75 \
+    when either is briefly unreachable, or a tag is not in the index yet or is still present after \
+    its delete; 78 when the index points at a forbidden host; \
     79 when the index has no such package; 80 when the credential cannot delete; 81 for a durable \
     tag, a namespace with no index, or `--offline`; 87 when the registry does not delete tags. \
     A dry run exits 81 or 75 exactly as the real run would; 80 and 87 surface only on a real delete.\n\n\
