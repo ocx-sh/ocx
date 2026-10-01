@@ -392,6 +392,24 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
     )
 
 
+@pytest.mark.parametrize(
+    ("seam", "features"),
+    [("glibc", ["libc.glibc"]), ("glibc,musl", ["libc.glibc", "libc.musl"])],
+)
+def test_about_json_reports_host_platform_with_features(
+    ocx: OcxRunner, seam: str, features: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``about --format json`` reports the host as ocx matches it: ``platforms[0]``
+    is the canonical string with its ``os.features``, ``features`` lists them, so
+    a script needs no knowledge of the ``libc`` family."""
+    monkeypatch.setitem(ocx.env, "__OCX_TEST_LIBC", seam)
+    about = ocx.json("about")
+
+    assert about["features"] == features
+    assert about["libc"] == features
+    assert about["platforms"][0].endswith("+" + ",".join(features)), about["platforms"]
+
+
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",

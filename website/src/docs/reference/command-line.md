@@ -1383,13 +1383,14 @@ Home       /home/user/.ocx
 
 **JSON output**
 
-`ocx --format json about` emits a flat object. The `commit`, `build`, and `ci` blocks are merged from the [build provenance][version-json-schema] payload and follow the same schema and suppression rules as `ocx --format json version`. The `libc` field is an array of detected libc os.feature tags (e.g. `["libc.glibc"]`, `["libc.glibc","libc.musl"]`); empty array `[]` when no libc was detected:
+`ocx --format json about` emits a flat object. The `commit`, `build`, and `ci` blocks are merged from the [build provenance][version-json-schema] payload and follow the same schema and suppression rules as `ocx --format json version`. `platforms[0]` is the host as OCX matches it, `os.features` included (`linux/amd64+libc.glibc`; several features join with `,`), and `features` lists those `os.features` on their own — a script selects the packages the host can run by checking that a package's offered features are a subset of `features`, without naming a feature family. The `libc` field is the libc subset of `features`: an array of detected libc os.feature tags (e.g. `["libc.glibc"]`, `["libc.glibc","libc.musl"]`); empty array `[]` when no libc was detected:
 
 ```json
 {
   "version": "0.3.2",
   "registry": "ocx.sh",
-  "platforms": ["linux/amd64"],
+  "platforms": ["linux/amd64+libc.glibc"],
+  "features": ["libc.glibc"],
   "libc": ["libc.glibc"],
   "shell": "bash",
   "home": "/home/user/.ocx",

@@ -45,9 +45,7 @@ impl About {
     pub async fn execute(&self, context: Context) -> anyhow::Result<ExitCode> {
         let version = crate::app::version().to_string();
         let registry = context.default_registry().to_string();
-        // Bare os/arch: `Platform`'s `Display` carries the libc, which the `Libc` row already shows.
         let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
-        let platforms: Vec<String> = vec![host_platform.segments().join("/")];
         let current_shell = shell::Shell::from_process().map(|s| format!("{s}"));
         let home = ocx_config::home::default_ocx_root()
             .map(|p| p.display().to_string())
@@ -55,7 +53,7 @@ impl About {
         // The cache `Context::try_init` populated; no second probe.
         let libc: Vec<String> = ocx_oci::cached_libc_labels();
 
-        let info = crate::api::data::about::About::new(version, registry, platforms, libc, current_shell, home);
+        let info = crate::api::data::about::About::new(version, registry, &host_platform, libc, current_shell, home);
 
         // The loader's own warning lands on a stderr the shims discard, so this command must report
         // the strip; on stderr, so `--format json`'s stdout stays one document.
@@ -92,7 +90,7 @@ impl About {
         let label_style = if color { Style::new().bold() } else { Style::new() };
         let dim_style = if color { Style::new().dim() } else { Style::new() };
 
-        let platforms = info.platforms.join(", ");
+        let platforms = info.plain_platforms.join(", ");
         let libc = info.libc.join(", ");
         let shell_str = info.shell.as_deref().unwrap_or("n/a");
         let commit_summary = info.commit_summary();

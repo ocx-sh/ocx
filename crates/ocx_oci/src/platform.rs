@@ -111,6 +111,14 @@ impl Platform {
         }
     }
 
+    /// The `os.features` tags; empty for `Any`.
+    pub fn os_features(&self) -> &[String] {
+        match self {
+            Self::Any => &[],
+            Self::Specific { os_features, .. } => os_features,
+        }
+    }
+
     /// Path segments: `["any"]` or `["linux", "arm64", "v8"]`.
     pub fn segments(&self) -> Vec<String> {
         match self {

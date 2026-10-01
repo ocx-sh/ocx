@@ -186,7 +186,15 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "description": "Host platform as ocx matches it, features included (`linux/amd64+libc.glibc`)."
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The host's full `os.features` (a superset of `libc`); a package is\nrunnable when its offered features are a subset of these."
         },
         "libc": {
           "type": "array",
@@ -245,6 +253,7 @@
         "version",
         "registry",
         "platforms",
+        "features",
         "libc",
         "shell",
         "home",
@@ -253,7 +262,7 @@
         "build",
         "ci"
       ],
-      "description": "System information about the ocx installation.\n\nPlain format: colored logo with key-value pairs alongside.\n\nJSON format: flat object with version + registry + platforms + libc +\nshell + home plus optional `channel`, `commit`, `build`, `ci` build-provenance\nblocks. The build-provenance fields are absent on local `cargo build`\nwithout git, matching `ocx version --format json` behaviour."
+      "description": "System information about the ocx installation.\n\nPlain format: colored logo with key-value pairs alongside.\n\nJSON format: flat object with version + registry + platforms + features + libc +\nshell + home plus optional `channel`, `commit`, `build`, `ci` build-provenance\nblocks. The build-provenance fields are absent on local `cargo build`\nwithout git, matching `ocx version --format json` behaviour."
     },
     "CommitInfo": {
       "type": "object",
