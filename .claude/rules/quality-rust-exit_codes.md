@@ -214,7 +214,8 @@ mytool install foo:1.0
 case $? in
     0)  echo "installed" ;;
     64) echo "usage error; check flags" ;;
-    69) echo "registry unreachable; retry with backoff" ;;
+    69) echo "registry unavailable; a rerun will not help" ;;
+    75) echo "temporary failure; retry with backoff" ;;
     78) echo "bad config; fix and retry" ;;
     79) echo "not found; pin a different version" ;;
     80) echo "auth failed; refresh credentials" ;;
