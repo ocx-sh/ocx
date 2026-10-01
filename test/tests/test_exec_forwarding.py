@@ -493,6 +493,37 @@ def test_ambient_default_registry_reaches_a_clean_child(
     )
 
 
+@pytest.mark.parametrize("hermetic", [False, True], ids=["ambient", "no-config"])
+def test_ambient_toolchain_dir_reaches_a_clean_child(
+    ocx: OcxRunner, published_package, hermetic: bool
+) -> None:
+    """A `toolchain_dir` root set only by `OCX_TOOLCHAIN_DIR` must reach a child
+    ocx, hermetic or not; without it the child renders its project tree
+    somewhere else than the parent did."""
+    ocx.plain("package", "install", published_package.short)
+    root = Path(ocx.ocx_home).resolve() / "tc"
+    overrides = {"OCX_TOOLCHAIN_DIR": str(root)}
+    if hermetic:
+        overrides["OCX_NO_CONFIG"] = "1"
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "%s" "${OCX_TOOLCHAIN_DIR-unset}"',
+        env_overrides=overrides,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(root), (
+        "the toolchain root the parent resolved from the environment must reach "
+        f"a --clean child; expected {str(root)!r}, got {result.stdout!r}"
+    )
+
+
 def test_ambient_insecure_registries_reach_a_clean_child(
     ocx: OcxRunner, published_package
 ) -> None:

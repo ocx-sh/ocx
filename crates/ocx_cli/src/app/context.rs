@@ -423,6 +423,9 @@ impl Context {
         // Resolved here so a refused root exits 78 on every command, read-only ones included; mapped
         // through `ConfigError` so `classify_error` reaches it via `source()`.
         let toolchain_root = ocx_config::ToolchainRoot::resolve(&config).map_err(ocx_config::error::Error::from)?;
+        // Forwarded because `apply_ocx_config` is set-or-remove and would strip `OCX_TOOLCHAIN_DIR`,
+        // leaving a hermetic child with no root.
+        config_view.toolchain_dir = toolchain_root.as_ref().map(|root| root.as_path().to_path_buf());
         let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
