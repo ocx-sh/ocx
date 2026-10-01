@@ -17,7 +17,7 @@ use crate::api::Printable;
 /// overlay entry carries `{"kind": "patch", "rule": "<glob>", "companion":
 /// "<companion-id>"}`, exactly these three keys: `rule` is the descriptor rule
 /// glob that admitted the companion for the base, and `companion` is the
-/// companion identifier whose interface projection produced the entry.
+/// identifier of the companion that produced the entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum EntrySource {

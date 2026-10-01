@@ -37,6 +37,14 @@ pub struct PatchTestArgs {
     #[clap(short, long)]
     platform: Option<ocx_oci::Platform>,
 
+    /// Use the base's own surface, the one its launchers see, instead of its consumers'
+    ///
+    /// Without `--self`, the result is the interface surface a consumer of the base composes:
+    /// `public` and `interface` variables. With `--self`, it is the surface the base's own
+    /// launchers compose: `public` and `private` variables.
+    #[clap(long = "self", default_value_t = false)]
+    self_view: bool,
+
     /// Path to a local archive for a companion package, allowing the companion
     /// to be materialized without a registry round-trip. Repeatable.
     ///
@@ -206,7 +214,14 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // slice in step 6, and a handful of entries is cheaper than the machinery to
     // hand them back out of the composition.
     let mut composition = manager
-        .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone(), &platform)
+        .seed_and_compose_patch_test(
+            &base_arc,
+            &descriptor_bytes,
+            &patches,
+            args.self_view,
+            env_overrides.clone(),
+            &platform,
+        )
         .await
         .map_err(|kind| ocx_package_manager::Error::package(base_id.clone(), kind))?;
 

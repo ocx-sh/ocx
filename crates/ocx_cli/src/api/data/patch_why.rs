@@ -9,8 +9,8 @@ use crate::api::Printable;
 /// A single env var an infrastructure-patch companion contributes to a base.
 ///
 /// `variable` is the env var name, `rule` is the descriptor rule `match` glob
-/// that admitted the companion for the base, and `companion` is the companion
-/// identifier whose interface projection produced the var.
+/// that admitted the companion for the base, and `companion` is the identifier
+/// of the companion that produced the var.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchWhyEntry {
     pub variable: String,
@@ -29,15 +29,22 @@ impl PatchWhyEntry {
 }
 
 /// `ocx patch why <base>`: each env var a companion contributes to `base`, with the matching rule
-/// and companion. Empty means no patches apply, never an error.
+/// and companion. Empty is never an error: either no companion applies, or those that apply add
+/// nothing to this surface.
 pub struct PatchWhyReport {
     base: String,
+    /// Every companion composed for `base`, including one that adds no var to this surface.
+    companions: Vec<String>,
     entries: Vec<PatchWhyEntry>,
 }
 
 impl PatchWhyReport {
-    pub fn new(base: String, entries: Vec<PatchWhyEntry>) -> Self {
-        Self { base, entries }
+    pub fn new(base: String, companions: Vec<String>, entries: Vec<PatchWhyEntry>) -> Self {
+        Self {
+            base,
+            companions,
+            entries,
+        }
     }
 }
 
@@ -50,7 +57,15 @@ impl Serialize for PatchWhyReport {
 impl Printable for PatchWhyReport {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if self.entries.is_empty() {
-            printer.print_hint(&format!("no patches apply to '{}'", self.base));
+            if self.companions.is_empty() {
+                printer.print_hint(&format!("no patches apply to '{}'", self.base));
+            } else {
+                printer.print_hint(&format!(
+                    "companions apply to '{}' but add no variable on this surface: {}",
+                    self.base,
+                    self.companions.join(", ")
+                ));
+            }
             return;
         }
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
@@ -85,6 +100,7 @@ mod tests {
     fn json_shape_is_bare_array() {
         let report = PatchWhyReport::new(
             "ocx.sh/java:21".to_owned(),
+            vec!["corp/jdk-trust:1.0".to_owned()],
             vec![PatchWhyEntry::new(
                 "JAVA_TRUST".to_owned(),
                 "ocx.sh/java:*".to_owned(),
@@ -109,7 +125,7 @@ mod tests {
 
     #[test]
     fn empty_report_serializes_to_empty_array() {
-        let report = PatchWhyReport::new("ocx.sh/cmake:3".to_owned(), Vec::new());
+        let report = PatchWhyReport::new("ocx.sh/cmake:3".to_owned(), Vec::new(), Vec::new());
         let json = serde_json::to_string(&report).expect("serializes");
         assert_eq!(json, "[]", "empty provenance must serialize to an empty array");
     }
