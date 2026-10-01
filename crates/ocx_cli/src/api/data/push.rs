@@ -23,7 +23,8 @@ use crate::api::data::sweep::SweptStatus;
 /// annotates nothing emits the first six keys alone.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PushReport {
-    /// The pushed package identifier (`registry/repository:tag`).
+    /// The pushed package identifier (`registry/repository:tag`), carrying the tag actually written —
+    /// the `--build-timestamp` suffix included — not the tag the caller passed.
     pub identifier: String,
     /// Outcome of the push. Always `"pushed"`: the command performs the push
     /// unconditionally (the registry merge is idempotent).

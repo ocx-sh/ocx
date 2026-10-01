@@ -3619,7 +3619,7 @@
       "properties": {
         "identifier": {
           "type": "string",
-          "description": "The pushed package identifier (`registry/repository:tag`)."
+          "description": "The pushed package identifier (`registry/repository:tag`), carrying the tag actually written —\nthe `--build-timestamp` suffix included — not the tag the caller passed."
         },
         "status": {
           "type": "string",

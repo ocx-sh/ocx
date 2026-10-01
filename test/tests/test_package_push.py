@@ -133,6 +133,30 @@ def test_push_report_json_schema_has_required_fields(
     ), report
 
 
+def test_push_report_identifier_names_the_timestamped_tag_that_was_pushed(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--build-timestamp` rewrites the tag at publish time; `identifier` names the tag written.
+
+    The tags file and the registry already carried the timestamped tag, so the
+    three are compared: a report that echoed the input would disagree with both.
+    """
+    rolling = "0.5.0-canary"
+    tags_file = tmp_path / "tags.txt"
+    report = _push_json(
+        ocx, unique_repo, rolling, tmp_path, platform=current_platform(),
+        extra_push_args=["--no-keep-tag", "--build-timestamp=datetime", "--tags-file", str(tags_file)],
+    )
+
+    recorded = [tag for tag in tags_file.read_text().split() if tag != rolling]
+    assert len(recorded) == 1, f"the tags file records one timestamped build, got {recorded}"
+    assert report["identifier"] == f"{ocx.registry}/{unique_repo}:{recorded[0]}", report
+    fq = f"{ocx.registry}/{unique_repo}"
+    ocx.plain("index", "update", fq)
+    listed = ocx.plain("index", "list", fq).stdout.split()
+    assert recorded[0] in listed, f"the registry lacks the pushed tag {recorded[0]}: {listed}"
+
+
 def test_push_report_cascade_tags_written_is_array(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

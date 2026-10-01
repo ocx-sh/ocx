@@ -415,8 +415,10 @@ impl PackagePush {
 
         // Platform manifests, never the index, whose digest a later platform merge rewrites.
         let platform_digests = outcome.platform_digests.clone();
-        let mut report = crate::api::data::push::PushReport::from_outcome(identifier.to_string(), outcome)
-            .with_annotations(annotations);
+        // `--build-timestamp` rewrites the tag at publish time, so the report names the tag written, not the input.
+        let pushed = identifier.clone_with_tag(&outcome.primary_tag).to_string();
+        let mut report =
+            crate::api::data::push::PushReport::from_outcome(pushed, outcome).with_annotations(annotations);
         // Post-push failures are never rolled back: each becomes a report row plus a log line.
         let mut failures: Vec<ocx_exit::ExitCode> = Vec::new();
 
