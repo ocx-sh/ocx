@@ -69,7 +69,7 @@ pub struct ComposeOutput {
 
 /// The axes a single-surface composition emits: `--self` is the private axis, the consumer view
 /// the interface axis.
-pub(crate) fn surface_axes(self_view: bool) -> Visibility {
+pub fn surface_axes(self_view: bool) -> Visibility {
     if self_view {
         Visibility::PRIVATE
     } else {
@@ -77,19 +77,25 @@ pub(crate) fn surface_axes(self_view: bool) -> Visibility {
     }
 }
 
-/// Whether `visibility` reaches any axis of `axes`.
+/// The axes a target is admitted through: a root on the surface's own axis, a dependency through
+/// its interface alone. A companion grafted onto the target composes on these.
+pub(crate) fn target_axes(is_root: bool, self_view: bool) -> Visibility {
+    if is_root {
+        surface_axes(self_view)
+    } else {
+        Visibility::INTERFACE
+    }
+}
+
+/// Whether `visibility` reaches any axis of `axes`; a transitive dependency is admitted on `axes`
+/// exactly when its effective visibility does.
 fn on_axes(visibility: Visibility, axes: Visibility) -> bool {
     (visibility.has_private() && axes.has_private()) || (visibility.has_interface() && axes.has_interface())
 }
 
 /// Whether a transitive dependency is admitted to a surface; roots are always admitted by the caller.
 pub(crate) fn dep_admitted(effective: Visibility, self_view: bool) -> bool {
-    dep_admitted_on(effective, surface_axes(self_view))
-}
-
-/// [`dep_admitted`] over a set of surface axes: admitted when its effective visibility reaches any.
-fn dep_admitted_on(effective: Visibility, axes: Visibility) -> bool {
-    on_axes(effective, axes)
+    on_axes(effective, surface_axes(self_view))
 }
 
 /// Whether one carrier crosses onto a surface: a root's on the surface's axis, a dependency's only
@@ -115,12 +121,22 @@ pub(crate) fn integrations_cross(self_view: bool) -> bool {
 }
 
 /// Whether a composed root is a package of its own or a patch companion grafted onto its targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootRole {
-    /// Its launchers are its own: `entrypoints/` on `PATH` and claimed.
-    Package,
+enum RootRole<'a> {
+    /// Its launchers are its own: `entrypoints/` and a deferred root's shims on `PATH`, and claimed.
+    /// Packages resolve through `paths`.
+    Package(&'a ComposePaths),
     /// Its launchers would run the companion's env, not its target's: off `PATH`, unclaimed.
-    Graft,
+    /// Packages resolve on their digest; the map is what earlier compositions emitted ([`Emitted`]).
+    Graft(&'a mut Emitted),
+}
+
+/// The packages a composition emitted (advisory tag stripped), each with the axes its own vars
+/// were emitted on: [`target_axes`] of how it was reached, merged when reached more than once.
+pub(crate) type Emitted = HashMap<ocx_oci::PinnedPackageRef, Visibility>;
+
+/// Whether a root's carrier crosses on `axes` and was not already emitted on `done`.
+fn crosses_anew(carrier: Visibility, axes: Visibility, done: Visibility) -> bool {
+    on_axes(carrier, axes) && !on_axes(carrier, done)
 }
 
 /// Compose the runtime env from one or more root packages; `self_view` selects the private
@@ -141,9 +157,7 @@ pub(crate) async fn compose(
         store,
         surface_axes(self_view),
         integrations_cross(self_view),
-        paths,
-        RootRole::Package,
-        &mut HashSet::new(),
+        RootRole::Package(paths),
     )
     .await
 }
@@ -151,9 +165,9 @@ pub(crate) async fn compose(
 /// Compose one patch companion as part of its targets, on the surface `axes` those targets are
 /// admitted through; `collect_integrations` is the outer composition's gate.
 ///
-/// `emitted` holds the packages already emitted (advisory tag stripped): a dependency in it is
-/// skipped, and on success the companion's own emissions join it. The companion itself is always
-/// emitted, but never its launchers ([`RootRole::Graft`]).
+/// A dependency in `emitted` is not emitted again, and a companion already in it adds only the
+/// carriers it has not yet emitted; on success the companion's own emissions join `emitted`. Its
+/// launchers never reach `PATH` ([`RootRole::Graft`]).
 ///
 /// # Errors
 ///
@@ -163,20 +177,17 @@ pub(crate) async fn compose_companion(
     store: &PackageStore,
     axes: Visibility,
     collect_integrations: bool,
-    emitted: &mut HashSet<ocx_oci::PinnedPackageRef>,
+    emitted: &mut Emitted,
 ) -> crate::Result<ComposeOutput> {
     // Committed only on success, or an optional companion that fails half-way hides deps it never emitted.
     let mut attempt = emitted.clone();
-    // Digest lane: a companion is not a lock entry, so no link names it.
     let out = compose_gated(
         std::slice::from_ref(companion),
         store,
         axes,
         // Never derived from `axes`: an absent dep dir would fail a surface that carries no integrations.
         collect_integrations,
-        &crate::composer::ComposePaths::digest_only(),
-        RootRole::Graft,
-        &mut attempt,
+        RootRole::Graft(&mut attempt),
     )
     .await?;
     *emitted = attempt;
@@ -186,16 +197,14 @@ pub(crate) async fn compose_companion(
 /// The composition itself over the surface axes `axes`, with the integrations carrier gated by an
 /// explicit input.
 ///
-/// Every emitted package path goes through `paths`, so "digest or link" is answered in one place.
-/// A dependency already in `seen` (advisory tag stripped) is skipped; every emitted package joins it.
+/// Every emitted package path goes through one [`ComposePaths`], so "digest or link" is answered in
+/// one place. A dependency already emitted (advisory tag stripped) is skipped.
 async fn compose_gated(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
     axes: Visibility,
     collect_integrations: bool,
-    paths: &ComposePaths,
-    role: RootRole,
-    seen: &mut HashSet<ocx_oci::PinnedPackageRef>,
+    role: RootRole<'_>,
 ) -> crate::Result<ComposeOutput> {
     // A single root was already gated at install time.
     if roots.len() > 1 {
@@ -204,8 +213,15 @@ async fn compose_gated(
 
     check_repo_digest_conflicts(roots, axes)?;
 
+    let digest_only = ComposePaths::digest_only();
+    let mut own_seen = Emitted::new();
+    let (paths, seen, graft) = match role {
+        RootRole::Package(paths) => (paths, &mut own_seen, false),
+        // Digest lane: a companion is not a lock entry, so no link names it.
+        RootRole::Graft(emitted) => (&digest_only, emitted, true),
+    };
+
     let mut entries: Vec<Entry> = Vec::new();
-    let mut emitted_roots: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     let mut admitted: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
     let mut admitted_binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)> = Vec::new();
     let mut admitted_entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)> = Vec::new();
@@ -221,7 +237,7 @@ async fn compose_gated(
             ContentState::Materialized
         };
         // Step 1: collect the surface-visible, deduplicated non-root entries, indexed to keep topological order.
-        let mut visible_entries: Vec<(usize, ocx_oci::PinnedPackageRef)> = Vec::new();
+        let mut visible_entries: Vec<(usize, ocx_oci::PinnedPackageRef, Visibility)> = Vec::new();
         for tc_entry in &root.resolved().dependencies {
             let key = tc_entry.identifier.strip_advisory();
 
@@ -230,24 +246,29 @@ async fn compose_gated(
                 continue;
             }
 
-            if !dep_admitted_on(tc_entry.visibility, axes) {
+            if !on_axes(tc_entry.visibility, axes) {
                 continue;
             }
 
             // After the surface gate, or a gated-out entry masks a later admitted visit of the same package.
-            if !seen.insert(key) {
+            // A dependency emits its interface side; a graft reached on the private axis alone lacks it.
+            let done = seen.get(&key).copied().unwrap_or(Visibility::SEALED);
+            if done.has_interface() {
                 continue;
             }
+            seen.insert(key, done.merge(Visibility::INTERFACE));
 
-            // Tag-bearing, or a tag-anchored patch rule (`*:21`) silently drops a required overlay.
-            admitted.push(tc_entry.identifier.clone());
+            if done == Visibility::SEALED {
+                // Tag-bearing, or a tag-anchored patch rule (`*:21`) silently drops a required overlay.
+                admitted.push(tc_entry.identifier.clone());
+            }
 
-            visible_entries.push((visible_entries.len(), tc_entry.identifier.clone()));
+            visible_entries.push((visible_entries.len(), tc_entry.identifier.clone(), done));
         }
 
         // Step 2: parallel-load metadata for all visible entries.
         let mut tasks: JoinSet<DepLoadResult> = JoinSet::new();
-        for (idx, dep_id) in &visible_entries {
+        for (idx, dep_id, _) in &visible_entries {
             let dep_id = dep_id.clone();
             let store = store.clone();
             let root = Arc::clone(root);
@@ -273,12 +294,14 @@ async fn compose_gated(
         }
 
         // Step 3: emit in topological order using pre-loaded metadata.
-        for (meta, dep_resolved, dep_id) in loaded.into_iter().flatten() {
+        let done_by_index = visible_entries.iter().map(|(_, _, done)| *done);
+        for ((meta, dep_resolved, dep_id), done) in loaded.into_iter().flatten().zip(done_by_index) {
             // Digest lane: a dependency is not a lock entry, so no link names it.
             let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), PathLane::Digest);
             let dep_content = dep_pkg.content();
 
             if carrier_crosses_on(Binaries::IMPLICIT_VISIBILITY, false, axes)
+                && !on_axes(Binaries::IMPLICIT_VISIBILITY, done)
                 && let Some(binaries) = meta.binaries()
             {
                 admitted_binaries.extend(binaries.iter().map(|name| (dep_id.clone(), name.clone())));
@@ -310,6 +333,7 @@ async fn compose_gated(
                 &dep_content,
                 &dep_dep_contexts,
                 axes,
+                done,
                 content_state,
                 &mut entries,
             )?;
@@ -317,69 +341,74 @@ async fn compose_gated(
 
         // Roots emit after their TC, so the root's `PATH` prepends win lookup over its deps.
         let root_key = root.identifier().strip_advisory();
-        // Keyed apart from `seen`, so a root an earlier composition already emitted still grafts here.
-        if emitted_roots.insert(root_key.clone()) {
-            seen.insert(root_key);
+        let done = seen.get(&root_key).copied().unwrap_or(Visibility::SEALED);
+        // A root listed twice composes once; a graft root reached before still adds what it has not emitted.
+        if !graft && done != Visibility::SEALED {
+            continue;
+        }
+        seen.insert(root_key, done.merge(axes));
+        if done == Visibility::SEALED {
             // Tag-bearing, as for deps.
             admitted.push(root.identifier().clone());
+        }
 
-            if carrier_crosses_on(Binaries::IMPLICIT_VISIBILITY, true, axes)
-                && let Some(binaries) = root.metadata().binaries()
-            {
-                admitted_binaries.extend(binaries.iter().map(|name| (root.identifier().clone(), name.clone())));
-            }
-            if role == RootRole::Package
-                && carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes)
-                && let Some(entrypoints) = root.metadata().entrypoints()
-            {
-                admitted_entrypoints.extend(
-                    entrypoints
-                        .names()
-                        .map(|name| (root.identifier().clone(), name.clone())),
-                );
-            }
+        if crosses_anew(Binaries::IMPLICIT_VISIBILITY, axes, done)
+            && let Some(binaries) = root.metadata().binaries()
+        {
+            admitted_binaries.extend(binaries.iter().map(|name| (root.identifier().clone(), name.clone())));
+        }
+        if !graft
+            && carrier_crosses_on(Entrypoints::IMPLICIT_VISIBILITY, true, axes)
+            && let Some(entrypoints) = root.metadata().entrypoints()
+        {
+            admitted_entrypoints.extend(
+                entrypoints
+                    .names()
+                    .map(|name| (root.identifier().clone(), name.clone())),
+            );
+        }
 
-            let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths);
+        let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths);
 
-            // Following lane: an explicit root is a lock entry, so a trusted link may name it.
-            let root_pkg = paths.install_path_for(root.dir(), PathLane::Following);
-            let root_content = root_pkg.content();
+        // Following lane: an explicit root is a lock entry, so a trusted link may name it.
+        let root_pkg = paths.install_path_for(root.dir(), PathLane::Following);
+        let root_content = root_pkg.content();
 
-            if collect_integrations {
-                let resolver = metadata::template::TemplateResolver::new(&root_content, &root_dep_contexts)
-                    .usage(INTEGRATION_TOKENS);
-                admitted_integrations.extend(
-                    root.metadata()
-                        .integrations()
-                        .resolve(&resolver)?
-                        .into_iter()
-                        .map(|entry| (root.identifier().clone(), entry)),
-                );
-            }
+        // An earlier reach on the interface axis already collected these.
+        if collect_integrations && !done.has_interface() {
+            let resolver =
+                metadata::template::TemplateResolver::new(&root_content, &root_dep_contexts).usage(INTEGRATION_TOKENS);
+            admitted_integrations.extend(
+                root.metadata()
+                    .integrations()
+                    .resolve(&resolver)?
+                    .into_iter()
+                    .map(|entry| (root.identifier().clone(), entry)),
+            );
+        }
 
+        if graft {
+            log_vars_off_axes(root, axes);
+            emit_package_vars(
+                root.metadata(),
+                &root_content,
+                &root_dep_contexts,
+                |visibility| crosses_anew(visibility, axes, done),
+                content_state,
+                &mut entries,
+            )?;
+        } else {
             // First, so it resolves last (consumers prepend): `entrypoints/` > `bin/` > `shims/`.
             emit_shim_slot(root, axes, &mut entries);
-
-            match role {
-                RootRole::Package => emit_root_path_block(
-                    root.metadata(),
-                    &root_pkg,
-                    &root_content,
-                    &root_dep_contexts,
-                    axes,
-                    content_state,
-                    &mut entries,
-                )?,
-                RootRole::Graft => emit_package_vars(
-                    root.metadata(),
-                    &root_content,
-                    &root_dep_contexts,
-                    /* is_root = */ true,
-                    axes,
-                    content_state,
-                    &mut entries,
-                )?,
-            }
+            emit_root_path_block(
+                root.metadata(),
+                &root_pkg,
+                &root_content,
+                &root_dep_contexts,
+                axes,
+                content_state,
+                &mut entries,
+            )?;
         }
     }
 
@@ -483,8 +512,7 @@ fn emit_package_vars(
     metadata: &metadata::Metadata,
     content: &Path,
     dep_contexts: &HashMap<DependencyName, DependencyContext>,
-    is_root: bool,
-    axes: Visibility,
+    crosses: impl Fn(Visibility) -> bool,
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
@@ -497,7 +525,7 @@ fn emit_package_vars(
     let mut declared_before: SelfEnvScope<Entry> = SelfEnvScope::new();
 
     for var in env {
-        let crosses = carrier_crosses_on(var.visibility, is_root, axes);
+        let crosses = crosses(var.visibility);
         // A non-crossing var skips emit assertions, so a value nobody emits cannot fail the composition.
         let resolved = if crosses {
             resolver.resolve(var, &declared_before)?
@@ -518,12 +546,19 @@ fn emit_package_vars(
 
 /// Emit the dep's env vars, then its `entrypoints/` PATH entry, pushed last so it shadows `bin/`
 /// (`test_synthetic_entrypoints_path_emitted_after_declared_bin`).
+///
+/// `done` holds the axes an earlier graft already emitted this package on; vars on them are skipped.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "emit_root_path_block's inputs, plus what an earlier graft already emitted"
+)]
 fn emit_dep_path_block(
     dep_metadata: &metadata::Metadata,
     dep_pkg: &PackageDir,
     dep_content: &Path,
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
     axes: Visibility,
+    done: Visibility,
     content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
@@ -531,8 +566,7 @@ fn emit_dep_path_block(
         dep_metadata,
         dep_content,
         dep_dep_contexts,
-        /* is_root = */ false,
-        axes,
+        |visibility| carrier_crosses_on(visibility, false, axes) && !on_axes(visibility, done),
         content_state,
         entries,
     )?;
@@ -563,8 +597,7 @@ fn emit_root_path_block(
         root_metadata,
         root_content,
         root_dep_contexts,
-        /* is_root = */ true,
-        axes,
+        |visibility| carrier_crosses_on(visibility, true, axes),
         content_state,
         entries,
     )?;
@@ -587,29 +620,12 @@ fn emit_root_path_block(
 ///
 /// [`DependencyError::Conflict`] for the first conflicting repository.
 pub fn check_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) -> Result<(), DependencyError> {
-    refuse_digest_conflicts(surface_closure(roots, axes))
-}
-
-/// [`check_repo_digest_conflicts`] over an identifier set already projected onto its surface.
-///
-/// # Errors
-///
-/// [`DependencyError::Conflict`] for the first conflicting repository.
-pub(crate) fn refuse_digest_conflicts<'a>(
-    identifiers: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
-) -> Result<(), DependencyError> {
-    match digest_conflicts(identifiers).into_iter().next() {
-        Some(conflict) => Err(DependencyError::Conflict {
-            repository: conflict.repository,
-            identifiers: conflict.identifiers,
-        }),
-        None => Ok(()),
-    }
+    RepositoryDigests::default().refuse(surface_closure(roots, axes))
 }
 
 /// Warn for every conflict [`check_repo_digest_conflicts`] would refuse; `deps` uses it so the tree stays inspectable.
-pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) {
-    for conflict in collect_repo_digest_conflicts(roots, surface_axes(self_view)) {
+pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) {
+    for conflict in collect_repo_digest_conflicts(roots, axes) {
         tracing::warn!(
             "conflicting versions for {}: {}",
             conflict.repository,
@@ -632,7 +648,7 @@ pub(crate) struct DigestConflict {
 
 /// Collects version conflicts across the union closure projected onto `axes`, sorted by repository.
 pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], axes: Visibility) -> Vec<DigestConflict> {
-    digest_conflicts(surface_closure(roots, axes))
+    RepositoryDigests::default().conflicts_with(surface_closure(roots, axes))
 }
 
 /// Each root's identifier and its dependencies admitted on `axes`, from `resolved()`.
@@ -653,26 +669,67 @@ pub(crate) fn admitted_dependencies(
     root.resolved()
         .dependencies
         .iter()
-        .filter(move |dep| dep_admitted_on(dep.visibility, axes))
+        .filter(move |dep| on_axes(dep.visibility, axes))
         .map(|dep| &dep.identifier)
 }
 
-/// The repositories `identifiers` reach at two or more digests, sorted by repository.
-pub(crate) fn digest_conflicts<'a>(
-    identifiers: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
-) -> Vec<DigestConflict> {
-    let mut by_repository: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
-    for identifier in identifiers {
-        record_repo_identifier(identifier, &mut by_repository);
+/// The distinct digests each repository was reached at so far, in first-seen order.
+#[derive(Debug, Default)]
+pub(crate) struct RepositoryDigests(BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>>);
+
+impl RepositoryDigests {
+    pub(crate) fn new<'a>(identifiers: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>) -> Self {
+        let mut digests = Self::default();
+        digests.extend(identifiers);
+        digests
     }
-    by_repository
-        .into_iter()
-        .filter(|(_, identifiers)| identifiers.len() >= 2)
-        .map(|(repository, identifiers)| DigestConflict {
-            repository,
-            identifiers,
-        })
-        .collect()
+
+    pub(crate) fn extend<'a>(&mut self, identifiers: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>) {
+        for identifier in identifiers {
+            record_repo_identifier(identifier, &mut self.0);
+        }
+    }
+
+    /// The repositories `candidates` touch that would then hold two or more digests, sorted by
+    /// repository; `self` is left unchanged.
+    pub(crate) fn conflicts_with<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
+    ) -> Vec<DigestConflict> {
+        let mut touched: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
+        for candidate in candidates {
+            let repository = ocx_oci::Repository::from(&**candidate);
+            let known = self.0.get(&repository);
+            touched
+                .entry(repository)
+                .or_insert_with(|| known.cloned().unwrap_or_default());
+            record_repo_identifier(candidate, &mut touched);
+        }
+        touched
+            .into_iter()
+            .filter(|(_, identifiers)| identifiers.len() >= 2)
+            .map(|(repository, identifiers)| DigestConflict {
+                repository,
+                identifiers,
+            })
+            .collect()
+    }
+
+    /// # Errors
+    ///
+    /// [`DependencyError::Conflict`] for the first repository [`Self::conflicts_with`] reports.
+    pub(crate) fn refuse<'a>(
+        &self,
+        candidates: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
+    ) -> Result<(), DependencyError> {
+        match self.conflicts_with(candidates).into_iter().next() {
+            Some(conflict) => Err(DependencyError::Conflict {
+                repository: conflict.repository,
+                identifiers: conflict.identifiers,
+            }),
+            None => Ok(()),
+        }
+    }
 }
 
 fn record_repo_identifier(
@@ -870,6 +927,23 @@ fn synth_shim_path_for(shim: &ShimDir) -> Entry {
         value: shim.bin().to_string_lossy().into_owned(),
         kind: ModifierKind::Path,
         separator: None,
+    }
+}
+
+/// Debug-log each var a companion's visibility keeps off the surface of the targets it grafts onto.
+fn log_vars_off_axes(companion: &InstallInfo, axes: Visibility) {
+    let Some(env) = companion.metadata().env() else {
+        return;
+    };
+    for var in env {
+        if !on_axes(var.visibility, axes) {
+            log::debug!(
+                "companion '{}': var '{}' ({:?}) stays off its targets' surface ({axes:?})",
+                companion.identifier(),
+                var.key,
+                var.visibility,
+            );
+        }
     }
 }
 
@@ -1239,7 +1313,7 @@ mod tests {
     use super::{
         ContentState, DependencyError, DigestConflict, carrier_crosses, carrier_crosses_on, check_entrypoints,
         check_repo_digest_conflicts, collect_repo_digest_conflicts, compose, compose_companion, dep_admitted,
-        dep_admitted_on, emit_dep_path_block, emit_root_path_block, integrations_cross, surface_axes,
+        emit_dep_path_block, emit_root_path_block, integrations_cross, on_axes, surface_axes, target_axes,
     };
 
     const REGISTRY: &str = "example.com";
@@ -3513,6 +3587,7 @@ mod tests {
             &dep_content,
             &dep_dep_contexts,
             surface_axes(false),
+            Visibility::SEALED,
             ContentState::Materialized,
             &mut entries,
         )
@@ -3593,6 +3668,7 @@ mod tests {
             &dep_content,
             &dep_dep_contexts,
             surface_axes(false),
+            Visibility::SEALED,
             ContentState::Materialized,
             &mut entries,
         )
@@ -4259,6 +4335,7 @@ mod tests {
             content,
             &dep_contexts,
             surface_axes(self_view),
+            Visibility::SEALED,
             ContentState::Materialized,
             &mut entries,
         )?;
@@ -4692,6 +4769,7 @@ mod tests {
 
     /// The single-axis mask of a surface admits and crosses exactly what the bool surface does,
     /// over every visibility × depth × surface; the expected column is the bool rule spelled out.
+    /// A target's axes cross a root's carrier exactly as that target itself is admitted.
     #[test]
     fn surface_mask_matches_bool_surface_for_every_visibility() {
         let visibilities = [
@@ -4713,17 +4791,18 @@ mod tests {
                     on_surface,
                     "{visibility:?} {self_view}"
                 );
-                assert_eq!(
-                    dep_admitted_on(visibility, axes),
-                    on_surface,
-                    "{visibility:?} {self_view}"
-                );
+                assert_eq!(on_axes(visibility, axes), on_surface, "{visibility:?} {self_view}");
                 for is_root in [false, true] {
                     let expected = if is_root {
                         on_surface
                     } else {
                         visibility.has_interface()
                     };
+                    assert_eq!(
+                        carrier_crosses_on(visibility, true, target_axes(is_root, self_view)),
+                        expected,
+                        "{visibility:?} target root={is_root} {self_view}"
+                    );
                     assert_eq!(
                         carrier_crosses(visibility, is_root, self_view),
                         expected,
@@ -4743,13 +4822,13 @@ mod tests {
     #[test]
     fn a_public_mask_is_the_union_of_both_surfaces() {
         for visibility in [Visibility::PRIVATE, Visibility::INTERFACE, Visibility::PUBLIC] {
-            assert!(dep_admitted_on(visibility, Visibility::PUBLIC), "{visibility:?}");
+            assert!(on_axes(visibility, Visibility::PUBLIC), "{visibility:?}");
             assert!(
                 carrier_crosses_on(visibility, true, Visibility::PUBLIC),
                 "{visibility:?}"
             );
         }
-        assert!(!dep_admitted_on(Visibility::SEALED, Visibility::PUBLIC));
+        assert!(!on_axes(Visibility::SEALED, Visibility::PUBLIC));
         assert!(!carrier_crosses_on(Visibility::PRIVATE, false, Visibility::PUBLIC));
     }
 
@@ -4896,8 +4975,11 @@ mod tests {
             },
         ));
 
-        let mut emitted: std::collections::HashSet<PinnedPackageRef> =
-            base.admitted.iter().map(PinnedPackageRef::strip_advisory).collect();
+        let mut emitted: super::Emitted = base
+            .admitted
+            .iter()
+            .map(|identifier| (identifier.strip_advisory(), Visibility::INTERFACE))
+            .collect();
         let out = compose_companion(&companion, &store, Visibility::INTERFACE, true, &mut emitted)
             .await
             .unwrap();
@@ -4911,6 +4993,278 @@ mod tests {
             !out.entries.iter().any(|entry| entry.key == "SHARED_HOME"),
             "a dependency the base already emitted as a root must not be emitted again; entries: {:?}",
             out.entries
+        );
+    }
+
+    /// `identifier` named with the advisory tag `tag`, same digest.
+    fn tagged(identifier: &PinnedPackageRef, tag: &str) -> PinnedPackageRef {
+        PinnedPackageRef::try_from(
+            identifier
+                .as_identifier()
+                .clone_with_tag(tag)
+                .clone_with_digest(identifier.digest()),
+        )
+        .unwrap()
+    }
+
+    fn var_with(key: &str, visibility: Visibility) -> Var {
+        Var {
+            visibility,
+            ..marker_var(key)
+        }
+    }
+
+    /// A companion reaching `dependency` over a public edge, declaring nothing itself.
+    fn companion_reaching(dir: &std::path::Path, hex_char: char, dependency: &PinnedPackageRef) -> Arc<InstallInfo> {
+        Arc::new(install_info_with(
+            dir,
+            "companion",
+            hex_char,
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: dependency.clone(),
+                    visibility: Visibility::PUBLIC,
+                }],
+            },
+        ))
+    }
+
+    /// An already-emitted dependency is skipped by package identity: another advisory tag on its
+    /// digest is the same package, another digest of its repository is not.
+    #[tokio::test]
+    async fn a_companion_dependency_is_deduped_by_digest_not_by_repository_or_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let shared = pinned("shared", 's');
+        let other_digest = pinned("shared", 't');
+        for dependency in [&shared, &other_digest] {
+            seed_package_with_metadata(
+                &store,
+                dependency,
+                &bundle_metadata(vec![marker_var("SHARED_MARKER")], &[]),
+                &ResolvedPackage::new(),
+            );
+        }
+
+        for (dependency, expected) in [(tagged(&shared, "1"), 0), (other_digest.clone(), 1)] {
+            let mut emitted = super::Emitted::from([(tagged(&shared, "2").strip_advisory(), Visibility::INTERFACE)]);
+            let out = compose_companion(
+                &companion_reaching(dir.path(), 'c', &dependency),
+                &store,
+                Visibility::INTERFACE,
+                false,
+                &mut emitted,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                out.entries.iter().filter(|entry| entry.key == "SHARED_MARKER").count(),
+                expected,
+                "{dependency}: entries {:?}",
+                out.entries
+            );
+        }
+    }
+
+    /// A companion that fails part-way commits nothing to `emitted`, so a later companion still
+    /// emits the dependency the failed one reached first.
+    #[tokio::test]
+    async fn a_failed_companion_leaves_emitted_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let shared = pinned("shared", 's');
+        seed_package_with_metadata(
+            &store,
+            &shared,
+            &bundle_metadata(vec![marker_var("SHARED_MARKER")], &[]),
+            &ResolvedPackage::new(),
+        );
+        let failing = Arc::new(install_info_with(
+            dir.path(),
+            "failing",
+            'f',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage {
+                dependencies: [shared.clone(), pinned("absent", 'a')]
+                    .into_iter()
+                    .map(|identifier| ResolvedDependency {
+                        identifier,
+                        visibility: Visibility::PUBLIC,
+                    })
+                    .collect(),
+            },
+        ));
+
+        let mut emitted = super::Emitted::new();
+        let failed = compose_companion(&failing, &store, Visibility::INTERFACE, false, &mut emitted).await;
+        assert!(
+            failed.is_err(),
+            "premise: a dependency missing from the store fails the composition"
+        );
+        assert!(emitted.is_empty(), "a failed companion commits nothing: {emitted:?}");
+
+        let later = compose_companion(
+            &companion_reaching(dir.path(), 'c', &shared),
+            &store,
+            Visibility::INTERFACE,
+            false,
+            &mut emitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            later
+                .entries
+                .iter()
+                .filter(|entry| entry.key == "SHARED_MARKER")
+                .count(),
+            1,
+            "a later companion emits the dependency; entries: {:?}",
+            later.entries
+        );
+    }
+
+    /// A companion already emitted adds only the vars its earlier reach did not carry: a dependency
+    /// reach carried its interface side, a root reach the axes it was composed on.
+    #[tokio::test]
+    async fn a_companion_reached_before_adds_only_the_vars_not_yet_emitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let companion = Arc::new(install_info_with(
+            dir.path(),
+            "companion",
+            'c',
+            bundle_metadata(
+                vec![
+                    var_with("C_PRIVATE", Visibility::PRIVATE),
+                    var_with("C_INTERFACE", Visibility::INTERFACE),
+                    var_with("C_PUBLIC", Visibility::PUBLIC),
+                ],
+                &[],
+            ),
+            ResolvedPackage::new(),
+        ));
+        let key = companion.identifier().strip_advisory();
+
+        for (done, axes, expected) in [
+            (
+                Visibility::SEALED,
+                Visibility::PUBLIC,
+                vec!["C_PRIVATE", "C_INTERFACE", "C_PUBLIC"],
+            ),
+            (Visibility::INTERFACE, Visibility::PRIVATE, vec!["C_PRIVATE"]),
+            (Visibility::INTERFACE, Visibility::INTERFACE, vec![]),
+            (Visibility::PRIVATE, Visibility::PRIVATE, vec![]),
+            (Visibility::PRIVATE, Visibility::PUBLIC, vec!["C_INTERFACE"]),
+        ] {
+            let mut emitted = super::Emitted::new();
+            if done != Visibility::SEALED {
+                emitted.insert(key.clone(), done);
+            }
+            let out = compose_companion(&companion, &store, axes, false, &mut emitted)
+                .await
+                .unwrap();
+            let keys: Vec<&str> = out.entries.iter().map(|entry| entry.key.as_str()).collect();
+            assert_eq!(keys, expected, "emitted on {done:?}, grafted on {axes:?}");
+            assert_eq!(emitted.get(&key), Some(&done.merge(axes)), "{done:?} {axes:?}");
+        }
+    }
+
+    /// A companion grafted on the private axis and later reached as another companion's dependency
+    /// still gets its interface side: the env is the same in either order.
+    #[tokio::test]
+    async fn a_companion_reached_privately_then_as_a_dependency_emits_its_interface_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let b_metadata = bundle_metadata(
+            vec![
+                var_with("B_PRIVATE", Visibility::PRIVATE),
+                var_with("B_INTERFACE", Visibility::INTERFACE),
+                var_with("B_PUBLIC", Visibility::PUBLIC),
+            ],
+            &[],
+        );
+        let b = Arc::new(install_info_with(
+            dir.path(),
+            "b",
+            'b',
+            b_metadata.clone(),
+            ResolvedPackage::new(),
+        ));
+        seed_package_with_metadata(&store, b.identifier(), &b_metadata, &ResolvedPackage::new());
+        let a = companion_reaching(dir.path(), 'a', b.identifier());
+
+        let mut keys_by_order = Vec::new();
+        for order in [
+            [(&b, Visibility::PRIVATE), (&a, Visibility::INTERFACE)],
+            [(&a, Visibility::INTERFACE), (&b, Visibility::PRIVATE)],
+        ] {
+            let mut emitted = super::Emitted::new();
+            let mut keys = std::collections::BTreeSet::new();
+            for (companion, axes) in order {
+                let out = compose_companion(companion, &store, axes, false, &mut emitted)
+                    .await
+                    .unwrap();
+                for entry in out.entries {
+                    assert!(keys.insert(entry.key.clone()), "{} emitted twice", entry.key);
+                }
+            }
+            keys_by_order.push(keys);
+        }
+        assert_eq!(
+            keys_by_order[0],
+            ["B_INTERFACE", "B_PRIVATE", "B_PUBLIC"].map(str::to_owned).into(),
+            "b, then a"
+        );
+        assert_eq!(keys_by_order[0], keys_by_order[1], "a, then b");
+    }
+
+    /// A companion is never a package of its own on `PATH`: deferred, its shim slot stays off,
+    /// where the same root composed as a package puts it on.
+    #[tokio::test]
+    async fn a_deferred_companion_puts_no_shim_slot_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let shim = shim_dir_at(dir.path().join("shims").join("companion"));
+        let companion = Arc::new(
+            install_info_with(
+                dir.path(),
+                "companion",
+                'c',
+                bundle_metadata(vec![marker_var("COMPANION_MARKER")], &[]),
+                ResolvedPackage::new(),
+            )
+            .with_deferred(DeferredComposition::new(shim.clone(), Vec::new())),
+        );
+        let shim_bin = shim.bin().to_string_lossy().into_owned();
+
+        let as_package = compose(
+            std::slice::from_ref(&companion),
+            &store,
+            false,
+            &super::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            path_values(&as_package.entries).contains(&shim_bin),
+            "positive control: a deferred package puts its shim slot on PATH; entries: {:?}",
+            as_package.entries
+        );
+
+        let grafted = compose_companion(&companion, &store, Visibility::INTERFACE, true, &mut Default::default())
+            .await
+            .unwrap();
+        assert!(
+            grafted.entries.iter().any(|entry| entry.key == "COMPANION_MARKER"),
+            "positive control: the companion's var composes; entries: {:?}",
+            grafted.entries
+        );
+        assert!(
+            !path_values(&grafted.entries).contains(&shim_bin),
+            "a companion's shim slot stays off PATH; entries: {:?}",
+            grafted.entries
         );
     }
 

@@ -82,7 +82,7 @@ impl LauncherShim {
 
         // Consumer view, unlike `launcher exec`: this resolves a name the package publishes outward. The
         // attribution-keeping variant, since the record needs both and only this call has them.
-        let (mut entries, _, patch_companions, admitted) = manager
+        let (mut entries, _, _, admitted) = manager
             .resolve_env_with_attribution(&packages, false, EnvScope::package_tier(), &platform)
             .await?;
         // As in `ocx exec`: contributors disagreeing on a key's separator fail, not fold silently.
@@ -119,7 +119,6 @@ impl LauncherShim {
             RecordInputs {
                 packages: &packages,
                 admitted: &admitted,
-                patch_companions: &patch_companions,
                 executable: &resolved,
                 store_root: context.file_structure().packages.root(),
                 shim_root: context.file_structure().shims.root(),

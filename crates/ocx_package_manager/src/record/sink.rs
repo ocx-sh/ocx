@@ -593,7 +593,6 @@ mod tests {
             &RecordInputs {
                 packages: &packages,
                 admitted: &admitted,
-                patch_companions: &[],
                 executable: &executable,
                 store_root: &store_root,
                 shim_root: &shim_root,

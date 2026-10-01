@@ -333,8 +333,8 @@ pub use tasks::purge::{PurgeUnrooted, RootSet};
 // outside the crate.
 pub use tasks::render_toolchain::{RenderOutcome, RenderReport, RenderRequest, RenderedArtifact, RenderedItem};
 pub use tasks::resolve::{
-    AdmittedClaims, ChainBlob, ChainRole, EnvScope, NoTransport, PatchOverlay, PatchProvenance, PatchRootScope,
-    ResolvedChain, SitePatchRoots,
+    AdmittedClaims, ChainBlob, ChainRole, CompanionProjection, EnvScope, NoTransport, PatchOverlay, PatchProvenance,
+    PatchRootScope, ResolvedChain, SitePatchRoots,
 };
 pub use tasks::sbom::{SbomOptions, SbomReport};
 pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};

@@ -69,7 +69,7 @@ impl Deps {
         if self.flat {
             // Warn only, unlike `exec`/`env`'s hard error: the tree must stay inspectable to show why.
             let info_arcs: Vec<Arc<InstallInfo>> = infos.iter().cloned().map(Arc::new).collect();
-            composer::warn_repo_digest_conflicts(&info_arcs, self.self_view);
+            composer::warn_repo_digest_conflicts(&info_arcs, composer::surface_axes(self.self_view));
 
             // Tag-stripped key, not the digest alone: two repositories sharing a digest must stay apart.
             let mut seen = HashSet::new();

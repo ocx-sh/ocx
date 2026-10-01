@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use super::error::RecordsError;
 use super::purl::{has_logical_identity, package_url};
-use crate::tasks::resolve::{AdmittedClaims, PatchProvenance};
+use crate::tasks::resolve::AdmittedClaims;
 use ocx_config::env::OcxConfigView;
 use ocx_config::mirror::MirrorConfig;
 use ocx_oci::ssrf::allows_plain_http;
@@ -494,12 +494,8 @@ pub struct RecordInputs<'a> {
     /// Root packages; the transitive closure rides inside each resolved package.
     pub packages: &'a [Arc<InstallInfo>],
 
-    /// Claimed executable names per package: the binaries and entry points each put on `PATH`.
+    /// Claimed executable names per package, and the patch companions the site tier overlaid.
     pub admitted: &'a AdmittedClaims,
-
-    /// The patch companions the site tier overlaid, one entry per contributed
-    /// variable (so repeats are expected; the record dedups by content identity).
-    pub patch_companions: &'a [PatchProvenance],
 
     /// The resolved executable, as `Env::resolve_command` produced it.
     pub executable: &'a Path,
@@ -845,7 +841,7 @@ fn owning_root<'a>(inputs: &'a RecordInputs<'_>) -> Option<&'a Arc<InstallInfo>>
 }
 
 /// Project the closure: roots, then each root's dependencies in topological order,
-/// then patch companions; deduplicated by content identity, first-seen role wins.
+/// then patch companions, then theirs; deduplicated by content identity, first-seen role wins.
 fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
     let mut seen: HashSet<PinnedPackageRef> = HashSet::new();
     let mut descriptors = Vec::new();
@@ -893,13 +889,12 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
         }
     }
 
-    for provenance in inputs.patch_companions {
-        // `interface` whatever surface the companion composed on: `PatchProvenance` does not carry it.
+    for companion in &inputs.admitted.companions {
         if let Some(descriptor) = project(
-            &provenance.pinned,
+            &companion.pinned,
             Placement {
                 role: "companion",
-                visibility: Visibility::INTERFACE,
+                visibility: companion.surface,
                 platform: None,
             },
             inputs,
@@ -907,6 +902,24 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
             &mut seen,
         ) {
             descriptors.push(descriptor);
+        }
+    }
+
+    for companion in &inputs.admitted.companions {
+        for dependency in &companion.dependencies {
+            if let Some(descriptor) = project(
+                &dependency.identifier,
+                Placement {
+                    role: "dependency",
+                    visibility: dependency.visibility,
+                    platform: None,
+                },
+                inputs,
+                &admitted,
+                &mut seen,
+            ) {
+                descriptors.push(descriptor);
+            }
         }
     }
 
@@ -1052,6 +1065,8 @@ mod tests {
     use ocx_package::metadata::{BinaryName, EntrypointName, Metadata};
     use ocx_package::resolved_package::{ResolvedDependency, ResolvedPackage};
 
+    use crate::tasks::resolve::CompanionProjection;
+
     /// The platform *leaf* manifest digest — the bits that actually ran.
     const LEAF_HEX: &str = "3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0";
     /// The multi-arch image index that merely *pointed at* the leaf above.
@@ -1108,7 +1123,6 @@ mod tests {
     struct Frame {
         packages: Vec<Arc<InstallInfo>>,
         admitted: AdmittedClaims,
-        patch_companions: Vec<PatchProvenance>,
         executable: PathBuf,
         store_root: PathBuf,
         shim_root: PathBuf,
@@ -1163,9 +1177,6 @@ mod tests {
                         .collect(),
                     ..AdmittedClaims::default()
                 },
-                // The default frame composes no patch tier; the tests that assert
-                // companion projection install one explicitly.
-                patch_companions: Vec::new(),
                 executable: PathBuf::from("/home/ci/.ocx/packages/cmake/entrypoints/cmake"),
                 store_root: PathBuf::from("/home/ci/.ocx/packages"),
                 shim_root: PathBuf::from("/home/ci/.ocx/shims"),
@@ -1190,7 +1201,6 @@ mod tests {
             Self {
                 packages: vec![install(placeholder, "/home/ci/.ocx/packages/cmake", Vec::new())],
                 admitted: AdmittedClaims::default(),
-                patch_companions: Vec::new(),
                 executable: PathBuf::from("/home/ci/.ocx/packages/cmake/content/bin/cmake"),
                 store_root: PathBuf::from("/home/ci/.ocx/packages"),
                 shim_root: PathBuf::from("/home/ci/.ocx/shims"),
@@ -1209,7 +1219,6 @@ mod tests {
             RecordInputs {
                 packages: &self.packages,
                 admitted: &self.admitted,
-                patch_companions: &self.patch_companions,
                 executable: &self.executable,
                 store_root: &self.store_root,
                 shim_root: &self.shim_root,
@@ -1242,11 +1251,11 @@ mod tests {
 
     /// One companion projection, as `resolve_env_with_attribution` reports it: a
     /// descriptor rule that named a tag, and the digest that tag resolved to.
-    fn companion_provenance() -> PatchProvenance {
-        PatchProvenance {
-            rule_match: "*".to_string(),
-            companion: PackageRef::parse("internal.corp.example/corp-ca:2024").expect("identifier"),
+    fn companion_projection(surface: Visibility, dependencies: Vec<ResolvedDependency>) -> CompanionProjection {
+        CompanionProjection {
             pinned: pinned("corp-ca", "internal.corp.example", Some("2024"), COMPANION_HEX),
+            surface,
+            dependencies,
         }
     }
 
@@ -2132,7 +2141,7 @@ mod tests {
     #[test]
     fn a_patch_companion_is_recorded_after_the_roots_and_dependencies() {
         let mut frame = Frame::project();
-        frame.patch_companions = vec![companion_provenance()];
+        frame.admitted.companions = vec![companion_projection(Visibility::INTERFACE, Vec::new())];
 
         let descriptors = descriptors(&frame.inputs(project_scope()));
         let names: Vec<&str> = descriptors.iter().map(|d| d.name.as_str()).collect();
@@ -2163,26 +2172,88 @@ mod tests {
             "and the tag it was named under survives as the purl's own qualifier",
         );
         assert_eq!(companion.digest.get("sha256").map(String::as_str), Some(COMPANION_HEX),);
+    }
+
+    /// A companion's visibility is the surface it composed on, as a root's is its own.
+    #[test]
+    fn a_companion_is_recorded_with_the_surface_it_composed_on() {
+        for (surface, expected) in [
+            (Visibility::PRIVATE, "private"),
+            (Visibility::INTERFACE, "interface"),
+            (Visibility::PUBLIC, "public"),
+        ] {
+            let mut frame = Frame::project();
+            frame.admitted.companions = vec![companion_projection(surface, Vec::new())];
+
+            let descriptors = descriptors(&frame.inputs(project_scope()));
+            assert_eq!(
+                annotations_of(&descriptors, "corp-ca")
+                    .get("sh.ocx.visibility")
+                    .and_then(Value::as_str),
+                Some(expected),
+            );
+        }
+    }
+
+    /// A companion's dependencies are part of the closure: recorded after the companions, as
+    /// dependencies with their own visibility, and once when a root already reached them.
+    #[test]
+    fn a_companions_dependencies_are_recorded_after_the_companions() {
+        let mut frame = Frame::project();
+        let trust_store = pinned("corp/trust-store", "internal.corp.example", None, INDEX_HEX);
+        let runtime = pinned("ocx/libstdcxx-runtime", "index.ocx.sh", None, DEPENDENCY_HEX);
+        frame.admitted.companions = vec![companion_projection(
+            Visibility::INTERFACE,
+            vec![
+                ResolvedDependency {
+                    identifier: trust_store,
+                    visibility: Visibility::PRIVATE,
+                },
+                ResolvedDependency {
+                    identifier: runtime,
+                    visibility: Visibility::PUBLIC,
+                },
+            ],
+        )];
+
+        let descriptors = descriptors(&frame.inputs(project_scope()));
+        let names: Vec<&str> = descriptors.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
-            companion.annotations.get("sh.ocx.visibility").and_then(Value::as_str),
+            names,
+            vec!["cmake", "ninja", "libstdcxx-runtime", "corp-ca", "trust-store"],
+            "a companion's dependency follows the companions; one a root reached stays where it was",
+        );
+        let trust_store = annotations_of(&descriptors, "trust-store");
+        assert_eq!(
+            trust_store.get("sh.ocx.role").and_then(Value::as_str),
+            Some("dependency")
+        );
+        assert_eq!(
+            trust_store.get("sh.ocx.visibility").and_then(Value::as_str),
+            Some("private")
+        );
+        assert_eq!(
+            annotations_of(&descriptors, "libstdcxx-runtime")
+                .get("sh.ocx.visibility")
+                .and_then(Value::as_str),
             Some("interface"),
-            "the overlay composes a companion's interface surface and nothing else",
+            "the first-seen placement wins",
         );
     }
 
-    /// One companion contributing several environment variables arrives as
-    /// several provenance rows; the closure names it once, like every other
-    /// package reachable twice.
+    /// One companion named under two tags at one digest is one package in the closure.
     #[test]
-    fn a_companion_contributing_several_variables_is_recorded_once() {
+    fn a_companion_named_twice_at_one_digest_is_recorded_once() {
         let mut frame = Frame::project();
-        frame.patch_companions = vec![companion_provenance(), companion_provenance(), companion_provenance()];
+        let mut retagged = companion_projection(Visibility::INTERFACE, Vec::new());
+        retagged.pinned = pinned("corp-ca", "internal.corp.example", Some("latest"), COMPANION_HEX);
+        frame.admitted.companions = vec![companion_projection(Visibility::INTERFACE, Vec::new()), retagged];
 
         let descriptors = descriptors(&frame.inputs(project_scope()));
         assert_eq!(
             descriptors.iter().filter(|d| d.name == "corp-ca").count(),
             1,
-            "three contributed variables, one package",
+            "two tags, one digest, one package",
         );
     }
 
@@ -2192,11 +2263,9 @@ mod tests {
     #[test]
     fn a_companion_that_is_also_a_root_keeps_the_root_role() {
         let mut frame = Frame::project();
-        frame.patch_companions = vec![PatchProvenance {
-            rule_match: "*".to_string(),
-            companion: PackageRef::parse("index.ocx.sh/ocx/ninja").expect("identifier"),
-            pinned: pinned("ocx/ninja", "index.ocx.sh", None, NINJA_HEX),
-        }];
+        let mut ninja = companion_projection(Visibility::INTERFACE, Vec::new());
+        ninja.pinned = pinned("ocx/ninja", "index.ocx.sh", None, NINJA_HEX);
+        frame.admitted.companions = vec![ninja];
 
         let descriptors = descriptors(&frame.inputs(project_scope()));
         assert_eq!(descriptors.iter().filter(|d| d.name == "ninja").count(), 1);

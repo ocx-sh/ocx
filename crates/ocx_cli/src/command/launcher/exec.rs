@@ -16,9 +16,9 @@ use ocx_package::install_info::InstallInfo;
 use ocx_package::metadata::Metadata;
 use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, forwarded_env, reconcile_list_separators};
 use ocx_package::metadata::template::{TemplateResolver, Usage};
+use ocx_package_manager::AdmittedClaims;
 use ocx_package_manager::launch::{self, ExemptionReason, Launch};
 use ocx_package_manager::record::{RecordInputs, Scope};
-use ocx_package_manager::{AdmittedClaims, PatchProvenance};
 use ocx_store::file_structure::PackageDir;
 use ocx_util::prelude::SerdeExt;
 
@@ -72,7 +72,7 @@ impl LauncherExec {
         let packages = [std::sync::Arc::new(info)];
         // The attribution-keeping variant: the record names who claimed each `PATH` executable and every
         // patch companion, and this call is the only place either exists.
-        let (mut entries, _, patch_companions, admitted) = manager
+        let (mut entries, _, _, admitted) = manager
             .resolve_env_with_attribution(
                 &packages,
                 true,
@@ -135,7 +135,6 @@ impl LauncherExec {
             Resolved {
                 packages: &packages,
                 admitted: &admitted,
-                patch_companions: &patch_companions,
             },
             ChildEnv {
                 composed: &entries,
@@ -155,10 +154,8 @@ impl LauncherExec {
 struct Resolved<'a> {
     /// The package roots this frame composed — here, always exactly one.
     packages: &'a [std::sync::Arc<InstallInfo>],
-    /// Which package claimed each executable name on `PATH`.
+    /// Which package claimed each executable name on `PATH`, and the patch companions overlaid.
     admitted: &'a AdmittedClaims,
-    /// The patch companions the site tier overlaid onto them.
-    patch_companions: &'a [PatchProvenance],
 }
 
 /// What this launch records, decided once in [`LauncherExec::execute`].
@@ -186,11 +183,7 @@ async fn run_with_env(
     argv: &[String],
     recording: Recording,
 ) -> anyhow::Result<ExitCode> {
-    let Resolved {
-        packages,
-        admitted,
-        patch_companions,
-    } = resolved;
+    let Resolved { packages, admitted } = resolved;
     let mut process_env = env::Env::new();
     // Re-emits `OCX_ENV` after the package entries, or a nested launcher's package value beats the
     // project override at the second hop. No separator reconcile: the `OCX_ENV` decode gate refuses one.
@@ -216,7 +209,6 @@ async fn run_with_env(
         RecordInputs {
             packages,
             admitted,
-            patch_companions,
             executable: &executable,
             store_root: context.file_structure().packages.root(),
             shim_root: context.file_structure().shims.root(),

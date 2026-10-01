@@ -335,7 +335,6 @@ mod tests {
             RecordInputs {
                 packages: &self.packages,
                 admitted: &self.admitted,
-                patch_companions: &[],
                 executable: &self.executable,
                 store_root: &self.store_root,
                 shim_root: &self.shim_root,
