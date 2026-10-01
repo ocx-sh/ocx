@@ -232,6 +232,8 @@ at a call site — go through `EnvOverride::entries(cwd)`.
   `apply_ocx_config` (which strips a stale `OCX_ENV` first — the order is load-bearing). Without it
   a generated entrypoint launcher re-enters `ocx launcher exec`, re-applies the package's own
   entries, and silently reverts the override. `ocx exec` and `ocx package exec` both do this.
+  The same `ChildEnv` carries `identities: Some(&LaunchIdentities::from_infos(..))` for the composed
+  roots; with `None` a launcher matches patch rules only by `*`, since its package dir has no name.
 
 ## Cross-Cutting: CI Env Export (`--ci`)
 

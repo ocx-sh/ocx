@@ -73,15 +73,15 @@ the project file is directly read, and nowhere else.
 
 Without an explicit forwarding step, a launcher re-entry would silently break that promise. A
 package's generated entrypoint re-enters ocx through the hidden `ocx launcher exec`
-subcommand, resolving its own base from a synthetic content-addressed identifier rather than
-`ocx.toml` — so on its own it has no way to know the parent project opted this base out, and
-would re-apply the companion the parent just suppressed.
+subcommand, resolving its own base from its package directory rather than `ocx.toml` — so on
+its own it has no way to know the parent project opted this base out, and would re-apply the
+companion the parent just suppressed.
 
 [`ocx exec`][cmd-run] closes that gap by forwarding the opt-out to the child process over
 [`OCX_PATCHES`][env-ocx-patches]: alongside the resolved `[patches]` tier, it includes the
-opted-out bases' canonical `registry/repository` keys **and** the content digest of each one
-actually resolved that run. The digest leg is what a launcher's re-entry matches against,
-since it has no repository path to compare. [`ocx env`][cmd-env-root] and
+opted-out bases' canonical `registry/repository` keys. It also forwards the names it resolved
+each package under in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], and the launcher
+matches the opt-out against those names. [`ocx env`][cmd-env-root] and
 [`ocx direnv export`][cmd-direnv-export] read the same project config and honor the opt-out
 directly in the environment they compose — they have no child launcher to forward it to.
 
@@ -427,6 +427,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [env-ocx-global]: ./environment.md#ocx-global
 [env-ocx-project]: ./environment.md#ocx-project
 [env-ocx-patches]: ./environment.md#ocx-patches
+[env-ocx-launch-identities]: ./environment.md#ocx-launch-identities
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
 [env-ocx-toolchain-pinned]: ./environment.md#ocx-toolchain-pinned
 

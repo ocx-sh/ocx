@@ -16,6 +16,7 @@ use ocx_config::managed_config::ManagedConfigUpdateError;
 use ocx_config::mirror::MirrorConfigError;
 use ocx_config::patch::PatchConfigError;
 use ocx_config::tls::TlsError;
+use ocx_package::launch::LaunchIdentityError;
 use ocx_package::metadata::env::apply::ForwardedEnvError;
 use ocx_package::metadata::env::apply::ListSeparatorError;
 use ocx_package_manager::managed_config::ManagedConfigPublishError;
@@ -179,6 +180,13 @@ impl ClassifyExitCode for PatchConfigError {
     }
 }
 
+/// 78, the same as a malformed `OCX_PATCHES`: both are the patch tier a parent ocx handed down.
+impl ClassifyExitCode for LaunchIdentityError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(ExitCode::ConfigError)
+    }
+}
+
 impl ClassifyExitCode for TlsError {
     fn classify(&self) -> Option<ExitCode> {
         let code = match self {
@@ -209,6 +217,7 @@ pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<
     downcast_arm!(cause, ManagedConfigError);
     downcast_arm!(cause, MirrorConfigError);
     downcast_arm!(cause, PatchConfigError);
+    downcast_arm!(cause, LaunchIdentityError);
     downcast_arm!(cause, ManagedConfigFetchError);
     downcast_arm!(cause, ManagedConfigPersistError);
     downcast_arm!(cause, ManagedConfigUpdateError);
@@ -470,6 +479,21 @@ mod tests {
                 "every OCX_ENV decode failure is 65; {error} was not"
             );
         }
+    }
+
+    /// A malformed `OCX_LAUNCH_IDENTITIES` exits as a malformed `OCX_PATCHES` does.
+    #[test]
+    fn launch_identity_error_classifies_as_a_malformed_patch_tier() {
+        let guard = ocx_util::env::overrides::lock();
+        guard.set(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES, "not json {{{");
+        let identity_error = ocx_package::launch::LaunchIdentities::from_env().expect_err("malformed");
+        guard.set(ocx_config::env::keys::OCX_PATCHES, "not json {{{");
+        let patches_error = ocx_config::patch::patches_from_env().expect_err("malformed");
+
+        let identity_code = crate::exit::classify_error(&identity_error);
+        let patches_code = crate::exit::classify_error(&patches_error);
+        assert_eq!(identity_code, ExitCode::ConfigError);
+        assert_eq!(identity_code, patches_code);
     }
 
     /// A separator disagreement between two contributors to one key is exit

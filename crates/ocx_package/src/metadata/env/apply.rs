@@ -11,6 +11,7 @@ use std::ffi::OsStr;
 use super::entry::Entry;
 use super::list;
 use super::modifier::ModifierKind;
+use crate::launch::LaunchIdentities;
 use ocx_config::env::{Env, EnvKey, OcxConfigView, keys};
 use ocx_util::env::{is_reserved_ocx_key, is_valid_env_key, var};
 
@@ -21,6 +22,9 @@ pub struct ChildEnv<'a> {
     /// Only the caller-contributed tail (project/group `[env]`, `--env`); a
     /// launcher re-entry re-derives the package part, so forwarding it would apply it twice.
     pub forwarded: &'a [Entry],
+    /// The names this composition resolved each package under, for a launcher's patch
+    /// matching; `None` keeps whatever the process inherited.
+    pub identities: Option<&'a LaunchIdentities>,
 }
 
 /// Folding resolved [`Entry`] vectors onto an [`Env`].
@@ -70,6 +74,15 @@ impl EnvEntriesExt for Env {
         self.apply_ocx_config(config);
         // After `apply_ocx_config`, which strips `OCX_ENV`, or the payload is deleted.
         set_forwarded_env(self, env.forwarded);
+        // Only under a `[patches]` tier, so a host without one sees no new variable.
+        if config.patches.is_some()
+            && let Some(identities) = env.identities
+        {
+            match identities.encode() {
+                Some(json) => self.set(keys::OCX_LAUNCH_IDENTITIES, json),
+                None => self.remove(keys::OCX_LAUNCH_IDENTITIES),
+            }
+        }
     }
 }
 
@@ -728,6 +741,74 @@ mod tests {
             r#"{"entries":[{"key":"A\nB","value":"1","type":"constant"}]}"#,
         );
         assert!(matches!(forwarded_env(), Err(ForwardedEnvError::InvalidKey { .. })));
+    }
+
+    fn patched_view() -> OcxConfigView {
+        let mut view = OcxConfigView::new("/abs/ocx");
+        view.patches = Some(ocx_config::patch::ResolvedPatchConfig {
+            system_required: false,
+            no_patches: std::collections::BTreeSet::new(),
+            registry: "corp.example.com/patches".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: true,
+        });
+        view
+    }
+
+    const IDENTITIES: &str =
+        r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":["ocx.sh/plantuml:1"]}"#;
+
+    fn identities() -> crate::launch::LaunchIdentities {
+        let guard = ocx_util::env::overrides::lock();
+        guard.set(keys::OCX_LAUNCH_IDENTITIES, IDENTITIES);
+        crate::launch::LaunchIdentities::from_env().unwrap().unwrap()
+    }
+
+    fn child_env_with(identities: Option<&crate::launch::LaunchIdentities>, view: &OcxConfigView) -> Env {
+        let mut child = Env::clean();
+        child.set(keys::OCX_LAUNCH_IDENTITIES, "inherited");
+        child.apply_child_env(
+            ChildEnv {
+                composed: &[],
+                forwarded: &[],
+                identities,
+            },
+            view,
+        );
+        child
+    }
+
+    /// Under a `[patches]` tier the composing parent's map replaces an inherited one.
+    #[test]
+    fn apply_child_env_writes_launch_identities_under_a_patch_tier() {
+        let identities = identities();
+        let child = child_env_with(Some(&identities), &patched_view());
+        assert_eq!(
+            child.get(keys::OCX_LAUNCH_IDENTITIES).and_then(|value| value.to_str()),
+            Some(IDENTITIES)
+        );
+    }
+
+    /// An empty map clears the inherited one: the parent is authoritative for its child tree.
+    #[test]
+    fn apply_child_env_clears_inherited_identities_for_an_empty_map() {
+        let child = child_env_with(Some(&crate::launch::LaunchIdentities::default()), &patched_view());
+        assert!(child.get(keys::OCX_LAUNCH_IDENTITIES).is_none());
+    }
+
+    /// No `[patches]` tier means no change, and `None` keeps a nested launch's inherited map.
+    #[test]
+    fn apply_child_env_leaves_launch_identities_alone_without_a_tier_or_a_map() {
+        let identities = identities();
+        for child in [
+            child_env_with(Some(&identities), &OcxConfigView::new("/abs/ocx")),
+            child_env_with(None, &patched_view()),
+        ] {
+            assert_eq!(
+                child.get(keys::OCX_LAUNCH_IDENTITIES).and_then(|value| value.to_str()),
+                Some("inherited")
+            );
+        }
     }
 
     #[test]

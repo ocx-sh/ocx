@@ -14,6 +14,7 @@ use std::sync::Arc;
 use clap::Parser;
 use ocx_config::env;
 use ocx_oci::{PackageRef, PinnedPackageRef};
+use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::BinaryName;
 use ocx_package_manager::Arrival;
 use ocx_package_manager::EnvScope;
@@ -94,6 +95,7 @@ impl LauncherShim {
             ChildEnv {
                 composed: &entries,
                 forwarded: &[],
+                identities: Some(&LaunchIdentities::from_infos(&packages)),
             },
             context.config_view(),
         );

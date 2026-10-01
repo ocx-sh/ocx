@@ -67,6 +67,13 @@ pub mod keys {
     /// Decode fails closed on the whole envelope (reserved key, unknown `kind`): a forged entry
     /// can set a value, so [`OCX_PATCHES`]'s leniency must not be copied.
     pub const OCX_ENV: &str = "OCX_ENV";
+    /// JSON map from a content digest to the `registry/repository[:tag]` names one composition
+    /// resolved it under; read by `ocx launcher exec` to match targeted patch rules.
+    ///
+    /// Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
+    /// `--env` cannot set it. [`crate::env::Env::apply_ocx_config`] leaves it alone, or a launcher nested
+    /// under another launcher loses the outer composition's names.
+    pub const OCX_LAUNCH_IDENTITIES: &str = "OCX_LAUNCH_IDENTITIES";
     /// Boolean — `ocx self setup` modifies no shell profile. Mirrors `--no-modify-path`.
     pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
     /// OCI reference overriding `[managed].source` for this invocation only; empty is unset,
@@ -953,6 +960,7 @@ mod tests {
         assert!(is_reserved_ocx_key("OCX_OFFLINE"));
         assert!(is_reserved_ocx_key("OCX_DEFAULT_REGISTRY"));
         assert!(is_reserved_ocx_key("__OCX_TESTING_INSTALL_BINARY"));
+        assert!(is_reserved_ocx_key(keys::OCX_LAUNCH_IDENTITIES));
         // Windows env names are case-insensitive, so a lowercase spelling
         // lands in the same slot and must be caught by the same gate.
         assert!(is_reserved_ocx_key("ocx_offline"));

@@ -186,6 +186,14 @@ A companion's own entrypoint launchers are never put on `PATH`, since they run t
 environment rather than its target's. Its own `binaries` claim is admitted, and so are the
 claims and launchers of its dependencies, as for any dependency.
 
+A generated launcher finds its package by directory, and one directory serves every name that
+resolves to its digest. The command that composed the environment passes the names it used in
+[`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], and the launcher matches rules against
+each of them. So `ocx.sh/java:*` reaches the JDK's launchers when the JDK runs through
+`ocx exec`, `ocx package exec` or a lazy tool's shim. A launcher run by its absolute path has no
+such parent and matches only `*` rules. A digest-only composition passes a name without a tag,
+which tag-anchored rules skip as they do everywhere else.
+
 ### Execution time only {#patches-how-execution-time}
 
 Patches are composed when OCX builds an environment to run something: `ocx exec`,
@@ -719,6 +727,7 @@ For the full field reference, see the [`[patches]` configuration section][config
 
 <!-- environment -->
 [env-ocx-patches]: ../reference/environment.md#ocx-patches
+[env-ocx-launch-identities]: ../reference/environment.md#ocx-launch-identities
 [env-ocx-patch-snapshot]: ../reference/environment.md#ocx-patch-snapshot
 
 <!-- env composition -->
