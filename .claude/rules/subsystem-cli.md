@@ -85,7 +85,10 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `command.rs` | `Command` enum dispatching to subcommands; `External(Vec<OsString>)` variant routes unknown names to plugin dispatch |
 | `app/context.rs` | `Context`: per-invocation state (FileStructure, Index, PackageManager, Api) |
 | `app/context_options.rs` | `ContextOptions`: global flags (offline, remote, format, color, log-level) |
-| `app/update_check.rs` | GitHub release update notification |
+| `app/update_check.rs` | Self update check: notice, and the `apply` hook that installs after the command |
+| `app/background_check.rs` | The one gate in front of every background check that reaches the network |
+| `app/managed_config_check.rs` | `[managed]` refresh tick, behind the shared gate |
+| `app/toolchain_drift_check.rs` | Toolchain drift notice, behind the shared gate |
 | `app/version.rs` | Version string accessor |
 | `app/plugin_dispatch.rs` | Git/cargo-style external subcommand dispatch; see "Cross-Cutting: Plugin Dispatch" below |
 | `command/*.rs` | One file per subcommand |
@@ -370,6 +373,29 @@ beats config" reflex — do not write a rule, help text or doc that inverts it.
   is `ToolchainRoot::resolve` at the `config.toml` seam — a relative root, a path that exists and is
   not a directory, and an insufficiently contained one are all refused there — and `ToolchainRoot`
   is constructible only by that call, so an unvalidated path cannot reach the resolver.
+
+## Cross-Cutting: Background Checks
+
+Three checks ride along with a command: the self update check, the `[managed]` refresh tick and the toolchain drift notice. All are best-effort. None may fail a command or write to stdout.
+
+**One gate.** `background_check::skip_reason(kill_switch, offline)` returns the first reason a check must not run, or `None`. Order: kill switch, `is_ci()`, offline, stderr not a terminal. A caller logs the reason at debug level. A new check calls this helper and never re-implements the gate. The kill switch is the only per-check input: `OCX_NO_UPDATE_CHECK` for the self check and the drift notice, `OCX_NO_CONFIG_REFRESH` for the managed tick.
+
+**One policy.** `ctx.update_policy()` yields a `ResolvedUpdatePolicy` (`self_policy`, `toolchain`, `interval`), resolved once per invocation by `ocx_config::update`. Precedence per key is env, then the `[update]` section, then the default. The resolver has no error path: an invalid value falls through to the next source, a file value with one warning and an env value at debug level. `toolchain` is never `Apply`. A check reads the policy only after the gate passed, so `ocx config` and `ocx version` print no `[update]` warning. `self_policy == Manual` returns before the probe so the throttle state file is not touched. Never add an `update` field to `ProjectConfig`: `[update]` is a personal `config.toml` setting, and the managed tier and `ocx.toml` must not carry it.
+
+**Hook sites in `App::run`**, after `Context::try_init` and under `!in_seam()`:
+
+| Site | Gate | Runs |
+|------|------|------|
+| `update_check::check_for_update(&ctx)` | `should_check_for_update` | Before the command; returns `Some(identifier)` only for `self = "apply"` with an update available |
+| `managed_config_check::check_for_managed_config_refresh(&ctx)` | `should_check_managed_config_refresh` | Before the command |
+| `toolchain_drift_check::check_for_toolchain_drift(&ctx)` | `should_check_toolchain_drift` | Before the command |
+| `update_check::apply_pending(&manager, &identifier)` | `Some` from the first row | After `command.execute`, on `Ok` and on `Err` |
+
+`should_check_toolchain_drift` is an exhaustive match: the `should_check_for_update` skip set plus `Update`, `Lock`, `Add`, `Remove` and `Init`. `apply_pending` takes the `Context` manager clone captured before `execute` consumes the context, because that manager carries `with_auto_verify`. It never changes the command's result. The throttle is touched before the outcome, so a failed apply is not retried within the interval.
+
+The drift probe reads leaf digests through `index().remote_view()` and never runs `resolve_lock`. A project toolchain is probed only when `ocx_project::consent::evaluate` reports it consented, so a freshly cloned `ocx.lock` cannot make every command contact its registries. The per-prompt hook never runs any of these checks.
+
+User-facing surface: `website/src/docs/reference/configuration.md` `[update]`, and `reference/environment.md` `OCX_SELF_UPDATE`, `OCX_TOOLCHAIN_UPDATE`, `OCX_UPDATE_CHECK_INTERVAL`, `OCX_NO_UPDATE_CHECK`.
 
 ## Cross-Cutting: Plugin Dispatch
 

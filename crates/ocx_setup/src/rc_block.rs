@@ -825,7 +825,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         let managed = ManagedConfig {
             source: Some(hostile.to_string()),
             required: Some(true),
-            refresh: Some(ocx_config::managed::RefreshPolicy::Notify),
+            refresh: Some(ocx_config::refresh::RefreshPolicy::Notify),
             interval: Some("1d".to_string()),
             system_locked: false,
         };
@@ -868,7 +868,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         let managed = ManagedConfig {
             source: Some("corp.example.com/ocx-config:user".to_string()),
             required: Some(true),
-            refresh: Some(ocx_config::managed::RefreshPolicy::Notify),
+            refresh: Some(ocx_config::refresh::RefreshPolicy::Notify),
             interval: Some("1d".to_string()),
             system_locked: false,
         };
@@ -896,14 +896,14 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
         let old = ManagedConfig {
             source: Some("old.example.com/ocx-config:user".to_string()),
             required: Some(true),
-            refresh: Some(ocx_config::managed::RefreshPolicy::Notify),
+            refresh: Some(ocx_config::refresh::RefreshPolicy::Notify),
             interval: Some("1d".to_string()),
             system_locked: false,
         };
         let new = ManagedConfig {
             source: Some("new.example.com/ocx-config:user".to_string()),
             required: Some(true),
-            refresh: Some(ocx_config::managed::RefreshPolicy::Notify),
+            refresh: Some(ocx_config::refresh::RefreshPolicy::Notify),
             interval: Some("1d".to_string()),
             system_locked: false,
         };

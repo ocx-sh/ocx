@@ -15,6 +15,7 @@ use ocx_config::managed_config::ManagedConfigPersistError;
 use ocx_config::managed_config::ManagedConfigUpdateError;
 use ocx_config::mirror::MirrorConfigError;
 use ocx_config::patch::PatchConfigError;
+use ocx_config::refresh::IntervalError;
 use ocx_config::tls::TlsError;
 use ocx_package::launch::LaunchIdentityError;
 use ocx_package::metadata::env::apply::ForwardedEnvError;
@@ -168,6 +169,12 @@ impl ClassifyExitCode for ManagedConfigError {
     }
 }
 
+impl ClassifyExitCode for IntervalError {
+    fn classify(&self) -> Option<ExitCode> {
+        Some(ExitCode::ConfigError)
+    }
+}
+
 impl ClassifyExitCode for MirrorConfigError {
     fn classify(&self) -> Option<ExitCode> {
         Some(ExitCode::ConfigError)
@@ -215,6 +222,7 @@ pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<
     downcast_arm!(cause, ListSeparatorError);
     downcast_arm!(cause, CommandResolutionError);
     downcast_arm!(cause, ManagedConfigError);
+    downcast_arm!(cause, IntervalError);
     downcast_arm!(cause, MirrorConfigError);
     downcast_arm!(cause, PatchConfigError);
     downcast_arm!(cause, LaunchIdentityError);

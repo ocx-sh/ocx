@@ -325,8 +325,9 @@ pub async fn probe_managed_config_digest(
 
 // ── Pure persistence primitive ────────────────────────────────────────────────
 
-/// Parses the payload, proves its `extra_ca_certs_pem` loads on this host, strips any `[managed]`
-/// section (a payload never redirects the tier that fetched it), and writes the snapshot.
+/// Parses the payload, strips any `[update]` and `[managed]` section (a payload never redirects
+/// the tier that fetched it), proves its `extra_ca_certs_pem` loads on this host, and writes the
+/// snapshot.
 ///
 /// # Errors
 ///
@@ -338,8 +339,33 @@ pub async fn persist_managed_config(
 ) -> Result<ManagedConfigSnapshot, ManagedConfigPersistError> {
     let text = fetched.config_text;
 
-    let parsed: crate::Config =
+    let mut table: toml::Table =
         toml::from_str(&text).map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
+    // Before the typed parse: `[update]` is personal, and a shape this ocx cannot read must not
+    // refuse the rest of a payload written for a newer one.
+    let stripped_update = table.remove("update").is_some();
+    if stripped_update {
+        log::debug!(
+            "managed-config payload for '{source}' contained an [update] section; dropped before persisting \
+             ([update] is read from local config.toml only)"
+        );
+    }
+    let stripped_managed = table.remove("managed").is_some();
+    if stripped_managed {
+        log::warn!(
+            "managed-config payload for '{source}' contained a [managed] section; stripped before persisting \
+             (a remote payload can never redirect the tier that fetched it)"
+        );
+    }
+
+    let stripped = stripped_update || stripped_managed;
+    // The text parse when nothing was stripped, so its error keeps the line and column.
+    let parsed: crate::Config = if stripped {
+        toml::Value::Table(table.clone()).try_into()
+    } else {
+        toml::from_str(&text)
+    }
+    .map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
 
     // Before the write, or every later `try_init` fails closed on this snapshot.
     if let Some(pem) = parsed.extra_ca_certs_pem.clone() {
@@ -356,17 +382,10 @@ pub async fn persist_managed_config(
         .map_err(|source| ManagedConfigPersistError::ExtraCaCertsInvalid { source })?;
     }
 
-    let config = if parsed.managed.is_some() {
-        log::warn!(
-            "managed-config payload for '{source}' contained a [managed] section; stripped before persisting \
-             (a remote payload can never redirect the tier that fetched it)"
-        );
-        let mut value: toml::Value =
-            toml::from_str(&text).map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
-        if let Some(table) = value.as_table_mut() {
-            table.remove("managed");
-        }
-        toml::to_string(&value).expect("re-serializing a toml::Value with one key removed cannot fail")
+    let config = if stripped {
+        toml::to_string(&table).map_err(|error| ManagedConfigPersistError::SnapshotWriteFailed {
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })?
     } else {
         text
     };
@@ -991,6 +1010,26 @@ mod tests {
             snapshot.config.contains("corp.example.com"),
             "other sections survive the strip"
         );
+    }
+
+    /// A payload's `[update]` is dropped before the typed parse, whatever its shape, so a payload
+    /// written for a newer ocx still persists on an older host.
+    #[tokio::test]
+    async fn persist_managed_config_drops_a_malformed_update_section() {
+        // A bare key must precede the first table header, or TOML files it under that table.
+        for toml in [
+            "update = 1\n[registry]\ndefault = \"corp.example.com\"\n",
+            "[registry]\ndefault = \"corp.example.com\"\n[update]\ninterval = []\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = ManagedConfigPaths::new(dir.path());
+
+            let snapshot = persist_managed_config(&paths, &identifier(), fetched(toml))
+                .await
+                .unwrap_or_else(|error| panic!("{toml:?}: {error}"));
+            assert!(!snapshot.config.contains("update"), "{}", snapshot.config);
+            assert!(snapshot.config.contains("corp.example.com"), "{}", snapshot.config);
+        }
     }
 
     /// An invalid-TOML payload fails persist and leaves the existing snapshot

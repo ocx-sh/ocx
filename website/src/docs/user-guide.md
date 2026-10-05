@@ -1144,13 +1144,23 @@ If the hand-off cannot finish — most commonly a shell profile carrying edits i
 
 When `ocx self update` runs, OCX queries for the latest `major.minor.patch` release tag. Rolling tags (`1`, `1.2`), pre-releases (`1.2.3-rc1`), and build-tagged versions (`1.2.3+build`) are filtered out — the command recommends only stable releases.
 
-The background update-check runs automatically at most once per day (configurable via [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval]). When a newer version is detected, a notice is printed to stderr at the end of the current command:
+Two background checks run on an interactive terminal, outside CI, and online. One asks whether a newer ocx exists. The other asks whether a tag pinned in a project's `ocx.lock` has moved. Each runs at most once per interval, one day by default ([`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval], or `interval` under [`[update]`][config-update]). The check runs before your command and waits for one registry round trip. A failed check is never a command failure.
+
+When a newer version is detected, a notice is printed to stderr:
 
 ```
 A new OCX version is available: ocx.sh/ocx/cli:1.1.0. Consider updating by running `ocx self update`.
 ```
 
-Set [`OCX_NO_UPDATE_CHECK=1`][env-ocx-no-update-check] to disable the background check entirely. The check is also suppressed in CI environments and non-TTY stderr.
+The `[update]` section of `config.toml` chooses what each check does. `self = "apply"` installs the newer ocx after your command finishes, whether it succeeded or failed, and the exit code is unchanged. The new binary takes effect on the next run. `self = "manual"` stops the check. `toolchain` takes `notify` or `manual`; the drift notice names [`ocx update`][cmd-update], because only that command moves a pin. See the [`[update]` reference][config-update] for the keys, and note that the managed tier and `ocx.toml` cannot set them.
+
+```toml
+[update]
+self = "apply"
+interval = "1d"
+```
+
+[`OCX_SELF_UPDATE`][env-ocx-self-update] and [`OCX_TOOLCHAIN_UPDATE`][env-ocx-toolchain-update] set the same postures from the environment, and they beat the config file. Set [`OCX_NO_UPDATE_CHECK=1`][env-ocx-no-update-check] to disable both checks entirely. The checks are also suppressed in CI environments and non-TTY stderr.
 
 When reporting a bug, run [`ocx version --verbose`][cmd-version] to capture commit, build timestamp, target, and CI run URL. For dev-channel builds the output also shows `channel: dev`.
 
@@ -1158,6 +1168,7 @@ When reporting a bug, run [`ocx version --verbose`][cmd-version] to capture comm
 [Command-line reference → `ocx self update`][cmd-self-update] — exit codes, install path, throttle bypass.
 [Command-line reference → `ocx version`][cmd-version] — verbose build provenance, JSON schema.
 [Environment reference → `OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] — adjust the background check frequency.
+[Configuration reference → `[update]`][config-update] — `self`, `toolchain` and `interval`, and which tiers may set them.
 :::
 
 ## Supply-Chain Integrity {#supply-chain}
@@ -1539,6 +1550,9 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [env-docker-config]: ./reference/environment.md#external-docker-config
 [env-ocx-no-update-check]: ./reference/environment.md#ocx-no-update-check
 [env-ocx-update-check-interval]: ./reference/environment.md#ocx-update-check-interval
+[env-ocx-self-update]: ./reference/environment.md#ocx-self-update
+[env-ocx-toolchain-update]: ./reference/environment.md#ocx-toolchain-update
+[config-update]: ./reference/configuration.md#keys-update
 [env-no-verify]: ./reference/environment.md#ocx-no-verify
 [env-shell-activation-files]: ./reference/environment.md#shell-activation-files
 [xdg-basedir]: ./reference/environment.md#external-xdg-config-home

@@ -4,9 +4,10 @@
 //! Managed-config update and throttled background-refresh task methods for [`PackageManager`].
 
 use super::super::PackageManager;
-use ocx_config::managed::{RefreshPolicy, ResolvedManagedConfig};
+use ocx_config::managed::ResolvedManagedConfig;
 use ocx_config::managed_config::ManagedConfigUpdateError;
 use ocx_config::patch::ResolvedPatchConfig;
+use ocx_config::refresh::RefreshPolicy;
 use ocx_oci::Digest;
 
 /// Outcome of a full managed-config update cycle.

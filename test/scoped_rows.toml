@@ -56,8 +56,13 @@ ocx_sign = [
     "tests/test_sigstore_stack_smoke.py",
     "tests/test_golden_fixtures.py",
 ]
-# `config`, managed tier, `--frozen`
-ocx_config = ["tests/test_config*.py", "tests/test_managed_config.py", "tests/test_frozen.py"]
+# `config`, managed tier, `[update]`, `--frozen`
+ocx_config = [
+    "tests/test_config*.py",
+    "tests/test_managed_config.py",
+    "tests/test_frozen.py",
+    "tests/test_update_config.py",
+]
 # CAS + symlink namespace (`install`, `uninstall`, `purge`, `clean`, `which`), shim blob
 ocx_store = [
     "tests/test_install.py",

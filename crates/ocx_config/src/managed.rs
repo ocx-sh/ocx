@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::refresh::{IntervalError, RefreshPolicy, parse_interval};
+
 // No `deny_unknown_fields`, for the fleet forward-compat reason stated on `crate::Config`.
 /// Configuration for the `[managed]` tier.
 ///
@@ -29,6 +31,11 @@ pub struct ManagedConfig {
     pub required: Option<bool>,
 
     /// Background refresh posture. Defaults to `notify`.
+    ///
+    /// `apply` swaps in a drifted snapshot, `notify` advises `ocx config update`, `manual`
+    /// refreshes only on `ocx config update`. CI never runs the background check. An unknown
+    /// value is ignored with a warning, so the default applies.
+    #[serde(default, deserialize_with = "deserialize_refresh")]
     pub refresh: Option<RefreshPolicy>,
 
     /// Background refresh throttle interval, `\d+[smhd]?` (bare = seconds).
@@ -43,32 +50,8 @@ pub struct ManagedConfig {
     pub system_locked: bool,
 }
 
-/// Background refresh posture for the `[managed]` tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RefreshPolicy {
-    /// Drift silently triggers a full fetch + persist + swap — but only via the
-    /// background tick, whose activation gate is narrow: it fires only on an
-    /// interactive terminal (stderr is a TTY), outside CI, and online. CI and
-    /// other automation hosts never see the tick run; they must refresh the
-    /// snapshot with an explicit `ocx config update`.
-    Apply,
-    /// Drift prints a stderr advisory ("run `ocx config update`"); content is
-    /// never fetched by the background tick.
-    Notify,
-    /// The background tick is skipped entirely; only `ocx config update`
-    /// refreshes the snapshot.
-    Manual,
-}
-
-impl std::fmt::Display for RefreshPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Apply => "apply",
-            Self::Notify => "notify",
-            Self::Manual => "manual",
-        })
-    }
+fn deserialize_refresh<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<RefreshPolicy>, D::Error> {
+    crate::refresh::deserialize_lenient(deserializer, "[managed] refresh")
 }
 
 /// Fully resolved [`ManagedConfig`], with defaults applied and the source parsed.
@@ -152,11 +135,10 @@ pub enum ManagedConfigError {
     },
 
     /// The `interval` field is not a valid `\d+[smhd]?` duration.
-    #[error("managed config interval '{value}' is not a valid duration")]
-    InvalidInterval {
-        /// The offending interval string.
-        value: String,
-    },
+    // Interpolated, not `#[source]`: the classifier answers at this variant, and a source would
+    // print the interval twice in the `{:#}` chain.
+    #[error("managed config {0}")]
+    InvalidInterval(IntervalError),
 
     /// `required = true` (the default) and no snapshot exists whose provenance
     /// matches the effective `source` — identical online and offline.
@@ -193,7 +175,7 @@ impl ManagedConfig {
     pub const DEFAULT_REFRESH: RefreshPolicy = RefreshPolicy::Notify;
 
     /// Default `interval` value.
-    pub const DEFAULT_INTERVAL: &'static str = "1d";
+    pub const DEFAULT_INTERVAL: &'static str = crate::refresh::DEFAULT_INTERVAL;
 
     /// Mark this tier as system-locked when its effective `required` is true, for the reason on
     /// [`PatchConfig::lock_as_system`](crate::patch::PatchConfig::lock_as_system).
@@ -384,7 +366,8 @@ fn resolve_target(
 
     let required = managed.required.unwrap_or(ManagedConfig::DEFAULT_REQUIRED);
     let refresh = managed.refresh.unwrap_or(ManagedConfig::DEFAULT_REFRESH);
-    let interval = parse_interval(managed.interval.as_deref().unwrap_or(ManagedConfig::DEFAULT_INTERVAL))?;
+    let interval = parse_interval(managed.interval.as_deref().unwrap_or(ManagedConfig::DEFAULT_INTERVAL))
+        .map_err(ManagedConfigError::InvalidInterval)?;
 
     Ok(Some(ResolvedManagedConfig {
         source: identifier,
@@ -393,39 +376,6 @@ fn resolve_target(
         interval,
         system_required: managed.system_locked,
     }))
-}
-
-/// Parses `\d+[smhd]?` (bare digits = seconds) into a [`Duration`](std::time::Duration).
-///
-/// # Errors
-///
-/// Returns [`ManagedConfigError::InvalidInterval`] when `value` does not match
-/// the grammar.
-pub fn parse_interval(value: &str) -> Result<std::time::Duration, ManagedConfigError> {
-    let invalid = || ManagedConfigError::InvalidInterval {
-        value: value.to_string(),
-    };
-
-    if value.is_empty() {
-        return Err(invalid());
-    }
-
-    let (digits, suffix) = match value.chars().last() {
-        Some(last) if last.is_ascii_alphabetic() => (&value[..value.len() - 1], Some(last)),
-        _ => (value, None),
-    };
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(invalid());
-    }
-    let count: u64 = digits.parse().map_err(|_| invalid())?;
-    let multiplier = match suffix {
-        None | Some('s') => 1,
-        Some('m') => 60,
-        Some('h') => 3_600,
-        Some('d') => 86_400,
-        Some(_) => return Err(invalid()),
-    };
-    Ok(std::time::Duration::from_secs(count.saturating_mul(multiplier)))
 }
 
 #[cfg(test)]
@@ -476,6 +426,23 @@ mod tests {
         assert_eq!(managed.required, Some(true));
         assert_eq!(managed.refresh, Some(RefreshPolicy::Notify));
         assert_eq!(managed.interval.as_deref(), Some("1d"));
+    }
+
+    /// An unknown `refresh` posture must not fail the file: a payload written for a newer ocx
+    /// would otherwise break every older binary in the fleet.
+    #[test]
+    fn unknown_refresh_posture_is_ignored_and_the_rest_of_the_section_survives() {
+        let config: crate::Config = toml::from_str(
+            r#"
+            [managed]
+            source = "internal.company.com/ocx-config:user"
+            refresh = "someday"
+        "#,
+        )
+        .expect("an unknown refresh posture must not fail the parse");
+        let managed = config.managed.expect("[managed] section must be present");
+        assert_eq!(managed.refresh, None);
+        assert_eq!(managed.source.as_deref(), Some("internal.company.com/ocx-config:user"));
     }
 
     /// Fleet forward-compat (v2 posture flip): unknown `[managed]` fields are
@@ -613,100 +580,6 @@ mod tests {
         assert_eq!(managed.required, Some(true));
     }
 
-    // ── parse_interval ────────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_interval_bare_digits_is_seconds() {
-        assert_eq!(parse_interval("30").unwrap(), std::time::Duration::from_secs(30));
-    }
-
-    #[test]
-    fn parse_interval_seconds_suffix() {
-        assert_eq!(parse_interval("45s").unwrap(), std::time::Duration::from_secs(45));
-    }
-
-    #[test]
-    fn parse_interval_minutes_suffix() {
-        assert_eq!(parse_interval("5m").unwrap(), std::time::Duration::from_secs(5 * 60));
-    }
-
-    #[test]
-    fn parse_interval_hours_suffix() {
-        assert_eq!(parse_interval("2h").unwrap(), std::time::Duration::from_secs(2 * 3600));
-    }
-
-    #[test]
-    fn parse_interval_days_suffix() {
-        assert_eq!(parse_interval("1d").unwrap(), std::time::Duration::from_secs(86_400));
-    }
-
-    #[test]
-    fn parse_interval_default_constant_parses_to_one_day() {
-        assert_eq!(
-            parse_interval(ManagedConfig::DEFAULT_INTERVAL).unwrap(),
-            std::time::Duration::from_secs(86_400)
-        );
-    }
-
-    /// "0" is bare digits with no suffix (seconds), and zero seconds is a
-    /// valid (if degenerate) duration — pins the current behavior rather than
-    /// rejecting it, since nothing about the grammar excludes zero.
-    #[test]
-    fn parse_interval_zero_is_valid_zero_duration() {
-        assert_eq!(parse_interval("0").unwrap(), std::time::Duration::ZERO);
-    }
-
-    /// A digit count that cannot fit `u64` fails at the `str::parse::<u64>()`
-    /// step itself (before the day-multiplier `saturating_mul`), so it
-    /// gracefully yields `InvalidInterval` rather than panicking.
-    #[test]
-    fn parse_interval_rejects_overflow_magnitude_value() {
-        assert!(matches!(
-            parse_interval("99999999999999999999d"),
-            Err(ManagedConfigError::InvalidInterval { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_interval_rejects_empty_string() {
-        assert!(matches!(
-            parse_interval(""),
-            Err(ManagedConfigError::InvalidInterval { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_interval_rejects_garbage() {
-        assert!(matches!(
-            parse_interval("garbage"),
-            Err(ManagedConfigError::InvalidInterval { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_interval_rejects_negative() {
-        assert!(matches!(
-            parse_interval("-5"),
-            Err(ManagedConfigError::InvalidInterval { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_interval_rejects_unknown_suffix() {
-        assert!(matches!(
-            parse_interval("5x"),
-            Err(ManagedConfigError::InvalidInterval { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_interval_rejects_trailing_garbage_after_suffix() {
-        assert!(matches!(
-            parse_interval("5ss"),
-            Err(ManagedConfigError::InvalidInterval { .. })
-        ));
-    }
-
     // ── resolve_managed_config ───────────────────────────────────────────────
 
     fn managed_snapshot(source: &str, config_toml: &str) -> ManagedConfigSnapshot {
@@ -777,6 +650,17 @@ mod tests {
         };
         let result = resolve_managed_config(&config, None, None);
         assert!(matches!(result, Err(ManagedConfigError::InvalidInterval { .. })));
+    }
+
+    /// The managed interval message is a user-visible string; wrapping `IntervalError` keeps it.
+    #[test]
+    fn invalid_interval_message_is_unchanged_by_the_wrapped_error() {
+        let error = ManagedConfigError::InvalidInterval(parse_interval("not-a-duration").unwrap_err());
+        assert_eq!(
+            error.to_string(),
+            "managed config interval 'not-a-duration' is not a valid duration"
+        );
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     /// Env override resolution order: env `OCX_MANAGED_CONFIG` beats the seed.

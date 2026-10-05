@@ -550,7 +550,7 @@ pub async fn apply_managed_config(
         source: identifier,
         required: ManagedConfig::DEFAULT_REQUIRED,
         refresh: ManagedConfig::DEFAULT_REFRESH,
-        interval: ocx_config::managed::parse_interval(ManagedConfig::DEFAULT_INTERVAL)
+        interval: ocx_config::refresh::parse_interval(ManagedConfig::DEFAULT_INTERVAL)
             .expect("DEFAULT_INTERVAL is always a valid interval"),
         system_required: false,
     };

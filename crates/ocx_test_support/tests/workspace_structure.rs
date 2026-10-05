@@ -1712,6 +1712,13 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
          which the loader raises as `ConfigError::Parse`. There is no concrete type to register",
     ),
     (
+        "ocx_config/src/refresh.rs",
+        "D::Error",
+        "`deserialize_lenient`'s error is the deserializer's own associated type, like \
+         `deserialize_mirrors_table`'s: `#[serde(deserialize_with)]` makes it `toml::de::Error`, raised by the \
+         loader as `ConfigError::Parse`. It never fails on a value, only on a deserializer that yields none",
+    ),
+    (
         "ocx_config/src/shell.rs",
         "ConsentPatternError",
         "WP-26: `validate_consent_pattern` and `normalize_consent_pattern` have no caller outside this \

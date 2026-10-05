@@ -254,7 +254,8 @@ fn is_absent(error: &ocx_project::Error) -> bool {
         ocx_project::Error::OciClient(_)
         | ocx_project::Error::OciIndex(_)
         | ocx_project::Error::Config(_)
-        | ocx_project::Error::InternalFile(_, _) => false,
+        | ocx_project::Error::InternalFile(_, _)
+        | ocx_project::Error::UpdateSectionInProject(_) => false,
     }
 }
 

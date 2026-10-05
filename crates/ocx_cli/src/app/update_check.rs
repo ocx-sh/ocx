@@ -1,49 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::io::IsTerminal;
-use std::time::Duration;
+use ocx_config::env::keys;
+use ocx_config::refresh::RefreshPolicy;
+use ocx_oci::PackageRef;
+use ocx_package_manager::{PackageManager, TagProbe, UpdateCheckResult};
 
-use ocx_package_manager::{TagProbe, UpdateCheckResult};
-
-use super::Context;
+use super::{Context, background_check};
 
 /// Checks the remote registry for a newer OCX version and prints a notice to stderr.
 ///
-/// Never fails the command: errors are logged at debug level.
-pub async fn check_for_update(ctx: &Context) {
-    if ocx_util::env::flag("OCX_NO_UPDATE_CHECK", false) {
-        log::debug!("Update check skipped: OCX_NO_UPDATE_CHECK is set");
-        return;
+/// Returns the release to install after the command when `[update] self = "apply"`; always
+/// `None` for now, so `apply` behaves as `notify`. Never fails the command: errors are logged
+/// at debug level.
+pub async fn check_for_update(ctx: &Context) -> Option<PackageRef> {
+    if let Some(reason) = background_check::skip_reason(keys::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
+        log::debug!("Update check skipped: {reason}");
+        return None;
     }
-    if ocx_util::env::is_ci() {
-        log::debug!("Update check skipped: CI environment detected");
-        return;
+    let policy = ctx.update_policy();
+    // Before the probe, so `manual` never touches the throttle state file either.
+    if policy.self_policy == RefreshPolicy::Manual {
+        log::debug!("Update check skipped: [update] self = \"manual\"");
+        return None;
     }
-    if ctx.is_offline() {
-        log::debug!("Update check skipped: offline mode");
-        return;
-    }
-    if !std::io::stderr().is_terminal() {
-        log::debug!("Update check skipped: stderr is not a terminal");
-        return;
-    }
-
-    // `None` (unset or malformed) takes the lib's 24h default.
-    let throttle: Option<Duration> = match ocx_util::env::var("OCX_UPDATE_CHECK_INTERVAL") {
-        None => None,
-        Some(s) => match s.trim().parse::<u64>() {
-            Ok(0) => Some(Duration::ZERO),
-            Ok(n) => Some(Duration::from_secs(n)),
-            Err(_) => {
-                log::debug!("Update check: ignoring malformed OCX_UPDATE_CHECK_INTERVAL={s:?}");
-                None
-            }
-        },
-    };
 
     // A live probe regardless of ChainMode: a local read would only echo a stale local index.
-    match ctx.manager().self_check_update(throttle, TagProbe::Remote).await {
+    match ctx
+        .manager()
+        .self_check_update(Some(policy.interval), TagProbe::Remote)
+        .await
+    {
         Ok(UpdateCheckResult::AlreadyUpToDate) => {
             log::debug!("Already up to date.");
         }
@@ -57,4 +44,10 @@ pub async fn check_for_update(ctx: &Context) {
             log::debug!("Update check failed: {err}");
         }
     }
+    None
 }
+
+/// Installs `identifier` after the user's command has finished; never changes its outcome.
+///
+/// Not implemented yet: returns without installing.
+pub async fn apply_pending(_manager: &PackageManager, _identifier: &PackageRef) {}
