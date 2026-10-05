@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::path::Path;
+
 use tokio::task::JoinSet;
 
 use crate::{concurrency::Concurrency, error::PackageError, error::PackageErrorKind};
@@ -84,6 +86,44 @@ impl PackageManager {
     }
 }
 
+impl PackageManager {
+    /// Points `link`, an absolute caller-chosen path, at `info`'s package root and records it as a GC root.
+    ///
+    /// Refuses a path inside the ocx home, where it could stand in for an ocx-owned link, and a path that
+    /// holds anything but a link into the package store, so a user's file or directory is never replaced.
+    #[allow(clippy::result_large_err)]
+    pub async fn link_install(&self, info: &InstallInfo, link: &Path) -> Result<(), PackageErrorKind> {
+        let fs = self.file_structure();
+        let pkg_root = info.dir().dir.as_path();
+
+        // A deferred package has no directory yet, so a link to it would publish a dangling install.
+        if info.deferred().is_some() {
+            return Err(PackageErrorKind::Internal(crate::error::file_error(
+                pkg_root,
+                std::io::Error::other("refusing to point an install link at a deferred package"),
+            )));
+        }
+
+        if link.starts_with(fs.root()) || !link_is_replaceable(&fs.packages, link) {
+            return Err(PackageErrorKind::LinkPathOccupied(link.to_path_buf()));
+        }
+
+        log::debug!("Creating install link at '{}'.", link.display());
+        super::common::reference_manager(fs)
+            .link(link, pkg_root)
+            .map_err(|error| PackageErrorKind::Internal(error.into()))
+    }
+}
+
+/// Absent, or a link into the package store; any other lookup failure is left for the link write to report.
+fn link_is_replaceable(packages: &ocx_store::file_structure::PackageStore, link: &Path) -> bool {
+    match std::fs::symlink_metadata(link) {
+        Err(_) => true,
+        Ok(_) if ocx_util::fs::symlink::is_link(link) => super::common::leads_into_store(packages, link),
+        Ok(_) => false,
+    }
+}
+
 /// Creates candidate and/or current symlinks for a single package.
 #[allow(clippy::result_large_err)]
 async fn create_install_symlinks(
@@ -101,6 +141,127 @@ async fn create_install_symlinks(
 pub(super) fn finalize_indexed_errors(mut indexed_errors: Vec<(usize, PackageError)>) -> Vec<PackageError> {
     indexed_errors.sort_by_key(|(index, _)| *index);
     indexed_errors.into_iter().map(|(_, error)| error).collect()
+}
+
+#[cfg(test)]
+mod link_install_tests {
+    use std::path::{Path, PathBuf};
+
+    use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
+    use ocx_package::{install_info::InstallInfo, resolved_package::ResolvedPackage};
+    use ocx_store::file_structure::{FileStructure, PackageDir};
+
+    use crate::{PackageManager, error::PackageErrorKind};
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        manager: PackageManager,
+        info: InstallInfo,
+        outside: PathBuf,
+    }
+
+    /// An offline manager whose home holds one package root, plus a directory outside that home.
+    fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let home = root.join("home");
+        let fs = FileStructure::with_root(home.clone());
+        let pkg_root = fs.packages.root().join("registry").join("pkg");
+        std::fs::create_dir_all(pkg_root.join("content")).unwrap();
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(home.join("index")),
+            }),
+            vec![],
+            ChainMode::Offline,
+        );
+        let identifier = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("pkg", "example.com")
+                .clone_with_digest(ocx_oci::Digest::Sha256("a".repeat(64))),
+        )
+        .unwrap();
+        let info = InstallInfo::new(
+            identifier,
+            serde_json::from_str(r#"{"type":"bundle","version":1,"env":[]}"#).unwrap(),
+            ResolvedPackage::new(),
+            PackageDir::with_root(pkg_root),
+        );
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        Fixture {
+            _tmp: tmp,
+            manager: PackageManager::new(fs, index, None, "example.com"),
+            info,
+            outside,
+        }
+    }
+
+    fn assert_occupied(result: Result<(), PackageErrorKind>, link: &Path) {
+        match result {
+            Err(PackageErrorKind::LinkPathOccupied(path)) => assert_eq!(path, link),
+            other => panic!("expected LinkPathOccupied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_path_is_linked_and_rooted() {
+        let f = fixture();
+        let link = f.outside.join("tools").join("pkg");
+        f.manager.link_install(&f.info, &link).await.unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), f.info.dir().dir);
+        let back_ref = f
+            .info
+            .dir()
+            .refs_symlinks_dir()
+            .join(ocx_store::reference_manager::ReferenceManager::name_for_path(&link));
+        assert_eq!(std::fs::read_link(back_ref).unwrap(), link);
+    }
+
+    #[tokio::test]
+    async fn existing_store_link_is_relinked() {
+        let f = fixture();
+        let link = f.outside.join("pkg");
+        f.manager.link_install(&f.info, &link).await.unwrap();
+        f.manager.link_install(&f.info, &link).await.unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), f.info.dir().dir);
+    }
+
+    #[tokio::test]
+    async fn regular_file_is_refused_and_kept() {
+        let f = fixture();
+        let link = f.outside.join("pkg");
+        std::fs::write(&link, b"user data").unwrap();
+        assert_occupied(f.manager.link_install(&f.info, &link).await, &link);
+        assert_eq!(std::fs::read(&link).unwrap(), b"user data");
+    }
+
+    #[tokio::test]
+    async fn directory_is_refused() {
+        let f = fixture();
+        let link = f.outside.join("pkg");
+        std::fs::create_dir(&link).unwrap();
+        assert_occupied(f.manager.link_install(&f.info, &link).await, &link);
+        assert!(link.is_dir());
+    }
+
+    #[tokio::test]
+    async fn link_outside_the_store_is_refused() {
+        let f = fixture();
+        let target = f.outside.join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        let link = f.outside.join("pkg");
+        ocx_util::fs::symlink::create(&target, &link).unwrap();
+        assert_occupied(f.manager.link_install(&f.info, &link).await, &link);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    }
+
+    #[tokio::test]
+    async fn path_inside_the_ocx_home_is_refused() {
+        let f = fixture();
+        let link = f.manager.file_structure().root().join("symlinks").join("pkg");
+        assert_occupied(f.manager.link_install(&f.info, &link).await, &link);
+        assert!(!link.exists());
+    }
 }
 
 #[cfg(test)]

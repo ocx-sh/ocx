@@ -1759,6 +1759,15 @@ mod tests {
 
     /// Every classification arm minted since the freeze (DEC-55 route 4).
     const NEW_ARMS: &[NewArm] = &[
+        // #584 — `install --link` refuses a path holding something other than an ocx package link.
+        NewArm {
+            target: "PackageErrorKind",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::LinkPathOccupied(_)",
+            value: "ExitCode::DataError",
+        },
         // #477 — announce refuses a root whose `name` disagrees with the
         // identifier the run announces. 65, the `DescDisappeared` family: two
         // sides disagree and only a human decides.

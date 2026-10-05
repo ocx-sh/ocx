@@ -49,16 +49,16 @@ impl Which {
         let manager = context.manager();
         let fs = context.file_structure();
 
-        let entries: Vec<api::data::paths::LocatedPath> = if let Some(kind) = self.content_path.symlink_kind() {
-            // Always `PathKind::Package`: `install` and `select`, this namespace's only writers,
-            // never accept `--lazy-mode`.
-            let _ = manager.find_symlink_all(identifiers.clone(), kind).await?;
+        let source = self.content_path.link_source(identifiers.len())?;
+        let entries: Vec<api::data::paths::LocatedPath> = if let Some(source) = source {
+            // Always `PathKind::Package`: `install` and `select`, the only link writers, never accept `--lazy-mode`.
+            let infos = manager.find_symlink_all(identifiers.clone(), &source).await?;
             self.packages
                 .iter()
-                .zip(identifiers.iter())
-                .map(|(raw, id)| api::data::paths::LocatedPath {
+                .zip(infos)
+                .map(|(raw, info)| api::data::paths::LocatedPath {
                     package: raw.raw().to_string(),
-                    path: fs.symlinks.symlink(id, kind),
+                    path: info.dir().dir.clone(),
                     kind: PathKind::Package,
                 })
                 .collect()

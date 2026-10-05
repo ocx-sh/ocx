@@ -112,13 +112,13 @@ pub struct Env {
 }
 
 impl Env {
-    /// Materialization for an eager package: `--candidate`/`--current` root composed values in the
-    /// install-symlink namespace instead of the object store.
-    fn materialization(&self) -> Materialization {
-        match self.content_path.symlink_kind() {
-            Some(kind) => Materialization::Symlink(kind),
+    /// Materialization for an eager package: `--candidate`/`--current`/`--link` root composed values in
+    /// an install link instead of the object store.
+    fn materialization(&self) -> Result<Materialization, crate::error::UsageError> {
+        Ok(match self.content_path.link_source(self.packages.len())? {
+            Some(source) => Materialization::Symlink(source),
             None => Materialization::Install,
-        }
+        })
     }
 
     /// Refuses `--ci github`, which `require_equals` reads as bare `--ci` plus a package `github` whose
@@ -147,13 +147,13 @@ impl Env {
 
         let manager = context.manager();
 
-        let materialization = self.materialization();
+        let materialization = self.materialization()?;
         let mode = resolved_lazy_mode(self.lazy_mode.mode(), self.self_view)?;
         // A deferred package has no install symlink to root values in, so the two requests contradict;
         // 64 beats silently honouring either.
         if mode == ocx_project::lazy::LazyMode::Always && matches!(materialization, Materialization::Symlink(_)) {
             return Err(crate::error::UsageError::new(
-                "--candidate/--current cannot be combined with a lazy-mode of 'always': a deferred package has no install symlink to root values in",
+                "--candidate/--current/--link cannot be combined with a lazy-mode of 'always': a deferred package has no install symlink to root values in",
             )
             .into());
         }
