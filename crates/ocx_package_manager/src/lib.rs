@@ -414,7 +414,9 @@ pub use tasks::resolve::{
 };
 pub use tasks::sbom::{SbomOptions, SbomReport};
 pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};
-pub use tasks::update_check::{HandoffFailure, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
+pub use tasks::update_check::{
+    HandoffFailure, HandoffStdio, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult,
+};
 pub use tasks::verify::{VerifyOptions, VerifyReport};
 
 use crate::patch::PatchSnapshot;

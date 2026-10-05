@@ -138,6 +138,15 @@ pub enum SelfUpdateResult {
     Skipped(SkippedReason),
 }
 
+/// Where the hand-off child's stdin and stdout go; its stderr is always inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffStdio {
+    /// stdin inherited, stdout sent to this process's stderr: `ocx self update`.
+    Interactive,
+    /// stdin and stdout discarded: an unattended apply after the user's command, whose stdout is not ours.
+    Unattended,
+}
+
 /// Where the update-check probe lists candidate tags from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagProbe {
@@ -267,20 +276,13 @@ impl PackageManager {
         query_installed_version(self, identifier).await
     }
 
-    /// Pulls the release [`TagProbe::Remote`] finds, bypassing the throttle, then re-executes it as its
-    /// own `ocx self setup --handoff`; the verdict is the `current` symlink, not the child's exit status.
+    /// Pulls the release [`TagProbe::Remote`] finds, bypassing the throttle, then applies it through
+    /// [`Self::self_apply`] with [`HandoffStdio::Interactive`].
     ///
     /// # Errors
     ///
-    /// `crate::error::Error` on install failure; a failed hand-off is reported as
-    /// [`SelfUpdateResult::Pulled`] or an [`Installed`](SelfUpdateResult::Installed) carrying a [`HandoffFailure`].
+    /// `crate::error::Error` on check or install failure; see [`Self::self_apply`] for hand-off outcomes.
     pub async fn self_update(&self) -> Result<SelfUpdateResult, crate::error::Error> {
-        use crate::concurrency::Concurrency;
-
-        let ocx_id = ocx_oci::ocx_cli_identifier();
-
-        let current_version = query_installed_version(self, &ocx_id).await;
-
         let check_result = self
             .self_check_update(Some(Duration::ZERO), TagProbe::Remote)
             .await
@@ -295,38 +297,60 @@ impl PackageManager {
             UpdateCheckResult::Skipped(reason) => Ok(SelfUpdateResult::Skipped(reason)),
             UpdateCheckResult::AlreadyUpToDate => Ok(SelfUpdateResult::AlreadyUpToDate),
             UpdateCheckResult::UpdateAvailable(latest_id) => {
-                let to_tag = latest_id
-                    .tag()
-                    .expect("find_latest_version always returns tagged identifier")
-                    .to_string();
-                let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
-                let candidate = false;
-                // The new binary's setup selects, or `current` swaps before any setup surface is written
-                // and a failed setup strands a half-migrated machine.
-                let select = false;
-                // Patch discovery for ocx itself could abort the update with a spurious required-companion error.
-                let skip_discovery = true;
-                let infos = self
-                    .install_all(
-                        vec![latest_id],
-                        platform,
-                        candidate,
-                        select,
-                        Concurrency::default(),
-                        skip_discovery,
-                    )
-                    .await?;
-                let info = infos
-                    .into_iter()
-                    .next()
-                    .expect("install_all returns one InstallInfo per requested package");
-
-                let handoff = hand_off_setup(self, &info, &to_tag).await;
-                let moved = current_names(self.file_structure(), &ocx_id, info.dir().root()).await;
-
-                Ok(self_update_verdict(moved, handoff, current_version, to_tag))
+                self.self_apply(latest_id, HandoffStdio::Interactive).await
             }
         }
+    }
+
+    /// Installs `latest` without selecting it, then re-executes it as its own `ocx self setup --handoff`;
+    /// the verdict is the `current` symlink, not the child's exit status.
+    ///
+    /// `latest` is a tagged `ocx.sh/ocx/cli` reference, as [`UpdateCheckResult::UpdateAvailable`] carries;
+    /// an untagged one is `Skipped(UnparseableLatest)` and installs nothing.
+    ///
+    /// # Errors
+    ///
+    /// `crate::error::Error` on install failure; a failed hand-off is reported as
+    /// [`SelfUpdateResult::Pulled`] or an [`Installed`](SelfUpdateResult::Installed) carrying a [`HandoffFailure`].
+    pub async fn self_apply(
+        &self,
+        latest: ocx_oci::PackageRef,
+        stdio: HandoffStdio,
+    ) -> Result<SelfUpdateResult, crate::error::Error> {
+        use crate::concurrency::Concurrency;
+
+        let Some(to_tag) = latest.tag().map(str::to_owned) else {
+            return Ok(SelfUpdateResult::Skipped(SkippedReason::UnparseableLatest));
+        };
+        let ocx_id = ocx_oci::ocx_cli_identifier();
+        let current_version = query_installed_version(self, &ocx_id).await;
+
+        let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
+        let candidate = false;
+        // The new binary's setup selects, or `current` swaps before any setup surface is written
+        // and a failed setup strands a half-migrated machine.
+        let select = false;
+        // Patch discovery for ocx itself could abort the update with a spurious required-companion error.
+        let skip_discovery = true;
+        let infos = self
+            .install_all(
+                vec![latest],
+                platform,
+                candidate,
+                select,
+                Concurrency::default(),
+                skip_discovery,
+            )
+            .await?;
+        let info = infos
+            .into_iter()
+            .next()
+            .expect("install_all returns one InstallInfo per requested package");
+
+        let handoff = hand_off_setup(self, &info, &to_tag, stdio).await;
+        let moved = current_names(self.file_structure(), &ocx_id, info.dir().root()).await;
+
+        Ok(self_update_verdict(moved, handoff, current_version, to_tag))
     }
 }
 
@@ -421,6 +445,7 @@ async fn hand_off_setup(
     manager: &PackageManager,
     info: &ocx_package::InstallInfo,
     tag: &str,
+    stdio: HandoffStdio,
 ) -> Option<HandoffFailure> {
     let env = match compose_env_for(manager, info.clone()).await {
         Ok(env) => env,
@@ -430,27 +455,39 @@ async fn hand_off_setup(
         Ok(binary) => binary,
         Err(error) => return Some(HandoffFailure::SpawnFailed(error.to_string())),
     };
-    run_handoff(&binary, tag, &info.identifier().digest()).await
+    run_handoff(&binary, tag, &info.identifier().digest(), stdio).await
 }
 
 /// Spawns `binary` with the hand-off argv and classifies how it ended.
 ///
 /// No deadline: a timeout could only kill a setup mid-write, leaving a half-migrated machine.
-async fn run_handoff(binary: &std::path::Path, tag: &str, digest: &ocx_oci::Digest) -> Option<HandoffFailure> {
+async fn run_handoff(
+    binary: &std::path::Path,
+    tag: &str,
+    digest: &ocx_oci::Digest,
+    stdio: HandoffStdio,
+) -> Option<HandoffFailure> {
     let argv = handoff_argv(tag, digest);
     log::debug!("Handing setup to '{}' as {:?}.", binary.display(), argv);
 
     let mut command = tokio::process::Command::new(binary);
     command.args(argv);
 
-    // Child stdout goes to our stderr, or `ocx --format json self update | jq` parses the child's table.
-    match stderr_as_stdio() {
-        Ok(stdio) => {
-            command.stdout(stdio);
-        }
-        // Discarded, never inherited: an inherited stdout corrupts the parent's payload.
-        Err(error) => {
-            log::debug!("Cannot redirect the hand-off's stdout ({error}); discarding it.");
+    match stdio {
+        // Child stdout goes to our stderr, or `ocx --format json self update | jq` parses the child's table.
+        HandoffStdio::Interactive => match stderr_as_stdio() {
+            Ok(stdio) => {
+                command.stdout(stdio);
+            }
+            // Discarded, never inherited: an inherited stdout corrupts the parent's payload.
+            Err(error) => {
+                log::debug!("Cannot redirect the hand-off's stdout ({error}); discarding it.");
+                command.stdout(std::process::Stdio::null());
+            }
+        },
+        // The user's command owns stdout and stdin; an unattended child may prompt or print into neither.
+        HandoffStdio::Unattended => {
+            command.stdin(std::process::Stdio::null());
             command.stdout(std::process::Stdio::null());
         }
     }
@@ -1095,7 +1132,7 @@ mod tests {
         // as "the update failed".
         let recorder = write_argv_recorder(tmp.path(), &recorded, 82);
 
-        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest()).await;
+        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
 
         let argv: Vec<String> = std::fs::read_to_string(&recorded)
             .expect("the recorder must have run")
@@ -1129,7 +1166,7 @@ mod tests {
         let recorded = tmp.path().join("argv");
         let recorder = write_argv_recorder(tmp.path(), &recorded, 0);
 
-        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest()).await;
+        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
 
         assert!(outcome.is_none(), "a clean child carries no failure; got: {outcome:?}");
     }
@@ -1140,12 +1177,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let absent = tmp.path().join("no-such-binary");
 
-        let outcome = super::run_handoff(&absent, "0.6.1", &fixture_digest()).await;
+        let outcome = super::run_handoff(&absent, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
 
         assert!(
             matches!(outcome, Some(super::HandoffFailure::SpawnFailed(_))),
             "an unspawnable binary must surface as SpawnFailed; got: {outcome:?}"
         );
+    }
+
+    /// An unattended hand-off gets `/dev/null` for stdin and stdout, so it can neither
+    /// prompt nor print into the user's command output.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unattended_handoff_nulls_stdin_and_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let recorded = tmp.path().join("fds");
+        let script = tmp.path().join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nfds=$(readlink /proc/$$/fd/0; readlink /proc/$$/fd/1)\nprintf '%s\\n' \"$fds\" > '{}'\n",
+                recorded.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outcome = super::run_handoff(&script, "0.6.1", &fixture_digest(), super::HandoffStdio::Unattended).await;
+
+        assert!(outcome.is_none(), "got: {outcome:?}");
+        let fds: Vec<String> = std::fs::read_to_string(&recorded)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(fds, ["/dev/null", "/dev/null"], "stdin then stdout");
     }
 
     /// Writes a `sh` script that records its arguments one per line and exits
