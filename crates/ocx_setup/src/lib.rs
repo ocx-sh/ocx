@@ -116,6 +116,16 @@ pub fn session_path_written(session_path: &[(PathBuf, SessionPathOutcome)]) -> b
         .any(|(_, outcome)| *outcome == SessionPathOutcome::Written)
 }
 
+/// The macOS LaunchAgent plist when this run wrote it; feeds the note that macOS lists the agent as `sh`.
+pub fn launch_agent_written(session_path: &[(PathBuf, SessionPathOutcome)]) -> Option<&Path> {
+    session_path
+        .iter()
+        .find(|(path, outcome)| {
+            *outcome == SessionPathOutcome::Written && path.ends_with(session_path::macos::PLIST_RELATIVE_PATH)
+        })
+        .map(|(path, _)| path.as_path())
+}
+
 /// True when a profile's managed fence carried user edits and was left untouched;
 /// drives exit 82 and the `self update` `--force` advisory.
 pub fn profiles_dirty(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
@@ -872,6 +882,43 @@ mod tests {
     /// Read a profile file back, for write-side assertions.
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).expect("profile file present after write")
+    }
+
+    // ── the LaunchAgent note ─────────────────────────────────────────────────
+
+    #[test]
+    fn launch_agent_written_names_the_plist_a_run_wrote() {
+        let plist = PathBuf::from("/Users/u/Library/LaunchAgents/sh.ocx.path.plist");
+        let session_path = vec![(plist.clone(), SessionPathOutcome::Written)];
+
+        assert_eq!(launch_agent_written(&session_path), Some(plist.as_path()));
+    }
+
+    #[test]
+    fn launch_agent_written_is_none_for_an_unchanged_plist() {
+        let session_path = vec![(
+            PathBuf::from("/Users/u/Library/LaunchAgents/sh.ocx.path.plist"),
+            SessionPathOutcome::Unchanged,
+        )];
+
+        assert_eq!(launch_agent_written(&session_path), None);
+    }
+
+    #[test]
+    fn launch_agent_written_is_none_for_the_file_name_outside_launch_agents() {
+        let session_path = vec![(PathBuf::from("/tmp/sh.ocx.path.plist"), SessionPathOutcome::Written)];
+
+        assert_eq!(launch_agent_written(&session_path), None);
+    }
+
+    #[test]
+    fn launch_agent_written_is_none_for_a_written_linux_store() {
+        let session_path = vec![(
+            PathBuf::from("/home/u/.config/environment.d/ocx.conf"),
+            SessionPathOutcome::Written,
+        )];
+
+        assert_eq!(launch_agent_written(&session_path), None);
     }
 
     // ── C-060: the session-PATH directory order ──────────────────────────────

@@ -2403,6 +2403,10 @@ Each platform has exactly one store:
 
 The registration is idempotent by presence test, never by append: a second `ocx self setup` reports `unchanged` and the stored value does not grow.
 
+::: tip "sh" in macOS Login Items
+macOS names a login item that is not an app bundle after the program it runs. System Settings › General › Login Items › **Allow in the Background** therefore lists this agent as **sh**, and setup prints a note saying so. That entry is `sh.ocx.path`: a short `/bin/sh` script that puts ocx's two directories on the session `PATH` at login. Turned off, GUI applications started after the next login no longer get those directories. To remove it, see [Removing the session PATH by hand](#self-setup-session-path-removal).
+:::
+
 **A write failure is a warning, not an exit code.** A store that cannot be written is reported and warned about, and setup still exits 0; re-running retries it. The one refusal that *is* fatal is an `$OCX_HOME` this platform's format cannot spell — a `%` or `;` on Windows, a character `environment.d` cannot carry, a `"` the plist quoting cannot carry. That is checked **before** anything is written, so a refused run leaves the machine byte-identical, and it exits [`78`](#exit-codes).
 
 Each store's reach has limits worth knowing. `environment.d` is read only by processes started under `systemd --user` — confirmed for GNOME and KDE Plasma Wayland, and read by neither LightDM (by default), SDDM, nor a non-systemd desktop; a Flatpak- or Snap-sandboxed application takes its `PATH` from the sandbox instead. `~/.pam_environment` is deliberately not written — it has been deprecated since pam_env 1.5.0. On every platform, terminals and applications already open see nothing until they are restarted.
