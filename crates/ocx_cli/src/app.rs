@@ -31,7 +31,7 @@ pub mod seam;
 
 mod toolchain_drift_check;
 
-mod update_check;
+pub(crate) mod update_check;
 
 mod version;
 pub use version::version;

@@ -966,3 +966,332 @@ def test_self_update_handoff_introduces_no_block_on_a_never_setup_machine(
         )
     fenced = sorted(path.name for path in home.iterdir() if path.is_file() and "# >>> ocx" in path.read_text())
     assert fenced == [], f"no profile may gain an ocx fence on a never-set-up machine; got: {fenced}"
+
+
+# Background self-apply (`OCX_SELF_UPDATE=apply`). The helpers live in
+# `tests/self_apply_support.py`. Each case that expects silence first shows, on the
+# same fixture, a run in which the apply fires.
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_notify_prints_the_notice_and_installs_nothing(ocx: OcxRunner, tmp_path: Path, unique_repo: str) -> None:
+    """The control for every apply case: `notify` finds the newer ocx and only says so.
+
+    The notice is today's wording; `current` stays on 0.0.1 and no hand-off child starts.
+    """
+    from tests.self_apply_support import (
+        apply_env,
+        assert_not_applied,
+        plain,
+        run_on_pty,
+    )
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    current = _current_symlink(ocx, repo)
+    before = current.resolve()
+
+    env = apply_env(ocx, repo, home, {"OCX_SELF_UPDATE": "notify"})
+    status, terminal, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
+
+    assert status == 0, terminal
+    assert "A new OCX version is available" in plain(terminal), f"the notice must print; got:\n{terminal}"
+    assert_not_applied(current, before, receipt, terminal)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_apply_installs_after_the_command_and_leaves_its_stdout_alone(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """`apply` installs the newer ocx once the command is done.
+
+    Control on the same fixture: a `notify` run first, which installs nothing.
+    Then the `apply` run must print byte-identical stdout, exit the same, move
+    `current` to 0.0.2 through the hand-off child (receipt, `current` still old
+    when it started) and print exactly one apply line.
+    """
+    from tests.self_apply_support import (
+        apply_env,
+        apply_lines,
+        assert_not_applied,
+        current_is_new_stand_in,
+        plain,
+        run_on_pty,
+    )
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    current = _current_symlink(ocx, repo)
+    before = current.resolve()
+    command = ("--format", "json", "clean", "--dry-run")
+
+    control_env = apply_env(ocx, repo, home, {"OCX_SELF_UPDATE": "notify"})
+    control_status, control_terminal, control_stdout = run_on_pty(ocx, tmp_path, control_env, command)
+    assert control_status == 0, control_terminal
+    assert control_stdout, "the command must write to stdout or byte-identity proves nothing"
+    assert_not_applied(current, before, receipt, control_terminal)
+
+    status, terminal, stdout = run_on_pty(ocx, tmp_path, apply_env(ocx, repo, home, {}), command)
+
+    assert status == control_status, f"the apply must not change the exit code:\n{terminal}"
+    assert stdout == control_stdout, "the apply must leave the command's stdout byte-identical"
+    assert current.resolve() != before and current_is_new_stand_in(current), (
+        f"`current` must name the 0.0.2 package after the apply; it resolves to {current.resolve()}"
+    )
+    lines = apply_lines(terminal)
+    assert len(lines) == 1, f"exactly one apply line expected; got {lines!r}\n{terminal}"
+    assert "ocx 0.0.2 installed; it takes effect on the next run." in lines[0], lines[0]
+    assert "A new OCX version is available" not in plain(terminal), "apply replaces the notify notice"
+
+    record = _hand_off_receipt(receipt)
+    pinned = fetch_platform_manifest_digest(ocx.registry, repo, "0.0.2", platform=current_platform())
+    assert record["argv"].split() == ["self", "setup", f"0.0.2@{pinned}", "--handoff"], record["argv"]
+    assert record["current"] == str(before), "the child, not the parent, performs the select"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_apply_runs_after_a_failing_command_and_keeps_its_exit_code(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """The failing-command half: the apply still runs when the command errors.
+
+    The failing command's exit code under `apply` equals its code under the
+    `notify` control, and is non-zero, so the equality is not two zeros.
+    """
+    from tests.self_apply_support import (
+        apply_env,
+        apply_lines,
+        assert_not_applied,
+        current_is_new_stand_in,
+        run_on_pty,
+    )
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    current = _current_symlink(ocx, repo)
+    before = current.resolve()
+    command = ("package", "install", f"{repo}_absent:1.0.0")
+
+    control_env = apply_env(ocx, repo, home, {"OCX_SELF_UPDATE": "notify"})
+    control_status, control_terminal, _ = run_on_pty(ocx, tmp_path, control_env, command)
+    assert control_status != 0, f"the command must fail for this case to mean anything:\n{control_terminal}"
+    assert_not_applied(current, before, receipt, control_terminal)
+
+    status, terminal, _ = run_on_pty(ocx, tmp_path, apply_env(ocx, repo, home, {}), command)
+
+    assert status == control_status, f"the apply must not change a failing command's exit code:\n{terminal}"
+    assert current_is_new_stand_in(current), "the apply must run after a failing command too"
+    assert len(apply_lines(terminal)) == 1, f"exactly one apply line expected:\n{terminal}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_failed_apply_prints_one_failed_line_and_keeps_the_exit_code(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """A hand-off that never selects is one `failed` line, never a failed command.
+
+    The 0.0.2 stand-in records its receipt and exits 70 without selecting, so
+    the receipt proves the install was attempted. The `notify` control on the
+    same fixture gives the exit code the apply run must equal.
+    """
+    from tests.self_apply_support import apply_env, apply_lines, run_on_pty
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path, hand_off="refuse")
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    current = _current_symlink(ocx, repo)
+    before = current.resolve()
+
+    control_env = apply_env(ocx, repo, home, {"OCX_SELF_UPDATE": "notify"})
+    control_status, control_terminal, _ = run_on_pty(ocx, tmp_path, control_env, ("clean", "--dry-run"))
+    assert control_status == 0, control_terminal
+
+    status, terminal, _ = run_on_pty(ocx, tmp_path, apply_env(ocx, repo, home, {}), ("clean", "--dry-run"))
+
+    assert status == control_status, f"a failed apply must not change the exit code:\n{terminal}"
+    _hand_off_receipt(receipt)
+    assert current.resolve() == before, "a refused hand-off leaves `current` where it was"
+    lines = apply_lines(terminal)
+    assert len(lines) == 1, f"exactly one apply line expected; got {lines!r}\n{terminal}"
+    assert "Automatic ocx update to 0.0.2 failed:" in lines[0], lines[0]
+    assert "Run `ocx self update` to retry." in lines[0], lines[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_failed_apply_is_not_retried_inside_the_throttle_window(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """The throttle is touched before the outcome, so a failure is not retried at once.
+
+    Interval 3600: the first run attempts and fails, the second prints no apply
+    line and starts no second child. Control on the same fixture: interval 0
+    attempts again, so the silence above is the throttle and not a dead apply.
+    """
+    from tests.self_apply_support import apply_env, apply_lines, run_on_pty
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path, hand_off="refuse")
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    windowed = apply_env(ocx, repo, home, {"OCX_UPDATE_CHECK_INTERVAL": "3600"})
+
+    first_status, first, _ = run_on_pty(ocx, tmp_path, windowed, ("clean", "--dry-run"))
+    assert first_status == 0, first
+    assert len(apply_lines(first)) == 1, f"the first run must attempt and fail:\n{first}"
+    _hand_off_receipt(receipt)
+
+    second_status, second, _ = run_on_pty(ocx, tmp_path, windowed, ("clean", "--dry-run"))
+    assert second_status == 0, second
+    assert apply_lines(second) == [], f"inside the window nothing may be printed:\n{second}"
+    assert receipt.read_text().count("argv=") == 1, "no second hand-off child may start inside the window"
+
+    control_status, control, _ = run_on_pty(ocx, tmp_path, apply_env(ocx, repo, home, {}), ("clean", "--dry-run"))
+    assert control_status == 0, control
+    assert len(apply_lines(control)) == 1, f"control: interval 0 must attempt again:\n{control}"
+    assert receipt.read_text().count("argv=") == 2, "control: the second attempt must start a child"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_apply_with_no_current_install_is_silent_and_installs_nothing(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str
+) -> None:
+    """An ocx not installed by ocx has no `current`, so there is nothing to update.
+
+    Both versions are published and indexed but never installed. The run must
+    print no apply line, create no `current` and start no child. Control on
+    the same fixture: once 0.0.1 is installed selected, the same run applies.
+    """
+    from tests.self_apply_support import (
+        apply_env,
+        apply_lines,
+        current_is_new_stand_in,
+        run_on_pty,
+    )
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = apply_env(ocx, repo, home, {})
+
+    status, terminal, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
+
+    assert status == 0, terminal
+    assert_not_exists(_current_symlink(ocx, repo))
+    assert not receipt.exists(), "no hand-off child may start without a current install"
+    assert apply_lines(terminal) == [], f"a bootstrap skip is silent; got:\n{terminal}"
+
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    control_status, control, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
+    assert control_status == 0, control
+    assert len(apply_lines(control)) == 1, f"control: with a current install the apply must fire:\n{control}"
+    assert current_is_new_stand_in(_current_symlink(ocx, repo))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+@pytest.mark.parametrize("variant", ["no-pty", "ci", "skip-list-command", "kill-switch", "offline"])
+def test_apply_never_runs_where_the_background_check_is_gated(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str, variant: str
+) -> None:
+    """No apply without a terminal, under CI, on a skip-list command, killed or offline.
+
+    `no-pty` captures stderr through a pipe, the others use a pty. Each gated run
+    leaves `current` on 0.0.1, starts no child and prints no apply line. Control
+    on the same fixture and env: the ungated run (pty, `clean --dry-run`)
+    applies, so the gated silence is the gate and not an apply that never fires.
+    """
+    from tests.self_apply_support import (
+        apply_env,
+        apply_lines,
+        assert_not_applied,
+        current_is_new_stand_in,
+        run_on_pty,
+    )
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    current = _current_symlink(ocx, repo)
+    before = current.resolve()
+    env = apply_env(ocx, repo, home, {})
+
+    if variant == "no-pty":
+        gated_output = ocx.run("clean", "--dry-run", format=None, env_overrides=env).stderr
+    else:
+        if variant == "ci":
+            gated_env, args = {**env, "CI": "1"}, ("clean", "--dry-run")
+        elif variant == "kill-switch":
+            gated_env, args = {**env, "OCX_NO_UPDATE_CHECK": "1"}, ("clean", "--dry-run")
+        elif variant == "offline":
+            gated_env, args = env, ("--offline", "clean", "--dry-run")
+        else:
+            gated_env, args = env, ("version",)
+        status, gated_output, _ = run_on_pty(ocx, tmp_path, gated_env, args)
+        assert status == 0, gated_output
+    assert_not_applied(current, before, receipt, gated_output)
+
+    status, terminal, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
+    assert status == 0, terminal
+    assert len(apply_lines(terminal)) == 1, f"control: the ungated run must apply:\n{terminal}"
+    assert current_is_new_stand_in(current)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty and POSIX shell stand-in are POSIX-only")
+def test_apply_is_refused_by_a_trust_policy_with_the_wrong_identity(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str, sigstore_stack, identity_token
+) -> None:
+    """The unattended install runs under the operator's trust policy.
+
+    The 0.0.2 stand-in is really signed. With a policy for the self repository
+    naming another identity the apply is refused: `current` stays on 0.0.1, no
+    hand-off child starts, one `failed` line prints and the command exits 0.
+    Control on the same fixture: the policy naming the signer's own identity
+    lets the same run install, so the refusal is the identity and not the setup.
+    """
+    from tests.self_apply_support import (
+        apply_env,
+        apply_lines,
+        current_is_new_stand_in,
+        run_on_pty,
+        write_trust_policy,
+    )
+
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    home = tmp_path / "home"
+    home.mkdir()
+    current = _current_symlink(ocx, repo)
+    before = current.resolve()
+    ocx.run("package", "sign", *sigstore_stack.sign_args(identity_token), f"{repo}:0.0.2", format=None)
+    scope = f"{ocx.registry}/{repo}"
+    env = apply_env(ocx, repo, home, {"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_json)})
+
+    write_trust_policy(ocx, scope, "someone-else@example.com", sigstore_stack.issuer)
+    status, terminal, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
+
+    assert status == 0, f"a refused apply must not change the command's exit code:\n{terminal}"
+    assert current.resolve() == before, "a refused apply leaves `current` where it was"
+    assert not receipt.exists(), "a refused apply must stop before the hand-off child starts"
+    lines = apply_lines(terminal)
+    assert len(lines) == 1, f"exactly one apply line expected; got {lines!r}\n{terminal}"
+    assert "Automatic ocx update to 0.0.2 failed:" in lines[0], lines[0]
+
+    write_trust_policy(ocx, scope, sigstore_stack.identity, sigstore_stack.issuer)
+    control_status, control, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
+    assert control_status == 0, control
+    assert current_is_new_stand_in(current), f"control: the matching identity must let the apply install:\n{control}"
