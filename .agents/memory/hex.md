@@ -103,6 +103,10 @@ research-axes:
 
 ## Memory
 
+- **Plan (hex-plan high, 2026-10-05, plan-approved): `.claude/artifacts/plan_update_family.md`** — #405, #42, #479,
+  #548, #310, #590; 6 pipelines / 2 waves, one squashed commit per issue on `goat`; critical path P2→P5. Research:
+  `research_update_upgrade_ux.md`. Owner rulings: frozen push skips refresh; `ocx upgrade` same-major unless `--major`; managed tier ignores `[update]`; `[update]` never fails a command.
+  Next: `/hex-execute .claude/artifacts/plan_update_family.md`.
 - **Plan (hex-plan xhigh, 2026-09-29, done — review approved at 6b2163a23): `.claude/artifacts/plan_snapshot_lifecycle.md`** (
   7 in-grant WPs / 3 waves; next is `/hex-finalize`). No active plan. Out of grant: fork push (ocx-sh/rust-oci-client, blocks CI),
   ocx-indexbot, ocx-sh/index schema, ocx-mirror. Codex quota exhausted at plan review; copilot substitute ran.
