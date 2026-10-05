@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import make_package, resolved_metadata_path
+from src.helpers import inspect_entry, make_package, resolved_metadata_path
 from src.registry import (
     fetch_manifest_digest,
     fetch_platform_manifest_digest,
@@ -417,3 +417,91 @@ def test_push_report_platform_digests_survive_no_keep_tag(
         ocx.registry, unique_repo, "1.0.0", platform=plat
     )
     assert report["platform_digests"] == {plat: expected}, report
+
+
+# ---------------------------------------------------------------------------
+# A push moves the local pin of every tag it wrote (#405). `ocx package inspect
+# <repo:tag>` answers from that pin when one exists, so its candidate digests are
+# the narrowest tag-to-digest read; `index=False` leaves the pin to the push alone.
+# ---------------------------------------------------------------------------
+
+
+def _resolved_leaf_digests(ocx: OcxRunner, short: str) -> set[str]:
+    """The platform-manifest digests ``short`` resolves to through the local index chain."""
+    return {c["digest"] for c in inspect_entry(ocx.json("package", "inspect", short), short)["candidates"]}
+
+
+def test_push_moves_the_warm_pin_of_a_retagged_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """After content B is pushed over ``repo:t``, resolving ``repo:t`` answers B.
+
+    Content A is resolved first (``index update`` warms the pin), so the second
+    resolve cannot fall through to the registry: only the push can have moved it.
+    """
+    short = f"{unique_repo}:1.0.0"
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "a", cascade=False, index=False)
+    ocx.plain("index", "update", short)
+    digest_a = fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.0.0")
+    assert _resolved_leaf_digests(ocx, short) == {digest_a}, "precondition: the pin is warm on A"
+
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "b", cascade=False, index=False, bins=["hello-b"], push_env={"OCX_FROZEN": "0"})
+    digest_b = fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.0.0")
+    assert digest_b != digest_a, "precondition: the registry tag moved to different content"
+
+    assert _resolved_leaf_digests(ocx, short) == {digest_b}
+
+
+def test_push_cascade_moves_the_warm_pin_of_every_cascade_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A ``--cascade`` push of B over A moves ``repo:1`` and ``repo:1.2``, not only the pushed tag."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    make_package(ocx, unique_repo, "1.2.3", tmp_path / "a", cascade=True, index=False)
+    ocx.plain("index", "update", unique_repo)
+    cascade_tags = ["1.2.3", "1.2", "1"]
+    digest_a = fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.2.3")
+    for tag in cascade_tags:
+        assert _resolved_leaf_digests(ocx, f"{unique_repo}:{tag}") == {digest_a}, (
+            f"precondition: the pin of {tag} is warm on A"
+        )
+
+    make_package(ocx, unique_repo, "1.2.3", tmp_path / "b", cascade=True, index=False, bins=["hello-b"], push_env={"OCX_FROZEN": "0"})
+    digest_b = fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.2.3")
+    assert digest_b != digest_a, "precondition: the registry tag moved to different content"
+
+    for tag in cascade_tags:
+        assert _resolved_leaf_digests(ocx, f"{unique_repo}:{tag}") == {digest_b}, (
+            f"the cascade tag {tag} still resolves to the old content"
+        )
+
+
+def test_frozen_push_succeeds_and_leaves_the_warm_pin_untouched(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Under ``--frozen`` the post-push refresh is skipped silently.
+
+    The push still exits 0 (``ocx.plain`` rejects any other code) and the registry
+    moves to B, but a frozen invocation never moves a pin, so the local pin keeps
+    answering A until an explicit ``index update``. ``OCX_FROZEN`` is the env form of
+    ``--frozen``.
+    """
+    short = f"{unique_repo}:1.0.0"
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "a", cascade=False, index=False)
+    ocx.plain("index", "update", short)
+    digest_a = fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.0.0")
+
+    make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "b", cascade=False, index=False,
+        bins=["hello-b"], push_env={"OCX_FROZEN": "1"},
+    )
+    assert fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.0.0") != digest_a, (
+        "precondition: the frozen push still moved the registry tag"
+    )
+
+    assert _resolved_leaf_digests(ocx, short) == {digest_a}

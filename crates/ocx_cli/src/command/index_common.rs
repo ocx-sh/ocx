@@ -71,6 +71,36 @@ pub(super) async fn refresh_packages(
     oci_index: &ocx_index::Index,
     packages: &[ocx_oci::PackageRef],
 ) -> Option<anyhow::Error> {
+    let failures = refresh_each(local_index, index_sources, oci_index, packages).await;
+    for (input_index, error) in &failures {
+        log_failure("Failed to update index for", &packages[*input_index].to_string(), error);
+    }
+    first_failure(failures)
+}
+
+/// Best-effort refresh of the tags a push just wrote, from `oci_index` alone. A failure only logs
+/// at debug: the push already landed, and an ERROR line would read as if it had not.
+pub(super) async fn refresh_pushed_tags(
+    local_index: &ocx_index::LocalIndex,
+    oci_index: &ocx_index::Index,
+    packages: &[ocx_oci::PackageRef],
+) {
+    for (input_index, error) in refresh_each(local_index, &[], oci_index, packages).await {
+        log::debug!(
+            "the local index still pins the old digest of '{}': {}",
+            sanitize_for_terminal(&packages[input_index].to_string()),
+            sanitize_error_chain(error.as_ref())
+        );
+    }
+}
+
+/// The one bounded fan-out; failures carry their input index, in completion order.
+async fn refresh_each(
+    local_index: &ocx_index::LocalIndex,
+    index_sources: &[ocx_index::OcxIndex],
+    oci_index: &ocx_index::Index,
+    packages: &[ocx_oci::PackageRef],
+) -> Vec<(usize, anyhow::Error)> {
     // No spawn, so the borrows need no per-task clone; results arrive out of order.
     let results: Vec<(usize, anyhow::Result<()>)> = futures::stream::iter(packages.iter().enumerate())
         .map(|(input_index, identifier)| async move {
@@ -96,15 +126,10 @@ pub(super) async fn refresh_packages(
         .collect()
         .await;
 
-    let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
-    for (input_index, result) in results {
-        if let Err(error) = result {
-            log_failure("Failed to update index for", &packages[input_index].to_string(), &error);
-            failures.push((input_index, error));
-        }
-    }
-
-    first_failure(failures)
+    results
+        .into_iter()
+        .filter_map(|(input_index, result)| result.err().map(|error| (input_index, error)))
+        .collect()
 }
 
 /// The lowest-index failure, or `None`; a sort, since the fan-out completes out of order. Shared

@@ -13,7 +13,7 @@ use ocx_package::{
 };
 
 use crate::api::data::push::SignedPlatformReport;
-use crate::command::package_sign_common;
+use crate::command::{index_common, package_sign_common};
 use crate::options::key::KeyOpt;
 use crate::options::rekor_upload::RekorUploadOpt;
 use crate::options::signature_format::SignatureFormatOpt;
@@ -412,6 +412,7 @@ impl PackagePush {
         let mut pushed_tags = vec![outcome.primary_tag.clone()];
         pushed_tags.extend(outcome.cascade_tags.iter().cloned());
         pushed_tags.extend(outcome.aliases_written.iter().cloned());
+        refresh_pushed_pins(&context, &publisher, &identifier, &pushed_tags).await;
 
         // Platform manifests, never the index, whose digest a later platform merge rewrites.
         let platform_digests = outcome.platform_digests.clone();
@@ -603,6 +604,37 @@ fn merge_annotations(generated: BTreeMap<String, String>, explicit: &[(String, S
     let mut merged = generated;
     merged.extend(explicit.iter().cloned());
     merged
+}
+
+/// Moves the local pin of every tag the push wrote, so a resolve by tag answers the new content.
+/// Best-effort: the push already landed, so nothing here touches its exit code.
+async fn refresh_pushed_pins(
+    context: &crate::app::Context,
+    publisher: &Publisher,
+    identifier: &ocx_oci::PackageRef,
+    tags: &[String],
+) {
+    // A frozen invocation never moves a pin.
+    if context.config_view().frozen {
+        return;
+    }
+    // An index-owned namespace pins what its published index says, which a push does not change.
+    if context
+        .index_sources()
+        .iter()
+        .any(|source| source.jurisdiction(identifier) != ocx_index::Jurisdiction::Outside)
+    {
+        return;
+    }
+    // Canonical, never mirrored: a mirror may still serve the digest this push just replaced.
+    let oci_index = ocx_index::Index::from_remote(ocx_index::OciIndex::canonical(ocx_index::OciIndexConfig {
+        client: publisher.client().clone(),
+    }));
+    let packages: Vec<ocx_oci::PackageRef> = tags
+        .iter()
+        .map(|tag| identifier.without_digest().clone_with_tag(tag))
+        .collect();
+    index_common::refresh_pushed_tags(context.local_index(), &oci_index, &packages).await;
 }
 
 #[cfg(test)]

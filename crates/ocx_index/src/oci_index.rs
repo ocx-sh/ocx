@@ -22,13 +22,25 @@ pub use config::OciIndexConfig;
 pub struct OciIndex {
     client: ocx_oci::Client,
     cache: cache::SharedCache,
+    addressing: ReadAddressing,
 }
 
 impl OciIndex {
+    /// A mirror may answer: for reads that back no write.
     pub fn new(config: OciIndexConfig) -> Self {
         Self {
             client: config.client,
             cache: Default::default(),
+            addressing: ReadAddressing::Mirrored,
+        }
+    }
+
+    /// Every read addresses the canonical registry, never a mirror: for a refresh that must
+    /// observe a write this process just made there.
+    pub fn canonical(config: OciIndexConfig) -> Self {
+        Self {
+            addressing: ReadAddressing::Canonical,
+            ..Self::new(config)
         }
     }
 
@@ -36,10 +48,7 @@ impl OciIndex {
     async fn fetch_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Vec<String>> {
         Ok(self
             .client
-            .list_tags_addressed(
-                ocx_oci::OciIdentifier::passthrough(identifier),
-                ReadAddressing::Mirrored,
-            )
+            .list_tags_addressed(ocx_oci::OciIdentifier::passthrough(identifier), self.addressing)
             .await?
             .into_iter()
             .filter(|tag| !is_reserved_tag(tag))
@@ -94,10 +103,7 @@ impl index_impl::IndexImpl for OciIndex {
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         Ok(Some(
             self.client
-                .fetch_manifest_addressed(
-                    &ocx_oci::OciIdentifier::passthrough(identifier),
-                    ReadAddressing::Mirrored,
-                )
+                .fetch_manifest_addressed(&ocx_oci::OciIdentifier::passthrough(identifier), self.addressing)
                 .await?,
         ))
     }
@@ -121,13 +127,9 @@ impl index_impl::IndexImpl for OciIndex {
             Acquisition::Leader(handle) => handle,
             Acquisition::Resolved(digest) => return Ok(Some(digest)),
         };
-        // A mirror may answer only because this read backs no write.
         match self
             .client
-            .fetch_manifest_digest_addressed(
-                &ocx_oci::OciIdentifier::passthrough(identifier),
-                ReadAddressing::Mirrored,
-            )
+            .fetch_manifest_digest_addressed(&ocx_oci::OciIdentifier::passthrough(identifier), self.addressing)
             .await
         {
             Ok(digest) => {
@@ -152,10 +154,7 @@ impl index_impl::IndexImpl for OciIndex {
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         Ok(self
             .client
-            .fetch_manifest_raw_bytes_addressed(
-                &ocx_oci::OciIdentifier::passthrough(identifier),
-                ReadAddressing::Mirrored,
-            )
+            .fetch_manifest_raw_bytes_addressed(&ocx_oci::OciIdentifier::passthrough(identifier), self.addressing)
             .await?)
     }
 
@@ -163,6 +162,7 @@ impl index_impl::IndexImpl for OciIndex {
         Box::new(Self {
             client: self.client.clone(),
             cache: self.cache.clone(),
+            addressing: self.addressing,
         })
     }
 }
@@ -299,5 +299,40 @@ mod tests {
             .await
             .expect("a transient outage must not poison the tag for the life of the process")
             .expect("the stub answers");
+    }
+
+    /// The manifest read a tagged refresh makes goes to the mirror by default and past it when
+    /// built `canonical`, so a refresh right after a push cannot pin what a stale mirror serves.
+    #[tokio::test]
+    async fn canonical_reads_bypass_a_configured_mirror() {
+        let identifier = ocx_oci::PackageRef::new_registry("ns/pkg", "example.com").clone_with_tag("3.28");
+        let read_host = |canonical: bool| {
+            let identifier = identifier.clone();
+            async move {
+                let data = StubTransportData::new();
+                let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(data.clone())))
+                    .with_test_mirror("example.com", "mirror.test", "cache");
+                let config = OciIndexConfig { client };
+                let index = if canonical {
+                    OciIndex::canonical(config)
+                } else {
+                    OciIndex::new(config)
+                };
+                let _ = index_impl::IndexImpl::fetch_manifest_raw_bytes(&index, &identifier).await;
+                let targets = data.read().read_targets.clone();
+                assert_eq!(targets.len(), 1, "one manifest read: {targets:?}");
+                (targets[0].1.clone(), targets[0].2.clone())
+            }
+        };
+
+        assert_eq!(
+            read_host(false).await,
+            ("mirror.test".to_string(), "cache/ns/pkg".to_string())
+        );
+        assert_eq!(
+            read_host(true).await,
+            ("example.com".to_string(), "ns/pkg".to_string()),
+            "a canonical index must read the registry the push wrote, unrewritten"
+        );
     }
 }
