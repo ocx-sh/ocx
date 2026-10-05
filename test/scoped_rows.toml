@@ -66,6 +66,7 @@ ocx_config = [
 # CAS + symlink namespace (`install`, `uninstall`, `purge`, `clean`, `which`), shim blob
 ocx_store = [
     "tests/test_install.py",
+    "tests/test_toolchain_drift_notice.py",
     "tests/test_uninstall.py",
     "tests/test_purge.py",
     "tests/test_clean*.py",
@@ -132,6 +133,7 @@ ocx_package_manager = [
     "tests/test_pinned_offline.py",
     "tests/test_install_libc.py",
     "tests/test_status.py",
+    "tests/test_toolchain_drift_notice.py",
     "tests/test_inspect*.py",
     "tests/test_toolchain_env.py",
     "tests/test_plugin_dispatch.py",

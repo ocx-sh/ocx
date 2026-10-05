@@ -1146,10 +1146,14 @@ When `ocx self update` runs, OCX queries for the latest `major.minor.patch` rele
 
 Two background checks run on an interactive terminal, outside CI, and online. One asks whether a newer ocx exists. The other asks whether a tag pinned in a project's `ocx.lock` has moved. Each runs at most once per interval, one day by default ([`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval], or `interval` under [`[update]`][config-update]). The check runs before your command and waits for one registry round trip. A failed check is never a command failure.
 
-When a newer version is detected, a notice is printed to stderr:
+When either check finds something, one notice is printed to stderr before your command's output. Each toolchain lists at most three tools by name, and the last line names the commands that show what moved:
 
 ```
-A new OCX version is available: ocx.sh/ocx/cli:1.1.0. Consider updating by running `ocx self update`.
+ocx: updates available
+  ocx 1.1.0 — run `ocx self update`
+  project (~/work/proj): cmake, ninja, uv and 6 more — run `ocx update`
+  global: shellcheck — run `ocx --global update`
+  details: `ocx update --check`, `ocx --global update --check`
 ```
 
 The `[update]` section of `config.toml` chooses what each check does. `self = "apply"` installs the newer ocx after your command finishes, whether it succeeded or failed, and the exit code is unchanged. The new binary takes effect on the next run. `self = "manual"` stops the check. `toolchain` takes `notify` or `manual`; the drift notice names [`ocx update`][cmd-update], because only that command moves a pin. See the [`[update]` reference][config-update] for the keys, and note that the managed tier and `ocx.toml` cannot set them.

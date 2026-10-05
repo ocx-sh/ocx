@@ -183,6 +183,7 @@ pub enum RenderStampTarget<'a> {
 /// {root}/
 ///   update-check/
 ///     {slug}          — zero-byte file; mtime = time of last registry probe
+///     toolchain/{key} — the same, per project key or `global`, for the drift notice
 ///   projects/
 ///     {key}/
 ///       consent.json  — per-project shell-activation consent stamp
@@ -209,6 +210,24 @@ impl StateStore {
     pub fn update_check_file(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         let slug = identifier.to_string().to_slug();
         self.update_check_dir().join(slug)
+    }
+
+    /// Drift-notice throttle marker for the project toolchain at the canonical `project_dir`, keyed as
+    /// `state/projects/<key>/` is; write it only through [`Self::touch`].
+    ///
+    /// Never keyed by package: one project's clean probe would then suppress another's drift.
+    pub fn toolchain_drift_marker(&self, project_dir: &Path) -> PathBuf {
+        self.toolchain_drift_dir()
+            .join(crate::reference_manager::ReferenceManager::name_for_path(project_dir))
+    }
+
+    /// [`Self::toolchain_drift_marker`] for the global toolchain; no 16-hex project key can collide with it.
+    pub fn global_toolchain_drift_marker(&self) -> PathBuf {
+        self.toolchain_drift_dir().join("global")
+    }
+
+    fn toolchain_drift_dir(&self) -> PathBuf {
+        self.update_check_dir().join("toolchain")
     }
 
     pub fn managed_config(&self) -> ocx_config::managed_config::ManagedConfigPaths {
@@ -403,6 +422,46 @@ mod tests {
             !file_name.contains('/'),
             "slug must not contain slashes; got: {file_name}"
         );
+    }
+
+    // ── toolchain drift markers ──────────────────────────────────────────────
+
+    #[test]
+    fn toolchain_drift_marker_is_the_project_key_under_update_check_toolchain() {
+        let store = StateStore::new("/ocx/state");
+        let project_dir = Path::new("/work/project");
+        assert_eq!(
+            store.toolchain_drift_marker(project_dir),
+            PathBuf::from("/ocx/state/update-check/toolchain")
+                .join(crate::reference_manager::ReferenceManager::name_for_path(project_dir))
+        );
+    }
+
+    /// One marker per project: a shared one would let project A's clean probe suppress B's drift.
+    #[test]
+    fn toolchain_drift_markers_differ_per_project_and_from_global() {
+        let store = StateStore::new("/ocx/state");
+        let first = store.toolchain_drift_marker(Path::new("/work/a"));
+        let second = store.toolchain_drift_marker(Path::new("/work/b"));
+        let global = store.global_toolchain_drift_marker();
+        assert_ne!(first, second);
+        assert_ne!(first, global);
+        assert_eq!(global, PathBuf::from("/ocx/state/update-check/toolchain/global"));
+    }
+
+    /// A path-derived name would exceed NAME_MAX (255) here; the key stays 16 hex characters.
+    #[test]
+    fn toolchain_drift_marker_name_is_bounded_for_a_path_over_300_characters() {
+        let store = StateStore::new("/ocx/state");
+        let long_dir = PathBuf::from("/work").join("segment-".repeat(40));
+        assert!(long_dir.as_os_str().len() > 300);
+
+        let marker = store.toolchain_drift_marker(&long_dir);
+
+        let name = marker.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name.len(), 16, "got: {name}");
+        assert!(name.chars().all(|ch| ch.is_ascii_hexdigit()), "got: {name}");
+        assert_eq!(marker.parent(), Some(Path::new("/ocx/state/update-check/toolchain")));
     }
 
     // ── host_capabilities_file ───────────────────────────────────────────────

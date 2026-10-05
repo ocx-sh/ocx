@@ -32,6 +32,7 @@ pub mod seam;
 mod toolchain_drift_check;
 
 pub(crate) mod update_check;
+mod update_notice;
 
 mod version;
 pub use version::version;
@@ -168,17 +169,22 @@ impl App {
             unreachable!("None handled in static-command bypass above");
         };
         // Every probe reaches the network; the seam never makes a request.
-        let pending_update = if !in_seam() && should_check_for_update(&cli.command) {
-            update_check::check_for_update(&context).await
-        } else {
-            None
-        };
+        let mut notice_rows = Vec::new();
+        let mut pending_update = None;
+        if !in_seam() && should_check_for_update(&cli.command) {
+            match update_check::check_for_update(&context).await {
+                Some(update_check::SelfUpdate::Notice(row)) => notice_rows.push(row),
+                Some(update_check::SelfUpdate::Apply(identifier)) => pending_update = Some(identifier),
+                None => {}
+            }
+        }
         if !in_seam() && should_check_managed_config_refresh(&cli.command) {
             managed_config_check::check_for_managed_config_refresh(&context).await;
         }
         if !in_seam() && should_check_toolchain_drift(command) {
-            toolchain_drift_check::check_for_toolchain_drift(&context).await;
+            notice_rows.extend(toolchain_drift_check::check_for_toolchain_drift(&context).await);
         }
+        update_notice::print(context.ui(), &notice_rows);
         // Captured before `execute` consumes the context: this manager carries `with_auto_verify`,
         // so trust policy also covers the unattended install.
         let pending_update = pending_update.map(|identifier| (context.manager().clone(), identifier));
@@ -321,7 +327,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
 }
 
 /// Skips the network update check for static, `self`, `config` and `shell` commands, and for
-/// the trampoline and per-prompt hot paths (`exec`, `run`, `env`, `direnv`).
+/// the trampoline and per-prompt hot paths (`exec`, `run`, `launcher`, `env`, `direnv`).
 ///
 /// `Shell` variants are listed, not wildcarded, so a new one is checked by default
 /// (`should_check_for_update_skips_all_shell_variants_canary`).
@@ -341,6 +347,7 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
                 | command::Command::Config(_)
                 | command::Command::Exec(_)
                 | command::Command::DeprecatedRun(_)
+                | command::Command::Launcher(_)
                 | command::Command::Env(_)
                 | command::Command::Direnv(_)
         )
@@ -361,6 +368,7 @@ fn should_check_toolchain_drift(command: &command::Command) -> bool {
         | Command::Config(_)
         | Command::Exec(_)
         | Command::DeprecatedRun(_)
+        | Command::Launcher(_)
         | Command::Env(_)
         | Command::Direnv(_)
         | Command::Update(_)
@@ -375,7 +383,6 @@ fn should_check_toolchain_drift(command: &command::Command) -> bool {
         | Command::Status(_)
         | Command::Login(_)
         | Command::Logout(_)
-        | Command::Launcher(_)
         | Command::Package(_)
         | Command::Patch(_)
         | Command::Pull(_) => true,
@@ -459,23 +466,16 @@ mod tests {
 
     // ── Record frame vocabulary ──────────────────────────────────────────────
 
-    /// Every `FrameCommand` an execution record can carry names its command
-    /// **exactly** as [`canonical_command_name`] does.
+    /// Each `FrameCommand` names its command **exactly** as [`canonical_command_name`] does.
     ///
-    /// Two ocx-authored JSON documents describe the same invocation — the v1
-    /// error envelope and the execution record — and a consumer joining them on
-    /// the command has to be able to grep one string. This is the binding: not a
-    /// pair of restated literals like the shim wire token (which spans a crate
-    /// `ocx_lib` cannot depend on), but a real comparison, because this crate
-    /// links both sides.
+    /// The v1 error envelope and the execution record describe the same invocation,
+    /// so a consumer joining them must grep one string. This is a real comparison,
+    /// not restated literals, because this crate links both sides. It checks **per
+    /// variant**, so swapping two spellings cannot pass, and the `Cli` parse names
+    /// the arm so a rename cannot drift arm and spelling together without reding.
     ///
-    /// The mapping is checked **per variant** rather than as a set, so swapping
-    /// two spellings cannot pass. The `Cli` parse is what names the arm: a hand
-    /// written `Command` value would let a future rename drift the arm and the
-    /// spelling together without reding.
-    ///
-    /// Red state: change any `#[serde(rename = …)]` on `FrameCommand`, or any of
-    /// the four arms in `canonical_command_name`, and its row fails.
+    /// Red state: change a `#[serde(rename = …)]` on `FrameCommand` or an arm in
+    /// `canonical_command_name`, and its row fails.
     #[test]
     fn every_record_frame_command_matches_the_canonical_cli_name() {
         use clap::Parser as _;
@@ -841,8 +841,9 @@ mod tests {
     /// predicate that skips everything.
     ///
     /// `Exec` is what a rendered `<home>/toolchain/active/bin/<name>` trampoline
-    /// `exec`s (`ocx_package_manager::launcher::body`), `DeprecatedRun` is its
-    /// still-shipped `ocx run` spelling, and `Env`/`Direnv` are what a shell
+    /// `exec`s, `DeprecatedRun` is its still-shipped `ocx run` spelling,
+    /// `Launcher` is what every generated package launcher runs
+    /// (`ocx_package_manager::launcher::body`), and `Env`/`Direnv` are what a shell
     /// evaluates — `.envrc` re-runs `ocx direnv export` on every directory
     /// change. On any of them the probe's live tag listing plus `ocx --format
     /// json version` subprocess spawn lands on a command the user never typed.
@@ -857,10 +858,20 @@ mod tests {
         let deprecated_run = command::toolchain_exec::ToolchainExec::parse_from(["run", "--", "true"]);
         let env = command::toolchain_env::ToolchainEnv::parse_from(["env"]);
         let direnv = command::direnv::Direnv::parse_from(["direnv"]);
+        let launcher_exec = parse_command(&["launcher", "exec", "/pkg", "--", "cmake"]);
+        let launcher_shim = parse_command(&[
+            "launcher",
+            "shim",
+            "index.ocx.sh/ocx/cmake@sha256:3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0",
+            "--",
+            "cmake",
+        ]);
 
         for (label, cmd) in [
             ("exec", command::Command::Exec(exec)),
             ("run", command::Command::DeprecatedRun(deprecated_run)),
+            ("launcher exec", launcher_exec),
+            ("launcher shim", launcher_shim),
             ("env", command::Command::Env(env)),
             ("direnv", command::Command::Direnv(direnv)),
         ] {
@@ -1042,6 +1053,7 @@ mod tests {
             &["init"],
             &["version"],
             &["exec", "--", "true"],
+            &["launcher", "exec", "/pkg", "--", "cmake"],
             &["env"],
             &["direnv"],
             &["shell", "state"],
@@ -1082,6 +1094,7 @@ mod tests {
             &["version"],
             &["exec", "--", "true"],
             &["run", "--", "true"],
+            &["launcher", "exec", "/pkg", "--", "cmake"],
             &["env"],
             &["direnv"],
             &["shell", "allow"],

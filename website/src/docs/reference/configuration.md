@@ -968,7 +968,7 @@ What ocx does when a tag that a project's or the global toolchain's `ocx.lock` p
 
 `"apply"` is accepted so a value written for the `self` key does not break the file. It behaves as `"notify"` and prints one warning, because only [`ocx update`][cmd-update] advances a lock.
 
-The check compares the platform digests recorded in the lock with what the registry serves now, and never writes the local index. A project toolchain is probed only when the project is [consented](#keys-shell-consent); the global toolchain needs no consent. With no lock, a stale lock, a registry error, or a probe that exceeds five seconds, the check stays silent.
+The check compares the platform digests recorded in the lock with what the registry serves now, and never writes the local index. A project toolchain is probed only when the project is [consented](#keys-shell-consent); the global toolchain needs no consent. With no lock, a stale lock, a registry error, or a check that runs past five seconds in total, the check stays silent.
 
 #### `interval` {#keys-update-interval}
 
