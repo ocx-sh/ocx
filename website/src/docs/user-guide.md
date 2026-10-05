@@ -195,15 +195,16 @@ Slash-nested names are ordinary OCI repositories — `ocx package install ocx/mi
 
 ## Embed a stable path in your IDE or shell {#stable-paths}
 
-Package-store paths are content-addressed and change on every upgrade — never embed them directly in an IDE config or shell profile. Embed a [symlink][in-depth-storage-symlinks] instead. Three modes cover every case:
+Package-store paths are content-addressed and change on every upgrade — never embed them directly in an IDE config or shell profile. Embed a [symlink][in-depth-storage-symlinks] instead. Four modes cover every case:
 
 | Mode | Flag | Path | Auto-install | Use case |
 |---|---|---|---|---|
 | Package store *(default)* | *(none)* | `~/.ocx/packages/…/<digest>/` | yes (online) | CI, scripts, one-shot queries |
 | Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/<tag>` | **no** | Pin a specific tag in editor or IDE config |
 | Current symlink | `--current` | `~/.ocx/symlinks/…/current` | **no** | "Always selected" path in shell profiles or IDE settings |
+| Your own link | `--link <PATH>` | `<PATH>` | **no** | A path your build or repository chooses, such as `./.tools/cmake` |
 
-Both symlink modes target the [package root][in-depth-storage-packages] directly; consumers traverse one level in (`…/content/` for files, `…/entrypoints/` for launchers, or read `…/metadata.json`).
+All three symlink modes target the [package root][in-depth-storage-packages] directly; consumers traverse one level in (`…/content/` for files, `…/entrypoints/` for launchers, or read `…/metadata.json`).
 
 ```jsonc
 // .vscode/settings.json — path survives every upgrade
@@ -217,6 +218,12 @@ export PATH="$HOME/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin:$PATH"
 
 When `ocx package install --select kitware/cmake:3.32` runs later, `current` is re-pointed and the IDE / shell pick up the new version with no config edits.
 
+When a build tool wants the package at a path of its own, let ocx write the link there:
+
+<<< @/_scripts/user-guide/install-link.sh{sh}
+
+The link keeps the package safe from [`ocx clean`][cmd-clean] for as long as it exists. A link you create yourself with `ln -s` does not: `ocx clean` may remove the package behind it. Delete the link when the package is no longer needed, and the next `ocx clean` reclaims it.
+
 :::tip Prefer `ocx env` for shells
 The hand-written `export PATH=…/current/content/bin` above is an escape hatch for tools that cannot evaluate shell at startup (IDEs, JSON config files). For interactive shells and project envs, prefer [`ocx env`][cmd-env-root] (toolchain-tier) or [`ocx package env`][cmd-package-env] (per-package) — they compose the full env, not just `PATH`, and stay forward-compatible if the package adds new env entries on upgrade.
 :::
@@ -225,7 +232,7 @@ For automation, [`ocx package which`][cmd-which] prints the resolved package roo
 
 <<< @/_scripts/user-guide/stable-paths-which.sh{sh}
 
-Both `--candidate` and `--current` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
+`--candidate`, `--current` and `--link` fail immediately if the required symlink is absent — they never auto-install. A digest component in the identifier is rejected.
 
 ### Running an installed binary on Windows {#stable-paths-windows}
 

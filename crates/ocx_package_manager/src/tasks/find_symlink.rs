@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::{error::PackageError, error::PackageErrorKind};
+use crate::{composer::LinkSource, error::PackageError, error::PackageErrorKind};
 use ocx_package::install_info::InstallInfo;
-use ocx_store::{file_structure, file_structure::PackageDir, file_structure::SymlinkKind};
+use ocx_store::{file_structure, file_structure::PackageDir};
 
 use super::super::PackageManager;
 
@@ -31,51 +31,57 @@ impl PackageManager {
         }
     }
 
-    /// Resolves a package through an install symlink rather than the object store.
+    /// Resolves a package through an install link rather than the object store.
     ///
-    /// The returned content path is the symlink path itself, so it stays stable across package updates.
+    /// The returned content path is the link path itself, so it stays stable across package updates.
     pub async fn find_symlink(
         &self,
         package: &ocx_oci::PackageRef,
-        kind: SymlinkKind,
+        source: &LinkSource,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        log::debug!("Finding {:?} symlink for '{}'.", kind, package);
+        log::debug!("Finding {:?} link for '{}'.", source, package);
 
         if package.digest().is_some() {
             return Err(PackageErrorKind::SymlinkRequiresTag);
         }
 
-        if kind == SymlinkKind::Current
-            && let Some(tag) = package.tag()
-        {
-            log::warn!("--current ignores the tag '{tag}' of '{package}'");
-        }
-
-        let symlink_path = self.file_structure().symlinks.symlink(package, kind);
+        let symlink_path = match source {
+            LinkSource::Candidate => self.file_structure().symlinks.candidate(package),
+            LinkSource::Current => {
+                if let Some(tag) = package.tag() {
+                    log::warn!("--current ignores the tag '{tag}' of '{package}'");
+                }
+                self.file_structure().symlinks.current(package)
+            }
+            LinkSource::Path(path) => path.clone(),
+        };
 
         if !ocx_util::fs::path_exists_lossy(&symlink_path).await {
-            return Err(PackageErrorKind::SymlinkNotFound(kind));
+            return Err(PackageErrorKind::SymlinkNotFound(source.clone()));
         }
 
         let packages = &self.file_structure().packages;
+        // A caller-chosen path may lead anywhere; only the ocx-owned namespaces are known to land in the store.
+        if matches!(source, LinkSource::Path(_)) && !super::common::leads_into_store(packages, &symlink_path) {
+            return Err(PackageErrorKind::SymlinkNotFound(source.clone()));
+        }
+
         let (metadata, resolved) = super::common::load_object_data(packages, &symlink_path)
             .await
             .map_err(PackageErrorKind::Internal)?;
-        let identifier = super::common::identifier_for_symlink(packages, &symlink_path, package, kind)
+        let identifier = super::common::identifier_for_symlink(packages, &symlink_path, package, source)
             .await
             .map_err(PackageErrorKind::Internal)?;
 
         log::debug!(
-            "Resolved '{}' via {:?} symlink at '{}'",
+            "Resolved '{}' via {:?} link at '{}'",
             package,
-            kind,
+            source,
             symlink_path.display()
         );
 
-        // Rooted at the symlink, not its target, or `${installPath}` changes on every update.
-        let dir = PackageDir {
-            dir: symlink_path.to_path_buf(),
-        };
+        // Rooted at the link, not its target, or `${installPath}` changes on every update.
+        let dir = PackageDir { dir: symlink_path };
 
         Ok(InstallInfo::new(identifier, metadata, resolved, dir))
     }
@@ -83,13 +89,13 @@ impl PackageManager {
     pub async fn find_symlink_all(
         &self,
         packages: Vec<ocx_oci::PackageRef>,
-        kind: SymlinkKind,
+        source: &LinkSource,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
         let mut infos = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();
 
         for package in &packages {
-            match self.find_symlink(package, kind).await {
+            match self.find_symlink(package, source).await {
                 Ok(info) => infos.push(info),
                 Err(kind) => errors.push(PackageError::new(package.clone(), kind)),
             }
@@ -217,5 +223,24 @@ mod tests {
         let result = manager.installed_current_digest(&identifier).await;
         assert!(result.is_ok(), "garbage digest file must not return an error");
         assert!(result.unwrap().is_none(), "garbage digest file must return None");
+    }
+
+    // ── find_symlink: a caller-chosen link that does not lead into the store ──
+
+    /// A `--link` path at a directory outside the package store is not a package, so `SymlinkNotFound`.
+    #[tokio::test]
+    async fn find_symlink_path_outside_store_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = make_offline_manager(&tmp.path().join("home"));
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let source = crate::composer::LinkSource::Path(outside);
+        let identifier = ocx_oci::PackageRef::new_registry("pkg", "example.com");
+
+        let result = manager.find_symlink(&identifier, &source).await;
+        match result {
+            Err(crate::error::PackageErrorKind::SymlinkNotFound(found)) => assert_eq!(found, source),
+            other => panic!("expected SymlinkNotFound, got {:?}", other.err()),
+        }
     }
 }

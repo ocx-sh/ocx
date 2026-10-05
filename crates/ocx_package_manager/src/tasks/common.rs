@@ -52,22 +52,30 @@ pub async fn find_in_store(
     }
 }
 
-/// Reconstructs the [`PinnedPackageRef`](ocx_oci::PinnedPackageRef) behind a candidate or current symlink.
+/// Reconstructs the [`PinnedPackageRef`](ocx_oci::PinnedPackageRef) behind an install link.
 ///
 /// `Current` drops the caller's tag, which `current` may not hold, or it fabricates a never-installed identifier.
 pub async fn identifier_for_symlink(
     objects: &PackageStore,
     symlink_path: &Path,
     identifier: &ocx_oci::PackageRef,
-    kind: file_structure::SymlinkKind,
+    source: &crate::composer::LinkSource,
 ) -> Result<ocx_oci::PinnedPackageRef, crate::Error> {
     let digest_path = objects.digest_file_for_content(symlink_path)?;
     let digest = file_structure::read_digest_file(&digest_path).await?;
-    let base = match kind {
-        file_structure::SymlinkKind::Candidate => identifier.clone(),
-        file_structure::SymlinkKind::Current => identifier.without_tag(),
+    let base = match source {
+        crate::composer::LinkSource::Current => identifier.without_tag(),
+        crate::composer::LinkSource::Candidate | crate::composer::LinkSource::Path(_) => identifier.clone(),
     };
     Ok(ocx_oci::PinnedPackageRef::try_from(base.clone_with_digest(digest))?)
+}
+
+/// Whether `path` resolves to a directory inside the package store; false on any resolution failure.
+pub(crate) fn leads_into_store(objects: &PackageStore, path: &Path) -> bool {
+    let (Ok(target), Ok(root)) = (dunce::canonicalize(path), dunce::canonicalize(objects.root())) else {
+        return false;
+    };
+    target.starts_with(root)
 }
 
 /// Loads metadata.json and resolve.json for an object path or install symlink.

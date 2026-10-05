@@ -211,12 +211,16 @@ pub enum PackageErrorKind {
     /// A symlink-based path was requested but the identifier carries a digest.
     #[error("symlink resolution requires a tag, not a digest")]
     SymlinkRequiresTag,
-    /// The requested install symlink does not exist.
+    /// The requested install link does not exist, or does not lead into the package store.
     #[error("{}", match _0 {
-        file_structure::SymlinkKind::Candidate => "no installed candidate",
-        file_structure::SymlinkKind::Current => "no selected version",
+        crate::composer::LinkSource::Candidate => "no installed candidate".to_string(),
+        crate::composer::LinkSource::Current => "no selected version".to_string(),
+        crate::composer::LinkSource::Path(path) => format!("no installed package at '{}'", path.display()),
     })]
-    SymlinkNotFound(file_structure::SymlinkKind),
+    SymlinkNotFound(crate::composer::LinkSource),
+    /// `install --link` was given a path that holds something other than an ocx package link.
+    #[error("'{}' exists and is not an ocx package link; refusing to replace it", _0.display())]
+    LinkPathOccupied(std::path::PathBuf),
     /// A spawned task panicked unexpectedly.
     #[error("task panicked unexpectedly")]
     TaskPanicked,

@@ -62,6 +62,9 @@ pub struct Exec {
     #[clap(flatten)]
     platform: options::PlatformOption,
 
+    #[clap(flatten)]
+    content_path: options::ContentPath,
+
     /// Top tier of the `lazy-mode` ladder for every package composed into the child environment.
     ///
     /// `always` composes a package as a generated shim: its declared names
@@ -109,6 +112,17 @@ impl Exec {
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         let mode = resolved_lazy_mode(self.lazy_mode.mode(), self.self_view)?;
+        let materialization = match self.content_path.link_source(identifiers.len())? {
+            // A deferred package has no install link to compose from, so the two requests contradict.
+            Some(_) if mode == ocx_project::lazy::LazyMode::Always => {
+                return Err(crate::error::UsageError::new(
+                    "--candidate/--current/--link cannot be combined with a lazy-mode of 'always': a deferred package has no install link to compose from",
+                )
+                .into());
+            }
+            Some(source) => Materialization::Symlink(source),
+            None => Materialization::Install,
+        };
         // Cloned: `identifiers` is also the record's requested set.
         let requests: Vec<ComposeRequest> = identifiers
             .iter()
@@ -118,7 +132,7 @@ impl Exec {
             })
             .collect();
         let composed = manager
-            .compose_roots(&requests, &platform, Materialization::Install, context.concurrency())
+            .compose_roots(&requests, &platform, materialization, context.concurrency())
             .await?;
         for advisory in &composed.advisories {
             context.ui().warn(advisory.to_string());

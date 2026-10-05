@@ -109,6 +109,7 @@ impl ClassifyExitCode for PackageErrorKind {
             | Self::ShimNameInvalid(_)
             | Self::ShimNameNotClaimed(_)
             | Self::ShimClaimUnfulfilled(_) => ExitCode::DataError,
+            Self::LinkPathOccupied(_) => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
             Self::RequiredCompanionFailed { source, .. } => return source.classify(),
             // The full chain walker, not a single-hop `classify()`, or nested causes go unclassified.

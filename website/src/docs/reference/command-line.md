@@ -351,9 +351,9 @@ case $? in
 esac
 ```
 
-### `--candidate` / `--current` {#path-resolution}
+### `--candidate` / `--current` / `--link` {#path-resolution}
 
-The `--candidate` and `--current` flags are available on commands that resolve a package's
+The `--candidate`, `--current` and `--link` flags are available on commands that resolve a package's
 location on disk, for example [`package env`](#package-env), [`package which`](#which), or [`package exec`](#package-exec).
 
 Every mode returns a **package root** — the directory that contains the package's `content/` and
@@ -362,7 +362,7 @@ files. The mode controls only the *shape* of the path that names that root.
 
 By default these commands return the content-addressed path in the
 [object store](../in-depth/storage.md#packages) — a hash-derived directory that changes
-whenever the package is reinstalled at a different version. Use `--candidate` or `--current` to
+whenever the package is reinstalled at a different version. Use `--candidate`, `--current` or `--link` to
 resolve via a [stable install symlink](#path-resolution) instead, whose path never
 changes regardless of the underlying object. This is useful for paths embedded in editor configs,
 Makefiles, or shell profiles that should survive package updates.
@@ -372,8 +372,9 @@ Makefiles, or shell profiles that should survive package updates.
 | Object store (default) | _(none)_ | `~/.ocx/packages/…/{digest}/` |
 | Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/{tag}` |
 | Current symlink | `--current` | `~/.ocx/symlinks/…/current` |
+| Your own link | `--link <PATH>` | `<PATH>`, as written by [`package install --link`](#package-install) |
 
-All three paths name the same package root: the install symlinks target the object-store package
+All four paths name the same package root: the install symlinks target the object-store package
 directory directly. Consumers that need installed files traverse into `<root>/content/`, launcher
 consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>/metadata.json`.
 
@@ -381,7 +382,8 @@ consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>
 
 - `--candidate`: the package must already be installed. Digest identifiers are rejected — use a tag identifier.
 - `--current`: a version must be selected first (via [`select`](#select) or [`install --select`](#install)). Digest identifiers are rejected. The tag portion of the identifier is ignored — only registry and repository are used to locate the symlink.
-- `--candidate` and `--current` are mutually exclusive.
+- `--link <PATH>`: the link must have been written by [`package install --link`](#package-install). Takes exactly one package, whose identifier names it in the output; more than one exits 64. Digest identifiers are rejected. A path that does not lead to an installed package exits 79.
+- `--candidate`, `--current` and `--link` are mutually exclusive.
 
 ### `--lazy-mode` {#arg-lazy-mode}
 
@@ -847,7 +849,7 @@ Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable fo
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
 In the default mode, packages are auto-installed if not already available locally (including transitive dependencies). Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before its environment is composed — the same gate as [`package install`](#package-install) (see its auto-verify contract).
-See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
+See [Path Resolution](#path-resolution) for the `--candidate`, `--current` and `--link` modes.
 
 For the full `ocx package env` entry, see [`package env`](#package-env).
 
@@ -864,7 +866,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Target platform to consider when resolving packages.
-- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- `--candidate`, `--current`, `--link <PATH>`: Path resolution mode — see [Path Resolution](#path-resolution).
 - `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries (everything publisher marked for own runtime). Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes]. `integrations` is always `[]` under `--self` — integrations reach only the interface surface, regardless of view.
 - `--shell[=NAME]`: Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`.
 - `--ci[=PROVIDER]`: Write the resolved environment into the CI system's persistence channel so later pipeline steps see the exported paths and variables. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects from [`GITHUB_ACTIONS`][env-github-actions] / [`GITLAB_CI`][env-gitlab-ci] (exits 64 if neither detected). Equals-form required. Mutually exclusive with `--shell`. See [CI Integration][in-depth-ci] for full walkthrough.
@@ -986,7 +988,7 @@ Resolves one or more packages and prints their package root paths. This is an OC
 
 The package root is the directory containing the package's `content/` and `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package files. Consumers traverse into `<root>/content/` for installed files or `<root>/entrypoints/` for generated launchers — both stay one path join away.
 
-By default the content-addressed object-store package root is returned. The `--candidate` and `--current` modes return the stable install symlink path; those symlinks themselves target the package root, so traversal works the same through them. See [Path Resolution](#path-resolution) for the trade-off between modes.
+By default the content-addressed object-store package root is returned. The `--candidate`, `--current` and `--link` modes return the stable install symlink path; those symlinks themselves target the package root, so traversal works the same through them. See [Path Resolution](#path-resolution) for the trade-off between modes.
 
 Never downloads anything, whether or not [`--lazy-mode`](#arg-lazy-mode) is passed — this command only reports what already exists on disk. Every entry also names which **kind** of directory it found: `package` for a materialized package root, or `shim` for a package composed with `--lazy-mode always` whose content has not downloaded yet. Once such a package has been used once, its content is on disk and the entry reports `package` again. `--candidate` and `--current` always report `package`, because the install symlinks they resolve are only ever written for materialized content. See [Deferred Packages][in-depth-lazy-loading] for the full lifecycle.
 
@@ -1002,8 +1004,8 @@ ocx package which [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-p`, `--platform`: Platform to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
-- `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
+- `-p`, `--platform`: Platform to consider when resolving. Defaults to the current platform. Ignored when `--candidate`, `--current` or `--link` is set.
+- `--candidate`, `--current`, `--link <PATH>`: Path resolution mode — see [Path Resolution](#path-resolution).
 - [`--lazy-mode`](#arg-lazy-mode): Report a deferred package's shim directory instead of refusing it — see below. Has no effect together with `--candidate`/`--current`, which always report a materialized package.
 - `-h`, `--help`: Print help information.
 
@@ -1665,6 +1667,7 @@ ocx package install [OPTIONS] <PACKAGE>...
 
 - `-p`, `--platform`: Target platform to consider.
 - `-s`, `--select`: After installing, update the [current symlink](#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current`.
+- `--link <PATH>`: Also link the package at `PATH` — see [`package install`](#package-install).
 - `-h`, `--help`: Print help information.
 
 
@@ -5473,6 +5476,7 @@ ocx package install [OPTIONS] <PACKAGE>...
 |------|-------|-------------|
 | `-p`, `--platform` | | Target platform — see [Platforms][reference-platforms] for the grammar (e.g. `linux/amd64`, `linux/amd64+libc.glibc`, `linux/amd64+libc.musl`, `darwin/arm64`). Defaults to the auto-detected current platform. When a feature-tagged value is supplied, OCX selects the manifest whose `os.features` are a subset of the supplied features — use this to force a specific libc variant when you know it will run on the host. If the package ships for the host os/arch but no candidate's `os.features` are a subset of the resolved features (e.g. a glibc-only host against a musl-only entry), install exits [`65`](#exit-codes) (`DataError`) and the error lists the available platforms to override with. |
 | `-s`, `--select` | | After installing, update the [current symlink][fs-symlinks] for each package to point to the newly installed version. |
+| `--link <PATH>` | | Also link the installed package at `PATH`, a location you choose (for example `./.tools/cmake`). While the link exists, [`clean`](#clean) keeps the package; delete the link to release it. Takes exactly one package, otherwise exits 64. `PATH` must not exist yet or be a link an earlier `--link` wrote; a file, a directory, a link elsewhere, or a path inside `OCX_HOME` exits 65 and is left untouched. Read it back with `--link` on [`package which`](#which), [`package env`](#package-env) or [`package exec`](#package-exec). Written for a foreign-platform install too. |
 | `--verify` | | Verify the package's signature when a [`[[trust.policy]]`][config-trust] covers it (default); re-enables verification for this invocation even if [`OCX_NO_VERIFY`][env-no-verify] is set. No effect on a package outside every policy's scope. |
 | `--no-verify` | | Skip that verification for this invocation. Equivalent env var: [`OCX_NO_VERIFY`][env-no-verify] (the flag wins over the env). |
 | `-h`, `--help` | | Print help information. |
@@ -5589,6 +5593,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | Flag | Short | Description |
 |------|-------|-------------|
 | `-p`, `--platform` | | Target platform to consider. |
+| `--candidate`, `--current`, `--link <PATH>` | | Compose from an install link instead of the object store; never installs — see [Path Resolution](#path-resolution). |
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
 | `--rm` | | Remove the packages from the store once the command finishes. A package this invocation downloaded leaves nothing behind; only what nothing else holds is removed — a package that is also installed, one a project's or the global `ocx.lock` pins, or a site-patch companion all stay. Removed and kept packages are logged at the `info` [log level](#arg-log-level), so the terminal stays the command's. The exit code is always the command's; a removal that fails warns on stderr and leaves the exit code alone. Without this flag ocx replaces itself with the command on Unix; with it, ocx stays running as the command's parent and the command's process id is no longer ocx's — see the "Process replacement on Unix" box below. A kill of ocx itself skips the removal, the same hole [`docker run --rm`][docker-run-rm] has. | off |
@@ -5645,7 +5650,7 @@ In plain format, the `Key`/`Type`/`Value` table itself is unchanged — a hint l
 If a package declares [dependencies][ug-dependencies], their environment variables are included in the output in [topological order][ug-deps-env] — dependencies before dependents.
 
 In the default mode, packages are auto-installed if not already available locally (including transitive dependencies). Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before its environment is composed — the same gate as [`package install`](#package-install) (see its auto-verify contract).
-See [Path Resolution](#path-resolution) for the `--candidate` and `--current` modes.
+See [Path Resolution](#path-resolution) for the `--candidate`, `--current` and `--link` modes.
 
 **Usage**
 
@@ -5663,7 +5668,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 | Flag | Short | Description |
 |------|-------|-------------|
 | `-p`, `--platform` | | Target platform to consider. |
-| `--candidate`, `--current` | | Path resolution mode — see [Path Resolution](#path-resolution). |
+| `--candidate`, `--current`, `--link <PATH>` | | Path resolution mode — see [Path Resolution](#path-resolution). |
 | `--self` | | Self view: emits `private` + `public` entries. Default: consumer view (`public` + `interface`). `integrations` is always `[]` under `--self` — integrations reach only the interface surface, regardless of view. |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim instead of downloading content up front. Has no effect together with `--candidate`/`--current`, which always resolve a materialized package. Typing `always` together with `--self` is a usage error (exit 64) — a shim is a consumer-facing launcher and `--self` selects the private view that bypasses launchers, so the two ask for contradictory things. An `always` merely *inherited* from `OCX_LAZY_MODE` is not: `--self` outranks it and composes eagerly. |
 | `--shell[=NAME]` | | Emit eval-safe shell export lines for the named dialect. Same conventions as root [`ocx env --shell`](#env-root). Mutually exclusive with `--ci`. |

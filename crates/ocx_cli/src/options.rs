@@ -33,7 +33,7 @@ pub use bin_scan::{BinScan, BinScanMode};
 pub use completion::Completion;
 pub use compression_level::CompressionLevel;
 pub use consent::Consent;
-pub use content_path::ContentPath;
+pub use content_path::{ContentPath, absolute_link};
 pub use env_override::EnvOverride;
 pub use forge_write::ForgeWriteOptions;
 pub use group_selection::GroupSelection;

@@ -4,6 +4,7 @@
 // No `--global`: `ocx package install --global` is a deliberate usage error (64); the toolchain-tier
 // form is `ocx --global add` (`handshake_toolchain_cli.md`).
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -15,6 +16,14 @@ pub struct Install {
     /// Also set the installed version as current (creates the current symlink)
     #[clap(short = 's', long = "select")]
     select: bool,
+
+    /// Also link the installed package at PATH, which keeps it from `ocx clean` while the link exists.
+    ///
+    /// Takes exactly one package. PATH must be absent or a link an earlier `--link` wrote; anything else is
+    /// refused (exit 65). Delete the link to release the package. Read it back with `--link` on
+    /// `package which`, `package env` or `package exec`.
+    #[clap(long = "link", value_name = "PATH")]
+    link: Option<PathBuf>,
 
     #[clap(flatten)]
     platform: options::PlatformOption,
@@ -29,6 +38,14 @@ pub struct Install {
 
 impl Install {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Before any registry work, so a bad invocation installs nothing.
+        let link = match &self.link {
+            Some(_) if self.packages.len() != 1 => {
+                return Err(crate::error::UsageError::new("--link takes exactly one package").into());
+            }
+            Some(path) => Some(options::absolute_link(path)?),
+            None => None,
+        };
         let oci_packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         log::info!(
             "Installing packages: {}",
@@ -49,6 +66,14 @@ impl Install {
                 false, // user-requested install — run patch discovery
             )
             .await?;
+        if let (Some(link), [info]) = (&link, install_infos.as_slice()) {
+            manager.link_install(info, link).await.map_err(|kind| {
+                ocx_package_manager::error::Error::InstallFailed(vec![ocx_package_manager::error::PackageError::new(
+                    oci_packages[0].clone(),
+                    kind,
+                )])
+            })?;
+        }
 
         let fs = context.file_structure();
         let packages = self
@@ -57,9 +82,11 @@ impl Install {
             .zip(oci_packages.iter())
             .zip(install_infos.iter())
             .map(|((raw, oci_pkg), info)| {
-                // The symlink actually written: none for a foreign-platform install (the
-                // `wire_selection` gate), `current` under `--select`, else the candidate.
-                let path = if !info.is_host_runnable() {
+                // The link actually written: `--link` when given, none for a foreign-platform install
+                // (the `wire_selection` gate), `current` under `--select`, else the candidate.
+                let path = if let Some(link) = &link {
+                    Some(link.clone())
+                } else if !info.is_host_runnable() {
                     None
                 } else if self.select {
                     Some(fs.symlinks.current(oci_pkg))

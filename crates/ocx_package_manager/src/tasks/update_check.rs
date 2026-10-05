@@ -341,7 +341,7 @@ const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 async fn query_installed_version(manager: &PackageManager, identifier: &ocx_oci::PackageRef) -> Option<String> {
     // Via `current`, not tag resolution, which needs `:latest` and breaks on registries with no cascade tags.
     let info = manager
-        .find_symlink(identifier, ocx_store::file_structure::SymlinkKind::Current)
+        .find_symlink(identifier, &crate::composer::LinkSource::Current)
         .await
         .ok()?;
 

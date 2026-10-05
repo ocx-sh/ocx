@@ -24,8 +24,7 @@ use ocx_package::{
 use ocx_project::{ProjectConfig, ProjectLock, ladder::Ladder, lazy::LazyMode, lazy::LazyModeLadder};
 use ocx_store::{
     file_structure::FileStructure, file_structure::PackageDir, file_structure::PackageStore,
-    file_structure::RenderStampScope, file_structure::ShimDir, file_structure::SymlinkKind,
-    file_structure::ToolchainHome,
+    file_structure::RenderStampScope, file_structure::ShimDir, file_structure::ToolchainHome,
 };
 
 use super::tasks::common;
@@ -998,9 +997,19 @@ pub enum Materialization {
     Install,
     /// Probe the local store only; a miss is omitted, not an error (`ocx env --no-pull`).
     LocalOnly,
-    /// Resolve through the stable install-symlink namespace
-    /// (`ocx package env --candidate` / `--current`).
-    Symlink(SymlinkKind),
+    /// Resolve through an install link (`ocx package env --candidate` / `--current` / `--link`).
+    Symlink(LinkSource),
+}
+
+/// The install link a [`Materialization::Symlink`] read goes through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkSource {
+    /// `symlinks/<registry>/<repository>/candidates/<tag>`.
+    Candidate,
+    /// `symlinks/<registry>/<repository>/current`; the identifier's tag is ignored.
+    Current,
+    /// A link `ocx package install --link` wrote; always absolute.
+    Path(PathBuf),
 }
 
 /// A request the composing caller dropped rather than failed on.
@@ -1074,8 +1083,8 @@ impl PackageManager {
                     slots[*index] = Some(Arc::new(found.info));
                 }
             }
-            Materialization::Symlink(kind) => {
-                let found = self.find_symlink_all(identifiers, *kind).await?;
+            Materialization::Symlink(source) => {
+                let found = self.find_symlink_all(identifiers, source).await?;
                 for ((index, _), info) in eager.iter().zip(found) {
                     slots[*index] = Some(Arc::new(info));
                 }
