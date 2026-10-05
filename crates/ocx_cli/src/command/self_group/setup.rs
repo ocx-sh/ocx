@@ -397,6 +397,13 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
             "log out and back in for the session PATH to reach programs started outside a shell",
         );
     }
+    // macOS names an unbundled login item after its executable, so the agent shows up as `sh`.
+    if !dry_run && let Some(plist) = setup::launch_agent_written(&outcome.session_path) {
+        context.ui().status(
+            "Setup",
+            format!("macOS lists the session-PATH agent as \"sh\" under Login Items; that entry is ocx's LaunchAgent {plist:?}"),
+        );
+    }
 }
 
 /// Decide the exit code: [`OcxExitCode::DirtyRcBlock`] (82) for a dirty profile or `[managed]` fence left
