@@ -359,6 +359,38 @@ pub fn remove_binding_in_memory(
     Ok(())
 }
 
+/// Point the `name` binding of `group` ([`crate::DEFAULT_GROUP`] for `[tools]`) at `tag`, keeping
+/// its registry and repository, and return the retagged identifier; no I/O, `path` is error
+/// context. A digest on the old identifier is dropped with the tag it pinned.
+///
+/// # Errors
+///
+/// [`ProjectErrorKind::BindingNotFound`] — `group` holds no `name` binding.
+pub fn retag_binding_in_memory(
+    config: &mut crate::config::ProjectConfig,
+    path: &Path,
+    name: &str,
+    group: &str,
+    tag: &str,
+) -> Result<PackageRef, Error> {
+    let table = if group == super::internal::DEFAULT_GROUP {
+        Some(&mut config.tools)
+    } else {
+        config.groups.get_mut(group).map(|body| &mut body.tools)
+    };
+    let Some(binding) = table.and_then(|tools| tools.get_mut(name)) else {
+        return Err(Error::Project(ProjectError::new(
+            path.to_path_buf(),
+            ProjectErrorKind::BindingNotFound { name: name.to_owned() },
+        )));
+    };
+    *binding = binding.clone_with_tag(tag);
+    let retagged = binding.clone();
+
+    config.invalidate_declaration_hash_cache();
+    Ok(retagged)
+}
+
 /// Create a minimal config (schema directive plus empty `[tools]`) at
 /// `config_path` and return the path; fails if one exists.
 ///
@@ -557,6 +589,94 @@ mod tests {
             remove_binding_in_memory(config, config_path, name, group)
         })
         .await
+    }
+
+    /// Retag a binding through the production path — the `ocx upgrade` shape.
+    async fn retag_binding(
+        config_path: &Path,
+        locks_root: &Path,
+        name: &str,
+        group: &str,
+        tag: &str,
+    ) -> Result<(), Error> {
+        commit_through_guard(config_path, locks_root, |config| {
+            retag_binding_in_memory(config, config_path, name, group, tag).map(|_| ())
+        })
+        .await
+    }
+
+    // ── retag_binding ────────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retag_binding_moves_default_tag_and_keeps_comments() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(
+            dir.path(),
+            "# project tools\n[tools]\n# build system\ncmake = \"example.com/cmake:3.28\"  # pinned minor\nninja = \"example.com/ninja:1.11\"\n",
+        );
+
+        retag_binding(
+            &toml(dir.path()),
+            &locks(dir.path()),
+            "cmake",
+            crate::DEFAULT_GROUP,
+            "3.29",
+        )
+        .await
+        .unwrap();
+
+        let rendered = fs::read_to_string(toml(dir.path())).unwrap();
+        assert!(rendered.contains("# project tools"), "{rendered}");
+        assert!(rendered.contains("# build system"), "{rendered}");
+        assert!(rendered.contains("# pinned minor"), "{rendered}");
+        assert!(rendered.contains("example.com/ninja:1.11"), "{rendered}");
+        let cfg = reload_config(dir.path());
+        assert_eq!(cfg.tools["cmake"], test_id("example.com", "cmake", "3.29"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retag_binding_targets_named_group_only() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(
+            dir.path(),
+            "[tools]\ncmake = \"example.com/cmake:3.28\"\n\n[group.ci.tools]\ncmake = \"example.com/cmake:3.28\"\n",
+        );
+
+        retag_binding(&toml(dir.path()), &locks(dir.path()), "cmake", "ci", "4")
+            .await
+            .unwrap();
+
+        let cfg = reload_config(dir.path());
+        assert_eq!(cfg.tools["cmake"], test_id("example.com", "cmake", "3.28"));
+        assert_eq!(cfg.groups["ci"].tools["cmake"], test_id("example.com", "cmake", "4"));
+    }
+
+    #[test]
+    fn retag_binding_errors_when_missing_and_drops_a_digest() {
+        let path = Path::new("ocx.toml");
+        let mut cfg = ProjectConfig::from_toml_str(&format!(
+            "[tools]\ncmake = \"example.com/cmake:3.28@sha256:{}\"\n",
+            "a".repeat(64)
+        ))
+        .unwrap();
+
+        let err = retag_binding_in_memory(&mut cfg, path, "ninja", crate::DEFAULT_GROUP, "1.12")
+            .expect_err("an absent binding must be refused");
+        assert!(
+            matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::BindingNotFound { .. })),
+            "expected BindingNotFound; got: {err}"
+        );
+        let err = retag_binding_in_memory(&mut cfg, path, "cmake", "ci", "3.29")
+            .expect_err("an absent group must be refused");
+        assert!(
+            matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::BindingNotFound { .. })),
+            "expected BindingNotFound; got: {err}"
+        );
+
+        let retagged = retag_binding_in_memory(&mut cfg, path, "cmake", crate::DEFAULT_GROUP, "3.29").unwrap();
+        assert_eq!(retagged, test_id("example.com", "cmake", "3.29"));
+        assert_eq!(retagged.digest(), None);
+        assert_eq!(cfg.tools["cmake"], retagged);
     }
 
     // ── add_binding ──────────────────────────────────────────────────────────

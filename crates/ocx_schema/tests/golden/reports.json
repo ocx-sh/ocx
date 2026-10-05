@@ -159,6 +159,12 @@
     "VerboseUpdateReport": {
       "$ref": "#/$defs/VerboseUpdateReport"
     },
+    "UpgradeReport": {
+      "$ref": "#/$defs/UpgradeReport"
+    },
+    "VerboseUpgradeReport": {
+      "$ref": "#/$defs/VerboseUpgradeReport"
+    },
     "VerificationReport": {
       "$ref": "#/$defs/VerificationReport"
     },
@@ -6278,6 +6284,197 @@
         "metadata_changed"
       ],
       "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\n`tag` and the version fields, and in `changes` rows also `from`/`to`, are\npresent and `null` rather than absent. A version is best effort: a miss,\nan `--offline` or `--frozen` run, or a digest-pinned binding reports\n`null`. **The payload is identical with and without `--verbose`**:\nverbosity changes the plain rendering only."
+    },
+    "UpgradeReport": {
+      "type": "object",
+      "properties": {
+        "upgrades": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TagUpgrade"
+          },
+          "description": "Bindings whose declared tag moved (or, under `--check`, would move)."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SkippedBinding"
+          },
+          "description": "Bindings left alone, each with its reason."
+        },
+        "beyond_major": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BeyondMajor"
+          },
+          "description": "Bindings with a newer release beyond their major."
+        },
+        "lock": {
+          "$ref": "#/$defs/UpdateReport",
+          "description": "What the re-lock moved in `ocx.lock`."
+        }
+      },
+      "required": [
+        "upgrades",
+        "skipped",
+        "beyond_major",
+        "lock"
+      ],
+      "description": "Report emitted by `ocx upgrade` (and by `ocx upgrade --check` before it exits 65).\n\nRows are ordered by `(group, name)`. `lock` is the `ocx update` report of the re-lock the\nretagged bindings caused."
+    },
+    "TagUpgrade": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local binding name (the `ocx.toml` key)."
+        },
+        "group": {
+          "type": "string",
+          "description": "Owning group — `default` for the top-level `[tools]` table."
+        },
+        "from_tag": {
+          "type": "string",
+          "description": "The tag declared before the upgrade."
+        },
+        "to_tag": {
+          "type": "string",
+          "description": "The tag declared after the upgrade."
+        }
+      },
+      "required": [
+        "name",
+        "group",
+        "from_tag",
+        "to_tag"
+      ],
+      "description": "One binding whose declared tag moved in `ocx.toml`."
+    },
+    "SkippedBinding": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local binding name (the `ocx.toml` key)."
+        },
+        "group": {
+          "type": "string",
+          "description": "Owning group — `default` for the top-level `[tools]` table."
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The declared tag; `null` when the binding spells none (a bare name or a digest)."
+        },
+        "reason": {
+          "$ref": "#/$defs/SkipReason",
+          "description": "Why the tag did not move."
+        }
+      },
+      "required": [
+        "name",
+        "group",
+        "tag",
+        "reason"
+      ],
+      "description": "One binding `ocx upgrade` left alone."
+    },
+    "SkipReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "digest_pinned",
+          "description": "The binding names a digest, so there is no tag to move."
+        },
+        {
+          "type": "string",
+          "const": "latest",
+          "description": "The binding tracks `latest`, which already follows every release."
+        },
+        {
+          "type": "string",
+          "const": "not_a_version",
+          "description": "The tag is not a version (`nightly`, a bare variant name)."
+        },
+        {
+          "type": "string",
+          "const": "prerelease_or_build",
+          "description": "The tag carries a prerelease or build suffix, which pins one exact artifact."
+        },
+        {
+          "type": "string",
+          "const": "up_to_date",
+          "description": "No newer release exists within the policy."
+        }
+      ],
+      "description": "Why `ocx upgrade` leaves a binding's tag where it is; a report row, never an error."
+    },
+    "BeyondMajor": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local binding name (the `ocx.toml` key)."
+        },
+        "group": {
+          "type": "string",
+          "description": "Owning group — `default` for the top-level `[tools]` table."
+        },
+        "tag": {
+          "type": "string",
+          "description": "The tag declared after this run."
+        },
+        "newest_tag": {
+          "type": "string",
+          "description": "The newest tag at the same precision in a higher major."
+        }
+      },
+      "required": [
+        "name",
+        "group",
+        "tag",
+        "newest_tag"
+      ],
+      "description": "A newer release outside the current major, which only `--major` moves to."
+    },
+    "VerboseUpgradeReport": {
+      "type": "object",
+      "properties": {
+        "upgrades": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TagUpgrade"
+          },
+          "description": "Bindings whose declared tag moved (or, under `--check`, would move)."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SkippedBinding"
+          },
+          "description": "Bindings left alone, each with its reason."
+        },
+        "beyond_major": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BeyondMajor"
+          },
+          "description": "Bindings with a newer release beyond their major."
+        },
+        "lock": {
+          "$ref": "#/$defs/UpdateReport",
+          "description": "What the re-lock moved in `ocx.lock`."
+        }
+      },
+      "required": [
+        "upgrades",
+        "skipped",
+        "beyond_major",
+        "lock"
+      ],
+      "description": "Report emitted by `ocx upgrade` (and by `ocx upgrade --check` before it exits 65).\n\nRows are ordered by `(group, name)`. `lock` is the `ocx update` report of the re-lock the\nretagged bindings caused."
     },
     "VerificationReport": {
       "type": "object",

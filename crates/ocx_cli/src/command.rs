@@ -80,6 +80,7 @@ pub mod toolchain_env;
 pub mod toolchain_exec;
 pub mod uninstall;
 pub mod update;
+pub mod upgrade;
 pub mod version;
 pub mod which;
 
@@ -158,6 +159,21 @@ pub enum Command {
         `shells/default/bin` launchers reached through the `active` link follow the advanced lock. \
         That directory carries its own `.gitignore`, so `git status` stays clean.")]
     Update(update::Update),
+    /// Move declared tags in ocx.toml to the newest published release.
+    #[command(long_about = "\
+        Move declared tags in ocx.toml to the newest published release.\n\n\
+        `ocx update` moves the lock to where a tag points now; `ocx upgrade` moves the tag \
+        itself. A binding keeps its variant and precision and stays within its major: \
+        `cmake:3.28` moves to `cmake:3.29`, and `cmake:3` has nothing to move to until \
+        `--major` lets it cross to `cmake:4`. A newer major is listed for information either \
+        way. Digest-pinned, `latest`, prerelease, build-suffixed and non-version tags are left \
+        alone and reported with the reason. The retagged bindings are then re-locked and the \
+        project toolchain re-rendered, as `ocx update` does.\n\n\
+        Pass binding names or `-g/--group` to upgrade only part of the toolchain. `--check` \
+        writes nothing and exits 65 when a tag would move. Needs an existing `ocx.lock` (exit \
+        78), refuses a drifted `ocx.toml` (exit 65), rejects an unknown group or name (exit \
+        64), and is refused under `--frozen` or `--offline` (exit 81).")]
+    Upgrade(upgrade::Upgrade),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
     Launcher(launcher::Launcher),
@@ -228,6 +244,7 @@ impl Command {
             Command::Login(login) => login.execute(context).await,
             Command::Logout(logout) => logout.execute(context).await,
             Command::Update(update) => update.execute(context).await,
+            Command::Upgrade(upgrade) => upgrade.execute(context).await,
             Command::Launcher(launcher) => launcher.execute(context).await,
             Command::Package(package) => package.execute(context).await,
             Command::Patch(patch_group) => patch_group.execute(context).await,

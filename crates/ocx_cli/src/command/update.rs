@@ -112,7 +112,7 @@ impl Update {
         let mut report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref());
         // Offline and frozen runs read a snapshot that may lag the registry, so they report no version.
         if !context.is_offline() && !context.config_view().frozen {
-            report.fill_versions(&concrete_versions(resolve_index, &report).await);
+            report.fill_versions(&concrete_versions(resolve_index, report.version_lookups()).await);
         }
 
         // Reported before the exit-65 diagnostic, so a refusal names what moved.
@@ -190,9 +190,12 @@ const VERSION_PROBES: usize = 8;
 /// Most version lookups in flight at once.
 const VERSION_LOOKUP_CONCURRENCY: usize = 8;
 
-/// The concrete release behind each of the report's tagged pins; a miss or a failed lookup is absent.
-async fn concrete_versions(index: &ocx_index::Index, report: &UpdateReport) -> BTreeMap<VersionKey, String> {
-    futures::stream::iter(report.version_lookups())
+/// The concrete release behind each lookup ([`UpdateReport::version_lookups`]); a miss or a failed lookup is absent.
+pub(crate) async fn concrete_versions(
+    index: &ocx_index::Index,
+    lookups: BTreeMap<VersionKey, BTreeMap<String, ocx_oci::Digest>>,
+) -> BTreeMap<VersionKey, String> {
+    futures::stream::iter(lookups)
         .map(|((pull, tag), leaves)| async move {
             let advisory = pull.clone_with_tag(tag.as_str());
             let found =
@@ -211,7 +214,7 @@ async fn concrete_versions(index: &ocx_index::Index, report: &UpdateReport) -> B
 }
 
 /// The exit-78 error for a missing predecessor `ocx.lock`.
-fn missing_lock(lock_path: &std::path::Path) -> CommandError {
+pub(crate) fn missing_lock(lock_path: &std::path::Path) -> CommandError {
     CommandError::new(
         format!(
             "ocx.lock not found at {}; run `ocx lock` to create it",
@@ -228,7 +231,7 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
 /// # Errors
 ///
 /// [`ocx_exit::ExitCode::UsageError`] for an unknown group or a name matching no binding in scope.
-fn select_touched(
+pub(crate) fn select_touched(
     config: &ProjectConfig,
     groups: &[String],
     names: &[String],
