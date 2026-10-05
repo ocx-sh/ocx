@@ -45,6 +45,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -395,6 +396,45 @@ def test_shared_layer_files_have_same_inode(
         f"but got {inode_a} (A) vs {inode_b} (B). "
         f"Paths: {file_a}, {file_b}"
     )
+
+
+# ---------------------------------------------------------------------------
+# I7: Hard-linked names in the source tree install as one inode (ocx-sh/ocx#585)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ocx package create stores full copies on Windows")
+def test_hard_linked_names_install_as_one_inode(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """I7: A multicall binary shipped under several hard-linked names is
+    bundled once (later names become tar hard-link entries) and installs with
+    every name sharing one inode, so argv[0] dispatch sees each name as itself.
+    """
+    pkg_dir = _build_fixed_pkg_dir(tmp_path, "multicall-pkg")
+    names = ["hello", "hello-alias", "hello-other"]
+    for alias in names[1:]:
+        os.link(pkg_dir / "bin" / "hello", pkg_dir / "bin" / alias)
+
+    metadata_path = tmp_path / "multicall-metadata.json"
+    _write_minimal_metadata(metadata_path)
+    tag = "1.0.0"
+    bundle_path = tmp_path / "bundle-multicall.tar.xz"
+    _push_bundle(ocx, pkg_dir, metadata_path, bundle_path, f"{ocx.registry}/{unique_repo}:{tag}")
+
+    with tarfile.open(bundle_path, "r:xz") as archive:
+        links = {member.name: member.linkname for member in archive.getmembers() if member.islnk()}
+    assert links == {"bin/hello-alias": "bin/hello", "bin/hello-other": "bin/hello"}
+
+    short = f"{unique_repo}:{tag}"
+    ocx.plain("index", "update", short)
+    ocx.json("package", "install", short)
+    bin_dir = _find_content_path(ocx, short) / "bin"
+
+    inodes = {name: os.stat(bin_dir / name).st_ino for name in names}
+    assert len(set(inodes.values())) == 1, f"hard-linked names installed as separate files: {inodes}"
 
 
 # ---------------------------------------------------------------------------

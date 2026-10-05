@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -60,7 +62,8 @@ impl Backend for TarBackend {
     async fn add_dir_all(&mut self, archive_path: PathBuf, dir: PathBuf) -> Result<()> {
         self.run_blocking(move |builder| {
             let mut count = 0u64;
-            add_dir_recursive(builder, &archive_path, &dir, &mut count)?;
+            let mut first_names = HashMap::new();
+            add_dir_recursive(builder, &archive_path, &dir, &mut count, &mut first_names)?;
             tracing::debug!("Bundled {count} entries total");
             Ok(())
         })
@@ -87,6 +90,7 @@ fn add_dir_recursive(
     base_path: &Path,
     dir: &Path,
     count: &mut u64,
+    first_names: &mut HashMap<(u64, u64), PathBuf>,
 ) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| Error::Io {
@@ -109,16 +113,42 @@ fn add_dir_recursive(
             base_path.join(&name)
         };
 
-        builder
-            .append_path_with_name(&path, &archive_name)
-            .map_err(Error::Tar)?;
-
         let ft = entry.file_type().map_err(|e| Error::Io {
             path: path.clone(),
             source: e,
         })?;
+        let link_target = if ft.is_file() {
+            let metadata = entry.metadata().map_err(|e| Error::Io {
+                path: path.clone(),
+                source: e,
+            })?;
+            hard_link_key(&metadata).and_then(|key| match first_names.entry(key) {
+                Entry::Occupied(first) => Some((metadata, first.get().clone())),
+                Entry::Vacant(slot) => {
+                    slot.insert(archive_name.clone());
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        if let Some((metadata, first_name)) = link_target {
+            let mut header = tar::Header::new_gnu();
+            header.set_metadata_in_mode(&metadata, tar::HeaderMode::Deterministic);
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_size(0);
+            builder
+                .append_link(&mut header, &archive_name, &first_name)
+                .map_err(Error::Tar)?;
+        } else {
+            builder
+                .append_path_with_name(&path, &archive_name)
+                .map_err(Error::Tar)?;
+        }
+
         if ft.is_dir() {
-            add_dir_recursive(builder, &archive_name, &path, count)?;
+            add_dir_recursive(builder, &archive_name, &path, count, first_names)?;
         }
 
         *count += 1;
@@ -128,6 +158,19 @@ fn add_dir_recursive(
         }
     }
     Ok(())
+}
+
+/// `(device, inode)` of a file with more than one name, the identity a later name links back to.
+#[cfg(unix)]
+fn hard_link_key(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.nlink() > 1).then(|| (metadata.dev(), metadata.ino()))
+}
+
+// ponytail: Windows std has no stable link count or file index, so every name stays a full copy there.
+#[cfg(not(unix))]
+fn hard_link_key(_metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 /// Extract a tar from `reader` into `output`, returning the reader (partially consumed on error) for its adapter state.
@@ -358,6 +401,139 @@ mod tests {
                 "alias is a copy, not a hard link"
             );
         }
+        // No stable link count on Windows: a write through one name showing up under the other proves one NTFS file.
+        #[cfg(windows)]
+        {
+            std::fs::write(&alias, b"rewritten").unwrap();
+            let original = extract_dir.path().join("dir/original.txt");
+            assert_eq!(
+                std::fs::read(&original).unwrap(),
+                b"rewritten",
+                "alias is a copy, not a hard link"
+            );
+        }
+    }
+
+    /// Bundles `src` under `base` into a plain tar and lists each entry as (path, type, link name, size).
+    #[cfg(unix)]
+    async fn bundle_entries(
+        src: &std::path::Path,
+        base: &str,
+    ) -> (tempfile::TempDir, Vec<(String, ::tar::EntryType, Option<String>, u64)>) {
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar");
+        let mut archive = Archive::create(&archive_path).await.unwrap();
+        archive.add_dir_all(base, src).await.unwrap();
+        archive.finish().await.unwrap();
+
+        let mut tar = ::tar::Archive::new(std::fs::File::open(&archive_path).unwrap());
+        let entries = tar
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let header = entry.header();
+                (
+                    entry.path().unwrap().to_string_lossy().into_owned(),
+                    header.entry_type(),
+                    entry
+                        .link_name()
+                        .unwrap()
+                        .map(|name| name.to_string_lossy().into_owned()),
+                    header.size().unwrap(),
+                )
+            })
+            .collect();
+        (out_dir, entries)
+    }
+
+    /// A multicall tree: `bin/llvm` plus two hard-linked names for it.
+    #[cfg(unix)]
+    fn multicall_tree() -> tempfile::TempDir {
+        let src = tempfile::tempdir().unwrap();
+        let bin = src.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("llvm"), b"multicall body").unwrap();
+        std::fs::hard_link(bin.join("llvm"), bin.join("clang")).unwrap();
+        std::fs::hard_link(bin.join("llvm"), bin.join("clang++")).unwrap();
+        src
+    }
+
+    /// ocx-sh/ocx#585: every name of one inode after the first in walk order is a link entry, so the bytes are stored once.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_linked_names_are_stored_once() {
+        let src = multicall_tree();
+        let (_out, entries) = bundle_entries(src.path(), "").await;
+
+        let file = |name: &str| entries.iter().find(|entry| entry.0 == name).unwrap().clone();
+        let body_len = b"multicall body".len() as u64;
+        assert_eq!(
+            file("bin/clang"),
+            ("bin/clang".into(), ::tar::EntryType::Regular, None, body_len)
+        );
+        for alias in ["bin/clang++", "bin/llvm"] {
+            assert_eq!(
+                file(alias),
+                (alias.into(), ::tar::EntryType::Link, Some("bin/clang".into()), 0),
+                "{alias} must be a hard-link entry to the first name in sorted order"
+            );
+        }
+    }
+
+    /// The link name is an archive path, so a bundle prefix lands in it too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_link_names_carry_the_bundle_prefix() {
+        let src = multicall_tree();
+        let (_out, entries) = bundle_entries(src.path(), "pkg").await;
+
+        let llvm = entries.iter().find(|entry| entry.0 == "pkg/bin/llvm").unwrap();
+        assert_eq!(llvm.1, ::tar::EntryType::Link);
+        assert_eq!(llvm.2.as_deref(), Some("pkg/bin/clang"));
+    }
+
+    /// A file whose other names all live outside the bundled tree has nothing in the archive to link to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_link_to_a_file_outside_the_tree_stays_a_full_copy() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("tool"), b"tool body").unwrap();
+        let src = tempfile::tempdir().unwrap();
+        std::fs::hard_link(outside.path().join("tool"), src.path().join("tool")).unwrap();
+
+        let (_out, entries) = bundle_entries(src.path(), "").await;
+
+        assert_eq!(entries, vec![("tool".into(), ::tar::EntryType::Regular, None, 9)]);
+    }
+
+    /// Bundle then extract: the names come back as one inode, which is what an install hardlinks into the package.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_linked_names_round_trip_as_one_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let src = multicall_tree();
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar.zst");
+        let mut archive = Archive::create(&archive_path).await.unwrap();
+        archive.add_dir_all("", src.path()).await.unwrap();
+        archive.finish().await.unwrap();
+
+        let extract_dir = tempfile::tempdir().unwrap();
+        Archive::extract(&archive_path, extract_dir.path()).await.unwrap();
+
+        let inode = |name: &str| {
+            std::fs::metadata(extract_dir.path().join("bin").join(name))
+                .unwrap()
+                .ino()
+        };
+        assert_eq!(inode("clang"), inode("llvm"));
+        assert_eq!(inode("clang++"), inode("llvm"));
+        assert_eq!(
+            std::fs::read(extract_dir.path().join("bin/clang++")).unwrap(),
+            b"multicall body"
+        );
     }
 
     /// Regression: tar archives must not embed the build host's ownership or per-file
