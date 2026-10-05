@@ -259,6 +259,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Login(_) => "login",
         Command::Logout(_) => "logout",
         Command::Update(_) => "update",
+        Command::Upgrade(_) => "upgrade",
         Command::Launcher(sub) => match sub {
             LauncherCmd::Exec(_) => "launcher exec",
             LauncherCmd::Shim(_) => "launcher shim",
@@ -372,6 +373,7 @@ fn should_check_toolchain_drift(command: &command::Command) -> bool {
         | Command::Env(_)
         | Command::Direnv(_)
         | Command::Update(_)
+        | Command::Upgrade(_)
         | Command::Lock(_)
         | Command::Add(_)
         | Command::Remove(_)
@@ -1047,6 +1049,7 @@ mod tests {
     fn should_check_toolchain_drift_skips_the_lock_writers_and_the_update_skip_set() {
         for argv in [
             &["update"][..],
+            &["upgrade"],
             &["lock"],
             &["add", "ocx.sh/cmake:3"],
             &["remove", "cmake"],
@@ -1064,6 +1067,20 @@ mod tests {
             assert!(
                 !should_check_toolchain_drift(&command),
                 "`ocx {}` must not run the toolchain drift check",
+                argv.join(" ")
+            );
+        }
+    }
+
+    /// `upgrade` keeps the self check and the managed tick, the same as `update`.
+    #[test]
+    fn upgrade_keeps_the_self_check_and_the_managed_tick() {
+        for argv in [&["update"][..], &["upgrade"]] {
+            let command = Some(parse_command(argv));
+            assert!(should_check_for_update(&command), "`ocx {}`", argv.join(" "));
+            assert!(
+                should_check_managed_config_refresh(&command),
+                "`ocx {}`",
                 argv.join(" ")
             );
         }

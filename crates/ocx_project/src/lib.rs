@@ -39,7 +39,8 @@ pub use lock::{
     first_per_content, locked_tool_content_equal,
 };
 pub use mutate::{
-    add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding_in_memory, set_activate,
+    add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding_in_memory,
+    retag_binding_in_memory, set_activate,
 };
 pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};

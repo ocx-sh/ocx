@@ -96,6 +96,8 @@ pub fn reports_schema() -> String {
         ocx::api::data::tag::Tags,
         ocx::api::data::update::UpdateReport,
         ocx::api::data::update::VerboseUpdateReport,
+        ocx::api::data::upgrade::UpgradeReport,
+        ocx::api::data::upgrade::VerboseUpgradeReport,
         ocx::api::data::verification::VerificationReport,
         ocx::api::data::version::VerboseVersionData,
         ocx::api::data::version::VersionData,

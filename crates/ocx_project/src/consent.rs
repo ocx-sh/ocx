@@ -289,9 +289,9 @@ pub enum Revoked {
     Absent,
 }
 
-/// Record consent for `project_dir` over `sources`. Only the seven
-/// project-scoped commands (`add`, `remove`, `lock`, `update`, `pull`, `exec`,
-/// `init`) may call it: a stamp from a shared loader would auto-grant consent.
+/// Record consent for `project_dir` over `sources`. Only the eight
+/// project-scoped commands (`add`, `remove`, `lock`, `update`, `upgrade`, `pull`,
+/// `exec`, `init`) may call it: a stamp from a shared loader would auto-grant consent.
 /// `project_dir` must come from [`canonical_project_dir`], or the stamp keys as
 /// another directory.
 ///

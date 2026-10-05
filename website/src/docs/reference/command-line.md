@@ -1873,7 +1873,7 @@ Re-resolves advisory tags in `ocx.toml` against the live registry and rewrites `
 
 Because it is the only command that holds both the predecessor `ocx.lock` and the candidate at the same moment, `ocx update` reports **what moved**, not just what is now pinned: a table of the bindings whose pull identifier changed, the ones that held still summarized behind a hint line unless `--verbose` lists them too. See [Report](#update-report) below for the full shape.
 
-Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped update advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To pin a new explicit version, edit `ocx.toml` directly; that is a declaration change, not an update.
+Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped update advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To move the declared tag to a newer release, use [`ocx upgrade`](#upgrade); that is a declaration change, not an update.
 
 ::: tip `ocx update` vs `ocx lock`
 Whole-file `ocx update` always re-resolves every tag against the registry; scoped to `-g`/`NAME` arguments, it re-resolves only those. `ocx lock` only re-resolves when `ocx.toml` drifted (idempotent when clean), and prefers the local index like other project-tier commands. To advance versions, use `ocx update`. To reconcile a changed config, use `ocx lock`.
@@ -1954,6 +1954,101 @@ ocx update -g ci
 ```
 
 Concurrent invocations of `ocx update` and `ocx lock` serialise through a content-keyed lock entry under `$OCX_HOME/locks` — see [Concurrent writes][in-depth-project-lock-concurrency] for why the mutex is not on `ocx.toml` itself.
+
+### `upgrade` {#upgrade}
+
+Moves declared tags in `ocx.toml` to the newest published release, then re-locks and re-renders the project toolchain.
+
+[`ocx update`](#update) moves the lock to where a tag points now; `ocx upgrade` moves the tag itself. `cmake:3.28` becomes `cmake:3.29` in `ocx.toml`, and `ocx.lock` follows. Comments and formatting in `ocx.toml` survive the edit.
+
+Each binding keeps its variant and its precision. A `debug-3.28` binding considers only `debug-*` tags, and a two-component tag moves to a two-component tag. A binding stays within its current major unless `--major` is given. The candidate must be strictly newer than the declared tag, with no prerelease or build suffix.
+
+A binding that cannot move is a report row, never an error. Each carries one reason:
+
+| Reason | Meaning |
+|--------|---------|
+| `digest_pinned` | The binding is pinned to a digest. |
+| `latest` | The tag is `latest`, or the binding declares no tag. |
+| `not_a_version` | The tag is not a version (`nightly`). |
+| `prerelease_or_build` | The tag carries a prerelease or build suffix (`1.0.0-rc1`). |
+| `up_to_date` | No newer tag exists at that precision within the allowed major. |
+
+A newer major that `--major` was not asked to cross is listed as a hint, with the newest tag at the same precision.
+
+Tag listings come from the registry every time, as for `ocx update`, and never touch the local index. Only the retagged bindings are re-resolved; every other pin in `ocx.lock` carries forward unchanged. When nothing would move, nothing is resolved and neither file is written.
+
+::: tip `ocx upgrade` vs `ocx update`
+`ocx update` leaves `ocx.toml` alone and re-resolves tags to their current digests. `ocx upgrade` rewrites the tags in `ocx.toml` and re-locks only what it rewrote. A moving tag such as `:3` is the case for `update`; a pinned `:3.28` is the case for `upgrade`.
+:::
+
+**Usage**
+
+```shell
+ocx upgrade [OPTIONS] [NAME...]
+```
+
+**Options**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--check` | — | Prints the report and exits 0 (nothing would move) or 65 (`DataError`, a tag would move). Writes neither `ocx.toml` nor `ocx.lock`. A newer major that `--major` was not given for does not count. | off |
+| `--major` | — | Allow a tag to move to a newer major version. Without it a binding stays within its major and the newer major is only listed. | off |
+| `--group <NAME>` | `-g` | Upgrade every binding in one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Combine with `NAME` arguments to upgrade only those bindings within the named groups. | *(whole file)* |
+| `NAME...` | — | Binding names to upgrade. Each name is upgraded in every group it appears in (narrow with `-g`). | *(whole file)* |
+| `--verbose` | `-v` | List the skipped bindings with their reason as well as the upgraded ones. Affects the plain rendering only — `ocx --format json upgrade` carries every field either way. | off |
+| `-h`, `--help` | | Print help information. | |
+
+After writing, `ocx upgrade` materialises the new pins for the host platform, the default of `ocx update`.
+
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global upgrade`. See [`--global`][global-flag].
+:::
+
+#### Report {#upgrade-report}
+
+Plain format renders one four-column table — `Binding | Group | From | To` — with one row per moved tag. `From` and `To` are the tags as declared. Under `--verbose`, skipped bindings join the table with `skipped: <reason>` in the `To` column. Otherwise a hint names their count. Each beyond-major row adds a hint naming the newest tag and `--major`.
+
+`ocx --format json upgrade` emits `{ "upgrades": [...], "skipped": [...], "beyond_major": [...], "lock": {...} }`, identical at both verbosities. Rows are ordered by group, then name.
+
+| Field | Entry shape |
+|-------|-------------|
+| `upgrades[]` | `{ name, group, from_tag, to_tag }` |
+| `skipped[]` | `{ name, group, tag, reason }`. `tag` is `null` for a binding with no tag or a digest pin. `reason` is one of the values above. |
+| `beyond_major[]` | `{ name, group, tag, newest_tag }`. `tag` is the tag declared after this run; `newest_tag` is the newest tag in a higher major. |
+| `lock` | The [`ocx update` report](#update-report) of the re-lock the retagged bindings caused, version fields included. Its `changes` is empty when nothing moved. |
+
+`--check` prints this same report and exits 65 with **no** `error.detail` envelope — the report itself is the verdict.
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Tags moved and `ocx.lock` written, nothing needed to move, or `--check` found nothing to move. |
+| 64 | Missing `ocx.toml`, `--global` combined with `--project`, or an unknown `-g` group or binding `NAME`. |
+| 65 | `--check` found a tag that would move, or `ocx.toml` has drifted from `ocx.lock` (hand-edited since the last `ocx lock`) — run `ocx lock` to reconcile. |
+| 69 | Registry unreachable while listing tags or resolving. |
+| 74 | I/O error writing `ocx.toml` or `ocx.lock`. |
+| 75 | Transient failure (connect failure, timeout, 408/429/502/503/504) — retry. |
+| 78 | `ocx.toml` or `ocx.lock` malformed, or no `ocx.lock` exists (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
+| 79 | A `required` patch companion could not be found. `ocx.toml` and `ocx.lock` are already written at that point. |
+| 80 | Authentication failure against the registry. |
+| 81 | `--offline` or `--frozen`. Upgrading needs live tag listings. |
+
+**Examples**
+
+```shell
+# See which tags would move, without writing anything:
+ocx upgrade --check
+
+# Move every binding to its newest release within its major:
+ocx upgrade
+
+# Move just cmake, and let it cross to a new major:
+ocx upgrade --major cmake
+
+# Upgrade the ci group and list what was left alone:
+ocx upgrade -g ci --verbose
+```
 
 ### `pull` {#pull}
 

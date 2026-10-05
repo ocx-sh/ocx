@@ -524,7 +524,7 @@ mod tests {
         );
     }
 
-    // ── the write seam is a closed allowlist of seven commands ─────────────
+    // ── the write seam is a closed allowlist of eight commands ─────────────
 
     /// The seam call every consent writer routes through. A caller that stamps
     /// names one of these two; a caller that does not, names neither.
@@ -564,7 +564,7 @@ mod tests {
         rest[..end].to_string()
     }
 
-    /// Exactly the seven explicit project-scoped commands stamp consent, and
+    /// Exactly the eight explicit project-scoped commands stamp consent, and
     /// no other command file does.
     ///
     /// Both halves are asserted. The positive half is what keeps this from
@@ -573,8 +573,8 @@ mod tests {
     /// written from `ocx inspect` or `ocx env` would consent to a project the
     /// user only asked to look at.
     #[test]
-    fn a029_exactly_seven_commands_write_a_consent_stamp() {
-        let members: [(&str, &str); 7] = [
+    fn a029_exactly_eight_commands_write_a_consent_stamp() {
+        let members: [(&str, &str); 8] = [
             // `init` is the one member that creates the project it consents to,
             // through the sources-taking half of the seam: it has no lock to
             // derive a source set from (ocx-sh/ocx#397).
@@ -583,6 +583,7 @@ mod tests {
             ("remove", include_str!("../command/remove.rs")),
             ("lock", include_str!("../command/lock.rs")),
             ("update", include_str!("../command/update.rs")),
+            ("upgrade", include_str!("../command/upgrade.rs")),
             ("pull", include_str!("../command/pull.rs")),
             ("exec", include_str!("../command/toolchain_exec.rs")),
         ];

@@ -777,7 +777,7 @@ One exception, visible in the example above: when the invocation also carries an
 
 ### `OCX_NO_CONSENT` {#ocx-no-consent}
 
-When set to a [truthy value](#truthy-values), the seven commands that record a [shell-activation consent stamp][in-depth-shell-grants] as a side effect — [`add`][cmd-add], [`remove`][cmd-remove], [`lock`][cmd-lock], [`update`][cmd-update], [`pull`][cmd-pull], [`exec`][cmd-run] and [`init`][cmd-init] — run without writing one. Nothing else changes: the pull still pulls, the child process still runs, the lock is still written.
+When set to a [truthy value](#truthy-values), the eight commands that record a [shell-activation consent stamp][in-depth-shell-grants] as a side effect — [`add`][cmd-add], [`remove`][cmd-remove], [`lock`][cmd-lock], [`update`][cmd-update], [`upgrade`][cmd-upgrade], [`pull`][cmd-pull], [`exec`][cmd-run] and [`init`][cmd-init] — run without writing one. Nothing else changes: the pull still pulls, the child process still runs, the lock is still written.
 
 ```sh
 OCX_NO_CONSENT=1 ocx --project /work/checkout/ocx.toml pull
@@ -1292,6 +1292,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-init]: command-line.md#init
 [cmd-lock]: command-line.md#lock
 [cmd-update]: command-line.md#update
+[cmd-upgrade]: command-line.md#upgrade
 [cmd-shell-allow]: command-line.md#shell-allow
 [cmd-shell-revoke]: command-line.md#shell-revoke
 [cmd-pull]: command-line.md#pull
