@@ -99,7 +99,17 @@ OCX answers that by [ignoring what it does not recognize][config-unknown-keys]: 
 
 The trade is that a typo silently does nothing rather than failing loudly. Write payloads against the [config schema][config-schema] so your editor catches those where they are cheap to catch, use [`ocx config test`][cmd-config-test] to catch the rest before publishing, and [`ocx config update --check`][cmd-config-update] to see what a host actually resolved afterward.
 
+The same tolerance covers a value this binary does not know. An unknown [`refresh`][config-managed-refresh] posture, such as one a later ocx adds, is ignored with one warning and the default applies. It does not fail the file, so the rest of the section still takes effect on an older host.
+
 Tolerance handles *added* keys. A key whose meaning or value shape changes needs the other lever — a new tag family, with fleets moving over as they upgrade. See [rolling out an incompatible change][user-guide-managed-config-incompatible].
+
+### What a payload cannot set {#managed-update}
+
+One section is deliberately outside the managed tier's reach. [`[update]`][config-update] decides whether this host installs a newer ocx in the background, and that is a personal choice. A payload that carries `[update]` has the section dropped before the merge, and an `ocx.toml` that carries it fails to parse.
+
+The reason is the direction of trust. A fleet publisher or a cloned repository can supply registries, mirrors and patches, because those name where content comes from. Neither should be able to switch on binary replacement on a host that did not ask for it. The checks never run in CI at all, so a fleet has no need to push the setting.
+
+[`[update]`][config-update] never fails a command either. An invalid value in the file, or in [`OCX_SELF_UPDATE`][env-ocx-self-update], [`OCX_TOOLCHAIN_UPDATE`][env-ocx-toolchain-update] or [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval], is ignored and the next source applies. A setting about convenience must not be able to take a host out of service.
 
 ### Offline and `required` {#managed-offline}
 
@@ -240,6 +250,7 @@ For scripts, CI pipelines, and programmatic tools, include the registry in every
 [config-schema]: https://ocx.sh/schemas/config/v1.json
 [config-managed-refresh]: ../reference/configuration.md#keys-managed-refresh
 [config-managed-interval]: ../reference/configuration.md#keys-managed-interval
+[config-update]: ../reference/configuration.md#keys-update
 [config-managed-one-hop]: ../reference/configuration.md#keys-managed-one-hop
 [env-ref]: ../reference/environment.md
 [env-config]: ../reference/environment.md#ocx-config
@@ -247,6 +258,9 @@ For scripts, CI pipelines, and programmatic tools, include the registry in every
 [env-ocx-managed-config]: ../reference/environment.md#ocx-managed-config
 [env-ocx-no-config-refresh]: ../reference/environment.md#ocx-no-config-refresh
 [env-ocx-no-update-check]: ../reference/environment.md#ocx-no-update-check
+[env-ocx-self-update]: ../reference/environment.md#ocx-self-update
+[env-ocx-toolchain-update]: ../reference/environment.md#ocx-toolchain-update
+[env-ocx-update-check-interval]: ../reference/environment.md#ocx-update-check-interval
 [arg-config]: ../reference/command-line.md#arg-config
 [arg-offline]: ../reference/command-line.md#arg-offline
 [cmd-config-setup]: ../reference/command-line.md#config-setup

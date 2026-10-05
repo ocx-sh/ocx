@@ -26,6 +26,11 @@ pub enum Error {
     /// An I/O failure with its path, from a helper with no project context (exit 74).
     #[error("{0}: {1}")]
     InternalFile(PathBuf, #[source] std::io::Error),
+    /// `ocx.toml` declared `[update]` (exit 78): a personal setting, and a repository must not
+    /// switch on binary replacement for whoever clones it.
+    // Not a `ProjectErrorKind`: the exit-code baseline test pins that match's text verbatim.
+    #[error("{}: [update] belongs in config.toml, not in ocx.toml; update checks are a personal setting", .0.display())]
+    UpdateSectionInProject(PathBuf),
 }
 
 /// Flatten the index tier's `OciClient` and `File` onto this tier's variants.

@@ -878,6 +878,8 @@ Background refresh posture, checked at most once per [`interval`](#keys-managed-
 | `notify` (default) | Drift prints a stderr advisory ("run `ocx config update`"); content is not fetched by the tick. |
 | `manual` | The background tick is skipped entirely; only an explicit [`ocx config update`][cmd-config-update] refreshes the snapshot. |
 
+An unknown `refresh` value, such as a posture a later ocx adds, is ignored with one warning and the default (`notify`) applies. It does not fail the file, in the local seed or in a managed payload, so the rest of the section still takes effect. The [`[update]`](#keys-update) keys read the same three values with the same leniency.
+
 [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] kills the background tick regardless of `refresh`; an explicit [`ocx config update`][cmd-config-update] still works — and so does the reconciling re-sync [`ocx self setup`][cmd-self-setup] and [`ocx config setup`][cmd-config-setup] run against an already-adopted seed on every invocation. This variable governs the background tick only; use [`--offline`][arg-offline] to skip the setup-time re-sync instead.
 
 **Activation conditions.** The tick this posture governs only runs when *all* of the following hold: stderr is a terminal, the process is not running inside CI (`CI` unset), the invocation is not offline ([`--offline`][arg-offline]/[`OCX_OFFLINE`][env-offline]), the tier is not paused ([`ocx config update --pause`][cmd-config-update]), and the [`interval`](#keys-managed-interval) throttle window has elapsed. Any one of those failing skips the tick outright — so `refresh = "apply"` never auto-converges a CI runner or another headless host; those hosts converge only through an explicit [`ocx config update`][cmd-config-update].
@@ -910,6 +912,73 @@ A `[managed]` section inside the fetched payload itself is stripped before merge
 #### Trust root posture {#keys-managed-trust-root}
 
 Two keys a managed payload carries reach TLS or signature trust, and the tier treats them differently. [`trusted_root_json`](#keys-trust-sigstore-publish) arriving from a source that is not digest-pinned is ignored with a warning — an unpinned publisher could otherwise hand [`ocx package verify`][cmd-package-verify] a Fulcio CA of its own choosing. [`extra_ca_certs_pem`](#keys-extra_ca_certs-managed) is honored from an unpinned source instead, because a TLS root alone grants no such bypass; only the [`[trust.sigstore]`](#keys-trust-sigstore) client is held to the stricter, digest-pinned rule. See [Rolling it out to a fleet](#keys-extra_ca_certs-managed) for the full residual-risk statement.
+
+### `[update]` section {#keys-update}
+
+OCX checks in the background whether a newer ocx exists, and whether a tag pinned in a project's `ocx.lock` has moved. `[update]` sets what each check does when it finds something, and how often it looks.
+
+```toml
+[update]
+self      = "notify"
+toolchain = "notify"
+interval  = "1d"
+```
+
+Every key is optional. With no `[update]` section, both checks print a stderr notice at most once a day, and nothing is installed or rewritten.
+
+`[update]` is a personal preference, so it is read from the local `config.toml` tiers only: system, user, [`$OCX_HOME`][env-ocx-home], [`OCX_CONFIG`][env-config] and [`--config`][arg-config]. Two other places refuse it.
+
+- **The [`[managed]`](#keys-managed) tier ignores it.** A managed payload that carries `[update]` has the section dropped before the merge, with a debug log. A fleet publisher cannot switch on binary replacement for the hosts that sync the payload.
+- **`ocx.toml` refuses it.** A project file with an `[update]` table fails to parse, exit [`78`][exit-codes], and the message says the section belongs in `config.toml`. A cloned repository cannot configure how your ocx updates itself.
+
+**`[update]` never fails a command.** An invalid or unknown value is ignored and the next source applies: the next tier, then the built-in default. A bad value in a `config.toml` prints one stderr warning naming the key. A bad value in an environment variable is logged at debug level. A key a later ocx adds is an unknown key, and [unknown keys are ignored](#unknown-keys).
+
+Tiers merge field by field, nearest wins. A user file that sets only `interval` leaves a system file's `self` in force. Each key also has an environment variable that **beats** the file, unlike the [weakest-tier variables](#precedence).
+
+The background checks run only on an interactive terminal, outside CI, and online. [`OCX_NO_UPDATE_CHECK`][env-no-update-check] turns both off. They never run for `ocx version`, `ocx about` or `ocx shell completion`, and the toolchain notice also skips the commands that move a lock.
+
+#### `self` {#keys-update-self}
+
+**Type**: string (`"apply"` \| `"notify"` \| `"manual"`)  
+**Default**: `"notify"`  
+**Overridden by**: [`OCX_SELF_UPDATE`][env-ocx-self-update]
+
+What ocx does when a newer ocx is published. [`ocx self update`][cmd-self-update] always runs, whatever this says.
+
+| Value | Behavior |
+|-------|----------|
+| `notify` (default) | Prints a stderr notice naming [`ocx self update`][cmd-self-update]. |
+| `apply` | Installs the newer ocx after the command has finished, on success and on failure alike. The command's exit code never changes. The new binary takes effect on the next run. |
+| `manual` | Never checks, and never touches the throttle state file. |
+
+`apply` installs through the same path as [`ocx self update`][cmd-self-update], so the trust policy that covers an explicit install covers this one. Stderr gets one line describing the outcome. If the install fails, the line says so and names [`ocx self update`][cmd-self-update] as the retry, and the failed apply is not retried until the next [`interval`](#keys-update-interval). An ocx that [`ocx self setup`][cmd-self-setup] did not install has no managed copy to replace, and `apply` does nothing for it.
+
+#### `toolchain` {#keys-update-toolchain}
+
+**Type**: string (`"notify"` \| `"manual"`; `"apply"` is read as `"notify"`)  
+**Default**: `"notify"`  
+**Overridden by**: [`OCX_TOOLCHAIN_UPDATE`][env-ocx-toolchain-update]
+
+What ocx does when a tag that a project's or the global toolchain's `ocx.lock` pins now points at different content.
+
+| Value | Behavior |
+|-------|----------|
+| `notify` (default) | Prints one stderr line per toolchain file with drift, naming [`ocx update`][cmd-update] (`ocx --global update` for the global toolchain). |
+| `manual` | Never checks. |
+
+`"apply"` is accepted so a value written for the `self` key does not break the file. It behaves as `"notify"` and prints one warning, because only [`ocx update`][cmd-update] advances a lock.
+
+The check compares the platform digests recorded in the lock with what the registry serves now, and never writes the local index. A project toolchain is probed only when the project is [consented](#keys-shell-consent); the global toolchain needs no consent. With no lock, a stale lock, a registry error, or a probe that exceeds five seconds, the check stays silent.
+
+#### `interval` {#keys-update-interval}
+
+**Type**: string, `\d+[smhd]?` (bare digits = seconds)  
+**Default**: `"1d"`  
+**Overridden by**: [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval]
+
+Minimum spacing between two checks, shared by `self` and `toolchain`. `interval = "0"` (or `"0s"`) checks on every eligible command. A value that does not match the grammar warns once and the default applies.
+
+The `[managed]` tier's [`interval`](#keys-managed-interval) is a separate setting with the same grammar.
 
 ### `[[trust.policy]]` {#keys-trust}
 
@@ -1798,7 +1867,10 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |
 | [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] | [`[registries.<name>] insecure`](#keys-registries-insecure) | **Union**, not an override: a host named in either source is plaintext-eligible, and neither can take one back out |
-| [`OCX_NO_UPDATE_CHECK`][env-no-update-check] | None | CI-only concern; env var is sufficient |
+| [`OCX_NO_UPDATE_CHECK`][env-no-update-check] | None | Kill switch for both background checks, the ocx update check and the toolchain drift notice; forwarded to child ocx processes |
+| [`OCX_SELF_UPDATE`][env-ocx-self-update] | [`[update] self`](#keys-update-self) | Env var wins when both are set; an unrecognized value is ignored and never fails a command; not forwarded to child processes |
+| [`OCX_TOOLCHAIN_UPDATE`][env-ocx-toolchain-update] | [`[update] toolchain`](#keys-update-toolchain) | Env var wins when both are set; `apply` is read as `notify`; not forwarded to child processes |
+| [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] | [`[update] interval`](#keys-update-interval) | Env var wins when both are set; an invalid value falls through to the file, then to `1d`; not forwarded to child processes |
 | [`OCX_NO_MODIFY_PATH`][env-no-modify-path] | [`[shell] modify_path`](#keys-shell-modify-path) | Env var outranks the config key; the CLI flag `--no-modify-path` outranks both and, when passed, writes the config key too |
 
 [`OCX_OFFLINE`][env-offline] and [`OCX_REMOTE`][env-remote] are intentionally absent from the config file. Both are per-invocation modes — a persistent `offline = true` would silently break `ocx package install` on a fresh setup.
@@ -1820,6 +1892,8 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 The tiers above configure ocx itself. `ocx.toml` is a different file with a different lifecycle — see the [Project Toolchain guide][user-project] for discovery and locking. This section is the schema reference for the `ocx.toml` tables and keys that carry environment and resolve-time declarations: [`[group.<name>]`](#project-config-groups), [`[env]`](#project-config-env), [`[package."<id>"]`](#project-config-package), and the toolchain-level `lazy-mode` / `lazy-report` / [`activate`](#project-config-activate) / [`pinned`](#project-config-pinned) keys.
 
 One key that looks like it belongs here does not: [`toolchain_dir`](#keys-toolchain_dir) is a `config.toml` key, above.
+
+Two sections are refused here by name because they are personal settings: [`[shell]`](#keys-shell) and [`[update]`](#keys-update). Either one in `ocx.toml` fails the parse.
 
 ### `[group.<name>]` — `tools` and `env` {#project-config-groups}
 
@@ -2216,6 +2290,9 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [patches-user-guide]: ../user-guide/patches.md
 [patches-how-part-of-target]: ../user-guide/patches.md#patches-how-part-of-target
 [env-no-update-check]: ./environment.md#ocx-no-update-check
+[env-ocx-self-update]: ./environment.md#ocx-self-update
+[env-ocx-toolchain-update]: ./environment.md#ocx-toolchain-update
+[env-ocx-update-check-interval]: ./environment.md#ocx-update-check-interval
 [env-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
 [xdg-basedir]: ./environment.md#external-xdg-config-home

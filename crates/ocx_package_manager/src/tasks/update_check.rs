@@ -9,8 +9,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Default auto-check throttle interval: 24 hours.
-const DEFAULT_THROTTLE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Default auto-check throttle interval, the shared refresh default.
+fn default_throttle() -> Duration {
+    ocx_config::refresh::parse_interval(ocx_config::refresh::DEFAULT_INTERVAL).unwrap_or(Duration::from_secs(86_400))
+}
 
 use super::super::PackageManager;
 
@@ -162,7 +164,7 @@ impl PackageManager {
         probe: TagProbe,
     ) -> Result<UpdateCheckResult, crate::error::PackageErrorKind> {
         let state_path = self.file_structure().state.update_check_file(identifier);
-        let interval = throttle.unwrap_or(DEFAULT_THROTTLE);
+        let interval = throttle.unwrap_or_else(default_throttle);
 
         // A panicked blocking task reads as not throttled, or update-check wedges into permanent skip.
         let state_path_check = state_path.clone();
@@ -735,16 +737,13 @@ mod tests {
         );
     }
 
-    /// The default throttle interval constant is 24 hours (86 400 seconds).
-    ///
-    /// This is a const assertion so any accidental change to `DEFAULT_THROTTLE`
-    /// fails at compile time rather than at test runtime.
+    /// The default throttle, derived from the shared refresh default, is 24 hours.
     #[test]
     fn default_throttle_value_is_86400_seconds() {
         assert_eq!(
-            super::DEFAULT_THROTTLE,
+            super::default_throttle(),
             Duration::from_secs(24 * 60 * 60),
-            "DEFAULT_THROTTLE must be exactly 24 hours"
+            "default throttle must be exactly 24 hours"
         );
     }
 

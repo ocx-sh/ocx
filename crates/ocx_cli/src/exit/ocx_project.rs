@@ -92,6 +92,7 @@ impl ClassifyExitCode for ProjectError {
             Self::OciIndex(e) => return e.classify(),
             Self::Config(e) => return e.classify(),
             Self::InternalFile(_, _) => ExitCode::IoError,
+            Self::UpdateSectionInProject(_) => ExitCode::ConfigError,
         })
     }
 }

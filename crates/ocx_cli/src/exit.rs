@@ -1759,6 +1759,15 @@ mod tests {
 
     /// Every classification arm minted since the freeze (DEC-55 route 4).
     const NEW_ARMS: &[NewArm] = &[
+        // `[update]` in an `ocx.toml` is refused by name; 78 like the `[shell]` arm beside it.
+        NewArm {
+            target: "ProjectError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::UpdateSectionInProject(_)",
+            value: "ExitCode::ConfigError",
+        },
         // #584 — `install --link` refuses a path holding something other than an ocx package link.
         NewArm {
             target: "PackageErrorKind",

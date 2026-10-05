@@ -1,37 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::io::IsTerminal;
-
 use ocx_config::env;
 
-use super::Context;
+use super::{Context, background_check};
 
 /// Throttled background-refresh probe for the corporate managed-config tier, sibling of
 /// [`super::update_check::check_for_update`].
 ///
-/// Gates in exactly the update-check hook's order, suppressed when `OCX_NO_CONFIG_REFRESH` is
-/// truthy, `CI` is truthy ([`ocx_util::env::is_ci`]), `OCX_OFFLINE` or `--offline` is set, or
-/// stderr is not a terminal. Never fails the command (see
+/// Gated by [`background_check::skip_reason`] with the `OCX_NO_CONFIG_REFRESH` kill switch.
+/// Never fails the command (see
 /// [`ocx_package_manager::PackageManager::check_managed_config_refresh`]). Resolves the effective
 /// `[managed]` tier via [`ocx_config::managed::resolve_managed_target`] and hands off to
 /// `check_managed_config_refresh` unless its `refresh` posture is
-/// [`ocx_config::managed::RefreshPolicy::Manual`].
+/// [`ocx_config::refresh::RefreshPolicy::Manual`].
 pub async fn check_for_managed_config_refresh(ctx: &Context) {
-    if ocx_util::env::flag(env::keys::OCX_NO_CONFIG_REFRESH, false) {
-        log::debug!("Managed-config refresh skipped: OCX_NO_CONFIG_REFRESH is set");
-        return;
-    }
-    if ocx_util::env::is_ci() {
-        log::debug!("Managed-config refresh skipped: CI environment detected");
-        return;
-    }
-    if ctx.is_offline() {
-        log::debug!("Managed-config refresh skipped: offline mode");
-        return;
-    }
-    if !std::io::stderr().is_terminal() {
-        log::debug!("Managed-config refresh skipped: stderr is not a terminal");
+    if let Some(reason) = background_check::skip_reason(env::keys::OCX_NO_CONFIG_REFRESH, ctx.is_offline()) {
+        log::debug!("Managed-config refresh skipped: {reason}");
         return;
     }
 
@@ -39,8 +24,8 @@ pub async fn check_for_managed_config_refresh(ctx: &Context) {
 }
 
 async fn probe_managed_config_refresh(ctx: &Context) {
-    use ocx_config::managed::RefreshPolicy;
     use ocx_config::managed::resolve_managed_target;
+    use ocx_config::refresh::RefreshPolicy;
     use ocx_package_manager::ManagedConfigRefreshOutcome;
 
     let resolved = match resolve_managed_target(ctx.config(), ctx.managed_config_env_override()) {

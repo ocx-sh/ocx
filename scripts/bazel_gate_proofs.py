@@ -231,10 +231,10 @@ rule targets to 87. The tag guard printed `143 rule targets read` against a
 floor of 101 and passed: 42 of headroom is a floor that has stopped
 discriminating, which is the state this constant exists to close."""
 
-ACCEPTANCE_MODULE_TARGETS = 173
+ACCEPTANCE_MODULE_TARGETS = 174
 """One `sh_test` per `test/tests/test_*.py` (C-024) — `bazel query
-'kind(sh_test, //test:all)'` answers 173 and `ls test/tests/test_*.py` answers
-173 (172 before `test_install_link.py`; 181 until eight source-only sweep modules moved to the lint tier,
+'kind(sh_test, //test:all)'` answers 174 and `ls test/tests/test_*.py` answers
+174 (173 before `test_update_config.py`; 172 before `test_install_link.py`; 181 until eight source-only sweep modules moved to the lint tier,
 plan_test_speed_tiers.md C-009; 173 until `test_schema_generation.py` was
 ported into `crates/ocx_schema/tests/schema_outputs.rs`, C-020; 172 until
 `test_pull_progress.py`, whose only assertions were on log message text, was
@@ -251,7 +251,7 @@ per-module groups that left `:suite_inputs` (`:bench_inputs`,
 `:vendored_specs`). No `sh_test`, but `kind(rule, ...)` counts them, so the
 floor has to."""
 
-ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 182
+ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 183
 
 GRAPH_TAIL_TARGETS = 8
 """What `//...` holds that no earlier stage's universe names: `//:all` (4 —
@@ -1665,16 +1665,16 @@ def prove_counts() -> int:
         f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 169",
     )
     expect(
-        ACCEPTANCE_MODULE_TARGETS == 173,
-        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 173",
+        ACCEPTANCE_MODULE_TARGETS == 174,
+        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 174",
     )
     expect(
-        ACCEPTANCE_RULE_TARGETS == 182,
-        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 182",
+        ACCEPTANCE_RULE_TARGETS == 183,
+        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 183",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 359,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 359",
+        STAGE_FLOORS["stage-4"].minimum == 360,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 360",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1684,7 +1684,7 @@ def prove_counts() -> int:
     )
     print(
         "counts  OK : 21 = 21 + 0, 78 = 20 + 35 + 3 + 20, 82 = 78 + 4, 45 = 40 + 5, 42 = 39 + 3, "
-        "169 = 82 + 45 + 42, 182 = 173 + 9, 359 = 169 + 182 + 8 — internal consistency only; "
+        "169 = 82 + 45 + 42, 183 = 174 + 9, 360 = 169 + 183 + 8 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )

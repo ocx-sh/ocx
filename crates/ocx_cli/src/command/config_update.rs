@@ -51,7 +51,8 @@ pub struct ConfigUpdateArgs {
 
 /// Clap value parser for `--pause`: the interval grammar, capped at `MAX_PAUSE_INTERVAL`.
 fn parse_pause_duration(value: &str) -> Result<std::time::Duration, String> {
-    let duration = ocx_config::managed::parse_interval(value).map_err(|e| e.to_string())?;
+    let duration = ocx_config::refresh::parse_interval(value)
+        .map_err(|error| ocx_config::managed::ManagedConfigError::InvalidInterval(error).to_string())?;
     if duration > ocx_config::managed_config::MAX_PAUSE_INTERVAL {
         return Err(format!(
             "pause duration '{value}' exceeds the maximum of 7d; use `refresh = \"manual\"` for a permanent hold"

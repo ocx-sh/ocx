@@ -9,6 +9,8 @@ use crate::command;
 use crate::error_envelope::render_error_envelope;
 use crate::options::FormatMode;
 
+mod background_check;
+
 mod boundary;
 pub use boundary::finish;
 
@@ -26,6 +28,8 @@ pub mod project_context;
 
 #[cfg(any(test, feature = "__testing"))]
 pub mod seam;
+
+mod toolchain_drift_check;
 
 mod update_check;
 
@@ -160,22 +164,35 @@ impl App {
             },
         )
         .await?;
-        // Both probes reach the network; the seam never makes a request.
-        if !in_seam() && should_check_for_update(&cli.command) {
-            update_check::check_for_update(&context).await;
-        }
-        if !in_seam() && should_check_managed_config_refresh(&cli.command) {
-            managed_config_check::check_for_managed_config_refresh(&context).await;
-        }
         let Some(command) = &cli.command else {
             unreachable!("None handled in static-command bypass above");
         };
+        // Every probe reaches the network; the seam never makes a request.
+        let pending_update = if !in_seam() && should_check_for_update(&cli.command) {
+            update_check::check_for_update(&context).await
+        } else {
+            None
+        };
+        if !in_seam() && should_check_managed_config_refresh(&cli.command) {
+            managed_config_check::check_for_managed_config_refresh(&context).await;
+        }
+        if !in_seam() && should_check_toolchain_drift(command) {
+            toolchain_drift_check::check_for_toolchain_drift(&context).await;
+        }
+        // Captured before `execute` consumes the context: this manager carries `with_auto_verify`,
+        // so trust policy also covers the unattended install.
+        let pending_update = pending_update.map(|identifier| (context.manager().clone(), identifier));
 
         let format = cli.context.format.mode();
         let command_name = canonical_command_name(command);
         // No envelope after a report, or stdout carries two JSON documents.
         let reported = context.api().reported_handle();
-        match command.execute(context).await {
+        let result = command.execute(context).await;
+        // After the command, on success and failure alike, and never changing its result.
+        if let Some((manager, identifier)) = pending_update {
+            update_check::apply_pending(&manager, &identifier).await;
+        }
+        match result {
             Ok(code) => Ok(code),
             Err(err) if format == FormatMode::Json && !reported.load(std::sync::atomic::Ordering::Relaxed) => {
                 match render_error_envelope(command_name, &err) {
@@ -330,6 +347,41 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
     )
 }
 
+/// Whether the toolchain drift notice runs: the update-check skip set plus the commands that
+/// already re-resolve or rewrite the lock (`update`, `lock`, `add`, `remove`, `init`).
+///
+/// An exhaustive match, so a new command is a compile error until its membership is decided.
+fn should_check_toolchain_drift(command: &command::Command) -> bool {
+    use command::Command;
+    match command {
+        Command::Version(_)
+        | Command::About(_)
+        | Command::Shell(_)
+        | Command::Self_(_)
+        | Command::Config(_)
+        | Command::Exec(_)
+        | Command::DeprecatedRun(_)
+        | Command::Env(_)
+        | Command::Direnv(_)
+        | Command::Update(_)
+        | Command::Lock(_)
+        | Command::Add(_)
+        | Command::Remove(_)
+        | Command::Init(_)
+        | Command::External(_) => false,
+        Command::Clean(_)
+        | Command::Index(_)
+        | Command::Inspect(_)
+        | Command::Status(_)
+        | Command::Login(_)
+        | Command::Logout(_)
+        | Command::Launcher(_)
+        | Command::Package(_)
+        | Command::Patch(_)
+        | Command::Pull(_) => true,
+    }
+}
+
 /// Skips the managed-config refresh probe for static, `self`, `shell` and `config` commands.
 ///
 /// Also the required-snapshot exemption: without `shell state` here, `required = true` with no
@@ -399,7 +451,10 @@ fn in_seam() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_check_for_update, should_check_managed_config_refresh, should_enforce_managed_config_required};
+    use super::{
+        should_check_for_update, should_check_managed_config_refresh, should_check_toolchain_drift,
+        should_enforce_managed_config_required,
+    };
     use crate::command::{self, self_group, version};
 
     // ── Record frame vocabulary ──────────────────────────────────────────────
@@ -965,6 +1020,86 @@ mod tests {
                  otherwise `ocx shell state` exits 78 in exactly the broken state it exists to diagnose; \
                  variant idx={idx} ({label}) returned true from should_enforce_managed_config_required"
             );
+        }
+    }
+
+    fn parse_command(argv: &[&str]) -> command::Command {
+        use clap::Parser as _;
+        let cli = super::Cli::try_parse_from(std::iter::once("ocx").chain(argv.iter().copied()))
+            .unwrap_or_else(|error| panic!("`ocx {}` must parse: {error}", argv.join(" ")));
+        cli.command.expect("a subcommand was given")
+    }
+
+    /// The drift notice skips everything the update check skips, plus the commands that already
+    /// re-resolve or rewrite the lock — a notice there would tell the user to run what they just ran.
+    #[test]
+    fn should_check_toolchain_drift_skips_the_lock_writers_and_the_update_skip_set() {
+        for argv in [
+            &["update"][..],
+            &["lock"],
+            &["add", "ocx.sh/cmake:3"],
+            &["remove", "cmake"],
+            &["init"],
+            &["version"],
+            &["exec", "--", "true"],
+            &["env"],
+            &["direnv"],
+            &["shell", "state"],
+            &["self", "update"],
+            &["config", "test", "candidate.toml"],
+        ] {
+            let command = parse_command(argv);
+            assert!(
+                !should_check_toolchain_drift(&command),
+                "`ocx {}` must not run the toolchain drift check",
+                argv.join(" ")
+            );
+        }
+    }
+
+    /// The negative half, so a predicate that skips everything cannot pass the test above.
+    #[test]
+    fn should_check_toolchain_drift_runs_for_ordinary_commands() {
+        for argv in [&["status"][..], &["pull"], &["clean"]] {
+            let command = parse_command(argv);
+            assert!(
+                should_check_toolchain_drift(&command),
+                "`ocx {}` must run the toolchain drift check",
+                argv.join(" ")
+            );
+        }
+    }
+
+    /// Canary: no command that skips the update check may run the drift check.
+    #[test]
+    fn should_check_toolchain_drift_is_a_superset_of_the_update_skip_set() {
+        for argv in [
+            &["status"][..],
+            &["pull"],
+            &["clean"],
+            &["update"],
+            &["lock"],
+            &["version"],
+            &["exec", "--", "true"],
+            &["run", "--", "true"],
+            &["env"],
+            &["direnv"],
+            &["shell", "allow"],
+            &["shell", "revoke"],
+            &["shell", "state"],
+            &["self", "activate"],
+            &["self", "setup"],
+            &["self", "update"],
+            &["config", "update"],
+        ] {
+            let command = parse_command(argv);
+            if !should_check_for_update(&Some(parse_command(argv))) {
+                assert!(
+                    !should_check_toolchain_drift(&command),
+                    "`ocx {}` skips the update check, so it must skip the drift check too",
+                    argv.join(" ")
+                );
+            }
         }
     }
 }

@@ -252,8 +252,8 @@ impl ConfigLoader {
             ));
         }
 
-        let mut parsed: Config = match Self::parse_config_stripping_refused_consent(&snapshot.config, &resolved.source)
-        {
+        let payload = Self::strip_managed_update(&snapshot.config, &resolved.source);
+        let mut parsed: Config = match Self::parse_config_stripping_refused_consent(&payload, &resolved.source) {
             Ok(parsed) => parsed,
             Err(source) => {
                 // Not benign: WARN even when not `required`, where nothing else would report it.
@@ -280,6 +280,8 @@ impl ConfigLoader {
             );
         }
 
+        // Reached only if `strip_managed_update` could not re-serialize; a payload never sets `[update]`.
+        parsed.update = None;
         Self::guard_managed_sigstore_trust(&mut parsed, &resolved.source);
         Self::guard_managed_shell_consent(&mut parsed, &resolved.source);
         Self::stamp_shell_tier(&mut parsed, crate::ConfigTier::Managed);
@@ -296,6 +298,24 @@ impl ConfigLoader {
             ManagedSnapshotState::Applied,
             extra_ca_certs_tier,
         ))
+    }
+
+    /// `payload` without its `update` key, removed from the raw table before the typed parse.
+    ///
+    /// `[update]` is personal: a payload that could set `self = "apply"` would replace the fleet's
+    /// binaries, and a shape this ocx cannot read must not make the rest of the payload unusable.
+    fn strip_managed_update<'a>(payload: &'a str, source: &ocx_oci::OciIdentifier) -> std::borrow::Cow<'a, str> {
+        let Ok(mut table) = toml::from_str::<toml::Table>(payload) else {
+            return std::borrow::Cow::Borrowed(payload);
+        };
+        if table.remove("update").is_none() {
+            return std::borrow::Cow::Borrowed(payload);
+        }
+        log::debug!(
+            "managed-config payload for '{source}' contained an [update] section; ignored ([update] is read from local config.toml only)"
+        );
+        // A table that just parsed always serializes; on failure the typed parse still tolerates `[update]`.
+        toml::to_string(&table).map_or(std::borrow::Cow::Borrowed(payload), std::borrow::Cow::Owned)
     }
 
     /// Strips the `[trust]` values a remote payload is not entitled to set.
@@ -725,6 +745,9 @@ impl ConfigLoader {
                         source,
                     }
                 })?;
+            if let Some(update) = parsed.update.as_mut() {
+                update.set_origin(path);
+            }
             // Only the system file locks; it folds in first, so every lower tier sees its locks.
             if path == Self::system_path().as_path() {
                 Self::apply_system_locks(&mut parsed);
@@ -975,7 +998,7 @@ impl ConfigLoader {
         shell.consent_strip_reason = Some(reason);
     }
 
-    /// Fold a project-tier contribution into `accumulator` without its `[shell]` or `[records]`.
+    /// Fold a project-tier contribution into `accumulator` without its `[shell]`, `[records]` or `[update]`.
     ///
     /// Stripped here, not left to `ProjectConfig`'s `deny_unknown_fields`: `[shell]` consent from a
     /// repository would let a clone consent to itself, and `[records]` would let it redirect the
@@ -991,6 +1014,12 @@ impl ConfigLoader {
             log::warn!(
                 "a project-tier config declared [records]; stripped before merge (the execution-record sink is \
                  operator configuration in config.toml, never a repository's to redirect)"
+            );
+        }
+        if project_contribution.update.take().is_some() {
+            log::warn!(
+                "a project-tier config declared [update]; stripped before merge (update checks are a personal setting \
+                 in config.toml, never a repository's to switch on)"
             );
         }
         accumulator.merge(project_contribution);
@@ -1035,6 +1064,7 @@ impl ConfigLoader {
             mirrors,
             patches,
             managed,
+            update,
             trust,
             shell,
             records,
@@ -1052,6 +1082,8 @@ impl ConfigLoader {
         *managed = None;
         // `[shell]` has no locks: all of it is ambient host configuration.
         *shell = None;
+        // Not lockable: `[update]` is a personal setting, never operator policy.
+        *update = None;
         // No lock either; a hermetic child still inherits its parent's root via `OCX_TOOLCHAIN_DIR`.
         *toolchain_dir = None;
         // A locked pair survives, or a hermetic CI job drops out of the corporate CA with exit 69.
@@ -3280,6 +3312,115 @@ mod tests {
         );
     }
 
+    /// A managed payload's `[update]` never reaches the merged config, while the local tier's
+    /// `[update]` survives the fold: a publisher must not be able to switch on binary replacement.
+    ///
+    /// Red state: delete both the `strip_managed_update` call and the `parsed.update = None` in
+    /// `fold_managed_tier`, and the payload's `self = "apply"` wins over the local `manual`.
+    #[tokio::test]
+    async fn managed_payload_update_section_is_ignored() {
+        let env = ocx_util::env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n[update]\nself = \"manual\"\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[registry]\ndefault = \"managed-registry\"\n[update]\nself = \"apply\"\ninterval = \"0\"\n",
+        );
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs)
+            .await
+            .expect("load must succeed");
+
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("managed-registry"),
+            "the payload must actually fold, or the drop below is untested"
+        );
+        let update = loaded.merged.update.expect("the local [update] must survive");
+        assert_eq!(update.self_policy, Some(Ok(crate::refresh::RefreshPolicy::Manual)));
+        assert_eq!(
+            update.interval, None,
+            "no payload [update] key may reach the merged config"
+        );
+    }
+
+    /// A malformed `[update]` in a managed payload is dropped before the typed parse, so the rest of
+    /// the payload still applies: fleets run mixed ocx versions under one payload.
+    #[tokio::test]
+    async fn managed_payload_with_a_malformed_update_still_applies() {
+        // A bare key must precede the first table header, or TOML files it under that table.
+        for payload in [
+            "update = 1\n[registry]\ndefault = \"managed-registry\"\n",
+            "[registry]\ndefault = \"managed-registry\"\n[update]\ninterval = []\n",
+        ] {
+            let env = ocx_util::env::overrides::lock();
+            let dir = TempDir::new().unwrap();
+            env.set("OCX_HOME", dir.path().to_str().unwrap());
+            env.remove("OCX_CONFIG");
+            env.remove("OCX_NO_CONFIG");
+            env.remove("OCX_MANAGED_CONFIG");
+
+            std::fs::write(
+                dir.path().join("config.toml"),
+                "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+            )
+            .unwrap();
+            write_managed_snapshot(dir.path(), "registry.test/managed-config:v1", payload);
+
+            let inputs = ConfigInputs {
+                explicit_path: None,
+                explicit_project_path: None,
+                cwd: None,
+            };
+            let loaded = ConfigLoader::load_with_local_view(inputs)
+                .await
+                .expect("load must succeed");
+            assert_eq!(
+                loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+                Some("managed-registry"),
+                "{payload:?}: the payload must still apply"
+            );
+            assert!(loaded.merged.update.is_none(), "{payload:?}");
+        }
+    }
+
+    /// A wrongly typed local `[update]` never fails the load, or every command exits 78.
+    #[tokio::test]
+    async fn local_malformed_update_never_fails_the_load() {
+        for local_update in ["update = 1\n", "[update]\ninterval = 3600\n", "[update]\nself = 5\n"] {
+            let env = ocx_util::env::overrides::lock();
+            let dir = TempDir::new().unwrap();
+            env.set("OCX_HOME", dir.path().to_str().unwrap());
+            env.remove("OCX_CONFIG");
+            env.remove("OCX_NO_CONFIG");
+            env.remove("OCX_MANAGED_CONFIG");
+            std::fs::write(dir.path().join("config.toml"), local_update).unwrap();
+
+            let inputs = ConfigInputs {
+                explicit_path: None,
+                explicit_project_path: None,
+                cwd: None,
+            };
+            let loaded = ConfigLoader::load_with_local_view(inputs).await;
+            assert!(loaded.is_ok(), "{local_update:?}: {:?}", loaded.err());
+        }
+    }
+
     /// Criterion 7 (loader-level): a snapshot whose embedded provenance does
     /// not match the effective source must be treated as absent — content
     /// never reaches `Config`, mirrors/registry/patches included.
@@ -4163,6 +4304,17 @@ mod tests {
         );
     }
 
+    /// `[update]` is a personal setting with no lock, so a hermetic run keeps none of it.
+    #[test]
+    fn retain_system_locked_sections_drops_update() {
+        let mut config: crate::Config = toml::from_str("[update]\nself = \"manual\"\n").unwrap();
+        assert!(config.update.is_some(), "the fixture must carry [update]");
+
+        ConfigLoader::retain_system_locked_sections(&mut config);
+
+        assert!(config.update.is_none());
+    }
+
     /// The other half of the `[records]` clamp: a SYSTEM file that declares no
     /// `[records]` section locks nothing, so an operator who never opted in
     /// does not silently freeze every lower tier out of configuring a sink.
@@ -4943,6 +5095,25 @@ mod tests {
             Some("ocx.sh"),
             "everything a project tier IS allowed to set must still merge"
         );
+    }
+
+    /// A repository must not switch on unattended binary replacement for whoever clones it.
+    ///
+    /// Red state: delete the `take()` for `update` in [`ConfigLoader::fold_project_tier`].
+    #[test]
+    fn a_project_tier_fold_cannot_contribute_update() {
+        let mut merged: Config = toml::from_str("[update]\nself = \"manual\"\n").expect("base parses");
+        let project: Config = toml::from_str("[update]\nself = \"apply\"\n[registry]\ndefault = \"ocx.sh\"\n")
+            .expect("a project-tier contribution parses as a Config");
+        assert!(project.update.is_some(), "the fixture must carry [update]");
+
+        ConfigLoader::fold_project_tier(&mut merged, project);
+
+        assert_eq!(
+            merged.update.as_ref().and_then(|update| update.self_policy.clone()),
+            Some(Ok(crate::refresh::RefreshPolicy::Manual))
+        );
+        assert_eq!(merged.resolved_default_registry(), Some("ocx.sh"));
     }
 
     /// The `[records]` twin of the strip above, and the same class of defect: a

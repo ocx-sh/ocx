@@ -249,6 +249,11 @@ struct RawProjectConfig {
     /// `deny_unknown_fields` rejects the section with no remedy in the message.
     #[serde(default)]
     shell: Option<toml::Table>,
+
+    /// `[update]`, declared only to be refused by name, like `shell`; any value shape, so
+    /// `update = 1` is refused by name too.
+    #[serde(default)]
+    update: Option<toml::Value>,
 }
 
 impl ProjectConfig {
@@ -465,6 +470,11 @@ impl ProjectConfig {
         // checked-in file consent to itself.
         if raw.shell.is_some() {
             return Err(ProjectError::new(path, ProjectErrorKind::ShellSectionInProject).into());
+        }
+
+        // A checked-in `self = "apply"` would replace the binary of everyone who clones the repository.
+        if raw.update.is_some() {
+            return Err(super::Error::UpdateSectionInProject(path));
         }
 
         // Case-folded, not `contains_key`: `[group.Default]` beside the default group
@@ -826,6 +836,26 @@ cmake = "ocx.sh/cmake:3.28"
         assert_eq!(cached, standalone, "cached must equal the free-function output");
         // Second call returns the same cached value (cheap path).
         assert_eq!(cached, config.declaration_hash_cached());
+    }
+
+    /// `[update]` is a personal `config.toml` setting; an `ocx.toml` refuses it by name so the
+    /// message names the file it belongs in, not just "unknown field".
+    #[test]
+    fn update_section_in_ocx_toml_is_refused_by_name() {
+        let err = ProjectConfig::from_toml_str("[update]\nself = \"apply\"\n")
+            .expect_err("[update] must not parse in ocx.toml");
+
+        assert!(
+            matches!(err, super::super::Error::UpdateSectionInProject(_)),
+            "expected UpdateSectionInProject; got {err:?}"
+        );
+        assert!(err.to_string().contains("belongs in config.toml"), "{err}");
+
+        let err = ProjectConfig::from_toml_str("update = 1\n").expect_err("update = 1 must not parse in ocx.toml");
+        assert!(
+            matches!(err, super::super::Error::UpdateSectionInProject(_)),
+            "a non-table update is refused by name too; got {err:?}"
+        );
     }
 
     /// C-033: `[shell]` in an `ocx.toml` is refused by its own named arm at

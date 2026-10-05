@@ -740,16 +740,22 @@ This is a boolean, not a tri-state — there is no `OCX_HOOK=0|1|auto` — mirro
 
 ### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
 
-When set to a [truthy value](#truthy-values), OCX will not check the remote registry for newer versions on CLI startup.
-By default, OCX prints a notice to stderr if a newer version is available in the remote registry.
+When set to a [truthy value](#truthy-values), OCX runs no background update check on CLI startup. That covers the check for a newer ocx and the [toolchain drift notice](#ocx-toolchain-update).
+By default, OCX prints a notice to stderr if a newer ocx is available in the remote registry. It does the same if a tag pinned in a project's `ocx.lock` has moved.
 
-The update check is also automatically suppressed when:
+The background checks are also automatically suppressed when:
 - `CI` is set to a truthy value
 - [`OCX_OFFLINE`](#ocx-offline) is set to a truthy value (or `--offline` flag)
 - stderr is not a terminal (e.g., piped or redirected)
 - the command is `version`, `about`, or `shell completion`
 
-To disable the check entirely (including suppressing the throttle state write), use this variable. To change the check frequency instead of disabling it, use [`OCX_UPDATE_CHECK_INTERVAL`](#ocx-update-check-interval).
+The toolchain drift notice additionally skips the commands that write or advance the lock: `ocx update`, `ocx lock`, `ocx add`, `ocx remove` and `ocx init`.
+
+To disable the checks entirely (including suppressing the throttle state write), use this variable. To change the check frequency instead of disabling it, use [`OCX_UPDATE_CHECK_INTERVAL`](#ocx-update-check-interval). To change what a check does when it finds something, use [`OCX_SELF_UPDATE`](#ocx-self-update) and [`OCX_TOOLCHAIN_UPDATE`](#ocx-toolchain-update).
+
+This variable is **forwarded** to every subprocess `ocx` spawns. A [`--clean`][cmd-package-exec] child therefore keeps the checks off, instead of probing a registry the parent was told not to contact.
+
+Distinct from [`OCX_NO_CONFIG_REFRESH`](#ocx-no-config-refresh), which silences only the [`[managed]`][config-managed] refresh tick; neither variable affects the other.
 
 ### `OCX_NO_PROJECT` {#ocx-no-project}
 
@@ -923,6 +929,30 @@ Unlike [`OCX_OFFLINE`](#ocx-offline), this is **not** a network ban: known and d
 
 Equivalent to passing the [`--frozen`][arg-frozen] flag on every invocation; the flag takes precedence. Mutually exclusive with [`OCX_REMOTE`](#ocx-remote) (combining the two is a usage error, exit `64`); combining with [`OCX_OFFLINE`](#ocx-offline) is accepted, with offline taking effect.
 
+### `OCX_SELF_UPDATE` {#ocx-self-update}
+
+What the background check does when a newer ocx is published. Overrides [`[update] self`][config-update-self] in `config.toml`.
+
+```sh
+export OCX_SELF_UPDATE=manual
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `notify` | Print a notice on stderr naming `ocx self update`. The default when no tier sets the key. |
+| `apply` | Install the newer ocx after the command has finished. |
+| `manual` | Never check. The throttle state file is not touched either. |
+
+Values are lowercase and case-sensitive. An empty value reads as unset. **An unrecognized value never fails a command**: it is logged at debug level, ignored, and resolution falls through to `[update] self`, then to `notify`.
+
+**This variable beats the config file**, unlike [`OCX_TOOLCHAIN_ACTIVATE`](#ocx-toolchain-activate), which sits below it. An exported value overrides a `config.toml` that states the key, so a shell can turn the check off for one session without editing a file.
+
+`apply` runs only when the background check itself runs: stderr is a terminal, `CI` is unset, the invocation is online, and [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check) is unset. It runs after the command completes, whether the command succeeded or failed, and never changes the command's exit code. The new binary takes effect on the next invocation. Trust policy applies to the unattended install as it does to any other install.
+
+An ocx that [`ocx self setup`][cmd-self-setup] did not install has no managed copy to replace. For that ocx `apply` does nothing and logs at debug level.
+
+Not forwarded to child `ocx` processes, and not settable from a package's `env` or an `ocx.toml` `[env]` table: both are refused as reserved `OCX_*` keys.
+
 ### `OCX_TOOLCHAIN_ACTIVATE` {#ocx-toolchain-activate}
 
 How a rendered toolchain reaches your shell — by composing the environment at every prompt, by putting one directory on `PATH`, or not at all. Read by both tiers: a project's toolchain and the global one in `$OCX_HOME`.
@@ -999,26 +1029,56 @@ Two qualifications ride the link lane either way. **An entry whose link is absen
 
 **This variable is the weakest tier, not an override.** It sits *below* both [`--pinned` / `--no-pinned`][arg-pinned] and [`ocx.toml`'s `pinned` key][config-project-pinned], so it decides only for an invocation where neither of those speaks. Three of the five composing emitters — [`ocx direnv export`][cmd-direnv-export], the `env`-mode shell hook and the global login exporter — carry no flag, so for those this variable and the `ocx.toml` key are the whole ladder. See [`--pinned`, `--no-pinned`][arg-pinned] for the full ladder, for which commands carry the flag, and for why [`ocx pull`][cmd-pull] carries none.
 
-### `OCX_UPDATE_CHECK_INTERVAL` {#ocx-update-check-interval}
+### `OCX_TOOLCHAIN_UPDATE` {#ocx-toolchain-update}
 
-Override the minimum interval between automatic update-check registry probes. The check runs once per shell invocation after the interval elapses; it is a background notification only and does not block the command.
+What the background drift check does when a tag pinned in `ocx.lock` has moved in the registry. Overrides [`[update] toolchain`][config-update-toolchain] in `config.toml`.
+
+```sh
+export OCX_TOOLCHAIN_UPDATE=manual
+```
 
 | Value | Behaviour |
 |-------|-----------|
-| Unset | Default 24-hour interval |
-| `0` | Always check on every eligible invocation (bypass throttle) |
-| Positive integer | Custom interval in seconds |
+| `notify` | Print one stderr line per toolchain file with drift, naming [`ocx update`][cmd-update]. The default when no tier sets the key. |
+| `manual` | Never check. |
+
+`apply` is accepted but read as `notify`: only [`ocx update`][cmd-update] moves a pin, so the background check never rewrites a lock. Other values are logged at debug level and ignored. Values are lowercase, and an empty value reads as unset.
+
+**This variable beats the config file.** See [`OCX_SELF_UPDATE`](#ocx-self-update) for how that differs from the weakest-tier variables.
+
+The check compares the platform digests the lock records against what the registry serves now. It reads the registry without writing the local index. A project toolchain is probed only when the project is [consented][config-shell-consent], and the global toolchain needs no consent. A missing or stale lock, a registry error, and a check that runs past its five-second deadline all stay silent.
+
+The gates are those of [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check). Not forwarded to child `ocx` processes, and reserved against package and `ocx.toml` `[env]` declarations.
+
+### `OCX_UPDATE_CHECK_INTERVAL` {#ocx-update-check-interval}
+
+Override the minimum interval between background update checks, for ocx itself and for the toolchain drift notice. Overrides [`[update] interval`][config-update-interval] in `config.toml`.
+
+The check runs before the command, at most once per interval. A registry round trip is part of that run, so the command waits for it. Any failure is logged at debug level and never fails the command.
+
+The grammar is `\d+[smhd]?`: digits with an optional unit suffix. Bare digits are seconds.
+
+| Value | Behaviour |
+|-------|-----------|
+| Unset | Default `1d` (24 hours) |
+| `0` (or `0s`) | Always check on every eligible invocation (bypass throttle) |
+| `3600` | Bare digits are seconds: one hour |
+| `90s`, `15m`, `6h`, `2d` | Seconds, minutes, hours or days |
 
 ```sh
-export OCX_UPDATE_CHECK_INTERVAL=3600   # check at most once per hour
+export OCX_UPDATE_CHECK_INTERVAL=6h     # check at most once every six hours
 export OCX_UPDATE_CHECK_INTERVAL=0      # always check (development use)
 ```
 
-The state file that tracks the last probe is at `$OCX_HOME/state/update-check/ocx_sh_ocx_cli`. Its mtime is the data — the file is zero bytes.
+An invalid value, such as `bogus` or `1w`, is logged at debug level and ignored. Resolution falls through to `[update] interval`, then to `1d`. An empty value reads as unset. Surrounding whitespace is trimmed.
 
-The automatic update check is also suppressed when stderr is not a terminal (typical CI runners, pipelines, and redirected output) and when [`CI`](#external-ci) is set. Setting `OCX_UPDATE_CHECK_INTERVAL` does not override these suppressions — the notification is intentionally invisible in non-interactive contexts.
+**This variable beats the config file**, like the other [`[update]`][config-update] variables. It is not forwarded to child `ocx` processes.
 
-To disable the check entirely rather than adjusting its frequency, use [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check). The explicit [`ocx self update`][cmd-self-update] and [`ocx self update --check`][cmd-self-update] commands always bypass this interval — they are explicit user intent.
+The state files that track the last probe live under `$OCX_HOME/state/update-check/`. The ocx check uses `ocx_sh_ocx_cli`. Each toolchain has its own marker under `toolchain/`. The mtime is the data, and each file is zero bytes.
+
+The checks are also suppressed when stderr is not a terminal (typical CI runners, pipelines, and redirected output) and when [`CI`](#external-ci) is set. Setting `OCX_UPDATE_CHECK_INTERVAL` does not override these suppressions. The notification is intentionally invisible in non-interactive contexts.
+
+To disable the checks entirely rather than adjusting their frequency, use [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check). The explicit [`ocx self update`][cmd-self-update] and [`ocx self update --check`][cmd-self-update] commands always bypass this interval, because they are explicit user intent.
 
 ### Script env access (`ocx package test --script`) {#script-env-access}
 
@@ -1034,7 +1094,7 @@ The `ocx-mirror` tool lives in its own repository. Its environment variables are
 
 ### `CI` {#external-ci}
 
-When set to a [truthy value](#truthy-values), OCX suppresses the update check on startup.
+When set to a [truthy value](#truthy-values), OCX suppresses the background update checks on startup.
 Most CI systems (GitHub Actions, GitLab CI, Travis, etc.) set this automatically.
 
 ### CI Integration Variables {#external-ci-integration}
@@ -1308,6 +1368,11 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-trust-sigstore]: ./configuration.md#keys-trust-sigstore
 [external-ca-certificates]: #external-ca-certificates
 [config-managed-refresh]: ./configuration.md#keys-managed-refresh
+[config-update]: ./configuration.md#keys-update
+[config-update-self]: ./configuration.md#keys-update-self
+[config-update-toolchain]: ./configuration.md#keys-update-toolchain
+[config-update-interval]: ./configuration.md#keys-update-interval
+[config-shell-consent]: ./configuration.md#keys-shell-consent
 [config-keys-shell-modify-path]: ./configuration.md#keys-shell-modify-path
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches
 [patches-user-guide]: ../user-guide/patches.md

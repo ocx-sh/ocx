@@ -57,6 +57,17 @@
         }
       ]
     },
+    "update": {
+      "description": "Background update checks (`[update]`): the posture for ocx itself and for the toolchain,\nplus the interval between checks.\n\nA personal setting, read from `config.toml` only: a managed payload's `[update]` is\nignored and an `ocx.toml` refuses it. An unknown value never fails a command.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UpdateConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "trust": {
       "description": "Identity-pinned verification policies (`[[trust.policy]]`).\n\nUnlike every other section, trust policies **array-append** across the\n`config.toml` tiers rather than replace — the operator trust set is the\nunion of system, user and `$OCX_HOME`. At verify time this operator set\ntakes precedence over the project `ocx.toml`. Consumed by\n`ocx package verify`.",
       "anyOf": [
@@ -225,7 +236,7 @@
           ]
         },
         "refresh": {
-          "description": "Background refresh posture. Defaults to `notify`.",
+          "description": "Background refresh posture. Defaults to `notify`.\n\n`apply` swaps in a drifted snapshot, `notify` advises `ocx config update`, `manual`\nrefreshes only on `ocx config update`. CI never runs the background check. An unknown\nvalue is ignored with a warning, so the default applies.",
           "anyOf": [
             {
               "$ref": "#/$defs/RefreshPolicy"
@@ -233,7 +244,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "interval": {
           "description": "Background refresh throttle interval, `\\d+[smhd]?` (bare = seconds).\nDefaults to `\"1d\"`.",
@@ -245,24 +257,61 @@
       }
     },
     "RefreshPolicy": {
-      "description": "Background refresh posture for the `[managed]` tier.",
+      "description": "What a background check does when it finds drift.",
       "oneOf": [
         {
-          "description": "Drift silently triggers a full fetch + persist + swap — but only via the\nbackground tick, whose activation gate is narrow: it fires only on an\ninteractive terminal (stderr is a TTY), outside CI, and online. CI and\nother automation hosts never see the tick run; they must refresh the\nsnapshot with an explicit `ocx config update`.",
+          "description": "Drift is applied without asking, by the background check only, which runs only on an\ninteractive terminal, outside CI, and online.",
           "type": "string",
           "const": "apply"
         },
         {
-          "description": "Drift prints a stderr advisory (\"run `ocx config update`\"); content is\nnever fetched by the background tick.",
+          "description": "Drift prints a stderr advisory naming the command that applies it; nothing is fetched.",
           "type": "string",
           "const": "notify"
         },
         {
-          "description": "The background tick is skipped entirely; only `ocx config update`\nrefreshes the snapshot.",
+          "description": "The background check is skipped entirely; only an explicit command refreshes.",
           "type": "string",
           "const": "manual"
         }
       ]
+    },
+    "UpdateConfig": {
+      "description": "The `[update]` section of `config.toml`.",
+      "type": "object",
+      "properties": {
+        "self": {
+          "description": "What ocx does when a newer ocx is published: `apply` installs it after the command\nfinishes, `notify` (default) prints a notice, `manual` never checks.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "toolchain": {
+          "description": "What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice,\n`manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "interval": {
+          "description": "Minimum time between two checks, `\\d+[smhd]?` (bare digits = seconds); `\"0\"` checks on\nevery command. Defaults to `\"1d\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "TrustConfig": {
       "description": "Container for the `[trust]` config section (`[[trust.policy]]` entries).",

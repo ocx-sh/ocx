@@ -83,6 +83,17 @@ pub mod keys {
     ///
     /// Forwarded, or a child's refresh replaces the managed tier with config the parent never saw.
     pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
+    /// Boolean — kill switch for the background self-update and toolchain drift checks.
+    ///
+    /// Forwarded, or a `--clean` child probes the registry the parent was told not to.
+    pub const OCX_NO_UPDATE_CHECK: &str = "OCX_NO_UPDATE_CHECK";
+    /// Throttle interval of the background update checks, `\d+[smhd]?`; beats `[update] interval`.
+    /// Not forwarded: a personal preference, like [`OCX_LAZY_MODE`].
+    pub const OCX_UPDATE_CHECK_INTERVAL: &str = "OCX_UPDATE_CHECK_INTERVAL";
+    /// `RefreshPolicy` wire value for ocx's own update check; beats `[update] self`. Not forwarded.
+    pub const OCX_SELF_UPDATE: &str = "OCX_SELF_UPDATE";
+    /// `RefreshPolicy` wire value for the toolchain drift check; beats `[update] toolchain`. Not forwarded.
+    pub const OCX_TOOLCHAIN_UPDATE: &str = "OCX_TOOLCHAIN_UPDATE";
     /// Directory execution records are written to; absent or empty turns recording off.
     /// Forwarded so every frame of a launch chain records into the outermost sink.
     pub const OCX_RECORDS_DIR: &str = "OCX_RECORDS_DIR";
@@ -437,6 +448,11 @@ impl Env {
             self.set(keys::OCX_NO_CONFIG_REFRESH, "1");
         } else {
             self.remove(keys::OCX_NO_CONFIG_REFRESH);
+        }
+        if flag(keys::OCX_NO_UPDATE_CHECK, false) {
+            self.set(keys::OCX_NO_UPDATE_CHECK, "1");
+        } else {
+            self.remove(keys::OCX_NO_UPDATE_CHECK);
         }
         // An empty value must not travel, or the child reads it as "no default registry at all".
         match var(keys::OCX_DEFAULT_REGISTRY).filter(|value| !value.is_empty()) {
@@ -1561,6 +1577,62 @@ mod tests {
             env.get(keys::OCX_NO_CONFIG).is_none(),
             "the ambient OCX_NO_CONFIG is not the authority — the view is"
         );
+    }
+
+    #[test]
+    fn apply_ocx_config_forwards_the_update_kill_switch_from_ambient() {
+        let guard = ocx_util::env::overrides::lock();
+
+        guard.set(keys::OCX_NO_UPDATE_CHECK, "1");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_NO_UPDATE_CHECK).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "a truthy OCX_NO_UPDATE_CHECK must reach a --clean child"
+        );
+
+        guard.remove(keys::OCX_NO_UPDATE_CHECK);
+        let mut env = Env::clean();
+        env.set(keys::OCX_NO_UPDATE_CHECK, "1");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_NO_UPDATE_CHECK).is_none(),
+            "an absent ambient OCX_NO_UPDATE_CHECK must clear a stale child value"
+        );
+    }
+
+    /// The update postures are personal preferences: a child ocx reads its own, never a forwarded copy.
+    #[test]
+    fn apply_ocx_config_never_writes_the_update_preference_keys() {
+        let guard = ocx_util::env::overrides::lock();
+        let preference_keys = [
+            keys::OCX_SELF_UPDATE,
+            keys::OCX_TOOLCHAIN_UPDATE,
+            keys::OCX_UPDATE_CHECK_INTERVAL,
+        ];
+        for key in preference_keys {
+            guard.set(key, "apply");
+        }
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(env.get(keys::OCX_BINARY_PIN).unwrap(), "/abs/ocx");
+        for key in preference_keys {
+            assert!(env.get(key).is_none(), "`{key}` must never be forwarded to a child");
+        }
+    }
+
+    /// Package metadata and `ocx.toml` `[env]` both gate on this predicate, so neither can set an update posture.
+    #[test]
+    fn every_update_key_is_reserved() {
+        for key in [
+            keys::OCX_NO_UPDATE_CHECK,
+            keys::OCX_UPDATE_CHECK_INTERVAL,
+            keys::OCX_SELF_UPDATE,
+            keys::OCX_TOOLCHAIN_UPDATE,
+        ] {
+            assert!(is_reserved_ocx_key(key), "{key}");
+        }
     }
 
     #[test]

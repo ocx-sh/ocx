@@ -16,9 +16,11 @@ pub mod managed_config;
 pub mod mirror;
 pub mod patch;
 pub mod records;
+pub mod refresh;
 pub mod registry;
 pub mod shell;
 pub mod tls;
+pub mod update;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,7 @@ pub use self::mirror::MirrorConfig;
 pub use self::patch::PatchConfig;
 pub use self::registry::RegistryConfig;
 pub use self::shell::ShellConfig;
+pub use self::update::UpdateConfig;
 
 /// Which `config.toml` tier a value came from; runtime provenance only, never serialized.
 ///
@@ -114,6 +117,14 @@ pub struct Config {
     /// Absent → no managed tier configured (opt-in, seeded by
     /// `ocx self setup --managed-config`).
     pub managed: Option<ManagedConfig>,
+
+    /// Background update checks (`[update]`): the posture for ocx itself and for the toolchain,
+    /// plus the interval between checks.
+    ///
+    /// A personal setting, read from `config.toml` only: a managed payload's `[update]` is
+    /// ignored and an `ocx.toml` refuses it. An unknown value never fails a command.
+    // `fold_managed_tier` drops it and `ocx.toml` refuses it, or a publisher or a clone could switch on binary replacement.
+    pub update: Option<UpdateConfig>,
 
     /// Identity-pinned verification policies (`[[trust.policy]]`).
     ///
@@ -254,6 +265,12 @@ impl Config {
             match self.managed.as_mut() {
                 Some(self_managed) => self_managed.merge(other_managed),
                 None => self.managed = Some(other_managed),
+            }
+        }
+        if let Some(other_update) = other.update {
+            match self.update.as_mut() {
+                Some(self_update) => self_update.merge(other_update),
+                None => self.update = Some(other_update),
             }
         }
         // Trust policies append across tiers; `[trust.sigstore]` replaces, since two Fulcio CAs are ambiguous.

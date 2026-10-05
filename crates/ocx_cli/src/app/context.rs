@@ -77,6 +77,8 @@ pub struct Context {
     /// Extra-CA roots from env and the local tiers only, so the managed-tier fetch is never
     /// secured by material that tier delivered.
     extra_roots_local: ExtraRoots,
+    /// Resolved on first use, so only a command that runs an update check prints `[update]` warnings.
+    update_policy: std::sync::OnceLock<ocx_config::update::ResolvedUpdatePolicy>,
 }
 
 /// The two `[managed]` gates `Context::try_init` needs, named so the adjacent `bool`s cannot
@@ -460,6 +462,7 @@ impl Context {
             records_env,
             extra_roots_merged,
             extra_roots_local,
+            update_policy: std::sync::OnceLock::new(),
         })
     }
 
@@ -760,6 +763,12 @@ impl Context {
 
     pub fn manager(&self) -> &ocx_package_manager::PackageManager {
         &self.manager
+    }
+
+    /// The effective `[update]` posture: env ▸ local `config.toml` ▸ defaults, resolved once.
+    pub fn update_policy(&self) -> &ocx_config::update::ResolvedUpdatePolicy {
+        self.update_policy
+            .get_or_init(|| ocx_config::update::ResolvedUpdatePolicy::resolve(self.config.update.as_ref()))
     }
 
     /// Resolution-affecting policy to forward to subprocesses via [`env::Env::apply_ocx_config`].
