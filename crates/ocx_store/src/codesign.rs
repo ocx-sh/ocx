@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
@@ -28,10 +28,53 @@ pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
 
     remove_quarantine(content_path).await;
 
-    let signed_inodes = Arc::new(Mutex::new(HashSet::new()));
-    sign_directory(content_path.to_path_buf(), signed_inodes).await;
+    let groups = Arc::new(Mutex::new(HardLinkGroups::default()));
+    sign_directory(content_path.to_path_buf(), Arc::clone(&groups)).await;
+    let groups = std::mem::take(&mut *groups.lock().expect("hard-link groups mutex poisoned"));
+    relink_replaced_aliases(&groups).await;
 
     Ok(())
+}
+
+/// The Mach-O names met per inode: the first is signed, the others are hard links to it.
+#[derive(Default)]
+struct HardLinkGroups {
+    first_names: HashMap<u64, PathBuf>,
+    aliases: Vec<(u64, PathBuf)>,
+}
+
+/// Re-points each alias at its first name when signing gave that name a new inode, or the alias keeps the unsigned bytes.
+async fn relink_replaced_aliases(groups: &HardLinkGroups) {
+    for (inode, alias) in &groups.aliases {
+        let first = &groups.first_names[inode];
+        if file_inode(first).await == Some(*inode) {
+            continue;
+        }
+        // Link beside, then rename over: a failed link leaves the alias unsigned rather than missing.
+        let staged = alias.with_file_name(format!(
+            "{}.codesign_link",
+            alias.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        // A failed link leaves `staged` untouched: it may be a package file of that name, never ours to delete.
+        let relinked = match tokio::fs::hard_link(first, &staged).await {
+            Ok(()) => {
+                let renamed = tokio::fs::rename(&staged, alias).await;
+                if renamed.is_err() {
+                    tokio::fs::remove_file(&staged).await.ok(); // best effort; the warning below reports the failure
+                }
+                renamed
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = relinked {
+            log::warn!(
+                "Failed to relink {} to signed {}: {}",
+                alias.display(),
+                first.display(),
+                error
+            );
+        }
+    }
 }
 
 const MACHO_MAGIC: &[u32] = &[
@@ -63,7 +106,7 @@ async fn is_macho(path: &Path) -> bool {
 /// Boxed so the recursive `JoinSet::spawn` gets a nameable `Send` future, which a recursive `async fn` cannot prove.
 fn sign_directory(
     path: std::path::PathBuf,
-    signed_inodes: Arc<Mutex<HashSet<u64>>>,
+    groups: Arc<Mutex<HardLinkGroups>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let Ok(mut read_dir) = tokio::fs::read_dir(&path).await else {
@@ -88,8 +131,7 @@ fn sign_directory(
 
         let mut subdir_tasks = tokio::task::JoinSet::new();
         for dir in subdirs {
-            let inodes = Arc::clone(&signed_inodes);
-            subdir_tasks.spawn(sign_directory(dir, inodes));
+            subdir_tasks.spawn(sign_directory(dir, Arc::clone(&groups)));
         }
         while let Some(result) = subdir_tasks.join_next().await {
             if let Err(e) = result {
@@ -102,13 +144,13 @@ fn sign_directory(
             if !is_macho(&file).await {
                 continue;
             }
-            if let Some(inode) = file_inode(&file).await
-                && !signed_inodes
-                    .lock()
-                    .expect("signed_inodes mutex poisoned")
-                    .insert(inode)
-            {
-                continue; // Already signed via hardlink
+            if let Some(inode) = file_inode(&file).await {
+                let mut groups = groups.lock().expect("hard-link groups mutex poisoned");
+                if groups.first_names.contains_key(&inode) {
+                    groups.aliases.push((inode, file));
+                    continue;
+                }
+                groups.first_names.insert(inode, file.clone());
             }
             file_tasks.spawn(async move { sign_binary(&file).await });
         }
@@ -346,7 +388,7 @@ mod tests {
 
     // -- sign_directory -----------------------------------------------------------
 
-    // Unix-only: `signed_inodes` dedups by inode, but `file_inode` returns
+    // Unix-only: `groups` dedups by inode, but `file_inode` returns
     // `None` on non-Unix, so the count expectation only holds on Unix.
     #[cfg(unix)]
     #[tokio::test]
@@ -359,19 +401,19 @@ mod tests {
         create_file_with_magic(&bin_dir, "tool_b", &0xFEED_FACEu32.to_be_bytes());
         create_file_with_magic(&bin_dir, "script.sh", b"#!/b");
 
-        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
+        let groups = std::sync::Arc::new(std::sync::Mutex::new(super::HardLinkGroups::default()));
+        super::sign_directory(dir.path().to_path_buf(), groups.clone()).await;
 
         // Two Mach-O files; script.sh is not Mach-O.
-        assert_eq!(signed_inodes.lock().unwrap().len(), 2);
+        assert_eq!(groups.lock().unwrap().first_names.len(), 2);
     }
 
     #[tokio::test]
     async fn sign_directory_empty_directory() {
         let dir = TempDir::new().unwrap();
-        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
-        assert!(signed_inodes.lock().unwrap().is_empty());
+        let groups = std::sync::Arc::new(std::sync::Mutex::new(super::HardLinkGroups::default()));
+        super::sign_directory(dir.path().to_path_buf(), groups.clone()).await;
+        assert!(groups.lock().unwrap().first_names.is_empty());
     }
 
     #[tokio::test]
@@ -381,9 +423,9 @@ mod tests {
         create_file_with_magic(dir.path(), "data.json", b"{\"ke");
         create_file_with_magic(dir.path(), "image.png", &[0x89, b'P', b'N', b'G']);
 
-        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
-        assert!(signed_inodes.lock().unwrap().is_empty());
+        let groups = std::sync::Arc::new(std::sync::Mutex::new(super::HardLinkGroups::default()));
+        super::sign_directory(dir.path().to_path_buf(), groups.clone()).await;
+        assert!(groups.lock().unwrap().first_names.is_empty());
     }
 
     // Unix-only: relies on Unix symlinks and inode-based dedup.
@@ -402,14 +444,14 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&_real, &_link).unwrap();
 
-        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
+        let groups = std::sync::Arc::new(std::sync::Mutex::new(super::HardLinkGroups::default()));
+        super::sign_directory(dir.path().to_path_buf(), groups.clone()).await;
 
         // Only the real file should be signed, not the symlink.
-        assert_eq!(signed_inodes.lock().unwrap().len(), 1);
+        assert_eq!(groups.lock().unwrap().first_names.len(), 1);
     }
 
-    // Unix-only: `signed_inodes` dedups by inode, but `file_inode` returns
+    // Unix-only: `groups` dedups by inode, but `file_inode` returns
     // `None` on non-Unix, so the count expectation only holds on Unix.
     #[cfg(unix)]
     #[tokio::test]
@@ -422,11 +464,94 @@ mod tests {
         let hardlink = bin_dir.join("hardlink");
         crate::hardlink::create(&original, &hardlink).unwrap();
 
-        let signed_inodes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        super::sign_directory(dir.path().to_path_buf(), signed_inodes.clone()).await;
+        let groups = std::sync::Arc::new(std::sync::Mutex::new(super::HardLinkGroups::default()));
+        super::sign_directory(dir.path().to_path_buf(), groups.clone()).await;
 
         // Same inode — should only be signed once.
-        assert_eq!(signed_inodes.lock().unwrap().len(), 1);
+        assert_eq!(groups.lock().unwrap().first_names.len(), 1);
+        assert_eq!(groups.lock().unwrap().aliases.len(), 1);
+    }
+
+    #[cfg(unix)]
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    fn inode(path: &std::path::Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().ino()
+    }
+
+    /// The copy fallback renames a signed copy over the first name; every alias must follow it to the new inode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relink_moves_aliases_onto_a_replaced_first_name() {
+        let dir = TempDir::new().unwrap();
+        let first = create_file_with_magic(dir.path(), "first", b"old!");
+        let alias = dir.path().join("alias");
+        crate::hardlink::create(&first, &alias).unwrap();
+        let groups = super::HardLinkGroups {
+            first_names: [(inode(&first), first.clone())].into(),
+            aliases: vec![(inode(&first), alias.clone())],
+        };
+
+        let signed = dir.path().join("signed");
+        std::fs::write(&signed, b"new!").unwrap();
+        std::fs::rename(&signed, &first).unwrap();
+        super::relink_replaced_aliases(&groups).await;
+
+        assert_eq!(inode(&alias), inode(&first));
+        assert_eq!(std::fs::read(&alias).unwrap(), b"new!");
+        assert_eq!(names(dir.path()), ["alias", "first"]);
+    }
+
+    /// A package file that happens to carry the staging name is never deleted by a failed relink.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relink_keeps_a_package_file_named_like_the_staged_link() {
+        let dir = TempDir::new().unwrap();
+        let first = create_file_with_magic(dir.path(), "first", b"old!");
+        let alias = dir.path().join("alias");
+        crate::hardlink::create(&first, &alias).unwrap();
+        let occupant = dir.path().join("alias.codesign_link");
+        std::fs::write(&occupant, b"package data").unwrap();
+        let groups = super::HardLinkGroups {
+            first_names: [(inode(&first), first.clone())].into(),
+            aliases: vec![(inode(&first), alias.clone())],
+        };
+
+        let signed = dir.path().join("signed");
+        std::fs::write(&signed, b"new!").unwrap();
+        std::fs::rename(&signed, &first).unwrap();
+        super::relink_replaced_aliases(&groups).await;
+
+        assert_eq!(std::fs::read(&occupant).unwrap(), b"package data");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relink_leaves_aliases_of_an_unreplaced_first_name() {
+        let dir = TempDir::new().unwrap();
+        let first = create_file_with_magic(dir.path(), "first", b"same");
+        let alias = dir.path().join("alias");
+        crate::hardlink::create(&first, &alias).unwrap();
+        let original = inode(&alias);
+        let groups = super::HardLinkGroups {
+            first_names: [(original, first.clone())].into(),
+            aliases: vec![(original, alias.clone())],
+        };
+
+        super::relink_replaced_aliases(&groups).await;
+
+        assert_eq!(inode(&alias), original);
+        assert_eq!(inode(&first), original);
+        assert_eq!(names(dir.path()), ["alias", "first"]);
     }
 
     // -- sign_extracted_content (stubbed) -----------------------------------------

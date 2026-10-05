@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -143,8 +144,9 @@ def test_without_extract_the_archive_is_bundled_as_one_file(ocx: OcxRunner, tmp_
 
 def test_hard_link_entry_under_strip_keeps_its_contents(ocx: OcxRunner, tmp_path: Path):
     """A tar hard link addresses an earlier entry by its in-archive path, so
-    the link name takes the same strip as the entry names. Both files land in
-    the bundle with the same contents."""
+    the link name takes the same strip as the entry names. The alias lands in
+    the bundle as a hard link to the stripped original, reading the same
+    contents."""
     archive = _archive(
         tmp_path,
         ".tar.gz",
@@ -156,7 +158,10 @@ def test_hard_link_entry_under_strip_keeps_its_contents(ocx: OcxRunner, tmp_path
     result = _create(ocx, archive, out, "--extract", "--strip-components", "1")
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert set(bundle_members(out)) == {"bin/hello", "bin/hello-alias", "README.md"}
+    assert set(bundle_members(out)) == {"bin/hello", "README.md"}
+    with tarfile.open(out, "r:xz") as bundle:
+        alias = bundle.getmember("bin/hello-alias")
+    assert alias.islnk() and alias.linkname == "bin/hello"
     assert bundle_text(out, "bin/hello-alias") == HELLO_BODY
 
 
