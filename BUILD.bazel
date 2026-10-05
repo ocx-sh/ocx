@@ -10,6 +10,8 @@ load("//:rustdoc_diagnostics.bzl", "json_error_format")
 # labels; the lint is about depending on an external repository.
 _NOT_OURS = [
     "./.agents/*",
+    # Host tool caches (the xwin cross-compile SDK vendors third-party `.star`).
+    "./.cache/*",
     "./.git/*",
     "./.ocx/*",
     "./bazel-*/*",
