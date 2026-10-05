@@ -1831,7 +1831,7 @@ ocx lock [OPTIONS]
 |------|-------|-------------|---------|
 | `--pull` | — | After writing the lock, materialise all resolved packages into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. | — |
-| `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
+| `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale, with one stderr line pointing at `ocx lock` and no error logged; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |
 
@@ -1909,9 +1909,21 @@ Pass `--global` **before** the subcommand: `ocx --global update`. See [`--global
 
 #### Report {#update-report}
 
-Plain format renders one five-column table — `Binding | Group | Platform | From | To` — holding only the bindings whose pull identifier moved. `Binding` is `name:tag` as declared, or the bare `name` when digest-pinned; `From`/`To` are `sha256:` plus the first 12 hex digits (the same short-digest form [`package inspect`](#package-inspect) uses), `-` when the pin did not exist on that side. When any pin held still and `--verbose` was not given, a trailing hint names the count: `2 unchanged pins not shown; re-run with --verbose to list them` (singular: `1 unchanged pin not shown; re-run with --verbose to list it`). `--verbose` appends those rows to the same table instead of printing the hint. A scoped run (`-g`/positional names) lists only the bindings it examined as unchanged — a pin outside the scope was never re-resolved, so it is never reported either way.
+Plain format prints one row per tool that moved, with the release it moves from and to:
 
-`ocx --format json update` emits `{ "changes": [...], "unchanged": [...], "metadata_changed": bool }`, identical at both verbosities. Each `changes[]` entry is `{ name, group, platform, tag, from, to }`; each `unchanged[]` entry is `{ name, group, platform, tag, digest }`, where `digest` is the full pull identifier (`registry/repository@sha256:<hex>`) — the same form `from`/`to` carry, so all three are directly comparable and feed straight back into `ocx pull`. `tag` is `null` for a digest-pinned binding; `from`/`to` are `null` when the pin is newly introduced or dropped. `metadata_changed` reports whether load-bearing lock metadata (`declaration_hash`, `declaration_hash_version`, `lock_version`) moved — advisory fields like `generated_at` are ignored, since those move on every write. `--format json update --check` on drift prints this same report and exits 65 with **no** `error.detail` envelope — the report itself is the verdict, not a wrapped error.
+```text
+Binding      From      To
+bun:1        1.4.0  →  1.4.2
+git-cliff:2  2.14.1 →  2.14.2
+python:3.14  ?      →  3.14.8
+3 tools would move; run `ocx update` to apply
+```
+
+`Binding` is `name:tag` as declared, or the bare `name` when digest-pinned. A `Group` column appears only when the moved tools span more than one group. `?` marks a release that could not be named and `-` a pin that did not exist on that side. When a tool's platforms moved to different releases, the row shows the host platform's, or the releases most platforms share when the host is not among them. When any tool held still on every platform, a trailing hint names the count: `2 unchanged tools not shown; re-run with --verbose to list them`. `--verbose` instead prints one row per platform under `Binding | Group | Platform | From | To`, with `From`/`To` as `sha256:` plus the first 12 hex digits (the short-digest form [`package inspect`](#package-inspect) uses) and the release in parentheses when known — `sha256:3f2a9c1d7e4b (3.28.4)` — and lists the pins that held still as well. A scoped run (`-g`/positional names) lists only the bindings it examined as unchanged — a pin outside the scope was never re-resolved, so it is never reported either way.
+
+The closing line goes to stderr. Under `--check` it is the verdict behind exit 65, as in the example above, and no error is logged. A real update ends with `N tools moved` on an interactive terminal.
+
+`ocx --format json update` emits `{ "changes": [...], "unchanged": [...], "metadata_changed": bool }`, identical at both verbosities. Each `changes[]` entry is `{ name, group, platform, tag, from, to, from_version, to_version }`; each `unchanged[]` entry is `{ name, group, platform, tag, digest, version }`, where `digest` is the full pull identifier (`registry/repository@sha256:<hex>`) — the same form `from`/`to` carry, so all three are directly comparable and feed straight back into `ocx pull`. `tag` is `null` for a digest-pinned binding; `from`/`to` are `null` when the pin is newly introduced or dropped. `from_version`, `to_version` and `version` name the release an advisory tag pointed at on that row's platform — `3` moving from `3.28.3` to `3.28.4` — found by matching the pin against the repository's release tags. Each platform row is matched on its own, so one tag can report different releases on different platforms. They are `null` whenever no release can be named: a digest-pinned binding, a run under `--offline` or `--frozen`, or a pin no recent release matches. A `null` version never changes the exit code. `metadata_changed` reports whether load-bearing lock metadata (`declaration_hash`, `declaration_hash_version`, `lock_version`) moved — advisory fields like `generated_at` are ignored, since those move on every write. `--format json update --check` on drift prints this same report and exits 65 with **no** `error.detail` envelope — the report itself is the verdict, not a wrapped error.
 
 **Exit codes**
 

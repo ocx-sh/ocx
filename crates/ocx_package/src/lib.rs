@@ -8,6 +8,7 @@ pub mod publisher;
 pub mod bin_scan;
 pub mod bundle;
 pub mod cascade;
+pub mod concrete_version;
 pub mod dependency_pinning;
 pub mod description;
 pub mod error;

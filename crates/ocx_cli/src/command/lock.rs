@@ -9,7 +9,7 @@ use ocx_project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
-    load_project_for_mutate, load_project_with_lock, materialize_lock, record_activation_consent,
+    ProjectContextError, load_project_for_mutate, load_project_with_lock, materialize_lock, record_activation_consent,
 };
 use crate::conventions;
 use crate::options;
@@ -133,8 +133,15 @@ impl Lock {
 /// `ocx lock --check`: the staleness (65) and missing-lock (78) gates `ocx exec` and `ocx pull`
 /// enforce, with no network and no write.
 async fn run_check(context: &crate::app::Context) -> anyhow::Result<ExitCode> {
-    load_project_with_lock(context).await?;
-    Ok(ExitCode::SUCCESS)
+    match load_project_with_lock(context).await {
+        Ok(_) => Ok(ExitCode::SUCCESS),
+        // Drift is the answer `--check` asks for, not a failure; a missing lock stays an error (78).
+        // JSON keeps the error: its `error.detail` envelope is the only report this check emits.
+        Err(ProjectContextError::Lock(ocx_project::LockCurrency::Stale { .. })) if !context.api().is_json() => Ok(
+            crate::command::update::print_verdict("ocx.lock does not match ocx.toml; run `ocx lock` to update it"),
+        ),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Whether `{project_dir}/.gitattributes` carries `ocx.lock merge=union`.
