@@ -1101,6 +1101,8 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
         f"ocx lock --check on a stale lock must exit 65 (DataError); "
         f"rc={check.returncode}\nstderr:\n{check.stderr}"
     )
+    assert "run `ocx lock`" in check.stderr, check.stderr
+    assert "ERROR" not in check.stderr, f"drift under --check is an answer, not an error:\n{check.stderr}"
     after = _read_lock_bytes(project)
     assert before == after, "ocx lock --check must NOT mutate ocx.lock on drift"
 

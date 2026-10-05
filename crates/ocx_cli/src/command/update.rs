@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::process::ExitCode;
 
 use clap::Parser;
+use futures::StreamExt;
 use ocx_project::{
     ALL_GROUP, DEFAULT_GROUP, ProjectConfig, ResolveLockOptions, expand_all_keyword, resolve_lock, resolve_lock_touched,
 };
 
-use crate::api::data::update::{UpdateReport, VerboseUpdateReport};
+use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
 use crate::app::CommandError;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock, record_activation_consent};
 use crate::conventions;
@@ -108,22 +109,22 @@ impl Update {
         };
 
         // Built while the guard still holds the declaration the tag column reads; the commit consumes it.
-        let report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref());
+        let mut report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref());
+        // Offline and frozen runs read a snapshot that may lag the registry, so they report no version.
+        if !context.is_offline() && !context.config_view().frozen {
+            report.fill_versions(&concrete_versions(resolve_index, &report).await);
+        }
 
         // Reported before the exit-65 diagnostic, so a refusal names what moved.
         if self.check {
-            let moved = report.moved();
+            let verdict = report.summary(true);
             self.emit(&context, report)?;
-            if moved {
-                return Err(CommandError::new(
-                    "ocx.lock candidate would change pinned content; \
-                     re-run `ocx update` (without --check) to refresh the lock",
-                    ocx_exit::ExitCode::DataError,
-                )
-                .into());
-            }
-            return Ok(ExitCode::SUCCESS);
+            return Ok(match verdict {
+                Some(line) => print_verdict(&line),
+                None => ExitCode::SUCCESS,
+            });
         }
+        let summary = report.summary(false);
 
         // `-g`/NAME scope only the resolution, never the re-render; `--no-pull` renders from the offline view.
         let eager = self.pull.enabled(true);
@@ -157,6 +158,9 @@ impl Update {
         materialize_lock(&context, &new_lock, &config, eager, platform).await?;
 
         self.emit(&context, report)?;
+        if let Some(line) = summary {
+            context.ui().success(line);
+        }
 
         Ok(ExitCode::SUCCESS)
     }
@@ -169,6 +173,41 @@ impl Update {
             context.api().report(&report)
         }
     }
+}
+
+/// A `--check` that found drift: `line` on stderr, then exit 65.
+///
+/// Printed, not raised as an error: drift is the answer `--check` was asked for, so it gets no log line.
+// Unconditional, unlike `ui()`: in CI (non-interactive) this line is the only explanation of the 65.
+pub(crate) fn print_verdict(line: &str) -> ExitCode {
+    ocx_console::Printer::new(false, false).cerr().plain(line).end_line();
+    ocx_exit::ExitCode::DataError.into()
+}
+
+/// Most releases one advisory tag lookup probes before it reports no version.
+const VERSION_PROBES: usize = 8;
+
+/// Most version lookups in flight at once.
+const VERSION_LOOKUP_CONCURRENCY: usize = 8;
+
+/// The concrete release behind each of the report's tagged pins; a miss or a failed lookup is absent.
+async fn concrete_versions(index: &ocx_index::Index, report: &UpdateReport) -> BTreeMap<VersionKey, String> {
+    futures::stream::iter(report.version_lookups())
+        .map(|((pull, tag), leaves)| async move {
+            let advisory = pull.clone_with_tag(tag.as_str());
+            let found =
+                ocx_package::concrete_version::resolve_concrete_version(index, &advisory, &leaves, VERSION_PROBES)
+                    .await
+                    // Best effort: a failed lookup reports no version and never changes the exit code.
+                    .inspect_err(|error| tracing::debug!("version lookup for {advisory} failed: {error}"))
+                    .ok()
+                    .flatten();
+            found.map(|version| ((pull, tag), version.to_string()))
+        })
+        .buffer_unordered(VERSION_LOOKUP_CONCURRENCY)
+        .filter_map(std::future::ready)
+        .collect()
+        .await
 }
 
 /// The exit-78 error for a missing predecessor `ocx.lock`.

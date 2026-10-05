@@ -6133,7 +6133,7 @@
         "unchanged",
         "metadata_changed"
       ],
-      "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\n`tag`, and in `changes` rows also `from`/`to`, are present and `null`\nrather than absent. **The payload is identical with and without\n`--verbose`**: verbosity changes the plain rendering only."
+      "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\n`tag` and the version fields, and in `changes` rows also `from`/`to`, are\npresent and `null` rather than absent. A version is best effort: a miss,\nan `--offline` or `--frozen` run, or a digest-pinned binding reports\n`null`. **The payload is identical with and without `--verbose`**:\nverbosity changes the plain rendering only."
     },
     "BindingChange": {
       "type": "object",
@@ -6178,6 +6178,20 @@
             }
           ],
           "description": "Pull identifier after the update; `null` when dropped."
+        },
+        "from_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The release `tag` named before the update (`3` -> `3.28.3`); `null` when unknown."
+        },
+        "to_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The release `tag` names after the update; `null` when unknown."
         }
       },
       "required": [
@@ -6186,7 +6200,9 @@
         "platform",
         "tag",
         "from",
-        "to"
+        "to",
+        "from_version",
+        "to_version"
       ],
       "description": "One `(group, binding, platform)` pin that moved between the predecessor\nlock and the candidate.\n\n`from` is `None` when the pin is newly introduced (a binding or a platform\nthe predecessor did not carry); `to` is `None` when it was dropped. Both\nare the full pull identifier — `registry/repository@sha256:<hex>` — so a\nconsumer can feed either straight back to `ocx pull` without rebuilding it\nfrom parts."
     },
@@ -6215,6 +6231,13 @@
         "digest": {
           "$ref": "#/$defs/PackageRef",
           "description": "The unchanged pull identifier — the same\n`registry/repository@sha256:<hex>` form `changes[].from` / `to`\ncarry, so the two arrays are directly comparable."
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The release `tag` names (`3` -> `3.28.4`); `null` when unknown."
         }
       },
       "required": [
@@ -6222,7 +6245,8 @@
         "group",
         "platform",
         "tag",
-        "digest"
+        "digest",
+        "version"
       ],
       "description": "One `(group, binding, platform)` pin the update left where it was."
     },
@@ -6253,7 +6277,7 @@
         "unchanged",
         "metadata_changed"
       ],
-      "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\n`tag`, and in `changes` rows also `from`/`to`, are present and `null`\nrather than absent. **The payload is identical with and without\n`--verbose`**: verbosity changes the plain rendering only."
+      "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\n`tag` and the version fields, and in `changes` rows also `from`/`to`, are\npresent and `null` rather than absent. A version is best effort: a miss,\nan `--offline` or `--frozen` run, or a digest-pinned binding reports\n`null`. **The payload is identical with and without `--verbose`**:\nverbosity changes the plain rendering only."
     },
     "VerificationReport": {
       "type": "object",
