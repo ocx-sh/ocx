@@ -9,14 +9,22 @@ use ocx_package_manager::{
     HandoffFailure, HandoffStdio, PackageManager, SelfUpdateResult, TagProbe, UpdateCheckResult,
 };
 
+use super::update_notice::NoticeRow;
 use super::{Context, background_check};
 use crate::api::data::{sanitize_error_chain, sanitize_for_terminal};
 
+/// What a newer OCX release asks of the caller.
+pub(crate) enum SelfUpdate {
+    /// `notify`: a row for the update notice.
+    Notice(NoticeRow),
+    /// `apply`: the release to install once the command has finished.
+    Apply(PackageRef),
+}
+
 /// Checks the remote registry for a newer OCX version.
 ///
-/// Under `notify` prints a notice to stderr; under `apply` returns the release to install after
-/// the command instead. Skipped under `--frozen`, like the toolchain drift check. Never fails the command: errors are logged at debug level.
-pub async fn check_for_update(ctx: &Context) -> Option<PackageRef> {
+/// Skipped under `--frozen`, like the toolchain drift check. Never fails the command: errors are logged at debug level.
+pub(crate) async fn check_for_update(ctx: &Context) -> Option<SelfUpdate> {
     if let Some(reason) = background_check::skip_reason(keys::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
         log::debug!("Update check skipped: {reason}");
         return None;
@@ -46,10 +54,10 @@ pub async fn check_for_update(ctx: &Context) -> Option<PackageRef> {
             log::debug!("Update check skipped: {reason}");
         }
         Ok(UpdateCheckResult::UpdateAvailable(identifier)) if policy.self_policy == RefreshPolicy::Apply => {
-            return Some(identifier);
+            return Some(SelfUpdate::Apply(identifier));
         }
         Ok(UpdateCheckResult::UpdateAvailable(identifier)) => {
-            eprintln!("A new OCX version is available: {identifier}. Consider updating by running `ocx self update`.");
+            return Some(SelfUpdate::Notice(NoticeRow::ocx(&identifier)));
         }
         Err(err) => {
             log::debug!("Update check failed: {err}");

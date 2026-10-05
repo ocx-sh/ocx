@@ -12,6 +12,8 @@ const STYLE_STATUS_MESSAGE: Style = Style::new().style(console::Style::new().und
 const STYLE_PROMPT_LABEL: Style = Style::new().style(console::Style::new().bold());
 const STYLE_WARNING_PREFIX: Style = Style::new().style(console::Style::new().yellow().bold());
 const STYLE_SUCCESS: Style = Style::new().style(console::Style::new().green().bold());
+const STYLE_NOTICE_TITLE: Style = Style::new().style(console::Style::new().bold());
+const STYLE_NOTICE_COMMAND: Style = Style::new().style(console::Style::new().cyan());
 
 /// stderr diagnostics and interactive prompts; when quiet or non-interactive, diagnostics go to the `log` crate.
 #[derive(Clone, Copy)]
@@ -72,6 +74,45 @@ impl UserInterface {
         self.printer.cerr().render(message, &STYLE_SUCCESS).end_line();
     }
 
+    /// A titled block on stderr: `title` bold, one `  text — run `command`` line per row, then one
+    /// `  details: `a`, `b`` line unless `details` is empty, every command highlighted; nothing for no rows,
+    /// `log::info!` when quiet or non-interactive.
+    pub fn notice(&self, title: &str, rows: &[(&str, &str)], details: &[&str]) {
+        if rows.is_empty() {
+            return;
+        }
+        if self.quiet || !self.interactive {
+            log::info!("{title}");
+            for (text, command) in rows {
+                log::info!("{text} — run `{command}`");
+            }
+            if !details.is_empty() {
+                let commands: Vec<String> = details.iter().map(|command| format!("`{command}`")).collect();
+                log::info!("details: {}", commands.join(", "));
+            }
+            return;
+        }
+        self.printer.cerr().render(title, &STYLE_NOTICE_TITLE).end_line();
+        for (text, command) in rows {
+            self.printer
+                .cerr()
+                .plain(format!("  {text} — run "))
+                .render(format!("`{command}`"), &STYLE_NOTICE_COMMAND)
+                .end_line();
+        }
+        if let Some((first, rest)) = details.split_first() {
+            let mut line = self
+                .printer
+                .cerr()
+                .plain("  details: ")
+                .render(format!("`{first}`"), &STYLE_NOTICE_COMMAND);
+            for command in rest {
+                line = line.plain(", ").render(format!("`{command}`"), &STYLE_NOTICE_COMMAND);
+            }
+            line.end_line();
+        }
+    }
+
     /// Blank separator line on stderr; a no-op when quiet or non-interactive.
     pub fn status_break(&self) {
         if self.quiet || !self.interactive {
@@ -115,5 +156,40 @@ impl UserInterface {
         }
         self.printer.cerr().render(label, &STYLE_PROMPT_LABEL).end();
         rpassword::prompt_password("").map_err(io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The only test in this crate that captures, so no other writer shares the sink.
+    #[test]
+    fn notice_prints_a_title_one_line_per_row_and_the_details_line() {
+        let ui = UserInterface::new(Printer::new(false, false), true, false);
+        crate::capture::begin();
+        ui.notice(
+            "ocx: updates available",
+            &[
+                ("ocx 0.7.0", "ocx self update"),
+                ("project (~/proj): cmake", "ocx update"),
+                ("global: shellcheck", "ocx --global update"),
+            ],
+            &["ocx update --check", "ocx --global update --check"],
+        );
+        ui.notice("ocx: updates available", &[("ocx 0.7.0", "ocx self update")], &[]);
+        ui.notice("ocx: updates available", &[], &["ocx update --check"]);
+        let (stdout, stderr) = crate::capture::end();
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&stderr),
+            "ocx: updates available\n\
+             \x20 ocx 0.7.0 — run `ocx self update`\n\
+             \x20 project (~/proj): cmake — run `ocx update`\n\
+             \x20 global: shellcheck — run `ocx --global update`\n\
+             \x20 details: `ocx update --check`, `ocx --global update --check`\n\
+             ocx: updates available\n\
+             \x20 ocx 0.7.0 — run `ocx self update`\n"
+        );
     }
 }

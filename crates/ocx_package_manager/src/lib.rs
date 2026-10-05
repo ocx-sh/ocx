@@ -414,6 +414,7 @@ pub use tasks::resolve::{
 };
 pub use tasks::sbom::{SbomOptions, SbomReport};
 pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};
+pub use tasks::toolchain_drift::{DRIFT_DEADLINE, DriftedTool};
 pub use tasks::update_check::{
     HandoffFailure, HandoffStdio, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult,
 };

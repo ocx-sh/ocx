@@ -33,6 +33,7 @@ pub(crate) mod resolve_subject;
 pub(crate) mod sbom;
 pub(crate) mod select;
 pub(crate) mod sign;
+pub(crate) mod toolchain_drift;
 pub(crate) mod toolchain_names;
 pub(crate) mod uninstall;
 pub(crate) mod update_check;

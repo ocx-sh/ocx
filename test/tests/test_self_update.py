@@ -977,7 +977,7 @@ def test_self_update_handoff_introduces_no_block_on_a_never_setup_machine(
 def test_notify_prints_the_notice_and_installs_nothing(ocx: OcxRunner, tmp_path: Path, unique_repo: str) -> None:
     """The control for every apply case: `notify` finds the newer ocx and only says so.
 
-    The notice is today's wording; `current` stays on 0.0.1 and no hand-off child starts.
+    The notice names the new release and `ocx self update`; `current` stays on 0.0.1 and no hand-off child starts.
     """
     from tests.self_apply_support import (
         apply_env,
@@ -998,7 +998,8 @@ def test_notify_prints_the_notice_and_installs_nothing(ocx: OcxRunner, tmp_path:
     status, terminal, _ = run_on_pty(ocx, tmp_path, env, ("clean", "--dry-run"))
 
     assert status == 0, terminal
-    assert "A new OCX version is available" in plain(terminal), f"the notice must print; got:\n{terminal}"
+    assert "ocx: updates available" in plain(terminal), f"the notice must print; got:\n{terminal}"
+    assert "ocx 0.0.2 — run `ocx self update`" in plain(terminal), f"the notice must name the release; got:\n{terminal}"
     assert_not_applied(current, before, receipt, terminal)
 
 
@@ -1047,7 +1048,7 @@ def test_apply_installs_after_the_command_and_leaves_its_stdout_alone(
     lines = apply_lines(terminal)
     assert len(lines) == 1, f"exactly one apply line expected; got {lines!r}\n{terminal}"
     assert "ocx 0.0.2 installed; it takes effect on the next run." in lines[0], lines[0]
-    assert "A new OCX version is available" not in plain(terminal), "apply replaces the notify notice"
+    assert "ocx: updates available" not in plain(terminal), "apply replaces the notify notice"
 
     record = _hand_off_receipt(receipt)
     pinned = fetch_platform_manifest_digest(ocx.registry, repo, "0.0.2", platform=current_platform())
