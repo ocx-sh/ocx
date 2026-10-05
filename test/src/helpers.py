@@ -621,6 +621,10 @@ def make_package(
 
     Parameters
     ----------
+    index:
+        ``False`` publishes to the registry only and pushes with ``OCX_FROZEN=1``,
+        since ``ocx package push`` otherwise refreshes the local pin of every
+        tag it wrote.
     size_mb:
         Approximate size in MB of random padding data.  Useful for making
         downloads large enough to show progress bars.  When ``layers > 1``
@@ -685,7 +689,8 @@ def make_package(
         alone -- ``create`` and ``index update`` still run in the runner's
         isolated environment.  The runner strips ambient environment, so
         this is how a test fakes the CI variables ``--ci-annotations``
-        reads.
+        reads.  Wins over the ``OCX_FROZEN=1`` that ``index=False`` sets, so
+        ``{"OCX_FROZEN": "0"}`` lets such a push refresh the local index.
     integrations:
         Sets the metadata sidecar's ``integrations`` map (namespace ->
         opaque JSON payload, `adr_package_integrations.md`). Omit entirely
@@ -837,17 +842,13 @@ def make_package(
     if extra_push_args:
         push_args += extra_push_args
     push_args += ["-i", fq] + [str(b) for b in all_bundles]
-    ocx.plain(*push_args, env_overrides=push_env)
+    ocx.plain(*push_args, env_overrides=push_env if index else {"OCX_FROZEN": "1", **(push_env or {})})
 
-    # Update local index so install/find can discover the package.
-    # When cascade is enabled, use bare repo name to index all cascaded tags;
-    # when disabled, use tagged identifier for minimal indexing.
-    #
-    # `index=False` skips this step — needed when a replace-mirror is configured
-    # that does not carry this repo, so the tag-refresh read would 404. `ocx
-    # index update` now propagates that failure (a package-manager batch surfaces
-    # its errors), so callers that only assert against the registry over HTTP and
-    # never consult the local index must opt out.
+    # Update the local index so install/find can discover the package: the bare repo
+    # name indexes every cascaded tag, a tagged identifier only the one tag.
+    # `index=False` skips this and freezes the push above, for a replace-mirror that
+    # does not carry this repo (the tag-refresh read would 404 and `ocx index update`
+    # propagates it); callers that only read the registry over HTTP must opt out.
     short = f"{repo}:{tag}"
     if index:
         index_target = repo if cascade else short
