@@ -39,6 +39,7 @@ impl Status {
             &config_path,
             &config,
             lock.as_ref().map(Option::as_ref).map_err(String::clone),
+            &ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any),
         );
         context.api().report(&report)?;
 
