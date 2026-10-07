@@ -270,7 +270,7 @@ def test_upgrade_check_exits_65_and_writes_nothing(ocx: OcxRunner, tmp_path: Pat
     payload = _payload(result)
     assert payload["upgrades"] == [{"name": "cmake", "group": "default", "from_tag": "3.28", "to_tag": "3.29"}], payload
     assert "1 tag would move; run `ocx upgrade` to apply" in result.stderr, result.stderr
-    assert "ERROR" not in result.stderr, f"drift under --check is an answer, not an error:\n{result.stderr}"
+    assert "error:" not in result.stderr, f"drift under --check is an answer, not an error:\n{result.stderr}"
     assert (project / "ocx.toml").read_bytes() == before_toml
     assert (project / "ocx.lock").read_bytes() == before_lock
 

@@ -682,7 +682,7 @@ def test_item16_a_package_claiming_the_name_ocx_renders_a_trampoline_and_runs(
     assert pulled.returncode == EXIT_SUCCESS, (
         f"claiming the name `ocx` must not refuse; rc={pulled.returncode}\n{pulled.stderr}"
     )
-    assert "WARN" not in pulled.stderr, (
+    assert "warning:" not in pulled.stderr, (
         f"a claimed `ocx` warns nobody; got {pulled.stderr!r}"
     )
 
@@ -731,7 +731,7 @@ def test_item16_two_packages_claiming_one_name_render_one_trampoline_last_wins(
     assert pulled.returncode == EXIT_SUCCESS, (
         f"a name collision never refuses; rc={pulled.returncode}\n{pulled.stderr}"
     )
-    assert "WARN" not in pulled.stderr, (
+    assert "warning:" not in pulled.stderr, (
         f"a name collision never warns either; got {pulled.stderr!r}"
     )
 

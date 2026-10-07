@@ -17,13 +17,27 @@ import subprocess
 import pytest
 
 LEVELS = ("trace", "debug", "info", "warn", "error")
-# Compact format, no ANSI on a pipe: `<timestamp> <LEVEL> <spans and message>`.
+# With debug or trace enabled, the compact format (no ANSI on a pipe):
+# `<timestamp> <LEVEL> <spans and message>`.
 TRACING_LINE = re.compile(r"^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+(.*)$")
+# Otherwise cargo-style: `error: msg`, `warning: msg`, an info line bare.
+HUMAN_PREFIX = {"error": "error: ", "warn": "warning: "}
+
+
+def _level_of(line: str) -> tuple[str, str]:
+    """``(level, message)`` of one stderr line, in either rendering."""
+    if m := TRACING_LINE.match(line):
+        return m[1].lower(), m[2]
+    for level, prefix in HUMAN_PREFIX.items():
+        if line.startswith(prefix):
+            return level, line.removeprefix(prefix)
+    return "info", line
 
 
 def _lines_at(stderr: str, level: str) -> list[str]:
     """The span-and-message part of every tracing line rendered at ``level``."""
-    return [m[2] for line in stderr.splitlines() if (m := TRACING_LINE.match(line)) and m[1] == level.upper()]
+    parsed = (_level_of(line) for line in stderr.splitlines())
+    return [message for line_level, message in parsed if line_level == level]
 
 
 #: Replaced with ``published_package.fq`` before the row runs. Matched by

@@ -210,22 +210,35 @@ def snapshot(directory: Path) -> dict[str, tuple[bytes, int]]:
     }
 
 
-def error_messages(stderr: str) -> list[str]:
-    """The `ERROR`-level lines of an ocx run, with the timestamp/level prefix
-    stripped — what an operator reads, comparable across invocations.
+def _level_messages(stderr: str, label: str, level: str) -> list[str]:
+    """The lines rendered at one level, prefix stripped. Both renderings count:
+    `<label>: msg` at the default level, `<timestamp> <LEVEL> msg` under `--log-level debug`.
     """
-    return [line.split(" ERROR ", 1)[1] for line in stderr.splitlines() if " ERROR " in line]
+    messages = []
+    for line in stderr.splitlines():
+        if line.startswith(f"{label}: "):
+            messages.append(line.removeprefix(f"{label}: "))
+        elif f" {level} " in line:
+            messages.append(line.split(f" {level} ", 1)[1])
+    return messages
+
+
+def error_messages(stderr: str) -> list[str]:
+    """The error lines of an ocx run, with the prefix stripped — what an
+    operator reads, comparable across invocations.
+    """
+    return _level_messages(stderr, "error", "ERROR")
 
 
 def warning_messages(stderr: str) -> list[str]:
-    """The `WARN`-level lines, same treatment as `error_messages`.
+    """The warning lines, same treatment as `error_messages`.
 
     Two sync-perf scenarios turn on a state being absorbed *silently*, and
     silence is only a claim against the level that would otherwise carry the
     noise — hence a reader for that level rather than a substring search over
     the whole stream.
     """
-    return [line.split(" WARN ", 1)[1] for line in stderr.splitlines() if " WARN " in line]
+    return _level_messages(stderr, "warning", "WARN")
 
 
 def dispatch_object_requests(server: static_index.StaticIndexServer) -> list[str]:

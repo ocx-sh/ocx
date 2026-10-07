@@ -160,7 +160,7 @@ def test_update_check_lists_what_would_move_then_exits_65(
         f"--check must name what would move, not just refuse:\n{result.stdout}"
     )
     assert "1 tool would move; run `ocx update` to apply" in result.stderr, result.stderr
-    assert "ERROR" not in result.stderr, (
+    assert "error:" not in result.stderr, (
         f"drift is the answer --check asks for, not an error:\n{result.stderr}"
     )
     assert (project / "ocx.lock").read_bytes() == before, (

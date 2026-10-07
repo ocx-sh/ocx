@@ -5,9 +5,11 @@
 
 use ocx_console::progress::{LogWriter, LogWriterHandle};
 
+mod event_format;
 mod log_level;
 mod log_settings;
 
+pub use event_format::EventFormat;
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;
 
