@@ -2145,6 +2145,8 @@ The render is a **reconcile**, not an append: the computed name set is written a
 
 Each thing the render could not write is one `warning:` line on stderr naming the artifact, the path, and the reason. The reason is what you act on; the exit code says nothing, by the paragraph above.
 
+Files a file manager drops into any folder you open (`.DS_Store` and `._*` on macOS, `desktop.ini` and `Thumbs.db` on Windows, `.directory` from KDE) are not skipped entries: the render leaves them in place and does not report them, except inside `shells/default/bin/`, which is on `PATH` and keeps only what ocx wrote.
+
 The reason most people meet is a **directory sitting where a link belongs**. `cp -rL`, `rsync` without `-l`, Docker `COPY` and most zip extractors dereference symlinks, so a project copied by one of them arrives with `links/<group>/<entry>` as a full directory copy of the package instead of a link:
 
 ```
