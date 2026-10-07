@@ -747,7 +747,7 @@ async fn reconcile_links(
             });
         }
 
-        for name in read_dir_utf8_names(&home.links_group(group)?).await {
+        for name in read_dir_link_side_names(&home.links_group(group)?).await {
             if is_expected(&expected, &name, case_insensitive) {
                 continue;
             }
@@ -764,13 +764,13 @@ async fn reconcile_links(
 
     // `links/`'s own orphans, keyed on the lock: an unselected group is out of scope, not an orphan.
     let locked_groups: BTreeSet<&str> = request.lock.tools.iter().map(|tool| tool.group.as_str()).collect();
-    for name in read_dir_utf8_names(&links_root(home)).await {
+    for name in read_dir_link_side_names(&links_root(home)).await {
         if is_expected(&locked_groups, &name, case_insensitive) {
             continue;
         }
         // Entries before the group dir, or the non-recursive `remove_dir` fails `ENOTEMPTY` forever.
         // Joined raw: `links_group` would refuse this leftover name; `prune_within` contains it.
-        for entry in read_dir_utf8_names(&links_root(home).join(&name)).await {
+        for entry in read_dir_link_side_names(&links_root(home).join(&name)).await {
             let artifact = RenderedArtifact::Link {
                 group: name.clone(),
                 entry,
@@ -790,7 +790,7 @@ async fn reconcile_links(
     // Against the fixed `TREE_OWN_DEPTH1_NAMES`, never accessor-derived (`bin()` and `shell_bin()` share
     // a file name). Always case-folded, or a case collision prunes the tree's own directory
     // (`adr_toolchain_activation.md` § "Rationale from code: render_toolchain").
-    for name in read_dir_utf8_names(home.root()).await {
+    for name in read_dir_link_side_names(home.root()).await {
         if TREE_OWN_DEPTH1_NAMES
             .iter()
             .any(|kept| kept.eq_ignore_ascii_case(&name))
@@ -945,6 +945,31 @@ async fn read_dir_utf8_names(directory: &Path) -> Vec<String> {
         if let Some(name) = entry.file_name().to_str() {
             names.push(name.to_string());
         }
+    }
+    names.sort();
+    names
+}
+
+/// [`read_dir_utf8_names`] minus OS metadata files, which are left in place unreported: Finder and
+/// Explorer recreate them, so refusing one warned on every render. Never for `bin/`, which is on `PATH`.
+async fn read_dir_link_side_names(directory: &Path) -> Vec<String> {
+    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        // Regular files only: `desktop.ini` is a valid tool name, and a stale link by it is still ours.
+        if is_os_metadata_file(&name) && entry.file_type().await.is_ok_and(|kind| kind.is_file()) {
+            log::debug!(
+                "Toolchain render leaves OS metadata file '{}' in place",
+                entry.path().display()
+            );
+            continue;
+        }
+        names.push(name);
     }
     names.sort();
     names
@@ -1478,6 +1503,17 @@ fn is_leaked_case_probe(name: &str) -> bool {
         && name[prefix.len()..]
             .iter()
             .all(|byte| byte.is_ascii_digit() || *byte == b'-')
+}
+
+/// Whether `name` is a file a file manager drops into any directory it opens: macOS `.DS_Store` and
+/// `._*` AppleDouble files, Windows `desktop.ini` and `Thumbs.db`, KDE `.directory`. ASCII case-folded,
+/// as the volumes that carry them fold case.
+// ponytail: fixed list, the set is small and stable; a config key if a new OS file shows up often.
+fn is_os_metadata_file(name: &str) -> bool {
+    name.starts_with("._")
+        || [".DS_Store", "desktop.ini", "Thumbs.db", ".directory"]
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(name))
 }
 
 /// Whether the filesystem holding `directory` folds ASCII case — probed, since it is per-volume.
@@ -7027,6 +7063,68 @@ mod tests {
             assert_eq!(path, planted, "…and the report names the path it left alone");
             assert!(!reason.is_empty(), "…with a reason the user can act on");
         }
+    }
+
+    /// #591 — a file manager's metadata file on the link side is left in place
+    /// and never reported, so it warns on no render; Finder recreates it anyway.
+    ///
+    /// Two discriminating halves: a *link* named `Thumbs.db` is still pruned (a
+    /// valid tool name, so the name alone must not exempt it), and `bin/` still
+    /// prunes its `.DS_Store`, since that directory is on `PATH`.
+    ///
+    /// RED: drop the `is_os_metadata_file` filter in `read_dir_link_side_names`.
+    /// Every planted file comes back `Skipped` with a warn-line reason.
+    #[tokio::test]
+    async fn os_metadata_files_are_left_in_place_and_not_reported() {
+        let tree = Tree::new();
+        let default_group = links_root(&tree.home).join(DEFAULT_GROUP);
+        std::fs::create_dir_all(&default_group).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let planted = [
+            tree.home.root().join(".DS_Store"),
+            links_root(&tree.home).join(".DS_Store"),
+            links_root(&tree.home).join("desktop.ini"),
+            default_group.join(".DS_Store"),
+            default_group.join("._cmake"),
+        ];
+        for path in &planted {
+            std::fs::write(path, b"os-owned\n").unwrap();
+        }
+        let in_bin = tree.home.shell_bin(DEFAULT_SHELL).join(".DS_Store");
+        std::fs::write(&in_bin, b"os-owned\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tree.tmp.path(), default_group.join("Thumbs.db")).unwrap();
+
+        let report = render_a_default_tool(&tree).await;
+
+        for path in &planted {
+            assert_eq!(
+                std::fs::read(path).ok(),
+                Some(b"os-owned\n".to_vec()),
+                "{} survives byte-for-byte",
+                path.display()
+            );
+        }
+        let reported: Vec<&RenderedItem> = report
+            .items
+            .iter()
+            .filter(|item| match &item.artifact {
+                RenderedArtifact::Link { entry: name, .. }
+                | RenderedArtifact::GroupDirectory(name)
+                | RenderedArtifact::RootEntry(name) => name != "cmake" && name != "Thumbs.db",
+                RenderedArtifact::Trampoline(_) => false,
+            })
+            .collect();
+        assert!(reported.is_empty(), "no OS metadata file is reported: {reported:?}");
+
+        assert_eq!(outcome_of(&report, &trampoline(".DS_Store")), &RenderOutcome::Pruned);
+        assert!(std::fs::symlink_metadata(&in_bin).is_err(), "bin/ keeps pruning it");
+        #[cfg(unix)]
+        assert_eq!(
+            outcome_of(&report, &link(DEFAULT_GROUP, "Thumbs.db")),
+            &RenderOutcome::Pruned,
+            "a link named like an OS file is still ocx's to prune"
+        );
     }
 
     /// W8/RUL-44 — a symlink on a component **between** the project directory
