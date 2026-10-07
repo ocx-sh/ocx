@@ -28,7 +28,7 @@ impl KeyOpt {
     ///
     /// # Errors
     /// [`KeyRefError`] verbatim; the caller's `SignErrorKind::from` or
-    /// `VerifyErrorKind::from` routes an unimplemented backend to 85, the rest to 64.
+    /// `VerifyErrorKind::from` routes an unimplemented backend to 82, the rest to 64.
     pub fn reference(&self) -> Result<Option<KeyRef>, KeyRefError> {
         self.key.as_deref().map(KeyRef::parse).transpose()
     }
@@ -78,7 +78,7 @@ mod tests {
     }
 
     /// A recognised-but-unimplemented backend surfaces as its own error, so the
-    /// caller can route it to exit 85 instead of reporting a missing file.
+    /// caller can route it to exit 82 instead of reporting a missing file.
     #[test]
     fn an_unimplemented_backend_surfaces_as_its_own_error() {
         assert_eq!(

@@ -3,37 +3,74 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "ArchiveError")]
 pub enum Error {
     #[error("archive I/O error for '{}': {source}", path.display())]
+    #[exit(IoError, slug = "archive_io", summary = "Reading or writing an archive entry failed")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("tar error: {0}")]
+    #[exit(DataError, slug = "archive_tar_invalid", summary = "The tar stream is malformed")]
     Tar(#[source] std::io::Error),
     #[error("zip error: {0}")]
+    #[exit(DataError, slug = "archive_zip_invalid", summary = "The zip archive is malformed")]
     Zip(#[source] zip::result::ZipError),
     #[error("archive entry '{path}' escapes the extraction root", path = .0.display())]
+    #[exit(
+        DataError,
+        slug = "archive_entry_escape",
+        summary = "An archive entry path escapes the extraction root"
+    )]
     EntryEscape(PathBuf),
     #[error("symlink '{link}' with target '{target}' escapes the root directory", link = .link.display(), target = .target.display())]
+    #[exit(
+        DataError,
+        slug = "archive_symlink_escape",
+        summary = "An archive symlink points outside the extraction root"
+    )]
     SymlinkEscape { link: PathBuf, target: PathBuf },
     #[error("hard link '{link}' target '{target}' does not resolve inside the extraction root", link = .link.display(), target = .target.display())]
+    #[exit(
+        DataError,
+        slug = "archive_hard_link_escape",
+        summary = "An archive hard link does not resolve inside the extraction root"
+    )]
     HardLinkEscape { link: PathBuf, target: PathBuf },
     #[error("unsupported archive format: {0}")]
+    #[exit(
+        DataError,
+        slug = "archive_unsupported_format",
+        summary = "The archive format is not supported"
+    )]
     UnsupportedFormat(String),
     /// Refused: a sparse entry's apparent size is materialized without stream bytes, bypassing the decompression cap.
     #[error("archive entry '{}' uses the unsupported GNU sparse format", .0.display())]
+    #[exit(
+        DataError,
+        slug = "archive_gnu_sparse_unsupported",
+        summary = "An archive entry uses the unsupported GNU sparse format"
+    )]
     GnuSparseUnsupported(PathBuf),
     #[error("archive extraction exceeded the {cap}-byte decompression cap")]
+    #[exit(
+        DataError,
+        slug = "archive_extraction_cap_exceeded",
+        summary = "Extraction exceeded the decompressed-size cap"
+    )]
     ExtractionCapExceeded { cap: u64 },
     #[error("internal archive error: {0}")]
+    #[exit(Failure, slug = "archive_internal", summary = "An internal archive operation failed")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Transparent, so a codec failure renders and chains exactly as the codec's own error.
     #[error(transparent)]
+    #[exit(delegate)]
     Compression(#[from] crate::compression::error::Error),
     #[error(transparent)]
+    #[exit(delegate)]
     File(#[from] crate::error::FileError),
 }
 

@@ -12,7 +12,7 @@ knowledge that remains here is the default-registry constant and the
 An earlier draft's blanket "no OCX domain type here" was contradicted by
 `package_ref` itself — `DEFAULT_REGISTRY`/`OCX_SH_REGISTRY` and
 `ocx_cli_identifier()` (the `ocx.sh/ocx/cli` self-image, overridable only
-through the `__OCX_SELF_IMAGE` test seam, loopback-only, defense-in-depth
+through the `__OCX_TESTING_SELF_IMAGE` test seam, loopback-only, defense-in-depth
 asserted) are a deliberate, narrow exception to this crate's otherwise
 distribution-spec-generic surface. Do not widen it: no other module here may
 hardcode an OCX-specific registry, repository, or package name. If a second

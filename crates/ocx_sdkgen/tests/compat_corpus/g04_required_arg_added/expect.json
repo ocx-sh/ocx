@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push` gains a required `--registry` flag.",
+  "findings": [
+    {
+      "code": "G04",
+      "pointer": "/root/commands/0/commands/0/args/7",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

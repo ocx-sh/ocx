@@ -1,0 +1,12 @@
+{
+  "root": "ConfigUpdateData",
+  "exit_code": 0,
+  "decode": "ok",
+  "outcome": "success",
+  "unknown": [
+    "/status"
+  ],
+  "fields": {
+    "/status": "paused_by_aliens"
+  }
+}

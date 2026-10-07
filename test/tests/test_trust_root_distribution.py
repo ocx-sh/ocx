@@ -18,7 +18,7 @@ package, whose path-form ``trusted_root`` ``ocx config push`` inlines at publish
 time.
 
 Every case runs ``--offline`` against an unreachable Rekor. Offline is what makes
-the assertion falsifiable: with no trust material the run must exit 78, so a pass
+the assertion falsifiable: with no trust material the run must exit 81, so a pass
 can only have come from the rung under test — never from a cached key, and never
 from a TUF fetch.
 """
@@ -117,7 +117,7 @@ def test_home_convention_path_carries_the_trust_root_alone(
 
     Both halves matter. The first proves the rung is wired at all; the second
     proves the first was not passing for some other reason, by deleting the file
-    *and* the cache the successful run just warmed and demanding exit 78.
+    *and* the cache the successful run just warmed and demanding exit 81.
     """
     pkg = published_package
     _prepare(ocx, sigstore_stack, identity_token, pkg)
@@ -136,9 +136,9 @@ def test_home_convention_path_carries_the_trust_root_alone(
     _drop_trust_cache(ocx)
 
     red = _verify_offline(ocx, sigstore_stack, pkg)
-    assert red.returncode == 78, (
+    assert red.returncode == 81, (
         f"with the convention path removed and the cache cold, offline verify must "
-        f"fail closed at 78 — otherwise the green above proved nothing. Got "
+        f"fail closed at 81 — otherwise the green above proved nothing. Got "
         f"{red.returncode}\nstderr: {red.stderr.strip()}"
     )
 
@@ -310,14 +310,14 @@ def test_a_tag_pinned_managed_source_may_not_carry_a_trust_root(
     _adopt_managed(ocx, floating)
 
     result = _verify_offline(ocx, sigstore_stack, pkg, extra_env={"OCX_MANAGED_CONFIG": floating})
-    assert result.returncode == 78, (
+    assert result.returncode == 81, (
         f"a tag-pinned managed source must not be allowed to supply the trust root, "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    # The snapshot IS present (adopted above), so 78 must be the trust-material
+    # The snapshot IS present (adopted above), so 81 must be the trust-material
     # refusal and not "managed config snapshot required but absent" — otherwise
     # this test would pass without the loader ever dropping anything.
     assert "snapshot required" not in result.stderr, (
-        f"the snapshot must be present, so exit 78 has to come from the missing trust "
+        f"the snapshot must be present, so exit 81 has to come from the missing trust "
         f"root, not from an unadopted tier: {result.stderr.strip()}"
     )

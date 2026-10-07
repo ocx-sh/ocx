@@ -15,8 +15,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import pytest
 
 from src.registry import (
     IMAGE_INDEX_MEDIA_TYPE,
@@ -51,7 +57,7 @@ def _sign(ocx: OcxRunner, stack: SigstoreStack, token: Path, pkg: PackageInfo) -
         capture_output=True, text=True, env=ocx.env, check=False,
     )
     assert result.returncode == 0, f"sign setup failed: {result.stderr}"
-    return json.loads(result.stdout)["data"]
+    return json.loads(result.stdout)
 
 
 def _referrer_digest(data: dict) -> str:
@@ -265,7 +271,7 @@ def test_verify_without_referrers_api_or_fallback_tag_exits_79(
     Discovery reads *both* sources: the Referrers API, then the
     ``sha256-<hex>`` fallback tag. Nothing was signed here, so neither answers
     and the honest verdict is "no signatures found" (79) — not a capability
-    refusal (84). 84 is now write-path only; ``ocx package sign`` still raises
+    refusal (82). 82 is now write-path only; ``ocx package sign`` still raises
     it when the fallback index itself is refused.
     """
     from src.helpers import make_package
@@ -318,7 +324,7 @@ def test_verify_error_envelope_golden_shape(
     # pass silently — see test_verify_json_format_emits_single_envelope_on_stdout
     # for the dedicated single-stream contract test.
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
+    assert envelope["schema_version"] == 2
     assert envelope["command"] == "package verify"
     assert envelope["exit_code"] == 79
     assert "data" not in envelope, "error branch must not carry data"
@@ -348,8 +354,6 @@ def test_verify_json_format_emits_single_envelope_on_stdout(
     )
     assert result.returncode != 0, "unsigned package must fail verify"
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
-    assert envelope["command"] == "package verify"
     assert "error" in envelope
     assert "data" not in envelope, "error branch must not carry data"
 
@@ -360,35 +364,29 @@ def test_verify_success_envelope_golden_shape(
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """Success-branch JSON envelope matches frozen envelope contract.
+    """The success document is the verification report itself.
 
     Shape check:
-    - Root keys: ``schema_version``, ``command``, ``exit_code``, ``data``.
-    - ``exit_code`` is 0 on success.
-    - ``data.subject_digest`` and ``data.referrer_digest`` start with ``sha256:``.
-    - ``data.certificate_identity`` and ``data.certificate_oidc_issuer`` present.
-    - ``data.signatures`` present, one row per discovered signature.
-    - No ``error`` key on success branches.
+    - No envelope keys (``command``, ``exit_code``, ``data``) and no ``error``
+      key; the report leads with its own ``schema_version``, which is 2.
+    - ``subject_digest`` and ``referrer_digest`` start with ``sha256:``.
+    - ``certificate_identity`` and ``certificate_oidc_issuer`` present.
+    - ``signatures`` present, one row per discovered signature.
     """
     pkg = published_package
     _sign(ocx, sigstore_stack, identity_token, pkg)
 
     verify = _verify(ocx, sigstore_stack, pkg, json_format=True)
     assert verify.returncode == 0, verify.stderr
-    envelope = json.loads(verify.stdout)
-    assert envelope["schema_version"] == 1
-    assert envelope["command"] == "package verify"
-    assert envelope["exit_code"] == 0
-    assert "error" not in envelope, "success branch must not carry error"
-    data = envelope["data"]
+    data = json.loads(verify.stdout)
+    assert not {"command", "exit_code", "data", "error"} & data.keys(), data
+    assert next(iter(data)) == "schema_version" and data["schema_version"] == 2, data
     assert data["subject_digest"].startswith("sha256:")
     assert data["referrer_digest"].startswith("sha256:")
     assert data["certificate_identity"] == sigstore_stack.identity
     assert data["certificate_oidc_issuer"] == sigstore_stack.issuer
-    # S-006 is populated now (D6): the discovery pipeline fills ``signatures``,
-    # so a *successful* verify carries the key rather than omitting it. The
-    # omit-while-empty rule it replaces still holds on the failing branches --
-    # those never render ``data`` at all.
+    # A successful verify verified at least one signature, so ``signatures``
+    # is never absent and never empty.
     assert "signatures" in data, (
         f"a successful verify reports the signatures it verified, got {data!r}"
     )
@@ -417,7 +415,7 @@ def test_verify_detects_tampered_rekor_set(
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """A tampered Rekor SET → exit 65 (DataError), not exit 83.
+    """A tampered Rekor SET → exit 65 (DataError), not exit 75.
 
     RekorSetInvalid is a data-integrity failure (the bundle has been altered) —
     retry will not help, so it must map to ``DataError`` not ``TransparencyLogUnavailable``.
@@ -499,18 +497,18 @@ def test_verify_invalid_cert_chain_exits_65(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rekor unavailable during verify — exit 83
+# Rekor unavailable during verify — exit 75
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_verify_transparency_log_unavailable_exits_83(
+def test_verify_transparency_log_unavailable_exits_75(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
     tmp_path: Path,
 ) -> None:
-    """Rekor unreachable during the verify key lookup → exit 83.
+    """Rekor unreachable during the verify key lookup → exit 75.
 
     Distinguished from ``RekorSetInvalid`` (exit 65) because retry MAY help
     here — the service is down, not a crypto failure. The trust root carries the
@@ -524,11 +522,70 @@ def test_verify_transparency_log_unavailable_exits_83(
         ocx, sigstore_stack, pkg,
         rekor_url=adversarial.unreachable_rekor_url(),
         trusted_root=sigstore_stack.trusted_root_without_rekor_key(tmp_path),
+        json_format=True,
     )
-    assert verify.returncode == 83, (
-        f"expected exit 83 (TransparencyLogUnavailable), got {verify.returncode}\n"
+    assert verify.returncode == 75, (
+        f"expected exit 75 (TransparencyLogUnavailable), got {verify.returncode}\n"
         f"stderr: {verify.stderr.strip()}"
     )
+    # Exit 75 alone also admits a registry outage; the slug names the log.
+    assert json.loads(verify.stdout)["error"]["detail"] == "transparency_log_unavailable", verify.stdout
+
+
+@contextmanager
+def _rekor_answering(status: int) -> Iterator[str]:
+    """A loopback stand-in for Rekor that answers every request with ``status`` and no body."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            """Keep the pytest output free of the server's access log."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize("status", [404, 500])
+def test_verify_rekor_key_refusal_exits_69(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+    status: int,
+) -> None:
+    """A Rekor that answers its key request with 404 or 500 → exit 69, ``transparency_log_key_unavailable``.
+
+    A rerun gets the same answer (404 is the log refusing, 500 is outside the transport retry set), so
+    this is not the exit-75 retry of the test above. The trust root pins no Rekor key, on purpose, so the
+    fetch happens and can fail.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+
+    with _rekor_answering(status) as rekor_url:
+        verify = _verify(
+            ocx, sigstore_stack, pkg,
+            rekor_url=rekor_url,
+            trusted_root=sigstore_stack.trusted_root_without_rekor_key(tmp_path),
+            json_format=True,
+        )
+
+    assert verify.returncode == 69, (
+        f"expected exit 69 (Unavailable), got {verify.returncode}\nstderr: {verify.stderr.strip()}"
+    )
+    assert json.loads(verify.stdout)["error"]["detail"] == "transparency_log_key_unavailable", verify.stdout
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -700,7 +757,7 @@ def _attest(
         capture_output=True, text=True, env=env or ocx.env, check=False,
     )
     assert result.returncode == 0, f"attest setup failed: {result.stderr}"
-    return json.loads(result.stdout)["data"]
+    return json.loads(result.stdout)
 
 
 def _cyclonedx(padding_bytes: int = 0) -> str:
@@ -750,7 +807,7 @@ def test_verify_attestation_verifies_a_published_attestation(
     # candidate on the subject; the referrer digest names which one was read,
     # and `attest` reported it, so the two ends are tied together by identity
     # rather than by both merely succeeding.
-    assert json.loads(verify.stdout)["data"]["referrer_digest"] == published["referrer_digest"], (
+    assert json.loads(verify.stdout)["referrer_digest"] == published["referrer_digest"], (
         f"the verified referrer must be the attestation just published "
         f"({published['referrer_digest']}); got {verify.stdout.strip()}"
     )
@@ -1127,16 +1184,11 @@ def test_sbom_summary_on_a_non_cyclonedx_predicate_is_partial_failure_not_a_hard
         f"{result.returncode}\nstdout: {result.stdout.strip()}\n"
         f"stderr: {result.stderr.strip()}"
     )
-    envelope = json.loads(result.stdout)
-    assert envelope["exit_code"] == 0, (
-        f"the envelope's exit_code must match the process code; got "
-        f"{envelope['exit_code']} — CLI-04"
-    )
-    data = envelope["data"]
+    data = json.loads(result.stdout)
     assert data["summary"] == {
-        "status": "partial_failure", "verification": "verified", "exit_code": 0, "total": 1, "verified": 0, "unverified": 0, "refused": 1,
+        "status": "partial_failure", "verification": "verified", "total": 1, "verified": 0, "unverified": 0, "refused": 1,
     }
-    assert data["entries"] == [], "nothing summarized, so nothing is listed as summarized"
+    assert data["attestations"] == [], "nothing summarized, so nothing is listed as summarized"
 
     [refusal] = data["refused"]
     assert refusal["reason_kind"] == "sbom_summary_failed", (
@@ -1195,7 +1247,7 @@ def test_verify_without_platform_runs_against_what_resolved(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# `--key` and `--signature-format` grammar — exits 85 / 64
+# `--key` and `--signature-format` grammar — exits 82 / 64
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -1218,8 +1270,8 @@ def _verify_flags(ocx: OcxRunner, *flags: str) -> subprocess.CompletedProcess[st
     )
 
 
-def test_verify_key_with_unimplemented_backend_exits_85(ocx: OcxRunner) -> None:
-    """S-011. ``--key awskms://...`` → exit 85, naming the scheme.
+def test_verify_key_with_unimplemented_backend_exits_82(ocx: OcxRunner) -> None:
+    """S-011. ``--key awskms://...`` → exit 82, naming the scheme.
 
     The failure mode this pins is not the exit code but the *message*: read as
     a filename, ``awskms://alias/release`` fails with "no such file or
@@ -1228,13 +1280,13 @@ def test_verify_key_with_unimplemented_backend_exits_85(ocx: OcxRunner) -> None:
     anything treats the value as a path.
     """
     result = _verify_flags(ocx, "--key", "awskms://alias/release")
-    assert result.returncode == 85, (
-        f"expected exit 85 (UnsupportedKeyBackend), got {result.returncode}\n"
+    assert result.returncode == 82, (
+        f"expected exit 82 (Unsupported), got {result.returncode}\n"
         f"stderr: {result.stderr.strip()}"
     )
     envelope = json.loads(result.stdout)
     assert envelope["error"]["detail"] == "unsupported_key_backend", (
-        f"85 must be the key-backend refusal; got {envelope['error']}"
+        f"82 must carry the key-backend slug; got {envelope['error']}"
     )
     assert "awskms" in envelope["error"]["message"], (
         f"the message must name the scheme so the operator knows what is "
@@ -1251,7 +1303,7 @@ def test_verify_malformed_key_reference_exits_64(ocx: OcxRunner) -> None:
 
     Same parser, different verdict: ``vault://`` is not a backend OCX knows at
     all, so it is a bad invocation (64) rather than an unimplemented backend
-    (85). Sharing one code would tell an operator to wait for a feature that is
+    (82). Sharing one code would tell an operator to wait for a feature that is
     never coming.
     """
     result = _verify_flags(ocx, "--key", "vault://secret/cosign")
@@ -1481,7 +1533,7 @@ def test_verify_accepts_cosigns_keyless_dsse_bundle(ocx: OcxRunner, unique_repo:
         ocx, f"{ocx.registry}/{unique_repo}@{subject}", identity=identity, issuer=issuer,
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == subject
     assert data["referrer_digest"] == referrer.digest
     assert data["certificate_identity"] == identity
@@ -1543,7 +1595,7 @@ def test_verify_accepts_cosigns_key_mode_dsse_bundle(ocx: OcxRunner, unique_repo
         key=cosign_artifacts.GOLDEN / "keys" / "cosign.pub",
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == subject
     [entry] = data["signatures"]
     assert entry["key_backend"] == "file", entry
@@ -1555,6 +1607,9 @@ def test_verify_accepts_cosigns_key_mode_dsse_bundle(ocx: OcxRunner, unique_repo
     assert "certificate_oidc_issuer" not in entry, entry
     assert entry["signed_at"] == _iso8601(cosign_artifacts.golden_integrated_time("key")), (
         "cosign uploads a key-mode signature to Rekor too, so the instant is proved here"
+    )
+    assert not {"certificate_identity", "certificate_oidc_issuer"} & data.keys(), (
+        f"the report's flat fields repeat the passing row, so they omit the certificate too: {data}"
     )
 
 
@@ -1609,7 +1664,7 @@ def test_verify_accepts_cosigns_key_mode_simplesigning_sidecar(ocx: OcxRunner, u
         key=cosign_artifacts.GOLDEN / "keys" / "cosign.pub",
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     [entry] = data["signatures"]
     assert entry["signature_format"] == "simplesigning", entry
     assert entry["discovery_method"] == "sidecar_tag", entry
@@ -1719,7 +1774,7 @@ def test_verify_accepts_that_same_sidecar_under_allow_unlogged_signature(
         identity=identity, issuer=issuer, allow_unlogged=True,
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     [entry] = data["signatures"]
     assert entry["signature_format"] == "simplesigning", entry
     assert entry["discovery_method"] == "sidecar_tag", entry
@@ -1822,7 +1877,7 @@ def test_verify_reads_cosigns_bundle_through_the_fallback_tag_on_a_registry_with
         runner, f"{legacy_registry}/{unique_repo}@{subject}", identity=identity, issuer=issuer,
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     [entry] = data["signatures"]
     assert entry["discovery_method"] == "fallback_tag", (
         "the Referrers API 404s on this registry, so anything else means the "
@@ -1923,7 +1978,7 @@ def test_verify_narrows_into_an_index_and_accepts_cosigns_signature_on_the_platf
         identity=identity, issuer=issuer, platform="linux/amd64",
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == subject, (
         f"the verdict must name the narrowed platform manifest, not the index {index_digest}"
     )

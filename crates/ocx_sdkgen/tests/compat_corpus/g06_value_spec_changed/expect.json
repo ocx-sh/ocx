@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --jobs` changes its value type from integer to string.",
+  "findings": [
+    {
+      "code": "G06",
+      "pointer": "/root/commands/0/commands/0/args/3",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

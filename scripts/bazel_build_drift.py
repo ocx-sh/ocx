@@ -720,12 +720,13 @@ def sample_tree() -> tuple[str, dict]:
 
     The shape is copied because two of its irregularities are the ones a
     reader gets wrong. `ocx_shim` is a `[[bin]]` with no lib, so it holds a
-    `rust_test` and no `rust_library` — that is why `CRATES_LIB_TARGETS` is 19
-    against 20 packages. And `crates/ocx_cli` is the package `ocx`, which is
+    `rust_test` and no `rust_library`, and `ocx_exit_derive` is a proc-macro with
+    a `rust_proc_macro` and no test — that is why `CRATES_LIB_TARGETS` is 22
+    against 24 packages. And `crates/ocx_cli` is the package `ocx`, which is
     the one first-party mapping row that has to exist.
     """
-    directories = [LEAF, HUB, "ocx_shim"] + [
-        f"pkg{index:02d}" for index in range(4, CRATE_PACKAGES + 1)
+    directories = [LEAF, HUB, "ocx_shim", "ocx_exit_derive"] + [
+        f"pkg{index:02d}" for index in range(5, CRATE_PACKAGES + 1)
     ]
     expect(len(directories) == CRATE_PACKAGES, f"the fixture has {len(directories)} packages")
     directories[-1] = "ocx_cli"
@@ -751,7 +752,8 @@ def sample_tree() -> tuple[str, dict]:
     doc_tests = 0
     binaries = 0
     filegroups = 0
-    integration_budget = CRATES_TEST_TARGETS - CRATE_PACKAGES
+    # Every package but the shim and the proc-macro holds a lib and its unit test; the shim holds one test.
+    integration_budget = CRATES_TEST_TARGETS - CRATE_PACKAGES + 1
     for index, directory in enumerate(directories):
         package = f"crates/{directory}"
         name = "ocx" if directory == "ocx_cli" else directory
@@ -769,7 +771,13 @@ def sample_tree() -> tuple[str, dict]:
         if index == CRATE_PACKAGES - 2:
             first_party.append("ocx_cli")
         edges = normal + [f"//crates/{crate}:{crate}" for crate in first_party]
-        if directory == "ocx_shim":
+        if directory == "ocx_exit_derive":
+            # A proc-macro crate: one `rust_proc_macro`, no unit-test or doctest
+            # target (its expansions are tested from `ocx_exit`).
+            records.append(
+                _rule(package, "rust_proc_macro", directory, deps=edges, proc_macro=[ASYNC_TRAIT])
+            )
+        elif directory == "ocx_shim":
             # No lib: the package's only rule is the `[[bin]]` unit-test
             # target, and it carries the package's edges.
             records.append(
@@ -821,7 +829,7 @@ def sample_tree() -> tuple[str, dict]:
         if index < CRATES_FILEGROUP_TARGETS:
             records.append(_rule(package, "filegroup", f"{directory}_data", deps=[], proc_macro=[]))
             filegroups += 1
-        if binaries < CRATES_BINARY_TARGETS and directory != "ocx_shim":
+        if binaries < CRATES_BINARY_TARGETS and directory not in ("ocx_shim", "ocx_exit_derive"):
             # The `rust_binary` over a package's own `src/main.rs`
             # (`ocx_schema:ocx_schema_bin`, plan_test_speed_tiers.md C-020): its
             # one edge is its own lib, which the self-edge rule drops.

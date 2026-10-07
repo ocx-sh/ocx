@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_util::fs::path::AbsolutePath;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -8,18 +9,17 @@ use crate::app::build_info::Provenance;
 
 /// System information about the ocx installation.
 ///
-/// Plain format: colored logo with key-value pairs alongside.
-///
-/// JSON format: flat object with version + registry + platforms + features + libc +
-/// shell + home plus optional `channel`, `commit`, `build`, `ci` build-provenance
-/// blocks. The build-provenance fields are absent on local `cargo build`
-/// without git, matching `ocx version --format json` behaviour.
+/// The build-provenance blocks are absent on a local `cargo build` without
+/// git, as in `ocx version --format json`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct About {
+    /// The version ocx reports for itself.
     pub version: String,
+    /// The default registry a bare identifier resolves against.
+    #[schemars(with = "ocx_oci::RegistryHost")]
     pub registry: String,
-    /// Host platform as ocx matches it, features included (`linux/amd64+libc.glibc`).
-    pub platforms: Vec<String>,
+    /// The host platform as ocx matches it, `os.features` included.
+    pub platforms: Vec<ocx_oci::Platform>,
     /// The host's full `os.features` (a superset of `libc`); a package is
     /// runnable when its offered features are a subset of these.
     pub features: Vec<String>,
@@ -28,8 +28,11 @@ pub struct About {
     /// NixOS, failed probe). Reflects the same host detection the
     /// index-resolution path uses; a host may advertise multiple families.
     pub libc: Vec<String>,
+    /// The shell ocx detected; absent when it detected none.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
-    pub home: String,
+    /// The ocx home directory.
+    pub home: AbsolutePath,
     #[serde(flatten)]
     pub provenance: Provenance,
     /// Platforms as bare `os/arch`: the plain output shows the libc on its own row.
@@ -44,12 +47,12 @@ impl About {
         host_platform: &ocx_oci::Platform,
         libc: Vec<String>,
         shell: Option<String>,
-        home: String,
+        home: AbsolutePath,
     ) -> Self {
         Self {
             version,
             registry,
-            platforms: vec![host_platform.to_string()],
+            platforms: vec![host_platform.clone()],
             features: host_platform.os_features().to_vec(),
             libc,
             shell,
@@ -68,6 +71,9 @@ impl About {
 }
 
 impl Printable for About {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "About";
+
     fn print_plain(&self, _printer: &ocx_console::DataInterface) {
         // Fallback only: the command renders the plain form itself, with the logo.
         println!("Version:   {}", self.version);
@@ -83,24 +89,26 @@ impl Printable for About {
             println!("Libc:      {}", self.libc.join(", "));
         }
         println!("Shell:     {}", self.shell.as_deref().unwrap_or("n/a"));
-        println!("Home:      {}", self.home);
+        println!("Home:      {}", self.home.as_path().display());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::About;
+    use ocx_util::fs::path::AbsolutePath;
+
     use crate::app::build_info::{CommitInfo, Provenance};
 
     fn make_about_with_provenance(provenance: Provenance) -> About {
         About {
             version: "1.0.0".to_owned(),
             registry: "registry.example.com".to_owned(),
-            platforms: vec!["linux/amd64".to_owned()],
+            platforms: vec!["linux/amd64".parse().expect("platform")],
             features: Vec::new(),
             libc: Vec::new(),
             shell: None,
-            home: "/home/user/.ocx".to_owned(),
+            home: AbsolutePath::new(std::env::temp_dir()).expect("absolute temp dir"),
             provenance,
             plain_platforms: vec!["linux/amd64".to_owned()],
         }
@@ -154,10 +162,15 @@ mod tests {
             build: None,
             ci: None,
         });
-        about.platforms = vec!["linux/amd64+libc.glibc,libc.musl".to_owned()];
+        about.platforms = vec!["linux/amd64+libc.glibc,libc.musl".parse().expect("platform")];
         about.features = vec!["libc.glibc".to_owned(), "libc.musl".to_owned()];
         let value = serde_json::to_value(&about).unwrap();
-        assert_eq!(value["platforms"][0], "linux/amd64+libc.glibc,libc.musl");
+        assert_eq!(value["platforms"][0]["os"], "linux");
+        assert_eq!(value["platforms"][0]["architecture"], "amd64");
+        assert_eq!(
+            value["platforms"][0]["os.features"],
+            serde_json::json!(["libc.glibc", "libc.musl"])
+        );
         assert_eq!(value["features"], serde_json::json!(["libc.glibc", "libc.musl"]));
         assert!(
             value.get("plain_platforms").is_none(),

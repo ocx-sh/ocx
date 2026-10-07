@@ -35,6 +35,9 @@ impl PatchFreezeReport {
 }
 
 impl Printable for PatchFreezeReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PatchFreezeReport";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let rows: [Vec<String>; 2] = [
             vec!["companions".to_owned(), "descriptors".to_owned()],

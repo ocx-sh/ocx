@@ -166,16 +166,18 @@ impl PackageRef {
 
 /// The canonical, untagged OCX CLI identifier (`ocx.sh/ocx/cli`).
 ///
-/// The `__OCX_SELF_IMAGE` override is compiled only for tests, and honours loopback registries only.
+/// The `__OCX_TESTING_SELF_IMAGE` override is compiled only for tests, and honours loopback registries only.
 pub fn ocx_cli_identifier() -> PackageRef {
     #[cfg(any(test, feature = "__testing"))]
     {
-        if let Ok(spec) = std::env::var("__OCX_SELF_IMAGE")
+        if let Some(spec) = ocx_env::__OCX_TESTING_SELF_IMAGE
+            .get_raw()
+            .and_then(|value| value.into_string().ok())
             && let Some((registry, repository)) = parse_self_image_spec(&spec)
         {
             assert!(
                 is_loopback_registry(registry),
-                "__OCX_SELF_IMAGE override must target a loopback registry; got `{registry}`"
+                "__OCX_TESTING_SELF_IMAGE override must target a loopback registry; got `{registry}`"
             );
             return PackageRef::new_registry(repository, registry);
         }
@@ -183,7 +185,7 @@ pub fn ocx_cli_identifier() -> PackageRef {
     PackageRef::new_registry("ocx/cli", OCX_SH_REGISTRY)
 }
 
-/// Parses `__OCX_SELF_IMAGE` as `<registry>/<repo>`, split at the first `/`.
+/// Parses `__OCX_TESTING_SELF_IMAGE` as `<registry>/<repo>`, split at the first `/`.
 #[cfg(any(test, feature = "__testing"))]
 fn parse_self_image_spec(spec: &str) -> Option<(&str, &str)> {
     spec.split_once('/').filter(|(r, p)| !r.is_empty() && !p.is_empty())
@@ -913,15 +915,13 @@ mod tests {
         assert_eq!(id.repository(), "cmake");
     }
 
-    // ── ocx_cli_identifier + __OCX_SELF_IMAGE seam ──────────────────────
+    // ── ocx_cli_identifier + __OCX_TESTING_SELF_IMAGE seam ──────────────────────
 
-    /// Without the `__OCX_SELF_IMAGE` env var, the canonical identifier wins.
+    /// Without the `__OCX_TESTING_SELF_IMAGE` env var, the canonical identifier wins.
     #[test]
     fn ocx_cli_identifier_defaults_to_canonical() {
-        // Defensive: ensure no leftover env state from a sibling test.
-        // SAFETY: tests in this module never read this var concurrently;
-        // serial scope of `#[test]` provides the ordering guarantee.
-        unsafe { std::env::remove_var("__OCX_SELF_IMAGE") };
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::__OCX_TESTING_SELF_IMAGE);
         let id = ocx_cli_identifier();
         assert_eq!(id.registry(), OCX_SH_REGISTRY);
         assert_eq!(id.repository(), "ocx/cli");

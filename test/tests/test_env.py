@@ -42,7 +42,7 @@ def test_env_path_contains_bin(
     ocx.plain("package", "install", pkg.short)
 
     env_result = ocx.json("package", "env", pkg.short)
-    path_entry = next(e for e in env_result["entries"] if e["key"] == "PATH")
+    path_entry = next(e for e in env_result["items"] if e["key"] == "PATH")
     assert "/bin" in path_entry["value"] or "\\bin" in path_entry["value"]
 
 
@@ -55,7 +55,7 @@ def test_env_constant_contains_content_path(
 
     home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("package", "env", pkg.short)
-    home_entry = next(e for e in env_result["entries"] if e["key"] == home_key)
+    home_entry = next(e for e in env_result["items"] if e["key"] == home_key)
     assert registry_dir(ocx.registry) in home_entry["value"]
     # CAS layout: packages/{registry}/sha256/{prefix}/{suffix}/content
     assert "packages" in home_entry["value"]
@@ -70,7 +70,7 @@ def test_env_candidate_uses_symlink_path(
 
     home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("package", "env", "--candidate", pkg.short)
-    home_entry = next(e for e in env_result["entries"] if e["key"] == home_key)
+    home_entry = next(e for e in env_result["items"] if e["key"] == home_key)
     assert f"candidates/{pkg.tag}" in home_entry["value"] or f"candidates\\{pkg.tag}" in home_entry["value"]
 
 
@@ -755,7 +755,7 @@ def test_self_env_reference_resolves_identically_on_both_surfaces(
     surfaces = {}
     for flags in ((), ("--self",)):
         report = ocx.json("package", "env", *flags, application.short)
-        surfaces[flags] = {entry["key"]: entry["value"] for entry in report["entries"]}
+        surfaces[flags] = {entry["key"]: entry["value"] for entry in report["items"]}
 
     consumer, private = surfaces[()], surfaces[("--self",)]
     assert "APP_PRIVATE" not in consumer and private.get("APP_PRIVATE") == "app-private", (
@@ -804,7 +804,7 @@ def test_self_install_path_alias_resolves_like_the_bare_spelling(
     )
     ocx.plain("package", "install", pkg.short)
 
-    values = {entry["key"]: entry["value"] for entry in ocx.json("package", "env", pkg.short)["entries"]}
+    values = {entry["key"]: entry["value"] for entry in ocx.json("package", "env", pkg.short)["items"]}
     assert values["ALIAS_BIN"] == values["BARE_BIN"], (
         f"`${{self.installPath}}` must resolve identically to `${{installPath}}`; got "
         f"{values['ALIAS_BIN']!r} vs {values['BARE_BIN']!r}"
@@ -843,7 +843,7 @@ def test_escaped_token_publishes_and_composes_as_a_literal(
     )
     ocx.plain("package", "install", pkg.short)
 
-    values = {entry["key"]: entry["value"] for entry in ocx.json("package", "env", pkg.short)["entries"]}
+    values = {entry["key"]: entry["value"] for entry in ocx.json("package", "env", pkg.short)["items"]}
     assert values["EDITOR_ROOT"] == UNRECOGNISED_TOKEN, (
         f"the escape must collapse `$${{…}}` to a literal `${{…}}`; got "
         f"{values['EDITOR_ROOT']!r}, expected {UNRECOGNISED_TOKEN!r}"
@@ -1293,7 +1293,7 @@ def test_integrations_interpolation_end_to_end(
     row = next(r for r in env_result["integrations"] if r["namespace"] == "com.example.clang")
     value = row["payload"]
 
-    which = ocx.json("package", "which", pkg.short)
+    which = ocx.json("package", "which", pkg.short)["paths"]
     root = which[pkg.short]["path"]
     assert which[pkg.short]["kind"] == "package", (
         f"an installed package must locate as a materialized root, not a shim; got {which!r}"
@@ -1304,7 +1304,7 @@ def test_integrations_interpolation_end_to_end(
     assert value["C_Cpp.default.includePath"] == [f"{UNRECOGNISED_TOKEN}/**"], value
     assert value["sdk"] == "${installPath}", value
 
-    dep_which = ocx.json("package", "which", dep.short)
+    dep_which = ocx.json("package", "which", dep.short)["paths"]
     dep_root = dep_which[dep.short]["path"]
     assert dep_which[dep.short]["kind"] == "package", (
         f"the dependency must locate as a materialized root, not a shim; got {dep_which!r}"

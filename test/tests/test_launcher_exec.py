@@ -37,7 +37,7 @@ pytestmark = pytest.mark.command("launcher*")
 
 def _get_package_root(ocx: OcxRunner, pkg_short: str) -> Path:
     """Return the on-disk package root for an installed package."""
-    result = ocx.json("package", "which", pkg_short)
+    result = ocx.json("package", "which", pkg_short)["paths"]
     return Path(result[pkg_short]["path"])
 
 

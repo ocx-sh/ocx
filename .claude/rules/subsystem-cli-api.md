@@ -107,9 +107,8 @@ Status values, category tags, bounded sets = enums with `Display` and `Serialize
 
 ## JSON Serialization
 
-- Types wrapping `Vec<Entry>` implement custom `Serialize` to flatten to inner array.
-- Types using `HashMap` with `#[serde(flatten)]` produce top-level keyed objects.
-- Polymorphic types use `#[serde(untagged)]` to produce different JSON shapes per variant.
+- Types using `HashMap` with `#[serde(flatten)]` produce keyed objects nested under a named field, not the top level.
+- The full style guide, its lints and the sync obligations are in [subsystem-interface-contract.md](./subsystem-interface-contract.md).
 
 ## Adding a New Report Type
 

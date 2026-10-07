@@ -11,18 +11,14 @@ use super::error::ClaimError;
 use super::request::{OwnerIdentitySource, OwnerSpec};
 use crate::forge::{Forge, ForgeError};
 
-/// GitLab CI's user login variable.
-pub const GITLAB_USER_LOGIN: &str = "GITLAB_USER_LOGIN";
-/// GitLab CI's numeric user id variable.
-pub const GITLAB_USER_ID: &str = "GITLAB_USER_ID";
-/// GitHub Actions' actor login variable.
-pub const GITHUB_ACTOR: &str = "GITHUB_ACTOR";
-/// GitHub Actions' numeric actor id variable.
-pub const GITHUB_ACTOR_ID: &str = "GITHUB_ACTOR_ID";
-
-/// Every CI variable the ladder reads; a ladder test must override all four, or on a GitHub runner the
-/// [`ocx_util::env::var`] seam falls through and the test measures the environment, not the code.
-pub const CI_IDENTITY_VARS: [&str; 4] = [GITLAB_USER_LOGIN, GITLAB_USER_ID, GITHUB_ACTOR, GITHUB_ACTOR_ID];
+/// Every CI variable the ladder reads; a ladder test must override all four, or on a GitHub runner an
+/// unset override falls through to the process environment and the test measures it, not the code.
+pub const CI_IDENTITY_VARS: [&ocx_env::EnvVar; 4] = [
+    &ocx_env::GITLAB_USER_LOGIN,
+    &ocx_env::GITLAB_USER_ID,
+    &ocx_env::GITHUB_ACTOR,
+    &ocx_env::GITHUB_ACTOR_ID,
+];
 
 /// One confirmed owner, as it is written into the root and the report.
 ///
@@ -196,13 +192,15 @@ async fn seed_logins(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result<(Vec<O
 ///
 /// A non-numeric id falls through, never `unwrap_or(0)`: indexbot's auto-merge matches on that id.
 fn ci_identity() -> Option<(String, u64)> {
-    for (login_key, id_key) in [(GITLAB_USER_LOGIN, GITLAB_USER_ID), (GITHUB_ACTOR, GITHUB_ACTOR_ID)] {
-        let (Some(login), Some(id)) = (ocx_util::env::var(login_key), ocx_util::env::var(id_key)) else {
+    let pairs = [
+        (&ocx_env::GITLAB_USER_LOGIN, &ocx_env::GITLAB_USER_ID),
+        (&ocx_env::GITHUB_ACTOR, &ocx_env::GITHUB_ACTOR_ID),
+    ];
+    for (login_var, id_var) in pairs {
+        // `get` reads empty as unset, so an empty login falls through like an absent one.
+        let (Some(login), Some(id)) = (login_var.get(), id_var.get()) else {
             continue;
         };
-        if login.is_empty() {
-            continue;
-        }
         let Ok(id) = id.parse::<u64>() else {
             continue;
         };
@@ -325,14 +323,14 @@ mod tests {
 
     /// Takes the env lock and **removes all four** CI identity variables.
     ///
-    /// Not two. `ocx_util::env::var`'s test seam falls through to `std::env` for any
+    /// Not two. The override seam falls through to the process environment for any
     /// key with no override, and GitHub Actions exports `GITHUB_ACTOR` and
     /// `GITHUB_ACTOR_ID` on every runner — including the one this repository's
     /// gate runs on. A ladder test that overrides only the pair it exercises
     /// therefore takes the GitHub CI rung in CI and the rung it meant to test on a
     /// laptop: green in both, measuring the environment in one.
-    fn ladder_lock() -> ocx_util::env::overrides::EnvLock {
-        let lock = ocx_util::env::overrides::lock();
+    fn ladder_lock() -> ocx_env::overrides::EnvLock {
+        let lock = ocx_env::overrides::lock();
         for key in CI_IDENTITY_VARS {
             lock.remove(key);
         }
@@ -387,8 +385,8 @@ mod tests {
     #[tokio::test]
     async fn owner_ladder_explicit_replaces() {
         let lock = ladder_lock();
-        lock.set(GITHUB_ACTOR, "carol");
-        lock.set(GITHUB_ACTOR_ID, "5");
+        lock.set(&ocx_env::GITHUB_ACTOR, "carol");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "5");
         let forge = reachable_forge(Some(identity("dave", 6, false)));
 
         let resolution = resolve_owners(&forge, &[login("alice"), login("bob")])
@@ -423,8 +421,8 @@ mod tests {
     #[tokio::test]
     async fn empty_explicit_login_is_refused_not_treated_as_absent() {
         let lock = ladder_lock();
-        lock.set(GITHUB_ACTOR, "carol");
-        lock.set(GITHUB_ACTOR_ID, "5");
+        lock.set(&ocx_env::GITHUB_ACTOR, "carol");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "5");
         let forge = reachable_forge(None);
 
         let error = resolve_owners(&forge, &[login("")])
@@ -437,7 +435,7 @@ mod tests {
     }
 
     /// C-048 — the CI rung, under an **unreachable** users API, is labelled
-    /// `ci-environment`.
+    /// `ci_environment`.
     ///
     /// The discriminating input is the API state, not the rung: the same CI list
     /// under a reachable API is `resolved` (see below). Both rows are needed —
@@ -447,8 +445,8 @@ mod tests {
     #[tokio::test]
     async fn owner_ladder_ci_environment() {
         let lock = ladder_lock();
-        lock.set(GITLAB_USER_LOGIN, "carol");
-        lock.set(GITLAB_USER_ID, "5");
+        lock.set(&ocx_env::GITLAB_USER_LOGIN, "carol");
+        lock.set(&ocx_env::GITLAB_USER_ID, "5");
         let forge = unreachable_forge();
 
         let resolution = resolve_owners(&forge, &[]).await.expect("the CI pair is carried");
@@ -466,7 +464,7 @@ mod tests {
     /// A CI-derived list under a **reachable** users API is still server-confirmed.
     ///
     /// The highest-value uncovered cell: the natural implementation shortcuts the
-    /// CI arm straight to `ci-environment`, and then a `GITHUB_ACTOR` spelling the
+    /// CI arm straight to `ci_environment`, and then a `GITHUB_ACTOR` spelling the
     /// server disagrees with is written verbatim into the root. The server is the
     /// authority even when the CI environment already supplied a login and an id.
     ///
@@ -474,8 +472,8 @@ mod tests {
     #[tokio::test]
     async fn ci_list_is_still_server_confirmed_when_the_users_api_is_reachable() {
         let lock = ladder_lock();
-        lock.set(GITHUB_ACTOR, "AliCe");
-        lock.set(GITHUB_ACTOR_ID, "7");
+        lock.set(&ocx_env::GITHUB_ACTOR, "AliCe");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "7");
         let forge = reachable_forge(None);
 
         let resolution = resolve_owners(&forge, &[]).await.expect("the CI login is confirmed");
@@ -526,10 +524,10 @@ mod tests {
     #[tokio::test]
     async fn ci_pair_needs_both_halves() {
         for (key, value) in [
-            (GITHUB_ACTOR, "carol"),
-            (GITHUB_ACTOR_ID, "5"),
-            (GITLAB_USER_LOGIN, "carol"),
-            (GITLAB_USER_ID, "5"),
+            (&ocx_env::GITHUB_ACTOR, "carol"),
+            (&ocx_env::GITHUB_ACTOR_ID, "5"),
+            (&ocx_env::GITLAB_USER_LOGIN, "carol"),
+            (&ocx_env::GITLAB_USER_ID, "5"),
         ] {
             let lock = ladder_lock();
             lock.set(key, value);
@@ -544,7 +542,8 @@ mod tests {
                     login: "alice".to_string(),
                     id: 7
                 }],
-                "{key} alone must not seed the list"
+                "{} alone must not seed the list",
+                key.name
             );
         }
     }
@@ -557,10 +556,10 @@ mod tests {
     #[tokio::test]
     async fn gitlab_ci_pair_wins_over_github() {
         let lock = ladder_lock();
-        lock.set(GITLAB_USER_LOGIN, "carol");
-        lock.set(GITLAB_USER_ID, "5");
-        lock.set(GITHUB_ACTOR, "dave");
-        lock.set(GITHUB_ACTOR_ID, "6");
+        lock.set(&ocx_env::GITLAB_USER_LOGIN, "carol");
+        lock.set(&ocx_env::GITLAB_USER_ID, "5");
+        lock.set(&ocx_env::GITHUB_ACTOR, "dave");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "6");
         let forge = unreachable_forge();
 
         let resolution = resolve_owners(&forge, &[]).await.expect("a CI pair answers");
@@ -588,8 +587,8 @@ mod tests {
     async fn non_numeric_ci_id_falls_through_and_never_defaults_to_zero() {
         for spelling in ["", "not-a-number", "12x", "-1", " 5", "5 "] {
             let lock = ladder_lock();
-            lock.set(GITHUB_ACTOR, "carol");
-            lock.set(GITHUB_ACTOR_ID, spelling);
+            lock.set(&ocx_env::GITHUB_ACTOR, "carol");
+            lock.set(&ocx_env::GITHUB_ACTOR_ID, spelling);
             let forge = reachable_forge(Some(identity("alice", 7, false)));
 
             let resolution = resolve_owners(&forge, &[])
@@ -651,8 +650,8 @@ mod tests {
     #[tokio::test]
     async fn bare_login_with_unreachable_users_api_is_reraised() {
         let lock = ladder_lock();
-        lock.set(GITHUB_ACTOR, "carol");
-        lock.set(GITHUB_ACTOR_ID, "5");
+        lock.set(&ocx_env::GITHUB_ACTOR, "carol");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "5");
         let forge = unreachable_forge();
 
         let error = resolve_owners(&forge, &[login("alice")])
@@ -955,8 +954,8 @@ mod tests {
     #[tokio::test]
     async fn author_prefers_the_token_identity_over_the_ci_environment() {
         let lock = ladder_lock();
-        lock.set(GITHUB_ACTOR, "carol");
-        lock.set(GITHUB_ACTOR_ID, "5");
+        lock.set(&ocx_env::GITHUB_ACTOR, "carol");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "5");
         let forge = reachable_forge(Some(identity("alice", 7, false)));
 
         let resolution = resolve_owners(&forge, &[pair("bob", 8)])
@@ -995,12 +994,12 @@ mod tests {
     /// `expect`, and every job-token run loses its claim).
     #[tokio::test]
     async fn author_falls_through_to_the_ci_pair_when_the_identity_call_errs() {
-        // One lock for both halves: `ocx_util::env::overrides::lock` is exclusive, so a
+        // One lock for both halves: `ocx_env::overrides::lock` is exclusive, so a
         // second acquisition inside the same test would deadlock rather than
         // fail.
         let lock = ladder_lock();
-        lock.set(GITLAB_USER_LOGIN, "carol");
-        lock.set(GITLAB_USER_ID, "5");
+        lock.set(&ocx_env::GITLAB_USER_LOGIN, "carol");
+        lock.set(&ocx_env::GITLAB_USER_ID, "5");
 
         let resolution = resolve_owners(&unreachable_forge(), &[pair("bob", 8)])
             .await
@@ -1037,7 +1036,7 @@ mod tests {
     ///
     /// All three states in one function, because each alone passes for a
     /// constant: `resolved` alone passes for a hardcoded `Some(Resolved)`,
-    /// `ci-environment` alone for its opposite, and the `None` row is what
+    /// `ci_environment` alone for its opposite, and the `None` row is what
     /// forbids a word without an author to describe.
     ///
     /// Reds on: swapping the two words in `resolve_author`; returning one word
@@ -1045,8 +1044,8 @@ mod tests {
     #[tokio::test]
     async fn author_identity_source_names_the_rung_that_answered() {
         let lock = ladder_lock();
-        lock.set(GITHUB_ACTOR, "carol");
-        lock.set(GITHUB_ACTOR_ID, "5");
+        lock.set(&ocx_env::GITHUB_ACTOR, "carol");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "5");
 
         // Rung one: the credential's own account, which the forge asserted.
         let resolution = resolve_owners(&reachable_forge(Some(identity("alice", 7, false))), &[pair("bob", 8)])
@@ -1255,8 +1254,8 @@ mod tests {
 
         // The second rung, reachable from an ordinary environment read: no
         // token identity at all, and a hostile `GITHUB_ACTOR`.
-        lock.set(GITHUB_ACTOR, "ev(il)");
-        lock.set(GITHUB_ACTOR_ID, "9");
+        lock.set(&ocx_env::GITHUB_ACTOR, "ev(il)");
+        lock.set(&ocx_env::GITHUB_ACTOR_ID, "9");
         let ci = reachable_forge(None);
         let resolution = resolve_owners(&ci, &[login("alice")])
             .await

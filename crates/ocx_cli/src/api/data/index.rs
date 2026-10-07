@@ -19,10 +19,16 @@ use crate::api::data::sanitize_for_terminal;
 /// different fact from "the catalog already matched".
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RegenerateEntry {
+    /// The registry whose catalog was rebuilt.
+    #[schemars(with = "ocx_oci::RegistryHost")]
     pub registry: String,
+    /// The root documents the `p/` walk found.
     pub roots: usize,
+    /// Packages the catalog gained.
     pub added: Vec<String>,
+    /// Packages whose catalog row was rewritten.
     pub corrected: Vec<String>,
+    /// Packages the catalog lost.
     pub removed: Vec<String>,
 }
 
@@ -46,25 +52,27 @@ impl RegenerateEntry {
 }
 
 /// What `ocx index regenerate <REGISTRY>...` changed, per registry, in argument order.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct RegenerateReport {
-    registries: Vec<RegenerateEntry>,
+    /// One entry per registry, in argument order.
+    items: Vec<RegenerateEntry>,
 }
 
 impl RegenerateReport {
-    pub fn new(registries: Vec<RegenerateEntry>) -> Self {
-        Self { registries }
+    pub fn new(items: Vec<RegenerateEntry>) -> Self {
+        Self { items }
     }
 
     /// Whether every registry's catalog already matched its tree, which prints one line instead of
     /// a table; named so a test asserts the branch's actual condition.
     fn all_clean(&self) -> bool {
-        self.registries.iter().all(RegenerateEntry::is_clean)
+        self.items.iter().all(RegenerateEntry::is_clean)
     }
 
     /// The plain table's column-major rows, neutralized, so tests can assert what reaches the terminal.
     fn plain_rows(&self) -> [Vec<String>; 4] {
         let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        for entry in &self.registries {
+        for entry in &self.items {
             let mut changes: Vec<(&str, String)> = [
                 ("added", &entry.added),
                 ("corrected", &entry.corrected),
@@ -94,16 +102,13 @@ impl RegenerateReport {
     }
 }
 
-impl Serialize for RegenerateReport {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.registries.serialize(serializer)
-    }
-}
-
 impl Printable for RegenerateReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "RegenerateReport";
+
     fn print_plain(&self, printer: &DataInterface) {
         if self.all_clean() {
-            let roots: usize = self.registries.iter().map(|entry| entry.roots).sum();
+            let roots: usize = self.items.iter().map(|entry| entry.roots).sum();
             printer.print_hint(&format!(
                 "{roots} root document(s); every catalog already matched the tree, nothing written."
             ));
@@ -121,7 +126,10 @@ impl Printable for RegenerateReport {
 /// One registry's enumerated package set.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CatalogPreviewEntry {
+    /// The registry the packages were enumerated from.
+    #[schemars(with = "ocx_oci::RegistryHost")]
     pub registry: String,
+    /// The packages a sync would refresh, sorted.
     pub packages: Vec<String>,
 }
 
@@ -134,19 +142,21 @@ impl CatalogPreviewEntry {
 }
 
 /// What `ocx index sync --dry-run` would refresh, per registry, in argument order.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CatalogPreview {
-    registries: Vec<CatalogPreviewEntry>,
+    /// One entry per registry, in argument order.
+    items: Vec<CatalogPreviewEntry>,
 }
 
 impl CatalogPreview {
-    pub fn new(registries: Vec<CatalogPreviewEntry>) -> Self {
-        Self { registries }
+    pub fn new(items: Vec<CatalogPreviewEntry>) -> Self {
+        Self { items }
     }
 
     /// The plain table's column-major rows, neutralized.
     fn plain_rows(&self) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        for entry in &self.registries {
+        for entry in &self.items {
             for package in &entry.packages {
                 rows[0].push(sanitize_for_terminal(&entry.registry));
                 rows[1].push(sanitize_for_terminal(package));
@@ -156,13 +166,10 @@ impl CatalogPreview {
     }
 }
 
-impl Serialize for CatalogPreview {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.registries.serialize(serializer)
-    }
-}
-
 impl Printable for CatalogPreview {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "CatalogPreview";
+
     fn print_plain(&self, printer: &DataInterface) {
         let rows = self.plain_rows();
         if rows[0].is_empty() {
@@ -173,28 +180,6 @@ impl Printable for CatalogPreview {
             &["Registry".into(), "Package".into()],
             &rows.map(|column| column.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
-    }
-}
-
-// Transparent `Serialize`: the schema is the bare registry array.
-impl schemars::JsonSchema for CatalogPreview {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "CatalogPreview".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<CatalogPreviewEntry>>::json_schema(generator)
-    }
-}
-
-// Transparent `Serialize`: the schema is the bare registry array.
-impl schemars::JsonSchema for RegenerateReport {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "RegenerateReport".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<RegenerateEntry>>::json_schema(generator)
     }
 }
 
@@ -288,7 +273,7 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serializes");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("round-trips");
         assert_eq!(
-            parsed[0]["added"][0], HOSTILE,
+            parsed["items"][0]["added"][0], HOSTILE,
             "JSON must carry the key verbatim, not the display form"
         );
         assert!(
@@ -300,7 +285,7 @@ mod tests {
     // ── C-010 — report shape ─────────────────────────────────────────────────
 
     #[test]
-    fn regenerate_report_json_is_an_array_of_per_registry_objects() {
+    fn regenerate_report_json_is_an_items_list_of_per_registry_objects() {
         let report = RegenerateReport::new(vec![
             RegenerateEntry {
                 registry: "ocx.sh".to_string(),
@@ -320,14 +305,14 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&report).expect("serializes")).expect("round-trips");
 
-        assert_eq!(parsed[0]["registry"], "ocx.sh");
-        assert_eq!(parsed[0]["roots"], 3);
-        assert_eq!(parsed[0]["added"][0], "ns/added");
-        assert_eq!(parsed[0]["corrected"][0], "ns/corrected");
-        assert_eq!(parsed[0]["removed"][0], "ns/removed");
+        assert_eq!(parsed["items"][0]["registry"], "ocx.sh");
+        assert_eq!(parsed["items"][0]["roots"], 3);
+        assert_eq!(parsed["items"][0]["added"][0], "ns/added");
+        assert_eq!(parsed["items"][0]["corrected"][0], "ns/corrected");
+        assert_eq!(parsed["items"][0]["removed"][0], "ns/removed");
         // Argument order, not sorted — a per-registry failure is reported by
         // input index, so the report has to be readable against the same order.
-        assert_eq!(parsed[1]["registry"], "corp.example");
+        assert_eq!(parsed["items"][1]["registry"], "corp.example");
     }
 
     #[test]
@@ -459,7 +444,7 @@ mod tests {
     // ── C-027 — dry-run report shape ─────────────────────────────────────────
 
     #[test]
-    fn catalog_preview_json_is_registry_keyed_objects() {
+    fn catalog_preview_json_is_an_items_list_of_registry_objects() {
         let preview = CatalogPreview::new(vec![CatalogPreviewEntry::new(
             "ocx.sh".to_string(),
             vec!["ns/one".to_string(), "ns/two".to_string()],
@@ -467,9 +452,9 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&preview).expect("serializes")).expect("round-trips");
 
-        assert_eq!(parsed[0]["registry"], "ocx.sh");
-        assert_eq!(parsed[0]["packages"][0], "ns/one");
-        assert_eq!(parsed[0]["packages"][1], "ns/two");
+        assert_eq!(parsed["items"][0]["registry"], "ocx.sh");
+        assert_eq!(parsed["items"][0]["packages"][0], "ns/one");
+        assert_eq!(parsed["items"][0]["packages"][1], "ns/two");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, FromArgMatches, Parser};
 
 use crate::command;
-use crate::error_envelope::render_error_envelope;
+use crate::error_document::render_error_document;
 use crate::options::FormatMode;
 
 mod background_check;
@@ -19,6 +19,9 @@ pub use context::{Context, ManagedConfigGate, is_published_namespace};
 
 mod context_options;
 pub use context_options::ContextOptions;
+
+mod env_flags;
+pub use env_flags::ENV_FLAGS;
 
 mod managed_config_check;
 
@@ -65,7 +68,7 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
-impl crate::exit::ClassifyExitCode for CommandError {
+impl ocx_exit::ClassifyExitCode for CommandError {
     fn classify(&self) -> Option<ocx_exit::ExitCode> {
         Some(self.code)
     }
@@ -117,37 +120,48 @@ impl App {
         // Through `parse`, so a clap failure exits 64 (`EX_USAGE`) rather than clap's 2.
         let matches = match parse(Cli::command().color(color_mode.into()).styles(styles.clone()), &argv) {
             Ok(matches) => matches,
-            Err(code) => return Ok(code),
+            Err(code) => {
+                if json_requested(&argv) {
+                    print_usage_document(&argv);
+                }
+                return Ok(code);
+            }
         };
-        let cli = Cli::from_arg_matches(&matches)?;
+        let mut cli = Cli::from_arg_matches(&matches)?;
+        let format = cli.context.format.mode();
+        let command_name = cli.command.as_ref().map(canonical_command_name).unwrap_or_default();
+        let fail = |err: anyhow::Error| report_failure(format, &command_name, err);
+        // No subscriber exists yet: without one, a refused `OCX_*` value exits 78 with empty stderr.
+        cli.context.apply_env().map_err(|err| {
+            init_bypass_logging(&cli.context, color_config);
+            fail(err.into())
+        })?;
         // Before the static bypass, or a non-admitted static verb still runs under the seam.
         #[cfg(any(test, feature = "__testing"))]
         if seam::active() {
-            seam::admit(cli.command.as_ref())?;
+            seam::admit(cli.command.as_ref()).map_err(fail)?;
         }
 
         // Static commands bypass `Context::try_init`, which aborts on bad ambient config.
         match cli.command {
-            Some(command::Command::Version(ref v)) => return v.execute(&cli.context, color_config).await,
+            Some(command::Command::Version(ref v)) => return v.execute(&cli.context, color_config).await.map_err(fail),
             Some(command::Command::Shell(command::shell::Shell::Completion(ref c))) => {
-                return c.execute(&cli.context).await;
+                let result = c.execute(&cli.context).await;
+                if result.is_err() {
+                    init_bypass_logging(&cli.context, color_config);
+                }
+                return result.map_err(fail);
             }
             Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => {
                 // Runs on every shell startup, so it skips `Context::try_init`'s cost.
                 let result = a.execute(&cli.context, color_config).await;
-                // `finish` logs via `tracing`, whose subscriber `try_init` installs; without it the error vanishes.
-                // `.ok()`: `--reconcile` already installed the global subscriber via `Context::try_init`.
                 if result.is_err() {
-                    crate::tracing_init::LogSettings::default()
-                        .with_console_level(cli.context.log_level)
-                        .with_stderr_color(color_config.stderr)
-                        .init()
-                        .ok();
+                    init_bypass_logging(&cli.context, color_config);
                 }
-                return result;
+                return result.map_err(fail);
             }
             Some(command::Command::External(argv)) => {
-                return plugin_dispatch::dispatch(argv, &cli.context).await;
+                return plugin_dispatch::dispatch(argv, &cli.context).await.map_err(fail);
             }
             None => {
                 Cli::command().color(color_mode.into()).styles(styles).print_help()?;
@@ -164,7 +178,9 @@ impl App {
                 onboarding: is_managed_config_onboarding_command(&cli.command),
             },
         )
-        .await?;
+        .await
+        .map_err(fail)?;
+        command::deprecated::warn_renamed_flags(&context, &matches);
         let Some(command) = &cli.command else {
             unreachable!("None handled in static-command bypass above");
         };
@@ -189,9 +205,7 @@ impl App {
         // so trust policy also covers the unattended install.
         let pending_update = pending_update.map(|identifier| (context.manager().clone(), identifier));
 
-        let format = cli.context.format.mode();
-        let command_name = canonical_command_name(command);
-        // No envelope after a report, or stdout carries two JSON documents.
+        // No error document after a report, or stdout carries two JSON documents.
         let reported = context.api().reported_handle();
         let result = command.execute(context).await;
         // After the command, on success and failure alike, and never changing its result.
@@ -200,130 +214,123 @@ impl App {
         }
         match result {
             Ok(code) => Ok(code),
-            Err(err) if format == FormatMode::Json && !reported.load(std::sync::atomic::Ordering::Relaxed) => {
-                match render_error_envelope(command_name, &err) {
-                    // Through the printer, the one stdout path every report takes.
-                    Ok(rendered) => ocx_console::Printer::new(false, false)
-                        .cout()
-                        .plain(rendered)
-                        .end_line(),
-                    Err(render_err) => {
-                        // Log this and still return `err`, so neither cause is swallowed.
-                        log::error!("error envelope render failed: {render_err:#}");
-                    }
-                }
-                Err(err)
-            }
+            Err(err) if !reported.load(std::sync::atomic::Ordering::Relaxed) => Err(fail(err)),
             Err(err) => Err(err),
         }
     }
 }
 
-/// Canonical space-separated command name in the JSON error envelope.
+/// Install the log subscriber a command that bypassed `Context::try_init` failed without: `finish`
+/// logs the error through `tracing`, so without one it vanishes. `.ok()`: `self activate --reconcile`
+/// already installed it through `Context::try_init`.
+fn init_bypass_logging(options: &ContextOptions, color_config: ocx_console::ColorModeConfig) {
+    // The seam logs through its call-scoped subscriber; a global one would outlive the run.
+    if in_seam() {
+        return;
+    }
+    crate::tracing_init::LogSettings::default()
+        .with_console_level(options.log_level)
+        .with_stderr_color(color_config.stderr)
+        .init()
+        .ok();
+}
+
+/// Under `--format json`, print `err` as the error document; `err` is returned either way.
+fn report_failure(format: FormatMode, command: &str, err: anyhow::Error) -> anyhow::Error {
+    if format == FormatMode::Json {
+        print_error_document(command, &err);
+    }
+    err
+}
+
+fn print_error_document(command: &str, err: &anyhow::Error) {
+    match render_error_document(command, err) {
+        // Through the printer, the one stdout path every report takes; `--quiet` does not reach it.
+        Ok(rendered) => ocx_console::Printer::new(false, false)
+            .cout()
+            .plain(rendered)
+            .end_line(),
+        // Logged, and the caller still returns `err`, so neither cause is swallowed.
+        Err(render_err) => log::error!("error document render failed: {render_err:#}"),
+    }
+}
+
+/// Whether ocx's own `--format`/`--json` asks for JSON: the last spelling wins, and a flag after
+/// `--` belongs to the child command, so the scan stops there.
+fn json_requested(argv: &[std::ffi::OsString]) -> bool {
+    let mut json = false;
+    let mut tokens = argv.iter().skip(1).filter_map(|token| token.to_str());
+    while let Some(token) = tokens.next() {
+        match token {
+            "--" => break,
+            "--json" => json = true,
+            "--format" => match tokens.next() {
+                Some("--") | None => break,
+                Some(value) => json = value == "json",
+            },
+            _ => {
+                if let Some(value) = token.strip_prefix("--format=") {
+                    json = value == "json";
+                }
+            }
+        }
+    }
+    json
+}
+
+/// Print clap's refusal of `argv` as one error document (exit 64, kind `usage_error`).
+fn print_usage_document(argv: &[std::ffi::OsString]) {
+    use clap::error::ErrorKind;
+
+    let Err(error) = Cli::command().try_get_matches_from(argv) else {
+        return;
+    };
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        return;
+    }
+    // `StyledStr`'s `Display` never emits colour, so no escape code reaches the document.
+    let rendered = error.render().to_string();
+    let first_line = rendered.lines().next().unwrap_or_default();
+    let message = first_line.strip_prefix("error: ").unwrap_or(first_line);
+    let err = anyhow::Error::new(CommandError::new(message, ocx_exit::ExitCode::UsageError));
+    print_error_document(&usage_command_path(argv), &err);
+}
+
+/// The subcommand words of `argv` clap recognised before refusing it; `""` when none were.
+fn usage_command_path(argv: &[std::ffi::OsString]) -> String {
+    let root = Cli::command();
+    let mut current = &root;
+    let mut words = Vec::new();
+    for token in argv.iter().skip(1) {
+        if token == "--" || !current.has_subcommands() {
+            break;
+        }
+        // A flag, or a flag's value: neither names a subcommand.
+        if let Some(sub) = token
+            .to_str()
+            .filter(|token| !token.starts_with('-'))
+            .and_then(|token| current.find_subcommand(token))
+        {
+            words.push(sub.get_name());
+            current = sub;
+        }
+    }
+    words.join(" ")
+}
+
+/// Canonical space-separated command name in the error document.
 ///
 /// Frozen v1 (`adr_oci_referrers_signing_v1.md`): changing an existing mapping is a v2 schema bump.
-fn canonical_command_name(command: &command::Command) -> &'static str {
-    use command::Command;
-    use command::config::ConfigGroup as ConfigCmd;
-    use command::index::Index as IndexCmd;
-    use command::launcher::Launcher as LauncherCmd;
-    use command::package::Package as PackageCmd;
-    use command::package_cascade::CascadeGroup as CascadeCmd;
-    use command::package_description::DescriptionGroup as DescriptionCmd;
-    use command::patch::PatchGroup as PatchCmd;
-    use command::self_group::SelfGroup;
-    use command::shell::Shell as ShellCmd;
-    match command {
-        Command::Env(_) => "env",
-        Command::Add(_) => "add",
-        Command::Clean(_) => "clean",
-        Command::Config(sub) => match sub {
-            ConfigCmd::Setup(_) => "config setup",
-            ConfigCmd::Update(_) => "config update",
-            ConfigCmd::Push(_) => "config push",
-            ConfigCmd::Test(_) => "config test",
-        },
-        Command::Direnv(_) => "direnv",
-        Command::Index(sub) => match sub {
-            IndexCmd::Catalog(_) => "index catalog",
-            IndexCmd::List(_) => "index list",
-            IndexCmd::Update(_) => "index update",
-            IndexCmd::Sync(_) => "index sync",
-            IndexCmd::Regenerate(_) => "index regenerate",
-        },
-        Command::About(_) => "about",
-        Command::Init(_) => "init",
-        Command::Inspect(_) => "inspect",
-        Command::Status(_) => "status",
-        Command::Lock(_) => "lock",
-        Command::Login(_) => "login",
-        Command::Logout(_) => "logout",
-        Command::Update(_) => "update",
-        Command::Upgrade(_) => "upgrade",
-        Command::Launcher(sub) => match sub {
-            LauncherCmd::Exec(_) => "launcher exec",
-            LauncherCmd::Shim(_) => "launcher shim",
-        },
-        Command::Package(sub) => match sub {
-            PackageCmd::Announce(_) => "package announce",
-            PackageCmd::Attest(_) => "package attest",
-            PackageCmd::Cascade(sub) => match sub {
-                CascadeCmd::Check(_) => "package cascade check",
-                CascadeCmd::Repair(_) => "package cascade repair",
-            },
-            PackageCmd::Claim(_) => "package claim",
-            PackageCmd::Copy(_) => "package copy",
-            PackageCmd::Create(_) => "package create",
-            PackageCmd::Description(sub) => match sub {
-                DescriptionCmd::Push(_) => "package description push",
-                DescriptionCmd::Pull(_) => "package description pull",
-            },
-            // Deprecated spellings keep their released strings, like `DeprecatedRun` below.
-            PackageCmd::DeprecatedDescribe(_) => "package describe",
-            PackageCmd::DeprecatedInfo(_) => "package info",
-            PackageCmd::Deps(_) => "package deps",
-            PackageCmd::Env(_) => "package env",
-            PackageCmd::Inspect(_) => "package inspect",
-            PackageCmd::Prune(_) => "package prune",
-            PackageCmd::Install(_) => "package install",
-            PackageCmd::Pull(_) => "package pull",
-            PackageCmd::Push(_) => "package push",
-            PackageCmd::Receipt(_) => "package receipt",
-            PackageCmd::Sbom(_) => "package sbom",
-            PackageCmd::Select(_) => "package select",
-            PackageCmd::Deselect(_) => "package deselect",
-            PackageCmd::Sign(_) => "package sign",
-            PackageCmd::Test(_) => "package test",
-            PackageCmd::Verify(_) => "package verify",
-            PackageCmd::Exec(_) => "package exec",
-            PackageCmd::Uninstall(_) => "package uninstall",
-            PackageCmd::Which(_) => "package which",
-        },
-        Command::Patch(sub) => match sub {
-            PatchCmd::Freeze(_) => "patch freeze",
-            PatchCmd::Sync(_) => "patch sync",
-            PatchCmd::Publish(_) => "patch publish",
-            PatchCmd::Test(_) => "patch test",
-            PatchCmd::Why(_) => "patch why",
-        },
-        Command::Pull(_) => "pull",
-        Command::Remove(_) => "remove",
-        Command::Exec(_) => "exec",
-        // Keeps its released `"run"`, so the frozen v1 envelope needs no bump.
-        Command::DeprecatedRun(_) => "run",
-        Command::Shell(sub) => match sub {
-            ShellCmd::Allow(_) => "shell allow",
-            ShellCmd::Completion(_) => "shell completion",
-            ShellCmd::Revoke(_) => "shell revoke",
-            ShellCmd::State(_) => "shell state",
-        },
-        Command::Self_(sub) => match sub {
-            SelfGroup::Activate(_) => "self activate",
-            SelfGroup::Setup(_) => "self setup",
-            SelfGroup::Update(_) => "self update",
-        },
-        Command::Version(_) => "version",
-        Command::External(_) => "external",
+fn canonical_command_name(command: &command::Command) -> String {
+    use command::leaf::Leaf;
+    match command.leaf() {
+        // The v1 envelope named the whole group, so `direnv init` and `direnv export` stay `direnv`.
+        Some(Leaf::DirenvInit | Leaf::DirenvExport) => "direnv".to_owned(),
+        Some(leaf) => leaf.path().join(" "),
+        None => "external".to_owned(),
     }
 }
 
@@ -470,7 +477,7 @@ mod tests {
 
     /// Each `FrameCommand` names its command **exactly** as [`canonical_command_name`] does.
     ///
-    /// The v1 error envelope and the execution record describe the same invocation,
+    /// The v1 error document and the execution record describe the same invocation,
     /// so a consumer joining them must grep one string. This is a real comparison,
     /// not restated literals, because this crate links both sides. It checks **per
     /// variant**, so swapping two spellings cannot pass, and the `Cli` parse names
@@ -537,13 +544,12 @@ mod tests {
     /// The refusals travel as `anyhow` from `self activate --reconcile`, so
     /// they reach [`classify_error`] as a bare cause: this function's own
     /// downcast ladder does not know `SessionError`, and the code comes from
-    /// `crate::exit::classify_library_error`'s registry instead. A `SessionError`
-    /// added there without a `try_downcast!` entry silently degrades 78/65 to
-    /// the generic failure code, which no other test would notice.
+    /// `crate::exit::classify_library_error`'s `families!` list instead. A
+    /// `SessionError` left out of it silently degrades 78/65 to the generic
+    /// failure code, which no other test would notice.
     ///
-    /// Red state: delete `try_downcast!(SessionError)` from
-    /// `crates/ocx_cli/src/exit/classify.rs` and both assertions report
-    /// `Failure`.
+    /// Red state: delete `SessionError` from the `families!` list in
+    /// `crates/ocx_cli/src/exit.rs` and both assertions report `Failure`.
     #[test]
     fn c343_the_session_refusals_keep_their_exit_codes_through_anyhow() {
         use std::path::PathBuf;
@@ -1131,5 +1137,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn argv(words: &[&str]) -> Vec<std::ffi::OsString> {
+        std::iter::once("ocx")
+            .chain(words.iter().copied())
+            .map(Into::into)
+            .collect()
+    }
+
+    #[test]
+    fn json_is_requested_by_the_last_format_spelling_before_double_dash() {
+        let json = |words: &[&str]| super::json_requested(&argv(words));
+        assert!(json(&["--json", "package", "install"]));
+        assert!(json(&["--format", "json", "exec"]));
+        assert!(json(&["--format=json", "exec"]));
+        assert!(!json(&["--json", "--format", "plain", "exec"]));
+        assert!(!json(&["--json", "--format=plain", "exec"]));
+        assert!(json(&["--format=plain", "--json", "exec"]));
+        assert!(!json(&["exec", "--", "tool", "--json"]));
+        assert!(!json(&["exec", "--", "tool", "--format", "json"]));
+        assert!(!json(&["package", "install", "x:1"]));
+    }
+
+    #[test]
+    fn the_usage_command_is_the_subcommand_words_clap_recognised() {
+        let path = |words: &[&str]| super::usage_command_path(&argv(words));
+        assert_eq!(
+            path(&["--format", "json", "package", "install", "--nope", "x:1"]),
+            "package install"
+        );
+        assert_eq!(
+            path(&["--config", "/tmp/c.toml", "exec", "--nope", "--", "package"]),
+            "exec"
+        );
+        assert_eq!(path(&["--json", "--nope"]), "");
     }
 }

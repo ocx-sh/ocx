@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "ocx_home": "/home/conformance/.ocx",
+  "ocx_home_present": true,
+  "shell_integration_installed": false,
+  "toolchain_home": "/work/project/.ocx/toolchain",
+  "toolchain_bin": "/work/project/.ocx/toolchain/active/bin",
+  "activate": "env",
+  "pinned": false,
+  "carrier_present": false,
+  "carrier_bytes": 0,
+  "watch_set": [
+    {
+      "path": "/work/project/ocx.toml",
+      "present": true,
+      "size": 9007199254740991,
+      "modified_at": "2026-10-04T15:41:30Z"
+    },
+    {
+      "path": "/work/project/ocx.lock",
+      "present": true,
+      "size": 226,
+      "modified_at": "2026-10-04T15:41:31Z"
+    },
+    {
+      "path": "/home/conformance/.ocx/ocx.toml",
+      "present": false
+    },
+    {
+      "path": "/home/conformance/.ocx/ocx.lock",
+      "present": false
+    },
+    {
+      "path": "/home/conformance/.ocx/state/managed-config/snapshot.json",
+      "present": false
+    },
+    {
+      "path": "/home/conformance/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin",
+      "present": false
+    },
+    {
+      "path": "/etc/ocx/config.toml",
+      "present": false
+    },
+    {
+      "path": "/home/conformance/.config/ocx/config.toml",
+      "present": false
+    },
+    {
+      "path": "/home/conformance/.ocx/config.toml",
+      "present": false
+    },
+    {
+      "path": "/home/conformance/.ocx/state/projects/d03e54d070c0f864/consent.json",
+      "present": true,
+      "size": 182,
+      "modified_at": "2026-10-04T15:41:31Z"
+    }
+  ],
+  "project_dir": "/work/project",
+  "project_key": "d03e54d070c0f864",
+  "project_stamped": true,
+  "grant": "stamp",
+  "stamp_written_at": "2026-10-04T15:41:31Z",
+  "priors": [],
+  "hook": {
+    "rung": "auto"
+  },
+  "yielded_to": [],
+  "inert_reason": {
+    "type": "ledger_unreadable",
+    "first_prompt": true
+  },
+  "notes": []
+}

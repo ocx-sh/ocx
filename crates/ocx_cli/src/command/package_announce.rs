@@ -4,7 +4,7 @@
 //! `ocx package announce` — publish an owner-curated tag set into the index.
 //!
 //! The write-target refusals live on [`options::ForgeWriteOptions`], shared with `ocx package claim`:
-//! re-declaring `--out` ⟂ `--fork` or a `validate` refusal here would let the two commands diverge.
+//! re-declaring `--output` ⟂ `--fork` or a `validate` refusal here would let the two commands diverge.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,13 +23,13 @@ const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_regis
 /// Observe an owner-curated set of registry tags and publish the rebuilt entry into the index.
 ///
 /// Reads the committed index entry, re-observes the given tags, and writes the rebuilt entry
-/// to a local directory (`--out`) or opens a pull or merge request against the index
+/// to a local directory (`--output`) or opens a pull or merge request against the index
 /// repository: from a fork with `--fork`, else from a branch on the index repository itself,
 /// which needs push access there. A run that changes nothing reports as unchanged and commits
 /// nothing; it opens a request only to recover one an earlier run left unopened.
 ///
 /// A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under
-/// `--transport git` inside a GitLab job. Writing to `--out` works without one.
+/// `--transport git` inside a GitLab job. Writing to `--output` works without one.
 //
 // `override_usage`: a required `ArgGroup` renders every member regardless of `Arg::hide`, so without
 // it `--help` advertises the deprecated `--package`.
@@ -183,7 +183,7 @@ impl PackageAnnounce {
             // proxy variable, the client will actually use.
             insecure_hosts: context.insecure_hosts().to_vec(),
             ephemeral: self.ephemeral,
-            run_url: run_url(|key| ocx_util::env::var(key)),
+            run_url: run_url(ocx_env::EnvVar::get),
         };
 
         // Before the forge is built, so a missing or too-old git exits 69 with zero forge calls; gated on
@@ -251,8 +251,8 @@ impl PackageAnnounce {
 
     /// The write target the flag pair selects; neither flag pushes to `--index-repo` itself.
     fn target(&self) -> AnnounceTarget {
-        match (&self.forge.out, &self.forge.fork) {
-            (Some(directory), _) => AnnounceTarget::Out(directory.clone()),
+        match (self.forge.output(), &self.forge.fork) {
+            (Some(directory), _) => AnnounceTarget::Out(directory.to_path_buf()),
             (None, Some(coordinate)) => AnnounceTarget::Fork(coordinate.clone()),
             (None, None) => AnnounceTarget::Direct,
         }
@@ -261,18 +261,18 @@ impl PackageAnnounce {
 
 /// The URL of the CI run making this announce: GitLab's job URL, else the GitHub Actions run URL
 /// assembled from its three parts, else none. A blank variable counts as unset.
-fn run_url(var: impl Fn(&str) -> Option<String>) -> Option<String> {
-    let read = |key: &str| {
+fn run_url(var: impl Fn(&'static ocx_env::EnvVar) -> Option<String>) -> Option<String> {
+    let read = |key: &'static ocx_env::EnvVar| {
         var(key)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     };
-    if let Some(job) = read("CI_JOB_URL") {
+    if let Some(job) = read(&ocx_env::CI_JOB_URL) {
         return Some(job);
     }
-    let server = read("GITHUB_SERVER_URL")?;
-    let repository = read("GITHUB_REPOSITORY")?;
-    let run_id = read("GITHUB_RUN_ID")?;
+    let server = read(&ocx_env::GITHUB_SERVER_URL)?;
+    let repository = read(&ocx_env::GITHUB_REPOSITORY)?;
+    let run_id = read(&ocx_env::GITHUB_RUN_ID)?;
     Some(format!(
         "{}/{repository}/actions/runs/{run_id}",
         server.trim_end_matches('/')
@@ -306,7 +306,7 @@ mod tests {
     /// `package_flag`; the parse still succeeds and both assertions red.
     #[test]
     fn announce_accepts_positional() {
-        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "d", "acme/widget"])
+        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--output", "d", "acme/widget"])
             .expect("the positional is the canonical spelling");
         assert!(
             args.package_flag.is_none(),
@@ -341,9 +341,16 @@ mod tests {
     /// reds).
     #[test]
     fn announce_hidden_package_flag_binds_to_its_own_arg_id() {
-        let args =
-            PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "d", "--package", "acme/widget"])
-                .expect("the deprecated spelling still executes for one release pair");
+        let args = PackageAnnounce::try_parse_from([
+            "announce",
+            "--tags",
+            "1.0.0",
+            "--output",
+            "d",
+            "--package",
+            "acme/widget",
+        ])
+        .expect("the deprecated spelling still executes for one release pair");
         assert!(
             args.package.is_none(),
             "the deprecated flag must not bind the positional id, or nothing could tell the two apart"
@@ -383,7 +390,7 @@ mod tests {
             "announce",
             "--tags",
             "1.0.0",
-            "--out",
+            "--output",
             "d",
             "--package",
             "acme/widget",
@@ -410,7 +417,7 @@ mod tests {
     /// with both fields `None` and this reds.
     #[test]
     fn announce_neither_form_is_usage_error() {
-        let Err(error) = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "d"]) else {
+        let Err(error) = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--output", "d"]) else {
             panic!("naming no package at all must be refused");
         };
         assert_eq!(
@@ -475,7 +482,7 @@ mod tests {
     /// is membership-based for the same reason.
     ///
     /// Counted `== 1` rather than `contains`: announce declared
-    /// `--index-repo`, `--forge`, `--fork` and `--out` itself before this
+    /// `--index-repo`, `--forge`, `--fork` and `--output` itself before this
     /// package, and duplicating them beside the flatten rather than deleting
     /// them is the likely accident. A duplicate arg id is a
     /// `Command::build` panic, so it fails at runtime and not at `cargo check` —
@@ -563,7 +570,7 @@ mod tests {
     /// `CascadeGroup` is the in-repo precedent for the fix (variants carry no
     /// doc, the text lives with the flags it describes).
     ///
-    /// The variable is read from [`ocx_config::env::keys`] rather than spelled here,
+    /// The variable is read from its [`ocx_env`] declaration rather than spelled here,
     /// the same discipline `options::forge_write` applies to its exit-80 refusal:
     /// help naming a variable the ladder no longer reads is worse than no help.
     ///
@@ -579,8 +586,8 @@ mod tests {
     fn both_write_commands_render_the_credential_guidance() {
         let sentence = format!(
             "needs a forge credential: `{}`, or the job token under `--transport git` inside a \
-             GitLab job. Writing to `--out` works without one.",
-            ocx_config::env::keys::OCX_ANNOUNCE_TOKEN
+             GitLab job. Writing to `--output` works without one.",
+            ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name
         );
 
         for command in ["announce", "claim"] {
@@ -604,14 +611,14 @@ mod tests {
     #[test]
     fn package_is_required() {
         assert!(
-            PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "d"]).is_err(),
+            PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--output", "d"]).is_err(),
             "naming no package at all must be a clap usage error"
         );
     }
 
     #[test]
     fn package_parses_namespace_and_name() {
-        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "d", "acme/widget"])
+        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--output", "d", "acme/widget"])
             .expect("valid invocation parses");
         assert_eq!(
             args.package.expect("the positional is the canonical spelling").raw(),
@@ -630,7 +637,7 @@ mod tests {
     #[test]
     fn tags_selection_is_required() {
         assert!(
-            PackageAnnounce::try_parse_from(["announce", "--out", "d", "acme/widget"]).is_err(),
+            PackageAnnounce::try_parse_from(["announce", "--output", "d", "acme/widget"]).is_err(),
             "a tag selection is required"
         );
     }
@@ -643,7 +650,7 @@ mod tests {
     fn tags_selection_is_mutually_exclusive_over_every_pair() {
         for (index, first) in TAG_SELECTION_ARGV.iter().enumerate() {
             for second in &TAG_SELECTION_ARGV[index + 1..] {
-                let mut argv = vec!["announce", "--out", "d"];
+                let mut argv = vec!["announce", "--output", "d"];
                 argv.extend_from_slice(first);
                 argv.extend_from_slice(second);
                 argv.push("acme/widget");
@@ -661,7 +668,7 @@ mod tests {
     #[test]
     fn every_tags_selection_parses_on_its_own() {
         for selection in &TAG_SELECTION_ARGV {
-            let mut argv = vec!["announce", "--out", "d"];
+            let mut argv = vec!["announce", "--output", "d"];
             argv.extend_from_slice(selection);
             argv.push("acme/widget");
             assert!(
@@ -674,7 +681,7 @@ mod tests {
     #[test]
     fn ephemeral_with_refresh_is_a_usage_error() {
         let error =
-            PackageAnnounce::try_parse_from(["announce", "--refresh", "--ephemeral", "--out", "d", "acme/widget"])
+            PackageAnnounce::try_parse_from(["announce", "--refresh", "--ephemeral", "--output", "d", "acme/widget"])
                 .err()
                 .expect("--ephemeral beside --refresh must not parse");
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
@@ -683,7 +690,7 @@ mod tests {
             "--tags-file",
             "t",
             "--ephemeral",
-            "--out",
+            "--output",
             "d",
             "acme/widget",
         ])
@@ -698,7 +705,7 @@ mod tests {
     #[test]
     fn ephemeral_composes_with_every_selection_except_refresh() {
         for selection in &TAG_SELECTION_ARGV {
-            let mut argv = vec!["announce", "--ephemeral", "--out", "d"];
+            let mut argv = vec!["announce", "--ephemeral", "--output", "d"];
             argv.extend_from_slice(selection);
             argv.push("acme/widget");
             let parsed = PackageAnnounce::try_parse_from(&argv);
@@ -769,10 +776,10 @@ mod tests {
     #[test]
     fn run_url_prefers_gitlab_then_assembles_github_then_none() {
         let from = |pairs: &'static [(&'static str, &'static str)]| {
-            super::run_url(move |key| {
+            super::run_url(move |var| {
                 pairs
                     .iter()
-                    .find(|(name, _)| *name == key)
+                    .find(|(name, _)| *name == var.name)
                     .map(|(_, value)| (*value).to_string())
             })
         };
@@ -800,19 +807,21 @@ mod tests {
 
     #[test]
     fn tags_from_registry_sets_the_flag() {
-        let args = PackageAnnounce::try_parse_from(["announce", "--tags-from-registry", "--out", "d", "acme/widget"])
-            .expect("valid invocation parses");
+        let args =
+            PackageAnnounce::try_parse_from(["announce", "--tags-from-registry", "--output", "d", "acme/widget"])
+                .expect("valid invocation parses");
         assert!(args.tags_from_registry);
     }
 
     #[test]
     fn tags_splits_on_commas() {
-        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0,2.0.0", "--out", "d", "acme/widget"])
-            .expect("valid invocation parses");
+        let args =
+            PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0,2.0.0", "--output", "d", "acme/widget"])
+                .expect("valid invocation parses");
         assert_eq!(args.tags, vec!["1.0.0".to_string(), "2.0.0".to_string()]);
     }
 
-    /// The whole point of the fork-free path: with neither `--out` nor
+    /// The whole point of the fork-free path: with neither `--output` nor
     /// `--fork`, the announce branch goes to the index repository — NOT to a
     /// fork, and not to a local directory. Asserting on the resolved
     /// `AnnounceTarget` rather than on "clap accepted it" is deliberate: clap
@@ -824,7 +833,7 @@ mod tests {
             .expect("a target-less invocation is the direct path, not a usage error");
         assert!(
             matches!(args.target(), AnnounceTarget::Direct),
-            "no --out and no --fork must resolve to the direct (fork-free) target"
+            "no --output and no --fork must resolve to the direct (fork-free) target"
         );
     }
 
@@ -832,8 +841,9 @@ mod tests {
     /// `match` that collapsed everything onto one arm.
     #[test]
     fn out_and_fork_each_resolve_to_their_own_target() {
-        let out = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "somewhere", "acme/widget"])
-            .expect("valid invocation parses");
+        let out =
+            PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--output", "somewhere", "acme/widget"])
+                .expect("valid invocation parses");
         assert!(
             matches!(out.target(), AnnounceTarget::Out(directory) if directory == std::path::Path::new("somewhere"))
         );
@@ -859,14 +869,14 @@ mod tests {
                 "announce",
                 "--tags",
                 "1.0.0",
-                "--out",
+                "--output",
                 "d",
                 "--fork",
                 "o/r",
                 "acme/widget",
             ])
             .is_err(),
-            "--out and --fork together must be a clap usage error"
+            "--output and --fork together must be a clap usage error"
         );
     }
 
@@ -888,7 +898,7 @@ mod tests {
 
     #[test]
     fn index_repo_defaults_to_ocx_sh_index() {
-        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--out", "d", "acme/widget"])
+        let args = PackageAnnounce::try_parse_from(["announce", "--tags", "1.0.0", "--output", "d", "acme/widget"])
             .expect("valid invocation parses");
         assert_eq!(args.forge.index_repo.host, None);
         assert_eq!(args.forge.index_repo.namespace, "ocx-sh");
@@ -902,7 +912,7 @@ mod tests {
                 "announce",
                 "--tags",
                 "1.0.0",
-                "--out",
+                "--output",
                 "d",
                 "--yank",
                 "0.9.0",
@@ -915,7 +925,7 @@ mod tests {
             "announce",
             "--tags",
             "1.0.0",
-            "--out",
+            "--output",
             "d",
             "--yank",
             "0.9.0",

@@ -118,6 +118,11 @@ impl Context {
 
         log::debug!("Creating context with options: {:?}", options);
 
+        // Before any other read, so a refused spelling fails here and not as some later symptom.
+        let mut env_notices = retired_env_notices()?;
+        check_hardening_env()?;
+        env_notices.extend(invalid_boolean_env_notices());
+
         // Fills the host-libc cache `Platform::current()` reads; local-only, so it runs offline too.
         if !in_seam {
             ocx_oci::HostCapabilities::detect_and_cache(
@@ -138,7 +143,7 @@ impl Context {
 
         let project_path = options.project.clone();
 
-        let cwd = ocx_util::env::current_dir()?;
+        let cwd = ocx_env::current_dir()?;
         let loaded_config = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: options.config.as_deref(),
             explicit_project_path: options.project.as_deref(),
@@ -163,11 +168,14 @@ impl Context {
 
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let ui = UserInterface::new(printer, !in_seam && console::Term::stderr().is_term(), options.quiet);
+        for notice in env_notices {
+            ui.warn(notice);
+        }
         // Shared with the Context-free `ocx version` bypass so both pick the same default format.
         let api = options.build_api(color_config);
 
         // Fail-closed: a CA error aborts before any client is built.
-        let extra_ca_env = ocx_util::env::var(env::keys::OCX_EXTRA_CA_CERTS).filter(|value| !value.is_empty());
+        let extra_ca_env = ocx_env::OCX_EXTRA_CA_CERTS.get();
         let (extra_ca_tier_merged, extra_ca_tier_local) = (
             loaded_config.extra_ca_certs_tier,
             loaded_config.extra_ca_certs_tier_local,
@@ -225,11 +233,16 @@ impl Context {
         let index_store = options
             .index
             .clone()
-            .or_else(|| ocx_util::env::var(env::keys::OCX_INDEX).map(std::path::PathBuf::from))
+            .or_else(|| {
+                ocx_env::OCX_INDEX
+                    .get_raw()
+                    .and_then(|v| v.into_string().ok())
+                    .map(PathBuf::from)
+            })
             .map(|home| ocx_index::IndexStore::new(home).with_locks_root(file_structure.locks.clone()))
             .unwrap_or_else(|| ocx_index::IndexStore::machine_local(&file_structure));
         // Also gates the offline path: a committed root's yanked tag is refused on a local resolve.
-        let allow_yanked = ocx_util::env::flag(env::keys::OCX_ALLOW_YANKED, false);
+        let allow_yanked = ocx_env::OCX_ALLOW_YANKED.bool_or(false)?;
         let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
             index_store: index_store.clone(),
         })
@@ -265,13 +278,12 @@ impl Context {
             file_structure.blobs.clone(),
         );
 
-        let default_registry = ocx_util::env::string(
-            env::keys::OCX_DEFAULT_REGISTRY,
+        let default_registry = ocx_env::OCX_DEFAULT_REGISTRY.get().unwrap_or_else(|| {
             config
                 .resolved_default_registry()
                 .map(str::to_owned)
-                .unwrap_or_else(|| ocx_oci::DEFAULT_REGISTRY.into()),
-        );
+                .unwrap_or_else(|| ocx_oci::DEFAULT_REGISTRY.into())
+        });
 
         // `no_patches` is never grafted onto this tier, or it turns ambient and is re-forwarded over
         // `OCX_PATCHES` into unrelated children.
@@ -281,7 +293,10 @@ impl Context {
         };
 
         // `OCX_PATCH_SNAPSHOT` is the sole selector, orthogonal to `--frozen`.
-        let patch_snapshot_path = ocx_util::env::var(env::keys::OCX_PATCH_SNAPSHOT).map(std::path::PathBuf::from);
+        let patch_snapshot_path = ocx_env::OCX_PATCH_SNAPSHOT
+            .get_raw()
+            .and_then(|v| v.into_string().ok())
+            .map(PathBuf::from);
         let loaded_patch_snapshot = if let Some(ref path) = patch_snapshot_path {
             ocx_package_manager::patch::PatchSnapshot::read(path)
                 .await
@@ -299,11 +314,11 @@ impl Context {
         let records_env = ocx_package_manager::record::RecordsOptions::from_env();
 
         // `OCX_NO_CONFIG=1` is hermetic: it also suppresses the env override read here.
-        let no_config = ocx_util::env::flag("OCX_NO_CONFIG", false);
+        let no_config = ocx_env::OCX_NO_CONFIG.bool_or(false)?;
         let managed_config_env_override = if no_config {
             None
         } else {
-            ocx_util::env::var(env::keys::OCX_MANAGED_CONFIG)
+            ocx_env::OCX_MANAGED_CONFIG.get_raw().and_then(|v| v.into_string().ok())
         };
 
         // The fetch client uses the local-only mirror view, or the payload's own `[mirrors]` could
@@ -377,7 +392,7 @@ impl Context {
         // Attached once on the shared manager so every install surface inherits auto-verify.
         let operator_policies = config.trust_policies().to_vec();
         // Read once: auto-verify and the forwarded `config_view` must see the same value.
-        let no_verify_env = ocx_util::env::flag(env::keys::OCX_NO_VERIFY, false);
+        let no_verify_env = ocx_env::OCX_NO_VERIFY.bool_or(false)?;
         let auto_verify = if operator_policies.is_empty() {
             None
         } else {
@@ -412,7 +427,7 @@ impl Context {
         config_view.no_verify = no_verify_env;
         // Forwarded, or the child re-reads the config chain the parent pruned and the two frames
         // of one launch resolve against different configuration.
-        config_view.no_config = ocx_util::env::flag(env::keys::OCX_NO_CONFIG, false);
+        config_view.no_config = ocx_env::OCX_NO_CONFIG.bool_or(false)?;
         // Forwarded because `apply_ocx_config` is set-or-remove and would strip `OCX_RECORDS_DIR`.
         // The clamp applies during `merge`, so the lock clears only after it.
         let mut forwarded_records = records_config.clone();
@@ -645,7 +660,7 @@ impl Context {
             .collect();
         namespaces.sort();
 
-        let allow_yanked = ocx_util::env::flag(env::keys::OCX_ALLOW_YANKED, false);
+        let allow_yanked = ocx_env::OCX_ALLOW_YANKED.bool_or(false)?;
         let mut sources = Vec::with_capacity(namespaces.len());
         for namespace in namespaces {
             // Pins the connect address so a root `repository` host cannot rebind between validate and
@@ -933,7 +948,8 @@ fn build_auto_verify(
         state,
         // Through the same door `ocx package verify` reads it at, so one env value cannot mean a
         // bare path here and a `file://` one there.
-        trusted_root_env: std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT")
+        trusted_root_env: ocx_env::OCX_SIGSTORE_TRUSTED_ROOT
+            .get_raw()
             .map(PathBuf::from)
             .map(explicit_trust_root_path),
 
@@ -1013,13 +1029,16 @@ fn resolve_concurrency(jobs: Option<usize>) -> ocx_package_manager::Concurrency 
 
     let raw = match jobs {
         Some(n) => Some(n),
-        None => ocx_util::env::var("OCX_JOBS").and_then(|v| match v.parse::<usize>() {
-            Ok(n) => Some(n),
-            Err(e) => {
-                log::warn!("ignoring invalid OCX_JOBS value {v:?}: {e}");
-                None
-            }
-        }),
+        None => ocx_env::OCX_JOBS
+            .get_raw()
+            .and_then(|v| v.into_string().ok())
+            .and_then(|v| match v.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    log::warn!("ignoring invalid OCX_JOBS value {v:?}: {e}");
+                    None
+                }
+            }),
     };
 
     match raw {
@@ -1040,8 +1059,7 @@ fn resolve_concurrency(jobs: Option<usize>) -> ocx_package_manager::Concurrency 
 /// [`UsageError`](crate::error::UsageError) (exit `64`) on the conflict.
 fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), crate::error::UsageError> {
     // `OCX_PROJECT=""` means unset to the loader, so it is no explicit selection here.
-    let explicit_project =
-        view.project.is_some() || ocx_util::env::var(env::keys::OCX_PROJECT).is_some_and(|v| !v.is_empty());
+    let explicit_project = view.project.is_some() || ocx_env::OCX_PROJECT.get().is_some();
     if view.global && explicit_project {
         return Err(crate::error::UsageError::new(
             "--global cannot be combined with an explicit --project / OCX_PROJECT selection",
@@ -1067,6 +1085,66 @@ fn check_frozen_remote_exclusivity(view: &env::OcxConfigView) -> Result<(), crat
     Ok(())
 }
 
+/// One warning per in-window retired spelling that is set, from one scan of the environment.
+///
+/// # Errors
+///
+/// [`RetiredEnvError`](crate::error::RetiredEnvError) (exit `78`) when a removed spelling is set;
+/// an inverted one is always removed, or an old setting would flip a hardening switch.
+fn retired_env_notices() -> Result<Vec<String>, crate::error::RetiredEnvError> {
+    use ocx_env::{Change, Status};
+
+    let (mut refused, mut notices) = (Vec::new(), Vec::new());
+    for entry in ocx_env::retired_hits(&ocx_env::snapshot()) {
+        let (name, replacement) = (entry.name, entry.replacement.name);
+        match (entry.change, entry.status) {
+            (Change::Polarity, _) | (_, Status::Removed) => refused.push(entry),
+            (Change::Rename, Status::Window { removal }) => {
+                notices.push(format!(
+                    "{name} is renamed to {replacement}; the old name is removed in {removal}"
+                ));
+            }
+            (Change::ValueRename { old, new }, Status::Window { removal }) => {
+                notices.push(format!(
+                    "{name}={old} is renamed to {name}={new}; the old value is removed in {removal}"
+                ));
+            }
+        }
+    }
+    if refused.is_empty() {
+        Ok(notices)
+    } else {
+        Err(crate::error::RetiredEnvError { refused })
+    }
+}
+
+/// Refuses an invalid value in a hardening switch, which must never fall open on a typo.
+///
+/// # Errors
+///
+/// [`ocx_env::InvalidEnv`] (exit `78`) naming the first such key.
+fn check_hardening_env() -> Result<(), ocx_env::InvalidEnv> {
+    ocx_env::all()
+        .filter(|var| var.on_invalid == ocx_env::OnInvalid::Error && var.value == ocx_env::EnvValue::Bool)
+        .try_for_each(|var| var.bool_or(false).map(drop))
+}
+
+/// One warning per non-hardening boolean set to a value that is not a boolean, which reads as its
+/// default. Names the key only: the value may be a secret pasted into the wrong variable.
+fn invalid_boolean_env_notices() -> Vec<String> {
+    ocx_env::all()
+        .filter(|var| var.on_invalid == ocx_env::OnInvalid::Default && var.value == ocx_env::EnvValue::Bool)
+        // Set, yet answering whichever default it is asked for: only an unparseable value does that.
+        .filter(|var| var.get_os().is_some() && var.bool_or(false).ok() != var.bool_or(true).ok())
+        .map(|var| {
+            format!(
+                "environment variable '{}' has an invalid value and is ignored",
+                var.name
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     //! Spec for the `--global` ⟂ explicit-project exclusivity guard.
@@ -1077,15 +1155,12 @@ mod tests {
     //! env-sourced gaps clap cannot see (`OCX_GLOBAL` via the arg default,
     //! or `OCX_PROJECT` which is not a clap arg). The `OCX_PROJECT` gap is
     //! exercised end-to-end by `test/tests/test_global_toolchain.py`
-    //! (`test_env_global_with_env_project_conflict`); it is not unit-tested
-    //! here because `ocx_util::env::var`'s test-override seam is inert when
-    //! `ocx_lib` is consumed as a (non-`cfg(test)`) dependency, and real
-    //! env mutation is `unsafe` on edition 2024. This test pins the
+    //! (`test_env_global_with_env_project_conflict`). This test pins the
     //! `--project`-flag path, whose `||` short-circuits before any env read
     //! and is therefore deterministic.
 
     use super::*;
-    use crate::exit::ClassifyExitCode;
+    use ocx_exit::ClassifyExitCode;
     use ocx_exit::ExitCode;
 
     /// One `[[trust.policy]]`, enough to make `build_auto_verify` return
@@ -1983,26 +2058,35 @@ mod tests {
     /// dials at init either way — every client is built lazily. One call per
     /// test: the log subscriber and the process-wide Sigstore root install
     /// are both first-wins, which nextest's one-process-per-test honours.
-    async fn context_over_home(home: &Path, online: bool) -> Context {
+    async fn context_over_home(env: &ocx_env::overrides::EnvLock, home: &Path, online: bool) -> Context {
+        let context = try_context_over_home(env, home, online)
+            .await
+            .expect("a context over the fixture home");
+        assert_eq!(
+            context.file_structure().root(),
+            home,
+            "the context must resolve the tempdir as its home, or this reads someone else's config"
+        );
+        context
+    }
+
+    async fn try_context_over_home(
+        env: &ocx_env::overrides::EnvLock,
+        home: &Path,
+        online: bool,
+    ) -> anyhow::Result<Context> {
         use clap::Parser as _;
 
         use crate::app::{Cli, ManagedConfigGate};
 
-        // SAFETY: `OCX_HOME` and the four config-shaping variables are read
-        // through `ocx_util::env::var`, whose `#[cfg(test)]` override seam is
-        // internal to `ocx_lib` and unavailable from this crate; the process
-        // environment is the only seam. nextest runs one test per process, so
-        // this cannot race a sibling.
-        unsafe {
-            std::env::set_var("OCX_HOME", home);
-            for key in [
-                "OCX_EXTRA_CA_CERTS",
-                "OCX_CONFIG",
-                "OCX_NO_CONFIG",
-                "OCX_MANAGED_CONFIG",
-            ] {
-                std::env::remove_var(key);
-            }
+        env.set(&ocx_env::OCX_HOME, home.to_str().expect("temp path is utf-8"));
+        for var in [
+            &ocx_env::OCX_EXTRA_CA_CERTS,
+            &ocx_env::OCX_CONFIG,
+            &ocx_env::OCX_NO_CONFIG,
+            &ocx_env::OCX_MANAGED_CONFIG,
+        ] {
+            env.remove(var);
         }
         let argv: &[&str] = if online {
             &["ocx", "index", "catalog"]
@@ -2010,7 +2094,7 @@ mod tests {
             &["ocx", "--offline", "index", "catalog"]
         };
         let cli = Cli::parse_from(argv);
-        let context = Context::try_init(
+        Context::try_init(
             &cli.context,
             ocx_console::ColorModeConfig {
                 stdout: false,
@@ -2023,13 +2107,44 @@ mod tests {
             },
         )
         .await
-        .expect("a context over the fixture home");
-        assert_eq!(
-            context.file_structure().root(),
-            home,
-            "the context must resolve the tempdir as its home, or this reads someone else's config"
-        );
-        context
+    }
+
+    /// An offline [`try_context_over_home`] and every warning it emitted, through whichever sink
+    /// `UserInterface::warn` took: the printer when stderr is a terminal, the log otherwise.
+    async fn init_capturing_warnings(
+        env: &ocx_env::overrides::EnvLock,
+        home: &Path,
+    ) -> (anyhow::Result<Context>, String) {
+        use tracing::instrument::WithSubscriber as _;
+
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer({
+                let sink = sink.clone();
+                move || sink.clone()
+            })
+            .finish();
+        ocx_console::capture::begin();
+        let result = try_context_over_home(env, home, false)
+            .with_subscriber(subscriber)
+            .await;
+        let (_, printed) = ocx_console::capture::end();
+        let mut output = sink.0.lock().unwrap().clone();
+        output.extend(printed);
+        (result, String::from_utf8_lossy(&output).into_owned())
     }
 
     /// A managed-config snapshot on disk at `source` carrying `payload`,
@@ -2077,7 +2192,8 @@ mod tests {
     #[tokio::test]
     async fn extra_ca_try_init_keeps_an_unpinned_managed_root_out_of_the_local_and_sigstore_views() {
         let home = home_with_unpinned_managed_root();
-        let context = context_over_home(home.path(), false).await;
+        let env = ocx_env::overrides::lock();
+        let context = context_over_home(&env, home.path(), false).await;
 
         assert_eq!(
             context.extra_roots_merged().len(),
@@ -2115,7 +2231,8 @@ mod tests {
         )
         .unwrap();
 
-        let context = context_over_home(home.path(), false).await;
+        let env = ocx_env::overrides::lock();
+        let context = context_over_home(&env, home.path(), false).await;
 
         assert_eq!(context.extra_roots_merged().len(), 1);
         assert_eq!(context.extra_roots_local().len(), 1);
@@ -2134,7 +2251,8 @@ mod tests {
     #[tokio::test]
     async fn extra_ca_try_init_builds_the_managed_client_from_the_local_view() {
         let home = home_with_unpinned_managed_root();
-        let context = context_over_home(home.path(), true).await;
+        let env = ocx_env::overrides::lock();
+        let context = context_over_home(&env, home.path(), true).await;
 
         let managed = context
             .manager()
@@ -2150,5 +2268,260 @@ mod tests {
             1,
             "positive control: the registry client beside it does carry the merged root"
         );
+    }
+
+    // ── retired spellings and hardening switches ─────────────────────────────
+
+    const SECRET: &str = "s3cr3t-value";
+
+    fn retired_table(entries: Vec<ocx_env::Retired>) -> &'static [ocx_env::Retired] {
+        Box::leak(entries.into_boxed_slice())
+    }
+
+    fn retired(
+        name: &'static str,
+        replacement: &'static ocx_env::EnvVar,
+        change: ocx_env::Change,
+        status: ocx_env::Status,
+    ) -> ocx_env::Retired {
+        ocx_env::Retired {
+            name,
+            replacement,
+            change,
+            status,
+        }
+    }
+
+    const WINDOW: ocx_env::Status = ocx_env::Status::Window {
+        removal: ocx_env::Release {
+            major: 9,
+            minor: 0,
+            patch: 0,
+        },
+    };
+
+    #[test]
+    fn a_retired_name_in_its_window_warns_once_naming_both_keys_and_is_honoured() {
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            "OCX_REGISTRY_DEFAULT",
+            &ocx_env::OCX_DEFAULT_REGISTRY,
+            ocx_env::Change::Rename,
+            WINDOW,
+        )]));
+        env.remove(&ocx_env::OCX_DEFAULT_REGISTRY);
+        env.set_raw("OCX_REGISTRY_DEFAULT", SECRET);
+
+        let notices = retired_env_notices().expect("an in-window spelling is honoured, not refused");
+        assert_eq!(notices.len(), 1, "exactly one warning: {notices:?}");
+        assert!(
+            notices[0].contains("OCX_REGISTRY_DEFAULT"),
+            "names the old key: {}",
+            notices[0]
+        );
+        assert!(
+            notices[0].contains("OCX_DEFAULT_REGISTRY"),
+            "names the new key: {}",
+            notices[0]
+        );
+        assert!(!notices[0].contains(SECRET), "never the value: {}", notices[0]);
+        assert_eq!(ocx_env::OCX_DEFAULT_REGISTRY.get().as_deref(), Some(SECRET));
+    }
+
+    #[test]
+    fn only_the_replacement_set_warns_nothing() {
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            "OCX_REGISTRY_DEFAULT",
+            &ocx_env::OCX_DEFAULT_REGISTRY,
+            ocx_env::Change::Rename,
+            WINDOW,
+        )]));
+        env.remove_raw("OCX_REGISTRY_DEFAULT");
+        env.set(&ocx_env::OCX_DEFAULT_REGISTRY, "ocx.sh");
+
+        assert_eq!(
+            retired_env_notices().expect("nothing retired is set"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_in_window_value_rename_warns_naming_the_key_and_maps_the_value() {
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            ocx_env::OCX_LAZY_MODE.name,
+            &ocx_env::OCX_LAZY_MODE,
+            ocx_env::Change::ValueRename {
+                old: "eager",
+                new: "always",
+            },
+            WINDOW,
+        )]));
+        env.set(&ocx_env::OCX_LAZY_MODE, "eager");
+
+        let notices = retired_env_notices().expect("an in-window value spelling is honoured");
+        assert_eq!(notices.len(), 1, "exactly one warning: {notices:?}");
+        assert!(notices[0].contains("OCX_LAZY_MODE"), "names the key: {}", notices[0]);
+        assert_eq!(ocx_env::OCX_LAZY_MODE.get().as_deref(), Some("always"));
+    }
+
+    #[test]
+    fn a_removed_name_exits_78_naming_the_replacement_and_never_the_value() {
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            "OCX_REGISTRY_DEFAULT",
+            &ocx_env::OCX_DEFAULT_REGISTRY,
+            ocx_env::Change::Rename,
+            ocx_env::Status::Removed,
+        )]));
+        env.remove(&ocx_env::OCX_DEFAULT_REGISTRY);
+        env.set_raw("OCX_REGISTRY_DEFAULT", SECRET);
+
+        let error = retired_env_notices().expect_err("a removed spelling is refused");
+        assert_eq!(crate::exit::classify_error(&error), ExitCode::ConfigError);
+        let message = error.to_string();
+        assert!(message.contains("OCX_REGISTRY_DEFAULT"), "names the old key: {message}");
+        assert!(
+            message.contains("OCX_DEFAULT_REGISTRY"),
+            "names the replacement: {message}"
+        );
+        assert!(!message.contains(SECRET), "never the value: {message}");
+        assert_eq!(
+            ocx_env::OCX_DEFAULT_REGISTRY.get(),
+            None,
+            "a removed name is not honoured"
+        );
+    }
+
+    #[test]
+    fn a_polarity_change_is_refused_even_inside_a_window() {
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            "OCX_VERIFY",
+            &ocx_env::OCX_NO_VERIFY,
+            ocx_env::Change::Polarity,
+            WINDOW,
+        )]));
+        env.remove(&ocx_env::OCX_NO_VERIFY);
+        env.set_raw("OCX_VERIFY", "0");
+
+        let error = retired_env_notices().expect_err("an inverted spelling is never honoured");
+        assert_eq!(crate::exit::classify_error(&error), ExitCode::ConfigError);
+        assert!(
+            error.to_string().contains("OCX_NO_VERIFY"),
+            "names the replacement: {error}"
+        );
+        assert_eq!(ocx_env::OCX_NO_VERIFY.get(), None);
+    }
+
+    // The four `try_init_*` cases below install the global subscriber, so each needs a process of its own.
+
+    #[tokio::test]
+    async fn try_init_refuses_a_removed_env_spelling_with_exit_78() {
+        let home = tempfile::tempdir().unwrap();
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            "OCX_REGISTRY_DEFAULT",
+            &ocx_env::OCX_DEFAULT_REGISTRY,
+            ocx_env::Change::Rename,
+            ocx_env::Status::Removed,
+        )]));
+        env.remove(&ocx_env::OCX_DEFAULT_REGISTRY);
+        env.set_raw("OCX_REGISTRY_DEFAULT", SECRET);
+
+        let (result, _) = init_capturing_warnings(&env, home.path()).await;
+        let error = result.err().expect("context init refuses a removed spelling");
+        assert_eq!(crate::exit::classify_error(error.as_ref()), ExitCode::ConfigError);
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("OCX_DEFAULT_REGISTRY"),
+            "names the replacement: {message}"
+        );
+        assert!(!message.contains(SECRET), "never the value: {message}");
+    }
+
+    #[tokio::test]
+    async fn try_init_warns_once_for_an_in_window_env_spelling() {
+        let home = tempfile::tempdir().unwrap();
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![retired(
+            "OCX_REGISTRY_DEFAULT",
+            &ocx_env::OCX_DEFAULT_REGISTRY,
+            ocx_env::Change::Rename,
+            WINDOW,
+        )]));
+        env.remove(&ocx_env::OCX_DEFAULT_REGISTRY);
+        env.set_raw("OCX_REGISTRY_DEFAULT", "registry.example.test");
+
+        let (result, output) = init_capturing_warnings(&env, home.path()).await;
+        result.expect("an in-window spelling is honoured");
+        let notice = "OCX_REGISTRY_DEFAULT is renamed to OCX_DEFAULT_REGISTRY";
+        assert_eq!(output.matches(notice).count(), 1, "exactly one notice: {output}");
+    }
+
+    #[tokio::test]
+    async fn try_init_warns_once_naming_an_invalid_boolean_and_never_its_value() {
+        let home = tempfile::tempdir().unwrap();
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_UPDATE_CHECK, "ture-s3cr3t");
+
+        let (result, output) = init_capturing_warnings(&env, home.path()).await;
+        result.expect("an invalid non-hardening boolean falls back to its default");
+        assert_eq!(
+            output.matches("OCX_NO_UPDATE_CHECK").count(),
+            1,
+            "exactly one warning naming the key: {output}"
+        );
+        assert!(!output.contains("ture-s3cr3t"), "never the value: {output}");
+    }
+
+    #[tokio::test]
+    async fn try_init_warns_nothing_for_a_valid_boolean() {
+        let home = tempfile::tempdir().unwrap();
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_UPDATE_CHECK, "yes");
+
+        let (result, output) = init_capturing_warnings(&env, home.path()).await;
+        result.expect("a valid boolean");
+        assert!(!output.contains("OCX_NO_UPDATE_CHECK"), "no warning: {output}");
+    }
+
+    #[test]
+    fn the_shipped_table_refuses_and_warns_nothing() {
+        let _env = ocx_env::overrides::lock();
+        assert_eq!(
+            retired_env_notices().expect("no retired spelling is set"),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Every `on_invalid = Error` switch, not a hand list: a new hardening switch is covered on declaration.
+    #[test]
+    fn an_invalid_hardening_value_exits_78_naming_the_key_and_never_the_value() {
+        let hardening: Vec<_> = ocx_env::all()
+            .filter(|var| var.on_invalid == ocx_env::OnInvalid::Error)
+            .collect();
+        assert!(
+            hardening.len() >= 4,
+            "the four hardening switches at minimum: {hardening:?}"
+        );
+        for var in hardening {
+            let env = ocx_env::overrides::lock();
+            env.set(var, SECRET);
+            let error = check_hardening_env().expect_err(var.name);
+            assert_eq!(
+                crate::exit::classify_error(&error),
+                ExitCode::ConfigError,
+                "{}",
+                var.name
+            );
+            let message = error.to_string();
+            assert!(message.contains(var.name), "names the key: {message}");
+            assert!(!message.contains(SECRET), "never the value: {message}");
+
+            env.set(var, "1");
+            assert_eq!(check_hardening_env(), Ok(()), "{} accepts a boolean", var.name);
+        }
     }
 }

@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use crate::error::UsageError;
 use anyhow::Context as _;
 use clap::Parser;
+use ocx_oci::RegistryHost;
 use ocx_oci::auth::login::{OciClientPing, RegistryPing, login};
 use ocx_oci::auth::store::{Credential, DockerCredentialStore, StoreOptions};
 use secrecy::SecretString;
@@ -59,11 +60,12 @@ impl Login {
             .registry
             .clone()
             .unwrap_or_else(|| context.default_registry().to_string());
+        let host = registry_host(&registry)?;
 
         // Before any prompt: the user must see which registry the credentials go to, above all when
         // the default applied.
         let ui = context.ui();
-        ui.status("Logging in", &registry);
+        ui.status("Logging in", host.as_str());
         ui.status_break();
 
         let username = match &self.username {
@@ -105,7 +107,7 @@ impl Login {
         };
 
         // Warned before the put, so it lands whichever route the store takes.
-        let needs_plaintext_warning = self.allow_insecure_store && !has_helper_configured(&registry).await;
+        let needs_plaintext_warning = self.allow_insecure_store && !has_helper_configured(host.as_str()).await;
         if needs_plaintext_warning {
             ui.warn("storing credentials as plaintext base64 in ~/.docker/config.json (no native helper)");
         }
@@ -128,15 +130,36 @@ impl Login {
         } else {
             &NoopPing
         };
-        login(&registry, &cred, &store, ping).await?;
+        // The stored key must be the reported host: a pull looks credentials up by host alone.
+        login(host.as_str(), &cred, &store, ping).await?;
 
-        // The registry is reported as typed, not canonicalized.
         ui.status_break();
         ui.success("Login succeeded");
-        let result = LoginResult { registry, username };
+        let result = LoginResult {
+            registry: host,
+            username,
+        };
         context.api().report(&result)?;
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// The registry a docker-style argument names, scheme and path dropped as `docker login` does
+/// (`https://ghcr.io/v1/` is `ghcr.io`).
+///
+/// # Errors
+///
+/// A usage error when what remains is no `host[:port]`; the input is not echoed, since it can
+/// carry `user:password@`.
+pub fn registry_host(input: &str) -> Result<RegistryHost, UsageError> {
+    let unschemed = input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"))
+        .unwrap_or(input);
+    let authority = unschemed.split('/').next().unwrap_or_default();
+    authority
+        .parse()
+        .map_err(|_| UsageError::new("invalid registry: expected `host[:port]`"))
 }
 
 /// The `--no-verify` ping: always `Ok`, so `login()` stores without a round-trip.
@@ -191,6 +214,27 @@ fn json_pointer_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn registry_host_drops_scheme_and_path() {
+        for (input, expected) in [
+            ("ghcr.io", "ghcr.io"),
+            ("localhost:5000", "localhost:5000"),
+            ("https://ghcr.io/v1/", "ghcr.io"),
+            ("http://registry.corp:5000/v2", "registry.corp:5000"),
+            ("docker.io", "docker.io"),
+        ] {
+            assert_eq!(registry_host(input).expect(input).as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn registry_host_refuses_without_echoing_credentials() {
+        for input in ["https://user:hunter2@ghcr.io", "user:hunter2@ghcr.io", "", "https://"] {
+            let error = registry_host(input).expect_err(input);
+            assert!(!error.to_string().contains("hunter2"), "{error}");
+        }
+    }
 
     #[test]
     fn login_clap_rejects_password_value_flag() {

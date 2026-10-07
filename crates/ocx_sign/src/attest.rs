@@ -33,22 +33,22 @@ pub const MAX_PREDICATE_FILE_BYTES: usize = 15 * 1024 * 1024;
 /// The one DSSE `payloadType` this version writes and accepts.
 pub(crate) const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 
-/// The in-toto Statement `_type` OCX writes.
-pub(crate) const STATEMENT_TYPE_WRITTEN: &str = "https://in-toto.io/Statement/v1";
+/// The in-toto Statement `_type` OCX writes: the first accepted one.
+pub(crate) const STATEMENT_TYPE_WRITTEN: &str = ACCEPTED_STATEMENT_TYPES[0];
 
-/// Statement `_type` values accepted on verify.
+/// Statement `_type` values accepted on verify; the first is the one written.
 ///
 /// Dropping v0.1 refuses every cosign v3 attestation, which still writes it.
 pub(crate) const ACCEPTED_STATEMENT_TYPES: &[&str] =
     &["https://in-toto.io/Statement/v1", "https://in-toto.io/Statement/v0.1"];
 
-/// `(kind, version)` pairs accepted from a bundle's `tlogEntries[].kindVersion`.
+/// `(kind, version)` pairs accepted from a bundle's `tlogEntries[].kindVersion`; the first is the one written.
 ///
 /// Never add `intoto:0.0.1`: its PayloadHash is relaxed.
 pub(crate) const ACCEPTED_TLOG_KINDS: &[(&str, &str)] = &[("dsse", "0.0.1")];
 
-/// The `(kind, version)` pair the sign side uploads.
-pub(crate) const TLOG_KIND_WRITTEN: (&str, &str) = ("dsse", "0.0.1");
+/// The `(kind, version)` pair the sign side uploads: the first accepted one.
+pub(crate) const TLOG_KIND_WRITTEN: (&str, &str) = ACCEPTED_TLOG_KINDS[0];
 
 /// The `predicateType` cosign v3 writes on an image-signature DSSE statement.
 ///

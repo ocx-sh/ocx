@@ -3,12 +3,12 @@
 Agent-specific guidance with no other home. `README.md` says what this crate
 owns; this file states only what a change here must not break.
 
-## No `ClassifyExitCode` impl belongs in this crate
+## Classification is declared here, three types stay unarmed
 
-C-054 states it and the code holds it. The exit-code taxonomy lives in
-`ocx_cli` (`exit/ocx_store.rs` carries this crate's whole family), and three
-error types here reach a user without a `downcast_arm!` rung of their own, each
-recorded with its reason in `UNARMED_AT_THE_BOUNDARY` in
+Each error type that reaches a user declares its own exit code and slug with
+`#[derive(ocx_exit::Classify)]` in this crate. The binary only lists the type in its
+`ocx_exit::families!` registry. Three error types here are deliberately *not* armed,
+each recorded with its reason in `UNARMED_AT_THE_BOUNDARY` in
 `crates/ocx_test_support/tests/workspace_structure.rs`:
 
 - `assemble::AssembleError`, `cas_path::DigestFileError` and
@@ -19,7 +19,7 @@ recorded with its reason in `UNARMED_AT_THE_BOUNDARY` in
   that reaches the CLI is the armed `ocx_package_manager::Error` and never the
   union.
 
-Arming any of them adds a *second, closer* classification for a value that
+Deriving `Classify` on any of them adds a *second, closer* classification for a value that
 already has one — which moves an exit code. That is a behaviour decision and an
 ADR question, not an arm added in passing.
 

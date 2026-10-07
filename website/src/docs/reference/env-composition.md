@@ -271,11 +271,11 @@ Merging means someone has to resolve a conflict when two contributions disagree 
 
 ### Row Shape {#integrations-row-shape}
 
-The composed JSON envelope carries `integrations` as a fourth top-level array, alongside `entries`, `binaries`, and `entrypoints` — never nested inside `entries`:
+The composed JSON envelope carries `integrations` as a fourth top-level array, alongside `items`, `binaries`, and `entrypoints` — never nested inside `items`:
 
 ```json
 {
-  "entries": [ … ],
+  "items": [ … ],
   "binaries": [ … ],
   "entrypoints": [ … ],
   "integrations": [
@@ -294,7 +294,7 @@ Two packages declaring `com.microsoft.vscode` therefore produce two rows with id
 
 ### Ordering {#integrations-ordering}
 
-Rows follow the same admitted-set walk order [Composition Order](#composition-order) below uses for `entries`: for each root, its admitted dependencies first in topological order, then the root itself; roots in the order the package set produced them. Within one package's own contribution, namespaces are ordered lexicographically. A dependency reached by two different roots (a diamond) contributes once, at its first-seen position — the same cross-root dedup `binaries` and `entrypoints` already apply.
+Rows follow the same admitted-set walk order [Composition Order](#composition-order) below uses for `items`: for each root, its admitted dependencies first in topological order, then the root itself; roots in the order the package set produced them. Within one package's own contribution, namespaces are ordered lexicographically. A dependency reached by two different roots (a diamond) contributes once, at its first-seen position — the same cross-root dedup `binaries` and `entrypoints` already apply.
 
 ### Interface Surface Only {#integrations-interface-surface}
 

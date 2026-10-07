@@ -54,14 +54,14 @@ pub fn root_path(package: &str) -> String {
 
 /// Claim one package.
 ///
-/// `forge` must be `Some` in every mode, `--out` included: it still reads the committed root and
+/// `forge` must be `Some` in every mode, `--output` included: it still reads the committed root and
 /// resolves owners. `publisher` serves the `__ocx.desc` observation, behind the SSRF pre-flight.
 ///
 /// # Errors
 ///
 /// A [`ClaimError`] for a missing forge, a malformed `--repository`, a committed root naming another
 /// package or repository, an owner-ladder refusal, a description-observation failure, a missing base
-/// ref, a race lost twice (`NonFastForward` under `api`, `StaleLease` under `git`), an `--out` write
+/// ref, a race lost twice (`NonFastForward` under `api`, `StaleLease` under `git`), an `--output` write
 /// failure, or any forge failure.
 pub async fn claim(
     request: ClaimRequest,
@@ -410,9 +410,9 @@ async fn read_base_sha(forge: &dyn Forge, index_repo: &RepoCoordinate) -> Result
         })
 }
 
-/// Write the claim's file set (the root and the description's payload blobs) under `--out`.
+/// Write the claim's file set (the root and the description's payload blobs) under `--output`.
 ///
-/// Announce's writer, or `claim --out dir && publish dir` ships a root naming a readme it never wrote.
+/// Announce's writer, or `claim --output dir && publish dir` ships a root naming a readme it never wrote.
 ///
 /// # Errors
 ///
@@ -841,22 +841,18 @@ pub(crate) mod tests {
 
     /// Pins the shared clock and blanks the owner ladder's CI environment.
     ///
-    /// **Not re-entrant** — `ocx_util::env::overrides::lock()` is a plain
+    /// **Not re-entrant** — `ocx_env::overrides::lock()` is a plain
     /// `std::sync::Mutex`, so a second live guard on the same thread deadlocks.
     /// One per test.
     struct ClockSeam {
-        _lock: ocx_util::env::overrides::EnvLock,
+        _lock: ocx_env::overrides::EnvLock,
     }
 
     impl ClockSeam {
         fn pinned() -> Self {
-            let lock = ocx_util::env::overrides::lock();
-            // SAFETY: `EnvLock` serialises every env-touching test against this
-            // write, and `Drop` clears it unconditionally. `EnvLock::set` cannot
-            // carry the pin: `ocx_index::current_timestamp` reads
-            // `std::env::var` directly, so the override map never reaches it.
-            unsafe { std::env::set_var("__OCX_TESTING_ANNOUNCE_CLOCK", PINNED_INSTANT) };
-            // All four, never the pair a test exercises: `ocx_util::env::var`
+            let lock = ocx_env::overrides::lock();
+            lock.set(&ocx_env::__OCX_TESTING_ANNOUNCE_CLOCK, PINNED_INSTANT);
+            // All four, never the pair a test exercises: the `ocx_env` override seam
             // falls through to `std::env` for a key with no override, and
             // GitHub Actions exports `GITHUB_ACTOR`/`GITHUB_ACTOR_ID` on the
             // runner this repository's gate uses.
@@ -864,16 +860,6 @@ pub(crate) mod tests {
                 lock.remove(key);
             }
             Self { _lock: lock }
-        }
-    }
-
-    impl Drop for ClockSeam {
-        fn drop(&mut self) {
-            // SAFETY: see `ClockSeam::pinned`. A struct's own `Drop` runs before
-            // its fields', so the pin is gone before the lock releases — without
-            // this the pin outlives the test and every later reader of the
-            // shared clock in this process sees a fixed instant.
-            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
         }
     }
 
@@ -1014,8 +1000,8 @@ pub(crate) mod tests {
     ///
     /// The row that replaced `package_already_claimed_is_refused_at_data_error`:
     /// its contract is reversed, so the old test is not weakened but wrong.
-    /// Driven over `Direct` and `--out` together, because C-050 held in every
-    /// mode and its replacement has to as well — an `--out` re-claim that still
+    /// Driven over `Direct` and `--output` together, because C-050 held in every
+    /// mode and its replacement has to as well — an `--output` re-claim that still
     /// refused would be invisible to a `Direct`-only row.
     ///
     /// Four assertions in one run, because each alone passes for a different
@@ -1068,9 +1054,9 @@ pub(crate) mod tests {
             let root: Value = match index {
                 0 => committed_root_value(&forge),
                 _ => serde_json::from_slice(
-                    &std::fs::read(output.path().join(ROOT_PATH)).expect("the --out root is readable"),
+                    &std::fs::read(output.path().join(ROOT_PATH)).expect("the --output root is readable"),
                 )
-                .expect("the --out root is JSON"),
+                .expect("the --output root is JSON"),
             };
             assert_eq!(
                 root["created"], COMMITTED_DATE,
@@ -1412,13 +1398,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// D-2 — an `--out` claim writes the description blobs too, so
-    /// `claim --out dir && publish dir` never ships a root naming a readme the
+    /// D-2 — an `--output` claim writes the description blobs too, so
+    /// `claim --output dir && publish dir` never ships a root naming a readme the
     /// directory does not hold.
     ///
-    /// Announce parity: the `--out` contract is "the whole entry, every run".
+    /// Announce parity: the `--output` contract is "the whole entry, every run".
     ///
-    /// Reds on: writing only the root under `--out`.
+    /// Reds on: writing only the root under `--output`.
     #[test]
     fn an_out_claim_writes_the_description_blobs() {
         let _clock = pinned_clock();
@@ -1432,7 +1418,7 @@ pub(crate) mod tests {
             Some(&forge),
             &stub_publisher(data),
         ))
-        .expect("the --out claim succeeds");
+        .expect("the --output claim succeeds");
 
         let readme_relative = format!("p/acme/widget/o/sha256/{readme_hex}.md");
         assert!(
@@ -1853,7 +1839,7 @@ pub(crate) mod tests {
         block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher())).expect("one retry converges");
         assert_eq!(forge.commit_calls(), 2, "one rejection, one retry, then success");
 
-        // One `_clock` for the whole test: `ocx_util::env::overrides::lock()` is a plain
+        // One `_clock` for the whole test: `ocx_env::overrides::lock()` is a plain
         // `std::sync::Mutex`, so taking a second guard here would deadlock.
         let twice = first_claim_forge();
         *twice
@@ -1898,7 +1884,7 @@ pub(crate) mod tests {
         assert_eq!(forge.commit_calls(), 2, "the commit is redone against the re-read base");
         assert_eq!(forge.pull_request_calls(), 2, "and the request is opened on the retry");
 
-        // One `_clock` for the whole test: `ocx_util::env::overrides::lock()` is a plain
+        // One `_clock` for the whole test: `ocx_env::overrides::lock()` is a plain
         // `std::sync::Mutex`, so taking a second guard here would deadlock.
         let twice = first_claim_forge();
         *twice
@@ -1970,7 +1956,7 @@ pub(crate) mod tests {
     /// here, and it is the one a second rendering breaks.
     ///
     /// Reds on: rendering the word a second time in the body renderer with one
-    /// spelling changed (`ci_environment` for `ci-environment`).
+    /// spelling changed (`ci-environment` for `ci_environment`).
     #[test]
     fn owner_identity_source_is_rendered_once_for_body_and_outcome() {
         let _clock = pinned_clock();
@@ -2056,23 +2042,23 @@ pub(crate) mod tests {
         }
     }
 
-    // ── `--out` ──────────────────────────────────────────────────────────────
+    // ── `--output` ──────────────────────────────────────────────────────────────
 
-    /// A `--out` run is **always** `updated`, and it never reads
+    /// A `--output` run is **always** `updated`, and it never reads
     /// `ensure_push_access`.
     ///
     /// Two divergences from announce in one run, both of which a builder copying
     /// announce gets wrong. Claim compares against the open claim **branch**
-    /// (a committed root would already have exited 65), and `--out` writes no
+    /// (a committed root would already have exited 65), and `--output` writes no
     /// branch — so there is nothing for it to be unchanged against. And S-011's
     /// `push-access: skipped` is satisfied by **not calling**
     /// `ensure_push_access`: on GitHub an unreadable `permissions` is exit 80,
     /// not a `skipped` row, so asking the forge for one would refuse the very
-    /// unauthenticated `--out` run S-011 describes.
+    /// unauthenticated `--output` run S-011 describes.
     ///
-    /// Reds on: copying announce's committed-root comparison into the `--out` arm
-    /// (a repeated `--out` run then reports `unchanged`), or calling
-    /// `ensure_push_access` under `--out`.
+    /// Reds on: copying announce's committed-root comparison into the `--output` arm
+    /// (a repeated `--output` run then reports `unchanged`), or calling
+    /// `ensure_push_access` under `--output`.
     #[test]
     fn out_target_is_always_updated_and_skips_the_push_probe() {
         use crate::forge::{CapabilityName, CheckStatus};
@@ -2087,15 +2073,15 @@ pub(crate) mod tests {
                 Some(&forge),
                 &publisher(),
             ))
-            .expect("the --out run succeeds");
+            .expect("the --output run succeeds");
 
             assert_eq!(
                 outcome.status,
                 ClaimStatus::Updated,
-                "run {run}: --out is always updated"
+                "run {run}: --output is always updated"
             );
             assert_eq!(outcome.written_paths, vec![ROOT_PATH.to_string()], "run {run}");
-            assert!(outcome.pull_request.is_none(), "run {run}: --out opens nothing");
+            assert!(outcome.pull_request.is_none(), "run {run}: --output opens nothing");
             assert!(
                 !forge.calls().iter().any(|call| matches!(call, Call::EnsurePushAccess)),
                 "run {run}: S-011 — the rows come from `skipped_all()`, never from asking the forge"
@@ -2112,7 +2098,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A `None` forge is refused — `--out` still reads the committed root.
+    /// A `None` forge is refused — `--output` still reads the committed root.
     #[test]
     fn a_forge_is_required_in_every_mode() {
         let output = tempfile::TempDir::new().expect("a temp dir is created");
@@ -2121,7 +2107,7 @@ pub(crate) mod tests {
             None,
             &publisher(),
         ))
-        .expect_err("even --out needs the forge for the C-050 read");
+        .expect_err("even --output needs the forge for the C-050 read");
         assert!(matches!(error, ClaimError::ForgeRequired), "{error:?}");
     }
 

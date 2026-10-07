@@ -3,7 +3,7 @@
 # Copyright 2026 The OCX Authors
 """Bazel BEP -> OTLP traces, so S-013 can be asked of a real build.
 
-    scripts/bep_to_otlp.py --bep bep.json --min-targets 78
+    scripts/bep_to_otlp.py --bep bep.json --min-targets 89
 
 Proofs: scripts/tests/test_bep_to_otlp.py
 
@@ -153,11 +153,11 @@ distinguishably from a clean build. Three floors, all loud:
 * every invocation must yield a `started.uuid` and at least one
   `TargetComplete`;
 * the invocations together must reach `--min-targets`, default
-  `CRATES_RULE_TARGETS` — **78** — imported from `bazel_gate_proofs` rather
-  than restated, so the number has one home. 78 is `bazel query 'kind("rust_.*
-  rule", //crates/...)'` on this tree today (20 `rust_library` + 35
-  `rust_test` + 3 `rust_binary`: `ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
-  `ocx_shim:ocx_shim` + 20 `rust_doc_test`).
+  `CRATES_RULE_TARGETS` — **91** — imported from `bazel_gate_proofs` rather
+  than restated, so the number has one home. 89 is `bazel query 'kind("rust_.*
+  rule", //crates/...)'` on this tree today (22 `rust_library` + 41
+  `rust_test` + 4 `rust_binary`: `ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
+  `ocx_sdkgen:ocx_sdkgen_bin`, `ocx_shim:ocx_shim` + 22 `rust_doc_test`).
 
 ## Exits
 
@@ -1773,12 +1773,12 @@ def prove_bep_not_persisted() -> int:
 def prove_counts() -> int:
     """The floor has one home, and this asserts it is still that tree's answer."""
     expect(
-        CRATES_RULE_TARGETS == 78,
-        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 78 today",
+        CRATES_RULE_TARGETS == 91,
+        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 91 today",
     )
     print(
-        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 78, imported from "
-        "bazel_gate_proofs (20 rust_library + 35 rust_test + 3 rust_binary + 20 "
+        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 91, imported from "
+        "bazel_gate_proofs (22 rust_library + 41 rust_test + 4 rust_binary + 22 "
         "rust_doc_test) — "
         "bazel_gate_proofs.prove_counts is what re-checks the number"
     )

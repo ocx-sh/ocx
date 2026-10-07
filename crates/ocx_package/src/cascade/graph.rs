@@ -20,6 +20,7 @@ use ocx_oci::{
     media_type::MEDIA_TYPE_OCI_IMAGE_INDEX, media_type::MEDIA_TYPE_OCI_IMAGE_MANIFEST,
     media_type::MEDIA_TYPE_PACKAGE_V1,
 };
+use ocx_util::wire_words;
 
 #[cfg(test)]
 mod tests;
@@ -148,26 +149,27 @@ pub struct ExpectedSlot {
     pub source: Version,
 }
 
-/// The verdict for one (alias, platform) slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum SlotStatus {
-    /// The alias carries exactly the expected entry.
-    Ok,
-    /// The alias should carry a platform it does not carry at all.
-    Missing,
-    /// The alias carries this platform, but not the expected content.
-    Stale,
-    /// The alias carries a platform nothing folds into it — a leftover from
-    /// an earlier cascade. Reported always; removed only when the entry it
-    /// points at no longer exists.
-    Orphan,
-    /// The alias carries more than one entry for this platform. Only the last
-    /// one resolves, so a shadowed entry is invisible to every consumer while
-    /// still being published — including when the surviving one is exactly what
-    /// the fold expects. One row per shadowed entry, beside the row for the
-    /// entry that wins.
-    Duplicate,
+wire_words! {
+    /// The verdict for one (alias, platform) slot.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
+    pub enum SlotStatus {
+        /// The alias carries exactly the expected entry.
+        Ok = "ok",
+        /// The alias should carry a platform it does not carry at all.
+        Missing = "missing",
+        /// The alias carries this platform, but not the expected content.
+        Stale = "stale",
+        /// The alias carries a platform nothing folds into it — a leftover from
+        /// an earlier cascade. Reported always; removed only when the entry it
+        /// points at no longer exists.
+        Orphan = "orphan",
+        /// The alias carries more than one entry for this platform. Only the last
+        /// one resolves, so a shadowed entry is invisible to every consumer while
+        /// still being published — including when the surviving one is exactly what
+        /// the fold expects. One row per shadowed entry, beside the row for the
+        /// entry that wins.
+        Duplicate = "duplicate",
+    }
 }
 
 /// One row of the diff: what one alias holds for one platform versus what the
@@ -178,28 +180,34 @@ pub enum SlotStatus {
 // Strings, not parsed digests: an index may legitimately name an algorithm this build lacks.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct SlotRow {
+    /// The alias tag this slot belongs to.
     pub tag: AliasTag,
-    /// OCI platform object: `{os, architecture, variant?}`.
-    // `oci_client::manifest::Platform` is registry-defined and cannot carry our
-    // derive; it is published as free-form JSON rather than mirrored here.
-    #[schemars(with = "serde_json::Value")]
+    /// The slot's platform.
+    // Kept native, not `ocx_oci::Platform`: a registry may carry a platform this build does not
+    // support, and both serialize as the same OCI object.
+    #[schemars(with = "ocx_oci::Platform")]
     pub platform: native::Platform,
+    /// The slot's verdict.
     pub status: SlotStatus,
-    /// The digest the alias carries for this platform, if any.
+    /// The digest the alias carries for this platform; absent when it carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observed: Option<String>,
-    /// The digest the fold expects, if any.
+    /// The digest the fold expects; absent when it expects none.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
     /// The version the expectation was folded from.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Version>,
     /// The version the observed digest belongs to, when the observed content
-    /// is recognisable as some published version's — `None` when the alias
+    /// is recognisable as some published version's — absent when the alias
     /// points at content no observed leaf carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_source: Option<Version>,
 }
 
 /// What the registry holds at an alias tag, taken as a whole.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case", tag = "state")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum AliasState {
     /// An image index — the shape every alias is supposed to have.
     Present,
@@ -207,7 +215,10 @@ pub enum AliasState {
     Absent,
     /// The tag exists but resolves to a bare image manifest, so it has no
     /// per-platform slots at all and every expected platform reads as missing.
-    NotAnIndex { digest: ocx_oci::Digest },
+    NotAnIndex {
+        /// The bare manifest the tag resolves to.
+        digest: ocx_oci::Digest,
+    },
 }
 
 /// A disagreement between the registry graph and the public index that
@@ -216,35 +227,55 @@ pub enum AliasState {
 /// Only ever produced for a logical identifier: a physical repository has no
 /// reverse mapping back to an index root, so the layer is skipped entirely.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case", tag = "finding")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum IndexFinding {
     /// The index committed a different digest than the alias points at today.
     /// Repair cannot fix this — announcing the tag can.
     Stale {
+        /// The alias tag.
         tag: AliasTag,
+        /// The digest the index committed.
         committed: ocx_oci::Digest,
+        /// The digest the alias points at today.
         live: ocx_oci::Digest,
     },
     /// The registry carries the alias and the index has never recorded it.
-    NotCommitted { tag: AliasTag },
+    NotCommitted {
+        /// The alias tag.
+        tag: AliasTag,
+    },
 }
 
 /// Something check found that no repair can fix without new content being
 /// published.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case", tag = "reason")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum Unrepairable {
     /// A planned entry points at a child manifest the registry no longer
     /// holds, so writing the alias would publish a dangling pointer.
-    ChildManifestMissing { tag: AliasTag, digest: String },
+    ChildManifestMissing {
+        /// The alias tag.
+        tag: AliasTag,
+        /// The missing child manifest.
+        digest: ocx_oci::Digest,
+    },
     /// A planned entry names a digest algorithm this build cannot address, so
     /// whether the child is still there could not be checked at all. Distinct
-    /// from `child-manifest-missing`: nothing was observed to be gone —
+    /// from `child_manifest_missing`: nothing was observed to be gone —
     /// the alias is refused because the check could not be made.
-    ChildDigestUnaddressable { tag: AliasTag, digest: String },
+    ChildDigestUnaddressable {
+        /// The alias tag.
+        tag: AliasTag,
+        /// The child digest exactly as the index writes it; no `Digest`, since this build cannot parse it.
+        #[serde(rename = "digest_text")]
+        digest: String,
+    },
     /// Repairing the alias would leave it with no entries at all. Refused:
     /// an empty index is worse than a stale one.
-    WouldEmptyIndex { tag: AliasTag },
+    WouldEmptyIndex {
+        /// The alias tag.
+        tag: AliasTag,
+    },
 }
 
 // Also the input `plan_repairs` works from.
@@ -253,8 +284,11 @@ pub enum Unrepairable {
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct CascadeReport {
     /// The physical repository the graph was read from.
+    // Same `registry/repository[:tag][@digest]` string a package reference writes.
+    #[schemars(with = "ocx_oci::PackageRef")]
     pub identifier: ocx_oci::OciIdentifier,
     /// The logical name the user asked for, when it differed.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub logical: Option<ocx_oci::PackageRef>,
     /// Per alias, what the registry holds as a whole.
     pub aliases: BTreeMap<AliasTag, AliasState>,
@@ -285,6 +319,7 @@ impl CascadeReport {
 /// and a partially-applied run leaves every untouched alias byte-identical.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct PlannedWrite {
+    /// The alias tag to write.
     pub tag: AliasTag,
     /// The complete index to PUT at `tag`.
     // `OciImageIndex` comes from `oci_client` and cannot carry our derive. The
@@ -292,8 +327,9 @@ pub struct PlannedWrite {
     // this schema publishes, so it is described as free-form JSON.
     #[schemars(with = "serde_json::Value")]
     pub index: ocx_oci::ImageIndex,
-    /// The digest the alias points at now — `None` when the alias does not
+    /// The digest the alias points at now — absent when the alias does not
     /// exist yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_digest: Option<ocx_oci::Digest>,
     /// Every child manifest digest `index` references, deduped. Apply
     /// preflights each one so a missing child refuses the alias instead of

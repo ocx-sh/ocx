@@ -211,7 +211,7 @@ impl EnvScope {
 /// publisher could ship `OCX_CONSENT_NAMESPACES = "*/*"` or a forged `__OCX_ENV_STATE`
 /// into the user's shell at the next prompt.
 fn reserved_key_dropped(entry: &Entry, warned: &mut HashSet<String>) -> bool {
-    if !ocx_util::env::is_reserved_ocx_key(&entry.key) {
+    if !ocx_env::is_reserved_ocx_key(&entry.key) {
         return false;
     }
     // Once per key, not per contributor: the reconciler recomposes on every prompt.

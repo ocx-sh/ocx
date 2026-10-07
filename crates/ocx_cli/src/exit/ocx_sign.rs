@@ -1,244 +1,68 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_sign` error family.
+//! Test-only: the contract tests of the `ocx_sign` family. Its types declare their own codes with `#[derive(Classify)]`.
 
-use ocx_exit::ExitCode;
-
-use ocx_sign::verify::TrustRootLoadReason;
+use ocx_exit::ClassifyErrorKind;
 
 use ocx_sign::sign::SignError;
 use ocx_sign::sign::SignErrorKind;
 use ocx_sign::verify::VerifyError;
 use ocx_sign::verify::VerifyErrorKind;
 
-use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for VerifyError {
-    fn classify(&self) -> Option<ExitCode> {
-        match &self.kind {
-            // `None`, not `Some(Failure)`, or a wrapped registry 401/503 exits 1 instead of 80/75/69.
-            VerifyErrorKind::Internal(_) => None,
-            kind => Some(kind.exit_code()),
-        }
-    }
-}
-
-impl ClassifyErrorKind for VerifyErrorKind {
-    fn exit_code(&self) -> ExitCode {
-        match self {
-            Self::NoSignaturesFound
-            | Self::NoUsableBundle
-            | Self::TargetNotFound { .. }
-            | Self::TargetNotAnIndex { .. }
-            | Self::AttestationNotFound => ExitCode::NotFound,
-            Self::IdentityMismatch | Self::IssuerMismatch | Self::UnsignedRejectedByPolicy => {
-                ExitCode::PermissionDenied
-            }
-            Self::CertChainInvalid
-            | Self::SignatureInvalid
-            | Self::SubjectDigestMismatch
-            | Self::BundleParseFailed
-            | Self::RekorSetInvalid
-            | Self::TransparencyBodyMismatch
-            | Self::RekorInclusionProofAbsent
-            | Self::CandidateLimitExhausted { .. }
-            | Self::PredicateTypeMismatch { .. }
-            | Self::StatementSubjectMismatch { .. }
-            | Self::StatementSubjectAbsent
-            | Self::StatementSubjectWeakAlgorithm { .. }
-            | Self::BuilderMismatch { .. }
-            | Self::StatementTypeUnsupported { .. }
-            | Self::PayloadTypeUnsupported { .. }
-            | Self::SimpleSigningClaimUnsupported { .. }
-            | Self::MultipleSignatures { .. }
-            | Self::MultipleAttestations { .. }
-            | Self::UnsupportedTlogEntryKind { .. }
-            | Self::TlogBindingMismatch
-            | Self::CertificateValidityWindow { .. }
-            | Self::SbomMediaTypeUnsupported { .. }
-            | Self::AttestationTooLarge { .. }
-            | Self::AttestationPayloadTooLarge { .. }
-            | Self::TooManyAttestations { .. }
-            | Self::AttestationBudgetExhausted { .. } => ExitCode::DataError,
-            Self::RekorSetAbsentTsaPresent | Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
-            Self::UnsupportedKeyBackend(_) => ExitCode::UnsupportedKeyBackend,
-            // The carve-outs down to `TrustRootUnreadable` must precede the flatten below, or they exit 78.
-            Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => ExitCode::UnsupportedKeyBackend,
-            Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyUnreadable { .. })
-            | Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyMalformed {
-                fault: ocx_trust::KeyFault::Path,
-                ..
-            }) => ExitCode::IoError,
-            Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyMalformed {
-                fault: ocx_trust::KeyFault::FileBytes,
-                ..
-            }) => ExitCode::DataError,
-            Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. }) => ExitCode::IoError,
-            Self::TrustRootUnavailable
-            | Self::TrustRootLoad(_)
-            | Self::TrustPolicyInvalid(_)
-            | Self::ForbiddenRegistryTarget { .. } => ExitCode::ConfigError,
-            Self::InvalidEndpointUrl { reason, .. } => reason.exit_code(),
-            Self::NoIdentityProvided | Self::KeyReferenceInvalid(_) => ExitCode::UsageError,
-            Self::Internal(_) => ExitCode::Failure,
-        }
-    }
-
-    fn kind_detail(&self) -> &'static str {
-        // Frozen: scripts dispatch on these slugs, so a rename is a breaking change.
-        match self {
-            Self::NoSignaturesFound => "no_signatures_found",
-            Self::TargetNotFound { .. } => "target_not_found",
-            Self::TargetNotAnIndex { .. } => "target_not_an_index",
-            Self::NoUsableBundle => "no_usable_bundle",
-            Self::CandidateLimitExhausted { .. } => "candidate_limit_exhausted",
-            Self::IdentityMismatch => "identity_mismatch",
-            Self::UnsignedRejectedByPolicy => "unsigned_rejected_by_policy",
-            Self::IssuerMismatch => "issuer_mismatch",
-            Self::CertChainInvalid => "cert_chain_invalid",
-            Self::SignatureInvalid => "signature_invalid",
-            Self::SubjectDigestMismatch => "subject_digest_mismatch",
-            Self::RekorSetInvalid => "rekor_set_invalid",
-            Self::TransparencyBodyMismatch => "transparency_body_mismatch",
-            Self::RekorInclusionProofAbsent => "rekor_inclusion_proof_absent",
-            Self::RekorSetAbsentTsaPresent => "rekor_set_absent_tsa_present",
-            Self::TransparencyLogUnavailable => "transparency_log_unavailable",
-            Self::BundleParseFailed => "bundle_parse_failed",
-            Self::ForbiddenRegistryTarget { .. } => "forbidden_registry_target",
-            Self::TrustRootUnavailable => "trust_root_unavailable",
-            Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. }) => "trust_root_unreadable",
-            Self::TrustRootLoad(_) => "trust_root_load",
-            Self::NoIdentityProvided => "no_identity_provided",
-            Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => "unsupported_key_backend",
-            Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyUnreadable { .. })
-            | Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyMalformed {
-                fault: ocx_trust::KeyFault::Path,
-                ..
-            }) => "key_unreadable",
-            Self::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyMalformed {
-                fault: ocx_trust::KeyFault::FileBytes,
-                ..
-            }) => "key_malformed",
-            Self::TrustPolicyInvalid(_) => "trust_policy_invalid",
-            Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
-            Self::AttestationNotFound => "attestation_not_found",
-            Self::PredicateTypeMismatch { .. } => "predicate_type_mismatch",
-            Self::StatementSubjectMismatch { .. } => "statement_subject_mismatch",
-            Self::StatementSubjectAbsent => "statement_subject_absent",
-            Self::StatementSubjectWeakAlgorithm { .. } => "statement_subject_weak_algorithm",
-            Self::BuilderMismatch { .. } => "builder_mismatch",
-            Self::StatementTypeUnsupported { .. } => "statement_type_unsupported",
-            Self::PayloadTypeUnsupported { .. } => "payload_type_unsupported",
-            Self::SimpleSigningClaimUnsupported { .. } => "simple_signing_claim_unsupported",
-            Self::MultipleSignatures { .. } => "multiple_signatures",
-            Self::MultipleAttestations { .. } => "multiple_attestations",
-            Self::UnsupportedTlogEntryKind { .. } => "unsupported_tlog_entry_kind",
-            Self::TlogBindingMismatch => "tlog_binding_mismatch",
-            Self::CertificateValidityWindow { .. } => "certificate_validity_window",
-            Self::SbomMediaTypeUnsupported { .. } => "sbom_media_type_unsupported",
-            Self::AttestationTooLarge { .. } => "attestation_too_large",
-            Self::AttestationPayloadTooLarge { .. } => "attestation_payload_too_large",
-            Self::TooManyAttestations { .. } => "too_many_attestations",
-            Self::AttestationBudgetExhausted { .. } => "attestation_budget_exhausted",
-            Self::UnsupportedKeyBackend(_) => "unsupported_key_backend",
-            Self::KeyReferenceInvalid(_) => "key_reference_invalid",
-            Self::Internal(_) => "internal",
-        }
-    }
-}
-
-impl ClassifyExitCode for SignError {
-    fn classify(&self) -> Option<ExitCode> {
-        match &self.kind {
-            // `None`, not `Some(Failure)`, or a wrapped registry 401/503 exits 1 instead of 80/75/69.
-            SignErrorKind::Internal(_) => None,
-            kind => Some(kind.exit_code()),
-        }
-    }
-}
-
-impl ClassifyErrorKind for SignErrorKind {
-    fn exit_code(&self) -> ExitCode {
-        match self {
-            Self::FulcioBadRequest => ExitCode::ConfigError,
-            Self::ForbiddenRegistryTarget { .. } => ExitCode::ConfigError,
-            Self::OidcTokenRejected => ExitCode::AuthError,
-            Self::FulcioUnavailable => ExitCode::TempFail,
-            Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
-            Self::RekorSetMalformed
-            | Self::PredicateNotJson
-            | Self::PredicateTooLarge { .. }
-            | Self::SubjectDigestUnsupported { .. } => ExitCode::DataError,
-            Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
-            Self::TargetNotFound { .. } | Self::TargetNotAnIndex { .. } => ExitCode::NotFound,
-            Self::UnsupportedKeyBackend(_) => ExitCode::UnsupportedKeyBackend,
-            Self::KeyBackend(error) => match error {
-                ocx_sign::sign::key_backend::KeyBackendError::Unavailable { .. } => ExitCode::TempFail,
-                ocx_sign::sign::key_backend::KeyBackendError::Io(_) => ExitCode::IoError,
-                ocx_sign::sign::key_backend::KeyBackendError::MalformedKey { .. } => ExitCode::DataError,
-                ocx_sign::sign::key_backend::KeyBackendError::Unsupported { .. } => ExitCode::UnsupportedKeyBackend,
-            },
-            Self::OidcPreCheckFailed { .. }
-            | Self::OfflineSignRefused
-            | Self::OfflineAttestRefused
-            | Self::IdentityTokenFilePermissive { .. } => ExitCode::PermissionDenied,
-            Self::InvalidEndpointUrl { reason, .. } => reason.exit_code(),
-            Self::ProvenanceVersionUnsupported { .. }
-            | Self::UnsignedTypeUnsupported { .. }
-            | Self::SidecarRequiresSignature { .. }
-            | Self::KeyReferenceInvalid(_)
-            | Self::RekorUploadRequiredForKeyless => ExitCode::UsageError,
-            Self::Internal(_) => ExitCode::Failure,
-        }
-    }
-
-    fn kind_detail(&self) -> &'static str {
-        // Frozen: scripts dispatch on these slugs, so a rename is a breaking change.
-        match self {
-            Self::FulcioBadRequest => "fulcio_bad_request",
-            Self::OidcTokenRejected => "oidc_token_rejected",
-            Self::FulcioUnavailable => "fulcio_unavailable",
-            Self::TransparencyLogUnavailable => "transparency_log_unavailable",
-            Self::RekorSetMalformed => "rekor_set_malformed",
-            Self::ReferrersUnsupported => "referrers_unsupported",
-            Self::TargetNotFound { .. } => "target_not_found",
-            Self::TargetNotAnIndex { .. } => "target_not_an_index",
-            Self::SubjectDigestUnsupported { .. } => "subject_digest_unsupported",
-            Self::OidcPreCheckFailed { .. } => "oidc_pre_check_failed",
-            Self::ForbiddenRegistryTarget { .. } => "forbidden_registry_target",
-            Self::OfflineSignRefused => "offline_sign_refused",
-            Self::IdentityTokenFilePermissive { .. } => "identity_token_file_permissive",
-            Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
-            Self::PredicateNotJson => "predicate_not_json",
-            Self::PredicateTooLarge { .. } => "predicate_too_large",
-            Self::ProvenanceVersionUnsupported { .. } => "provenance_version_unsupported",
-            Self::OfflineAttestRefused => "offline_attest_refused",
-            Self::UnsignedTypeUnsupported { .. } => "unsigned_type_unsupported",
-            Self::SidecarRequiresSignature { .. } => "sidecar_requires_signature",
-            Self::UnsupportedKeyBackend(_) => "unsupported_key_backend",
-            Self::KeyBackend(_) => "key_backend",
-            Self::KeyReferenceInvalid(_) => "key_reference_invalid",
-            Self::RekorUploadRequiredForKeyless => "rekor_upload_required_for_keyless",
-            Self::Internal(_) => "internal",
-        }
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, SignError);
-    downcast_arm!(cause, VerifyError);
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exit::detail_slug;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
     use ocx_oci::client::error::ClientError;
 
     use ocx_oci::package_ref::PackageRef;
+    use ocx_sign::verify::TrustRootLoadReason;
 
     use ocx_trust::key_ref::KeyRefError;
+
+    use ocx_sign::sign::key_backend::KeyBackendError;
+
+    /// The code a bare kind answers for itself, `Failure` where it defers to the chain walker.
+    ///
+    /// A bare kind is no rung of the ladder, so [`crate::exit::classify_error`] cannot answer for it.
+    trait KindExitCode {
+        fn exit_code(&self) -> ExitCode;
+    }
+
+    impl<T: ClassifyExitCode> KindExitCode for T {
+        fn exit_code(&self) -> ExitCode {
+            self.classify().unwrap_or(ExitCode::Failure)
+        }
+    }
+
+    /// Asserts a bare kind reports `slug`, and that the registry files `slug` under the code the kind answers with.
+    fn assert_kind_detail<K: ClassifyExitCode + ClassifyErrorKind + std::fmt::Debug>(kind: &K, slug: &str) {
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(kind)),
+            slug,
+            "{kind:?}"
+        );
+        let registry = crate::exit::detail_registry();
+        let row = registry
+            .iter()
+            .find(|row| row.slug == slug)
+            .unwrap_or_else(|| panic!("{kind:?} produces `{slug}`, which no DETAILS table lists"));
+        assert_eq!(
+            row.exit_code,
+            kind.exit_code(),
+            "{kind:?}: `{slug}` is registered under one exit code and exits with another"
+        );
+    }
+
+    /// A Sigstore endpoint rejection carrying the unresolvable-host verdict (exit 69).
+    fn unresolvable_endpoint() -> ocx_oci::endpoint::UrlRejection {
+        ocx_oci::endpoint::UrlRejection::from(ocx_oci::ssrf::SsrfError::Resolution {
+            host: "fulcio.invalid".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
+        })
+    }
 
     // ── moved from ocx_lib::oci::attest::pipeline with the impl ──
 
@@ -255,10 +79,18 @@ mod tests {
     }
 
     #[test]
-    fn transparency_log_unavailable_maps_to_transparency_log_unavailable() {
+    fn transparency_log_unavailable_maps_to_temp_fail() {
         assert_eq!(
             SignErrorKind::TransparencyLogUnavailable.exit_code(),
-            ExitCode::TransparencyLogUnavailable
+            ExitCode::TempFail
+        );
+    }
+
+    #[test]
+    fn transparency_log_unreachable_maps_to_unavailable() {
+        assert_eq!(
+            SignErrorKind::TransparencyLogUnreachable.exit_code(),
+            ExitCode::Unavailable
         );
     }
 
@@ -268,11 +100,8 @@ mod tests {
     }
 
     #[test]
-    fn referrers_unsupported_maps_to_referrers_unsupported() {
-        assert_eq!(
-            SignErrorKind::ReferrersUnsupported.exit_code(),
-            ExitCode::ReferrersUnsupported,
-        );
+    fn referrers_unsupported_maps_to_unsupported() {
+        assert_eq!(SignErrorKind::ReferrersUnsupported.exit_code(), ExitCode::Unsupported,);
     }
 
     #[test]
@@ -284,12 +113,9 @@ mod tests {
     }
 
     #[test]
-    fn offline_sign_refused_maps_to_permission_denied() {
-        // Policy rejection of the *action*, not a passive network access.
-        assert_eq!(
-            SignErrorKind::OfflineSignRefused.exit_code(),
-            ExitCode::PermissionDenied
-        );
+    fn offline_sign_refused_maps_to_policy_blocked() {
+        // A local policy refusal, like every other offline refusal (81): loosen the flag, do not retry.
+        assert_eq!(SignErrorKind::OfflineSignRefused.exit_code(), ExitCode::PolicyBlocked);
     }
 
     #[test]
@@ -342,6 +168,52 @@ mod tests {
         assert_eq!(kind.exit_code(), ExitCode::UsageError);
     }
 
+    /// Reds on: a sign or verify wrapper reporting another slug than the kind that decides its code.
+    #[test]
+    fn wrappers_report_their_kinds_details() {
+        use crate::exit::tests::assert_detail;
+
+        let identifier = || PackageRef::parse("registry.example/pkg:1.0").expect("a valid reference");
+        let sign = SignError {
+            identifier: identifier(),
+            kind: SignErrorKind::PredicateNotJson,
+        };
+        assert_detail(&sign, "predicate_not_json");
+        let verify = VerifyError {
+            identifier: identifier(),
+            kind: VerifyErrorKind::IdentityMismatch,
+        };
+        assert_detail(&verify, "identity_mismatch");
+    }
+
+    /// `Internal` names the cause that decides the exit code, and says `internal` only when nothing does.
+    #[test]
+    fn internal_reports_the_slug_of_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+
+        let identifier = || PackageRef::parse("registry.example/pkg:1.0").expect("a valid reference");
+        let registry_fault = || -> Box<dyn std::error::Error + Send + Sync> {
+            Box::new(ocx_oci::client::error::ClientError::Registry(Box::new(
+                std::io::Error::other("503"),
+            )))
+        };
+        let sign = SignError {
+            identifier: identifier(),
+            kind: SignErrorKind::Internal(registry_fault()),
+        };
+        assert_detail(&sign, "registry_unavailable");
+        let verify = VerifyError {
+            identifier: identifier(),
+            kind: VerifyErrorKind::Internal(registry_fault()),
+        };
+        assert_detail(&verify, "registry_unavailable");
+        let unknown = SignError {
+            identifier: identifier(),
+            kind: SignErrorKind::Internal("something no classifier knows".into()),
+        };
+        assert_detail(&unknown, "internal");
+    }
+
     #[test]
     fn internal_maps_to_failure() {
         // Unclassified errors fall through to Failure (generic).
@@ -381,8 +253,8 @@ mod tests {
     }
 
     #[test]
-    fn offline_attest_refused_maps_to_permission_denied() {
-        // 77, byte-identical to `OfflineSignRefused`: attesting is signing, and
+    fn offline_attest_refused_maps_to_policy_blocked() {
+        // 81, byte-identical to `OfflineSignRefused`: attesting is signing, and
         // a policy refusal must not classify differently depending on which
         // verb reached it. Asserted against its twin rather than against the
         // literal, so the two can never drift apart.
@@ -390,10 +262,7 @@ mod tests {
             SignErrorKind::OfflineAttestRefused.exit_code(),
             SignErrorKind::OfflineSignRefused.exit_code()
         );
-        assert_eq!(
-            SignErrorKind::OfflineAttestRefused.exit_code(),
-            ExitCode::PermissionDenied
-        );
+        assert_eq!(SignErrorKind::OfflineAttestRefused.exit_code(), ExitCode::PolicyBlocked);
     }
 
     #[test]
@@ -401,13 +270,17 @@ mod tests {
         // The other half of the `From` split, asserted next to it so the two
         // codes cannot quietly converge: an unrecognised scheme and an empty
         // reference are malformed invocations (64), not unimplemented
-        // backends (85).
+        // backends (82).
         use ocx_trust::key_ref::KeyRef;
 
         for value in ["vault://secret/cosign", "file:"] {
             let kind = SignErrorKind::from(KeyRef::parse(value).expect_err("not a usable key reference"));
             assert_eq!(kind.exit_code(), ExitCode::UsageError, "value: {value}");
-            assert_eq!(kind.kind_detail(), "key_reference_invalid", "value: {value}");
+            assert_eq!(
+                detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&kind)),
+                "key_reference_invalid",
+                "value: {value}"
+            );
         }
     }
 
@@ -420,7 +293,10 @@ mod tests {
         // the message it was built to replace.
         let kind = SignErrorKind::RekorUploadRequiredForKeyless;
         assert_eq!(kind.exit_code(), ExitCode::UsageError);
-        assert_eq!(kind.kind_detail(), "rekor_upload_required_for_keyless");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&kind)),
+            "rekor_upload_required_for_keyless"
+        );
 
         let msg = format!("{kind}");
         assert!(msg.contains("--key"), "must name the flag that makes it legal: {msg}");
@@ -448,6 +324,7 @@ mod tests {
             ("oidc_token_rejected", OidcTokenRejected),
             ("fulcio_unavailable", FulcioUnavailable),
             ("transparency_log_unavailable", TransparencyLogUnavailable),
+            ("transparency_log_unreachable", TransparencyLogUnreachable),
             ("rekor_set_malformed", RekorSetMalformed),
             ("referrers_unsupported", ReferrersUnsupported),
             (
@@ -490,6 +367,13 @@ mod tests {
                     reason: UrlRejection::new("URL must use HTTPS"),
                 },
             ),
+            (
+                "endpoint_unresolvable",
+                InvalidEndpointUrl {
+                    endpoint: "--fulcio-url".into(),
+                    reason: unresolvable_endpoint(),
+                },
+            ),
             ("predicate_not_json", PredicateNotJson),
             (
                 "predicate_too_large",
@@ -523,8 +407,20 @@ mod tests {
             ),
             ("key_reference_invalid", KeyReferenceInvalid(KeyRefError::Empty)),
             (
-                "key_backend",
-                KeyBackend(ocx_sign::sign::key_backend::KeyBackendError::Unavailable { reason: "test".into() }),
+                "key_backend_unavailable",
+                KeyBackend(KeyBackendError::Unavailable { reason: "test".into() }),
+            ),
+            (
+                "key_unreadable",
+                KeyBackend(KeyBackendError::Io(std::io::Error::other("test"))),
+            ),
+            (
+                "key_malformed",
+                KeyBackend(KeyBackendError::MalformedKey { reason: "test".into() }),
+            ),
+            (
+                "unsupported_key_backend",
+                KeyBackend(KeyBackendError::Unsupported { scheme: Scheme::AwsKms }),
             ),
             ("rekor_upload_required_for_keyless", RekorUploadRequiredForKeyless),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
@@ -539,12 +435,12 @@ mod tests {
         // against 12 arms. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            25,
+            30,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 
         for (expected, kind) in pairs {
-            assert_eq!(kind.kind_detail(), *expected, "kind_detail() drift for {kind:?}",);
+            assert_kind_detail(kind, expected);
         }
     }
 
@@ -623,7 +519,7 @@ mod tests {
     #[test]
     fn rekor_set_invalid_maps_to_data_error() {
         // RekorSetInvalid is a tampered-bundle / crypto failure — exit 65 (DataError),
-        // NOT exit 83 (TransparencyLogUnavailable). A `case $? in 83) retry` handler must not
+        // NOT exit 75 (TransparencyLogUnavailable). A `case $? in 75) retry` handler must not
         // retry a tampered SET.
         assert_eq!(VerifyErrorKind::RekorSetInvalid.exit_code(), ExitCode::DataError);
     }
@@ -639,17 +535,25 @@ mod tests {
     }
 
     #[test]
-    fn transparency_log_unavailable_family_maps_to_transparency_log_unavailable() {
-        // 83 = "Rekor service unreachable or TSA transition" — retry may help.
-        for kind in [
-            VerifyErrorKind::RekorSetAbsentTsaPresent,
-            VerifyErrorKind::TransparencyLogUnavailable,
+    fn verify_transparency_log_unavailable_maps_to_temp_fail() {
+        // 75 = the Rekor service did not answer right now: the one retryable log failure.
+        assert_eq!(
+            VerifyErrorKind::TransparencyLogUnavailable.exit_code(),
+            ExitCode::TempFail
+        );
+    }
+
+    #[test]
+    fn transparency_log_failures_that_a_retry_cannot_fix_do_not_exit_75() {
+        // Each cause exits by what the caller does next: 69 the log will not serve its key, 65 the answer is
+        // unusable or the bundle is a shape this build cannot read, 81 offline forbids the fetch.
+        for (kind, expected) in [
+            (VerifyErrorKind::TransparencyLogKeyUnavailable, ExitCode::Unavailable),
+            (VerifyErrorKind::TransparencyLogResponseInvalid, ExitCode::DataError),
+            (VerifyErrorKind::RekorSetAbsentTsaPresent, ExitCode::DataError),
+            (VerifyErrorKind::OfflineNoPinnedRekorKey, ExitCode::PolicyBlocked),
         ] {
-            assert_eq!(
-                kind.exit_code(),
-                ExitCode::TransparencyLogUnavailable,
-                "variant: {kind:?}"
-            );
+            assert_eq!(kind.exit_code(), expected, "variant: {kind:?}");
         }
     }
 
@@ -676,7 +580,7 @@ mod tests {
 
     /// `--key awskms://alias/release` and `key = "awskms://alias/release"` in a
     /// `[[trust.policy]]` signer are one refusal through two doors: both build
-    /// [`KeyRefError::UnsupportedBackend`]. The flag door has always answered 85
+    /// [`KeyRefError::UnsupportedBackend`]. The flag door answers 82
     /// `unsupported_key_backend`; the config door flattened onto 78
     /// `config_error`, telling a fleet script "your config is malformed" for a
     /// backend that is simply not built yet.
@@ -686,7 +590,7 @@ mod tests {
     /// still be 78 `trust_policy_invalid`, or the guard has reclassified the
     /// whole family instead of carving out one case.
     #[test]
-    fn an_unsupported_key_backend_named_in_a_trust_policy_maps_to_85_not_78() {
+    fn an_unsupported_key_backend_named_in_a_trust_policy_maps_to_82_not_78() {
         let kms = VerifyErrorKind::TrustPolicyInvalid(ocx_trust::TrustPolicyError::KeyReferenceInvalid {
             scope: "ghcr.io/acme/*".into(),
             source: KeyRefError::UnsupportedBackend {
@@ -695,10 +599,13 @@ mod tests {
         });
         assert_eq!(
             kms.exit_code(),
-            ExitCode::UnsupportedKeyBackend,
-            "the same 85 the `--key awskms://…` door already answers"
+            ExitCode::Unsupported,
+            "the same 82 the `--key awskms://…` door already answers"
         );
-        assert_eq!(kms.kind_detail(), "unsupported_key_backend");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&kms)),
+            "unsupported_key_backend"
+        );
 
         let unrelated = VerifyErrorKind::TrustPolicyInvalid(ocx_trust::TrustPolicyError::IssuerUnset {
             scope: "ghcr.io/acme/*".into(),
@@ -708,7 +615,10 @@ mod tests {
             ExitCode::ConfigError,
             "a trust-policy error that is not the backend verdict stays 78"
         );
-        assert_eq!(unrelated.kind_detail(), "trust_policy_invalid");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&unrelated)),
+            "trust_policy_invalid"
+        );
     }
 
     /// `--key /nope` is one refusal through two doors, exactly as the
@@ -745,23 +655,39 @@ mod tests {
             ExitCode::IoError,
             "the same 74 `ocx package sign --key /nope` already answers"
         );
-        assert_eq!(unreadable.kind_detail(), "key_unreadable");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&unreadable)),
+            "key_unreadable"
+        );
 
         // A directory, or a character device: the path named something that is
         // not a readable regular file, which is the same 74 `--config` already
         // promises for a path that "exists but cannot be read".
         assert_eq!(malformed(KeyFault::Path).exit_code(), ExitCode::IoError);
-        assert_eq!(malformed(KeyFault::Path).kind_detail(), "key_unreadable");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&malformed(KeyFault::Path))),
+            "key_unreadable"
+        );
 
         // A regular file read in full whose bytes are not a key — 65, what sign
         // answers for the same file.
         assert_eq!(malformed(KeyFault::FileBytes).exit_code(), ExitCode::DataError);
-        assert_eq!(malformed(KeyFault::FileBytes).kind_detail(), "key_malformed");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&malformed(
+                KeyFault::FileBytes
+            ))),
+            "key_malformed"
+        );
 
         // An inline `key_pem`: no path and no file, so the config text is the
         // thing that is wrong and 78 stays right.
         assert_eq!(malformed(KeyFault::ConfigText).exit_code(), ExitCode::ConfigError);
-        assert_eq!(malformed(KeyFault::ConfigText).kind_detail(), "trust_policy_invalid");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&malformed(
+                KeyFault::ConfigText
+            ))),
+            "trust_policy_invalid"
+        );
     }
 
     #[test]
@@ -804,7 +730,6 @@ mod tests {
             TrustRootLoadReason::NoCtLogKey,
             TrustRootLoadReason::NoCertificateBlocks,
             TrustRootLoadReason::AmbiguousTrustRootConfig,
-            TrustRootLoadReason::OfflineTrustMaterialUnavailable,
         ];
         for reason in reasons {
             let kind = VerifyErrorKind::TrustRootLoad(reason);
@@ -827,13 +752,19 @@ mod tests {
             Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"));
         let unreadable = VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { source: missing });
         assert_eq!(unreadable.exit_code(), ExitCode::IoError);
-        assert_eq!(unreadable.kind_detail(), "trust_root_unreadable");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&unreadable)),
+            "trust_root_unreadable"
+        );
 
         let tuf: Box<dyn std::error::Error + Send + Sync> =
             Box::new(std::io::Error::other("TUF trust-root fetch failed"));
         let not_a_file_read = VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed { source: tuf });
         assert_eq!(not_a_file_read.exit_code(), ExitCode::ConfigError);
-        assert_eq!(not_a_file_read.kind_detail(), "trust_root_load");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&not_a_file_read)),
+            "trust_root_load"
+        );
     }
 
     #[test]
@@ -858,8 +789,12 @@ mod tests {
         for value in ["awskms://alias/release", "vault://secret/cosign"] {
             let rejection = || KeyRef::parse(value).expect_err("not a usable key reference");
             assert_eq!(
-                VerifyErrorKind::from(rejection()).kind_detail(),
-                SignErrorKind::from(rejection()).kind_detail(),
+                detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&VerifyErrorKind::from(
+                    rejection()
+                ))),
+                detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&SignErrorKind::from(
+                    rejection()
+                ))),
                 "one failure must read as one word on both paths: {value}"
             );
         }
@@ -877,7 +812,7 @@ mod tests {
     fn the_signing_key_password_variable_is_spelled_once() {
         assert_eq!(
             ocx_sign::sign::key_backend::OCX_KEY_PASSWORD,
-            ocx_config::env::keys::OCX_KEY_PASSWORD,
+            ocx_env::OCX_KEY_PASSWORD.declaration().name,
             "the signing-side constant drifted from the env vocabulary it mirrors"
         );
         assert_eq!(ocx_sign::sign::key_backend::OCX_KEY_PASSWORD, "OCX_KEY_PASSWORD");
@@ -905,7 +840,10 @@ mod tests {
             "the refusal must be typed, not a bare toml::de::Error: {error:?}"
         );
         let kind = VerifyErrorKind::TrustPolicyInvalid(error);
-        assert_eq!(kind.kind_detail(), "trust_policy_invalid");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&kind)),
+            "trust_policy_invalid"
+        );
         assert_eq!(
             crate::exit::classify_library_error(&VerifyError::new(sign_id(), kind)),
             ExitCode::ConfigError,
@@ -970,7 +908,7 @@ mod tests {
     #[test]
     fn sign_error_classify_delegates_to_kind() {
         let err = SignError::new(id(), SignErrorKind::TransparencyLogUnavailable);
-        assert_eq!(err.classify(), Some(ExitCode::TransparencyLogUnavailable));
+        assert_eq!(err.classify(), Some(ExitCode::TempFail));
     }
 
     // ── moved from ocx_lib::oci::sign::pipeline with the impl ──
@@ -1152,32 +1090,34 @@ mod tests {
 
     // recovered from ocx_lib::oci::sign::error
     #[test]
-    fn key_ref_unsupported_scheme_exits_85_with_its_own_category() {
+    fn key_ref_unsupported_scheme_exits_82_unsupported() {
         // T-16 / C-014. Every link is the production one: the real parser
         // produces the error, the real `From` impl picks the variant, the real
-        // `classify()` yields the exit code, and the real `from_exit_code`
+        // `classify()` yields the exit code, and the real `ExitCode::category`
         // turns that into the envelope's `error.kind`. Nothing is simulated.
         //
         // Asserting the number alone would not discriminate. An arm rewritten
-        // to `ErrorCategory::Internal` still exits 85 while the envelope says
+        // to `ErrorCategory::Internal` still exits 82 while the envelope says
         // `"internal"` -- exactly the silent failure the wildcard-free
-        // `from_exit_code` exists to expose -- so the *serialized* category is
+        // `ExitCode::category` exists to expose -- so the *serialized* category is
         // asserted as well.
-        use ocx_exit::ErrorCategory;
         use ocx_trust::key_ref::KeyRef;
 
         let rejected = KeyRef::parse("awskms://alias/release").expect_err("awskms has no implementation");
         let error = SignError::new(id(), SignErrorKind::from(rejected));
 
         let exit = error.classify().expect("an unsupported backend classifies itself");
-        assert_eq!(exit, ExitCode::UnsupportedKeyBackend);
-        assert_eq!(exit as u8, 85, "the number is what `case $? in 85)` matches");
-        assert_eq!(error.kind.kind_detail(), "unsupported_key_backend");
+        assert_eq!(exit, ExitCode::Unsupported);
+        assert_eq!(exit as u8, 82, "the number is what `case $? in 82)` matches");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&error.kind)),
+            "unsupported_key_backend"
+        );
 
-        let category = ErrorCategory::from_exit_code(exit);
+        let category = exit.category();
         assert_eq!(
             serde_json::to_string(&category).expect("ErrorCategory serializes"),
-            "\"unsupported_key_backend\"",
+            "\"unsupported\"",
             "envelope error.kind must be the dedicated category, never \"internal\""
         );
 
@@ -1196,32 +1136,34 @@ mod tests {
 
     // recovered from ocx_lib::oci::verify::error
     #[test]
-    fn verify_key_ref_unsupported_scheme_exits_85_with_its_own_category() {
+    fn verify_key_ref_unsupported_scheme_exits_82_unsupported() {
         // T-16 / C-015, the verify twin. Verify parses `--key` on its own path,
-        // so it must reach 85 without borrowing the sign-side error -- which is
+        // so it must reach 82 without borrowing the sign-side error -- which is
         // exactly what this asserts, end to end through the production chain:
         // real parser, real `From` impl, real `classify()`, real
-        // `from_exit_code`.
+        // `ExitCode::category`.
         //
         // The serialized category is asserted, not just the number. An arm
-        // rewritten to `ErrorCategory::Internal` still exits 85 while the
+        // rewritten to `ErrorCategory::Internal` still exits 82 while the
         // envelope says `"internal"`, and a test that checked only the number
         // would pass through that.
-        use ocx_exit::ErrorCategory;
         use ocx_trust::key_ref::KeyRef;
 
         let rejected = KeyRef::parse("awskms://alias/release").expect_err("awskms has no implementation");
         let error = VerifyError::new(id(), VerifyErrorKind::from(rejected));
 
         let exit = error.classify().expect("an unsupported backend classifies itself");
-        assert_eq!(exit, ExitCode::UnsupportedKeyBackend);
-        assert_eq!(exit as u8, 85, "the number is what `case $? in 85)` matches");
-        assert_eq!(error.kind.kind_detail(), "unsupported_key_backend");
+        assert_eq!(exit, ExitCode::Unsupported);
+        assert_eq!(exit as u8, 82, "the number is what `case $? in 82)` matches");
+        assert_eq!(
+            detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&error.kind)),
+            "unsupported_key_backend"
+        );
 
-        let category = ErrorCategory::from_exit_code(exit);
+        let category = exit.category();
         assert_eq!(
             serde_json::to_string(&category).expect("ErrorCategory serializes"),
-            "\"unsupported_key_backend\"",
+            "\"unsupported\"",
             "envelope error.kind must be the dedicated category, never \"internal\""
         );
 
@@ -1279,6 +1221,9 @@ mod tests {
             ("rekor_inclusion_proof_absent", RekorInclusionProofAbsent),
             ("rekor_set_absent_tsa_present", RekorSetAbsentTsaPresent),
             ("transparency_log_unavailable", TransparencyLogUnavailable),
+            ("transparency_log_key_unavailable", TransparencyLogKeyUnavailable),
+            ("transparency_log_response_invalid", TransparencyLogResponseInvalid),
+            ("offline_mode", OfflineNoPinnedRekorKey),
             ("bundle_parse_failed", BundleParseFailed),
             (
                 "forbidden_registry_target",
@@ -1309,6 +1254,13 @@ mod tests {
                 InvalidEndpointUrl {
                     endpoint: "--rekor-url".into(),
                     reason: UrlRejection::new("URL must use HTTPS"),
+                },
+            ),
+            (
+                "endpoint_unresolvable",
+                InvalidEndpointUrl {
+                    endpoint: "--rekor-url".into(),
+                    reason: unresolvable_endpoint(),
                 },
             ),
             ("attestation_not_found", AttestationNotFound),
@@ -1425,12 +1377,12 @@ mod tests {
         // all. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            46,
+            50,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 
         for (expected, kind) in pairs {
-            assert_eq!(kind.kind_detail(), *expected, "kind_detail() drift for {kind:?}",);
+            assert_kind_detail(kind, expected);
         }
     }
 }

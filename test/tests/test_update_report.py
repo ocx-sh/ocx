@@ -188,7 +188,7 @@ def test_update_json_payload_is_identical_at_both_verbosities(
     plain_payload = json.loads(plain_run.stdout)
     verbose_payload = json.loads(verbose_run.stdout)
 
-    assert set(plain_payload) == {"changes", "unchanged", "metadata_changed"}, plain_payload
+    assert set(plain_payload) == {"schema_version", "changes", "unchanged", "metadata_changed"}, plain_payload
     assert plain_payload == verbose_payload, (
         "--verbose must not change the JSON payload"
     )
@@ -277,7 +277,7 @@ current = "{ocx.registry}/{repo}:1.0.0"
 # ---------------------------------------------------------------------------
 # Concrete versions behind an advisory tag (#479): ``changes[]`` gains
 # ``from_version`` / ``to_version`` and ``unchanged[]`` gains ``version``, found by
-# probing the repository's patch tags. A miss reports ``null``, never a new exit code.
+# probing the repository's patch tags. A miss omits the field, never a new exit code.
 # ---------------------------------------------------------------------------
 
 AMD64 = "linux/amd64"
@@ -317,7 +317,7 @@ def _check_report(
 
 
 def _by_platform(rows: list[dict]) -> dict[str, dict]:
-    by_platform = {row["platform"]: row for row in rows}
+    by_platform = {f"{row['platform']['os']}/{row['platform']['architecture']}": row for row in rows}
     assert len(by_platform) == len(rows), f"one row per platform expected: {rows}"
     return by_platform
 
@@ -342,14 +342,14 @@ def test_update_check_names_the_patch_versions_an_advisory_tag_moved_between(
     assert change["to_version"] == "3.28.4", change
 
 
-def test_update_check_versions_are_null_offline_and_the_exit_code_holds(
+def test_update_check_versions_are_absent_offline_and_the_exit_code_holds(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Offline there is no registry to probe, so the version fields are
-    ``null`` while the same move still exits 65.
+    absent while the same move still exits 65.
 
     The online run on the same fixture is the control: without it a lookup
-    that never resolves anything would pass the ``null`` assertions.
+    that never resolves anything would pass the absence assertions.
     """
     repo = f"t_{uuid4().hex[:8]}_rep_cmake"
     make_package(ocx, repo, "3.28.3", tmp_path / "v3", cascade=True)
@@ -368,14 +368,14 @@ def test_update_check_versions_are_null_offline_and_the_exit_code_holds(
     )
     assert len(offline_payload["changes"]) == 1, offline_payload
     change = offline_payload["changes"][0]
-    assert "from_version" in change and change["from_version"] is None, change
-    assert "to_version" in change and change["to_version"] is None, change
+    assert "from_version" not in change, change
+    assert "to_version" not in change, change
 
 
 def test_update_check_digest_pinned_binding_reports_no_version(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """A digest pin names no advisory tag, so its ``version`` is ``null`` even
+    """A digest pin names no advisory tag, so its ``version`` is absent even
     though its digest equals the leaf of a real release — the sibling binding
     that does move still gets its versions and sets the exit code."""
     from src.registry import fetch_manifest_digest
@@ -406,8 +406,8 @@ pinned = "{ocx.registry}/{repo}@{pinned_digest}"
     assert moved["mover"]["from_version"] == "3.28.3", moved
     assert moved["mover"]["to_version"] == "3.28.4", moved
     assert set(held) == {"pinned"}, payload
-    assert held["pinned"]["tag"] is None, held
-    assert "version" in held["pinned"] and held["pinned"]["version"] is None, held
+    assert "tag" not in held["pinned"], held
+    assert "version" not in held["pinned"], held
 
 
 def test_update_check_variant_track_reports_variant_versions(

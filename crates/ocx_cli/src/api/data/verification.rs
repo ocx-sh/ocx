@@ -33,36 +33,31 @@ pub struct SignatureEntry {
     /// key — a legal shape, not malformed input. Registry-served, so it is
     /// untrusted input.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer embedded in the Fulcio cert. Absent under a key.
     /// Registry-served, so it is untrusted input.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
-    /// Rekor `integratedTime`, ISO-8601 UTC.
+    /// Rekor `integratedTime`.
     ///
     /// Certificate validity is judged against this instant, never against
     /// wall-clock now: a Fulcio certificate is valid for about ten minutes, and
     /// this timestamp is the only proof the signature happened inside that
     /// window. Absent when no transparency record exists (key mode without a
-    /// Rekor upload), which is legal and must be visible rather than inferred.
+    /// Rekor upload) or its time is unrepresentable; both must be visible
+    /// rather than inferred.
     // A wall-clock check fails every captured keyless fixture: its certificate has expired.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub signed_at: Option<String>,
+    pub signed_at: Option<ocx_util::time::Timestamp>,
     /// Rekor log index, the dedup key when present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub rekor_log_index: Option<u64>,
 }
 
 /// Summary of a successful Sigstore verification.
 ///
-/// JSON: `{ subject_digest, referrer_digest, certificate_identity,
-/// certificate_oidc_issuer, signed_at }`, plus `signatures` once a discovery
-/// pipeline populates it. Digests are always full in JSON; plain output
-/// shortens `referrer_digest` to 12 hex.
+/// The flat fields describe the passing signature, `signatures[0]`. Digests
+/// are always full in JSON; plain output shortens `referrer_digest` to 12 hex.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct VerificationReport {
     /// Digest of the subject manifest whose signature was verified.
@@ -77,38 +72,35 @@ pub struct VerificationReport {
     /// digest. Addressable as `GET /v2/<name>/manifests/<digest>` only under
     /// `signature_format == "bundle"`.
     pub referrer_digest: ocx_oci::Digest,
-    /// Certificate SAN (identity) embedded in the Fulcio cert.
-    pub certificate_identity: String,
-    /// Certificate OIDC issuer embedded in the Fulcio cert.
-    pub certificate_oidc_issuer: String,
-    /// Rekor integrated time (ISO-8601 UTC) of the signature entry.
-    pub signed_at: String,
-    /// Every signature discovered for the subject.
-    ///
-    /// **Absent** while empty, never `[]`: absence does not mean discovery
-    /// looked and found none.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    /// Certificate SAN (identity) embedded in the Fulcio cert. Absent under a key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_identity: Option<String>,
+    /// Certificate OIDC issuer embedded in the Fulcio cert. Absent under a key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_oidc_issuer: Option<String>,
+    /// Rekor integrated time of the signature entry. Absent when no
+    /// transparency record exists (a key without a Rekor upload) or its time
+    /// is unrepresentable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_at: Option<ocx_util::time::Timestamp>,
+    /// Every verified signature discovered for the subject, the passing one
+    /// first; never empty, since a verification that passed has at least one.
     pub signatures: Vec<SignatureEntry>,
 }
 
 impl VerificationReport {
-    /// Construct a verification report with `signatures` empty (omitted from JSON).
-    pub fn new(
-        subject_digest: ocx_oci::Digest,
-        referrer_digest: ocx_oci::Digest,
-        certificate_identity: String,
-        certificate_oidc_issuer: String,
-        signed_at: String,
-    ) -> Self {
-        Self {
+    /// Report the `passing` signature, first in `signatures` and repeated by the flat fields, then `others`.
+    pub fn new(subject_digest: ocx_oci::Digest, passing: SignatureEntry, others: Vec<SignatureEntry>) -> Self {
+        let mut report = Self {
             subject_digest,
-            referrer_digest,
-            certificate_identity,
-            certificate_oidc_issuer,
-            signed_at,
-            signatures: Vec::new(),
-        }
+            referrer_digest: passing.referrer_digest.clone(),
+            certificate_identity: passing.certificate_identity.clone(),
+            certificate_oidc_issuer: passing.certificate_oidc_issuer.clone(),
+            signed_at: passing.signed_at,
+            signatures: vec![passing],
+        };
+        report.signatures.extend(others);
+        report
     }
 }
 
@@ -129,18 +121,24 @@ impl VerificationReport {
             ),
             (
                 "Certificate identity",
-                sanitize_for_terminal(&self.certificate_identity),
+                sanitize_for_terminal(self.certificate_identity.as_deref().unwrap_or_default()),
             ),
             (
                 "Certificate OIDC issuer",
-                sanitize_for_terminal(&self.certificate_oidc_issuer),
+                sanitize_for_terminal(self.certificate_oidc_issuer.as_deref().unwrap_or_default()),
             ),
-            ("Signed at", sanitize_for_terminal(&self.signed_at)),
+            (
+                "Signed at",
+                sanitize_for_terminal(&self.signed_at.map(|at| at.to_string()).unwrap_or_default()),
+            ),
         ]
     }
 }
 
 impl Printable for VerificationReport {
+    const SCHEMA_VERSION: u32 = 2;
+    const ROOT: &'static str = "VerificationReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
         for (label, value) in self.plain_fields() {
@@ -149,16 +147,6 @@ impl Printable for VerificationReport {
         }
         data.print_table(&["Field".into(), "Value".into()], &rows);
     }
-
-    /// Emit the success envelope (`exit_code` 0).
-    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        let json = crate::error_envelope::render_success_envelope("package verify", self)?;
-        let parsed: serde_json::Value = serde_json::from_str(&json)?;
-        Ok(data.print_json(&parsed)?)
-    }
 }
 
 #[cfg(test)]
@@ -166,36 +154,8 @@ mod tests {
     use super::*;
     use crate::api::data::is_bidi_control;
 
-    fn sample_report() -> VerificationReport {
-        VerificationReport::new(
-            ocx_oci::Digest::Sha256("a".repeat(64)),
-            ocx_oci::Digest::Sha256("b".repeat(64)),
-            "test-signer@example.com".into(),
-            "https://fake-oidc.test".into(),
-            "2026-04-19T12:00:00Z".into(),
-        )
-    }
-
-    #[test]
-    fn json_output_matches_acceptance_contract() {
-        // Flat shape pinned by test/tests/test_verify.py::test_verify_success_envelope_golden_shape.
-        let report = sample_report();
-        let json = crate::error_envelope::render_success_envelope("package verify", &report).expect("render ok");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(parsed["schema_version"], 1);
-        assert_eq!(parsed["command"], "package verify");
-        assert_eq!(parsed["exit_code"], 0);
-        let data = &parsed["data"];
-        // JSON keeps every digest full, unlike plain mode — a shortened 12-hex
-        // form also satisfies `starts_with("sha256:")`, so exact equality is
-        // required to pin that JSON never shortens (see
-        // `print_plain_shortens_referrer_digest_but_not_subject` for the
-        // plain-mode counterpart).
-        assert_eq!(data["subject_digest"], format!("sha256:{}", "a".repeat(64)));
-        assert_eq!(data["referrer_digest"], format!("sha256:{}", "b".repeat(64)));
-        assert_eq!(data["certificate_identity"], "test-signer@example.com");
-        assert_eq!(data["certificate_oidc_issuer"], "https://fake-oidc.test");
-        assert!(parsed.get("error").is_none(), "success branch must not carry error");
+    fn at(instant: &str) -> ocx_util::time::Timestamp {
+        serde_json::from_value(serde_json::Value::from(instant)).expect("an RFC 3339 instant")
     }
 
     fn sample_signature() -> SignatureEntry {
@@ -206,36 +166,80 @@ mod tests {
             referrer_digest: ocx_oci::Digest::Sha256("b".repeat(64)),
             certificate_identity: Some("test-signer@example.com".into()),
             certificate_oidc_issuer: Some("https://fake-oidc.test".into()),
-            signed_at: Some("2026-04-19T12:00:00Z".into()),
+            signed_at: Some(at("2026-04-19T12:00:00Z")),
             rekor_log_index: Some(42),
         }
     }
 
-    /// T-19. `signatures` is **absent** from the serialized object while empty
-    /// — not `null`, not `[]`.
-    ///
-    /// The positive half is what makes the negative one evidence: a report that
-    /// carries a row must emit the key, or this test would also pass on a
-    /// `signatures` field that had been deleted outright, or on one whose
-    /// `skip_serializing_if` predicate always answered "skip".
-    #[test]
-    fn verification_report_json_omits_signatures_while_empty() {
-        let empty = sample_report();
-        let value = serde_json::to_value(&empty).expect("serialize");
-        let object = value.as_object().expect("report serializes as an object");
-        assert!(
-            !object.contains_key("signatures"),
-            "an empty `signatures` must be absent, not `[]` or `null`: {value}"
-        );
+    fn sample_report() -> VerificationReport {
+        VerificationReport::new(ocx_oci::Digest::Sha256("a".repeat(64)), sample_signature(), Vec::new())
+    }
 
-        let mut populated = sample_report();
-        populated.signatures.push(sample_signature());
-        let value = serde_json::to_value(&populated).expect("serialize");
-        let signatures = value
-            .get("signatures")
-            .and_then(|v| v.as_array())
-            .expect("a populated `signatures` must be present");
-        assert_eq!(signatures.len(), 1);
+    #[test]
+    fn json_output_is_the_unwrapped_report() {
+        let document = serde_json::to_value(sample_report()).expect("serialize");
+        for envelope_key in ["schema_version", "command", "exit_code", "data", "error"] {
+            assert!(
+                document.get(envelope_key).is_none(),
+                "{envelope_key} leaked: {document}"
+            );
+        }
+        // JSON keeps every digest full, unlike plain mode — a shortened 12-hex
+        // form also satisfies `starts_with("sha256:")`, so exact equality is
+        // required to pin that JSON never shortens (see
+        // `print_plain_shortens_referrer_digest_but_not_subject` for the
+        // plain-mode counterpart).
+        assert_eq!(document["subject_digest"], format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(document["referrer_digest"], format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(document["certificate_identity"], "test-signer@example.com");
+        assert_eq!(document["certificate_oidc_issuer"], "https://fake-oidc.test");
+        assert_eq!(document["signed_at"], "2026-04-19T12:00:00Z");
+    }
+
+    /// `signatures` is always present and leads with the passing signature
+    /// the flat fields repeat; a verification that passed has at least one.
+    #[test]
+    fn signatures_is_always_present_and_leads_with_the_passing_one() {
+        let other = SignatureEntry {
+            referrer_digest: ocx_oci::Digest::Sha256("d".repeat(64)),
+            ..sample_signature()
+        };
+        let document = serde_json::to_value(VerificationReport::new(
+            ocx_oci::Digest::Sha256("a".repeat(64)),
+            sample_signature(),
+            vec![other],
+        ))
+        .expect("serialize");
+        let signatures = document["signatures"].as_array().expect("signatures is an array");
+        assert_eq!(signatures.len(), 2);
+        assert_eq!(signatures[0]["referrer_digest"], document["referrer_digest"]);
+        assert_ne!(signatures[1]["referrer_digest"], document["referrer_digest"]);
+
+        let single = serde_json::to_value(sample_report()).expect("serialize");
+        assert_eq!(single["signatures"].as_array().map(Vec::len), Some(1), "{single}");
+    }
+
+    /// Under a key without a Rekor upload the flat certificate and time fields
+    /// are absent, not empty strings.
+    #[test]
+    fn a_key_mode_verification_omits_the_certificate_and_time() {
+        let key_mode = SignatureEntry {
+            key_backend: KeyBackendKind::File,
+            certificate_identity: None,
+            certificate_oidc_issuer: None,
+            signed_at: None,
+            rekor_log_index: None,
+            ..sample_signature()
+        };
+        let document = serde_json::to_value(VerificationReport::new(
+            ocx_oci::Digest::Sha256("a".repeat(64)),
+            key_mode,
+            Vec::new(),
+        ))
+        .expect("serialize");
+        for absent in ["certificate_identity", "certificate_oidc_issuer", "signed_at"] {
+            assert!(document.get(absent).is_none(), "{absent} must be absent: {document}");
+        }
     }
 
     /// The per-signature row spells its three vocabularies with the library's
@@ -306,8 +310,8 @@ mod tests {
             "the plain table must be identical whether or not signatures[] carries rows",
         );
         // And the hostile row really is in the report — otherwise the equality
-        // above would be comparing two empty arrays and proving nothing.
-        assert_eq!(populated.signatures.len(), 2);
+        // above would be comparing two identical arrays and proving nothing.
+        assert_eq!(populated.signatures.len(), 3);
     }
 
     /// `print_plain` shortens `referrer_digest` to 12 hex (only `subject_digest`
@@ -366,16 +370,15 @@ mod tests {
     // at the first failure and report one opaque name, which is the property
     // TEST-04 protects.
 
-    /// A report whose every free-text field carries `hostile`, rendered to the
+    /// A report whose certificate fields carry `hostile`, rendered to the
     /// exact `(label, value)` pairs `print_plain` writes.
     fn rendered_with(hostile: &str) -> Vec<String> {
-        let report = VerificationReport::new(
-            ocx_oci::Digest::Sha256("a".repeat(64)),
-            ocx_oci::Digest::Sha256("b".repeat(64)),
-            hostile.to_string(),
-            hostile.to_string(),
-            hostile.to_string(),
-        );
+        let passing = SignatureEntry {
+            certificate_identity: Some(hostile.to_string()),
+            certificate_oidc_issuer: Some(hostile.to_string()),
+            ..sample_signature()
+        };
+        let report = VerificationReport::new(ocx_oci::Digest::Sha256("a".repeat(64)), passing, Vec::new());
         report.plain_fields().into_iter().map(|(_, value)| value).collect()
     }
 
@@ -497,17 +500,15 @@ mod tests {
         // and `serde_json` escapes the C0 range by specification so the raw
         // ESC never reaches a terminal through this path either.
         let hostile = "\u{1b}]52;c;ZXZpbA==\u{7}signer@example.com";
-        let report = VerificationReport::new(
-            ocx_oci::Digest::Sha256("a".repeat(64)),
-            ocx_oci::Digest::Sha256("b".repeat(64)),
-            hostile.to_string(),
-            "https://fake-oidc.test".into(),
-            "2026-04-19T12:00:00Z".into(),
-        );
-        let json = crate::error_envelope::render_success_envelope("package verify", &report).expect("render ok");
+        let passing = SignatureEntry {
+            certificate_identity: Some(hostile.to_string()),
+            ..sample_signature()
+        };
+        let report = VerificationReport::new(ocx_oci::Digest::Sha256("a".repeat(64)), passing, Vec::new());
+        let json = serde_json::to_string(&report).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(
-            parsed["data"]["certificate_identity"], hostile,
+            parsed["certificate_identity"], hostile,
             "JSON must carry the identity verbatim, not the display form"
         );
         assert!(

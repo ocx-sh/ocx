@@ -855,7 +855,7 @@ mod tests {
         let desired = vec![
             path_entry("2FOO", "/opt/bin"),
             path_entry("A-B", "/opt/bin"),
-            path_entry("PATH", &format!("/a{}/b", ocx_util::env::PATH_SEPARATOR)),
+            path_entry("PATH", &format!("/a{}/b", ocx_util::path::PATH_SEPARATOR)),
             path_entry("LD_LIBRARY_PATH", ""),
             entry("GOFLAGS", "", ModifierKind::List, Some(" ")),
             entry("CFLAGS", "-O2\n-g", ModifierKind::List, Some(" ")),
@@ -1133,8 +1133,9 @@ mod tests {
     /// arm — retaining `$_` byte for byte — would actually do.
     #[test]
     fn c015_rule0_the_settle_compare_is_a019s_not_byte_exact() {
-        let folded = std::ffi::OsString::from(["/ocx/a/bin", "/program files/x"].join(ocx_util::env::PATH_SEPARATOR));
-        let live = std::ffi::OsString::from(["/ocx/a/bin", "\"/program files/x\""].join(ocx_util::env::PATH_SEPARATOR));
+        let folded = std::ffi::OsString::from(["/ocx/a/bin", "/program files/x"].join(ocx_util::path::PATH_SEPARATOR));
+        let live =
+            std::ffi::OsString::from(["/ocx/a/bin", "\"/program files/x\""].join(ocx_util::path::PATH_SEPARATOR));
         assert_ne!(folded, live, "the two spellings are not byte-equal");
         assert!(
             value_settled(Some(&folded), Some(&live), &ModifierKind::Path),
@@ -1143,7 +1144,7 @@ mod tests {
 
         // The red half: a segment that genuinely moved is never settled, and a
         // list value keeps the byte-exact rule its opaque elements require (E5).
-        let moved = std::ffi::OsString::from(["/program files/x", "/ocx/a/bin"].join(ocx_util::env::PATH_SEPARATOR));
+        let moved = std::ffi::OsString::from(["/program files/x", "/ocx/a/bin"].join(ocx_util::path::PATH_SEPARATOR));
         assert!(!value_settled(Some(&moved), Some(&live), &ModifierKind::Path));
         assert!(!value_settled(Some(&folded), Some(&live), &ModifierKind::List));
         assert!(!value_settled(Some(&folded), None, &ModifierKind::Path));
@@ -1162,7 +1163,7 @@ mod tests {
     fn c015_rule0_a_quoted_retained_segment_settles_on_windows() {
         let desired = vec![path_entry("PATH", r"C:\ocx\a\bin")];
         let ledger = ledger_with_project(desired.iter().map(LedgerEntry::from).collect(), Priors::new());
-        let live = [r"C:\ocx\a\bin", r#""C:\Program Files\x""#].join(ocx_util::env::PATH_SEPARATOR);
+        let live = [r"C:\ocx\a\bin", r#""C:\Program Files\x""#].join(ocx_util::path::PATH_SEPARATOR);
         let current = env_with(&[("PATH", live.as_str())]);
 
         let planned = plan(&desired, &current, &ledger, &[Path::new(r"C:\ocx")]);

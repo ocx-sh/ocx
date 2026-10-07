@@ -6,6 +6,10 @@
 //! The spawn primitives stay in a private submodule so no launch can skip deciding what it records
 //! (`adr_exec_resolution_record.md` § "Rationale from code: launch").
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the seam: the one module that builds the Command a tool launch runs"
+)]
 mod child_process;
 
 use std::path::{Path, PathBuf};
@@ -35,7 +39,7 @@ enum Mode<'a> {
     Exempt(ExemptionReason),
 }
 
-/// Why a launch does not record; each variant's call sites are pinned by `every_launch_exemption_is_enumerated`.
+/// Why a launch does not record; clippy bans [`Launch::exempt`], so each variant's call sites carry an `#[expect]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExemptionReason {
     /// `ocx package test` — a maintainer preview over local artifacts.
@@ -234,10 +238,18 @@ fn apply_posture(error: RecordsError, policy: &RecordingPolicy) -> Result<(), La
 }
 
 /// A launch could not be constructed, recorded, or started.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum LaunchError {
     /// The tool could not be started.
     #[error("failed to run '{resolved}'", resolved = .resolved.display())]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "launch_spawn_failed",
+            summary = "The resolved command could not be started"
+        )
+    )]
     Spawn {
         /// The resolved executable that could not be started.
         resolved: PathBuf,
@@ -248,6 +260,11 @@ pub enum LaunchError {
 
     /// A recording frame supplied no `argv`, so it named nothing to run.
     #[error("recording frame '{command}' carries no argv")]
+    #[exit(
+        Failure,
+        slug = "record_inputs_incomplete",
+        summary = "An execution record frame carries no argv"
+    )]
     IncompleteRecordInputs {
         /// The frame that failed validation.
         command: String,
@@ -258,6 +275,11 @@ pub enum LaunchError {
         "launch refused by [records] required = true in the resolved config chain: {command} does not record, and a fail-closed policy grants no exemption",
         command = .reason.command()
     )]
+    #[exit(
+        IoError,
+        slug = "record_exemption_refused",
+        summary = "The execution-record exemption was refused"
+    )]
     ExemptionRefused {
         /// The preview command whose exemption was refused.
         reason: ExemptionReason,
@@ -266,6 +288,7 @@ pub enum LaunchError {
     /// A record could not be written and the policy is `required`.
     // The message names the policy: under the SYSTEM clamp `required` may appear in nobody's config.
     #[error("launch refused by [records] required = true in the resolved config chain")]
+    #[exit(delegate = 0)]
     Records(#[from] crate::record::RecordsError),
 }
 
@@ -433,6 +456,7 @@ mod tests {
         let policy = policy(Some(PathBuf::from("/var/log/ocx/records")), true);
 
         for reason in [ExemptionReason::PackageTest, ExemptionReason::PatchTest] {
+            #[expect(clippy::disallowed_methods, reason = "exercises the exemption bound")]
             let error = Launch::exempt(Env::clean(), &frame.executable, &[], reason, &policy)
                 .err()
                 .expect("a required policy grants no exemption");
@@ -466,6 +490,7 @@ mod tests {
             policy(None, false),
             required_policy_without_a_sink(),
         ] {
+            #[expect(clippy::disallowed_methods, reason = "exercises the exemption bound")]
             Launch::exempt(
                 Env::clean(),
                 &frame.executable,
@@ -676,156 +701,53 @@ mod tests {
 mod firewall_tests {
     use std::path::{Path, PathBuf};
 
-    // ── Structural firewalls around the launch seam ──────────────────────────
-    //
-    // Two escapes the type system cannot close, and one test cannot do both:
-    // reaching a spawn primitive without going through `launch`, and reusing an
-    // existing `ExemptionReason` for a command it was not sanctioned for.
-    // Modelled on `script.rs`'s `no_starlark_import_outside_firewall`.
+    // Clippy (`disallowed_types` / `disallowed_methods` in the root `clippy.toml`) holds the launch seam
+    // for every file compiled for the host. This scan covers the rest: source clippy never compiles, and
+    // spawns inside `#[cfg(windows)]` / `#[cfg(target_os = ...)]` code a Linux clippy pass cannot see.
 
-    /// Tokens that mean "this file can start a process".
-    ///
-    /// A `Command` has to be named to be built, and these cover every spelling
-    /// that names one: `process::Command` for the qualified constructor and the
-    /// plain import, `process::{` for a braced or aliased one
-    /// (`use tokio::process::{Command as RawCommand}` — the form that matches
-    /// neither of the others), `process as ` for a renamed module, and
-    /// `CommandExt` for the `execvp` trait. Deliberately over-broad: a file
-    /// importing anything at all from a `process` module through a brace list
-    /// matches, and paying for that with one honest allowlist line is cheaper
-    /// than a token set that a rename slips past.
-    const SPAWN_TOKENS: &[&str] = &["process::Command", "process::{", "process as ", "CommandExt"];
-
-    /// Files sanctioned to spawn a process without going through `launch`.
-    ///
-    /// The firewall's subject is a **tool launch**: running a program that this
-    /// invocation resolved out of a package and composed an environment for.
-    /// That is what an execution record describes, and it is the only thing
-    /// `launch` owns. Every entry below spawns a program *ocx itself* chose for
-    /// its own purposes, so none of them is a tool launch — but each is listed
-    /// by name, because a blanket allowlist would be worse than no firewall.
-    const SPAWN_ALLOWED: &[(&str, &str)] = &[
-        (
-            "ocx_cli/src/app/plugin_dispatch.rs",
-            "git-style `ocx-<name>` plugin dispatch — an ocx extension, not a resolved package tool, \
-             and not one of the three recording frames (adr_cli_plugin_pattern.md)",
-        ),
-        (
-            "ocx_cli/src/command/self_group/activate.rs",
-            "test-only live-shell harness — runs bash/zsh/fish over the emitted activation stream to \
-             prove a user function named `ocx` never executes",
-        ),
-        (
-            "ocx_cli/tests/linux_self_contained.rs",
-            "integration test running `ldd` against the built binary",
-        ),
-        (
-            "ocx_cli/tests/macos_self_contained.rs",
-            "integration test running `otool` against the built binary",
-        ),
-        (
-            "ocx_schema/tests/schema_outputs.rs",
-            "integration test running the built `ocx_schema` generator binary as its subject",
-        ),
-        (
-            "ocx_test_support/tests/workspace_structure.rs",
-            "structural guards running `cargo metadata` and `cargo tree` over the workspace \
-             (plan_crate_split_workspace.md C-009, C-078)",
-        ),
-        (
-            "ocx_store/src/codesign.rs",
-            "fixed macOS system utilities (`codesign`, `xattr`, `cc` in tests) during extraction",
-        ),
-        (
-            "ocx_announce/src/forge/git_command.rs",
-            "the git write transport — runs the operator's own `git` to announce an index tag. Not a \
-             tool launch: the program is resolved on `PATH` for ocx's own purposes rather than out of \
-             a package, and no environment is composed for it. The whole git-transport path routes \
-             through this one file so the exemption stays a single reviewable line; the child-process \
-             builder is private and the file exports only a *running* helper taking a resolved \
-             `GitBinary`, so a sibling never holds a `Command` it could re-arm and can run git and \
-             nothing else",
-        ),
-        (
-            "ocx_oci/src/host_capabilities.rs",
-            "libc detection — runs a discovered loader with `--version` to classify its banner",
-        ),
-        (
-            "ocx_package/src/libc_lint.rs",
-            "test-only `cc` invocation building the ELF fixtures this lint classifies",
-        ),
-        (
-            "ocx_package_manager/src/launcher/body.rs",
-            "test-only `/bin/sh` harness — runs the emitted trampoline body against a stub `ocx` to \
-             prove C-033's `unset` really strips the caller's tier selectors and that the baked \
-             absolute path is exec'd verbatim; no production path in this file spawns anything",
-        ),
-        (
-            "ocx_package_manager/src/tasks/update_check.rs",
-            "self re-entry, twice over, and ocx is the program in both: the hermetic `ocx --format \
-             json version` that reads the installed version, and `ocx self update`'s hand-off — it \
-             pulls the new release without selecting, then runs THAT binary as `ocx self setup \
-             <tag>@<digest> --handoff` so the version being installed is the one that applies its \
-             own setup contract, which the process it replaces predates and cannot know. Neither is \
-             a tool launch: no package was resolved for a user and no environment was composed for \
-             a tool. `Launch::exempt` cannot serve the hand-off either — it returns \
-             `ExemptionRefused` under a fail-closed `[records]` posture, which would make `ocx self \
-             update` fail outright for a child with nothing to record",
-        ),
-        (
-            "ocx_script/src/ocx_module.rs",
-            "the Starlark host's `ocx.run`, reachable only from `package test` / `patch test`. Its \
-             exemption is inherited from those frames, not independent — and since it never reaches \
-             a `Launch`, both call sites apply the bound themselves via `launch::exemption_allowed` \
-             before starting the interpreter",
-        ),
-        (
-            "ocx_setup/src/profiles.rs",
-            "shell detection — asks a candidate shell what it is",
-        ),
-        (
-            "ocx_setup/src/session_path/macos.rs",
-            "the `launchctl` calls that load, unload and read the session-PATH LaunchAgent, plus a \
-             test-only load-time harness — runs the emitted LaunchAgent merge script under /bin/sh \
-             against a fake launchctl, the only way to prove ADR item 6 (the composed PATH is a \
-             function of the then-current session value) off macOS",
-        ),
-        (
-            "ocx_shell/src/shell.rs",
-            "test-only round-trip harness that sources generated export lines in a real shell",
-        ),
-        (
-            "ocx_shell/src/shell/hook.rs",
-            "test-only live-shell harness that runs a real shell to prove the per-prompt hook fires",
-        ),
+    /// Tokens that mean "this file can start a process": every spelling that names a `Command`, including
+    /// a braced or renamed import, and the `execvp` trait. Over-broad on purpose.
+    const SPAWN_TOKENS: &[&str] = &[
+        "process::Command",
+        "process::{",
+        "process::*",
+        "process as ",
+        "CommandExt",
     ];
 
-    /// Tokens that mean "this file claims a recording exemption".
-    const EXEMPTION_TOKENS: &[&str] = &["Launch::exempt", "ExemptionReason::"];
+    /// Source trees clippy does not lint as part of any crate: the SDK templates, and the golden copies of what
+    /// they generate.
+    const UNLINTED_ROOTS: &[&str] = &["ocx_sdkgen/templates/", "ocx_sdkgen/tests/golden/"];
 
-    /// The commands sanctioned not to record, one file each.
-    ///
-    /// `package test` and `patch test` are maintainer previews over local
-    /// unpublished artifacts: a record from them would describe something that
-    /// was never published.
-    ///
-    /// Checked as an **equality**, not a subset: a new command quietly reusing a
-    /// variant adds no variant and compiles clean, and a sanctioned site that
-    /// silently stops claiming its exemption leaves an entry here promising a
-    /// hole that no longer exists. Both directions are drift.
-    const EXEMPTION_ALLOWED: &[&str] = &[
-        // The launcher re-entry claims no exemption of its own: it INHERITS one
-        // from the pkg-root it was baked with, and only from the two scratch
-        // roots the commands below own. A fresh process re-reads `[records]`
-        // from its own config chain, so an exemption declared at those commands'
-        // spawn sites does not survive the hop — which is exactly the hole this
-        // entry closes rather than opens.
-        "ocx_cli/src/command/launcher/exec.rs",
-        "ocx_cli/src/command/package_test.rs",
-        "ocx_cli/src/command/patch_test.rs",
-        // Declares the enum and this test's own allowlist.
-        "ocx_package_manager/src/launch.rs",
+    /// The files under [`UNLINTED_ROOTS`] allowed to spawn: the generated Rust SDK's runtime spawns the caller's
+    /// `ocx`, never runs inside ocx, and resolves no package.
+    const GENERATED_SDK_SPAWNERS: &[&str] = &[
+        "ocx_sdkgen/templates/rust/spawn.rs",
+        "ocx_sdkgen/tests/golden/rust/spawn.rs",
     ];
+
+    /// The launch seam: the one module that owns spawning, and so needs no expectation.
+    const LAUNCH_SEAM: &[&str] = &["ocx_package_manager/src/launch.rs", "ocx_package_manager/src/launch/"];
+
+    /// What a sanctioned spawn site carries: an item-level `#[expect(clippy::disallowed_types, ...)]`, matched
+    /// with whitespace removed so a rustfmt-wrapped attribute still counts.
+    const EXPECTATION: &str = "#[expect(clippy::disallowed_types";
+
+    /// Files the unlinted roots must yield: the three templates and the nine golden files today. A reader
+    /// that stopped early would otherwise pass an empty tree.
+    const SCAN_FLOOR: usize = 12;
+
+    /// Files the workspace walk must yield (758 today). A walk that lost its root would otherwise pass.
+    const WORKSPACE_FLOOR: usize = 400;
+
+    /// Directory names holding build output or vendored code, never workspace source.
+    fn is_skipped_dir(name: &str) -> bool {
+        name == "target"
+            || name == "external"
+            || name == "node_modules"
+            || name.starts_with("bazel-")
+            || name.starts_with('.')
+    }
 
     fn crates_root() -> PathBuf {
         // CARGO_MANIFEST_DIR = crates/ocx_package_manager → parent = crates/.
@@ -842,24 +764,24 @@ mod firewall_tests {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if path.file_name().and_then(|name| name.to_str()) == Some("target") {
-                    continue;
+                if !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_skipped_dir)
+                {
+                    collect_rs(&path, out);
                 }
-                collect_rs(&path, out);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
                 out.push(path);
             }
         }
     }
 
-    /// Every `.rs` file under `crates/`, as `crates/`-relative slash-separated
-    /// paths paired with their contents.
-    fn sources() -> Vec<(String, String)> {
+    /// Every `.rs` file under `crates/`, as `crates/`-relative slash-separated paths paired with their contents.
+    fn workspace_sources() -> Vec<(String, String)> {
         let root = crates_root();
         let mut files = Vec::new();
         collect_rs(&root, &mut files);
-        assert!(!files.is_empty(), "expected to find Rust sources under {root:?}");
-
         files
             .iter()
             .filter_map(|path| {
@@ -869,163 +791,167 @@ mod firewall_tests {
             .collect()
     }
 
-    /// Whether `content` uses any of `tokens` outside a comment.
-    ///
-    /// Comment lines are skipped so the allowlists name real call sites only —
-    /// several modules mention these primitives in prose.
-    fn mentions(content: &str, tokens: &[&str]) -> bool {
+    fn is_unlinted(path: &str) -> bool {
+        UNLINTED_ROOTS.iter().any(|root| path.starts_with(root))
+    }
+
+    /// The compiled files that spawn without the seam's blessing: outside the launch seam, with no
+    /// [`EXPECTATION`] anywhere in the file to say why.
+    fn unexpected_spawners(sources: &[(String, String)]) -> Vec<String> {
+        let mut found: Vec<String> = sources
+            .iter()
+            .filter(|(path, _)| !is_unlinted(path) && !LAUNCH_SEAM.iter().any(|seam| path.starts_with(seam)))
+            .filter(|(_, content)| spawns(content) && !claims(content))
+            .map(|(path, _)| path.clone())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Whether `content` carries [`EXPECTATION`] outside a comment. A mention in prose or an `allow` does not
+    /// count. Per file, not per item: a second spawn in a claimed file passes.
+    fn claims(content: &str) -> bool {
+        let code: String = content
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        code.contains(EXPECTATION)
+    }
+
+    /// Whether `content` uses any of [`SPAWN_TOKENS`] outside a comment.
+    fn spawns(content: &str) -> bool {
         content
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .any(|line| tokens.iter().any(|token| line.contains(token)))
+            .any(|line| SPAWN_TOKENS.iter().any(|token| line.contains(token)))
     }
 
-    /// The seam itself: the module that owns the primitives, and this file,
-    /// whose allowlist quotes the tokens it searches for.
-    fn is_seam(path: &str) -> bool {
-        path == "ocx_package_manager/src/launch.rs" || path.starts_with("ocx_package_manager/src/launch/")
-    }
-
-    #[test]
-    fn every_allowlisted_file_still_exists() {
-        let present: Vec<String> = sources().into_iter().map(|(path, _)| path).collect();
-        let mut stale: Vec<&str> = SPAWN_ALLOWED
+    /// The files that disagree with `sanctioned`: spawning without being listed, or listed without spawning.
+    /// The second half keeps an entry from promising a hole that no longer exists.
+    fn disagreements(sources: &[(String, String)], sanctioned: &[&str]) -> Vec<String> {
+        let mut found: Vec<String> = sources
             .iter()
-            .map(|(path, _)| *path)
-            .chain(EXEMPTION_ALLOWED.iter().copied())
-            .filter(|allowed| !present.iter().any(|path| path == allowed))
+            .filter(|(path, content)| spawns(content) != sanctioned.contains(&path.as_str()))
+            .map(|(path, _)| path.clone())
             .collect();
-        stale.sort_unstable();
-
-        assert!(
-            stale.is_empty(),
-            "an allowlist entry names a file that no longer exists, so the firewall it opened is \
-             wider than anyone reading it would think:\n{}",
-            stale.join("\n")
+        found.extend(
+            sanctioned
+                .iter()
+                .filter(|path| !sources.iter().any(|(source, _)| source == *path))
+                .map(|path| (*path).to_owned()),
         );
-    }
-
-    /// The bypass the token set was widened for: a braced or renamed import
-    /// spells the constructor in a way `process::Command` never sees, so a new
-    /// command could spawn, compile, and pass the firewall.
-    ///
-    /// Fixtures rather than real files, because the point is the *detector* —
-    /// the real-source sweep below can only ever prove that nothing in the tree
-    /// spells it that way today.
-    #[test]
-    fn a_renamed_command_import_is_still_caught() {
-        let bypasses = [
-            "use tokio::process::{Command as RawCommand};\nRawCommand::new(\"sh\").spawn()",
-            "use std::process::{Command, Stdio};\nCommand::new(\"sh\").status()",
-            "use std::process as proc;\nproc::Command::new(\"sh\").output()",
-            "use tokio::process::Command as RawCommand;\nRawCommand::new(\"sh\").spawn()",
-            "std::process::Command::new(\"sh\").spawn()",
-        ];
-        for source in bypasses {
-            assert!(
-                mentions(source, SPAWN_TOKENS),
-                "a spawn spelled this way slips past the firewall:\n{source}"
-            );
-        }
-
-        // The discriminator: neither a comment about spawning nor an unrelated
-        // `process` import may trip it, or the allowlist fills with noise and
-        // stops naming anything.
-        for benign in [
-            "// this module never builds a process::Command",
-            "use std::process::ExitCode;\nExitCode::SUCCESS",
-            "let status = response.status();",
-        ] {
-            assert!(
-                !mentions(benign, SPAWN_TOKENS),
-                "the firewall must not fire on:\n{benign}"
-            );
-        }
+        found.sort();
+        found
     }
 
     #[test]
     fn no_process_spawn_outside_launch() {
-        let mut violations: Vec<String> = sources()
-            .into_iter()
-            .filter(|(path, _)| !is_seam(path))
-            .filter(|(path, _)| !SPAWN_ALLOWED.iter().any(|(allowed, _)| allowed == path))
-            .filter(|(_, content)| mentions(content, SPAWN_TOKENS))
-            .map(|(path, _)| path)
-            .collect();
-        violations.sort();
-
+        let workspace = workspace_sources();
         assert!(
-            violations.is_empty(),
-            "a spawn primitive is reachable outside the launch seam:\n{}\n\n\
-             Route the launch through `ocx_package_manager::launch` so it decides what it records. \
-             If this \
-             genuinely is not a tool launch, add it to `SPAWN_ALLOWED` with the reason.",
-            violations.join("\n")
+            workspace.len() >= WORKSPACE_FLOOR,
+            "the scan read {} files under crates/, below the floor of {WORKSPACE_FLOOR}",
+            workspace.len()
+        );
+        assert!(
+            workspace
+                .iter()
+                .any(|(path, content)| !is_unlinted(path) && spawns(content)),
+            "no compiled file spawns a process: the scan is reading nothing it can judge"
+        );
+        let unexpected = unexpected_spawners(&workspace);
+        assert!(
+            unexpected.is_empty(),
+            "a spawn primitive appears outside the launch seam with no `#[expect(clippy::disallowed_types, \
+             reason = ...)]` in the file (clippy cannot see code behind another platform's `cfg`):\n{}\n\n\
+             Route the launch through `ocx_package_manager::launch`, or claim it with the expectation.",
+            unexpected.join("\n")
         );
 
-        // `every_allowlisted_file_still_exists` already catches an entry whose
-        // file left the tree. What nothing saw is the other half: an entry
-        // naming a file that is still there and no longer spawns anything. It
-        // reads as a live exemption, so the allowlist keeps promising a hole it
-        // no longer describes — and the next file to take that path inherits an
-        // exemption nobody granted it. `EXEMPTION_ALLOWED` has had this
-        // direction since it was written; this one had not.
-        let sources = sources();
-        let mut stale: Vec<&str> = SPAWN_ALLOWED
-            .iter()
-            .map(|(allowed, _)| *allowed)
-            .filter(|allowed| {
-                !sources
-                    .iter()
-                    .any(|(path, content)| path == allowed && mentions(content, SPAWN_TOKENS))
-            })
-            .collect();
-        stale.sort_unstable();
+        let sources: Vec<(String, String)> = workspace.into_iter().filter(|(path, _)| is_unlinted(path)).collect();
         assert!(
-            stale.is_empty(),
-            "a spawn exemption names a file that no longer spawns, or no longer exists:\n{}\n\n\
-             Drop the entry, or re-point it at where the launch moved to.",
-            stale.join("\n")
+            sources.len() >= SCAN_FLOOR,
+            "the scan read {} files under {UNLINTED_ROOTS:?}, below the floor of {SCAN_FLOOR}",
+            sources.len()
+        );
+
+        let found = disagreements(&sources, GENERATED_SDK_SPAWNERS);
+        assert!(
+            found.is_empty(),
+            "a spawn primitive appears outside the launch seam in a tree clippy does not lint, or a \
+             sanctioned spawner no longer spawns:\n{}\n\nRoute the launch through \
+             `ocx_package_manager::launch`, or amend `GENERATED_SDK_SPAWNERS`.",
+            found.join("\n")
         );
     }
 
+    /// The detector goes red on a stray spawn in every spelling, on a sanctioned file that stopped spawning,
+    /// and stays quiet on prose and on an unrelated `process` import.
     #[test]
-    fn every_launch_exemption_is_enumerated() {
-        let mut claimants: Vec<String> = sources()
-            .into_iter()
-            .filter(|(_, content)| mentions(content, EXEMPTION_TOKENS))
-            .map(|(path, _)| path)
-            .collect();
-        claimants.sort();
+    fn the_unlinted_scan_goes_red_on_a_stray_spawn() {
+        let sanctioned = ["sdk/spawn.rs"];
+        let spelled = [
+            "use tokio::process::{Command as RawCommand};\nRawCommand::new(\"sh\").spawn()",
+            "use std::process::{Command, Stdio};\nCommand::new(\"sh\").status()",
+            "use std::process as proc;\nproc::Command::new(\"sh\").output()",
+            "std::process::Command::new(\"sh\").spawn()",
+            "use std::os::unix::process::CommandExt as _;\ncmd.exec()",
+            "use std::process::*;\nCommand::new(\"sh\").spawn()",
+        ];
+        for source in spelled {
+            let sources = [
+                ("sdk/spawn.rs".to_owned(), source.to_owned()),
+                ("sdk/stray.rs".to_owned(), source.to_owned()),
+            ];
+            assert_eq!(
+                disagreements(&sources, &sanctioned),
+                ["sdk/stray.rs"],
+                "a spawn spelled this way slips past the scan:\n{source}"
+            );
+        }
 
-        let mut unsanctioned: Vec<&str> = claimants
-            .iter()
-            .map(String::as_str)
-            .filter(|path| !EXEMPTION_ALLOWED.contains(path))
-            .collect();
-        unsanctioned.sort_unstable();
-        assert!(
-            unsanctioned.is_empty(),
-            "a recording exemption is claimed outside the sanctioned commands:\n{}\n\n\
-             Reusing an existing `ExemptionReason` adds no variant and compiles clean, which is \
-             what this test exists to catch. A new exclusion needs its own variant and its own \
-             entry in `EXEMPTION_ALLOWED`.",
-            unsanctioned.join("\n")
+        let quiet = [
+            ("sdk/spawn.rs".to_owned(), "// no spawn left here".to_owned()),
+            (
+                "sdk/prose.rs".to_owned(),
+                "// builds a process::Command\nuse std::process::ExitCode;".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            disagreements(&quiet, &sanctioned),
+            ["sdk/spawn.rs"],
+            "a stale sanctioned entry must be reported, prose and an unrelated import must not"
         );
+    }
 
-        let mut silent: Vec<&str> = EXEMPTION_ALLOWED
-            .iter()
-            .copied()
-            .filter(|allowed| !claimants.iter().any(|path| path == allowed))
-            .collect();
-        silent.sort_unstable();
-        assert!(
-            silent.is_empty(),
-            "a sanctioned exclusion no longer claims one:\n{}\n\n\
-             Either the command now records — in which case drop its entry — or it reached a \
-             spawn primitive some other way, which is the hole this allowlist claims does not \
-             exist.",
-            silent.join("\n")
+    /// A spawn behind another platform's `cfg` is reported unless the file carries the expectation or is the
+    /// launch seam.
+    #[test]
+    fn the_compiled_scan_goes_red_on_an_unclaimed_spawn() {
+        let spawn = "#[cfg(windows)]\nfn f() { std::process::Command::new(\"x\"); }";
+        let claimed = format!("#[expect(clippy::disallowed_types, reason = \"why\")]\n{spawn}");
+        let wrapped = format!("#[expect(\n    clippy::disallowed_types,\n    reason = \"why\"\n)]\n{spawn}");
+        let commented = format!("// #[expect(clippy::disallowed_types, reason = \"why\")]\n{spawn}");
+        let allowed = format!("#[allow(clippy::disallowed_types)]\n{spawn}");
+        let sources = [
+            ("ocx_a/src/stray.rs".to_owned(), spawn.to_owned()),
+            ("ocx_a/src/claimed.rs".to_owned(), claimed),
+            ("ocx_a/src/wrapped.rs".to_owned(), wrapped),
+            ("ocx_a/src/commented.rs".to_owned(), commented),
+            ("ocx_a/src/allowed.rs".to_owned(), allowed),
+            (
+                "ocx_package_manager/src/launch/child_process.rs".to_owned(),
+                spawn.to_owned(),
+            ),
+            (
+                "ocx_a/src/prose.rs".to_owned(),
+                "/// builds a `std::process::Command`".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            unexpected_spawners(&sources),
+            ["ocx_a/src/allowed.rs", "ocx_a/src/commented.rs", "ocx_a/src/stray.rs"]
         );
     }
 }

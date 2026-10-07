@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Structural guards over the whole workspace (plan C-009, C-010, C-046,
-//! C-053, C-078) — properties Cargo accepts silently and no behavioural test
-//! can observe: a dependency edge the crate map forbids, a `.rs` file no `mod`
-//! names, a `__testing` seam the release build could still select, a
-//! classification impl in a library crate.
+//! Structural guards over the whole workspace — properties Cargo accepts
+//! silently and no behavioural test can observe: a dependency edge the crate
+//! map forbids, a `.rs` file no `mod` names, a `__testing` seam the release
+//! build could still select, a hand-written classification impl, a derived
+//! classification no `families!` entry reaches.
 //!
 //! Every guard asserts a non-empty walk: a scope glob that stops matching
 //! must red, not pass. A guard whose phase has not landed is written
@@ -14,6 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+#[expect(
+    clippy::disallowed_types,
+    reason = "structural guards run `cargo metadata` and `cargo tree` over the workspace"
+)]
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
@@ -66,6 +70,10 @@ mod floor {
     /// `crates/ocx_cli/src`, where the downcast ladder lives — 191 at
     /// 2026-09-20.
     pub(crate) const LADDER_SOURCES: usize = 160;
+    /// `#[derive(Classify)]` types under `crates/*/src` — 79 at 2026-10-05.
+    pub(crate) const DERIVED_CLASSIFICATION_TYPES: usize = 77;
+    /// Entries of the `families!` list in `crates/ocx_cli/src/exit.rs` — 74 at 2026-10-05.
+    pub(crate) const FAMILIES_ENTRIES: usize = 72;
 }
 
 /// Refuse a walk that came back under `floor`, and return what it found.
@@ -109,12 +117,49 @@ fn read_manifest(path: &Path) -> toml::Value {
     toml::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
 }
 
+/// `cargo` as the test harness was given it, else from `PATH`.
+#[expect(
+    clippy::disallowed_types,
+    reason = "structural guards run `cargo metadata` and `cargo tree` over the workspace"
+)]
+fn cargo() -> Command {
+    #[expect(clippy::disallowed_methods, reason = "cargo's own CARGO, which no ocx code reads")]
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    Command::new(cargo)
+}
+
+/// `cargo tree` of `ocx`'s release dependencies, one `name version|features` line per package.
+fn release_tree() -> String {
+    let output = cargo()
+        .args([
+            "tree",
+            "-p",
+            "ocx",
+            "--edges",
+            "normal,build",
+            "--format",
+            "{p}|{f}",
+            "--prefix",
+            "none",
+            "--locked",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn cargo tree");
+    assert!(
+        output.status.success(),
+        "cargo tree failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// `cargo metadata --format-version 1 --locked <extra>` from the workspace
 /// root, as JSON. Fails loudly — a checker fed an empty graph would report
 /// "no edges" and pass.
 fn cargo_metadata(extra: &[&str]) -> serde_json::Value {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
+    let output = cargo()
         .args(["metadata", "--format-version", "1", "--locked"])
         .args(extra)
         .current_dir(workspace_root())
@@ -218,22 +263,30 @@ impl CrateMap {
 /// `deps_direction` and `scripts/edge_inventory.py` both read the TOML, so a
 /// loosened edge there would green both with no red anywhere — this table is
 /// what reds. Source: ADR § "Architecture — the crate map" as corrected by
-/// D-037 (the 17 rows), plus `ocx_python` (ecosystem tier, added with the
-/// crate); the transition rows sit in [`ADR_TRANSITION_ROWS`].
+/// D-037 (the 17 rows), plus `ocx_python` and `ocx_env` (ecosystem tier, each
+/// added with its crate); the transition rows sit in [`ADR_TRANSITION_ROWS`].
 /// Order within a row is irrelevant (compared as sets); the row set and every
 /// set are compared in both directions.
 const ADR_MAP: &[(&str, &[&str])] = &[
-    ("ocx_exit", &[]),
-    ("ocx_util", &[]),
-    ("ocx_console", &["ocx_exit", "ocx_util"]),
-    ("ocx_oci", &["ocx_util", "ocx_console", "ocx_exit"]),
-    ("ocx_trust", &["ocx_oci", "ocx_util"]),
-    ("ocx_sign", &["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]),
-    ("ocx_config", &["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]),
-    ("ocx_store", &["ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]),
+    ("ocx_exit", &["ocx_exit_derive"]),
+    ("ocx_exit_derive", &[]),
+    ("ocx_env", &["ocx_exit"]),
+    ("ocx_util", &["ocx_exit"]),
+    ("ocx_console", &["ocx_exit", "ocx_util", "ocx_env"]),
+    ("ocx_oci", &["ocx_util", "ocx_console", "ocx_exit", "ocx_env"]),
+    ("ocx_trust", &["ocx_oci", "ocx_util", "ocx_env"]),
+    ("ocx_sign", &["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]),
+    (
+        "ocx_config",
+        &["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"],
+    ),
+    (
+        "ocx_store",
+        &["ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"],
+    ),
     (
         "ocx_index",
-        &["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"],
+        &["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"],
     ),
     (
         "ocx_package",
@@ -244,6 +297,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_oci",
             "ocx_util",
             "ocx_exit",
+            "ocx_env",
         ],
     ),
     ("ocx_python", &["ocx_oci", "ocx_package"]),
@@ -257,6 +311,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_util",
             "ocx_console",
             "ocx_exit",
+            "ocx_env",
         ],
     ),
     (
@@ -271,6 +326,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_oci",
             "ocx_util",
             "ocx_exit",
+            "ocx_env",
         ],
     ),
     // D-037: += ocx_trust, += ocx_shell.
@@ -289,6 +345,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_exit",
             "ocx_trust",
             "ocx_shell",
+            "ocx_env",
         ],
     ),
     (
@@ -300,11 +357,19 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_oci",
             "ocx_util",
             "ocx_exit",
+            "ocx_env",
         ],
     ),
     (
         "ocx_script",
-        &["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_console"],
+        &[
+            "ocx_store",
+            "ocx_config",
+            "ocx_oci",
+            "ocx_util",
+            "ocx_console",
+            "ocx_env",
+        ],
     ),
     // D-037: += ocx_index, += ocx_package.
     (
@@ -319,14 +384,14 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_exit",
             "ocx_index",
             "ocx_package",
+            "ocx_env",
         ],
     ),
     ("ocx_test_support", &[]),
 ];
 
-/// The rows of the transition, beside the 18: the three packages that are not
-/// extraction targets. These have no README of the shell shape. `ocx_lib`'s
-/// row left with the crate at WP-37.
+/// The rows beside the 20: the packages that are not extraction targets.
+/// `ocx_sdkgen` is the published-document lint and links nothing.
 const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
     (
         "ocx",
@@ -347,6 +412,7 @@ const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
             "ocx_announce",
             "ocx_script",
             "ocx_setup",
+            "ocx_env",
         ],
     ),
     (
@@ -358,9 +424,12 @@ const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
             "ocx_package",
             "ocx_project",
             "ocx_package_manager",
+            "ocx_exit",
+            "ocx_env",
         ],
     ),
     ("ocx_shim", &[]),
+    ("ocx_sdkgen", &[]),
 ];
 
 /// The `[dev]` half of the same copy.
@@ -675,32 +744,10 @@ fn deps_direction_refuses_an_empty_member_graph() {
 #[test]
 fn release_feature_set_excludes_testing_seams() {
     let members = member_names(&workspace_metadata());
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
-        .args([
-            "tree",
-            "-p",
-            "ocx",
-            "--edges",
-            "normal,build",
-            "--format",
-            "{p}|{f}",
-            "--prefix",
-            "none",
-            "--locked",
-        ])
-        .current_dir(workspace_root())
-        .output()
-        .expect("spawn cargo tree");
-    assert!(
-        output.status.success(),
-        "cargo tree failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let tree = release_tree();
     let mut seen = BTreeSet::new();
     let mut leaks = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in tree.lines() {
         let Some((package, features)) = line.split_once('|') else {
             continue;
         };
@@ -896,6 +943,380 @@ fn readme_may_depend_on_rows_match_the_crate_map() {
         checked += 1;
     }
     assert!(checked > 1, "checked {checked} README(s) — scanned nothing");
+}
+
+/// Every `std::env::var`/`var_os` literal in `source`, comment lines skipped.
+fn env_read_literals(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in source.lines().filter(|line| !line.trim_start().starts_with("//")) {
+        for needle in ["var_os(\"", "var(\""] {
+            for (at, _) in line.match_indices(needle) {
+                let rest = &line[at + needle.len()..];
+                if let Some(end) = rest.find('"') {
+                    names.push(rest[..end].to_owned());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn unregistered(literals: &[String]) -> Vec<String> {
+    let registered: BTreeSet<&str> = ocx_env::all().map(|var| var.name).collect();
+    literals
+        .iter()
+        .filter(|name| !registered.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// `ocx_shim` stays free of `ocx_env` for its size budget, so it reads its variables by literal;
+/// each literal must still be a registry name, or a rename in the registry strands the shim.
+#[test]
+fn shim_env_literals_are_registry_names() {
+    let source = std::fs::read_to_string(crates_dir().join("ocx_shim/src/main.rs")).expect("shim source readable");
+    let literals = env_read_literals(&source);
+    assert!(
+        literals.iter().any(|name| name == "OCX_HOME") && literals.iter().any(|name| name == "OCX_BINARY_PIN"),
+        "the scan stopped finding the shim's two reads: {literals:?}"
+    );
+    assert_eq!(
+        unregistered(&literals),
+        Vec::<String>::new(),
+        "shim reads a name the registry does not declare"
+    );
+}
+
+#[test]
+fn shim_env_literal_scan_reds_on_an_unregistered_read() {
+    let source = "let a = std::env::var_os(\"OCX_HOME\");\n// std::env::var(\"OCX_COMMENTED\")\nlet b = std::env::var(\"OCX_SHIM_RENAMED\");";
+    let literals = env_read_literals(source);
+    assert_eq!(literals, ["OCX_HOME", "OCX_SHIM_RENAMED"]);
+    assert_eq!(unregistered(&literals), ["OCX_SHIM_RENAMED"]);
+}
+
+/// `ocx_env::dynamic` / `dynamic_secret` reads in `crates/` outside `ocx_env`, pinned.
+///
+/// A name from data is the exception; a declared variable reads through its static. A new site
+/// moves this number in the same change, so the review sees it; a removed one lowers it.
+const DYNAMIC_READS: usize = 8;
+
+/// Every `dynamic` / `dynamic_secret` token called or named through `ocx_env::`, literals and comments skipped.
+fn dynamic_reads(tokens: &[Token]) -> usize {
+    (0..tokens.len())
+        .filter(|&at| matches!(tokens[at].text.as_str(), "dynamic" | "dynamic_secret"))
+        .filter(|&at| {
+            let called = tokens.get(at + 1).is_some_and(|next| next.text == "(");
+            let pathed =
+                at >= 3 && tokens[at - 1].text == ":" && tokens[at - 2].text == ":" && tokens[at - 3].text == "ocx_env";
+            called || pathed
+        })
+        .count()
+}
+
+#[test]
+fn dynamic_read_ratchet() {
+    let mut files = Vec::new();
+    for (name, dir) in crate_dirs() {
+        if name == "ocx_env" {
+            continue;
+        }
+        files.extend(rust_sources(&dir.join("src")));
+        // Top level only: `tests/boundary_fixtures` holds deliberately unparsable sources.
+        if let Ok(entries) = std::fs::read_dir(dir.join("tests")) {
+            files.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "rs")),
+            );
+        }
+    }
+    assert!(
+        files.len() >= floor::ALL_CRATE_SOURCES,
+        "dynamic_read_ratchet walked {} file(s), under its floor of {}",
+        files.len(),
+        floor::ALL_CRATE_SOURCES
+    );
+    let per_file = map_sources(&files, &|_: &Path, source: &Source| dynamic_reads(source.tokens()));
+    let sites: Vec<String> = files
+        .iter()
+        .zip(&per_file)
+        .filter(|(_, count)| **count > 0)
+        .map(|(file, count)| format!("{} ({count})", file.display()))
+        .collect();
+    assert_eq!(
+        per_file.iter().sum::<usize>(),
+        DYNAMIC_READS,
+        "`ocx_env::dynamic` reads moved; read a declared variable through its static, or move \
+         `DYNAMIC_READS` with the new data-derived site:\n  {}",
+        sites.join("\n  ")
+    );
+}
+
+#[test]
+fn dynamic_read_scan_counts_calls_and_paths_only() {
+    let source = r#"
+        fn f(name: &str) {
+            let a = ocx_env::dynamic(name);
+            let b = names.map(ocx_env::dynamic_secret);
+            let c = dynamic(name);
+            let d = "ocx_env::dynamic(name)";
+            // ocx_env::dynamic(name)
+            let dynamic = 1;
+        }
+    "#;
+    let tokens = flatten(source.parse().expect("fixture lexes"));
+    assert_eq!(dynamic_reads(&tokens), 3);
+}
+
+/// The `std::env` functions `clippy.toml` disallows.
+const BANNED_ENV_FNS: [&str; 6] = ["var", "var_os", "vars", "vars_os", "set_var", "remove_var"];
+
+/// Raw `std::env` calls that stay, by file: the `ocx_env` seam itself, a build script reading
+/// cargo's own interface, `ocx_shim` (no `ocx_env` edge, for its size budget), the test proving
+/// the seam ignores the process environment, and cargo's `CARGO` for the tool these guards spawn.
+/// Each carries `#[expect(clippy::disallowed_methods, reason = …)]`; this list also covers what
+/// clippy cannot see (`cfg(windows)` arms, `build.rs` under Bazel).
+const RAW_ENV_RESIDUE: &[(&str, usize)] = &[
+    ("crates/ocx_cli/build.rs", 3),
+    ("crates/ocx_cli/src/app/seam.rs", 2),
+    ("crates/ocx_env/src/lib.rs", 3),
+    ("crates/ocx_sdkgen/templates/rust/spawn.rs", 1),
+    ("crates/ocx_sdkgen/tests/golden/rust/spawn.rs", 1),
+    ("crates/ocx_shim/src/main.rs", 2),
+    ("crates/ocx_test_support/tests/workspace_structure.rs", 1),
+];
+
+/// The variable each `ocx_shim` raw read names, so swapping in another name reds.
+const RAW_ENV_NAMED_RESIDUE: &[(&str, &str)] = &[
+    ("crates/ocx_shim/src/main.rs", "OCX_BINARY_PIN"),
+    ("crates/ocx_shim/src/main.rs", "OCX_HOME"),
+];
+
+/// Banned `env::<fn>` paths and `env::{…}` imports of them; a `::` after the name is a module path.
+/// A `std::env as <alias>` rename or a `std::env::*` glob counts itself: calls through it name no `env`.
+fn raw_env_calls(tokens: &[Token]) -> usize {
+    let text = |at: usize| tokens.get(at).map_or("", |token| token.text.as_str());
+    let banned = |at: usize| BANNED_ENV_FNS.contains(&text(at)) && text(at + 1) != ":";
+    let env_path = |at: usize| text(at) == "env" && text(at + 1) == ":" && text(at + 2) == ":";
+    let after_std = |at: usize| at >= 3 && text(at - 1) == ":" && text(at - 2) == ":" && text(at - 3) == "std";
+    // `std::env`, or `env` directly inside a `std::{…}` group; `metadata::env as …` is not std's.
+    let std_rooted = |at: usize| {
+        if at >= 2 && text(at - 1) == ":" && text(at - 2) == ":" {
+            return after_std(at);
+        }
+        let mut depth = 0usize;
+        for before in (0..at).rev() {
+            match text(before) {
+                "}" => depth += 1,
+                "{" if depth == 0 => return after_std(before),
+                "{" => depth -= 1,
+                ";" if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        false
+    };
+    let mut count = 0;
+    for at in 0..tokens.len() {
+        if text(at) == "env" && text(at + 1) == "as" {
+            count += usize::from(std_rooted(at));
+            continue;
+        }
+        if !env_path(at) {
+            continue;
+        }
+        if banned(at + 3) || (text(at + 3) == "*" && std_rooted(at)) {
+            count += 1;
+        } else if text(at + 3) == "{" {
+            let aliasable = std_rooted(at);
+            let mut depth = 0usize;
+            for inner in at + 3..tokens.len() {
+                match text(inner) {
+                    "{" => depth += 1,
+                    "}" if depth == 1 => break,
+                    "}" => depth -= 1,
+                    "*" if depth == 1 && aliasable => count += 1,
+                    "self" if depth == 1 && aliasable && text(inner + 1) == "as" => count += 1,
+                    _ if depth == 1 && banned(inner) => count += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Every compiled `.rs` file under `crates/`, `build.rs` included; the parse fixtures are data.
+fn compiled_crate_sources() -> Vec<PathBuf> {
+    let crates = crates_dir();
+    let data = [
+        crates.join("ocx_test_support/tests/fixtures"),
+        crates.join("ocx_test_support/tests/boundary_fixtures"),
+    ];
+    let files: Vec<PathBuf> = rust_sources(&crates)
+        .into_iter()
+        .filter(|path| {
+            let build_output = path.strip_prefix(&crates).is_ok_and(|relative| {
+                relative
+                    .components()
+                    .nth(1)
+                    .is_some_and(|part| part.as_os_str() == "target")
+            });
+            !build_output && !data.iter().any(|dir| path.starts_with(dir))
+        })
+        .collect();
+    assert!(
+        files.len() >= floor::ALL_CRATE_SOURCES,
+        "compiled_crate_sources walked {} file(s), under its floor of {}",
+        files.len(),
+        floor::ALL_CRATE_SOURCES
+    );
+    files
+}
+
+/// Clippy's ban lints only what the host compiles; this sees every `cfg` arm and every build script.
+#[test]
+fn raw_env_reads_are_the_pinned_residue() {
+    let files = compiled_crate_sources();
+    let per_file = map_sources(&files, &|_: &Path, source: &Source| raw_env_calls(source.tokens()));
+    let root = workspace_root();
+    let found: BTreeMap<String, usize> = files
+        .iter()
+        .zip(per_file)
+        .filter(|(_, count)| *count > 0)
+        .map(|(file, count)| {
+            let relative = file.strip_prefix(&root).unwrap_or(file);
+            (relative.to_string_lossy().replace('\\', "/"), count)
+        })
+        .collect();
+    let expected: BTreeMap<String, usize> = RAW_ENV_RESIDUE
+        .iter()
+        .map(|(file, count)| ((*file).to_owned(), *count))
+        .collect();
+    assert_eq!(
+        found, expected,
+        "raw `std::env` reads moved; read through an `ocx_env` static, or move `RAW_ENV_RESIDUE` with a \
+         reasoned `#[expect(clippy::disallowed_methods)]` site"
+    );
+    let named_files: BTreeSet<&str> = RAW_ENV_NAMED_RESIDUE.iter().map(|(file, _)| *file).collect();
+    let named: BTreeSet<(&str, String)> = named_files
+        .into_iter()
+        .flat_map(|file| {
+            let source = std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| panic!("{file}: {error}"));
+            env_read_literals(&source).into_iter().map(move |name| (file, name))
+        })
+        .collect();
+    let expected_named: BTreeSet<(&str, String)> = RAW_ENV_NAMED_RESIDUE
+        .iter()
+        .map(|(file, name)| (*file, (*name).to_owned()))
+        .collect();
+    assert_eq!(
+        named, expected_named,
+        "a pinned raw read names another variable; move `RAW_ENV_NAMED_RESIDUE`"
+    );
+}
+
+#[test]
+fn raw_env_scan_counts_every_cfg_arm_and_import_form() {
+    let source = r#"
+        use std::env::{self, var_os, args};
+        #[cfg(windows)]
+        fn a() { let _ = std::env::var("X"); }
+        fn b() {
+            let _ = env::vars_os().count();
+            unsafe { ::std::env::set_var("X", "1") };
+            let _ = names.map(std::env::var);
+            let _ = std::env::current_dir();
+            let _ = ocx_env::OCX_HOME.get();
+            let _ = ocx_package::metadata::env::var::Var::default();
+            let _ = "std::env::var(\"X\")";
+            // std::env::var("X")
+        }
+        use std::env as e;
+        fn c() { let _ = e::var("X"); }
+        use std::env::*;
+        fn d() { let _ = var("X"); }
+        use std::env::{self as f};
+        use std::{io, env as g};
+        use ocx_package::metadata::{env as metadata_env, env::{self as h}, env::*};
+    "#;
+    let tokens = flatten(source.parse().expect("fixture lexes"));
+    assert_eq!(raw_env_calls(&tokens), 9);
+}
+
+/// clap's `env` feature reads a variable behind `#[arg(env = …)]`, past `ocx_env`.
+#[test]
+fn clap_env_feature_is_off_in_the_release_build() {
+    let tree = release_tree();
+    let clap: Vec<&str> = tree
+        .lines()
+        .filter(|line| line.starts_with("clap ") || line.starts_with("clap_builder "))
+        .collect();
+    assert!(clap.len() >= 2, "cargo tree listed no clap and clap_builder: {clap:?}");
+    let with_env: Vec<&&str> = clap
+        .iter()
+        .filter(|line| {
+            line.split_once('|')
+                .is_some_and(|(_, features)| features.split(',').any(|f| f == "env"))
+        })
+        .collect();
+    assert!(with_env.is_empty(), "clap's `env` feature is on: {with_env:?}");
+}
+
+/// The ban's wiring: the root `clippy.toml` (and no crate-local one shadowing it), Bazel's label
+/// flag and export, and a ratchet baseline that admits no `disallowed_methods` hit.
+#[test]
+fn env_ban_is_wired_for_cargo_and_bazel() {
+    let root = workspace_root();
+    let read =
+        |name: &str| std::fs::read_to_string(root.join(name)).unwrap_or_else(|error| panic!("read {name}: {error}"));
+    let clippy: toml::Value = toml::from_str(&read("clippy.toml")).expect("clippy.toml parses");
+    let disallowed: BTreeSet<&str> = clippy["disallowed-methods"]
+        .as_array()
+        .expect("clippy.toml has `disallowed-methods`")
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(toml::Value::as_str))
+        .collect();
+    let wanted: BTreeSet<String> = BANNED_ENV_FNS.iter().map(|name| format!("std::env::{name}")).collect();
+    assert!(
+        wanted.iter().all(|path| disallowed.contains(path.as_str())),
+        "clippy.toml disallows {disallowed:?}, short of {wanted:?}"
+    );
+    let shadowing: Vec<String> = crate_dirs()
+        .into_iter()
+        .flat_map(|(_, dir)| [dir.join("clippy.toml"), dir.join(".clippy.toml")])
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect();
+    assert_eq!(
+        shadowing,
+        Vec::<String>::new(),
+        "a crate-local clippy.toml shadows the root one"
+    );
+    assert!(
+        read(".bazelrc")
+            .lines()
+            .any(|line| line.trim() == "build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml"),
+        ".bazelrc no longer hands clippy.toml to the Bazel clippy aspect"
+    );
+    assert!(
+        read("BUILD.bazel").contains("\"clippy.toml\""),
+        "BUILD.bazel no longer exports clippy.toml"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_str(&read("clippy-warn-baseline.json")).expect("clippy baseline parses");
+    let admitted: Vec<&String> = baseline
+        .as_object()
+        .expect("clippy baseline is an object")
+        .keys()
+        .filter(|key| key.ends_with("::clippy::disallowed_methods"))
+        .collect();
+    assert!(
+        admitted.is_empty(),
+        "the clippy baseline admits banned calls: {admitted:?}"
+    );
 }
 
 /// Each workspace member's `anyhow` dependency kinds — `"normal"`, `"dev"`,
@@ -1180,7 +1601,9 @@ fn every_public_item_of_ocx_util_has_a_consumer() {
     let mut silent: Vec<String> = Vec::new();
     let mut files_read = 0usize;
     for (name, dir) in &crates {
-        if name == "ocx_util" {
+        // `ocx_sdkgen` links no `ocx_*` crate (`deps_direction` holds that), and its schema
+        // vocabulary spells `$def` names such as `ByteSize` that would read as consumers.
+        if name == "ocx_util" || name == "ocx_sdkgen" {
             continue;
         }
         let sources = rust_sources(dir);
@@ -1228,7 +1651,8 @@ fn every_public_item_of_ocx_util_has_a_consumer() {
             consumer_text.match_indices(name.as_str()).any(|(at, _)| {
                 let before = consumer_text[..at].chars().next_back();
                 let after = consumer_text[at + name.len()..].chars().next();
-                let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                // A quoted name is data (`wrapper["Timestamp"]` is a JSON key), never a consumer.
+                let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '"');
                 boundary(before) && boundary(after)
             })
         })
@@ -1464,14 +1888,654 @@ fn library_subtrees(include_cli: bool) -> Vec<PathBuf> {
     subtrees
 }
 
+// ---------------------------------------------------------------------------
+// Classification is derived, never hand-written
+// ---------------------------------------------------------------------------
+
+/// The one hand-written classification impl: `CommandError` carries its exit code at runtime and has no
+/// slug, a shape `#[derive(Classify)]` cannot state.
+const HAND_IMPL_EXCEPTION: (&str, &str) = ("ocx_cli/src/app.rs", "CommandError");
+
+/// The classification traits a hand impl would name.
+const CLASSIFICATION_TRAITS: [&str; 2] = ["ClassifyExitCode", "ClassifyErrorKind"];
+
+/// Every `impl ClassifyExitCode for` / `impl ClassifyErrorKind for` in `parsed`, as a reach keyed on the trait.
+///
+/// A trait imported under another name (`use ocx_exit::ClassifyExitCode as Exit`) is read as the trait it
+/// names, so a rename cannot hide an impl. `#[cfg(test)]` items are skipped: a test-only impl ships in no
+/// binary, and `ocx_exit`'s own tests need one to prove the traits apart from the derive. `tests/`
+/// directories sit outside `crates/*/src` and are not walked. A macro body is no item, so its tokens are
+/// read too; `quote!` is the derive's own output and is the one macro left out. With `exempt`,
+/// [`HAND_IMPL_EXCEPTION`] is not reported.
+fn hand_classification_impls(file: &Path, parsed: &syn::File, exempt: bool) -> Vec<Reach> {
+    /// Alias -> the trait it renames, from every `use ... as` in the file.
+    struct Renames(BTreeMap<String, &'static str>);
+    impl Visit<'_> for Renames {
+        fn visit_item_use(&mut self, import: &syn::ItemUse) {
+            for (path, alias) in expand_use_tree(&import.tree) {
+                if let (Some(last), Some(alias)) = (path.last(), alias)
+                    && let Some(trait_name) = CLASSIFICATION_TRAITS.iter().find(|name| **name == last.as_str())
+                {
+                    self.0.insert(alias, *trait_name);
+                }
+            }
+        }
+    }
+
+    struct Impls<'a> {
+        file: &'a Path,
+        exempt: bool,
+        renames: BTreeMap<String, &'static str>,
+        found: Vec<Reach>,
+    }
+    impl Impls<'_> {
+        /// The trait `written` names, whether spelled out or renamed on import.
+        fn classification_trait(&self, written: &str) -> Option<&'static str> {
+            CLASSIFICATION_TRAITS
+                .iter()
+                .find(|name| **name == written)
+                .copied()
+                .or_else(|| self.renames.get(written).copied())
+        }
+        fn record(&mut self, name: &str, line: usize) {
+            self.found.push(Reach {
+                file: self.file.to_path_buf(),
+                line,
+                path: name.to_owned(),
+            });
+        }
+    }
+    impl Visit<'_> for Impls<'_> {
+        fn visit_item_mod(&mut self, module: &syn::ItemMod) {
+            if !is_cfg_test(&module.attrs) {
+                syn::visit::visit_item_mod(self, module);
+            }
+        }
+        fn visit_item_fn(&mut self, function: &syn::ItemFn) {
+            if !is_cfg_test(&function.attrs) {
+                syn::visit::visit_item_fn(self, function);
+            }
+        }
+        fn visit_item_impl(&mut self, block: &syn::ItemImpl) {
+            if is_cfg_test(&block.attrs) {
+                return;
+            }
+            if let Some((_, path, _)) = &block.trait_
+                && let Some(last) = path.segments.last()
+                && let Some(name) = self.classification_trait(&last.ident.to_string())
+            {
+                let on_exception = matches!(&*block.self_ty, syn::Type::Path(typed)
+                        if typed.path.segments.last().is_some_and(|segment| segment.ident == HAND_IMPL_EXCEPTION.1))
+                    && under_crates(self.file) == HAND_IMPL_EXCEPTION.0
+                    && name == "ClassifyExitCode";
+                if !(self.exempt && on_exception) {
+                    self.record(name, block.impl_token.span.start().line);
+                }
+            }
+            syn::visit::visit_item_impl(self, block);
+        }
+        fn visit_macro(&mut self, invocation: &syn::Macro) {
+            if !invocation
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "quote" || segment.ident == "quote_spanned")
+            {
+                let tokens = flatten(invocation.tokens.clone());
+                for pair in tokens.windows(2) {
+                    if let Some(name) = self.classification_trait(&pair[0].text)
+                        && pair[1].text == "for"
+                    {
+                        self.record(name, pair[0].at.line);
+                    }
+                }
+            }
+            syn::visit::visit_macro(self, invocation);
+        }
+    }
+
+    let mut renames = Renames(BTreeMap::new());
+    renames.visit_file(parsed);
+    let mut impls = Impls {
+        file,
+        exempt,
+        renames: renames.0,
+        found: Vec::new(),
+    };
+    impls.visit_file(parsed);
+    impls.found
+}
+
+/// Every `crates/*/src` tree.
+fn crate_source_subtrees() -> Vec<PathBuf> {
+    crate_dirs().into_iter().map(|(_, dir)| dir.join("src")).collect()
+}
+
+/// A classification is derived, so no `crates/*/src` writes `impl ClassifyExitCode for` or
+/// `impl ClassifyErrorKind for` by hand, bar `CommandError`'s `ClassifyExitCode`.
+///
+/// Reds on: a hand impl in any crate's `src`, a path-qualified one, a renamed import of the trait, one
+/// behind `macro_rules!`, a `CommandError` impl outside `app.rs`. Floored on the files read, and on the
+/// exception being live: were `app.rs` to stop carrying it the exemption would excuse nothing while
+/// reading as a rule.
 #[test]
-fn no_classification_in_libraries() {
-    let subtrees = library_subtrees(false);
-    assert_walk_floor("no_classification_in_libraries", &subtrees, floor::LIBRARY_SOURCES);
-    assert_no_needles(
+fn no_hand_written_classification_impl_outside_command_error() {
+    let subtrees = crate_source_subtrees();
+    let walked = assert_walk_floor("the hand-impl scan", &subtrees, floor::ALL_CRATE_SOURCES);
+    assert!(walked > 0, "the hand-impl scan read no file");
+    assert_scan(
         &subtrees,
-        &["ClassifyExitCode", "ClassifyErrorKind"],
         &fixture("classify_impl.rs.txt"),
+        "a hand-written `impl ClassifyExitCode for` / `impl ClassifyErrorKind for`",
+        &["ClassifyExitCode", "ClassifyErrorKind"],
+        &|file, source| hand_classification_impls(file, &source.file, true),
+    );
+
+    let app = crates_dir().join("ocx_cli/src/app.rs");
+    let bare = hand_classification_impls(&app, &Source::parse(&app).file, false);
+    assert_eq!(
+        bare.iter().map(|reach| reach.path.as_str()).collect::<Vec<_>>(),
+        ["ClassifyExitCode"],
+        "the `CommandError` exception is no longer the one impl `app.rs` carries"
+    );
+}
+
+/// The scan's own red and green: the witness holds exactly the shapes it must report, and `CommandError` is
+/// excused only in `app.rs`.
+#[test]
+fn the_hand_impl_scan_reds_on_each_shape_and_greens_on_the_exception() {
+    let witness = fixture("classify_impl.rs.txt");
+    let source = Source::parse(&witness);
+    let reds = hand_classification_impls(&witness, &source.file, true);
+    assert_eq!(
+        reds.iter().map(|reach| reach.path.as_str()).collect::<Vec<_>>(),
+        [
+            "ClassifyExitCode",
+            "ClassifyErrorKind",
+            "ClassifyExitCode",
+            "ClassifyExitCode"
+        ],
+        "plain, path-qualified, macro-hidden and a `CommandError` outside `app.rs` each red once; the \
+         commented and `#[cfg(test)]` ones never: {reds:?}"
+    );
+}
+
+/// Reds on: a hand impl written through `use ... as`, in an item or behind `macro_rules!`, going unseen.
+#[test]
+fn the_hand_impl_scan_reads_a_renamed_trait_import_as_the_trait() {
+    let parsed: syn::File = syn::parse_str(
+        "use ocx_exit::ClassifyExitCode as Exit;
+         use ocx_exit::{ClassifyErrorKind as Kind, ExitCode as Code};
+         impl Exit for Item {}
+         impl Kind for Other {}
+         impl Code for NotATrait {}
+         macro_rules! hidden { () => { impl Exit for Macro {} }; }
+         impl Exit for CommandError {}",
+    )
+    .expect("the renamed-import witness parses");
+    let reds = hand_classification_impls(Path::new("witness.rs"), &parsed, true);
+    assert_eq!(
+        reds.iter().map(|reach| reach.path.as_str()).collect::<Vec<_>>(),
+        [
+            "ClassifyExitCode",
+            "ClassifyErrorKind",
+            "ClassifyExitCode",
+            "ClassifyExitCode"
+        ],
+        "each renamed impl reds as the trait it names, a rename of any other import never does, and \
+         `CommandError` is excused only in `app.rs`: {reds:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Every derived classification reaches the ladder
+// ---------------------------------------------------------------------------
+
+/// Derived types that no `families!` entry names and no registered type delegates to, each with the reason
+/// it needs no rung. A derived type absent from here and from the list contributes no `detail_registry()`
+/// rows and no ladder rung, silently.
+const DERIVED_BUT_UNREACHED: &[(&str, &str, &str)] = &[(
+    "ocx_oci/src/ssrf.rs",
+    "PhysicalDialRefused",
+    "a struct `delegate = source` over the registered `SsrfError`: its rows are that error's, and its source is \
+     that error, so a chain walk that passes it reaches the same verdict",
+)];
+
+/// A struct's fields as `(name or tuple index, written type path)`.
+type FieldPaths = Vec<(String, Vec<String>)>;
+
+/// A type declaring `#[derive(Classify)]`, and where its struct-level `delegate` leads.
+#[derive(Debug)]
+struct DerivedType {
+    line: usize,
+    name: String,
+    /// For a struct carrying `#[exit(delegate ..)]`: the written path of the delegated field's type (through
+    /// `Box`/`Arc`), then the `.field` steps after it. `None` for an enum and for any other struct.
+    delegate: Option<(Vec<String>, Vec<String>)>,
+}
+
+/// What one file contributes to the derived-classification scan, as plain data so it crosses threads.
+#[derive(Default)]
+struct ClassifyFindings {
+    derived: Vec<DerivedType>,
+    /// Every struct's fields, for a `.field` step.
+    structs: BTreeMap<String, FieldPaths>,
+}
+
+/// The path `ty` is written as, looking through `Box` and `Arc`; `None` for a reference, trait object or tuple.
+fn written_path(ty: &syn::Type) -> Option<Vec<String>> {
+    let syn::Type::Path(typed) = ty else { return None };
+    let last = typed.path.segments.last()?;
+    if (last.ident == "Box" || last.ident == "Arc")
+        && let syn::PathArguments::AngleBracketed(arguments) = &last.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = arguments.args.first()
+    {
+        return written_path(inner);
+    }
+    Some(
+        typed
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
+}
+
+/// Each field whose type is a path.
+fn field_paths(fields: &syn::Fields) -> FieldPaths {
+    fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let key = field
+                .ident
+                .as_ref()
+                .map_or_else(|| index.to_string(), ToString::to_string);
+            Some((key, written_path(&field.ty)?))
+        })
+        .collect()
+}
+
+/// The field a `#[exit(delegate ..)]` hands on, as `.`-separated steps: `None` when the attribute is another
+/// form (`chain = ..` included, which hands its field on without inheriting its `DETAILS`), `Some(None)` for a
+/// bare `delegate`, which names the lone field.
+fn delegated_field(attribute: &syn::Attribute) -> Option<Option<Vec<String>>> {
+    use proc_macro2::TokenTree;
+
+    if !attribute.path().is_ident("exit") {
+        return None;
+    }
+    let syn::Meta::List(list) = &attribute.meta else {
+        return None;
+    };
+    let mut tokens = list.tokens.clone().into_iter();
+    let Some(TokenTree::Ident(form)) = tokens.next() else {
+        return None;
+    };
+    let named = matches!(tokens.next(), Some(TokenTree::Punct(punct)) if punct.as_char() == '=');
+    match (form.to_string().as_str(), named) {
+        ("delegate", false) => Some(None),
+        ("delegate", true) => {
+            let mut steps = Vec::new();
+            for token in tokens {
+                match token {
+                    TokenTree::Ident(step) => steps.push(step.to_string()),
+                    TokenTree::Literal(step) => steps.push(step.to_string()),
+                    TokenTree::Punct(punct) if punct.as_char() == '.' => {}
+                    _ => break,
+                }
+            }
+            Some(Some(steps))
+        }
+        _ => None,
+    }
+}
+
+/// Where the struct-level `delegate` among `attributes` hands its field on, in `fields`.
+///
+/// Only a struct delegate makes the struct's `DETAILS` its field type's `DETAILS`. An enum-variant `delegate`
+/// or `chain = field` arm classifies the error but adds no rows, so it is not read: a type behind only such an
+/// arm reads as unreached, which reds rather than passes.
+fn struct_delegate(attributes: &[syn::Attribute], fields: &syn::Fields) -> Option<(Vec<String>, Vec<String>)> {
+    let field = attributes.iter().find_map(delegated_field)?;
+    let paths = field_paths(fields);
+    let (first, steps) = match &field {
+        None => (paths.first()?.0.clone(), Vec::new()),
+        Some(steps) => (steps.first()?.clone(), steps[1..].to_vec()),
+    };
+    let (_, written) = paths.into_iter().find(|(key, _)| *key == first)?;
+    Some((written, steps))
+}
+
+/// Every non-test `#[derive(Classify)]` type in `parsed`, and every struct's fields.
+fn classify_findings(parsed: &syn::File) -> ClassifyFindings {
+    struct Scan(ClassifyFindings);
+    impl Visit<'_> for Scan {
+        fn visit_item_mod(&mut self, module: &syn::ItemMod) {
+            if !is_cfg_test(&module.attrs) {
+                syn::visit::visit_item_mod(self, module);
+            }
+        }
+        fn visit_item_fn(&mut self, function: &syn::ItemFn) {
+            if !is_cfg_test(&function.attrs) {
+                syn::visit::visit_item_fn(self, function);
+            }
+        }
+        fn visit_item_struct(&mut self, item: &syn::ItemStruct) {
+            if is_cfg_test(&item.attrs) {
+                return;
+            }
+            self.0
+                .structs
+                .entry(item.ident.to_string())
+                .or_insert_with(|| field_paths(&item.fields));
+            if derives(&item.attrs, "Classify") {
+                self.0.derived.push(DerivedType {
+                    line: item.ident.span().start().line,
+                    name: item.ident.to_string(),
+                    delegate: struct_delegate(&item.attrs, &item.fields),
+                });
+            }
+        }
+        fn visit_item_enum(&mut self, item: &syn::ItemEnum) {
+            if is_cfg_test(&item.attrs) || !derives(&item.attrs, "Classify") {
+                return;
+            }
+            self.0.derived.push(DerivedType {
+                line: item.ident.span().start().line,
+                name: item.ident.to_string(),
+                delegate: None,
+            });
+        }
+    }
+    let mut scan = Scan(ClassifyFindings::default());
+    scan.visit_file(parsed);
+    scan.0
+}
+
+/// Whether `file` is compiled for tests only: a `tests.rs` or anything under a `tests/` directory.
+fn is_test_only_file(file: &Path) -> bool {
+    file.file_name().is_some_and(|name| name == "tests.rs") || file.components().any(|part| part.as_os_str() == "tests")
+}
+
+/// The `(declaring file, name)` a struct delegate lands on, or `None` when it leaves the workspace.
+fn reach_target(
+    from: &Path,
+    (written, steps): &(Vec<String>, Vec<String>),
+    structs: &BTreeMap<(PathBuf, String), FieldPaths>,
+) -> Option<(PathBuf, String)> {
+    let mut at = resolve_type(from, written);
+    for step in steps {
+        let site = at.site?;
+        let fields = structs.get(&(site.clone(), at.name))?;
+        let (_, field) = fields.iter().find(|(key, _)| key == step)?;
+        at = resolve_type(&site, field);
+    }
+    Some((at.site?, at.name))
+}
+
+/// A declaration site: the file and the type name.
+type TypeKey = (PathBuf, String);
+
+/// What [`classification_verdict`] finds wrong.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ClassificationVerdict {
+    /// `families!` entries that resolve to no declaration, as written.
+    unresolved: Vec<String>,
+    /// Allowlist entries no longer derived, or now reached.
+    stale: Vec<TypeKey>,
+    /// Derived types neither reached nor allowlisted.
+    missing: Vec<TypeKey>,
+}
+
+/// The decision over the scan's data: a derived type is reached when a `families!` entry names it, or when a
+/// reached type's struct-level `delegate` lands on it (`delegates` maps each such struct to its target).
+fn classification_verdict(
+    derived: &BTreeSet<TypeKey>,
+    delegates: &BTreeMap<TypeKey, TypeKey>,
+    families: &[(String, Option<TypeKey>)],
+    allowed: &BTreeSet<TypeKey>,
+) -> ClassificationVerdict {
+    let mut verdict = ClassificationVerdict::default();
+    let mut reached: BTreeSet<TypeKey> = BTreeSet::new();
+    for (written, resolved) in families {
+        match resolved {
+            Some(key) => {
+                reached.insert(key.clone());
+            }
+            None => verdict.unresolved.push(written.clone()),
+        }
+    }
+    let mut frontier: Vec<TypeKey> = reached.iter().cloned().collect();
+    while let Some(key) = frontier.pop() {
+        if let Some(target) = delegates.get(&key)
+            && reached.insert(target.clone())
+        {
+            frontier.push(target.clone());
+        }
+    }
+    verdict.stale = allowed
+        .iter()
+        .filter(|key| !derived.contains(*key) || reached.contains(*key))
+        .cloned()
+        .collect();
+    verdict.missing = derived
+        .iter()
+        .filter(|key| !reached.contains(*key) && !allowed.contains(*key))
+        .cloned()
+        .collect();
+    verdict
+}
+
+/// Every `#[derive(Classify)]` type is a `ladder` rung or a `detail_registry()` source: listed in the binary's
+/// `families!` (`: rows_only` counts), reached by the struct-level `delegate` of a type that is, or named in
+/// [`DERIVED_BUT_UNREACHED`].
+///
+/// Only a struct delegate counts as reach: it makes the struct's `DETAILS` its field type's, while an enum arm's
+/// `delegate` or `chain = field` classifies the error without adding rows, and the CLI walker classifies only
+/// `families!` types. Reds on: a derived type nobody lists or delegates to, a `families!` entry that resolves
+/// to no declaration, an allowlist entry that is stale (no longer derived, or now reached). Floored on the
+/// derived types found and on the list read, so a reader that stopped finds nothing and cannot pass.
+#[test]
+fn every_derived_classification_type_is_registered_or_reached() {
+    let subtrees = crate_source_subtrees();
+    assert_walk_floor("the derived-classification scan", &subtrees, floor::ALL_CRATE_SOURCES);
+    let files: Vec<PathBuf> = subtrees
+        .iter()
+        .flat_map(|subtree| rust_sources(subtree))
+        .filter(|file| !is_test_only_file(file))
+        .collect();
+    let per_file = map_sources(&files, &|_: &Path, source: &Source| classify_findings(&source.file));
+    assert_eq!(
+        per_file.len(),
+        files.len(),
+        "the scan answered for {} of {} walked file(s)",
+        per_file.len(),
+        files.len()
+    );
+
+    let mut derived = BTreeMap::new();
+    let mut structs = BTreeMap::new();
+    for (file, findings) in files.iter().zip(per_file) {
+        for (name, fields) in findings.structs {
+            structs.insert((file.clone(), name), fields);
+        }
+        for item in findings.derived {
+            derived.insert((file.clone(), item.name.clone()), (item.line, item.delegate));
+        }
+    }
+    assert!(
+        derived.len() >= floor::DERIVED_CLASSIFICATION_TYPES,
+        "the scan found {} `#[derive(Classify)]` type(s), under its floor of {} — a reader that stopped \
+         reports every type it missed as registered",
+        derived.len(),
+        floor::DERIVED_CLASSIFICATION_TYPES
+    );
+
+    let exit = crates_dir().join("ocx_cli/src/exit.rs");
+    let exit_source = Source::parse(&exit);
+    let mut entries = Vec::new();
+    struct Lists<'a>(&'a mut Vec<(Vec<String>, bool)>);
+    impl Visit<'_> for Lists<'_> {
+        fn visit_item_mod(&mut self, module: &syn::ItemMod) {
+            if !is_cfg_test(&module.attrs) {
+                syn::visit::visit_item_mod(self, module);
+            }
+        }
+        fn visit_macro(&mut self, invocation: &syn::Macro) {
+            if invocation
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "families")
+            {
+                self.0.extend(families_entries(invocation));
+            }
+            syn::visit::visit_macro(self, invocation);
+        }
+    }
+    Lists(&mut entries).visit_file(&exit_source.file);
+    assert!(
+        entries.len() >= floor::FAMILIES_ENTRIES,
+        "the `families!` list in {} yielded {} entr(ies), under its floor of {}",
+        under_crates(&exit),
+        entries.len(),
+        floor::FAMILIES_ENTRIES
+    );
+
+    let families: Vec<(String, Option<TypeKey>)> = entries
+        .iter()
+        .map(|(path, _)| {
+            let resolved = resolve_type(&exit, path);
+            (path.join("::"), resolved.site.map(|site| (site, resolved.name)))
+        })
+        .collect();
+    let delegates: BTreeMap<TypeKey, TypeKey> = derived
+        .iter()
+        .filter_map(|(key, (_, delegate))| Some((key.clone(), reach_target(&key.0, delegate.as_ref()?, &structs)?)))
+        .collect();
+    let allowed: BTreeSet<TypeKey> = DERIVED_BUT_UNREACHED
+        .iter()
+        .map(|(file, name, _)| (crates_dir().join(file), (*name).to_owned()))
+        .collect();
+    let derived_keys: BTreeSet<TypeKey> = derived.keys().cloned().collect();
+    let verdict = classification_verdict(&derived_keys, &delegates, &families, &allowed);
+
+    assert!(
+        verdict.unresolved.is_empty(),
+        "`families!` entries resolving to no declaration in the workspace: {:?}",
+        verdict.unresolved
+    );
+    let stale: Vec<String> = verdict
+        .stale
+        .iter()
+        .map(|(file, name)| format!("{}::{name}", under_crates(file)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "DERIVED_BUT_UNREACHED entries that are no longer derived or are now reached: {stale:?}"
+    );
+    let missing: Vec<String> = verdict
+        .missing
+        .iter()
+        .map(|key| {
+            let path = under_crates(&key.0);
+            let krate = path.split('/').next().unwrap_or(&path);
+            format!("{krate}: {} ({path}:{})", key.1, derived[key].0)
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "`#[derive(Classify)]` types in no `families!` entry and behind no struct-level `delegate`, so they \
+         add no `error.detail` rows and no ladder rung. List each in `ocx_cli/src/exit.rs`, or add it to \
+         DERIVED_BUT_UNREACHED with the reason:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// Reds on: a derive missed, a `#[cfg(test)]` type counted, or a delegate read from anything but a struct.
+#[test]
+fn the_derived_type_scan_reads_each_arm_shape() {
+    let parsed: syn::File = syn::parse_str(
+        "#[derive(Debug, Classify)]
+         #[exit(delegate = kind)]
+         struct Wrapper { kind: Box<Inner>, other: Elsewhere }
+         #[derive(Classify)]
+         #[exit(delegate)]
+         struct Lone(Arc<Inner>);
+         #[derive(Classify)]
+         enum Many {
+             #[exit(delegate)]
+             Bare(Arc<Inner>),
+             #[exit(delegate = 0.kind)]
+             Stepped(Package),
+             #[exit(chain = source, fallback(Failure, slug = \"s\", summary = \"t\"))]
+             Chained { source: Inner },
+             #[exit(Failure, slug = \"s\", summary = \"t\")]
+             Coded,
+         }
+         #[derive(Debug)]
+         struct NotClassified;
+         #[cfg(test)]
+         mod tests { #[derive(Classify)] struct Hidden; }",
+    )
+    .expect("the arm-shape witness parses");
+    let found = classify_findings(&parsed);
+    let names: Vec<&str> = found.derived.iter().map(|item| item.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Wrapper", "Lone", "Many"],
+        "derived types, `#[cfg(test)]` and plain ones excluded"
+    );
+    let path = |text: &str| vec![text.to_owned()];
+    assert_eq!(found.derived[0].delegate, Some((path("Inner"), vec![])));
+    assert_eq!(found.derived[1].delegate, Some((path("Inner"), vec![])));
+    assert_eq!(
+        found.derived[2].delegate, None,
+        "an enum's `delegate` and `chain = field` arms reach nothing: only a struct delegate inherits `DETAILS`"
+    );
+    assert_eq!(found.structs["Wrapper"][0], ("kind".to_owned(), path("Inner")));
+}
+
+/// Reds on: an unreached derived type read as reached, a stale allowlist entry read as live, a reach that does
+/// not propagate through a chain of struct delegates, or an unresolved `families!` entry passed.
+#[test]
+fn the_classification_verdict_reds_on_each_defect() {
+    let key = |name: &str| (PathBuf::from("synthetic"), name.to_owned());
+    let derived: BTreeSet<TypeKey> = ["Listed", "Wrapper", "Inner", "Orphan"].map(key).into_iter().collect();
+    let delegates = BTreeMap::from([(key("Listed"), key("Wrapper")), (key("Wrapper"), key("Inner"))]);
+    let families = [("Listed".to_owned(), Some(key("Listed")))];
+
+    let verdict = classification_verdict(&derived, &delegates, &families, &BTreeSet::new());
+    assert_eq!(
+        verdict,
+        ClassificationVerdict {
+            missing: vec![key("Orphan")],
+            ..ClassificationVerdict::default()
+        },
+        "the listed type and both delegate hops are reached; the orphan is missing"
+    );
+
+    let allowed: BTreeSet<TypeKey> = [key("Orphan")].into_iter().collect();
+    assert_eq!(
+        classification_verdict(&derived, &delegates, &families, &allowed),
+        ClassificationVerdict::default(),
+        "an allowlisted orphan is accepted"
+    );
+
+    let allowed: BTreeSet<TypeKey> = [key("Orphan"), key("Inner"), key("Gone")].into_iter().collect();
+    assert_eq!(
+        classification_verdict(&derived, &delegates, &families, &allowed).stale,
+        [key("Gone"), key("Inner")],
+        "an allowlist entry that is reached, or no longer derived, is stale"
+    );
+
+    let families = [("a::Nowhere".to_owned(), None)];
+    assert_eq!(
+        classification_verdict(&derived, &BTreeMap::new(), &families, &BTreeSet::new()).unresolved,
+        ["a::Nowhere"],
+        "a `families!` entry resolving to nothing is reported as written"
     );
 }
 
@@ -1522,8 +2586,10 @@ fn no_classification_in_libraries() {
 fn boundary_subtrees() -> Vec<PathBuf> {
     /// Each excluded for a reason, never for convenience:
     /// - `ocx` is the consumer side of this boundary, not a crossing.
-    /// - `ocx_schema` is build-only and links into no command.
+    /// - `ocx_schema` and `ocx_sdkgen` are build- or test-only and link into no command.
     /// - `ocx_test_support` is this harness.
+    /// - `ocx_exit_derive` is a proc-macro: it runs at compile time and links into no
+    ///   command, so its `syn::Error` is a compile error and never a cause at runtime.
     /// - `ocx_python` is an ecosystem crate `ocx` does not link: its errors
     ///   never reach this ladder, and its consumers classify them (e.g.
     ///   ocx-mirror's `ocx_mirror_error::pylock`). Arming it here would add
@@ -1531,7 +2597,14 @@ fn boundary_subtrees() -> Vec<PathBuf> {
     ///
     /// `ocx_shim` needs no entry: it is a Windows launcher binary with no
     /// `lib.rs`, so the filter below drops it without a judgement call.
-    const NOT_ON_THE_BOUNDARY: &[&str] = &["ocx", "ocx_python", "ocx_schema", "ocx_test_support"];
+    const NOT_ON_THE_BOUNDARY: &[&str] = &[
+        "ocx",
+        "ocx_exit_derive",
+        "ocx_python",
+        "ocx_schema",
+        "ocx_sdkgen",
+        "ocx_test_support",
+    ];
 
     let dirs = crate_dirs();
     for excluded in NOT_ON_THE_BOUNDARY {
@@ -1581,7 +2654,7 @@ fn directory_name(dir: &Path) -> String {
 }
 
 /// Error types a `pub fn` under [`BOUNDARY_SUBTREES`] returns that the `ocx_cli`
-/// ladder carries no `downcast_arm!` for.
+/// `families!` list gives no rung.
 ///
 /// Arming one **moves an exit code** — from the walker's fall-through
 /// `Failure` (1) to whatever the arm says — and the crate split must not change
@@ -1596,7 +2669,7 @@ fn directory_name(dir: &Path) -> String {
 /// row here: `attempt_noclobber` and `persist_with_retry` are private and both
 /// `pub` wrappers around them return `std::io::Result`, so it crosses no `pub`
 /// signature and the existence assertion below rejects the row outright.
-/// Error types a `pub fn` hands the CLI that no `downcast_arm!` registers, each
+/// Error types a `pub fn` hands the CLI that no `families!` rung covers, each
 /// keyed on **the boundary site as well as the type** (B6-B3).
 ///
 /// Keyed on the rendered type alone, an exemption was a wildcard: every later
@@ -1610,7 +2683,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
     // were spelling, not substance: `GitHubFlavor::from_env` and
     // `GitLabFlavor::new` returned `super::error::Error`, which the arm
     // registry cannot resolve, while the type itself is armed by
-    // `downcast_arm!(cause, CiError)` in `ocx_cli/src/exit/ocx_shell.rs`. They
+    // the `families!` list in `ocx_cli/src/exit.rs`. They
     // are spelled `crate::ci::error::Error` now rather than recorded here —
     // a row claiming an armed type is unarmed is a false record, and the next
     // reader would act on it. Only the third is a real decision.
@@ -1625,7 +2698,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
          as text — `reconcile::plan` logs it in the A-10 warn line and `conventions::emit_lines` \
          formats it into a `# ocx:` note — and neither propagates a value that could carry an exit \
          code. There is no type here to arm: `&'static str` implements no `std::error::Error`, so a \
-         `downcast_arm!` rung could never match it",
+         `families!` rung could never match it",
     ),
     (
         "ocx_util/src/fs/bounded_read.rs",
@@ -1642,7 +2715,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
         "ocx_oci/src/manifest.rs",
         "InvalidImageIndex",
         "WP-24: `manifest::validate_image_index` raises it; every caller either `?`s it into \
-         `ClientError` or maps it onto `oci::index::error::Error`, both of which a `downcast_arm!` \
+         `ClientError` or maps it onto `oci::index::error::Error`, both of which a `families!` rung \
          registers",
     ),
     (
@@ -1683,14 +2756,14 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
         "ocx_trust/src/key_ref.rs",
         "KeyRefError",
         "WP-25: `oci/verify/error.rs` is the single `From` site, choosing between \
-         `VerifyErrorKind::UnsupportedKeyBackend` and `KeyReferenceInvalid`; `ocx_sign.rs` \
-         classifies both",
+         `VerifyErrorKind::UnsupportedKeyBackend` and `KeyReferenceInvalid`; \
+         `VerifyErrorKind` classifies both",
     ),
     (
         "ocx_trust/src/lib.rs",
         "TrustPolicyError",
-        "WP-25: it crosses as `VerifyErrorKind::TrustPolicyInvalid(..)`, which `ocx_sign.rs` \
-         classifies variant by variant — arming the inner type would put a second, closer \
+        "WP-25: it crosses as `VerifyErrorKind::TrustPolicyInvalid(..)`, which \
+         the Kind classifies variant by variant — arming the inner type would put a second, closer \
          classifier on a value that already has one",
     ),
     // The `ocx_config` rows are REVELATION too: every signature is
@@ -1719,6 +2792,15 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
          loader as `ConfigError::Parse`. It never fails on a value, only on a deserializer that yields none",
     ),
     (
+        "ocx_config/src/refresh.rs",
+        "IntervalError",
+        "`parse_interval`'s error. Every production caller turns it into text: `[update]` and \
+         `OCX_UPDATE_CHECK_INTERVAL` drop an unusable value with a warning or a debug line, \
+         `[managed]` wraps it as `ManagedConfigError::InvalidInterval` (an armed type), and \
+         `config update --pause` renders it into a clap value-parser message (exit 64). No caller \
+         propagates the bare value to the exit-code walk",
+    ),
+    (
         "ocx_config/src/shell.rs",
         "ConsentPatternError",
         "WP-26: `validate_consent_pattern` and `normalize_consent_pattern` have no caller outside this \
@@ -1745,7 +2827,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
         "AssembleError",
         "WP-27: `File` -> `InternalFile` (74), `SymlinkWalk` -> `SymlinkWalk` (delegates, 64/74), \
          `Archive` -> `Archive`; every `assemble_from_layer*` caller `?`s it into `ocx_lib::Error`, \
-         which a `downcast_arm!` registers",
+         which a `families!` rung registers",
     ),
     (
         "ocx_store/src/file_structure/cas_path.rs",
@@ -1771,6 +2853,13 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
     // replaced named none of them. Each signature is byte-identical to the one
     // at the merge base — nothing changed but who was looking.
     (
+        "ocx_package/src/upgrade_target.rs",
+        "SkipReason",
+        "`tracked_version` returns the reason a binding is left alone as its `Err`, but it is a report \
+         row, not a failure: `ocx upgrade` matches it into `SkippedBinding.reason` and exits 0. No \
+         path propagates it to the exit-code walk, and it implements no `std::error::Error`",
+    ),
+    (
         "ocx_package/src/cascade/graph.rs",
         "ScopeError",
         "B8: `scope_request` and `scope_filter`. Both production callers are in `ocx_cli` itself \
@@ -1784,7 +2873,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
         "D::Error",
         "B8: `reject_retired_platform`, a `#[serde(deserialize_with)]` helper. `D::Error` is \
          `<D as Deserializer<'de>>::Error` — a generic associated type under a bare \
-         `D: serde::Deserializer<'de>` bound, so there is no concrete type a `downcast_arm!` could \
+         `D: serde::Deserializer<'de>` bound, so there is no concrete type a `families!` rung could \
          name; serde's generated code is the only caller",
     ),
     (
@@ -1827,9 +2916,9 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
     ),
     // The `ocx_sign` rows, WP-31. `SignError` and `VerifyError` are armed;
     // `SignErrorKind` and `VerifyErrorKind` are what they carry, and
-    // `exit/ocx_sign.rs` implements `ClassifyErrorKind` on the Kind itself —
+    // The Kinds derive `Classify` themselves —
     // so a Kind's exit code is already decided there and is reached *through*
-    // the armed wrapper. A `downcast_arm!` on the Kind would register a second
+    // the armed wrapper. A `families!` rung on the Kind would register a second
     // entry for a value that already has one, which is the DEC-23 hazard.
     //
     // Three routes carry a bare Kind out of this crate, and none of them is an
@@ -1863,7 +2952,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
         "serde_json::Error",
         "WP-31: `PredicateType::wrap` hands the serializer's error through verbatim (ADR 1.18 shape). \
          Its one production caller, `statement::build`, maps it to `SignErrorKind::Internal` \
-         immediately, and `Internal` is the arm `exit/ocx_sign.rs` deliberately classifies as `None` \
+         immediately, and `Internal` is the arm `SignErrorKind` deliberately classifies as `None` \
          so the chain walker decides — exit 1 for a serializer that cannot fail on our own types",
     ),
     (
@@ -1907,7 +2996,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
         "KeyBackendError",
         "WP-31: `PemKeyBackend::{open, open_env, from_encrypted_pem}`. \
          `#[error(transparent)] KeyBackend(#[from] KeyBackendError)` on `SignErrorKind` is the sole \
-         conversion, and `exit/ocx_sign.rs` matches inside that arm to pick the code — so the value \
+         conversion, and `SignErrorKind` matches inside that arm to pick the code — so the value \
          is classified by variant already, one level in",
     ),
     (
@@ -2105,7 +3194,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
 /// `ArchiveError`, `CompressionError` — that no library signature ever writes,
 /// and a one-argument `Result<T>` names no type at its use site at all. Keyed
 /// on the bare last segment, all of them collapse onto the single string
-/// `Error`, which `downcast_arm!(cause, ocx_lib::Error)` arms — so every
+/// `Error`, which `ocx_lib::Error` in the `families!` list arms — so every
 /// `pub fn` under `crates/ocx_util/src` returning the alias discharged against
 /// an arm for a *different crate's* type, and deleting the two arms that really
 /// serve them left this guard green.
@@ -2117,7 +3206,7 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
 /// and resolving it would buy nothing while risking a one-sided failure.
 const AMBIGUOUS_ERROR_NAME: &str = "Error";
 
-/// A type as a `pub` signature or a `downcast_arm!` names it: the name at its
+/// A type as a `pub` signature or a `families!` entry names it: the name at its
 /// declaration — not at the use site, which may be a rename — and the file that
 /// declares it when the workspace does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2566,14 +3655,63 @@ fn resolve_named(from: &Path, ty: &NamedType) -> Resolved {
     }
 }
 
-/// Every type named by a `downcast_arm!` under `crates/ocx_cli/src/`, keyed the
-/// way [`Resolved::key`] keys the boundary scan's reaches.
+/// Every entry of a `families!` list as its path and whether it is `: rows_only`.
 ///
-/// Read off the invocations rather than a maintained list, for the reason
-/// DEC-22 gives: a list is one edit away from being short, and the guard that
-/// reads it cannot notice the entry that was never added. The `macro_rules!`
-/// definition in `exit.rs` is not an invocation and does not match — its own
-/// path is `macro_rules`.
+/// An entry the grammar does not parse panics, rather than reading as a type that was never listed.
+fn families_entries(invocation: &syn::Macro) -> Vec<(Vec<String>, bool)> {
+    let entries = invocation
+        .parse_body_with(|input: syn::parse::ParseStream<'_>| {
+            syn::punctuated::Punctuated::<(syn::TypePath, bool), syn::Token![,]>::parse_terminated_with(
+                input,
+                |input| {
+                    let ty: syn::TypePath = input.parse()?;
+                    if !input.peek(syn::Token![:]) {
+                        return Ok((ty, false));
+                    }
+                    input.parse::<syn::Token![:]>()?;
+                    let role: syn::Ident = input.parse()?;
+                    if role != "rows_only" {
+                        return Err(syn::Error::new(
+                            role.span(),
+                            "the one role a `families!` entry takes is `rows_only`",
+                        ));
+                    }
+                    Ok((ty, true))
+                },
+            )
+        })
+        .expect("a `families!` list parses");
+    entries
+        .into_iter()
+        .map(|(ty, rows_only)| {
+            let path = ty
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            (path, rows_only)
+        })
+        .collect()
+}
+
+/// The path of every type a `families!` list gives a rung: all of them but the `: rows_only` entries.
+///
+/// A `: rows_only` type is registered for its rows and downcast by nothing, so it arms no boundary reach.
+fn families_rungs(invocation: &syn::Macro) -> Vec<Vec<String>> {
+    families_entries(invocation)
+        .into_iter()
+        .filter(|(_, rows_only)| !rows_only)
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// Every type the `families!` list under `crates/ocx_cli/src/` gives a rung, keyed the way
+/// [`Resolved::key`] keys the boundary scan's reaches.
+///
+/// Read off the invocation rather than a maintained list, for the reason DEC-22 gives: a list is one
+/// edit away from being short, and the guard that reads it cannot notice the entry that was never added.
+/// The `macro_rules!` definition lives in `ocx_exit`, out of this walk.
 ///
 /// The whole path is kept, not its last segment: the ladder writes renamed
 /// imports (`UtilError`) and crate-qualified paths (`ocx_lib::Error`), and
@@ -2581,7 +3719,7 @@ fn resolve_named(from: &Path, ty: &NamedType) -> Resolved {
 ///
 /// `#[cfg(test)]` code is skipped, matching [`boundary_error_types`] and
 /// [`DeclaredTypes::absorb`]: an arm that reaches no binary arms nothing, and
-/// counting it would let a test-only `downcast_arm!` discharge a real reach
+/// counting it would let a test-only `families!` list discharge a real reach
 /// (B5R-6).
 fn armed_error_types() -> BTreeSet<String> {
     struct Arms {
@@ -2593,9 +3731,9 @@ fn armed_error_types() -> BTreeSet<String> {
         /// The one arm the sugar cannot express. `std::io::Error` is not
         /// OCX-owned, so `ClassifyExitCode` cannot be implemented for it
         /// (orphan rule) and `exit/classify.rs` downcasts it by hand — a form a
-        /// scanner that reads only `downcast_arm!` sees as *absent*, which is
+        /// scanner that reads only `families!` sees as *absent*, which is
         /// B5R-1's defect in miniature. Counted only under `exit/`, where every
-        /// downcast is a classification: `error_envelope.rs` downcasts to
+        /// downcast is a classification: `error_document.rs` downcasts to
         /// render, not to pick an exit code.
         ///
         /// The question this answers is whether the ladder names the type at
@@ -2645,21 +3783,9 @@ fn armed_error_types() -> BTreeSet<String> {
                 .path
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == "downcast_arm")
+                .is_some_and(|segment| segment.ident == "families")
             {
-                let tokens: Vec<Token> = flatten(invocation.tokens.clone());
-                // `cause , <path :: to :: Type>` — the type is everything after
-                // the one separating comma, and its identifiers are its path.
-                if let Some(comma) = tokens.iter().position(|token| token.text == ",") {
-                    let path: Vec<String> = tokens[comma + 1..]
-                        .iter()
-                        .filter(|token| is_identifier(&token.text))
-                        .map(|token| token.text.clone())
-                        .collect();
-                    if !path.is_empty() {
-                        self.paths.push(path);
-                    }
-                }
+                self.paths.extend(families_rungs(invocation));
             }
             syn::visit::visit_macro(self, invocation);
         }
@@ -2701,14 +3827,10 @@ fn armed_error_types() -> BTreeSet<String> {
     assert!(
         armed.len() > 40,
         "the downcast ladder yielded only {} armed type(s) — the extractor stopped reading \
-         `downcast_arm!` invocations",
+         `families!` list",
         armed.len()
     );
     armed
-}
-
-fn is_identifier(text: &str) -> bool {
-    text.starts_with(|c: char| c.is_alphabetic() || c == '_')
 }
 
 /// The error type of a `Result<..>` return, with the line its `Result` sits on.
@@ -2775,15 +3897,15 @@ fn quote_type(ty: &syn::Type) -> String {
     ty.to_token_stream().to_string().replace(' ', "")
 }
 
-/// Whether `attributes` carry a `derive` naming `Error`.
+/// Whether `attributes` carry a `derive` naming `name`.
 ///
 /// Matched on the derive's last path segment, so `thiserror::Error` — the one
 /// spelling this workspace writes — and a bare imported `Error` both count.
-fn derives_error(attributes: &[syn::Attribute]) -> bool {
+fn derives(attributes: &[syn::Attribute], name: &str) -> bool {
     attributes.iter().any(|attribute| {
         attribute.path().is_ident("derive")
             && matches!(&attribute.meta, syn::Meta::List(list)
-                if flatten(list.tokens.clone()).iter().any(|token| token.text == "Error"))
+                if flatten(list.tokens.clone()).iter().any(|token| token.text == name))
     })
 }
 
@@ -2831,7 +3953,7 @@ impl DeclaredTypes {
         impl Scan<'_> {
             fn record(&mut self, name: &syn::Ident, attributes: &[syn::Attribute]) {
                 let name = name.to_string();
-                if derives_error(attributes) {
+                if derives(attributes, "Error") {
                     self.0.implementing.insert(name.clone());
                 }
                 self.0.declared.insert(name);
@@ -3060,29 +4182,27 @@ fn unarmed_boundary_types(
 }
 
 /// Every error type a `pub fn` under `crates/ocx_lib/src/utility/` hands the
-/// CLI is registered in the `ocx_cli` downcast ladder (DEC-23, B3-13).
+/// CLI is listed in the `ocx_cli` `families!` list (DEC-23, B3-13).
 ///
-/// **What the existing tests cannot do.** `exit/classify.rs:456` says the
-/// mechanism outright: `try_classify` is a hand-written downcast ladder with no
-/// compile-time guard, and a type with no arm falls through to `Failure` (1).
+/// **What the existing tests cannot do.** `families!` refuses, at compile time, a
+/// listed type that lacks either trait; it cannot refuse a type nobody listed,
+/// and that type falls through to `Failure` (1).
 /// Every classification test in the tree is written against a type *someone
 /// remembered to arm* — they pin the arms that exist and are structurally
 /// incapable of failing for a type that has none, which is precisely the state
 /// `cargo nextest` was in, 8190/8190 green, while DEC-23 was shipped and only
-/// the acceptance suite saw it. `every_classification_matches_the_pre_split_baseline`
-/// is the same direction one step wider: it pins the arms the tree *has*
-/// against the arms it had at `7adaea62`.
+/// the acceptance suite saw it.
 ///
-/// This is the other direction. Neither side is a list: the obligation is
+/// This test is the other direction. Neither side is a list: the obligation is
 /// derived from `ocx_lib`'s own signatures and the discharge is derived from the
-/// ladder's own invocations, so a package that re-points a signature at a new
-/// error type grows the left side by itself and reds until the arm exists.
+/// `families!` list's own entries, so a package that re-points a signature at a new
+/// error type grows the left side by itself and reds until the type is listed.
 ///
 /// **The two alternatives, and why not.** An *exhaustive match* cannot be
 /// written — `downcast_ref` over `dyn Error` has no exhaustiveness, so the
 /// compiler would need the list of types enumerated somewhere, which is the
-/// thing that can be short. A *shared registry* the ladder is generated from and
-/// the test reads is worse: both sides then read the same list, so a type
+/// thing that can be short. A test reading the obligation off the *same list* `families!`
+/// generates the ladder from is worse: both sides then read the same list, so a type
 /// missing from it is missing from both and the check is green in exactly the
 /// broken state — the defect DEC-22 already named in the pin's old file list.
 #[test]
@@ -3116,7 +4236,7 @@ fn every_utility_error_reaching_the_cli_is_armed() {
     // very commit DEC-35 wants to be one line. A resolver that stopped
     // resolving keys every `Error` on a string no arm carries, so the reach is
     // reported by name here instead of quietly rejoining the bare `Error` that
-    // `downcast_arm!(cause, ocx_lib::Error)` discharges (B5R-1).
+    // `ocx_lib::Error` in the `families!` list discharges (B5R-1).
     //
     // Resolved **once per file**, for the three questions below to share. They
     // asked `boundary_error_types` the same question of the same file three
@@ -3206,7 +4326,7 @@ fn every_utility_error_reaching_the_cli_is_armed() {
             .cloned()
             .collect(),
         &fixture("unarmed_boundary_error.rs.txt"),
-        "a `pub fn` returning an error type no `downcast_arm!` in crates/ocx_cli/src registers",
+        "a `pub fn` returning an error type no `families!` rung in crates/ocx_cli/src/exit.rs covers",
         &["NeverArmedError"],
         &|path, source| {
             boundary_error_types(path, &source.file, scoped(path))
@@ -3726,7 +4846,7 @@ fn boundary_guard_calls() -> Vec<GuardCall> {
         }
     }
     assert!(
-        scanned > 5 && out.len() > 10,
+        scanned > 5 && out.len() > 9,
         "the call-site scan read {scanned} test file(s) and found {} guard call(s) — it stopped \
          recognising the shape, and every needle list would then be checked by nothing",
         out.len()

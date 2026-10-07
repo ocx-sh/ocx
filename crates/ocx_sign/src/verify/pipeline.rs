@@ -35,6 +35,7 @@ use crate::sign::bundle::{MAX_BUNDLE_SIZE_BYTES, parse_bundle};
 use crate::sign::state::SigningStatePaths;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{Client, OciTransport, ReferrersListing, sibling_tag_reference};
+use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
 use ocx_oci::referrer::media_types::{
     ANNOTATION_BUNDLE_CONTENT, ANNOTATION_BUNDLE_PREDICATE_TYPE, BUNDLE_CONTENT_DSSE, COSIGN_SBOM_ARTIFACT_TYPE,
     COSIGN_SIG_ARTIFACT_TYPE, SIGSTORE_BUNDLE_V03,
@@ -46,11 +47,6 @@ use ocx_trust::PolicyBackend;
 use ocx_trust::key_ref::KeyBackendKind;
 use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{Bundle, bundle, verification_material};
 use sigstore_protobuf_specs::dev::sigstore::rekor::v1::InclusionProof as ProtoInclusionProof;
-
-pub(super) const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
-    ocx_oci::OCI_IMAGE_MEDIA_TYPE,
-    "application/vnd.docker.distribution.manifest.v2+json",
-];
 
 /// Maximum accepted size of a referrer manifest, in bytes (a real one is a few hundred).
 pub(super) const MAX_REFERRER_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -1659,8 +1655,8 @@ impl RekorKeyMemo {
     ///
     /// # Errors
     ///
-    /// [`VerifyErrorKind::TransparencyLogUnavailable`] when the trust root pins
-    /// no key for this log and either the run is offline or the fetch fails.
+    /// [`VerifyErrorKind::OfflineNoPinnedRekorKey`] when the trust root pins no key for this log and the run is
+    /// offline; otherwise the fetch's own failure, see [`fetch_rekor_public_key_pem`].
     pub(super) async fn resolve(
         &self,
         trust_root: &TrustRoot,
@@ -1673,7 +1669,7 @@ impl RekorKeyMemo {
         }
         let pem = match trust_root.rekor_public_key_pem_for(log_id_hex) {
             Some(pinned) => pinned,
-            None if offline => return Err(VerifyErrorKind::TransparencyLogUnavailable),
+            None if offline => return Err(VerifyErrorKind::OfflineNoPinnedRekorKey),
             None => fetch_rekor_public_key_pem(rekor_url).await?,
         };
         self.lock().insert(log_id_hex.to_owned(), pem.clone());
@@ -1700,7 +1696,16 @@ impl RekorKeyMemo {
 /// Fetch the Rekor log's published public key PEM (trust-on-first-use, online).
 ///
 /// `pub` so the auto-verify hook fetches the key once per batch.
+///
+/// # Errors
+///
+/// [`VerifyErrorKind::TransparencyLogUnavailable`] for a transient send failure, a transient status (408/429/502/503/504)
+/// or a body stream that broke (retry); [`VerifyErrorKind::TransparencyLogKeyUnavailable`] for a non-transient send
+/// failure (a refused certificate) or any other non-2xx;
+/// [`VerifyErrorKind::TransparencyLogResponseInvalid`] for a body over the cap or not UTF-8.
 pub async fn fetch_rekor_public_key_pem(rekor_url: &Url) -> Result<String, VerifyErrorKind> {
+    use ocx_oci::endpoint::BodyReadError;
+
     let endpoint = rekor_url
         .join("api/v1/log/publicKey")
         .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
@@ -1708,15 +1713,34 @@ pub async fn fetch_rekor_public_key_pem(rekor_url: &Url) -> Result<String, Verif
         .get(endpoint)
         .send()
         .await
-        .map_err(|_| VerifyErrorKind::TransparencyLogUnavailable)?;
-    if !response.status().is_success() {
-        return Err(VerifyErrorKind::TransparencyLogUnavailable);
+        .map_err(|e| {
+            if ocx_oci::transport_policy::is_transient_transport_error(&e) {
+                VerifyErrorKind::TransparencyLogUnavailable
+            } else {
+                // The cause carries the remedy (a refused redirect says to point the URL at the final host).
+                tracing::warn!(
+                    "Rekor public-key request failed and a rerun will not change that: {}",
+                    ocx_oci::endpoint::describe_send_failure(e)
+                );
+                VerifyErrorKind::TransparencyLogKeyUnavailable
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(if ocx_oci::transport_policy::is_transient_status(status.as_u16()) {
+            VerifyErrorKind::TransparencyLogUnavailable
+        } else {
+            VerifyErrorKind::TransparencyLogKeyUnavailable
+        });
     }
     // Capped: a PEM public key is under a kilobyte.
     let raw = ocx_oci::endpoint::read_body_capped(response)
         .await
-        .ok_or(VerifyErrorKind::TransparencyLogUnavailable)?;
-    String::from_utf8(raw).map_err(|_| VerifyErrorKind::TransparencyLogUnavailable)
+        .map_err(|fault| match fault {
+            BodyReadError::Transport => VerifyErrorKind::TransparencyLogUnavailable,
+            BodyReadError::Oversize => VerifyErrorKind::TransparencyLogResponseInvalid,
+        })?;
+    String::from_utf8(raw).map_err(|_| VerifyErrorKind::TransparencyLogResponseInvalid)
 }
 
 /// Pull a referrer payload blob, reading at most `cap + 1` bytes (CWE-400).
@@ -1753,7 +1777,7 @@ async fn pull_referrer_manifest_capped(
     referrer_ref: &native::Reference,
 ) -> Result<Vec<u8>, VerifyErrorKind> {
     let (referrer_bytes, _) = transport
-        .pull_manifest_raw(referrer_ref, ACCEPTED_MANIFEST_TYPES)
+        .pull_manifest_raw(referrer_ref, SIGNABLE_MANIFEST_TYPES)
         .await
         .map_err(map_client_error)?;
     if referrer_bytes.len() as u64 > MAX_REFERRER_MANIFEST_BYTES {
@@ -1778,7 +1802,7 @@ async fn pull_sbom_sidecar_manifest(
     subject_digest: &Digest,
 ) -> Result<Option<(Vec<u8>, Digest)>, VerifyErrorKind> {
     let target = sibling_tag_reference(image, ocx_oci::tag::sbom_sidecar_tag(subject_digest));
-    let (bytes, digest) = match transport.pull_manifest_raw(&target, ACCEPTED_MANIFEST_TYPES).await {
+    let (bytes, digest) = match transport.pull_manifest_raw(&target, SIGNABLE_MANIFEST_TYPES).await {
         Ok(answer) => answer,
         Err(ClientError::ManifestNotFound(_)) => return Ok(None),
         Err(other) => return Err(map_client_error(other)),
@@ -2012,9 +2036,12 @@ fn truncation_failure(caps: ContentCaps, stop: ScanStop, unexamined: usize) -> V
 /// Pick the most actionable failure across the refused candidates (see [`failure_rank`]).
 fn best_failure(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind> {
     // Not `max_by_key`: it returns the last maximum, reordering which of two equal-ranked refusals is shown.
+    // The tie-break makes the verdict independent of referrer order even inside one tier.
     refused
         .into_iter()
-        .min_by_key(|candidate| std::cmp::Reverse(failure_rank(&candidate.reason)))
+        .min_by_key(|candidate| {
+            std::cmp::Reverse((failure_rank(&candidate.reason), failure_tiebreak(&candidate.reason)))
+        })
         .map(|candidate| candidate.reason)
 }
 
@@ -2038,9 +2065,27 @@ fn failure_rank(kind: &VerifyErrorKind) -> u8 {
         | VerifyErrorKind::CertChainInvalid
         | VerifyErrorKind::RekorSetInvalid
         | VerifyErrorKind::TransparencyBodyMismatch => 4,
-        VerifyErrorKind::TransparencyLogUnavailable | VerifyErrorKind::RekorSetAbsentTsaPresent => 3,
-        VerifyErrorKind::BundleParseFailed | VerifyErrorKind::NoUsableBundle => 2,
+        VerifyErrorKind::TransparencyLogUnavailable
+        | VerifyErrorKind::TransparencyLogKeyUnavailable
+        | VerifyErrorKind::TransparencyLogResponseInvalid
+        | VerifyErrorKind::OfflineNoPinnedRekorKey => 3,
+        // A bundle shape this build cannot process is the same genus as an unparseable one, and no retry helps.
+        VerifyErrorKind::BundleParseFailed
+        | VerifyErrorKind::NoUsableBundle
+        | VerifyErrorKind::RekorSetAbsentTsaPresent => 2,
         _ => 1,
+    }
+}
+
+/// Order the failures that share a [`failure_rank`] tier by how definitive their next action is.
+///
+/// A policy refusal (81) outranks bad data (65), which outranks an unusable log (69), which outranks a retry (75).
+fn failure_tiebreak(kind: &VerifyErrorKind) -> u8 {
+    match kind {
+        VerifyErrorKind::OfflineNoPinnedRekorKey => 3,
+        VerifyErrorKind::TransparencyLogResponseInvalid => 2,
+        VerifyErrorKind::TransparencyLogKeyUnavailable => 1,
+        _ => 0,
     }
 }
 
@@ -2091,7 +2136,7 @@ async fn pull_subject_manifest_verified(
     // Digest-addressed, not whatever the tag points at now.
     let pinned = image.clone_with_digest(subject_digest.to_string());
     let (bytes, _) = transport
-        .pull_manifest_raw(&pinned, ACCEPTED_MANIFEST_TYPES)
+        .pull_manifest_raw(&pinned, SIGNABLE_MANIFEST_TYPES)
         .await
         .map_err(map_client_error)?;
     // No size cap: the body is already allocated, so a cap would refuse only a genuine oversized manifest.
@@ -2170,7 +2215,7 @@ fn map_resolve_target_error(error: ResolveTargetError) -> VerifyErrorKind {
 /// Map an OCI client error into the verify taxonomy.
 pub fn map_client_error(error: ClientError) -> VerifyErrorKind {
     match error {
-        // Keep this arm: the catch-all would reclassify it to exit 1. Verify answers 79; 84 is write-path only.
+        // Keep this arm: the catch-all would reclassify it to exit 1. Verify answers 79; 82 is write-path only.
         ClientError::ReferrersUnsupported { .. } => VerifyErrorKind::NoSignaturesFound,
         ClientError::ManifestNotFound(_) | ClientError::BlobNotFound { .. } => VerifyErrorKind::NoSignaturesFound,
         // Malformed signature data: exit 65, not the catch-all's exit 1.
@@ -2510,6 +2555,16 @@ mod tests {
         assert!(identity > tamper);
         assert!(tamper > rekor_avail);
         assert!(rekor_avail > parse);
+        // Every way the log's key can fail to arrive is one service-availability tier.
+        for unavailable in [
+            VerifyErrorKind::TransparencyLogKeyUnavailable,
+            VerifyErrorKind::TransparencyLogResponseInvalid,
+            VerifyErrorKind::OfflineNoPinnedRekorKey,
+        ] {
+            assert_eq!(rekor_avail, failure_rank(&unavailable), "{unavailable:?}");
+        }
+        // A v2 bundle this build cannot read ranks with the unparseable, below an outage.
+        assert_eq!(parse, failure_rank(&VerifyErrorKind::RekorSetAbsentTsaPresent));
         // Every crypto-tamper variant sits in the same tier.
         assert_eq!(tamper, failure_rank(&VerifyErrorKind::SignatureInvalid));
         assert_eq!(tamper, failure_rank(&VerifyErrorKind::CertChainInvalid));
@@ -3523,6 +3578,46 @@ mod tests {
         ])
         .expect("a non-empty refusal list has a best");
         assert!(best_failure(Vec::new()).is_none(), "nothing refused, nothing to report");
+    }
+
+    /// Inside one rank tier the verdict must not depend on referrer order: policy (81) over data (65) over an
+    /// unusable log (69) over a retry (75).
+    #[test]
+    fn the_aggregate_failure_within_a_tier_does_not_depend_on_referrer_order() {
+        let kinds = || {
+            [
+                VerifyErrorKind::TransparencyLogUnavailable,
+                VerifyErrorKind::TransparencyLogKeyUnavailable,
+                VerifyErrorKind::TransparencyLogResponseInvalid,
+                VerifyErrorKind::OfflineNoPinnedRekorKey,
+            ]
+        };
+        let pick = |order: Vec<VerifyErrorKind>| {
+            best_failure(order.into_iter().map(refusal).collect()).expect("a non-empty refusal list has a best")
+        };
+        let forward = pick(kinds().into_iter().collect());
+        let backward = pick(kinds().into_iter().rev().collect());
+        assert!(
+            matches!(forward, VerifyErrorKind::OfflineNoPinnedRekorKey),
+            "{forward:?}"
+        );
+        assert!(
+            matches!(backward, VerifyErrorKind::OfflineNoPinnedRekorKey),
+            "{backward:?}"
+        );
+        // The retry ranks last: a non-retryable sibling wins from either side.
+        for order in [
+            vec![
+                VerifyErrorKind::TransparencyLogUnavailable,
+                VerifyErrorKind::TransparencyLogKeyUnavailable,
+            ],
+            vec![
+                VerifyErrorKind::TransparencyLogKeyUnavailable,
+                VerifyErrorKind::TransparencyLogUnavailable,
+            ],
+        ] {
+            assert!(matches!(pick(order), VerifyErrorKind::TransparencyLogKeyUnavailable));
+        }
     }
 
     /// The signature arm is untouched by all of the above: a `FirstMatch` scan
@@ -6612,6 +6707,110 @@ mod tests {
                 .expect("the log is up again for the second candidate"),
             STUB_KEY_PEM,
             "a cached Err would refuse every later candidate off one transient fault",
+        );
+    }
+
+    /// Serve one canned HTTP response to every connection on a loopback port; returns the base URL.
+    async fn rekor_key_stub(response: &'static [u8]) -> Url {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the rekor stub");
+        let addr = listener.local_addr().expect("the rekor stub has an address");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 2048];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket.write_all(response).await;
+            }
+        });
+        Url::parse(&format!("http://{addr}/")).expect("the rekor stub url parses")
+    }
+
+    /// Each way the public-key fetch can fail lands on its own next action: retry (75), a log that will not serve
+    /// its key (69), and a body that is not a key (65). One stub per case, so a mapping that collapses two reds.
+    #[tokio::test]
+    async fn a_rekor_key_fetch_failure_is_classified_by_what_the_caller_does_next() {
+        let down =
+            rekor_key_stub(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        let throttled =
+            rekor_key_stub(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        let missing = rekor_key_stub(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        let redirecting = rekor_key_stub(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let failing =
+            rekor_key_stub(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        let not_text =
+            rekor_key_stub(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n\xff\xfe").await;
+        let truncated = rekor_key_stub(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\nabc").await;
+        // A refused connection: nothing listens on the port the listener held.
+        let gone = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            drop(listener);
+            Url::parse(&format!("http://{addr}/")).expect("url")
+        };
+
+        assert!(matches!(
+            fetch_rekor_public_key_pem(&down).await,
+            Err(VerifyErrorKind::TransparencyLogUnavailable)
+        ));
+        assert!(matches!(
+            fetch_rekor_public_key_pem(&throttled).await,
+            Err(VerifyErrorKind::TransparencyLogUnavailable)
+        ));
+        assert!(matches!(
+            fetch_rekor_public_key_pem(&gone).await,
+            Err(VerifyErrorKind::TransparencyLogUnavailable)
+        ));
+        assert!(
+            matches!(
+                fetch_rekor_public_key_pem(&truncated).await,
+                Err(VerifyErrorKind::TransparencyLogUnavailable)
+            ),
+            "a body stream that breaks mid-read is a transport fault: retry"
+        );
+        assert!(matches!(
+            fetch_rekor_public_key_pem(&missing).await,
+            Err(VerifyErrorKind::TransparencyLogKeyUnavailable)
+        ));
+        assert!(
+            matches!(
+                fetch_rekor_public_key_pem(&redirecting).await,
+                Err(VerifyErrorKind::TransparencyLogKeyUnavailable)
+            ),
+            "a refused redirect is permanent: the URL has to change, a rerun will not"
+        );
+        assert!(
+            matches!(
+                fetch_rekor_public_key_pem(&failing).await,
+                Err(VerifyErrorKind::TransparencyLogKeyUnavailable)
+            ),
+            "a 500 repeats on rerun, so it is not the transport retry set"
+        );
+        assert!(matches!(
+            fetch_rekor_public_key_pem(&not_text).await,
+            Err(VerifyErrorKind::TransparencyLogResponseInvalid)
+        ));
+    }
+
+    /// Offline with no pinned key is the offline policy refusal, never a log outage: `--offline` forbids the very
+    /// fetch that would fix it, so a retry loop would spin on it.
+    #[tokio::test]
+    async fn offline_with_no_pinned_rekor_key_is_a_policy_refusal() {
+        let trust_root = TrustRoot::from_material(
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let url = Url::parse("http://127.0.0.1:9/").expect("url");
+        let refused = RekorKeyMemo::default().resolve(&trust_root, &url, true, "aa").await;
+        assert!(
+            matches!(refused, Err(VerifyErrorKind::OfflineNoPinnedRekorKey)),
+            "got: {refused:?}"
         );
     }
 

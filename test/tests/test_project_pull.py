@@ -1106,7 +1106,7 @@ def test_pull_dry_run_lists_all_locked_tools_no_writes(
     """``ocx pull --dry-run`` previews the lock without touching the store.
 
     Asserts: exit 0, structured JSON enumerating every locked tool with a
-    `would-fetch` status (since the store is empty), and no `content/`
+    `would_fetch` status (since the store is empty), and no `content/`
     directory created under ``packages/``.
     """
     repo_a, tag_a = _published_tool(ocx, tmp_path, "dryrun_a")
@@ -1140,12 +1140,12 @@ b = "{ocx.registry}/{repo_b}:{tag_b}"
 
     import json as _json
 
-    payload = _json.loads(result.stdout)
-    assert isinstance(payload, list), f"expected JSON array, got {type(payload).__name__}"
+    payload = _json.loads(result.stdout)["items"]
+    assert isinstance(payload, list), f"expected an `items` array, got {type(payload).__name__}"
     assert len(payload) == 2, f"expected 2 entries, got {len(payload)}"
     statuses = {entry["status"] for entry in payload}
-    assert statuses == {"would-fetch"}, (
-        f"all entries should be would-fetch on a cold store; got {statuses}"
+    assert statuses == {"would_fetch"}, (
+        f"all entries should be would_fetch on a cold store; got {statuses}"
     )
 
     ocx_home = Path(ocx.env["OCX_HOME"])
@@ -1194,13 +1194,13 @@ hello = "{ocx.registry}/{repo}:{tag}"
 
     import json as _json
 
-    payload = _json.loads(result.stdout)
+    payload = _json.loads(result.stdout)["items"]
     assert len(payload) == 1, f"expected 1 entry, got {len(payload)}"
     assert payload[0]["status"] == "cached", (
         f"warmed entry must report cached; got {payload[0]}\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     )
-    assert payload[0]["path"] is not None, (
+    assert payload[0].get("path") is not None, (
         "cached entry must include a path"
     )
 
@@ -1255,13 +1255,13 @@ hello = "{ocx.registry}/{repo}:{tag}"
     import json as _json
 
     pull_payload = _json.loads(pull.stdout)
-    # ``WarmedPaths`` serializes as an object keyed by the pulled identifier,
-    # each value ``{"path": ..., "kind": "package"|"shim"}``, plus one reserved
-    # sibling key ``advisories`` (always present, empty when nothing deferred).
+    # ``WarmedPaths`` keys ``paths`` by the pulled identifier, each value
+    # ``{"path": ..., "kind": "package"|"shim"}``, beside ``advisories``
+    # (always present, empty when nothing deferred).
     assert pull_payload["advisories"] == [], (
         f"an eager pull defers nothing, so it raises no advisories: {pull_payload}"
     )
-    rows = {key: value for key, value in pull_payload.items() if key != "advisories"}
+    rows = pull_payload["paths"]
     assert len(rows) == 1, f"expected 1 pull entry, got {rows}"
     warmed = next(iter(rows.values()))
     assert warmed["kind"] == "package", (
@@ -1288,7 +1288,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         f"ocx pull --dry-run failed: rc={dry.returncode}\nstderr:\n{dry.stderr}"
     )
 
-    dry_payload = _json.loads(dry.stdout)
+    dry_payload = _json.loads(dry.stdout)["items"]
     assert len(dry_payload) == 1, f"expected 1 dry-run entry, got {dry_payload}"
     cached = dry_payload[0]
     assert cached["status"] == "cached", cached

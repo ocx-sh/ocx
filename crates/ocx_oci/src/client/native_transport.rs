@@ -650,7 +650,7 @@ impl OciTransport for NativeTransport {
     ) -> Result<Vec<crate::Descriptor>> {
         let target = image.clone_with_digest(subject_digest.to_string());
         // A 404 is a capability verdict (`ReferrersUnsupported`), never an empty listing: the fallback path and
-        // exit 84 both depend on telling the two apart.
+        // exit 82 both depend on telling the two apart.
         match self
             .client
             .pull_referrers_native(&target, artifact_type)

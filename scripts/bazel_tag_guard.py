@@ -132,11 +132,11 @@ query would be a second reading of a second universe, and two readings of one
 fact are how they stop agreeing.
 
 **The floor is stage-scoped and advances — and this is the default stage.**
-`STAGE_FLOORS` (WP-13) declares stage 1 (`//crates/...` >= 82), stage 3
-(`//crates/... + //test/doc_scripts/...` >= 169, WP-33's 45 and WP-33b's 42
-added to `//crates/...`'s 82 — the 42 GIF renders took that package from 45 targets to
+`STAGE_FLOORS` (WP-13) declares stage 1 (`//crates/...` >= 95), stage 3
+(`//crates/... + //test/doc_scripts/...` >= 182, WP-33's 45 and WP-33b's 42
+added to `//crates/...`'s 95 — the 42 GIF renders took that package from 45 targets to
 87, and until the floor moved with them it cleared by 42 and discriminated
-nothing) and now stage 4 (`//...` >= 358: 169 + the acceptance package's 181 +
+nothing) and now stage 4 (`//...` >= 373: 182 + the acceptance package's 183 +
 the 8 root and website targets no earlier universe names). `--stage` defaults to
 stage 4, which is the single place the adoption's stage advances:
 `bazel:tag:guard` passes no `--stage` on purpose, so a second spelling cannot go
@@ -2332,10 +2332,11 @@ def prove_build_action(scratch: Path, live: list[dict]) -> int:
 def prove_rust_binary(scratch: Path, live: list[dict]) -> int:
     """Mode 2 (C-011 clause 2) — a `rust_binary` with neither per-target escape.
 
-    The live graph's three real `rust_binary` targets — the acceptance suite's
+    The live graph's four real `rust_binary` targets — the acceptance suite's
     binary under test and launcher (`//crates/ocx_cli:ocx`,
-    `//crates/ocx_shim:ocx_shim`) and `//crates/ocx_schema:ocx_schema_bin`
-    (plan_test_speed_tiers.md C-020) — are the subject of the unmutated green
+    `//crates/ocx_shim:ocx_shim`), `//crates/ocx_schema:ocx_schema_bin`
+    (plan_test_speed_tiers.md C-020) and the SDK generator's CLI
+    (`//crates/ocx_sdkgen:ocx_sdkgen_bin`) — are the subject of the unmutated green
     below: each must carry an explicitly specified `stamp = 0`. Every red state is
     one real `rust_library` record retyped to `rust_binary` with its `stamp` set
     to the default rules_rust measurably gives one (-1), so the reds do not
@@ -2348,10 +2349,16 @@ def prove_rust_binary(scratch: Path, live: list[dict]) -> int:
     binaries = sorted(r["rule"]["name"] for r in live if r["rule"]["ruleClass"] == "rust_binary")
     expect(
         binaries
-        == ["//crates/ocx_cli:ocx", "//crates/ocx_schema:ocx_schema_bin", "//crates/ocx_shim:ocx_shim"],
+        == [
+            "//crates/ocx_cli:ocx",
+            "//crates/ocx_schema:ocx_schema_bin",
+            "//crates/ocx_sdkgen:ocx_sdkgen_bin",
+            "//crates/ocx_shim:ocx_shim",
+        ],
         f"the live graph's rust_binary targets are {binaries}; this proof was re-read against "
-        "exactly //crates/ocx_cli:ocx, //crates/ocx_schema:ocx_schema_bin and "
-        "//crates/ocx_shim:ocx_shim, and must be re-read against the real ones",
+        "exactly //crates/ocx_cli:ocx, //crates/ocx_schema:ocx_schema_bin, "
+        "//crates/ocx_sdkgen:ocx_sdkgen_bin and //crates/ocx_shim:ocx_shim, and must be "
+        "re-read against the real ones",
     )
     expect(
         all(record.stamp_zero for record in read_rules("\n".join(json.dumps(r) for r in live))[0]

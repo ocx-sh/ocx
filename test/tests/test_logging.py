@@ -1,11 +1,11 @@
-"""``OCX_LOG`` still names every library crate as a log target.
+"""``OCX_LOG_LEVEL`` still names every library crate as a log target.
 
 Library code calls the ``log`` facade; the CLI's tracing subscriber renders
 those records on stderr through ``tracing_log::LogTracer``. A crate move can
 break either half silently — a record that no longer reaches the subscriber, or
 a directive that no longer names a target. The subscriber prints the level but
 no target (``with_target(false)``), so each row asserts on levels alone: a line
-at the row's level renders under ``OCX_LOG=<target>=<level>``, and none under
+at the row's level renders under ``OCX_LOG_LEVEL=<target>=<level>``, and none under
 the next stricter level. Message text stays free to change.
 """
 
@@ -15,6 +15,8 @@ import re
 import subprocess
 
 import pytest
+
+from src.helpers import SIGSTORE_DIR
 
 LEVELS = ("trace", "debug", "info", "warn", "error")
 # With debug or trace enabled, the compact format (no ANSI on a pipe):
@@ -47,7 +49,7 @@ PACKAGE = "<published package>"
 #: ``ocx_announce``'s lines sit behind a forge round-trip; without the fake forge
 #: the row would reach ``api.github.com`` and take its green from the internet.
 FORGE = "<fake forge base url>"
-#: Replaced with a ``tmp_path`` child: ``--out`` needs a directory that exists.
+#: Replaced with a ``tmp_path`` child: ``--output`` needs a directory that exists.
 OUT_DIR = "<claim out dir>"
 #: Header cosign writes and `PemKeyBackend::from_encrypted_pem` dispatches on;
 #: the body is deliberately not a key.
@@ -65,7 +67,7 @@ BAD_ENCRYPTED_KEY_PEM = (
 #: moved to one that opened the socket first.
 EXPECT_EXIT: dict[str, int | None] = {
     "ocx_oci": None,
-    "ocx_trust": None,
+    "ocx_trust": 65,
     "ocx_sign": None,
     "ocx_announce": 78,
 }
@@ -89,18 +91,31 @@ LIBRARY_TARGETS = [
         {"OCX_MANAGED_CONFIG": "ghcr.io/ocx-sh/nothing:0"},
         ("config", "setup", "--managed-config", ""),
     ),
-    # Every invocation reads OCX_NO_CONFIG through `env::flag`, which warns on a non-boolean.
-    ("ocx_util", "warn", {"OCX_NO_CONFIG": "maybe"}, CATALOG),
+    # Install extracts the package's tar layer, which logs its entry total.
+    ("ocx_util", "debug", {}, ("package", "install", PACKAGE)),
     # `shell revoke` on an unstamped project reports through `UserInterface::status`.
     ("ocx_console", "info", {}, ("--offline", "shell", "revoke")),
     # The credential lookup runs before the connect to the closed port 127.0.0.1:1.
     ("ocx_oci", "debug", {}, ("package", "install", "127.0.0.1:1/x:1")),
-    # A `--key` is compiled before anything is fetched; a bad PEM logs its rejection.
+    # A bad `--key` PEM logs its rejection. The trust root is resolved first, so it is
+    # pinned to the local fixture; without it a TUF fetch fails offline with exit 78 first,
+    # which the dead proxy proves.
     (
         "ocx_trust",
         "debug",
-        {"__OCX_TESTING_BAD_KEY_PEM": "-----BEGIN PUBLIC KEY-----\nnot a key\n-----END PUBLIC KEY-----"},
-        ("package", "verify", "--key", "env://__OCX_TESTING_BAD_KEY_PEM", "127.0.0.1:1/x:1"),
+        {
+            "__OCX_TESTING_BAD_KEY_PEM": "-----BEGIN PUBLIC KEY-----\nnot a key\n-----END PUBLIC KEY-----",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+        },
+        (
+            "package",
+            "verify",
+            "--sigstore-trusted-root",
+            str(SIGSTORE_DIR / "trusted_root.json"),
+            "--key",
+            "env://__OCX_TESTING_BAD_KEY_PEM",
+            "127.0.0.1:1/x:1",
+        ),
     ),
     # OCX_PROJECT="" takes the loader's escape hatch, logged before any file is read.
     ("ocx_config", "debug", {"OCX_PROJECT": ""}, CATALOG),
@@ -130,7 +145,7 @@ LIBRARY_TARGETS = [
             "oci://127.0.0.1/acme/widget",
             "--owner",
             "ocx-sh-nonexistent-claim-fixture:4242424242",
-            "--out",
+            "--output",
             OUT_DIR,
             "acme/widget",
         ),
@@ -147,9 +162,9 @@ def _run(ocx, argv: tuple[str, ...], check: bool = True, **env: str) -> subproce
 
 
 def test_debug_level_reaches_library_events(ocx):
-    """``--log-level debug`` renders every line ``OCX_LOG=ocx_index=debug`` selects, and ``info`` renders none."""
-    library = _lines_at(_run(ocx, CATALOG, OCX_LOG="ocx_index=debug").stderr, "debug")
-    assert library, "OCX_LOG=ocx_index=debug rendered no DEBUG line, so this test compares nothing"
+    """``--log-level debug`` renders every line ``OCX_LOG_LEVEL=ocx_index=debug`` selects, and ``info`` renders none."""
+    library = _lines_at(_run(ocx, CATALOG, OCX_LOG_LEVEL="ocx_index=debug").stderr, "debug")
+    assert library, "OCX_LOG_LEVEL=ocx_index=debug rendered no DEBUG line, so this test compares nothing"
     flag = _lines_at(ocx.plain(*CATALOG, log_level="debug").stderr, "debug")
     # `endswith`: under the flag, CLI spans the library-only filter drops prefix the same message.
     missing = [line for line in library if not any(other.endswith(line) for other in flag)]
@@ -162,7 +177,7 @@ def test_debug_level_reaches_library_events(ocx):
     ("target", "level", "extra_env", "argv"), LIBRARY_TARGETS, ids=[t for t, _, _, _ in LIBRARY_TARGETS]
 )
 def test_env_filter_selects_library_target(request, ocx, tmp_path, target, level, extra_env, argv):
-    """``OCX_LOG=<target>=<level>`` renders a line at that level; the next stricter level renders none."""
+    """``OCX_LOG_LEVEL=<target>=<level>`` renders a line at that level; the next stricter level renders none."""
     crate = target
     check = crate not in EXPECT_EXIT
     # Fixtures requested per row: a published package and a fake forge each cost a round-trip or a port.
@@ -183,7 +198,7 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, level
     docker_config.mkdir()
     extra_env = {**extra_env, "DOCKER_CONFIG": str(docker_config)}
 
-    completed = _run(ocx, argv, check=check, OCX_LOG=f"{target}={level}", **extra_env)
+    completed = _run(ocx, argv, check=check, OCX_LOG_LEVEL=f"{target}={level}", **extra_env)
     expected_status = EXPECT_EXIT.get(crate)
     if expected_status is not None:
         assert completed.returncode == expected_status, (
@@ -191,7 +206,7 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, level
             f"classifies to; stderr={completed.stderr!r}"
         )
     assert _lines_at(completed.stderr, level), (
-        f"OCX_LOG={target}={level} rendered no {level.upper()} line — is {target!r} still a log target?; "
+        f"OCX_LOG_LEVEL={target}={level} rendered no {level.upper()} line — is {target!r} still a log target?; "
         f"stderr={completed.stderr!r}"
     )
 
@@ -200,7 +215,7 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, level
         manager_home = tmp_path / "manager-home"
         manager_home.mkdir()
         manager = _run(
-            ocx, argv, check=check, OCX_LOG=f"ocx_package_manager={level}", OCX_HOME=str(manager_home), **extra_env
+            ocx, argv, check=check, OCX_LOG_LEVEL=f"ocx_package_manager={level}", OCX_HOME=str(manager_home), **extra_env
         )
         assert not _lines_at(manager.stderr, level), f"ocx_package_manager logs here too; stderr={manager.stderr!r}"
 
@@ -210,7 +225,7 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, level
     control_home.mkdir()
     stricter = LEVELS[LEVELS.index(level) + 1]
     control_run = _run(
-        ocx, argv, check=check, OCX_LOG=f"{target}={stricter}", OCX_HOME=str(control_home), **extra_env
+        ocx, argv, check=check, OCX_LOG_LEVEL=f"{target}={stricter}", OCX_HOME=str(control_home), **extra_env
     )
     # A control that failed earlier than the selected run never reached the line's code path.
     assert control_run.returncode == completed.returncode, (
@@ -219,14 +234,14 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, level
     )
     control = control_run.stderr
     assert not _lines_at(control, level), (
-        f"OCX_LOG={target}={stricter} still rendered {level.upper()} lines; stderr={control!r}"
+        f"OCX_LOG_LEVEL={target}={stricter} still rendered {level.upper()} lines; stderr={control!r}"
     )
 
 
 def test_env_filter_naming_no_crate_switches_every_crate_off(ocx):
-    """``OCX_LOG=<unknown target>=<level>`` renders nothing from any real crate, at any level."""
-    library = _lines_at(_run(ocx, CATALOG, OCX_LOG="ocx_index=debug").stderr, "debug")
-    assert library, "OCX_LOG=ocx_index=debug rendered no DEBUG line, so this test compares nothing"
+    """``OCX_LOG_LEVEL=<unknown target>=<level>`` renders nothing from any real crate, at any level."""
+    library = _lines_at(_run(ocx, CATALOG, OCX_LOG_LEVEL="ocx_index=debug").stderr, "debug")
+    assert library, "OCX_LOG_LEVEL=ocx_index=debug rendered no DEBUG line, so this test compares nothing"
     for level in ("trace", "debug", "info"):
-        stderr = _run(ocx, CATALOG, OCX_LOG=f"ocx_nonexistent_target={level}").stderr
+        stderr = _run(ocx, CATALOG, OCX_LOG_LEVEL=f"ocx_nonexistent_target={level}").stderr
         assert not _lines_at(stderr, level), f"an unknown target at {level} still rendered lines; stderr={stderr!r}"

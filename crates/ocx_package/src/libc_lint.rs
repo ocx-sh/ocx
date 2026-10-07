@@ -90,11 +90,11 @@ pub async fn check_declared_libc(
                 required,
             },
             platform => LibcLintError::UndeclaredLibc {
-                path,
-                interpreter,
-                suggestion: platform.with_os_feature(&required).to_string(),
-                platform: platform.to_string(),
-                required,
+                path: path.into_boxed_path(),
+                interpreter: interpreter.into(),
+                suggestion: platform.with_os_feature(&required).to_string().into(),
+                platform: platform.to_string().into(),
+                required: required.into(),
             },
         });
     }
@@ -347,7 +347,7 @@ fn classify_interpreter(interpreter: &str) -> Option<LibcFlavor> {
 }
 
 /// Failures of the create-time libc lint.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum LibcLintError {
     /// A binary on the interface `PATH` needs a libc family the declared platform's `os.features` omits.
     #[error(
@@ -356,18 +356,24 @@ pub enum LibcLintError {
          declare {suggestion}, or package a build that does not need {required}",
         path.display()
     )]
+    // Must match `PackageErrorKind::FeatureMismatch` (65), the install-time side of the same contract.
+    #[exit(
+        DataError,
+        slug = "undeclared_libc",
+        summary = "A binary needs a libc the package's platform does not declare"
+    )]
     UndeclaredLibc {
         /// The offending file in the content tree.
-        path: PathBuf,
+        // Boxed with its siblings: inline, this variant reaches clippy's `result_large_err` limit on Windows.
+        path: Box<Path>,
         /// The `PT_INTERP` value read out of it.
-        interpreter: String,
+        interpreter: Box<str>,
         /// The `os.features` tag it needs, e.g. `libc.glibc`.
-        required: String,
+        required: Box<str>,
         /// The declared platform, rendered.
-        // A string, not `Platform`: two `Platform` values push this variant past clippy's `result_large_err`.
-        platform: String,
+        platform: Box<str>,
         /// The same platform with `required` added, paste-ready for `--platform`.
-        suggestion: String,
+        suggestion: Box<str>,
     },
     /// The package is declared `any` but ships a dynamically linked native binary.
     #[error(
@@ -376,6 +382,11 @@ pub enum LibcLintError {
          without {required} — declare the concrete os/arch this content targets, with {required} \
          among its os.features",
         path.display()
+    )]
+    #[exit(
+        DataError,
+        slug = "agnostic_platform_libc_claim",
+        summary = "A libc-agnostic platform ships a binary that needs a libc"
     )]
     AgnosticPlatformClaim {
         /// The offending file in the content tree.
@@ -387,6 +398,11 @@ pub enum LibcLintError {
     },
     /// A file carrying the ELF magic could not be parsed.
     #[error("'{}' carries an ELF header but could not be parsed, so its libc requirement is unknown", path.display())]
+    #[exit(
+        DataError,
+        slug = "unparseable_elf",
+        summary = "A file carries an ELF header but cannot be parsed"
+    )]
     UnparseableElf {
         /// The file that failed to parse.
         path: PathBuf,
@@ -400,6 +416,11 @@ pub enum LibcLintError {
          so its requirement cannot be checked against os.features",
         path.display()
     )]
+    #[exit(
+        DataError,
+        slug = "unrecognized_interpreter",
+        summary = "A binary names an ELF interpreter no libc family claims"
+    )]
     UnrecognizedInterpreter {
         /// The file naming the unrecognised loader.
         path: PathBuf,
@@ -408,6 +429,11 @@ pub enum LibcLintError {
     },
     /// A candidate file could not be read at all.
     #[error("failed to read '{}' while checking its libc requirement", path.display())]
+    #[exit(
+        IoError,
+        slug = "libc_lint_read",
+        summary = "Reading a file while checking its libc requirement failed"
+    )]
     Read {
         /// The unreadable file.
         path: PathBuf,
@@ -422,6 +448,11 @@ pub enum LibcLintError {
          `${{self.installPath}}/<dir>`",
         values.join(", ")
     )]
+    #[exit(
+        DataError,
+        slug = "libc_scan_scope_unresolvable",
+        summary = "The libc scan scope cannot be resolved"
+    )]
     UnresolvableScanScope {
         /// The unresolvable `PATH` segments.
         values: Vec<String>,
@@ -434,18 +465,40 @@ pub enum LibcLintError {
          or `${{self.installPath}}/<dir>`",
         values.join(", ")
     )]
+    #[exit(
+        DataError,
+        slug = "libc_scan_scope_modifier",
+        summary = "The libc scan scope carries a modifier it cannot honour"
+    )]
     ModifierBearingScanScope {
         /// The modifier-bearing `PATH` segments.
         values: Vec<String>,
     },
     /// Walking the content tree for candidate files failed.
     #[error("failed to walk the content tree while checking declared os.features")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "libc_lint_scan_failed",
+            summary = "Walking the content tree for the libc check failed with an unclassified cause"
+        )
+    )]
     Scan(#[from] super::error::Error),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_stays_small_enough_to_return_by_value() {
+        // Clippy's `result_large_err` limit is 128 bytes and `PathBuf` is wider on Windows,
+        // which only a Windows clippy run would catch. 120 is the inline `Scan` cause, which stays
+        // unboxed: a boxed source is a `Box<Error>` the CLI's chain walk cannot downcast.
+        let size = std::mem::size_of::<LibcLintError>();
+        assert!(size <= 120, "LibcLintError is {size} bytes");
+    }
 
     // ── Interpreter attribution ──────────────────────────────────────────
 
@@ -741,6 +794,10 @@ mod tests {
         /// test binary on a `*-linux-gnu` target already went through a C
         /// linker driver, so "cc absent" is unreachable wherever this test
         /// runs, and a skip there would be a green that never ran.
+        #[expect(
+            clippy::disallowed_types,
+            reason = "test-only `cc` invocation building the ELF fixtures this lint classifies"
+        )]
         fn compile(dir: &std::path::Path, name: &str, source: &str, args: &[&str]) -> PathBuf {
             let source_path = dir.join(format!("{name}.c"));
             std::fs::write(&source_path, source).expect("write fixture source");
@@ -927,7 +984,7 @@ mod tests {
             else {
                 panic!("expected UndeclaredLibc, got {error:?}");
             };
-            assert_eq!(required, "libc.glibc");
+            assert_eq!(&**required, "libc.glibc");
             assert_eq!(
                 suggestion.to_string(),
                 "linux/amd64+libc.glibc",
@@ -958,7 +1015,7 @@ mod tests {
                 path.ends_with(".ld-shim"),
                 "the refusal must name the grammar-invalid file, got {path:?}"
             );
-            assert_eq!(required, "libc.glibc");
+            assert_eq!(&**required, "libc.glibc");
         }
 
         #[tokio::test]
@@ -992,7 +1049,7 @@ mod tests {
             let LibcLintError::UndeclaredLibc { required, .. } = &error else {
                 panic!("expected UndeclaredLibc, got {error:?}");
             };
-            assert_eq!(required, "libc.musl");
+            assert_eq!(&**required, "libc.musl");
         }
 
         #[tokio::test]
@@ -1207,7 +1264,7 @@ mod tests {
             let LibcLintError::UndeclaredLibc { path, required, .. } = &error else {
                 panic!("expected UndeclaredLibc, got {error:?}");
             };
-            assert_eq!(required, "libc.glibc");
+            assert_eq!(&**required, "libc.glibc");
             assert!(
                 path.ends_with("tools/tool"),
                 "the offender must be the tools/ sibling, got {path:?}"

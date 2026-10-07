@@ -20,8 +20,9 @@ use ocx_oci::client::error::ClientError;
 
 /// Why a copy could not be performed; the `#[source]` kind lets `--json` fill both
 /// `error.detail` and `error.context`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[error("copying {source_identifier} to {target_identifier}")]
+#[exit(delegate = kind)]
 pub struct CopyError {
     pub source_identifier: ocx_oci::PackageRef,
     pub target_identifier: ocx_oci::OciIdentifier,
@@ -30,23 +31,43 @@ pub struct CopyError {
 }
 
 /// Discriminant kind for [`CopyError`]; messages omit the endpoints, which the outer error names.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum CopyErrorKind {
     /// The source names an image index by digest: a snapshot of a mutable set, which cannot
     /// merge into a target that moved on.
     #[error("names an image index by digest; copy the tag instead")]
+    #[exit(
+        UsageError,
+        slug = "index_named_by_digest",
+        summary = "The source names an image index by digest, which cannot merge into the target"
+    )]
     IndexNamedByDigest,
 
     /// The source is a bare platform manifest, which carries no platform, and none was named.
     #[error("is a platform manifest and carries no platform; pass --platform")]
+    #[exit(
+        UsageError,
+        slug = "platform_required",
+        summary = "The source is a single-platform manifest and no platform was named"
+    )]
     PlatformRequired,
 
     /// The source is a bare platform manifest and more than one platform was named.
     #[error("is a single platform manifest; pass exactly one --platform")]
+    #[exit(
+        UsageError,
+        slug = "platform_ambiguous",
+        summary = "The source is a single-platform manifest and more than one platform was named"
+    )]
     PlatformAmbiguous,
 
     /// The source index offers no platform the request names.
     #[error("offers no platform matching {requested}; available: {available}")]
+    #[exit(
+        UsageError,
+        slug = "no_matching_platform",
+        summary = "The source index offers no requested platform"
+    )]
     NoMatchingPlatform {
         /// What was asked for, joined for display.
         requested: String,
@@ -55,7 +76,9 @@ pub enum CopyErrorKind {
     },
 
     /// Everything else; classification defers to the cause.
+    // `transparent` hides the cause from the chain walker, so `delegate` is the only path to its code.
     #[error(transparent)]
+    #[exit(delegate)]
     Registry(#[from] PackageError),
 }
 
@@ -105,7 +128,7 @@ pub struct CopyRequest<'a> {
 /// What became of one platform at the target.
 // Serialized as the enum, never the `Display` prose: `--format json` consumers match on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum Disposition {
     /// The target's index had no entry for this platform.
     Added,
@@ -1033,8 +1056,8 @@ mod tests {
         );
     }
 
-    /// The kind has to be reachable by a chain walk, or the envelope's
-    /// `detail` stays empty however good the enum is: `error_envelope.rs`
+    /// The kind has to be reachable by a chain walk, or the error document's
+    /// `detail` stays empty however good the enum is: `error_document.rs`
     /// downcasts each link of `source()`, so a kind that is not the outer
     /// error's source is invisible to it.
     #[tokio::test]
@@ -1625,7 +1648,7 @@ mod tests {
                 Disposition::Added => ("added", "added"),
                 Disposition::Unchanged => ("unchanged", "unchanged"),
                 Disposition::Replaced => ("replaced", "replaced"),
-                Disposition::KeptNotInSource => ("kept-not-in-source", "kept (not in source)"),
+                Disposition::KeptNotInSource => ("kept_not_in_source", "kept (not in source)"),
             };
             assert_eq!(
                 serde_json::to_string(&disposition).expect("serialize"),

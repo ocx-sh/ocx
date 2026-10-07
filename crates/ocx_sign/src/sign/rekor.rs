@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use ocx_oci::endpoint::BodyReadError;
 use serde::{Deserialize, Serialize};
 use sigstore::rekor::models::log_entry::RekorInclusionProof;
 use url::Url;
@@ -172,7 +173,18 @@ impl RekorClient {
             .body(body)
             .send()
             .await
-            .map_err(|_| SignErrorKind::TransparencyLogUnavailable)?;
+            .map_err(|e| {
+                if ocx_oci::transport_policy::is_transient_transport_error(&e) {
+                    SignErrorKind::TransparencyLogUnavailable
+                } else {
+                    // The cause carries the remedy (a refused redirect says to point the URL at the final host).
+                    tracing::warn!(
+                        "Rekor upload failed and a rerun will not change that: {}",
+                        ocx_oci::endpoint::describe_send_failure(e)
+                    );
+                    SignErrorKind::TransparencyLogUnreachable
+                }
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -182,7 +194,11 @@ impl RekorClient {
         // Capped: nothing in the Rekor API bounds what the endpoint returns.
         let raw = ocx_oci::endpoint::read_body_capped(response)
             .await
-            .ok_or(SignErrorKind::RekorSetMalformed)?;
+            .map_err(|fault| match fault {
+                // The log accepted the entry and the stream broke: the same retry as a failed send.
+                BodyReadError::Transport => SignErrorKind::TransparencyLogUnavailable,
+                BodyReadError::Oversize => SignErrorKind::RekorSetMalformed,
+            })?;
         parse_upload_response(&raw)
     }
 }
@@ -207,10 +223,13 @@ fn dsse_proposal_body(envelope_json: &str, leaf_pem: &str) -> Result<Vec<u8>, Si
 
 /// Which failure a non-2xx upload response is.
 ///
-/// 429 groups with 5xx as retryable, or a throttled log sends the operator to file a bug.
+/// A transient status (429 included) is a retry, or a throttled log sends the operator to file a bug; any other 5xx
+/// repeats on rerun (69); a 4xx is the log refusing the entry.
 fn classify_upload_status(status: reqwest::StatusCode) -> SignErrorKind {
-    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+    if ocx_oci::transport_policy::is_transient_status(status.as_u16()) {
         SignErrorKind::TransparencyLogUnavailable
+    } else if status.is_server_error() {
+        SignErrorKind::TransparencyLogUnreachable
     } else {
         SignErrorKind::RekorSetMalformed
     }
@@ -277,10 +296,27 @@ mod tests {
     // ── status classification ────────────────────────────────────────────────
 
     #[test]
-    fn a_500_is_the_log_being_unavailable() {
+    fn a_500_repeats_on_rerun_so_it_is_not_the_retry_set() {
+        // The transport retry policy keeps 500 out of the transient set: a rerun gets the same answer.
         assert!(matches!(
             classify_upload_status(StatusCode::INTERNAL_SERVER_ERROR),
+            SignErrorKind::TransparencyLogUnreachable
+        ));
+    }
+
+    #[test]
+    fn a_502_is_the_log_being_unavailable() {
+        assert!(matches!(
+            classify_upload_status(StatusCode::BAD_GATEWAY),
             SignErrorKind::TransparencyLogUnavailable
+        ));
+    }
+
+    #[test]
+    fn a_501_is_not_the_retry_set() {
+        assert!(matches!(
+            classify_upload_status(StatusCode::NOT_IMPLEMENTED),
+            SignErrorKind::TransparencyLogUnreachable
         ));
     }
 
@@ -295,7 +331,7 @@ mod tests {
     #[test]
     fn a_429_is_the_log_being_unavailable_despite_not_being_a_server_error() {
         // The case the status class alone gets wrong: a throttled signer is
-        // told to retry (exit 83), not to file a bug (exit 65).
+        // told to retry (exit 75), not to file a bug (exit 65).
         assert!(matches!(
             classify_upload_status(StatusCode::TOO_MANY_REQUESTS),
             SignErrorKind::TransparencyLogUnavailable
@@ -407,5 +443,81 @@ mod tests {
             parse_upload_response(raw),
             Err(SignErrorKind::RekorSetMalformed)
         ));
+    }
+
+    // ── upload over a loopback stub ──────────────────────────────────────────
+
+    /// Serve one canned HTTP response to every connection on a loopback port; returns a client on it.
+    async fn client_on_stub(response: &'static [u8]) -> RekorClient {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the rekor stub");
+        let addr = listener.local_addr().expect("the rekor stub has an address");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 4096];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket.write_all(response).await;
+            }
+        });
+        RekorClient {
+            url: Url::parse(&format!("http://{addr}/")).expect("the rekor stub url parses"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_upload_body_that_breaks_mid_stream_is_the_log_being_unavailable() {
+        let client =
+            client_on_stub(b"HTTP/1.1 201 Created\r\nContent-Length: 500\r\nConnection: close\r\n\r\nabc").await;
+        let failure = client.post_proposal(b"{}".to_vec()).await.err();
+        assert!(
+            matches!(failure, Some(SignErrorKind::TransparencyLogUnavailable)),
+            "got: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversize_upload_body_is_malformed() {
+        let declared = ocx_oci::endpoint::MAX_SIGSTORE_RESPONSE_BYTES + 1;
+        let head: &'static [u8] = Box::leak(
+            format!("HTTP/1.1 201 Created\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n")
+                .into_bytes()
+                .into_boxed_slice(),
+        );
+        let client = client_on_stub(head).await;
+        let failure = client.post_proposal(b"{}".to_vec()).await.err();
+        assert!(
+            matches!(failure, Some(SignErrorKind::RekorSetMalformed)),
+            "got: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_redirect_is_permanent_not_a_retry() {
+        let client = client_on_stub(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let failure = client.post_proposal(b"{}".to_vec()).await.err();
+        assert!(
+            matches!(failure, Some(SignErrorKind::TransparencyLogUnreachable)),
+            "got: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_the_log_being_unavailable() {
+        let url = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            drop(listener);
+            Url::parse(&format!("http://{addr}/")).expect("url")
+        };
+        let failure = RekorClient { url }.post_proposal(b"{}".to_vec()).await.err();
+        assert!(
+            matches!(failure, Some(SignErrorKind::TransparencyLogUnavailable)),
+            "got: {failure:?}"
+        );
     }
 }

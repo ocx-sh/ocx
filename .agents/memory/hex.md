@@ -6,9 +6,9 @@ not copies. Team-shared — commit it.
 ## Pointers
 
 - Verification: `CLAUDE.md` › "Build & Development" — `task verify:scoped
-  --force` per task and review-fix iteration (escalates to the full gate
-  when a path demands it); `task verify` (full) at the work-package merge
-  and at finalize; `task` = fast check.
+  --force` never per step or per merge (steps run the narrowest test they
+  touched; commits and merges use `--no-verify`); `task verify` (full) runs
+  only at the run's integration gate and at finalize; `task` = fast check.
 - Research artifacts: `.claude/artifacts/research_<topic>.md` (project
   convention, per `.claude/templates/artifacts/adr.template.md`; committed).
   `hex-discuss` lanes default to `.agents/research/` (gitignored) — copy into
@@ -55,23 +55,37 @@ models:
   fast-balanced: sonnet
   deep-reasoning: opus
   overrides:
-    reviewer:quality: deep-reasoning
     reviewer:security: deep-reasoning
-    reviewer:performance: deep-reasoning
-    reviewer:spec: deep-reasoning
 adversary: codex:rescue
 perspectives:
   always:
     - role: reviewer:security
       when: "{.github/workflows/**,.github/actions/**,crates/ocx_oci/**,crates/ocx_trust/**,crates/ocx_config/**,crates/ocx_store/**,crates/ocx_sign/**}"
+    # Focus: IC-22 + adr_exit_code_taxonomy.md (a code names the caller's next action, never a feature).
+    - role: reviewer:spec
+      when: "{crates/ocx_exit/**,crates/ocx_exit_derive/**,crates/ocx_cli/src/exit/**,crates/ocx_cli/src/exit.rs,crates/ocx_schema/tests/golden/errors.json}"
 research-axes:
   - registry ecosystems / OCI spec evolution
   - package-manager UX (mise, asdf, volta, proto)
   - shell integration mechanisms
 ```
 
-- Review is never downgraded to save cost — the reviewer overrides above
-  encode the CLAUDE.md "MODEL POLICY — NON-NEGOTIABLE" table.
+- **Finalize series shape: squash a PR branch to one commit** (owner preference, 2026-10-04 —
+  resolver B step 2, narrows the shipped bisectable default). The ruleset is rebase-only, so
+  the merge button cannot squash; a 61-commit series reached the PR once because this line
+  was missing. Breaking changes go in the body as a list; the subject carries `!`.
+- **Integration and release gates add what `task verify` cannot see** (2026-10-04 — PR #580's
+  first deep run went red on all three after a green `task verify NOCACHE=1`):
+  (1) `task satellite:verify` when a branch changes any ecosystem-tier crate's API — the
+  ocx-mirror consumer is upgraded in the same series, before finalize, not after CI says so;
+  (2) a native Windows `cargo test --workspace` staged on `C:` (global CLAUDE.md § Windows
+  checks) when a branch touches Rust — it also runs the testcases `bazel:test:unit` `--skip`s;
+  (3) `verify-deep.yml` is dispatched the moment the branch is first pushed, and the run is
+  watched **fail-fast** (poll job conclusions; the first red job wakes the orchestrator).
+  Never cancel or supersede a run without reading its failed jobs first.
+- Review runs on fast-balanced (sonnet) per the CLAUDE.md model policy;
+  only the security seat, which fires on the auth/credential paths above,
+  stays deep-reasoning.
 - Fable/Mythos is the session orchestrator only, never a spawn target
   (CLAUDE.md model policy; matches models.md Rule 4).
 - **`adversary: codex:rescue` is the configured name, not the seat that has run.** Codex has been
@@ -107,6 +121,15 @@ research-axes:
   #548, #310, #590; 6 pipelines / 2 waves, one squashed commit per issue on `goat`; critical path P2→P5. Research:
   `research_update_upgrade_ux.md`. Owner rulings: frozen push skips refresh; `ocx upgrade` same-major unless `--major`; managed tier ignores `[update]`; `[update]` never fails a command.
   Next: `/hex-execute .claude/artifacts/plan_update_family.md`.
+- **Active plan (hex-plan high, 2026-10-04, plan-approved): `.claude/artifacts/plan_typed_contract_registries.md`** —
+  from the Accepted `adr_typed_contract_registries.md` (D1–D17); contract wave P0 + 5 pipelines / 3 waves, critical path P0 → P1 (D2 bottom-up,
+  serial by static delegation) → P4. Subplan of `plan_ocx_interface_contract` (that one resumes at `/hex-finalize`). Research/architect/adversary
+  skipped (accepted ADR); 1 spec reviewer on the decomposition. D2 fallback (ADR option 2) is K-12.
+  `Next: /hex-execute .claude/artifacts/plan_typed_contract_registries.md`.
+- **Parent plan (hex-plan xhigh, 2026-10-03; awaiting /hex-finalize after the subplan above): `.claude/artifacts/plan_ocx_interface_contract.md`** —
+  40 in-repo WPs / 17 waves + X1–X5 (needs other-repo grant: ocx-mirror, ocx-sdk-python, ocx-sdk-rust). ADR now Accepted
+  (validation B1 + 9 Warns applied). Panel spec/architect/researcher + codex (ran, not quota-exhausted); 1 spec re-validation: pass.
+  `Next: /hex-execute .claude/artifacts/plan_ocx_interface_contract.md`.
 - **Plan (hex-plan xhigh, 2026-09-29, done — review approved at 6b2163a23): `.claude/artifacts/plan_snapshot_lifecycle.md`** (
   7 in-grant WPs / 3 waves; next is `/hex-finalize`). No active plan. Out of grant: fork push (ocx-sh/rust-oci-client, blocks CI),
   ocx-indexbot, ocx-sh/index schema, ocx-mirror. Codex quota exhausted at plan review; copilot substitute ran.
@@ -120,6 +143,20 @@ research-axes:
   (retain N per channel / whole-channel teardown via GitLab `environment:on_stop`), index removal of
   marked tags only, no tombstones. Research: `.agents/research/snapshot-lifecycle-{codebase-recon,prior-art}.md`.
   `Next: /hex-architect .agents/discussions/snapshot-lifecycle.md` (floor: high).
+- **Discussion handed off (hex-discuss, 2026-10-03): `.agents/discussions/ocx-interface-contract.md`
+  → architect.** OCX machine-interface contract in three phases: (0) interface vocabulary + lints, typed `EnvVar`
+  registry with a clippy `disallowed-methods` ban and two-way doc-coverage tests, plus a path-scoped sync rule;
+  (1) a coherence pass over reports/flags/env/errors; (2) a compat baseline taken from the last release tag after the pass, a clap grammar
+  spec in OCX-owned JSON, an in-workspace Rust generator, the Rust SDK pilot, and ocx-mirror as first consumer. Research:
+  `.agents/research/research_{ocx_interface_recon,cli_interface_contracts_prior_art,zero_dep_sdk_codegen,interface_coherence_inventory}.md`.
+  `Next: /hex-architect .agents/discussions/ocx-interface-contract.md` (floor: high).
+- **ADR Proposed (hex-architect xhigh, 2026-10-03): `.claude/artifacts/adr_ocx_interface_contract.md`** +
+  `system_design_ocx_interface_contract.md`, from the ocx-interface-contract dossier. Option D (hybrid; owned `cli.json`,
+  bare roots with `schema_version`, errors stay on stdout, never-null, new `ocx_env` leaf crate). Re-score puts E (typify for
+  Rust) ahead, 81 to 77; decided at phase-2 go/no-go. Panel spec/quality/security/sota + codex (ran, 12 Block), 1 fix pass, validation: 18/20 Block
+  resolved, 1 Block left (mirror consumer gate cannot go red: `SweepEnvelope` `#[serde(default)]`), 9 Warn → escalated to owner.
+  Reviews: `.claude/artifacts/review_adr_interface_contract_*.md`. Spin-offs ocx-sh/ocx#571, #572.
+  Axis worth a Preferences hint: data model / compatibility (machine-output conventions).
 - Retro candidate (project-context): "One build at a time host-wide; fan out edit workers freely (31 GB host OOM-rebooted)" — ledger hex-execute-parallel-build-oom, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (project-context): "Shared-checkout commits race prek's stash of all unstaged files" — ledger project-prek-stash-shared-checkout, .agents/retro/reports/2026-09-28.md.
 - Retro candidate (project-context): "Build/verify time dominates loops (2,409 tool-busy min mined)" — ledger project-slow-builds, .agents/retro/reports/2026-09-28.md.
@@ -330,8 +367,8 @@ research-axes:
   token and starts B2.** Execution deviations DX-1…DX-42 live in the plan's
   "## Execution deviations" table; § Schedule log carries every merge SHA and gate quote.
   Owner questions open: D12–D18 in § Deferred findings. Cap 3 worktrees (2 under 16 GB free);
-  full verifies one at a time; `task verify:scoped --force` escalates to full whenever a root
-  manifest, taskfile or `scripts/**` changed, or a crate in `scoped_gate.py`'s
+  full verifies one at a time (integration and release gates only); `task verify:scoped --force` escalates to full whenever a root
+  manifest changed (taskfile and `scripts/**` edits route cheap since 2026-10-04), or a crate in `scoped_gate.py`'s
   `TABLE_ESCALATES` (`ocx_test_support`, `ocx`; `ocx_lib`'s row left with the crate at
   WP-37) — ≈ 10 min on this
   host, the scoped path ≈ 2 min.
@@ -366,7 +403,7 @@ research-axes:
     the plan-owned structural tests as the only line-check exemption (DX-17); (4) a
     `TMPDIR` under the repo reds `project_path_walk_without_git_or_ceiling_returns_none`
     on any tree — builder scratch lives in `~/.cache/`; (5) the plan's literal
-    `OCX_LOG=ocx_cli=debug` could never discriminate — the CLI's target is its package
+    log directive `ocx_cli=debug` could never discriminate — the CLI's target is its package
     name `ocx`; measure the tool before believing the plan about it; (6) `codex:rescue`
     can die on the Codex usage limit mid-review — a skip is not a review, say so in the
     handoff; (7) `task claude:tests` listed one file — the hook and workflow tests were
@@ -421,13 +458,12 @@ research-axes:
   worse: it returns **empty**, even redirected to a file. Use `git rev-list --parents`,
   `git diff-tree -r --name-status <base> <ref>`, `git show --stat` and `git rev-parse`. Same family
   as the known `grep -c` / `rg` alternation defects; the failure is always a silent negative.
-- **A build slot is the only way several agent worktrees share one host (2026-09-05).**
-  `<repo>/.tmp/hex/build-slot.sh` is a host-wide `flock` that additionally waits for >= 10 GB free
-  before exec'ing, and every `cargo`/`nextest`/`clippy`/`task`/pytest call in every worker goes
-  through it. Without it, concurrent work packages OOM-kill the orchestrator, which is how the first
-  wave-3 session died. Keep at most **2 build-capable workers** alive; read-only reviewers are free.
-  The slot is shared with *other* Claude sessions on the same machine, so multi-minute waits are
-  normal and must not be worked around.
+- **No worker-side locks; pipelines share one build's budget (v5, 2026-10-04).** The build-slot
+  `flock` serialized every worktree to parallelism 1.0 (builders spent ~36 % of their lifetime
+  waiting) and is retired. Rule: live pipelines x `CARGO_BUILD_JOBS` <= the single-build `jobs`
+  in `.cargo/config.toml` (12), so RAM stays at about one build; workers never wait on a lock, a
+  gate or a poll. Steps run the narrowest `cargo test -p x` and commit with `--no-verify`. Bazel
+  and the docker acceptance suite are gate-only (orchestrator, background).
 - **An orchestrator killed mid-run leaves its workers' commits but loses its own plan edits
   (2026-09-05).** Worker commits then cite `DX-` rows that exist nowhere, and renumbering is
   impossible because the commits cannot be rewritten. Keep the number allocation the commits already

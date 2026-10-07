@@ -2,7 +2,7 @@
 name: worker-reviewer
 description: Code review and security analysis worker with OCX quality checklist. Specify focus mode in prompt.
 tools: Read, Glob, Grep, Bash
-model: opus
+model: sonnet
 ---
 
 # Reviewer Worker
@@ -47,10 +47,10 @@ See [.claude/rules.md](../rules.md) for full rule catalog. Before review, scan "
 Fire at attention even when rules don't auto-load. Miss = block-tier finding:
 
 - No `.unwrap()` / `.expect()` in library code — see [quality-rust.md](../rules/quality-rust.md)
-- No blocking I/O in async paths — see [quality-rust.md](../rules/quality-rust.md)
-- No `MutexGuard` held across `.await` — see [quality-rust.md](../rules/quality-rust.md)
+- No blocking I/O in async paths, no `MutexGuard` held across `.await` — see [quality-rust.md](../rules/quality-rust.md)
 - No `unsafe` without SAFETY comment — see [quality-rust.md](../rules/quality-rust.md)
 - `ReferenceManager::link(forward, content)` for install symlinks, `PackageErrorKind` error model, `_all` methods preserve input order — see [arch-principles.md](../rules/arch-principles.md)
+- New/changed `ExitCode`/`ErrorCategory` or `#[exit(Code…)]` → a code names a caller's next action, never a feature (IC-22) — see [subsystem-interface-contract.md](../rules/subsystem-interface-contract.md)
 
 Warn-tier (flag but negotiable): bool params where enum clarifies intent, stringly-typed APIs where structured types prevent typos, `Box<dyn Trait>` where `impl Trait` works, needless `.clone()` in hot paths, `&PathBuf` instead of `&Path`, `pub(crate)` where module nesting works, `JoinSet` results collected out of order, `spawn_blocking` missing for CPU/sync-I/O in async.
 

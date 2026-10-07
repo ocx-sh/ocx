@@ -96,7 +96,7 @@ fn assemble(
                         .inclusion_proof
                         .as_ref()
                         .and_then(proto_inclusion_proof)
-                        .ok_or(SignErrorKind::TransparencyLogUnavailable)?,
+                        .ok_or(SignErrorKind::RekorSetMalformed)?,
                 ),
                 canonicalized_body: rekor.canonicalized_body.clone(),
             }]
@@ -383,8 +383,8 @@ mod tests {
         )
         .expect_err("an unencodable proof must not produce a bundle");
         assert!(
-            matches!(err, SignErrorKind::TransparencyLogUnavailable),
-            "expected TransparencyLogUnavailable, got: {err:?}"
+            matches!(err, SignErrorKind::RekorSetMalformed),
+            "expected RekorSetMalformed, got: {err:?}"
         );
     }
 
@@ -582,8 +582,8 @@ mod tests {
         )
         .expect_err("a proofless Rekor entry must not produce a bundle");
         assert!(
-            matches!(err, SignErrorKind::TransparencyLogUnavailable),
-            "expected TransparencyLogUnavailable, got: {err:?}"
+            matches!(err, SignErrorKind::RekorSetMalformed),
+            "expected RekorSetMalformed, got: {err:?}"
         );
     }
 

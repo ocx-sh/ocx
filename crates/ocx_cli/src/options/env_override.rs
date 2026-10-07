@@ -55,10 +55,11 @@ impl EnvOverride {
                 // Before the lookup, so `--env OCX_OFFLINE` is exit 64 whether or not it is set.
                 reject_unusable_key(argument)?;
                 // Unset is skipped without a warning: most of what an allowlist names is absent.
-                if let Some(value) = ocx_util::env::var(argument) {
+                // `dynamic_secret`: an allowlist may pass a CI token through, which `dynamic` refuses.
+                if let Some(value) = ocx_env::dynamic_secret(argument) {
                     entries.push(Entry {
                         key: argument.to_owned(),
-                        value,
+                        value: value.into_inner(),
                         kind: ModifierKind::Constant,
                         separator: None,
                     });
@@ -125,12 +126,12 @@ impl EnvOverride {
 ///
 /// [`crate::error::UsageError`] (exit 64) for either refusal, naming the key.
 fn reject_unusable_key(key: &str) -> Result<(), crate::error::UsageError> {
-    if !ocx_util::env::is_valid_env_key(key) {
+    if !ocx_env::is_valid_env_key(key) {
         return Err(crate::error::UsageError::new(format!(
             "--env key '{key}' is not a valid environment variable name"
         )));
     }
-    if ocx_util::env::is_reserved_ocx_key(key) {
+    if ocx_env::is_reserved_ocx_key(key) {
         return Err(crate::error::UsageError::new(format!(
             "--env key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set"
         )));
@@ -207,8 +208,8 @@ mod tests {
     fn env_override_bare_name_passes_the_invoking_value_through() {
         use ocx_package::metadata::env::modifier::ModifierKind;
 
-        let guard = ocx_util::env::overrides::lock();
-        guard.set("PASSTHROUGH_FOO", "from-the-parent");
+        let guard = ocx_env::overrides::lock();
+        guard.set_raw("PASSTHROUGH_FOO", "from-the-parent");
 
         let parsed = parse_one("PASSTHROUGH_FOO").expect("a bare name must parse");
         assert_eq!(parsed.len(), 1, "a set name must contribute exactly one entry");
@@ -225,15 +226,27 @@ mod tests {
         assert_eq!(parsed[0].separator, None);
     }
 
+    /// A declared CI secret passes through too: `ocx exec --clean --env CI_JOB_TOKEN` is how a
+    /// tool under `--clean` gets the job's credential.
+    #[test]
+    fn env_override_bare_name_passes_a_declared_secret_through() {
+        let guard = ocx_env::overrides::lock();
+        guard.set(ocx_env::CI_JOB_TOKEN.declaration(), "job-token");
+
+        let parsed = parse_one("CI_JOB_TOKEN").expect("a bare name must parse");
+        assert_eq!(parsed.len(), 1, "a set secret must contribute exactly one entry");
+        assert_eq!(parsed[0].value, "job-token");
+    }
+
     /// The two states that are not "set to something": an unset name is
     /// skipped silently (an allowlist names what *may* travel), and a name set
     /// to the empty string is set — `FOO=` means the empty string on every
     /// other surface, and it means it here too.
     #[test]
     fn env_override_bare_name_skips_unset_and_forwards_empty() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
-        guard.remove("PASSTHROUGH_FOO");
+        guard.remove_raw("PASSTHROUGH_FOO");
         assert!(
             parse_one("PASSTHROUGH_FOO")
                 .expect("an unset name must parse")
@@ -241,7 +254,7 @@ mod tests {
             "an unset name must contribute no entry, and must not be an error"
         );
 
-        guard.set("PASSTHROUGH_FOO", "");
+        guard.set_raw("PASSTHROUGH_FOO", "");
         let parsed = parse_one("PASSTHROUGH_FOO").expect("an empty-valued name must parse");
         assert_eq!(parsed.len(), 1, "an empty string is a value, not an absence");
         assert_eq!(parsed[0].value, "");
@@ -272,10 +285,10 @@ mod tests {
     /// through `apply_ocx_config`; a user allowlist is never the way in.
     #[test]
     fn env_override_rejects_a_reserved_bare_name() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         // Set, so a refusal cannot be an artifact of the variable's absence.
-        guard.set("OCX_OFFLINE", "1");
-        guard.set("__OCX_TESTING_X", "1");
+        guard.set(&ocx_env::OCX_OFFLINE, "1");
+        guard.set_raw("__OCX_TESTING_X", "1");
 
         for reserved in ["OCX_OFFLINE", "OCX_DEFAULT_REGISTRY", "__OCX_TESTING_X"] {
             let error = parse_one(reserved).expect_err("a reserved bare name must be rejected");

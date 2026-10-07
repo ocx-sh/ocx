@@ -51,15 +51,14 @@ impl LazyMode {
     /// Reads the `OCX_LAZY_MODE` tier, case-insensitively; empty or
     /// unrecognised (warned) is absent, so the ladder continues.
     pub fn from_env() -> Option<Self> {
-        let key = ocx_config::env::keys::OCX_LAZY_MODE;
-        let value = ocx_util::env::var(key)?;
-        if value.is_empty() {
-            return None;
-        }
+        let value = ocx_env::OCX_LAZY_MODE.get()?;
         match value.to_ascii_lowercase().parse::<Self>() {
             Ok(mode) => Some(mode),
             Err(error) => {
-                log::warn!("Environment variable '{key}' ignored: {error}");
+                log::warn!(
+                    "Environment variable '{}' ignored: {error}",
+                    ocx_env::OCX_LAZY_MODE.name
+                );
                 None
             }
         }
@@ -126,15 +125,14 @@ impl FromStr for LazyReport {
 impl LazyReport {
     /// Reads the `OCX_LAZY_REPORT` tier, with [`LazyMode::from_env`]'s contract.
     pub fn from_env() -> Option<Self> {
-        let key = ocx_config::env::keys::OCX_LAZY_REPORT;
-        let value = ocx_util::env::var(key)?;
-        if value.is_empty() {
-            return None;
-        }
+        let value = ocx_env::OCX_LAZY_REPORT.get()?;
         match value.to_ascii_lowercase().parse::<Self>() {
             Ok(report) => Some(report),
             Err(error) => {
-                log::warn!("Environment variable '{key}' ignored: {error}");
+                log::warn!(
+                    "Environment variable '{}' ignored: {error}",
+                    ocx_env::OCX_LAZY_REPORT.name
+                );
                 None
             }
         }
@@ -238,7 +236,6 @@ mod tests {
     //! test the contract rather than restate the code.
 
     use super::*;
-    use ocx_config::env::keys;
 
     // ── C-006: `lazy-mode` ladder precedence ────────────────────────────────
     //
@@ -675,23 +672,23 @@ mod tests {
 
     #[test]
     fn lazy_mode_from_env_parses_case_insensitively() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for spelling in ["always", "ALWAYS", "Always"] {
-            env.set(keys::OCX_LAZY_MODE, spelling);
+            env.set(&ocx_env::OCX_LAZY_MODE, spelling);
             assert_eq!(
                 LazyMode::from_env(),
                 Some(LazyMode::Always),
                 "`OCX_LAZY_MODE={spelling}` must parse case-insensitively"
             );
         }
-        env.set(keys::OCX_LAZY_MODE, "NEVER");
+        env.set(&ocx_env::OCX_LAZY_MODE, "NEVER");
         assert_eq!(LazyMode::from_env(), Some(LazyMode::Never));
     }
 
     #[test]
     fn lazy_mode_from_env_is_absent_when_unset() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(keys::OCX_LAZY_MODE);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_LAZY_MODE);
         assert_eq!(
             LazyMode::from_env(),
             None,
@@ -704,8 +701,8 @@ mod tests {
     /// the ladder still applies.
     #[test]
     fn lazy_mode_from_env_falls_back_on_an_unrecognized_value() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_LAZY_MODE, "sometimes");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_LAZY_MODE, "sometimes");
         assert_eq!(
             LazyMode::from_env(),
             None,
@@ -716,33 +713,33 @@ mod tests {
     /// An exported-but-empty variable (`OCX_LAZY_MODE=` in a CI job's env
     /// block) is the same absence as unset. C-006 does not name this case;
     /// treating it as "absent" is the only reading consistent with
-    /// [`ocx_util::env::string`], which already maps empty to the default.
+    /// [`ocx_env::EnvVar::get`], which already reads empty as unset.
     #[test]
     fn lazy_mode_from_env_treats_an_empty_value_as_absent() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_LAZY_MODE, "");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_LAZY_MODE, "");
         assert_eq!(LazyMode::from_env(), None, "an empty value is an absent tier");
     }
 
     #[test]
     fn lazy_report_from_env_parses_case_insensitively() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for spelling in ["progress", "PROGRESS", "Progress"] {
-            env.set(keys::OCX_LAZY_REPORT, spelling);
+            env.set(&ocx_env::OCX_LAZY_REPORT, spelling);
             assert_eq!(
                 LazyReport::from_env(),
                 Some(LazyReport::Progress),
                 "`OCX_LAZY_REPORT={spelling}` must parse case-insensitively"
             );
         }
-        env.set(keys::OCX_LAZY_REPORT, "SILENT");
+        env.set(&ocx_env::OCX_LAZY_REPORT, "SILENT");
         assert_eq!(LazyReport::from_env(), Some(LazyReport::Silent));
     }
 
     #[test]
     fn lazy_report_from_env_is_absent_when_unset() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(keys::OCX_LAZY_REPORT);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_LAZY_REPORT);
         assert_eq!(
             LazyReport::from_env(),
             None,
@@ -752,8 +749,8 @@ mod tests {
 
     #[test]
     fn lazy_report_from_env_falls_back_on_an_unrecognized_value() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_LAZY_REPORT, "loud");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_LAZY_REPORT, "loud");
         assert_eq!(
             LazyReport::from_env(),
             None,
@@ -765,8 +762,8 @@ mod tests {
     /// [`lazy_mode_from_env_treats_an_empty_value_as_absent`].
     #[test]
     fn lazy_report_from_env_treats_an_empty_value_as_absent() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_LAZY_REPORT, "");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_LAZY_REPORT, "");
         assert_eq!(LazyReport::from_env(), None, "an empty value is an absent tier");
     }
 }

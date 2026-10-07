@@ -56,10 +56,10 @@ fn baked_project_selector(body: &str) -> String {
 /// sidecar grammar, the trampoline goldens and the committed shim blobs.
 #[tokio::test]
 async fn the_selector_a_trampoline_bakes_resolves_to_the_project_it_names() {
-    let env = ocx_util::env::overrides::lock();
-    env.remove("OCX_PROJECT");
-    env.remove("OCX_NO_PROJECT");
-    env.remove("OCX_CEILING_PATH");
+    let env = ocx_env::overrides::lock();
+    env.remove(&ocx_env::OCX_PROJECT);
+    env.remove(&ocx_env::OCX_NO_PROJECT);
+    env.remove(&ocx_env::OCX_CEILING_PATH);
 
     let dir = TempDir::new().unwrap();
     // The canonical spelling: `tempfile` hands back a path under `/tmp`,
@@ -101,10 +101,10 @@ async fn the_selector_a_trampoline_bakes_resolves_to_the_project_it_names() {
 /// the missing-home rule are one change.
 #[tokio::test]
 async fn a_baked_home_whose_project_moved_away_resolves_to_no_project() {
-    let env = ocx_util::env::overrides::lock();
-    env.remove("OCX_PROJECT");
-    env.remove("OCX_NO_PROJECT");
-    env.remove("OCX_CEILING_PATH");
+    let env = ocx_env::overrides::lock();
+    env.remove(&ocx_env::OCX_PROJECT);
+    env.remove(&ocx_env::OCX_NO_PROJECT);
+    env.remove(&ocx_env::OCX_CEILING_PATH);
 
     let dir = TempDir::new().unwrap();
     let project_root = dunce::canonicalize(dir.path()).expect("the scratch project canonicalises");

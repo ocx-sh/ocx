@@ -96,14 +96,14 @@ ocx package verify -p linux/amd64 prod.example.com/acme/mytool:1.4.2
 ```
 
 This works only because the digest did not move. It is also the reason a target registry
-without the Referrers API is refused with exit 84 rather than accepted: such a registry
+without the Referrers API is refused with exit 82 rather than accepted: such a registry
 takes a referrer manifest as an ordinary upload and then never lists it, so the provenance
 would be lost silently. Pass `--no-referrers` to promote the package alone, deliberately.
 
 **Descriptions do not travel by default.** The README, logo and catalog annotations on the
 `__ocx.desc` tag are repository-level prose rather than part of the version being promoted,
 and environments legitimately carry different ones — a staging catalog page that says "not
-for production use" should not follow the package to production. Add `--description` to
+for production use" should not follow the package to production. Add `--with-description` to
 copy it along, or promote it on its own once it is right:
 
 ```sh

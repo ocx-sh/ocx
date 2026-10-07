@@ -22,8 +22,8 @@ pub fn for_flavor(flavor: CiFlavor, version: Option<&Version>) -> BTreeMap<Strin
         annotations.insert(SOURCE.to_string(), source);
     }
     let revision = match flavor {
-        CiFlavor::GitHubActions => "GITHUB_SHA",
-        CiFlavor::GitLab => "CI_COMMIT_SHA",
+        CiFlavor::GitHubActions => &ocx_env::GITHUB_SHA,
+        CiFlavor::GitLab => &ocx_env::CI_COMMIT_SHA,
     };
     if let Some(revision) = var(revision) {
         annotations.insert(REVISION.to_string(), revision);
@@ -40,11 +40,11 @@ fn source(flavor: CiFlavor) -> Option<String> {
     match flavor {
         // GHES server URLs are operator-typed and may end in `/`.
         CiFlavor::GitHubActions => {
-            let server = var("GITHUB_SERVER_URL")?;
-            let repository = var("GITHUB_REPOSITORY")?;
+            let server = var(&ocx_env::GITHUB_SERVER_URL)?;
+            let repository = var(&ocx_env::GITHUB_REPOSITORY)?;
             Some(format!("{}/{repository}", server.trim_end_matches('/')))
         }
-        CiFlavor::GitLab => var("CI_PROJECT_URL"),
+        CiFlavor::GitLab => var(&ocx_env::CI_PROJECT_URL),
     }
 }
 
@@ -61,7 +61,7 @@ fn created(flavor: CiFlavor) -> String {
 
 /// GitLab's `$CI_PIPELINE_CREATED_AT` as RFC 3339, or `None` when unset, blank or malformed.
 fn pipeline_created_at() -> Option<chrono::DateTime<chrono::Utc>> {
-    let raw = var("CI_PIPELINE_CREATED_AT")?;
+    let raw = var(&ocx_env::CI_PIPELINE_CREATED_AT)?;
     match chrono::DateTime::parse_from_rfc3339(&raw) {
         Ok(parsed) => Some(parsed.with_timezone(&chrono::Utc)),
         Err(_) => {
@@ -73,8 +73,9 @@ fn pipeline_created_at() -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// A runtime environment variable, trimmed (file-interpolated values keep a newline), blank as absent.
-fn var(key: &str) -> Option<String> {
-    ocx_util::env::var(key)
+fn var(declaration: &'static ocx_env::EnvVar) -> Option<String> {
+    declaration
+        .get()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -82,28 +83,29 @@ fn var(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_util::env::overrides::{self as env, EnvLock};
+    use ocx_env::overrides::{self as env, EnvLock};
 
     /// Every variable [`for_flavor`] can read, so a test states the whole
     /// environment rather than inheriting the developer's own `GITHUB_*`.
-    const READS: [&str; 6] = [
-        "GITHUB_SERVER_URL",
-        "GITHUB_REPOSITORY",
-        "GITHUB_SHA",
-        "CI_PROJECT_URL",
-        "CI_COMMIT_SHA",
-        "CI_PIPELINE_CREATED_AT",
+    const READS: [&ocx_env::EnvVar; 7] = [
+        &ocx_env::GITHUB_SERVER_URL,
+        &ocx_env::GITHUB_REPOSITORY,
+        &ocx_env::GITHUB_SHA,
+        &ocx_env::CI_PROJECT_URL,
+        &ocx_env::CI_COMMIT_SHA,
+        &ocx_env::CI_PIPELINE_CREATED_AT,
+        &ocx_env::SOURCE_DATE_EPOCH,
     ];
 
     /// Locks the environment and replaces it wholesale with `vars`;
     /// `SOURCE_DATE_EPOCH` is cleared unless named.
-    fn only(vars: &[(&str, &str)]) -> EnvLock {
+    fn only(vars: &[(&'static ocx_env::EnvVar, &str)]) -> EnvLock {
         let lock = env::lock();
-        for key in READS.iter().chain(["SOURCE_DATE_EPOCH"].iter()) {
-            lock.remove(*key);
+        for key in READS {
+            lock.remove(key);
         }
         for (key, value) in vars {
-            lock.set(*key, *value);
+            lock.set(key, *value);
         }
         lock
     }
@@ -115,9 +117,9 @@ mod tests {
     #[test]
     fn github_actions_joins_the_server_url_and_the_repository() {
         let _lock = only(&[
-            ("GITHUB_SERVER_URL", "https://github.com"),
-            ("GITHUB_REPOSITORY", "ocx-sh/ocx"),
-            ("GITHUB_SHA", "cafebabe"),
+            (&ocx_env::GITHUB_SERVER_URL, "https://github.com"),
+            (&ocx_env::GITHUB_REPOSITORY, "ocx-sh/ocx"),
+            (&ocx_env::GITHUB_SHA, "cafebabe"),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitHubActions, Some(&version("1.2.3")));
@@ -134,9 +136,9 @@ mod tests {
     #[test]
     fn gitlab_reads_its_own_four_variables() {
         let _lock = only(&[
-            ("CI_PROJECT_URL", "https://gitlab.example.com/acme/widget"),
-            ("CI_COMMIT_SHA", "0123456789abcdef"),
-            ("CI_PIPELINE_CREATED_AT", "2026-09-10T08:30:00Z"),
+            (&ocx_env::CI_PROJECT_URL, "https://gitlab.example.com/acme/widget"),
+            (&ocx_env::CI_COMMIT_SHA, "0123456789abcdef"),
+            (&ocx_env::CI_PIPELINE_CREATED_AT, "2026-09-10T08:30:00Z"),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitLab, Some(&version("2.0.0")));
@@ -158,9 +160,9 @@ mod tests {
     #[test]
     fn a_flavor_reads_only_its_own_variables() {
         let _lock = only(&[
-            ("GITHUB_SERVER_URL", "https://github.com"),
-            ("GITHUB_REPOSITORY", "ocx-sh/ocx"),
-            ("GITHUB_SHA", "cafebabe"),
+            (&ocx_env::GITHUB_SERVER_URL, "https://github.com"),
+            (&ocx_env::GITHUB_REPOSITORY, "ocx-sh/ocx"),
+            (&ocx_env::GITHUB_SHA, "cafebabe"),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitLab, None);
@@ -172,8 +174,8 @@ mod tests {
     #[test]
     fn an_unset_or_blank_variable_writes_no_key() {
         let _lock = only(&[
-            ("CI_PROJECT_URL", "  "),
-            ("CI_PIPELINE_CREATED_AT", "2026-09-10T08:30:00Z"),
+            (&ocx_env::CI_PROJECT_URL, "  "),
+            (&ocx_env::CI_PIPELINE_CREATED_AT, "2026-09-10T08:30:00Z"),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitLab, None);
@@ -196,8 +198,8 @@ mod tests {
     #[test]
     fn source_date_epoch_outranks_the_pipeline_clock() {
         let _lock = only(&[
-            ("CI_PIPELINE_CREATED_AT", "2026-09-10T08:30:00Z"),
-            ("SOURCE_DATE_EPOCH", " 1700000000 "),
+            (&ocx_env::CI_PIPELINE_CREATED_AT, "2026-09-10T08:30:00Z"),
+            (&ocx_env::SOURCE_DATE_EPOCH, " 1700000000 "),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitLab, None);
@@ -212,8 +214,8 @@ mod tests {
     #[test]
     fn a_malformed_source_date_epoch_falls_back_to_the_pipeline_clock() {
         let _lock = only(&[
-            ("CI_PIPELINE_CREATED_AT", "2026-09-10T08:30:00Z"),
-            ("SOURCE_DATE_EPOCH", "yesterday"),
+            (&ocx_env::CI_PIPELINE_CREATED_AT, "2026-09-10T08:30:00Z"),
+            (&ocx_env::SOURCE_DATE_EPOCH, "yesterday"),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitLab, None);
@@ -242,8 +244,8 @@ mod tests {
     #[test]
     fn github_enterprise_server_url_trailing_slash_is_trimmed() {
         let _lock = only(&[
-            ("GITHUB_SERVER_URL", "https://ghe.corp.example/"),
-            ("GITHUB_REPOSITORY", "team/tool"),
+            (&ocx_env::GITHUB_SERVER_URL, "https://ghe.corp.example/"),
+            (&ocx_env::GITHUB_REPOSITORY, "team/tool"),
         ]);
 
         let annotations = for_flavor(CiFlavor::GitHubActions, None);
@@ -260,7 +262,7 @@ mod tests {
     /// truncated `server/` one.
     #[test]
     fn a_partial_github_source_writes_no_source_key() {
-        let _lock = only(&[("GITHUB_SERVER_URL", "https://github.com")]);
+        let _lock = only(&[(&ocx_env::GITHUB_SERVER_URL, "https://github.com")]);
 
         let annotations = for_flavor(CiFlavor::GitHubActions, None);
 
@@ -275,7 +277,7 @@ mod tests {
     /// one canonical spelling rather than being passed through verbatim.
     #[test]
     fn a_gitlab_pipeline_timestamp_is_normalized_to_utc_seconds() {
-        let _lock = only(&[("CI_PIPELINE_CREATED_AT", "2026-09-10T10:30:00.123456+02:00")]);
+        let _lock = only(&[(&ocx_env::CI_PIPELINE_CREATED_AT, "2026-09-10T10:30:00.123456+02:00")]);
 
         let annotations = for_flavor(CiFlavor::GitLab, None);
 
@@ -293,7 +295,7 @@ mod tests {
     /// the wall clock reads.
     #[test]
     fn a_malformed_gitlab_pipeline_timestamp_falls_back_to_the_clock() {
-        let _lock = only(&[("CI_PIPELINE_CREATED_AT", "last tuesday")]);
+        let _lock = only(&[(&ocx_env::CI_PIPELINE_CREATED_AT, "last tuesday")]);
 
         let annotations = for_flavor(CiFlavor::GitLab, None);
 

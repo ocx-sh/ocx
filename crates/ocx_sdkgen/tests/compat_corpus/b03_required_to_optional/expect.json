@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "PushReport's `digest` becomes optional.",
+  "findings": [
+    {
+      "code": "B03",
+      "pointer": "/$defs/PushReportRoot/properties/digest",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

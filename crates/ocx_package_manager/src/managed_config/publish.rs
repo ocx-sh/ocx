@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use ocx_config::ConfigTier;
 use ocx_config::tls::{ExtraRootsSource, TlsError, parse_pem, read_path};
+use ocx_exit::{Pick, Row};
 use ocx_oci::layer_ref::LayerRef;
 use ocx_oci::{OciIdentifier, Platform};
 use ocx_package::info::Info;
@@ -32,9 +33,10 @@ pub struct ManagedConfigPublishOptions {
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Errors raised while validating or publishing a managed-config payload.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ManagedConfigPublishError {
     #[error("failed to read managed config payload '{}'", path.display())]
+    #[exit(with = read_failure, rows((NotFound, slug = "managed_config_input_not_found", summary = "A file the managed-config payload names does not exist"), (PermissionDenied, slug = "permission_denied", summary = "The operating system refused access to a file or directory"), (IoError, slug = "managed_config_payload_read_failed", summary = "Reading the managed-config payload failed")))]
     ReadFailed {
         path: PathBuf,
         #[source]
@@ -43,6 +45,11 @@ pub enum ManagedConfigPublishError {
 
     /// Over [`ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES`].
     #[error("managed config payload is {actual} bytes, exceeding the maximum allowed {maximum} bytes")]
+    #[exit(
+        ConfigError,
+        slug = "managed_config_payload_too_large",
+        summary = "The managed-config payload exceeds the allowed size"
+    )]
     PayloadTooLarge {
         /// Both sizes are in bytes.
         actual: u64,
@@ -51,6 +58,11 @@ pub enum ManagedConfigPublishError {
 
     /// Not UTF-8, not TOML, or not the config schema.
     #[error("managed config payload is not a valid config file")]
+    #[exit(
+        ConfigError,
+        slug = "managed_config_payload_invalid_toml",
+        summary = "The managed-config payload is not a valid config file"
+    )]
     InvalidToml {
         #[source]
         source: toml::de::Error,
@@ -58,28 +70,50 @@ pub enum ManagedConfigPublishError {
 
     /// A consumer strips a published `[managed]` section anyway.
     #[error("managed config payload must not contain a [managed] section")]
+    #[exit(
+        ConfigError,
+        slug = "managed_config_contains_managed_section",
+        summary = "The managed-config payload contains a [managed] section"
+    )]
     ContainsManagedSection,
 
     /// Both `trusted_root` and `trusted_root_json`: which one wins is not predictable from the file.
     #[error("managed config payload declares both trusted_root and trusted_root_json in [trust.sigstore]: keep one")]
+    #[exit(
+        ConfigError,
+        slug = "ambiguous_trust_root",
+        summary = "The payload declares both trusted_root and trusted_root_json"
+    )]
     AmbiguousTrustRoot,
 
     /// Both `extra_ca_certs` and `extra_ca_certs_pem`, for the same reason as [`Self::AmbiguousTrustRoot`].
     #[error("managed config payload declares both extra_ca_certs and extra_ca_certs_pem: keep one")]
+    #[exit(
+        ConfigError,
+        slug = "ambiguous_extra_ca_certs",
+        summary = "Both extra_ca_certs and extra_ca_certs_pem are declared"
+    )]
     AmbiguousExtraCaCerts,
 
     /// A `[[trust.policy]]` key signer names a path, which exists only on the operator's disk.
     #[error("managed config payload declares a key signer by path in [[trust.policy]]: inline it as `key_pem` instead")]
+    #[exit(
+        ConfigError,
+        slug = "managed_config_key_by_path",
+        summary = "The payload declares a trust-policy key signer by path instead of inline"
+    )]
     ManagedConfigKeyByPath,
 
     /// A `[[trust.policy]]` entry does not compile, which would fail closed on every consumer at once.
     #[error("managed config payload declares an unusable [[trust.policy]] entry")]
+    #[exit(with = trust_policy_backend, rows((Unsupported, slug = "unsupported_key_backend", summary = "A key reference names a recognised key backend this build does not implement"), (ConfigError, slug = "invalid_trust_policy", summary = "The payload declares an unusable trust-policy entry")))]
     InvalidTrustPolicy {
         #[source]
         source: ocx_trust::TrustPolicyError,
     },
 
     #[error("failed to read trusted root '{}' named by [trust.sigstore] trusted_root", path.display())]
+    #[exit(with = read_failure, rows((NotFound, slug = "managed_config_input_not_found", summary = "A file the managed-config payload names does not exist"), (PermissionDenied, slug = "permission_denied", summary = "The operating system refused access to a file or directory"), (IoError, slug = "trusted_root_read_failed", summary = "Reading the trusted root the payload names failed")))]
     TrustedRootReadFailed {
         path: PathBuf,
         #[source]
@@ -87,6 +121,11 @@ pub enum ManagedConfigPublishError {
     },
 
     #[error("trusted root '{}' is not a usable Sigstore trusted root: {detail}", path.display())]
+    #[exit(
+        ConfigError,
+        slug = "trusted_root_invalid",
+        summary = "The named file is not a usable Sigstore trusted root"
+    )]
     TrustedRootInvalid {
         /// The resolved trusted-root path.
         path: PathBuf,
@@ -96,6 +135,7 @@ pub enum ManagedConfigPublishError {
     /// Carries [`ExtraRootsSource`], not a path, so a PEM body pasted where a
     /// path belongs is redacted rather than echoed (CWE-532).
     #[error("cannot read {origin} named by the payload")]
+    #[exit(with = read_failure, rows((NotFound, slug = "managed_config_input_not_found", summary = "A file the managed-config payload names does not exist"), (PermissionDenied, slug = "permission_denied", summary = "The operating system refused access to a file or directory"), (IoError, slug = "extra_ca_certs_read_failed", summary = "Reading the extra CA bundle the payload names failed")))]
     ExtraCaCertsReadFailed {
         origin: ExtraRootsSource,
         #[source]
@@ -105,6 +145,11 @@ pub enum ManagedConfigPublishError {
     /// The file named by `extra_ca_certs` is not a usable CA bundle (65: the
     /// bytes are wrong); the inner verdict names the path, so this must not.
     #[error("the extra CA certificate bundle named by the payload is not usable")]
+    #[exit(
+        DataError,
+        slug = "extra_ca_certs_invalid",
+        summary = "The extra CA bundle the payload names is not usable"
+    )]
     ExtraCaCertsInvalid {
         #[source]
         source: ocx_config::tls::TlsError,
@@ -113,6 +158,11 @@ pub enum ManagedConfigPublishError {
     /// The inline `extra_ca_certs_pem` is not a usable CA bundle (78: the
     /// payload's own content is wrong); the inner verdict names the key, so this must not.
     #[error("the extra CA certificate bundle inlined in the payload is not usable")]
+    #[exit(
+        ConfigError,
+        slug = "extra_ca_certs_pem_invalid",
+        summary = "The extra CA bundle inlined in the payload is not usable"
+    )]
     ExtraCaCertsPemInvalid {
         #[source]
         source: TlsError,
@@ -124,6 +174,11 @@ pub enum ManagedConfigPublishError {
         "{origin} is not UTF-8 and cannot be inlined; strip the non-UTF-8 label lines outside the \
          -----BEGIN/-----END blocks"
     )]
+    #[exit(
+        DataError,
+        slug = "extra_ca_certs_not_utf8",
+        summary = "The extra CA bundle is not UTF-8 and cannot be persisted"
+    )]
     ExtraCaCertsNotUtf8 {
         origin: ExtraRootsSource,
         #[source]
@@ -131,18 +186,25 @@ pub enum ManagedConfigPublishError {
     },
 
     #[error("failed to stage managed config payload for publishing")]
+    #[exit(
+        IoError,
+        slug = "managed_config_stage_failed",
+        summary = "Staging the managed-config payload for publishing failed"
+    )]
     StageFailed {
         #[source]
         source: std::io::Error,
     },
 
     #[error("failed to bundle managed config payload")]
+    #[exit(delegate = source)]
     BundleFailed {
         #[source]
         source: Box<crate::Error>,
     },
 
     #[error("failed to list existing tags for '{identifier}'")]
+    #[exit(delegate = source)]
     ListTagsFailed {
         identifier: Box<OciIdentifier>,
         #[source]
@@ -150,10 +212,36 @@ pub enum ManagedConfigPublishError {
     },
 
     #[error("failed to push managed config package")]
+    #[exit(delegate = source)]
     PushFailed {
         #[source]
         source: Box<crate::Error>,
     },
+}
+
+/// A read failure answers by the `io::Error` kind: 79 absent, 77 refused, else the variant's own 74 row.
+fn read_failure(error: &ManagedConfigPublishError, [not_found, denied, other]: [Row; 3]) -> Pick<'_> {
+    let (ManagedConfigPublishError::ReadFailed { source, .. }
+    | ManagedConfigPublishError::TrustedRootReadFailed { source, .. }
+    | ManagedConfigPublishError::ExtraCaCertsReadFailed { source, .. }) = error
+    else {
+        return Pick::row(other);
+    };
+    Pick::row(match source.kind() {
+        std::io::ErrorKind::NotFound => not_found,
+        std::io::ErrorKind::PermissionDenied => denied,
+        _ => other,
+    })
+}
+
+/// Parity with `--key` and the local config tiers, which answer 85 for an unsupported key backend.
+fn trust_policy_backend(error: &ManagedConfigPublishError, [unsupported, invalid]: [Row; 2]) -> Pick<'_> {
+    match error {
+        ManagedConfigPublishError::InvalidTrustPolicy { source } if source.names_unsupported_backend() => {
+            Pick::row(unsupported)
+        }
+        _ => Pick::row(invalid),
+    }
 }
 
 /// Whether a key signer names its key by path; a KMS reference travels with the

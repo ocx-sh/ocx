@@ -23,7 +23,7 @@ def test_select_switches_current_symlink(
     ocx.json("package", "install", "-s", v1.short)
     ocx.json("package", "install", v2.short)
 
-    install_v2 = ocx.json("package", "install", v2.short)
+    install_v2 = ocx.json("package", "install", v2.short)["packages"]
     content_v2 = Path(install_v2[v2.short]["path"])
 
     ocx.plain("package", "select", v2.short)
@@ -85,8 +85,8 @@ def test_select_multiple_packages_switches_both_current_symlinks(
     repo_b = f"t_{uuid4().hex[:8]}_select_multi_b"
     a = make_package(ocx, repo_a, "1.0.0", tmp_path)
     b = make_package(ocx, repo_b, "1.0.0", tmp_path)
-    install_a = ocx.json("package", "install", a.short)
-    install_b = ocx.json("package", "install", b.short)
+    install_a = ocx.json("package", "install", a.short)["packages"]
+    install_b = ocx.json("package", "install", b.short)["packages"]
 
     ocx.plain("package", "select", a.short, b.short)
 

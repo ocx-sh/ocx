@@ -14,8 +14,10 @@ use crate::api::Printable;
 /// actually apply rather than as absent.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchesView {
-    /// Registry hosting patch descriptors.
-    pub registry: String,
+    /// The `[patches] registry` value: the registry, and optionally a repository prefix, hosting
+    /// patch descriptors.
+    // Not `registry`: that name promises a bare `host[:port]`, and this value may carry a path.
+    pub repository_prefix: String,
     /// Path template for per-package patch repositories, placeholders intact.
     pub path_template: String,
     /// Whether an unavailable companion fails the launch.
@@ -41,9 +43,8 @@ pub struct ManagedView {
 /// Plain format: key/value table; rows with no payload are suppressed, and
 /// list-valued fields render one row per value.
 ///
-/// JSON format: a fixed shape — every field is always present, with `null` or
-/// `[]` where a tier is unconfigured, so a consumer can key on
-/// `.valid`/`.unknown_keys` without probing for the field first.
+/// JSON format: the list fields are always present (`[]` when empty); `registry_default`,
+/// `patches` and `managed` are omitted when the tier is unconfigured.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigTestData {
     /// The candidate file this report describes.
@@ -53,6 +54,7 @@ pub struct ConfigTestData {
     /// the document rather than inferring it from the exit code.
     pub(crate) valid: bool,
     /// Effective `[registry] default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registry_default: Option<String>,
     /// Effective `[registries.<name>]` keys, sorted.
     pub(crate) registries: Vec<String>,
@@ -74,8 +76,10 @@ pub struct ConfigTestData {
     /// it declares `[patches]`, else the forwarded `OCX_PATCHES` env tier. A
     /// candidate declaring `[patches]` therefore outranks an ambient
     /// `OCX_PATCHES`, exactly as it would once adopted.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) patches: Option<PatchesView>,
     /// The machine's `[managed]` tier posture.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) managed: Option<ManagedView>,
     /// Dotted paths of keys the config schema ignores, sorted. Advisory: the
     /// loader ignores unknown keys by design, so these are equally typos and
@@ -106,7 +110,7 @@ impl ConfigTestData {
             mirrors: sorted_keys(effective.mirrors.as_ref()),
             plain_http: sorted(plain_http),
             patches: patches.map(|patches| PatchesView {
-                registry: patches.registry,
+                repository_prefix: patches.registry,
                 path_template: patches.path_template,
                 required: patches.required,
             }),
@@ -134,6 +138,9 @@ fn sorted_keys<V>(table: Option<&std::collections::HashMap<String, V>>) -> Vec<S
 }
 
 impl Printable for ConfigTestData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "ConfigTestData";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut fields: Vec<Cell> = Vec::new();
         let mut values: Vec<Cell> = Vec::new();
@@ -161,7 +168,7 @@ impl Printable for ConfigTestData {
             row("Plain HTTP".into(), host.clone());
         }
         if let Some(patches) = &self.patches {
-            row("Patch registry".into(), patches.registry.clone());
+            row("Patch registry".into(), patches.repository_prefix.clone());
             row("Patch path".into(), patches.path_template.clone());
             row("Patch required".into(), patches.required.to_string());
         }

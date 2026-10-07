@@ -317,7 +317,7 @@ mod tests {
         );
     }
 
-    /// The description read that `package copy --description` and
+    /// The description read that `package copy --with-description` and
     /// `package description push --from` write back from goes to the CANONICAL
     /// host, with a mirror configured for it.
     ///

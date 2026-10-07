@@ -6,7 +6,7 @@ Every probe-dependent case runs on a real terminal (``run_on_a_terminal``): the 
 skips when stderr is not a terminal, so over pipes a "no state file" assertion is green in every
 state. Each such case shows its red control (the probe fires) and its green outcome on the same
 fixture, reached through ``ocx clean --dry-run`` (local-only; ``version`` is in the skip list).
-The self check goes to a loopback repository through the ``__OCX_SELF_IMAGE`` seam (``--features
+The self check goes to a loopback repository through the ``__OCX_TESTING_SELF_IMAGE`` seam (``--features
 ocx/__testing``), so no case reaches ocx.sh or publishes a package: the probe touches its state
 file whether or not the repository exists. The managed tick's own switch is pinned by
 ``test_managed_config.py::test_no_config_refresh_kill_switch_stops_the_background_apply_tick``."""
@@ -57,7 +57,7 @@ def _write_config(ocx: OcxRunner, text: str) -> None:
 
 def _self_env(ocx: OcxRunner, unique_repo: str) -> dict[str, str]:
     """Redirects the self check to a loopback repository nothing needs to publish."""
-    return {"__OCX_SELF_IMAGE": f"{ocx.registry}/{unique_repo}_self"}
+    return {"__OCX_TESTING_SELF_IMAGE": f"{ocx.registry}/{unique_repo}_self"}
 
 
 def _on_terminal(

@@ -2,7 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 use clap::Parser;
-use ocx_config::env;
 use ocx_config::env::OcxConfigView;
 use ocx_console::{ColorMode, ColorModeConfig, DataInterface, Printer};
 
@@ -39,7 +38,7 @@ pub struct ContextOptions {
     /// toolchain never composes into project resolution; `ocx exec` and
     /// `ocx package exec` stay hermetic and never read it.
     // `-g` is `--group` after a subcommand (`options/group_selection.rs`); position disambiguates, do not unify.
-    #[arg(short = 'g', long, conflicts_with = "project", default_value_t = ocx_util::env::flag(env::keys::OCX_GLOBAL, false))]
+    #[arg(short = 'g', long, conflicts_with = "project")]
     pub global: bool,
 
     /// Route mutable lookups (tag list, catalog, tag->manifest) to the
@@ -52,7 +51,7 @@ pub struct ContextOptions {
     /// "pinned-only mode": no source contact, and any tag-addressed
     /// resolution that cannot be satisfied locally errors instead of
     /// silently falling back. Equivalent env var: `OCX_REMOTE`.
-    #[arg(short = 'r', long, default_value_t = ocx_util::env::flag(env::keys::OCX_REMOTE, false))]
+    #[arg(short = 'r', long)]
     pub remote: bool,
 
     /// Disable all network access.
@@ -61,7 +60,7 @@ pub struct ContextOptions {
     /// digest-pinned identifier; unpinned tags missing from the local
     /// index will error. Useful for hermetic CI runs and air-gapped
     /// environments. Equivalent env var: `OCX_OFFLINE`.
-    #[arg(long, default_value_t = ocx_util::env::flag(env::keys::OCX_OFFLINE, false))]
+    #[arg(long)]
     pub offline: bool,
 
     /// Freeze tag resolution to the local index; never fetch an unknown tag.
@@ -74,7 +73,7 @@ pub struct ContextOptions {
     /// packages: patch companions and managed configuration still resolve live.
     /// Unlike `--offline` and Cargo's `--frozen`, the network stays reachable
     /// for known content. Conflicts with `--remote`. Env var: `OCX_FROZEN`.
-    #[arg(long, conflicts_with = "remote", default_value_t = ocx_util::env::flag(env::keys::OCX_FROZEN, false))]
+    #[arg(long, conflicts_with = "remote")]
     pub frozen: bool,
 
     #[clap(flatten)]
@@ -85,7 +84,7 @@ pub struct ContextOptions {
     /// When set, the CLI's structured report (table or JSON) is not printed
     /// and no transfer progress is rendered on stderr.
     /// Equivalent env var: `OCX_QUIET`.
-    #[arg(short = 'q', long, default_value_t = ocx_util::env::flag("OCX_QUIET", false))]
+    #[arg(short = 'q', long)]
     pub quiet: bool,
 
     /// Maximum number of root packages to pull concurrently.
@@ -125,6 +124,25 @@ pub struct ContextOptions {
 }
 
 impl ContextOptions {
+    /// Turns on each root switch whose environment variable is truthy; a flag on the command line
+    /// already won. Kept out of the clap build so the grammar's defaults stay literal.
+    ///
+    /// # Errors
+    ///
+    /// [`ocx_env::InvalidEnv`] when a variable declared to refuse an unparsable value holds one.
+    pub fn apply_env(&mut self) -> Result<(), ocx_env::InvalidEnv> {
+        for (flag, var) in [
+            (&mut self.global, &ocx_env::OCX_GLOBAL),
+            (&mut self.remote, &ocx_env::OCX_REMOTE),
+            (&mut self.offline, &ocx_env::OCX_OFFLINE),
+            (&mut self.frozen, &ocx_env::OCX_FROZEN),
+            (&mut self.quiet, &ocx_env::OCX_QUIET),
+        ] {
+            *flag |= var.bool_or(false)?;
+        }
+        Ok(())
+    }
+
     /// Builds the reporting [`Api`](api::Api); the only construction, shared by
     /// [`crate::app::Context::try_init`] and Context-free commands (`ocx version`).
     // A second construction site would drop `--color` or drift the format default.
@@ -179,6 +197,52 @@ mod tests {
     /// The flattened `Format` group reaches the `Api` the context builds —
     /// the wiring `options::format`'s own tests cannot see. Resolution
     /// semantics are covered there.
+    /// The root switches read their variables after parsing, and a flag on the command line
+    /// still turns one on when the variable is off.
+    #[test]
+    fn apply_env_turns_on_the_switches_whose_variables_are_set() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        let parsed = |args: &[&str]| {
+            let mut options = ContextOptions::try_parse_from(args).expect("args parse");
+            options.apply_env().expect("every variable holds a boolean");
+            options
+        };
+
+        let plain = parsed(&["ocx", "--frozen"]);
+        assert!(plain.frozen && !plain.offline && !plain.remote && !plain.global && !plain.quiet);
+
+        for (key, value) in [
+            (&ocx_env::OCX_OFFLINE, "1"),
+            (&ocx_env::OCX_REMOTE, "yes"),
+            (&ocx_env::OCX_GLOBAL, "true"),
+            (&ocx_env::OCX_QUIET, "on"),
+        ] {
+            env.set(key, value);
+        }
+        let from_env = parsed(&["ocx"]);
+        assert!(from_env.offline && from_env.remote && from_env.global && from_env.quiet);
+        assert!(!from_env.frozen);
+    }
+
+    /// A refusing variable's unparsable value is an error naming the key, not a silent off.
+    #[test]
+    fn apply_env_refuses_an_unparsable_refusing_variable() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::OCX_FROZEN, "not-a-bool");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        let error = options.apply_env().expect_err("OCX_FROZEN refuses an invalid value");
+        assert_eq!(error.key, "OCX_FROZEN");
+
+        // A lenient variable still falls back to off.
+        env.remove(&ocx_env::OCX_FROZEN);
+        env.set(&ocx_env::OCX_REMOTE, "maybe");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("OCX_REMOTE falls back");
+        assert!(!options.remote);
+    }
+
     #[test]
     fn build_api_honors_the_flattened_format_group() {
         assert!(!is_json(&["ocx"]), "default is plain");

@@ -123,7 +123,7 @@ def test_deps_flat_offline_shows_topological_order(
     # Parse JSON — entries should be in topological order: C, B, A.
     import json
     data = json.loads(result.stdout)
-    ids = [e["identifier"] for e in data["entries"]]
+    ids = [e["identifier"] for e in data["items"]]
     assert len(ids) == 3
     # C (leaf) must come before B, B before A.
     c_idx = next(i for i, x in enumerate(ids) if f"{unique_repo}_c" in x)

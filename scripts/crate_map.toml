@@ -16,21 +16,26 @@
 # (`crate_map_toml_matches_rust_table` asserts both).
 
 [allowed]
-# ---- the 18 crates of the map (17 product crates + ocx_test_support) ----
-ocx_exit = []
-ocx_util = []
-ocx_console = ["ocx_exit", "ocx_util"]
-ocx_oci = ["ocx_util", "ocx_console", "ocx_exit"]
-ocx_trust = ["ocx_oci", "ocx_util"]
-ocx_sign = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]
-ocx_config = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]
-ocx_store = ["ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
-ocx_index = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
-ocx_package = ["ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
+# ---- the 20 crates of the map (19 product crates + ocx_test_support) ----
+# `#[derive(Classify)]` is re-exported by `ocx_exit` so a tier crate names one
+# dependency. The derive is a proc-macro: it links nothing into a consumer.
+ocx_exit = ["ocx_exit_derive"]
+ocx_exit_derive = []
+# The environment registry: `ocx_exit` for its errors' classification, nothing else.
+ocx_env = ["ocx_exit"]
+ocx_util = ["ocx_exit"]
+ocx_console = ["ocx_exit", "ocx_util", "ocx_env"]
+ocx_oci = ["ocx_util", "ocx_console", "ocx_exit", "ocx_env"]
+ocx_trust = ["ocx_oci", "ocx_util", "ocx_env"]
+ocx_sign = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_config = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_store = ["ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_index = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_package = ["ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 # PEP 751 lock -> OCX package translation. `ocx` does not link it; its
 # consumer is ocx-mirror (a lockstep satellite), ocx-dist is planned.
 ocx_python = ["ocx_oci", "ocx_package"]
-ocx_shell = ["ocx_package", "ocx_config", "ocx_store", "ocx_oci", "ocx_util", "ocx_console", "ocx_exit"]
+ocx_shell = ["ocx_package", "ocx_config", "ocx_store", "ocx_oci", "ocx_util", "ocx_console", "ocx_exit", "ocx_env"]
 ocx_project = [
     "ocx_shell",
     "ocx_package",
@@ -41,6 +46,7 @@ ocx_project = [
     "ocx_oci",
     "ocx_util",
     "ocx_exit",
+    "ocx_env",
 ]
 # D-037: += ocx_trust (auto_verify's `TrustPolicy`), += ocx_shell (1.16 moves
 # `activation.rs` here and it drives `shell::reconcile`).
@@ -57,9 +63,10 @@ ocx_package_manager = [
     "ocx_exit",
     "ocx_trust",
     "ocx_shell",
+    "ocx_env",
 ]
-ocx_announce = ["ocx_index", "ocx_package", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
-ocx_script = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_console"]
+ocx_announce = ["ocx_index", "ocx_package", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_script = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_console", "ocx_env"]
 # D-037: += ocx_index (setup.rs builds an `Index`), += ocx_package
 # (bootstrap's `Version`).
 ocx_setup = [
@@ -72,6 +79,7 @@ ocx_setup = [
     "ocx_exit",
     "ocx_index",
     "ocx_package",
+    "ocx_env",
 ]
 # D-037 / design spec § E: zero `ocx_*` dependencies, dev-dependency only.
 ocx_test_support = []
@@ -95,11 +103,14 @@ ocx = [
     "ocx_announce",
     "ocx_script",
     "ocx_setup",
+    "ocx_env",
 ]
 # Build-only schema generator (ADR map + C-067).
-ocx_schema = ["ocx", "ocx_oci", "ocx_config", "ocx_package", "ocx_project", "ocx_package_manager"]
+ocx_schema = ["ocx", "ocx_oci", "ocx_config", "ocx_package", "ocx_project", "ocx_package_manager", "ocx_exit", "ocx_env"]
 # The Windows launcher shim: nothing.
 ocx_shim = []
+# The published-document contract lint: reads the documents as JSON, links nothing.
+ocx_sdkgen = []
 
 # Dev edges (`[dev-dependencies]`) are judged against this section instead.
 # A dev-only edge never legalises a runtime one: a crate whose dev edge is

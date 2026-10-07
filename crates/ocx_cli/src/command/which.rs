@@ -182,8 +182,7 @@ async fn locate_all(
 
 #[cfg(test)]
 mod tests {
-    use crate::exit::ClassifyExitCode as _;
-    use ocx_exit::ExitCode;
+    use ocx_exit::{ClassifyExitCode as _, ExitCode};
     use ocx_package_manager::error::PackageErrorKind;
 
     use super::*;

@@ -1,5 +1,7 @@
 # ADR: Corporate Managed Configuration Tier (`[managed]`)
 
+**Amended by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (2026-10-07):** exit codes 82-87 and the `error.kind` values that twinned 83-87 are folded into next-action codes (82 `DirtyRcBlock` -> 81; 83 -> 75, 69, 65 or 81; 84, 85, 86 and 87 -> 82, with the job-token allowlist case of 86 -> 77). Every exit-code row below is historical; the `error.detail` slugs are unchanged.
+
 > **v2 amendment (2026-07-05, managed-config v2 — config-as-package).** The custom
 > artifact wire shape and the oras-push publish recipe (Decision H, and the
 > `application/vnd.sh.ocx.config.v1`(+toml) media types referenced throughout) are

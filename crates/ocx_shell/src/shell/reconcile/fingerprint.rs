@@ -45,12 +45,17 @@ pub fn fingerprint(
     hex::encode(hasher.finalize())
 }
 
+/// [`GRANT_SIGNALS`](ocx_config::shell::GRANT_SIGNALS) as declarations, in its order; a test holds the two equal.
+static GRANT_SIGNAL_VARS: [&ocx_env::EnvVar; 2] = [&ocx_env::OCX_CONSENT_PATHS, &ocx_env::OCX_CONSENT_NAMESPACES];
+
 /// [`fingerprint`] (blocking) over this process's [`GRANT_SIGNALS`](ocx_config::shell::GRANT_SIGNALS) environment.
 ///
 /// The one reader for `ocx self activate --reconcile` and `ocx shell state`, so both compute the same value.
 #[must_use]
 pub fn current_fingerprint(watch_paths: &[PathBuf], project_dir: Option<&Path>) -> String {
-    let [consent_paths, consent_namespaces] = ocx_config::shell::GRANT_SIGNALS.map(ocx_util::env::var);
+    // Verbatim: an empty grant folds differently from an unset one.
+    let [consent_paths, consent_namespaces] =
+        GRANT_SIGNAL_VARS.map(|var| var.get_raw().and_then(|value| value.into_string().ok()));
     fingerprint(
         watch_paths,
         project_dir,
@@ -106,13 +111,11 @@ pub fn watch_paths(
         None => {
             // Unconditional, as in the loader: `OCX_NO_CONFIG` does not prune the system tier's locked sections.
             paths.push(ocx_config::loader::ConfigLoader::system_path());
-            if !ocx_util::env::flag("OCX_NO_CONFIG", false) {
+            if !ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false) {
                 paths.extend(ocx_config::loader::ConfigLoader::user_path());
                 paths.extend(ocx_config::loader::ConfigLoader::home_path());
             }
-            if let Some(explicit) =
-                ocx_util::env::var(ocx_config::env::keys::OCX_CONFIG).filter(|value| !value.is_empty())
-            {
+            if let Some(explicit) = ocx_env::OCX_CONFIG.get() {
                 paths.push(PathBuf::from(explicit));
             }
         }
@@ -193,6 +196,25 @@ mod fingerprint_tests {
 
     fn unix_time(seconds: u64, nanos: u32) -> std::time::SystemTime {
         std::time::UNIX_EPOCH + std::time::Duration::new(seconds, nanos)
+    }
+
+    /// The fold reads [`GRANT_SIGNAL_VARS`] and the hook guard watches `GRANT_SIGNALS`; a grant one
+    /// list names and the other does not is a stale `inert` verdict nothing expires.
+    #[test]
+    fn grant_signal_vars_declare_exactly_the_grant_signals() {
+        assert_eq!(GRANT_SIGNAL_VARS.map(|var| var.name), ocx_config::shell::GRANT_SIGNALS);
+    }
+
+    /// An empty grant and an unset one fold to different fingerprints, as they did before the
+    /// registry: the read is verbatim.
+    #[test]
+    fn current_fingerprint_folds_an_empty_grant_apart_from_an_unset_one() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_CONSENT_NAMESPACES);
+        env.remove(&ocx_env::OCX_CONSENT_PATHS);
+        let unset = current_fingerprint(&[], None);
+        env.set(&ocx_env::OCX_CONSENT_PATHS, "");
+        assert_ne!(current_fingerprint(&[], None), unset);
     }
 
     /// C-019 — the fold is deterministic: the same watch set folds to the same
@@ -521,8 +543,8 @@ mod watch_path_tests {
     /// assertion fails.
     #[test]
     fn watch_paths_under_no_config_re_derive_the_system_tier_and_nothing_below_it() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
 
         let paths = watch_paths(&file_structure, None, None, None);

@@ -1813,7 +1813,7 @@ bad = "ocx.sh/CMAKE:3.28"
 
     /// A checked-in `ocx.toml` cannot declare the trust-sensitive `OCX_*`
     /// variables — not in `[env]`, not in a group's — because both sit in the
-    /// namespace `ocx_util::env::is_reserved_ocx_key` reserves.
+    /// namespace `ocx_env::is_reserved_ocx_key` reserves.
     ///
     /// `OCX_NO_VERIFY` turns off the policy-gated auto-verify on install/pull
     /// and is forwarded to every child ocx; `OCX_IDENTITY_TOKEN` is a bearer
@@ -1821,7 +1821,7 @@ bad = "ocx.sh/CMAKE:3.28"
     /// repository silently disable signature verification for everyone who runs
     /// a tool out of it.
     ///
-    /// Built from the `keys::` constants rather than string literals: the gate
+    /// Built from the registry's declarations rather than string literals: the gate
     /// matches on the `OCX_` prefix, so respelling either variable outside that
     /// prefix moves it out of the gate's reach without touching the gate. That
     /// is the failure this test exists to catch, alongside the gate itself
@@ -1829,8 +1829,8 @@ bad = "ocx.sh/CMAKE:3.28"
     #[test]
     fn project_env_cannot_declare_trust_sensitive_ocx_keys() {
         for key in [
-            ocx_config::env::keys::OCX_NO_VERIFY,
-            ocx_config::env::keys::OCX_IDENTITY_TOKEN,
+            ocx_env::OCX_NO_VERIFY.name,
+            ocx_env::OCX_IDENTITY_TOKEN.declaration().name,
         ] {
             for scope in ["env", "group.ci.env"] {
                 let toml_str = format!("[{scope}]\n{key} = \"1\"\n");
@@ -1857,7 +1857,7 @@ bad = "ocx.sh/CMAKE:3.28"
 
     // ── resolve() contract tests ─────────────────────────────────────────────
     //
-    // Each test acquires `ocx_util::env::overrides::lock()` and clears the three env
+    // Each test acquires `ocx_env::overrides::lock()` and clears the three env
     // vars that influence resolution so tests do not bleed state.
     // `OCX_CEILING_PATH` is set to the workspace root in CWD-walk tests so
     // the walk cannot escape into the real filesystem.
@@ -1875,11 +1875,11 @@ bad = "ocx.sh/CMAKE:3.28"
     /// CWD walk finds `ocx.toml` → returns `(config_path, lock_path)`.
     #[tokio::test]
     async fn resolve_walk_hit_returns_project_paths() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let tmp = tempfile::tempdir().expect("tempdir");
-        env.set("OCX_CEILING_PATH", tmp.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, tmp.path().to_str().unwrap());
         let config_path = tmp.path().join("ocx.toml");
         tokio::fs::write(&config_path, "").await.expect("write");
         let result = ProjectConfig::resolve(Some(tmp.path()), None, None, false)
@@ -1898,12 +1898,12 @@ bad = "ocx.sh/CMAKE:3.28"
     /// regression that re-adds the fallback would make this `Some` and fail.
     #[tokio::test]
     async fn project_path_returns_none_without_global_or_project() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let home_dir = tempfile::tempdir().expect("home tempdir");
-        env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, workspace.path().to_str().unwrap());
         // A home `ocx.toml` exists but must NOT be discovered implicitly.
         tokio::fs::write(home_dir.path().join("ocx.toml"), "")
             .await
@@ -1926,12 +1926,12 @@ bad = "ocx.sh/CMAKE:3.28"
     /// walk.
     #[tokio::test]
     async fn resolve_selects_ocx_home_under_global() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let ocx_home = tempfile::tempdir().expect("ocx_home tempdir");
         let workspace = tempfile::tempdir().expect("workspace tempdir");
-        env.set("OCX_CEILING_PATH", workspace.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, workspace.path().to_str().unwrap());
         // A competing project file in the CWD must be bypassed by `global`.
         tokio::fs::write(workspace.path().join("ocx.toml"), "")
             .await
@@ -1956,10 +1956,10 @@ bad = "ocx.sh/CMAKE:3.28"
     /// Explicit missing path → `Err(FileNotFound)` propagated from Phase 1.
     #[tokio::test]
     async fn resolve_explicit_missing_returns_file_not_found_error() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let missing = PathBuf::from("/tmp/ocx-resolve-test-nonexistent-explicit.toml");
         let err = ProjectConfig::resolve(None, Some(&missing), None, false)
             .await
@@ -2010,7 +2010,7 @@ foo = "ocx.sh/foo:1"
             name: "all".into(),
             hint: "rename this group; `all` is a reserved keyword that selects every declared group",
         };
-        let err = crate::Error::Project(ProjectError::new(std::path::PathBuf::new(), kind));
+        let err = crate::Error::from(ProjectError::new(std::path::PathBuf::new(), kind));
         let formatted = format!("{err:#}");
         assert!(
             formatted.contains("[group.all] is reserved"),
@@ -2249,7 +2249,7 @@ bogus = 1
         let crate::Error::Project(pe) = err else {
             panic!("expected Error::Project");
         };
-        pe
+        *pe
     }
 
     /// The error [`validate_toolchain_name`] produces for `name` at `scope`,
@@ -2919,23 +2919,23 @@ bogus = 1
         // The other tier, same vocabulary, opposite outcome by design (C-006 /
         // C-007). Goes through the crate's `#[cfg(test)]` env seam, never
         // `std::env::set_var`, which is process-global and racy.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for value in ["always", "bogus", " bin"] {
-            env.set(ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE, value);
+            env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, value);
             assert_eq!(
                 ActivateMode::from_env(),
                 None,
                 "C-006: `OCX_TOOLCHAIN_ACTIVATE={value}` yields an ABSENT tier at exit 0, never a refusal"
             );
         }
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE, "BIN");
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "BIN");
         assert_eq!(
             ActivateMode::from_env(),
             Some(ActivateMode::Bin),
             "C-006/C-015: the env reader folds ASCII case, while the file tier refuses `BIN` — \
              `from_env` is the only folding reader and that asymmetry is deliberate"
         );
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE, "");
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "");
         assert_eq!(
             ActivateMode::from_env(),
             None,

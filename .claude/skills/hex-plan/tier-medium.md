@@ -1,9 +1,8 @@
 # Tier: medium
 
 Minimal plan for **two-way-door** changes — a flag or option, a doc edit, a
-fixture, a single-area tweak of ≤3 files. Keep the contract-first TDD skeleton
-(Stub → Specify → Implement → Review) so `/hex-execute` runs the plan
-unchanged; only scale the worker count and research depth down.
+fixture, a single-area tweak of ≤3 files. Scale the worker count and
+research depth down; the plan stays contract-first.
 
 `Read` this file from [`SKILL.md`](SKILL.md) after the config is announced.
 Shared vocabulary is linked, not restated: roles in
@@ -60,30 +59,22 @@ approach is enough when the change is genuinely small.
 
 ## Phase 5: Decompose (inline)
 
-Produce a single Stub → Specify → Implement → Review cycle in the plan. For
-≤3 files this may collapse into one task. A Parallelization section is still
-required, even if it is one work package with no dependencies
-([`worktree.md`](../hex-core/references/worktree.md#worktree-work-package-mechanics))
-— the tier's ≤3-file scope is itself the justification, no extra line
-needed. Single WP: the "Shippable after wave" line is exempt — delete it,
-since the sole WP is the shippable unit. The WP still carries a `Verify` cell
-and a `Review` cell — the latter empty, or `risk` when the author knows
-more than the file set shows
-([`decompose.md`](../hex-core/references/decompose.md#parallel-by-default-decomposition));
-a plan carrying the generation marker needs the `Verify` column present.
+One pipeline: a few ordered steps (for ≤3 files, possibly one), each a
+Stub → Specify → Implement brief, no contract wave, no marks
+([`SKILL.md`](SKILL.md#the-plan-artifact)). The Parallelization section is
+still required, even for one pipeline with no dependencies
+([`worktree.md`](../hex-core/references/worktree.md#pipeline-worktree-mechanics))
+— the tier's ≤3-file scope is itself the justification; the "Shippable after
+wave" line is exempt, since the sole pipeline is the shippable unit.
 
 **Federation.** When `hex.md › Pointers` carries `Federation:` bullets and
 the target's scope lies in a satellite, Decompose offers that satellite's
-key in the WP's `Repo` column and adds the mandatory integration WP row it
-depends on (C-311) — the plan then carries more than the single WP this
-tier otherwise collapses to. Wave-cutting, once more than one WP exists,
-applies the `(Repo, path)` disjointness key, not bare paths (C-316).
+key in the pipeline's `Repo` column and adds the mandatory integration
+pipeline row (C-311) — the plan then carries more than the single pipeline
+this tier otherwise collapses to. Once more than one pipeline exists,
+disjointness is keyed on `(Repo, path)`, not bare paths (C-316).
 `/hex-plan` never runs the C-303 pre-flight and never writes into a
 satellite (C-314). Absent `Federation:` bullets, unchanged.
-
-Print the **effective-tier histogram** at this point, linking rather than
-restating its grammar
-([`decompose.md`](../hex-core/references/decompose.md#parallel-by-default-decomposition)).
 
 ## Phase 6: Review (single reviewer, single pass)
 

@@ -17,7 +17,9 @@ use ocx_config::shell::effective_consent;
 use ocx_package_manager::activation::{self, ProjectIdentity};
 use ocx_project::consent::{Decision, Reason};
 use ocx_shell::shell::coexistence;
-use ocx_shell::shell::reconcile::{self, CARRIER_KEY, Ledger};
+use ocx_shell::shell::reconcile::{self, Ledger};
+use ocx_util::fs::path::AbsolutePath;
+use ocx_util::size::ByteSize;
 
 use crate::api::data::shell_state::{HookStatus, Note, ShellStateReport, VerboseShellState, WatchMember};
 use crate::app::project_context::{self, ProjectContextError};
@@ -59,14 +61,17 @@ impl ShellState {
 /// [`ocx_util::error::FileError`] (exit 74) when `$OCX_HOME` exists but cannot be read; an absent home is a
 /// fresh install, not an error.
 async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateReport> {
-    let ocx_home = context.file_structure().root().to_path_buf();
-    let ocx_home_present = read_ocx_home(&ocx_home).await?;
-    let shell_integration_installed = shell_integration_installed(&ocx_home).await;
+    let root = context.file_structure().root();
+    let absolute = std::path::absolute(root).map_err(|error| ocx_util::error::FileError::new(root, error))?;
+    let ocx_home = AbsolutePath::new(absolute)
+        .ok_or_else(|| ocx_util::error::FileError::new(root, std::io::ErrorKind::InvalidInput.into()))?;
+    let ocx_home_present = read_ocx_home(ocx_home.as_path()).await?;
+    let shell_integration_installed = shell_integration_installed(ocx_home.as_path()).await;
 
     // The carrier is untrusted input: nothing below builds a path from it.
-    let carrier = ocx_util::env::var(CARRIER_KEY);
+    let carrier = ocx_env::__OCX_ENV_STATE.get_raw().and_then(|v| v.into_string().ok());
     let carrier_present = carrier.is_some();
-    let carrier_bytes = carrier.as_deref().map_or(0, str::len);
+    let carrier_bytes = ByteSize::from(carrier.as_deref().map_or(0, str::len) as u64);
     let ledger = carrier.as_deref().and_then(Ledger::decode);
 
     let hook = resolve_hook(context);
@@ -85,7 +90,7 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
     }
     if let Some(project) = project {
         // Only the CWD walk skips symlinked candidates; an explicit selector follows them.
-        let env_project = ocx_util::env::var("OCX_PROJECT");
+        let env_project = ocx_env::OCX_PROJECT.get_raw().and_then(|v| v.into_string().ok());
         if walked_to_project(context.global(), context.project_path(), env_project.as_deref()) {
             notes.extend(symlinked_candidate_note(&project.identity.config_path, &project.identity.dir).await);
         }
@@ -142,7 +147,7 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
             Decision::Activate(grant) => Some(*grant),
             Decision::Inert(_) => None,
         }),
-        stamp_written_at: project.and_then(|project| project.stamp_written_at.clone()),
+        stamp_written_at: project.and_then(|project| project.stamp_written_at),
         priors,
         hook,
         yielded_to,
@@ -182,10 +187,13 @@ async fn toolchain_state(
     let home = context.manager().toolchain_home(&scope, context.toolchain_root())?;
     let (activate, pinned, note) = toolchain_settings(&config_path).await;
 
+    // A relative `$OCX_HOME` leaves the global home relative; the report promises absolute paths.
+    let absolute =
+        |path: PathBuf| std::path::absolute(&path).map_err(|error| ocx_util::error::FileError::new(path, error));
     Ok(ToolchainState {
-        home: home.root().to_path_buf(),
+        home: absolute(home.root().to_path_buf())?,
         // The home's accessor, never `home.join("bin")`, or the report drifts from every PATH route.
-        bin: home.bin(),
+        bin: absolute(home.bin())?,
         activate,
         pinned,
         note,
@@ -284,7 +292,7 @@ struct ResolvedProject {
     /// Whether a usable stamp exists (an unusable stamp counts as absent).
     stamped: bool,
     /// The instant that stamp records, read off the stamp, never `stat`'d.
-    stamp_written_at: Option<String>,
+    stamp_written_at: Option<ocx_util::time::Timestamp>,
     /// The activation predicate's answer.
     decision: Decision,
     /// Why this project's `ocx.lock` refuses composition, as `compose` reports it.
@@ -331,7 +339,7 @@ async fn resolve_project(context: &crate::app::Context, whitelist: &ShellConsent
 
     Resolution::Resolved(Box::new(ResolvedProject {
         stamped: evaluated.stamped(),
-        stamp_written_at: evaluated.stamp().map(|stamp| stamp.stamped_at.clone()),
+        stamp_written_at: evaluated.stamp().map(|stamp| stamp.stamped_at),
         decision: evaluated.decision().clone(),
         lock_refusal: lock_refusal(&identity, evaluated.lock()).await,
         identity,
@@ -385,7 +393,7 @@ fn resolve_hook(context: &crate::app::Context) -> HookStatus {
 ///
 /// The hook discards the loader's warning, so this row is the user's only view of the skip.
 async fn symlinked_candidate_note(config_path: &Path, project_dir: &Path) -> Option<Note> {
-    let cwd = ocx_util::env::current_dir().ok()?;
+    let cwd = ocx_env::current_dir().ok()?;
     let resolved_dir = config_path.parent()?;
 
     let mut current = cwd.as_path();
@@ -488,19 +496,18 @@ async fn watch_set(paths: &[PathBuf]) -> Vec<WatchMember> {
         let member = match tokio::fs::metadata(&path).await {
             Ok(meta) => WatchMember {
                 present: true,
-                size: Some(meta.len()),
-                mtime: meta
+                size: Some(meta.len().into()),
+                modified_at: meta
                     .modified()
                     .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|since| since.as_secs()),
+                    .map(|time| chrono::DateTime::<chrono::Utc>::from(time).into()),
                 path,
             },
             Err(_) => WatchMember {
                 path,
                 present: false,
                 size: None,
-                mtime: None,
+                modified_at: None,
             },
         };
         members.push(member);
@@ -606,7 +613,7 @@ mod tests {
         let resolved = ResolvedProject {
             identity,
             stamped: evaluated.stamped(),
-            stamp_written_at: evaluated.stamp().map(|stamp| stamp.stamped_at.clone()),
+            stamp_written_at: evaluated.stamp().map(|stamp| stamp.stamped_at),
             decision: evaluated.decision().clone(),
             lock_refusal: None,
         };

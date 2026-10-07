@@ -19,9 +19,17 @@
 //! non-compression host dylib ever leaks in.
 #![cfg(target_os = "linux")]
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running `ldd` against the built binary"
+)]
 use std::process::Command;
 
 #[test]
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running `ldd` against the built binary"
+)]
 fn ocx_does_not_dynamically_link_compression_libs() {
     let bin = env!("CARGO_BIN_EXE_ocx");
     let Ok(out) = Command::new("ldd").arg(bin).output() else {

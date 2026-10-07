@@ -13,6 +13,7 @@ use crate::command::index_common;
 /// loop, so one bounded ceiling covers a run over any number of registries.
 #[derive(Parser)]
 pub struct IndexSync {
+    /// Registries whose catalog names the packages to refresh.
     #[clap(required = true, num_args = 1.., value_name = "REGISTRY")]
     registries: Vec<String>,
 
@@ -33,7 +34,7 @@ impl IndexSync {
         // Before any fetch: bulk tag → digest binding is what a freeze stops. The only frozen gate here;
         // `exactly_one_frozen_gate` fails a second one.
         if context.config_view().frozen {
-            return Err(index_common::policy_blocked("`ocx index sync`", "frozen").into());
+            return Err(index_common::policy_blocked("`ocx index sync`").into());
         }
 
         let oci_index = ocx_index::Index::from_remote(remote_index.clone());

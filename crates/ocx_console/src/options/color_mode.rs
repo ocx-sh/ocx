@@ -100,16 +100,16 @@ impl ColorModeConfig {
     fn from_env() -> Self {
         let enabled = 'env: {
             // Precedence: NO_COLOR (https://no-color.org/), CLICOLOR_FORCE, CLICOLOR=0, TERM=dumb, then a tty probe.
-            if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
+            if ocx_env::NO_COLOR.get().is_some() {
                 break 'env false;
             }
-            if std::env::var("CLICOLOR_FORCE").is_ok_and(|v| v != "0" && !v.is_empty()) {
+            if ocx_env::CLICOLOR_FORCE.get().is_some_and(|v| v != "0") {
                 break 'env true;
             }
-            if std::env::var("CLICOLOR").is_ok_and(|v| v == "0") {
+            if ocx_env::CLICOLOR.get().is_some_and(|v| v == "0") {
                 break 'env false;
             }
-            if std::env::var("TERM").is_ok_and(|v| v == "dumb") {
+            if ocx_env::TERM.get().is_some_and(|v| v == "dumb") {
                 break 'env false;
             }
             return Self {
@@ -154,6 +154,37 @@ mod tests {
             !config.relayed,
             "an explicit refusal must reach the relayed channel too"
         );
+    }
+
+    /// Every row decides before the tty probe, so the answer never depends on how the test runs.
+    #[test]
+    fn auto_follows_the_color_environment_precedence() {
+        let keys: [&'static ocx_env::EnvVar; 4] = [
+            &ocx_env::NO_COLOR,
+            &ocx_env::CLICOLOR_FORCE,
+            &ocx_env::CLICOLOR,
+            &ocx_env::TERM,
+        ];
+        let env = ocx_env::overrides::lock();
+        let rows: [(&[(&ocx_env::EnvVar, &str)], bool); 7] = [
+            (&[(&ocx_env::NO_COLOR, "1"), (&ocx_env::CLICOLOR_FORCE, "1")], false),
+            (&[(&ocx_env::NO_COLOR, ""), (&ocx_env::CLICOLOR_FORCE, "1")], true),
+            (&[(&ocx_env::CLICOLOR_FORCE, "0"), (&ocx_env::CLICOLOR, "0")], false),
+            (&[(&ocx_env::CLICOLOR_FORCE, ""), (&ocx_env::TERM, "dumb")], false),
+            (&[(&ocx_env::CLICOLOR_FORCE, "1"), (&ocx_env::TERM, "dumb")], true),
+            (&[(&ocx_env::CLICOLOR, "1"), (&ocx_env::TERM, "dumb")], false),
+            (&[(&ocx_env::CLICOLOR, "0"), (&ocx_env::TERM, "xterm")], false),
+        ];
+        for (set, expected) in rows {
+            for key in keys {
+                env.remove(key);
+            }
+            for (key, value) in set {
+                env.set(key, *value);
+            }
+            let config = ColorModeConfig::from_env();
+            assert_eq!((config.stdout, config.relayed), (expected, expected), "{set:?}");
+        }
     }
 
     #[test]

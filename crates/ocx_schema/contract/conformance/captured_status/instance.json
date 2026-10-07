@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "project": "/work/project/ocx.toml",
+  "lock": {
+    "present": true,
+    "current": true,
+    "lock_version": 3,
+    "declaration_hash": "sha256:3110f8345dc4c5212b94d6a8286773b2e86ab817db53cf02ce7eede77c2c36ab",
+    "declaration_hash_expected": "sha256:3110f8345dc4c5212b94d6a8286773b2e86ab817db53cf02ce7eede77c2c36ab",
+    "generated_by": "ocx 0.6.4",
+    "generated_at": "2026-10-04T15:41:31Z"
+  },
+  "groups": {
+    "default": {
+      "tools": {},
+      "env": {}
+    }
+  },
+  "package_settings": {}
+}

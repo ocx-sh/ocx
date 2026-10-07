@@ -167,7 +167,7 @@ pub(super) fn referrer_descriptor_facets(
 
 /// Maps a failed fallback-index PUT to `ReferrersUnsupported` only when the registry answered and declined.
 ///
-/// Not on `ClientError::Registry` alone, which folds in a plain 500: exit 84 would claim no rerun can help.
+/// Not on `ClientError::Registry` alone, which folds in a plain 500: exit 82 would claim no rerun can help.
 fn fallback_write_refused(error: ClientError, image: &crate::native::Reference) -> ClientError {
     let declined = match &error {
         ClientError::Registry(source) => registry_declined(source.as_ref()),
@@ -187,7 +187,7 @@ fn fallback_write_refused(error: ClientError, image: &crate::native::Reference) 
 
 /// The fallback index cannot hold this referrer; the call site logs which limit was hit.
 ///
-/// `ReferrersUnsupported` (84): 75 would promise a rerun helps, 65 would blame the caller's document.
+/// `ReferrersUnsupported` (82): 75 would promise a rerun helps, 65 would blame the caller's document.
 fn index_cannot_hold_it(image: &crate::native::Reference) -> ClientError {
     ClientError::ReferrersUnsupported {
         registry: image.resolve_registry().to_string(),
@@ -196,7 +196,7 @@ fn index_cannot_hold_it(image: &crate::native::Reference) -> ClientError {
 
 /// Whether a boxed transport error is the registry declining the document.
 ///
-/// Anything unrecognised is not a decline, since 84 tells a script to stop retrying.
+/// Anything unrecognised is not a decline, since 82 tells a script to stop retrying.
 fn registry_declined(source: &(dyn std::error::Error + 'static)) -> bool {
     use oci_client::errors::OciDistributionError;
     match source.downcast_ref::<OciDistributionError>() {
@@ -1334,7 +1334,7 @@ mod tests {
     }
 
     /// No Referrers API and no fallback tag is *no signatures*, not *cannot
-    /// look*. Returning `ReferrersUnsupported` here is what made exit 84 the
+    /// look*. Returning `ReferrersUnsupported` here is what made exit 82 the
     /// answer to a question the operator did not ask.
     #[tokio::test]
     async fn a_missing_api_and_a_missing_tag_read_as_an_empty_fallback_listing() {
@@ -1352,7 +1352,7 @@ mod tests {
     /// Losing every round is a loud, retryable failure — never an `Ok` that
     /// dropped the descriptor.
     ///
-    /// Exhaustion is exit 75, not 84: nothing was refused, and a rerun against
+    /// Exhaustion is exit 75, not 82: nothing was refused, and a rerun against
     /// a quieter registry converges. `MAX_FALLBACK_ATTEMPTS` and the whole
     /// exhaustion arm have no other test — the racing test converges, which is
     /// the opposite branch.
@@ -1448,14 +1448,14 @@ mod tests {
     /// answers a real status.
     #[tokio::test]
     async fn the_status_the_registry_answered_decides_the_append_exit_code() {
-        for (status, _expected) in [
+        for (status, expected) in [
             // Answered and declined: the index is not something it will hold.
-            (400, ocx_exit::ExitCode::ReferrersUnsupported),
-            (405, ocx_exit::ExitCode::ReferrersUnsupported),
-            (422, ocx_exit::ExitCode::ReferrersUnsupported),
+            (400, ocx_exit::ExitCode::Unsupported),
+            (405, ocx_exit::ExitCode::Unsupported),
+            (422, ocx_exit::ExitCode::Unsupported),
             // A fault. `registry_error`'s transient arm is `is_transient_status`,
             // which excludes 500, so a 500 lands in the `Registry` catch-all with
-            // every parse error — reporting it as 84 would tell a CI wrapper to
+            // every parse error — reporting it as 82 would tell a CI wrapper to
             // stop retrying a sign that would have succeeded.
             (500, ocx_exit::ExitCode::Unavailable),
             (501, ocx_exit::ExitCode::Unavailable),
@@ -1463,10 +1463,21 @@ mod tests {
             let mut registry = FallbackRegistry::new();
             registry.push_status = Some(status);
 
-            let _error = registry
+            let error = registry
                 .append_referrer_fallback_index(&image(), &subject(), &descriptor("a"))
                 .await
                 .expect_err("the fixture answers every PUT with an error");
+            // The exit code is `ocx_cli`'s mapping of the variant: `ReferrersUnsupported` is 82, `Registry` is 69.
+            match expected {
+                ocx_exit::ExitCode::Unsupported => assert!(
+                    matches!(error, ClientError::ReferrersUnsupported { .. }),
+                    "status {status} must read as a declined index, got {error:?}"
+                ),
+                _ => assert!(
+                    matches!(error, ClientError::Registry(_)),
+                    "status {status} must stay a registry fault, got {error:?}"
+                ),
+            }
         }
     }
 
@@ -1632,7 +1643,7 @@ mod tests {
         assert_eq!(rebuilt.schema_version, crate::INDEX_SCHEMA_VERSION);
     }
 
-    /// A registry that answers and declines the index earns exit 84; a
+    /// A registry that answers and declines the index earns exit 82; a
     /// credential problem keeps exit 77, and a transient fault keeps its own.
     #[test]
     fn only_a_registry_refusal_of_the_index_becomes_referrers_unsupported() {
@@ -1642,7 +1653,7 @@ mod tests {
         assert!(matches!(refused, ClientError::ReferrersUnsupported { .. }));
 
         // `registry_error`'s catch-all folds a plain 500 into `Registry` — the
-        // same variant a 400 arrives in. Reporting it as 84 would tell a script
+        // same variant a 400 arrives in. Reporting it as 82 would tell a script
         // the endpoint is not served and retrying is pointless, about the one
         // failure where retrying is the answer.
         let fault = fallback_write_refused(ClientError::Registry(Box::new(server_error(500))), &target);
@@ -1655,7 +1666,7 @@ mod tests {
         let missing = fallback_write_refused(ClientError::Registry(Box::new(server_error(404))), &target);
         assert!(matches!(missing, ClientError::Registry(_)));
 
-        // Nothing that is not a recognisable registry answer earns 84 either.
+        // Nothing that is not a recognisable registry answer earns 82 either.
         let opaque = fallback_write_refused(ClientError::Registry("declined".into()), &target);
         assert!(matches!(opaque, ClientError::Registry(_)));
 

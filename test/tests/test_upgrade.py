@@ -152,7 +152,7 @@ def test_upgrade_moves_minor_tag_and_keeps_precision_and_comments(
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
     payload = _payload(result)
-    assert set(payload) == {"upgrades", "skipped", "beyond_major", "lock"}, payload
+    assert set(payload) == {"schema_version", "upgrades", "skipped", "beyond_major", "lock"}, payload
     assert payload["upgrades"] == [{"name": "cmake", "group": "default", "from_tag": "3.28", "to_tag": "3.29"}], payload
     assert payload["beyond_major"] == [], payload
 
@@ -523,8 +523,10 @@ def test_upgrade_on_a_drifted_toml_exits_65(ocx: OcxRunner, tmp_path: Path) -> N
     _assert_untouched(project, drifted.encode(), lock_bytes)
 
 
-@pytest.mark.parametrize("flag", ["--offline", "--frozen"])
-def test_upgrade_under_offline_or_frozen_exits_81(ocx: OcxRunner, tmp_path: Path, flag: str) -> None:
+@pytest.mark.parametrize(("flag", "detail"), [("--offline", "offline_mode"), ("--frozen", None)])
+def test_upgrade_under_offline_or_frozen_exits_81(
+    ocx: OcxRunner, tmp_path: Path, flag: str, detail: str | None
+) -> None:
     """Choosing a newer tag needs the registry, which both flags forbid."""
     project, _ = _locked_single(ocx, tmp_path, "up_policy")
     toml_bytes, lock_bytes = (project / "ocx.toml").read_bytes(), (project / "ocx.lock").read_bytes()
@@ -532,4 +534,8 @@ def test_upgrade_under_offline_or_frozen_exits_81(ocx: OcxRunner, tmp_path: Path
     result = _upgrade(ocx, project, global_flags=(flag,))
 
     assert result.returncode == EXIT_POLICY_BLOCKED, result.stderr
+    error = _payload(result)["error"]
+    assert error["kind"] == "permission_denied", result.stdout
+    if detail is not None:
+        assert error["detail"] == detail, result.stdout
     _assert_untouched(project, toml_bytes, lock_bytes)

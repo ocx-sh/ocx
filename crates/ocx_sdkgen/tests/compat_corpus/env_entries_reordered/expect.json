@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "The `env` section lists `OCX_COMPRESSION` and `OCX_TRACE_FILE` in a different order.",
+  "findings": []
+}

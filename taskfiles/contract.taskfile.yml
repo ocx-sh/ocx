@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# The machine-interface contract's baseline. The compat gate compares the
+# goldens with the previous release's copy under contract/baseline/, committed
+# because a Bazel sandbox has no git to `git show` a tag with. Rotating it is an
+# owner act, run once a release tag exists; test/lint/test_contract_baseline.py
+# reds "rotation pending" until it has run.
+
+version: '3'
+
+vars:
+  CONTRACT: crates/ocx_schema/contract
+  BASELINE: '{{.CONTRACT}}/baseline'
+  GOLDEN: crates/ocx_schema/tests/golden
+
+tasks:
+  rotate:
+    desc: 'Rotate the contract baseline to a release tag (task contract:rotate TAG=vX.Y.Z), after the tag exists'
+    dir: '{{.ROOT_DIR}}'
+    requires:
+      vars: [TAG]
+    # Read as "$TAG", never templated into the script: a CLI value is shell text otherwise.
+    env:
+      TAG: '{{.TAG}}'
+    cmds:
+      - |
+        set -eu
+        printf '%s\n' "$TAG" | grep -qxE 'v[0-9]+\.[0-9]+\.[0-9]+' || {
+          echo "contract:rotate: TAG=$TAG is not vX.Y.Z" >&2; exit 1; }
+        commit=$(git rev-parse --verify --quiet --end-of-options "refs/tags/$TAG^{commit}") || {
+          echo "contract:rotate: no tag $TAG (git fetch --tags?)" >&2; exit 1; }
+        git merge-base --is-ancestor "$commit" HEAD || {
+          echo "contract:rotate: $TAG is not an ancestor of HEAD" >&2; exit 1; }
+        for name in cli.json errors.json reports.json; do
+          git cat-file -e "refs/tags/$TAG:{{.GOLDEN}}/$name" || {
+            echo "contract:rotate: $TAG has no {{.GOLDEN}}/$name; nothing written" >&2; exit 1; }
+        done
+        mkdir -p '{{.BASELINE}}'
+        for name in cli.json errors.json reports.json; do
+          git cat-file blob "refs/tags/$TAG:{{.GOLDEN}}/$name" > "{{.BASELINE}}/$name"
+        done
+        printf '%s\n' "$TAG" > '{{.BASELINE}}/RELEASE'
+        # Drop the acknowledged breaks, keep the header that documents the format.
+        sed '/^\[\[break\]\]/,$d' '{{.CONTRACT}}/ledger.toml' > '{{.CONTRACT}}/ledger.toml.tmp'
+        mv '{{.CONTRACT}}/ledger.toml.tmp' '{{.CONTRACT}}/ledger.toml'
+      # The baseline lint over the result: a stale or wrong TAG reds here, not in CI.
+      - uv run --directory test pytest lint/test_contract_baseline.py -q -p no:cacheprovider
+      - |
+        echo "Baseline rotated to $TAG. Run task verify, then commit it on its own:"
+        echo "  git add crates/ocx_schema/contract && git commit -m 'chore(contract): rotate the baseline to $TAG'"

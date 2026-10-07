@@ -66,7 +66,7 @@ impl ConfigUpdateArgs {
         use ocx_config::managed::resolve_managed_target;
         use ocx_package_manager::ManagedConfigUpdateResult;
 
-        use crate::api::data::config_update::{ConfigUpdateData, ConfigUpdateStatus};
+        use crate::api::data::config_update::{ConfigUpdateData, ConfigUpdateStatus, parse_timestamp};
 
         // No required-snapshot gate here: this command exists to satisfy exactly that missing state.
         let resolved = resolve_managed_target(context.config(), context.managed_config_env_override())?;
@@ -81,7 +81,7 @@ impl ConfigUpdateArgs {
                 kill_switches: Vec::new(),
                 drift: None,
                 tag: None,
-                paused_until: None,
+                pause_ends_at: None,
                 pinned: None,
             })?;
             return Ok(ExitCode::SUCCESS);
@@ -104,13 +104,13 @@ impl ConfigUpdateArgs {
             context.api().report(&ConfigUpdateData {
                 status: ConfigUpdateStatus::CheckUnavailable,
                 source: Some(resolved.source.to_string()),
-                digest: snapshot.map(|snapshot| snapshot.digest.to_string()),
-                fetched_at: snapshot.map(|snapshot| snapshot.fetched_at.clone()),
+                digest: snapshot.map(|snapshot| snapshot.digest.clone()),
+                fetched_at: snapshot.and_then(|snapshot| parse_timestamp(&snapshot.fetched_at)),
                 policy: Some(resolved.refresh.to_string()),
                 kill_switches: active_kill_switches(),
                 drift: None,
                 tag: snapshot.and_then(|snapshot| snapshot.tag.clone()),
-                paused_until: Some(pause.paused_until),
+                pause_ends_at: parse_timestamp(&pause.paused_until),
                 pinned: None,
             })?;
             return Ok(ExitCode::SUCCESS);
@@ -138,13 +138,13 @@ impl ConfigUpdateArgs {
 
         // Only after the persist succeeded: `--pause` with VERSION records the pause, any other update
         // clears it.
-        let paused_until = if let Some(duration) = self.pause {
+        let pause_ends_at = if let Some(duration) = self.pause {
             let pause = ocx_config::managed_config::ManagedConfigPause::for_duration(
                 duration,
                 self.version.as_ref().map(|spec| spec.to_string()),
             );
             ocx_config::managed_config::write_pause(&managed_paths, &pause).await?;
-            Some(pause.paused_until)
+            parse_timestamp(&pause.paused_until)
         } else {
             ocx_config::managed_config::clear_pause(&managed_paths).await?;
             None
@@ -152,9 +152,9 @@ impl ConfigUpdateArgs {
 
         let (status, digest) = match &result {
             ManagedConfigUpdateResult::AlreadyCurrent { digest } => {
-                (ConfigUpdateStatus::AlreadyCurrent, Some(digest.to_string()))
+                (ConfigUpdateStatus::AlreadyCurrent, Some(digest.clone()))
             }
-            ManagedConfigUpdateResult::Updated { digest } => (ConfigUpdateStatus::Updated, Some(digest.to_string())),
+            ManagedConfigUpdateResult::Updated { digest } => (ConfigUpdateStatus::Updated, Some(digest.clone())),
         };
 
         // A digest-pinned seed binds the required gate to that digest, so syncing another fails the
@@ -181,7 +181,7 @@ impl ConfigUpdateArgs {
             kill_switches: active_kill_switches(),
             drift: None,
             tag: target.source.tag().map(str::to_string),
-            paused_until,
+            pause_ends_at,
             pinned: self.pause.and(self.version.as_ref()).map(|spec| spec.to_string()),
         })?;
         Ok(ExitCode::SUCCESS)
@@ -194,12 +194,12 @@ async fn execute_check(
     context: &crate::app::Context,
     resolved: &ocx_config::managed::ResolvedManagedConfig,
 ) -> anyhow::Result<ExitCode> {
-    use crate::api::data::config_update::ConfigUpdateData;
+    use crate::api::data::config_update::{ConfigUpdateData, parse_timestamp};
 
     let snapshot = context.managed_config_snapshot();
     let source = resolved.source.to_string();
-    let digest = snapshot.map(|snapshot| snapshot.digest.to_string());
-    let fetched_at = snapshot.map(|snapshot| snapshot.fetched_at.clone());
+    let digest = snapshot.map(|snapshot| snapshot.digest.clone());
+    let fetched_at = snapshot.and_then(|snapshot| parse_timestamp(&snapshot.fetched_at));
     let tag = snapshot.and_then(|snapshot| snapshot.tag.clone());
     let policy = resolved.refresh.to_string();
     let pause = ocx_config::managed_config::read_pause(&context.file_structure().state.managed_config()).await;
@@ -217,7 +217,7 @@ async fn execute_check(
         kill_switches: active_kill_switches(),
         drift,
         tag,
-        paused_until: pause.as_ref().map(|pause| pause.paused_until.clone()),
+        pause_ends_at: pause.as_ref().and_then(|pause| parse_timestamp(&pause.paused_until)),
         pinned: pause.and_then(|pause| pause.pinned_version),
     })?;
     Ok(ExitCode::SUCCESS)
@@ -248,11 +248,10 @@ fn derive_check_status(
 /// The active kill switches relevant to the managed-config tier.
 fn active_kill_switches() -> Vec<String> {
     let mut switches = Vec::new();
-    if ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONFIG_REFRESH, false) {
-        switches.push(ocx_config::env::keys::OCX_NO_CONFIG_REFRESH.to_string());
-    }
-    if ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONFIG, false) {
-        switches.push(ocx_config::env::keys::OCX_NO_CONFIG.to_string());
+    for var in [&ocx_env::OCX_NO_CONFIG_REFRESH, &ocx_env::OCX_NO_CONFIG] {
+        if var.bool_or(false).unwrap_or(false) {
+            switches.push(var.name.to_owned());
+        }
     }
     switches
 }

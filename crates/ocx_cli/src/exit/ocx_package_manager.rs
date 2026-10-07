@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_package_manager` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_package_manager` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_package_manager::error::DependencyError;
 use ocx_package_manager::error::Error as PackageManagerError;
@@ -12,154 +10,9 @@ use ocx_package_manager::launch::LaunchError;
 use ocx_package_manager::patch::PatchError;
 use ocx_package_manager::record::RecordsError;
 
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for LaunchError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Spawn { .. } => None,
-            Self::IncompleteRecordInputs { .. } => Some(ExitCode::Failure),
-            Self::ExemptionRefused { .. } => Some(ExitCode::IoError),
-            Self::Records(e) => e.classify(),
-        }
-    }
-}
-
-impl ClassifyExitCode for PatchError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::FetchFailed { source } => source.classify(),
-            Self::BlobWriteFailed { .. } => Some(ExitCode::IoError),
-            Self::PolicyBlocked { .. } => Some(ExitCode::PolicyBlocked),
-            Self::DescriptorVanished { .. } => Some(ExitCode::NotFound),
-            Self::SnapshotActive => Some(ExitCode::ConfigError),
-            Self::SnapshotDescriptorMissing { .. } => Some(ExitCode::NotFound),
-            Self::ProjectConfigUnreadable { .. } => Some(ExitCode::ConfigError),
-            Self::InvalidDescriptorJson { .. }
-            | Self::UnsupportedVersion { .. }
-            | Self::UnsupportedSnapshotVersion { .. }
-            | Self::UnexpectedManifest { .. }
-            | Self::UnexpectedArtifactType { .. }
-            | Self::WrongLayerCount { .. }
-            | Self::UnexpectedLayerMediaType { .. }
-            | Self::LayerSizeExceeded { .. }
-            | Self::LayerDigestMismatch { .. }
-            | Self::ManifestDigestMismatch { .. }
-            | Self::DescriptorTooLarge { .. } => Some(ExitCode::DataError),
-        }
-    }
-}
-
-impl ClassifyExitCode for PackageManagerError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::SelfCheckFailed(pe) => pe.kind.classify(),
-            Self::FindFailed(es)
-            | Self::InstallFailed(es)
-            | Self::UninstallFailed(es)
-            | Self::DeselectFailed(es)
-            | Self::ResolveFailed(es)
-            | Self::InspectFailed(es)
-            // Batch variants carry no `#[source]`, so the chain walker never reaches the inner kind.
-            | Self::SelectFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
-            Self::DiscoverFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
-            // Write `e.classify()`, never `e.classify()?`: `STANDS_IN_FOR`'s normaliser strips only `return` and a binder.
-            Self::OfflineMode => Some(ExitCode::PolicyBlocked),
-            Self::InternalFile(_, _) => Some(ExitCode::IoError),
-            Self::LayerNotStaged { .. } => Some(ExitCode::Failure),
-            Self::LayerLayout(_) => None,
-            Self::SymlinkWalk(e) => e.classify(),
-            Self::InternalPathInvalid(_) => Some(ExitCode::Failure),
-            Self::SerializationFailure(_) => Some(ExitCode::DataError),
-            Self::UnsupportedMediaType(_, _) => Some(ExitCode::DataError),
-            Self::MetadataBlobTooLarge { .. } => Some(ExitCode::DataError),
-            Self::Platform(e) => e.classify(),
-            Self::Project(e) => e.classify(),
-            Self::ProjectRegistry(e) => e.classify(),
-            Self::OciClient(e) => e.classify(),
-            Self::Archive(e) => e.classify(),
-            Self::Package(e) => e.as_ref().classify(),
-            Self::OciIndex(e) => e.classify(),
-            Self::FileStructure(e) => e.classify(),
-            Self::Digest(e) => e.classify(),
-            Self::Patch(e) => e.as_ref().classify(),
-            Self::Dependency(e) => e.classify(),
-            Self::PinnedIdentifier(e) => e.classify(),
-            Self::Singleflight(e) => e.classify(),
-            Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
-            Self::ToolchainHomeNotAbsolute { .. } => Some(ExitCode::DataError),
-            Self::LauncherPathNotUtf8 { .. } => Some(ExitCode::DataError),
-            Self::Sign(e) => e.as_ref().classify(),
-            Self::Verify(e) => e.as_ref().classify(),
-        }
-    }
-}
-
-impl ClassifyExitCode for PackageErrorKind {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::NotFound | Self::SymlinkNotFound(_) | Self::BlobNotFound(_) => ExitCode::NotFound,
-            Self::OfflineManifestMissing(_) => ExitCode::PolicyBlocked,
-            Self::SelectionAmbiguous(_)
-            | Self::SymlinkRequiresTag
-            | Self::DigestMissing
-            | Self::EntrypointCollision { .. }
-            | Self::FeatureMismatch { .. }
-            | Self::ShimNamesNotEnumerable { .. }
-            | Self::ShimNameInvalid(_)
-            | Self::ShimNameNotClaimed(_)
-            | Self::ShimClaimUnfulfilled(_) => ExitCode::DataError,
-            Self::LinkPathOccupied(_) => ExitCode::DataError,
-            Self::TaskPanicked => ExitCode::Failure,
-            Self::RequiredCompanionFailed { source, .. } => return source.classify(),
-            // The full chain walker, not a single-hop `classify()`, or nested causes go unclassified.
-            Self::PatchDiscovery(inner) => {
-                return Some(super::classify_library_error(
-                    inner as &(dyn std::error::Error + 'static),
-                ));
-            }
-            Self::ToolchainPath(inner) => return inner.classify(),
-            Self::Internal(inner) => return Some(super::classify_library_error(inner)),
-        })
-    }
-}
-
-impl ClassifyExitCode for DependencyError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Conflict { .. } => Some(ExitCode::DataError),
-            // `None` lets the walker reach the leader's typed cause; a `Some` would mask it.
-            Self::SetupFailed(_) => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for RecordsError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Io { .. } | Self::Serialize(_) => ExitCode::IoError,
-            Self::TemplateUnknownPlaceholder { .. }
-            | Self::TemplateNotUnique
-            | Self::NameNotAFilename { .. }
-            | Self::RequiredWithoutSink => ExitCode::ConfigError,
-            Self::SinkSymlink { .. } => ExitCode::ConfigError,
-        })
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, PackageManagerError);
-    downcast_arm!(cause, PackageErrorKind);
-    downcast_arm!(cause, DependencyError);
-    downcast_arm!(cause, PatchError);
-    downcast_arm!(cause, RecordsError);
-    downcast_arm!(cause, LaunchError);
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use ocx_exit::ExitCode;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
 
     /// The chain walk the binary performs, over one error.
     fn classify<E: std::error::Error + 'static>(err: E) -> ExitCode {
@@ -367,7 +220,7 @@ mod tests {
             error.to_string().starts_with("failed to discover patches for package"),
             "got: {error}"
         );
-        assert_eq!(error.classify(), Some(ExitCode::NotFound));
+        assert_eq!(crate::exit::classify_library_error(&error), ExitCode::NotFound);
     }
 
     // ── moved from ocx_package_manager::error with the impl ──
@@ -407,6 +260,73 @@ mod tests {
 
     // ── moved from ocx_package_manager::tasks::patch_discovery with the impl ──
 
+    /// Reds on: a package-manager slug, batched, delegated or walked, naming another cause than the
+    /// exit code does.
+    #[test]
+    fn package_manager_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+        use ocx_package::metadata::entrypoint::EntrypointName;
+        use ocx_util::singleflight;
+
+        let entry = |kind| PackageError::new(ocx_oci::PackageRef::new_registry("a", "example.com"), kind);
+        let batch = vec![
+            entry(PackageErrorKind::NotFound),
+            entry(PackageErrorKind::SymlinkRequiresTag),
+        ];
+        assert_detail(&PackageManagerError::InspectFailed(batch), "package_not_found");
+        let traversal = || ocx_util::archive::Error::SymlinkEscape {
+            link: PathBuf::from("escape"),
+            target: PathBuf::from("../../../../etc"),
+        };
+        assert_detail(
+            &PackageErrorKind::from(ClientError::internal(traversal())),
+            "archive_symlink_escape",
+        );
+        let wrapped = PackageErrorKind::from(ClientError::internal(traversal()));
+        assert_detail(
+            &PackageManagerError::InstallFailed(vec![entry(wrapped)]),
+            "archive_symlink_escape",
+        );
+        let vanished = PackageErrorKind::PatchDiscovery(PatchError::DescriptorVanished {
+            identifier: Box::new(ocx_oci::PackageRef::new_registry("global", "patches.example.com")),
+        });
+        assert_detail(
+            &PackageManagerError::DiscoverFailed(vec![entry(vanished)]),
+            "patch_descriptor_vanished",
+        );
+        assert_detail(&PackageManagerError::OfflineMode, "offline_mode");
+
+        let spawn = LaunchError::Spawn {
+            resolved: PathBuf::from("/store/cmake/content/bin/cmake"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        assert_detail(&spawn, "permission_denied");
+        let opaque = LaunchError::Spawn {
+            resolved: PathBuf::from("/store/cmake/content/bin/cmake"),
+            source: std::io::Error::other("exec format error"),
+        };
+        assert_detail(&opaque, "launch_spawn_failed");
+        let incomplete = LaunchError::IncompleteRecordInputs {
+            command: "ocx exec".to_string(),
+        };
+        assert_detail(&incomplete, "record_inputs_incomplete");
+
+        let hex = "a".repeat(64);
+        let owner = |name: &str| {
+            let reference: ocx_oci::PackageRef = format!("ocx.sh/{name}:1.0@sha256:{hex}")
+                .parse()
+                .expect("a pinned reference");
+            ocx_oci::PinnedPackageRef::try_from(reference).expect("the reference carries a digest")
+        };
+        let collision = PackageErrorKind::EntrypointCollision {
+            name: EntrypointName::try_from("cmake").expect("a valid entrypoint name"),
+            owners: vec![owner("foo"), owner("bar")],
+        };
+        let shared = singleflight::SharedError::for_test(collision);
+        let setup = DependencyError::SetupFailed(singleflight::Error::Failed(shared));
+        assert_detail(&setup, "entrypoint_collision");
+    }
+
     /// `PackageErrorKind::RequiredCompanionFailed` delegates exit-code
     /// classification to the inner `source` error.
     ///
@@ -416,7 +336,6 @@ mod tests {
     /// Traces: STUB MANIFEST §3 classification arm delegates to `source.classify()`.
     #[test]
     fn required_companion_failed_exit_code_delegates_to_source() {
-        use crate::exit::ClassifyExitCode;
         use ocx_exit::ExitCode;
         use ocx_package_manager::error::PackageErrorKind;
 

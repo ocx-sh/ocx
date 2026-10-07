@@ -141,6 +141,11 @@ def assert_no_signature(ocx: OcxRunner, repo: str, subject_digest: str) -> None:
     )
 
 
+def platform_key(platform: dict) -> str:
+    """The ``platform_digests`` key a report's platform object stands for."""
+    return "/".join(filter(None, (platform["os"], platform["architecture"], platform.get("variant"))))
+
+
 def sole_platform_digest(report: dict) -> tuple[str, str]:
     """The one ``(platform, digest)`` pair a single-platform push records."""
     digests = report["platform_digests"]
@@ -190,7 +195,7 @@ def test_push_sign_writes_one_signature_per_platform_manifest(
     for row in report["signatures"]:
         assert row["status"] == "completed", row
         subject = row["report"]["subject_digest"]
-        assert subject == report["platform_digests"][row["platform"]], (
+        assert subject == report["platform_digests"][platform_key(row["platform"])], (
             f"row {row['platform']} signed {subject}, not the manifest that push landed on"
         )
         status, index = list_referrers(ocx.registry, pkg.repo, subject)
@@ -217,7 +222,7 @@ def test_push_sign_signs_the_platform_manifest_never_the_index(
 
     platform, platform_digest = sole_platform_digest(report)
     [row] = report["signatures"]
-    assert row["platform"] == platform
+    assert platform_key(row["platform"]) == platform
     assert row["report"]["subject_digest"] == platform_digest
     assert row["report"]["subject_digest"] != report["manifest_digest"], (
         "push signed the image index; every later platform merge would strand that signature"
@@ -231,9 +236,9 @@ def test_push_sign_reports_the_key_model_and_the_absent_transparency_record(
 ) -> None:
     """A key-mode inline signature says it is a key, and says no record was made.
 
-    ``transparency_log_index`` is asserted ``None`` rather than merely absent:
-    under a key ``--rekor-upload`` is opt-in, so a missing Rekor entry has to be
-    a fact the operator can see rather than one they infer from a missing key.
+    ``transparency_log_index`` is absent: under a key ``--rekor-upload`` is
+    opt-in, and ``key_backend`` is what tells the operator no record was asked
+    for.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     report = push_report(
@@ -245,8 +250,8 @@ def test_push_sign_reports_the_key_model_and_the_absent_transparency_record(
     assert signature["key_backend"] == "file"
     assert signature["signer"] == "file", "signer must not still say keyless-fulcio under a key"
     assert signature["public_key_hint"], "a key-mode signature reports the key's cosign hint"
-    assert signature["transparency_log_index"] is None, (
-        "no --rekor-upload means no transparency record, reported as null"
+    assert "transparency_log_index" not in signature, (
+        "no --rekor-upload means no transparency record, so no log index"
     )
 
     bundle = json.loads(get_blob(ocx.registry, pkg.repo, signature["legs"][0]["payload_digest"]))
@@ -471,12 +476,12 @@ def test_push_sign_keyless_with_no_rekor_upload_is_refused(
     )
 
 
-def test_an_unimplemented_key_backend_exits_85_from_sign_attest_and_push(
+def test_an_unimplemented_key_backend_exits_82_from_sign_attest_and_push(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """``ExitCode::UnsupportedKeyBackend = 85`` is reachable from every writer.
+    """``ExitCode::Unsupported = 82`` is reachable from every writer.
 
-    85 and its ``unsupported_key_backend`` category exist only so a script can
+    82 and its ``unsupported_key_backend`` detail exist only so a script can
     ``case $?`` on "this backend is recognised but not built yet". They were
     reachable from ``verify`` alone: ``sign``, ``attest`` and ``push`` returned
     the refusal as a bare ``SignErrorKind``, which ``classify_error`` cannot
@@ -515,11 +520,11 @@ def test_an_unimplemented_key_backend_exits_85_from_sign_attest_and_push(
 
     for command, result in runs.items():
         envelope = json.loads(result.stdout)
-        assert result.returncode == 85, (
+        assert result.returncode == 82, (
             f"`{command}` exits {result.returncode} for an unimplemented key backend\n{result.stdout}"
         )
-        assert envelope["exit_code"] == 85, f"`{command}` envelope disagrees with $?: {envelope}"
-        assert envelope["error"]["kind"] == "unsupported_key_backend", f"`{command}`: {envelope}"
+        assert envelope["exit_code"] == 82, f"`{command}` envelope disagrees with $?: {envelope}"
+        assert envelope["error"]["kind"] == "unsupported", f"`{command}`: {envelope}"
         assert envelope["error"]["detail"] == "unsupported_key_backend", f"`{command}`: {envelope}"
         assert envelope["error"]["context"]["identifier"] == reference, (
             f"`{command}` lost the identifier, which only a bare kind can do: {envelope}"

@@ -1,7 +1,31 @@
+// Witness for `no_hand_written_classification_impl_outside_command_error`.
+//
+// A commented impl is no witness: impl ClassifyExitCode for Commented {}
+
 impl ClassifyExitCode for Probe {
     fn classify(&self) -> u8 { 70 }
 }
 
-impl ClassifyErrorKind for Probe {
+impl ocx_exit::ClassifyErrorKind for Probe {
     fn kind(&self) -> u8 { 1 }
+}
+
+macro_rules! hidden {
+    () => {
+        impl ClassifyExitCode for Hidden {
+            fn classify(&self) -> u8 { 70 }
+        }
+    };
+}
+
+// `CommandError` is excused in `ocx_cli/src/app.rs` only.
+impl ClassifyExitCode for CommandError {
+    fn classify(&self) -> u8 { 70 }
+}
+
+#[cfg(test)]
+mod fixtures {
+    impl ClassifyExitCode for TestOnly {
+        fn classify(&self) -> u8 { 70 }
+    }
 }

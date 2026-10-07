@@ -10,14 +10,17 @@ use crate::api::Printable;
 use crate::api::data::path_kind::PathKind;
 
 /// A resolved package and its package root, the parent of `content/` and `entrypoints/`.
-#[derive(Serialize, schemars::JsonSchema)]
 pub struct PathEntry {
     pub package: String,
     pub path: PathBuf,
 }
 
-/// Resolved package roots for `ocx package pull`, keyed by input identifier in request order.
+/// Resolved package roots for `ocx package pull`.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Paths {
+    /// Each package root, keyed by the identifier as given, in request order.
+    #[serde(rename = "paths", serialize_with = "paths_by_package")]
+    #[schemars(with = "std::collections::BTreeMap<String, PathBuf>")]
     pub entries: Vec<PathEntry>,
 }
 
@@ -27,18 +30,15 @@ impl Paths {
     }
 }
 
-impl Serialize for Paths {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
-        for entry in &self.entries {
-            map.serialize_entry(&entry.package, &entry.path)?;
-        }
-        map.end()
-    }
+/// Request order is the contract, so the entries serialize as a map without passing through a sorted one.
+fn paths_by_package<S: serde::Serializer>(entries: &[PathEntry], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(entries.iter().map(|entry| (&entry.package, &entry.path)))
 }
 
 impl Printable for Paths {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Paths";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.entries {
@@ -64,14 +64,19 @@ pub struct LocatedPath {
     /// The requested identifier: serialized only as the map key, kept for the plain `Package` column.
     #[serde(skip)]
     pub package: String,
+    /// The located directory.
     pub path: PathBuf,
+    /// Whether `path` is a package root or a shim tree.
     pub kind: PathKind,
 }
 
-/// Located packages for `ocx package which`, keyed by requested identifier in request order.
-///
-/// Not a widened [`Paths`]: every `pull` row is a materialized root, so `kind` there would be constant.
+/// Located packages for `ocx package which`.
+// Not a widened `Paths`: every `pull` row is a materialized root, so `kind` there would be constant.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LocatedPaths {
+    /// Each located package, keyed by the identifier as given, in request order.
+    #[serde(rename = "paths", serialize_with = "located_by_package")]
+    #[schemars(with = "std::collections::BTreeMap<String, LocatedPath>")]
     pub entries: Vec<LocatedPath>,
 }
 
@@ -81,18 +86,15 @@ impl LocatedPaths {
     }
 }
 
-impl Serialize for LocatedPaths {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
-        for entry in &self.entries {
-            map.serialize_entry(&entry.package, entry)?;
-        }
-        map.end()
-    }
+/// Request order is the contract, so the entries serialize as a map without passing through a sorted one.
+fn located_by_package<S: serde::Serializer>(entries: &[LocatedPath], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(entries.iter().map(|entry| (&entry.package, entry)))
 }
 
 impl Printable for LocatedPaths {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "LocatedPaths";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
@@ -104,34 +106,6 @@ impl Printable for LocatedPaths {
             &["Package".into(), "Kind".into(), "Path".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
-    }
-}
-
-// Hand-written: `Serialize` writes a map keyed by package, not the struct's fields.
-impl schemars::JsonSchema for Paths {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Paths".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "additionalProperties": generator.subschema_for::<std::path::PathBuf>(),
-        })
-    }
-}
-
-// Hand-written: `Serialize` writes a map keyed by package, not the struct's fields.
-impl schemars::JsonSchema for LocatedPaths {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "LocatedPaths".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "additionalProperties": generator.subschema_for::<LocatedPath>(),
-        })
     }
 }
 
@@ -147,24 +121,26 @@ mod tests {
         }
     }
 
-    /// The wire shape C-016 settles (PLAN-NC-1): still a **map** keyed by the
-    /// requested identifier — not the array the ADR first proposed — with the
-    /// value grown from a bare path string into an object.
+    /// A map keyed by the requested identifier, under the named `paths`
+    /// property, with each value an object.
     #[test]
     fn the_report_is_a_map_keyed_by_the_requested_identifier() {
         let report = LocatedPaths::new(vec![located("cmake:3.28", "/store/packages/cmake", PathKind::Package)]);
 
         let json = serde_json::to_value(&report).expect("serializes");
-        assert!(
-            json.is_object(),
-            "the top level must stay a map keyed by identifier, never an array: {json}"
+        assert_eq!(
+            json.as_object()
+                .map(|root| root.keys().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["paths"]),
+            "the map sits under one named property: {json}"
         );
-        assert_eq!(json["cmake:3.28"]["path"], "/store/packages/cmake");
-        assert_eq!(json["cmake:3.28"]["kind"], "package");
+        let paths = &json["paths"];
+        assert_eq!(paths["cmake:3.28"]["path"], "/store/packages/cmake");
+        assert_eq!(paths["cmake:3.28"]["kind"], "package");
         // The identifier is the key, so it must not also be a field — it would
         // be byte-identical to the key and a second place to go stale.
         assert!(
-            json["cmake:3.28"].get("package").is_none(),
+            paths["cmake:3.28"].get("package").is_none(),
             "the identifier is the key, not a field: {json}"
         );
     }
@@ -181,16 +157,16 @@ mod tests {
         ]);
 
         let json = serde_json::to_value(&report).expect("serializes");
+        let paths = &json["paths"];
         assert_eq!(
-            json["ripgrep:14"]["kind"], "shim",
+            paths["ripgrep:14"]["kind"], "shim",
             "a deferred row must announce itself: {json}"
         );
-        assert_eq!(json["ripgrep:14"]["path"], "/store/shims/ripgrep");
-        // Both rows survive, in request order, so the map is not collapsing
-        // entries that share a kind.
-        assert_eq!(json["cmake:3.28"]["kind"], "package");
+        assert_eq!(paths["ripgrep:14"]["path"], "/store/shims/ripgrep");
+        // Both rows survive, so the map is not collapsing entries that share a kind.
+        assert_eq!(paths["cmake:3.28"]["kind"], "package");
         assert_eq!(
-            json.as_object().map(serde_json::Map::len),
+            paths.as_object().map(serde_json::Map::len),
             Some(2),
             "one identifier in, one entry out, for each request: {json}"
         );
@@ -208,8 +184,23 @@ mod tests {
 
         let json = serde_json::to_value(&report).expect("serializes");
         assert_eq!(
-            json["cmake:3.28"], "/store/packages/cmake",
+            json["paths"]["cmake:3.28"], "/store/packages/cmake",
             "ocx package pull's value must stay a bare path string: {json}"
+        );
+    }
+
+    /// Request order survives: the map is written as given, never re-sorted.
+    #[test]
+    fn keys_keep_request_order() {
+        let report = LocatedPaths::new(vec![
+            located("zeta:1", "/z", PathKind::Package),
+            located("alpha:1", "/a", PathKind::Package),
+        ]);
+        let json = serde_json::to_string(&report).expect("serializes");
+        let position = |key: &str| json.find(key).expect("key present");
+        assert!(
+            position("zeta:1") < position("alpha:1"),
+            "request order must survive serialization: {json}"
         );
     }
 }

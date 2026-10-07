@@ -33,10 +33,10 @@ plan-jobs = ["./verify-version"]
 # needs it. .claude/tests/test_workflows.py pins both edges.
 global-artifacts-jobs = ["./scan-binaries"]
 # Post-announce jobs to run in CI
-post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release", "./docker-publish"]
+post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release", "./docker-publish", "./sdkgen-publish"]
 # Extra permissions for custom jobs. The override REPLACES the defaults, so
 # every scope the called workflow needs must be listed.
-github-custom-job-permissions = { scan-binaries = { contents = "read" }, docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" }, post-release-oci-publish = { contents = "read", packages = "write" } }
+github-custom-job-permissions = { scan-binaries = { contents = "read" }, docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" }, post-release-oci-publish = { contents = "read", packages = "write" }, sdkgen-publish = { contents = "read", packages = "write", id-token = "write" } }
 # No `include` for LICENSE-THIRD-PARTY.md: dist's auto-include glob is a
 # prefix match on `LICENSE*`, so it already lands in every archive. Listing
 # it explicitly puts it in twice (verified with `dist plan`).

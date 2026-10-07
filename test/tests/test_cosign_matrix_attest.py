@@ -426,7 +426,7 @@ def _ocx_attests_cosign_verifies(
     assert attested.returncode == 0, (
         f"ocx could not attest {cell}\nstdout: {attested.stdout}\nstderr: {attested.stderr}"
     )
-    assert json.loads(attested.stdout)["data"]["predicate_type"] == PREDICATE_TYPE_URI, (
+    assert json.loads(attested.stdout)["predicate_type"] == PREDICATE_TYPE_URI, (
         f"ocx resolved `--type {PREDICATE_TYPE}` to something other than {PREDICATE_TYPE_URI}, "
         f"so cosign's --type assertion below would be about a different document: {attested.stdout}"
     )
@@ -881,7 +881,7 @@ def test_cosign_verifies_an_ocx_attestation_sidecar_tag(
     assert attested.returncode == 0, (
         f"ocx could not attest {cell}\nstdout: {attested.stdout}\nstderr: {attested.stderr}"
     )
-    report = json.loads(attested.stdout)["data"]
+    report = json.loads(attested.stdout)
     assert report["predicate_type"] == PREDICATE_TYPE_URI, (
         f"ocx resolved `--type {PREDICATE_TYPE}` to something other than {PREDICATE_TYPE_URI}, "
         f"so cosign's --type assertion below would be about a different document: {attested.stdout}"
@@ -1129,9 +1129,9 @@ def test_ocx_lists_a_cosign_sbom_sidecar_tag(
     assert listed.returncode == 0, (
         f"ocx must list a cosign `.sbom` sidecar\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
     )
-    data = json.loads(listed.stdout)["data"]
+    data = json.loads(listed.stdout)
     assert data["summary"]["verification"] == "unverified"
-    [entry] = data["entries"]
+    [entry] = data["attestations"]
     assert entry["verified"] is False, f"nothing signed this document: {entry}"
     assert entry["predicate_type"] == PREDICATE_TYPE_URI, entry
     assert entry["subject_digest"] == subject_digest, entry
@@ -1177,6 +1177,6 @@ def test_ocx_lists_a_cosign_sbom_sidecar_tag(
         "a read map covering only OCX's spellings refuses it here\n"
         f"stdout: {spdx_listed.stdout}\nstderr: {spdx_listed.stderr}"
     )
-    [spdx_entry] = json.loads(spdx_listed.stdout)["data"]["entries"]
+    [spdx_entry] = json.loads(spdx_listed.stdout)["attestations"]
     assert spdx_entry["predicate_type"] == SPDX_PREDICATE_TYPE_URI, spdx_entry
     assert spdx_entry["verified"] is False, spdx_entry

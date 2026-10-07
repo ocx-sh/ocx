@@ -23,7 +23,7 @@ impl ModifyPath {
     /// `Some(false)` for `--no-modify-path`, else `None`.
     ///
     /// Collapsing `None` to a `bool` lets absence outrank
-    /// [`OCX_NO_MODIFY_PATH`](ocx_config::env::keys::OCX_NO_MODIFY_PATH) and `config.toml`.
+    /// [`OCX_NO_MODIFY_PATH`](ocx_env::OCX_NO_MODIFY_PATH) and `config.toml`.
     pub fn explicit(&self) -> Option<bool> {
         if self.no_modify_path { Some(false) } else { None }
     }

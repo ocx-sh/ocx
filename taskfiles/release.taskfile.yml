@@ -76,6 +76,132 @@ tasks:
         fi
         echo "release:provenance:proof: release build green, __testing build red"
 
+  # The release step of `ocx.sh/ocx/sdkgen` (plan_ocx_interface_contract.md
+  # C-034): `ocx-sdkgen` packaged as an OCX package, pushed and signed keyless by
+  # `.github/workflows/sdkgen-publish.yml` at release. Nothing here pushes or
+  # signs; `sdkgen:dry-run` is the whole step minus the registry.
+  #
+  #   task release:sdkgen:dry-run                          # build + package for this host
+  #   task release:sdkgen:package BIN=<path> PLATFORM=<p> OUT=<dir>   # package a built binary
+  sdkgen:package:
+    desc: Package ocx-sdkgen as ocx.sh/ocx/sdkgen into OUT/ocx-sdkgen.tar.xz (BIN and PLATFORM together name a built binary; default builds this host's)
+    dir: '{{.ROOT_DIR}}'
+    # Read as "$VAR", never templated into the script: a CLI value is shell text otherwise.
+    env:
+      BIN: '{{.BIN | default ""}}'
+      PLATFORM: '{{.PLATFORM | default ""}}'
+      OUT: '{{.OUT | default (printf "%s/target/sdkgen-package" .ROOT_DIR)}}'
+    cmds:
+      - |
+        set -euo pipefail
+        if [ -n "$BIN" ] && [ -z "$PLATFORM" ]; then
+          echo "release:sdkgen:package: BIN names a binary built elsewhere, so PLATFORM must say what it runs on" >&2; exit 1
+        fi
+        if [ -z "$BIN" ]; then
+          cargo build --release --locked -p ocx_sdkgen
+          BIN="target/release/ocx-sdkgen"
+          # A host build is dynamically linked, so a Linux platform declares its libc
+          # (`ocx package create` refuses an undeclared one); CI's musl builds are static.
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) PLATFORM=linux/amd64+libc.glibc ;;
+            Linux-aarch64) PLATFORM=linux/arm64+libc.glibc ;;
+            Darwin-x86_64) PLATFORM=darwin/amd64 ;;
+            Darwin-arm64) PLATFORM=darwin/arm64 ;;
+            *) echo "release:sdkgen:package: no default platform for $(uname -s)-$(uname -m); pass BIN and PLATFORM" >&2; exit 1 ;;
+          esac
+        fi
+        ext=""
+        case "$BIN" in *.exe) ext=".exe" ;; esac
+        mkdir -p "$OUT"
+        rm -rf "$OUT/content"
+        mkdir -p "$OUT/content/bin"
+        install -m 0755 "$BIN" "$OUT/content/bin/ocx-sdkgen${ext}"
+        # A redistribution of the binary owes recipients the same notices as
+        # the release archive (oci-publish.yml does the same for ocx/cli).
+        install -m 0644 LICENSE LICENSE-THIRD-PARTY.md "$OUT/content/"
+        ocx package create "$OUT/content" \
+          -m packaging/sdkgen/metadata.json \
+          -o "$OUT/ocx-sdkgen.tar.xz" \
+          -p "$PLATFORM" \
+          --force
+        echo "release:sdkgen:package: $OUT/ocx-sdkgen.tar.xz ($PLATFORM)"
+
+  # The signing contract, as runnable checks: the signer identity a keyless
+  # signature from the workflow carries must match the trust policy SDK
+  # repositories pin, `id-token: write` must sit on the signing job alone, and
+  # every job must be guarded to this repository (the workflow is callable from
+  # any repository, and its certificate names the workflow, not the caller).
+  # Each is shown to fail as well as pass by its mismatch arms below.
+  sdkgen:check:
+    desc: Check the ocx-sdkgen release wiring - the signer identity matches the trust policy, only the sign job holds id-token write, and every job is guarded to ocx-sh/ocx
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - |
+        python3 - <<'PY'
+        import re, sys, tomllib
+
+        WORKFLOW = ".github/workflows/sdkgen-publish.yml"
+        POLICY = "packaging/sdkgen/trust-policy.toml"
+        failures = []
+
+        # 1. id-token: write is on the `sign` job and nowhere else.
+        holders, seen, job = [], [], None
+        guarded = set()
+        in_jobs = False
+        for line in open(WORKFLOW, encoding="utf-8").read().splitlines():
+            if line == "jobs:":
+                in_jobs = True
+                continue
+            m = re.match(r"^  ([a-z][a-z0-9-]*):\s*$", line)
+            if in_jobs and m:
+                job = m.group(1)
+                seen.append(job)
+            if re.match(r"^\s*id-token:\s*write\b", line):
+                holders.append(job if in_jobs else "<workflow level>")
+            # A job-level `if:` sits at four spaces, which no step key does.
+            if in_jobs and job and re.match(r"^    if:.*github\.repository == 'ocx-sh/ocx'", line):
+                guarded.add(job)
+        if len(seen) < 4:
+            failures.append(f"read {len(seen)} jobs from {WORKFLOW}, expected at least 4: the reader stopped")
+        if holders != ["sign"]:
+            failures.append(f"id-token: write is held by {holders}, expected exactly ['sign']")
+
+        # 1b. Every job is guarded to the home repository: `github.repository`
+        # is the caller's in a reusable workflow, and the signing identity names
+        # the workflow, so an unguarded job signs for any repository that calls it.
+        for j in seen:
+            if j not in guarded:
+                failures.append(f"job {j} has no job-level `if: ... github.repository == 'ocx-sh/ocx'`")
+
+        # 2. A Fulcio certificate from the workflow names `job_workflow_ref`.
+        policy = tomllib.load(open(POLICY, "rb"))["trust"]["policy"]
+        signers = [s for p in policy for s in p["signers"] if s["kind"] == "keyless"]
+        if len(signers) != 1:
+            failures.append(f"{POLICY} must carry one keyless signer, found {len(signers)}")
+        else:
+            rx = re.compile(signers[0]["identity_regexp"])
+            base = "https://github.com/ocx-sh/ocx/" + WORKFLOW
+            for ref, expect in [("refs/tags/v1.2.3", True), ("refs/heads/main", False), ("refs/tags/v1.2.3-rc.1", False)]:
+                got = rx.search(base + "@" + ref) is not None
+                if got != expect:
+                    failures.append(f"identity {base}@{ref}: policy match is {got}, expected {expect}")
+            other = rx.search("https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/tags/v1.2.3")
+            if other:
+                failures.append("the policy also accepts release.yml, which holds no signing step")
+
+        for f in failures:
+            print("release:sdkgen:check:", f, file=sys.stderr)
+        if failures:
+            sys.exit(1)
+        print("release:sdkgen:check: id-token: write on", holders, "; repository guard on", sorted(guarded), "; identity matches", POLICY)
+        PY
+
+  sdkgen:dry-run:
+    desc: Dry run of the ocx.sh/ocx/sdkgen release step - build and package ocx-sdkgen for this host, never push or sign
+    cmds:
+      - task: sdkgen:check
+      - task: sdkgen:package
+
   # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
   # After this task succeeds, the human reviews and commits.
   #

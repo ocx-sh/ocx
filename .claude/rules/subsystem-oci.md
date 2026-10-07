@@ -688,4 +688,4 @@ on `oci` (DIP).
 
 ## Quality Gate
 
-Per task / review-fix iteration: `task verify:scoped --force`. Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself).
+Per task / review-fix iteration: `task verify:scoped --force`. Full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels).

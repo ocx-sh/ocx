@@ -37,7 +37,7 @@ def _expected_entries(ocx: OcxRunner, pkg: PackageInfo) -> dict[str, dict[str, s
     Returns ``{key: {"type": ..., "value": ...}}`` in the default consumer view.
     """
     data = ocx.json("package", "env", pkg.short)
-    return {e["key"]: {"type": e["type"], "value": e["value"]} for e in data["entries"]}
+    return {e["key"]: {"type": e["kind"], "value": e["value"]} for e in data["items"]}
 
 
 def _run_env(

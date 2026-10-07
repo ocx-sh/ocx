@@ -63,7 +63,7 @@ def attest(
     assert result.returncode == 0, (
         f"attest (setup) failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    return json.loads(result.stdout)["data"]
+    return json.loads(result.stdout)
 
 
 def sbom_args(stack: SigstoreStack, *, identity: str | None = None) -> list[str]:
@@ -209,13 +209,13 @@ def test_sbom_lists_the_verified_attestation_with_its_signer_and_time(
         f"sbom failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["summary"] == {
-        "status": "success", "verification": "verified", "exit_code": 0, "total": 1, "verified": 1, "unverified": 0, "refused": 0,
+        "status": "success", "verification": "verified", "total": 1, "verified": 1, "unverified": 0, "refused": 0,
     }
     assert data["refused"] == []
 
-    [entry] = data["entries"]
+    [entry] = data["attestations"]
     assert entry["predicate_type"] == CYCLONEDX_URI
     assert entry["subject_digest"] == attested["subject_digest"]
     assert entry["referrer_digest"] == attested["referrer_digest"]
@@ -259,9 +259,9 @@ def test_sbom_without_identity_flags_defaults_to_permissive_listing(
         f"no identity source must default to a permissive listing, not a refusal\\n"
         f"stdout: {result.stdout}\\nstderr: {result.stderr}"
     )
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["summary"]["verification"] == "unverified"
-    [entry] = data["entries"]
+    [entry] = data["attestations"]
     assert entry["verified"] is False
     # S-004, unverified half: `shadowed` is emitted on every entry regardless of
     # trust class -- it answers "is this superseded", not "was this checked".
@@ -545,7 +545,7 @@ def test_sbom_narrowed_to_an_unpublished_type_reports_not_found(
 
     listed = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"the attestation must verify before narrowing means anything: {listed.stdout}"
-    assert json.loads(listed.stdout)["data"]["summary"]["verified"] == 1
+    assert json.loads(listed.stdout)["summary"]["verified"] == 1
 
     narrowed = ocx.run(
         "package", "sbom", *sbom_args(sigstore_stack),
@@ -592,7 +592,7 @@ def test_sbom_summary_reports_the_cyclonedx_document_fields(
     )
     assert result.returncode == 0, f"summary failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
-    [entry] = json.loads(result.stdout)["data"]["entries"]
+    [entry] = json.loads(result.stdout)["attestations"]
     assert entry["summary"] == {
         "spec_version": "1.6",
         "serial_number": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
@@ -637,11 +637,11 @@ def test_sbom_summary_refuses_a_non_cyclonedx_predicate_but_listing_still_works(
         f"an unreadable document refuses its own entry, not the run, got "
         f"{summarized.returncode}\nstdout: {summarized.stdout}"
     )
-    data = json.loads(summarized.stdout)["data"]
+    data = json.loads(summarized.stdout)
     assert data["summary"] == {
-        "status": "partial_failure", "verification": "verified", "exit_code": 0, "total": 1, "verified": 0, "unverified": 0, "refused": 1,
+        "status": "partial_failure", "verification": "verified", "total": 1, "verified": 0, "unverified": 0, "refused": 1,
     }
-    assert data["entries"] == [], "nothing summarized, so nothing is listed as summarized"
+    assert data["attestations"] == [], "nothing summarized, so nothing is listed as summarized"
 
     [refusal] = data["refused"]
     assert refusal["reason_kind"] == "sbom_summary_failed", (
@@ -656,7 +656,7 @@ def test_sbom_summary_refuses_a_non_cyclonedx_predicate_but_listing_still_works(
     assert listed.returncode == 0, (
         f"the listing must still work without --summary\nstdout: {listed.stdout}"
     )
-    [entry] = json.loads(listed.stdout)["data"]["entries"]
+    [entry] = json.loads(listed.stdout)["attestations"]
     assert entry["predicate_type"] == SPDX_URI
     assert "summary" not in entry
 
@@ -702,12 +702,12 @@ def test_sbom_summary_partial_failure_still_summarizes_the_readable_entry(
     assert result.returncode == 0, (
         f"a partial mixed set still exits 0\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["summary"] == {
-        "status": "partial_failure", "verification": "verified", "exit_code": 0, "total": 2, "verified": 1, "unverified": 0, "refused": 1,
+        "status": "partial_failure", "verification": "verified", "total": 2, "verified": 1, "unverified": 0, "refused": 1,
     }
 
-    [entry] = data["entries"]
+    [entry] = data["attestations"]
     assert entry["predicate_type"] == CYCLONEDX_URI
     assert entry["referrer_digest"] == cdx_attested["referrer_digest"]
     assert entry["summary"] == {
@@ -784,7 +784,7 @@ def test_nine_attestations_do_not_crowd_out_the_signature_or_each_other(
 
     listed = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
-    summary = json.loads(listed.stdout)["data"]["summary"]
+    summary = json.loads(listed.stdout)["summary"]
     assert summary["verified"] == 9, (
         f"expected all nine attestations, got {summary['verified']} "
         f"(refused {summary['refused']}) — the signature must be discriminated "
@@ -910,12 +910,12 @@ def test_sbom_lists_a_foreign_tools_raw_referrer_as_unverified(
 
     listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"sbom failed\\nstdout: {listed.stdout}\\nstderr: {listed.stderr}"
-    data = json.loads(listed.stdout)["data"]
+    data = json.loads(listed.stdout)
     assert data["summary"] == {
-        "status": "success", "verification": "unverified", "exit_code": 0,
+        "status": "success", "verification": "unverified",
         "total": 1, "verified": 0, "unverified": 1, "refused": 0,
     }
-    [entry] = data["entries"]
+    [entry] = data["attestations"]
     assert entry["verified"] is False
     assert entry["predicate_type"] == CYCLONEDX_URI
     assert "certificate_identity" not in entry
@@ -924,7 +924,7 @@ def test_sbom_lists_a_foreign_tools_raw_referrer_as_unverified(
         "package", "sbom", *no_identity_args(sigstore_stack), "--summary", published_package.short, check=False,
     )
     assert summarized.returncode == 0, f"stdout: {summarized.stdout}"
-    [summary_entry] = json.loads(summarized.stdout)["data"]["entries"]
+    [summary_entry] = json.loads(summarized.stdout)["attestations"]
     assert summary_entry["summary"]["component_count"] == 0
 
 
@@ -987,7 +987,7 @@ def test_sbom_shadows_the_index_cyclonedx_but_never_the_index_spdx(
 
     listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
-    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["data"]["entries"]}
+    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["attestations"]}
 
     assert set(entries) == {platform_cyclonedx, index_cyclonedx, index_spdx}, (
         "all three documents must be listed: --format json marks a superseded "
@@ -1056,7 +1056,7 @@ def test_sbom_without_platform_shadows_nothing(
         check=False,
     )
     assert listed.returncode == 0, f"stdout: {listed.stdout}\nstderr: {listed.stderr}"
-    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["data"]["entries"]}
+    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["attestations"]}
     assert set(entries) == {index_cyclonedx}, (
         "with no --platform the index is the subject itself, so only its own "
         f"documents are read; got {sorted(entries)}"
@@ -1098,7 +1098,7 @@ def test_sbom_demand_mode_lists_the_verified_document_and_refuses_the_unsigned_s
 
     listed = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, listed.stdout
-    data = json.loads(listed.stdout)["data"]
+    data = json.loads(listed.stdout)
     assert data["summary"]["verification"] == "verified"
     assert (data["summary"]["verified"], data["summary"]["unverified"], data["summary"]["refused"]) == (1, 0, 1)
     [refusal] = data["refused"]
@@ -1397,7 +1397,7 @@ def test_edge_3_demand_mode_lists_the_valid_signed_document_beside_two_refusals(
 
     listed = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"stdout: {listed.stdout}\nstderr: {listed.stderr}"
-    data = json.loads(listed.stdout)["data"]
+    data = json.loads(listed.stdout)
     assert (data["summary"]["verified"], data["summary"]["unverified"], data["summary"]["refused"]) == (1, 0, 2), (
         f"expected 1 verified, 0 unverified, 2 refused; got {data['summary']!r}"
     )
@@ -1446,10 +1446,10 @@ def test_edge_4_permissive_mode_extracts_a_signed_bundles_payload_unverified(
         published_package.short, check=False,
     )
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["summary"]["verification"] == "unverified"
     assert (data["summary"]["verified"], data["summary"]["unverified"]) == (0, 1)
-    [entry] = data["entries"]
+    [entry] = data["attestations"]
     assert entry["verified"] is False
     assert "certificate_identity" not in entry
     assert "certificate_oidc_issuer" not in entry
@@ -1461,9 +1461,9 @@ def test_edge_4_permissive_mode_extracts_a_signed_bundles_payload_unverified(
         "package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False,
     )
     assert demanded.returncode == 0, demanded.stdout
-    demanded_data = json.loads(demanded.stdout)["data"]
+    demanded_data = json.loads(demanded.stdout)
     assert demanded_data["summary"]["verification"] == "verified"
-    [demanded_entry] = demanded_data["entries"]
+    [demanded_entry] = demanded_data["attestations"]
     assert demanded_entry["verified"] is True
     assert demanded_entry["certificate_identity"] == sigstore_stack.identity
 
@@ -1495,12 +1495,12 @@ def test_edge_5_permissive_mode_lists_a_signed_and_an_unsigned_document_both_unv
 
     result = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
     assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["summary"]["verification"] == "unverified"
     assert (data["summary"]["verified"], data["summary"]["unverified"]) == (0, 2), (
         f"both documents must list unverified under permissive mode, got {data['summary']!r}"
     )
-    assert all(not entry["verified"] for entry in data["entries"])
+    assert all(not entry["verified"] for entry in data["attestations"])
 
 
 def test_edge_6_verify_flag_with_no_identity_source_is_a_usage_error(
@@ -1582,7 +1582,7 @@ def test_edge_8_verify_and_no_verify_flags_last_win(
         f"--no-verify last must win and list permissively, got {permissive_last.returncode}\n"
         f"stdout: {permissive_last.stdout}"
     )
-    assert json.loads(permissive_last.stdout)["data"]["summary"]["verification"] == "unverified"
+    assert json.loads(permissive_last.stdout)["summary"]["verification"] == "unverified"
 
     demand_last = ocx.run(
         "package", "sbom", "--no-verify", "--verify",
@@ -1632,7 +1632,7 @@ def test_w2_a_cross_family_mislabelled_referrer_is_listed_under_its_layer_type(
 
     listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"a cross-family disagreement must be labelled, not refused\nstdout: {listed.stdout}"
-    [entry] = json.loads(listed.stdout)["data"]["entries"]
+    [entry] = json.loads(listed.stdout)["attestations"]
     assert entry["predicate_type"] == SPDX_URI, (
         f"the layer served SPDX bytes, so SPDX is what the row must claim, got: {entry!r}"
     )
@@ -1655,7 +1655,7 @@ def test_w2_a_cross_family_mislabelled_referrer_is_listed_under_its_layer_type(
         published_package.short, check=False,
     )
     assert hit.returncode == 0, f"--type spdx must match the layer's real type\nstdout: {hit.stdout}"
-    [hit_entry] = json.loads(hit.stdout)["data"]["entries"]
+    [hit_entry] = json.loads(hit.stdout)["attestations"]
     assert hit_entry["predicate_type"] == SPDX_URI
 
 
@@ -1683,7 +1683,7 @@ def test_w2_type_flag_narrows_a_correctly_typed_raw_attachment(
         published_package.short, check=False,
     )
     assert hit.returncode == 0, f"stdout: {hit.stdout}"
-    [entry] = json.loads(hit.stdout)["data"]["entries"]
+    [entry] = json.loads(hit.stdout)["attestations"]
     assert entry["predicate_type"] == CYCLONEDX_URI
 
     missed = ocx.run(

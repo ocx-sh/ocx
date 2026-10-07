@@ -186,11 +186,11 @@ number at once (`181` here, `172` in `test/BUILD.bazel`'s comment, `188` in a
 work order); `bazel_gate_proofs` is now the only place it is written down, and
 `prove_counts` below reads `test/tests/` to check even that."""
 
-SCOPED_ROWS = 20
+SCOPED_ROWS = 23
 """`[crates]` rows of `test/scoped_rows.toml` — one per workspace member but `ocx`."""
 
-SCOPED_ESCALATE_ROWS = 2
-"""`ocx_test_support` and `ocx_python`: the rows whose subset is the whole suite."""
+SCOPED_ESCALATE_ROWS = 3
+"""`ocx_test_support`, `ocx_python` and `ocx_env`: the rows whose subset is the whole suite."""
 
 ACCEPTANCE_PACKAGE = "//test"
 CLI_PACKAGE = "ocx"
@@ -1771,23 +1771,30 @@ def fixture_modules(count: int = ACCEPTANCE_MODULES) -> set[str]:
 
 
 def fixture_rows(modules: set[str]) -> dict[str, str]:
-    """A `[crates]`-shaped table: 20 rows, two of them `escalate`.
+    """A `[crates]`-shaped table: 23 rows, three of them `escalate`.
 
     Globs are two-digit prefixes over the fixture's own three-digit module
-    names, so each of the 18 non-`escalate` rows owns a live decade and every
-    module is reachable from some row — a dead glob is then a mutation rather
+    names, so each of the 20 non-`escalate` rows owns a live decade (or module)
+    and every module is reachable from some row — a dead glob is then a mutation rather
     than this table's normal state, which is the only way `select-glob-dead`
     can be shown red on purpose.
     """
-    rows: dict[str, str] = {"ocx_test_support": "escalate", "ocx_python": "escalate"}
+    rows: dict[str, str] = {
+        "ocx_test_support": "escalate",
+        "ocx_python": "escalate",
+        "ocx_env": "escalate",
+    }
     glob_rows = SCOPED_ROWS - SCOPED_ESCALATE_ROWS
     # Decades are derived from the modules present, not from the row count: the
     # fixture's size follows the live acceptance suite, so hard-coding one decade
     # per row leaves the tail uncovered the moment the suite outgrows
     # `glob_rows * 10` — and an uncovered module makes `select-glob-dead` this
     # table's resting state instead of a mutation. Surplus decades fold into the
-    # last row, which keeps every module reachable at any count.
+    # last row, which keeps every module reachable at any count. More rows than
+    # decades would leave a row owning nothing, so single modules become the unit.
     decades = sorted({name[len("tests/test_mod") : -len("0.py")] for name in modules})
+    if len(decades) < glob_rows:
+        decades = sorted(name[len("tests/test_mod") : -len(".py")] for name in modules)
     for index in range(glob_rows):
         owned = (
             decades[index : index + 1] if index < glob_rows - 1 else decades[index:]
@@ -1815,13 +1822,14 @@ def fixture_crate_of_dir() -> dict[str, str]:
 
     `crates/ocx_cli` holds the package named `ocx`; every other member's
     directory is its package name. A selector keyed on the directory would
-    miss `ocx`, which has no row and selects `//test:all` like the two
-    `escalate` rows, `ocx_test_support` and `ocx_python`.
+    miss `ocx`, which has no row and selects `//test:all` like the three
+    `escalate` rows, `ocx_test_support`, `ocx_python` and `ocx_env`.
     """
-    mapping = {f"crates/crate{index:02d}": f"crate{index:02d}" for index in range(18)}
+    mapping = {f"crates/crate{index:02d}": f"crate{index:02d}" for index in range(19)}
     mapping["crates/ocx_cli"] = "ocx"
     mapping["crates/ocx_test_support"] = "ocx_test_support"
     mapping["crates/ocx_python"] = "ocx_python"
+    mapping["crates/ocx_env"] = "ocx_env"
     return mapping
 
 

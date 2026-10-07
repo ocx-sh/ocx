@@ -15,7 +15,6 @@ use std::process::ExitCode;
 use clap::Parser;
 use tokio::io::AsyncWriteExt as _;
 
-use crate::exit::ClassifyErrorKind as _;
 use ocx_package_manager::SbomOptions;
 use ocx_sign::attest::predicate::PredicateType;
 use ocx_sign::sbom;
@@ -153,7 +152,7 @@ impl PackageSbom {
         // `both` cannot pin one verification result, so it is a usage error before any request.
         let signature_format = self.signature_format.pin().map_err(crate::error::UsageError::from)?;
 
-        // Parsed up front, or `--key awskms://...` is reported as a missing file instead of exit 85.
+        // Parsed up front, or `--key awskms://...` is reported as a missing file instead of exit 82.
         let key = self
             .key
             .reference()
@@ -286,15 +285,15 @@ impl PackageSbom {
         let mut refusals: Vec<RefusedEntry> = refused
             .into_iter()
             .map(|candidate| RefusedEntry {
-                referrer_digest: candidate.referrer_digest,
+                referrer_digest: ocx_oci::Digest::try_from(candidate.referrer_digest.as_str()).ok(),
                 reason: candidate.reason.to_string(),
-                reason_kind: candidate.reason.kind_detail(),
+                reason_kind: crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&candidate.reason)),
             })
             .collect();
 
         for candidate in attestations {
             let is_shadowed = shadowed.contains(&candidate.verify.referrer_digest);
-            let referrer_digest = candidate.verify.referrer_digest.to_string();
+            let referrer_digest = candidate.verify.referrer_digest;
             let summary = match self.summary_for(
                 &candidate.attestation.predicate_type,
                 candidate.attestation.predicate.get().as_bytes(),
@@ -310,11 +309,11 @@ impl PackageSbom {
                 predicate_type: candidate.attestation.predicate_type,
                 verified: true,
                 shadowed: is_shadowed,
-                subject_digest: candidate.attestation.subject_digest.to_string(),
+                subject_digest: candidate.attestation.subject_digest,
                 referrer_digest,
                 certificate_identity: candidate.verify.certificate_identity,
                 certificate_oidc_issuer: candidate.verify.certificate_oidc_issuer,
-                signed_at: candidate.verify.signed_at.map(package_sign_common::iso8601),
+                signed_at: candidate.verify.signed_at.and_then(package_sign_common::signed_at),
                 summary,
             });
         }
@@ -322,7 +321,7 @@ impl PackageSbom {
         // Always `verified: false` with no signer fields: the permissive-mode safety invariant.
         for candidate in unverified {
             let is_shadowed = shadowed.contains(&candidate.referrer_digest);
-            let referrer_digest = candidate.referrer_digest.to_string();
+            let referrer_digest = candidate.referrer_digest;
             let summary = match self.summary_for(&candidate.predicate_type, &candidate.document, &referrer_digest) {
                 Ok(summary) => summary,
                 Err(refusal) => {
@@ -334,7 +333,7 @@ impl PackageSbom {
                 predicate_type: candidate.predicate_type,
                 verified: false,
                 shadowed: is_shadowed,
-                subject_digest: candidate.subject_digest.to_string(),
+                subject_digest: candidate.subject_digest,
                 referrer_digest,
                 certificate_identity: None,
                 certificate_oidc_issuer: None,
@@ -355,7 +354,7 @@ impl PackageSbom {
         &self,
         predicate_type: &str,
         document: &[u8],
-        referrer_digest: &str,
+        referrer_digest: &ocx_oci::Digest,
     ) -> Result<Option<SbomSummaryOut>, RefusedEntry> {
         if !self.summary {
             return Ok(None);
@@ -363,7 +362,7 @@ impl PackageSbom {
         summarize(predicate_type, document)
             .map(Some)
             .map_err(|reason| RefusedEntry {
-                referrer_digest: referrer_digest.to_string(),
+                referrer_digest: Some(referrer_digest.clone()),
                 reason,
                 reason_kind: SUMMARY_FAILED,
             })
@@ -534,7 +533,7 @@ async fn write_stream<W: tokio::io::AsyncWrite + Unpin>(sink: &mut W, bytes: &[u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error_envelope::render_error_envelope;
+    use crate::error_document::render_error_document;
     use ocx_package_manager::error::{PackageError, PackageErrorKind};
 
     fn identifier() -> ocx_oci::PackageRef {
@@ -542,15 +541,12 @@ mod tests {
     }
 
     fn envelope(err: &anyhow::Error) -> serde_json::Value {
-        let json = render_error_envelope("package sbom", err).expect("render envelope");
+        let json = render_error_document("package sbom", err).expect("render envelope");
         serde_json::from_str(&json).expect("valid json")
     }
 
     /// The code the process would exit with, through the same authority
-    /// `main.rs` uses. `render_error_envelope` classifies with the *library*
-    /// classifier alone, which by construction cannot downcast a CLI-local
-    /// [`CommandError`] — so an envelope assertion on one of those reads 1
-    /// no matter which code the command chose.
+    /// `main.rs` uses.
     fn exit_code(err: &anyhow::Error) -> u8 {
         crate::exit::classify_error(err.as_ref()) as u8
     }
@@ -823,7 +819,7 @@ mod tests {
             ListingVerification::Verified,
             "a demanded listing must say so, so a script can read the rows correctly",
         );
-        let signed = &demanded.entries[0];
+        let signed = &demanded.attestations[0];
         assert!(signed.verified);
         assert_eq!(signed.certificate_identity.as_deref(), Some("you@example.com"));
         assert!(signed.summary.is_some());
@@ -842,7 +838,7 @@ mod tests {
             ListingVerification::Unverified,
             "an unverified listing must say so: the rows look the same either way",
         );
-        let unverified = &permissive.entries[0];
+        let unverified = &permissive.attestations[0];
         assert!(!unverified.verified, "an unverified entry must be labelled as such");
         assert_eq!(
             unverified.certificate_identity, None,
@@ -952,8 +948,11 @@ mod tests {
             &BTreeSet::new(),
         );
 
-        assert_eq!(listing.entries.len(), 1, "the readable document is still listed");
-        assert_eq!(listing.entries[0].referrer_digest, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(listing.attestations.len(), 1, "the readable document is still listed");
+        assert_eq!(
+            listing.attestations[0].referrer_digest.to_string(),
+            format!("sha256:{}", "b".repeat(64))
+        );
         assert_eq!(listing.refused.len(), 1);
         assert_eq!(listing.refused[0].reason_kind, "sbom_summary_failed");
         assert_eq!(listing.summary.unverified, 1);
@@ -1211,19 +1210,25 @@ mod tests {
         );
 
         assert_eq!(
-            listing.entries.len(),
+            listing.attestations.len(),
             1,
             "the readable document must still be listed, not lost with the other one",
         );
-        assert_eq!(listing.entries[0].referrer_digest, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(
+            listing.attestations[0].referrer_digest.to_string(),
+            format!("sha256:{}", "b".repeat(64))
+        );
         assert!(
-            listing.entries[0].summary.is_some(),
+            listing.attestations[0].summary.is_some(),
             "the entry that did summarize must still carry its summary",
         );
 
         assert_eq!(listing.refused.len(), 1, "the unreadable document moves to refused");
         let refusal = &listing.refused[0];
-        assert_eq!(refusal.referrer_digest, format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(
+            refusal.referrer_digest.as_ref().map(ToString::to_string),
+            Some(format!("sha256:{}", "c".repeat(64)))
+        );
         assert_eq!(
             refusal.reason_kind, "sbom_summary_failed",
             "a script branches on the slug, so it must be the summary one, not a verify slug",
@@ -1237,10 +1242,10 @@ mod tests {
         assert_eq!(listing.summary.total, 2, "every candidate is still accounted for");
         assert_eq!(listing.summary.verified, 1);
         assert_eq!(listing.summary.refused, 1);
-        assert_eq!(listing.summary.status, "partial_failure");
         assert_eq!(
-            listing.summary.exit_code, 0,
-            "a refusal beside a result is the reported path, which has exactly one code",
+            listing.summary.status,
+            crate::api::data::sbom::ListingStatus::PartialFailure,
+            "a refusal beside a result is a reported partial failure, not an error",
         );
     }
 
@@ -1256,13 +1261,13 @@ mod tests {
             &BTreeSet::new(),
         );
 
-        assert_eq!(listing.entries.len(), 1);
-        assert!(listing.entries[0].summary.is_none());
+        assert_eq!(listing.attestations.len(), 1);
+        assert!(listing.attestations[0].summary.is_none());
         assert!(
             listing.refused.is_empty(),
             "nothing was read, so nothing can be refused"
         );
-        assert_eq!(listing.summary.status, "success");
+        assert_eq!(listing.summary.status, crate::api::data::sbom::ListingStatus::Success);
     }
 
     /// A summary refusal joins the pipeline's own refusals rather than
@@ -1280,7 +1285,7 @@ mod tests {
             &BTreeSet::new(),
         );
 
-        assert!(listing.entries.is_empty());
+        assert!(listing.attestations.is_empty());
         assert_eq!(listing.summary.total, 2);
         let slugs: Vec<&str> = listing.refused.iter().map(|entry| entry.reason_kind).collect();
         assert_eq!(
@@ -1312,7 +1317,7 @@ mod tests {
             Vec::new(),
             &shadowed,
         );
-        let marked: Vec<bool> = listing.entries.iter().map(|entry| entry.shadowed).collect();
+        let marked: Vec<bool> = listing.attestations.iter().map(|entry| entry.shadowed).collect();
         assert_eq!(
             marked,
             vec![true, false],
@@ -1330,7 +1335,7 @@ mod tests {
         );
         assert_eq!(
             permissive
-                .entries
+                .attestations
                 .iter()
                 .map(|entry| entry.shadowed)
                 .collect::<Vec<bool>>(),

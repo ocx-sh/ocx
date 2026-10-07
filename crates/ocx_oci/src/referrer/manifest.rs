@@ -104,7 +104,7 @@ pub fn bundle_now() -> chrono::DateTime<chrono::Utc> {
 /// The single reader of the variable (also `ocx_shell::ci::annotations`), or a
 /// malformed value warns on one path and stays silent on the other.
 pub fn pinned_instant() -> Option<chrono::DateTime<chrono::Utc>> {
-    let raw = ocx_util::env::var("SOURCE_DATE_EPOCH")?;
+    let raw = ocx_env::SOURCE_DATE_EPOCH.get_raw()?.into_string().ok()?;
     let parsed = created_from_epoch(&raw);
     if parsed.is_none() {
         // Log the key, never the value: a CI job log reaches more readers than the environment.
@@ -301,22 +301,22 @@ mod tests {
     /// half (the crate has no log-capture harness — see the WP report).
     #[test]
     fn pinned_instant_locks_its_source_date_epoch_contract() {
-        let lock = ocx_util::env::overrides::lock();
+        let lock = ocx_env::overrides::lock();
 
-        lock.remove("SOURCE_DATE_EPOCH");
+        lock.remove(&ocx_env::SOURCE_DATE_EPOCH);
         assert_eq!(pinned_instant(), None, "an unset variable pins no instant");
 
-        lock.set("SOURCE_DATE_EPOCH", "1700000000");
+        lock.set(&ocx_env::SOURCE_DATE_EPOCH, "1700000000");
         assert_eq!(
             pinned_instant().map(bundle_created).as_deref(),
             Some("2023-11-14T22:13:20Z"),
             "a valid epoch pins that instant"
         );
 
-        lock.set("SOURCE_DATE_EPOCH", "");
+        lock.set(&ocx_env::SOURCE_DATE_EPOCH, "");
         assert_eq!(pinned_instant(), None, "an empty value pins no instant");
 
-        lock.set("SOURCE_DATE_EPOCH", "yesterday");
+        lock.set(&ocx_env::SOURCE_DATE_EPOCH, "yesterday");
         assert_eq!(pinned_instant(), None, "a malformed value pins no instant");
     }
 }

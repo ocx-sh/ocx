@@ -230,7 +230,7 @@ def test_reinstalling_a_tag_resolves_to_the_first_install_digest(
         `identifier` is the canonical resolved form — tag plus the digest it
         pinned to.
         """
-        report = ocx.json("package", "install", pkg.short)
+        report = ocx.json("package", "install", pkg.short)["packages"]
         identifier = report[pkg.short]["identifier"]
         _, _, digest = identifier.partition("@")
         assert digest.startswith("sha256:"), f"expected a pinned identifier, got {identifier!r}"

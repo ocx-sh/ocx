@@ -28,8 +28,11 @@ pub const fn default_entry_visibility() -> Visibility {
 /// JSON Schema for `Var.visibility`: the three entry values, without `"sealed"`.
 pub fn entry_visibility_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
-        "type": "string",
-        "enum": ["private", "public", "interface"],
+        "oneOf": [
+            {"type": "string", "const": "private", "description": "Visible to the package's own runtime only."},
+            {"type": "string", "const": "public", "description": "Visible to the package's own runtime and to consumers."},
+            {"type": "string", "const": "interface", "description": "Visible to consumers only."},
+        ],
         "description": "Entry-axis visibility on a `Var` entry: `private` (self-only), `public` \
                         (consumer + self), `interface` (consumer-only). `sealed` is rejected for \
                         entries — entries always belong to at least the package's own runtime. See \
@@ -139,8 +142,13 @@ impl schemars::JsonSchema for Visibility {
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "type": "string",
-            "enum": ["sealed", "private", "public", "interface"],
+            "description": "Two-axis visibility of a dependency edge or env entry: whether it reaches the package's own runtime, its consumers, both or neither.",
+            "oneOf": [
+                {"type": "string", "const": "sealed", "description": "Visible to neither the package's own runtime nor its consumers."},
+                {"type": "string", "const": "private", "description": "Visible to the package's own runtime only."},
+                {"type": "string", "const": "public", "description": "Visible to the package's own runtime and to consumers."},
+                {"type": "string", "const": "interface", "description": "Visible to consumers only."},
+            ],
         })
     }
 }

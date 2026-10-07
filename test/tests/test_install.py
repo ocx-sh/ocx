@@ -43,7 +43,7 @@ def test_install_creates_content_directory(
 ):
     """ocx install <pkg>"""
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
     content = Path(result[pkg.short]["path"])
     assert_dir_exists(content)
 
@@ -74,7 +74,7 @@ def test_install_select_reports_current_path(
     reported path must surface `current`, the alias the user just set.
     """
     pkg = published_package
-    result = ocx.json("package", "install", "-s", pkg.short)
+    result = ocx.json("package", "install", "-s", pkg.short)["packages"]
 
     reported = Path(result[pkg.short]["path"])
     assert reported.name == "current"
@@ -85,7 +85,7 @@ def test_install_without_select_reports_candidate_path(
 ):
     """ocx install <pkg> reports the tag-pinned candidate path."""
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
 
     reported = Path(result[pkg.short]["path"])
     assert reported.name == pkg.tag
@@ -122,10 +122,10 @@ def test_install_foreign_platform_writes_no_candidate(
     foreign = _AMD64 if current_platform() != _AMD64 else _ARM64
     ref = f"{ocx.registry}/{unique_repo}:3.28"
 
-    installs = ocx.json("package", "install", f"--platform={foreign}", ref)
+    installs = ocx.json("package", "install", f"--platform={foreign}", ref)["packages"]
     assert len(installs) == 1, f"one identifier in, one entry out: {installs}"
     entry = next(iter(installs.values()))
-    assert entry["path"] is None, f"foreign install must report no host symlink: {installs}"
+    assert "path" not in entry, f"foreign install must report no host symlink: {installs}"
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
@@ -145,7 +145,7 @@ def test_install_without_select_preserves_current(
     v1, v2 = published_two_versions
 
     # Install v1 with select
-    result_v1 = ocx.json("package", "install", "-s", v1.short)
+    result_v1 = ocx.json("package", "install", "-s", v1.short)["packages"]
     content_v1 = Path(result_v1[v1.short]["path"])
 
     # Install v2 without select
@@ -175,7 +175,7 @@ def test_install_records_the_pulling_origin(
     the one the registry served.
     """
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
 
     pkg_root = Path(result[pkg.short]["path"])
     origins = pkg_root / "refs" / "origins"

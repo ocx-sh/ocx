@@ -5,34 +5,30 @@
 //! variant and precision, within its major unless crossing is allowed.
 
 use ocx_oci::PackageRef;
+use ocx_util::wire_words;
 
 use crate::version::Version;
 
-/// Why `ocx upgrade` leaves a binding's tag where it is; a report row, never an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SkipReason {
-    /// The binding names a digest, so there is no tag to move.
-    DigestPinned,
-    /// The binding tracks `latest`, which already follows every release.
-    Latest,
-    /// The tag is not a version (`nightly`, a bare variant name).
-    NotAVersion,
-    /// The tag carries a prerelease or build suffix, which pins one exact artifact.
-    PrereleaseOrBuild,
-    /// No newer release exists within the policy.
-    UpToDate,
+wire_words! {
+    /// Why `ocx upgrade` leaves a binding's tag where it is; a report row, never an error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, schemars::JsonSchema)]
+    pub enum SkipReason {
+        /// The binding names a digest, so there is no tag to move.
+        DigestPinned = "digest_pinned",
+        /// The binding tracks `latest`, which already follows every release.
+        Latest = "latest",
+        /// The tag is not a version (`nightly`, a bare variant name).
+        NotAVersion = "not_a_version",
+        /// The tag carries a prerelease or build suffix, which pins one exact artifact.
+        PrereleaseOrBuild = "prerelease_or_build",
+        /// No newer release exists within the policy.
+        UpToDate = "up_to_date",
+    }
 }
 
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            SkipReason::DigestPinned => "digest_pinned",
-            SkipReason::Latest => "latest",
-            SkipReason::NotAVersion => "not_a_version",
-            SkipReason::PrereleaseOrBuild => "prerelease_or_build",
-            SkipReason::UpToDate => "up_to_date",
-        })
+        f.write_str(self.as_str())
     }
 }
 

@@ -213,7 +213,9 @@ fn run() -> Result<i32, ShimError> {
 
     // Containment runs only when `OCX_HOME` resolves; `launcher exec`'s `validate_launcher_pkg_root` stays
     // authoritative. A `pkg_root` that fails to resolve under a good `OCX_HOME` is suspicious: delegate, but say so.
-    if let (Some(pkg_root), Some(ocx_home)) = (sidecar.containment_path(), std::env::var_os("OCX_HOME")) {
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
+    let ocx_home = std::env::var_os("OCX_HOME");
+    if let (Some(pkg_root), Some(ocx_home)) = (sidecar.containment_path(), ocx_home) {
         let home = std::path::Path::new(&ocx_home);
         if let Ok(canon_home) = dunce::canonicalize(home) {
             match dunce::canonicalize(pkg_root) {
@@ -246,6 +248,7 @@ fn run() -> Result<i32, ShimError> {
     }
 
     // Defined-but-empty must stay `Some`: `core::resolve_program` treats it as a pin.
+    #[expect(clippy::disallowed_methods, reason = "no ocx_env edge: the shim's size budget")]
     let pin = std::env::var_os("OCX_BINARY_PIN").map(|v| v.to_string_lossy().into_owned());
     let program = core::resolve_program(pin.as_deref(), sidecar.baked_ocx());
 

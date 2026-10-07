@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 ///
 /// No `source()`: the io cause lives in the message only, or a `{err:#}` walk prints it twice.
 /// The field is `cause` because `thiserror` promotes a field named `source` to `Error::source`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(IoError, slug = "file_io", summary = "Reading or writing an internal file failed")]
 #[error("internal file error for '{path}': {cause}", path = .path.display(), cause = .cause)]
 pub struct FileError {
     pub path: PathBuf,
@@ -28,16 +29,24 @@ impl FileError {
 /// A JSON serialization or deserialization failed.
 ///
 /// The serializer error stays `source()`, which exit-code classification descends into.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(
+    DataError,
+    slug = "json_serialization",
+    summary = "JSON could not be serialized or deserialized"
+)]
 #[error("JSON serialization error")]
 pub struct SerializationError(#[from] pub serde_json::Error);
 
 /// Either failure, for a JSON round-trip that touches the disk; a function that fails one way returns the concrete type.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "UtilError")]
 pub enum Error {
     #[error(transparent)]
+    #[exit(delegate)]
     File(#[from] FileError),
     #[error(transparent)]
+    #[exit(delegate)]
     Serialization(#[from] SerializationError),
 }
 

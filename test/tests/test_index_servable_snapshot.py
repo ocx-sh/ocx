@@ -774,7 +774,7 @@ def test_frozen_refuses_the_catalog_snapshot_and_permits_regenerate(
     static_index.write_catalog(catalog_path.parent.parent, drifted)
 
     regenerated = ocx.json("--frozen", "--index", str(index_dir), "index", "regenerate", NAMESPACE)
-    assert regenerated[0]["removed"] == [f"{unique_repo}/ghost"], (
+    assert regenerated["items"][0]["removed"] == [f"{unique_repo}/ghost"], (
         f"--frozen must permit regenerate and it must drop the ghost entry, got {regenerated}"
     )
     assert f"{unique_repo}/ghost" not in static_index.read_catalog(catalog_path)
@@ -982,10 +982,10 @@ def test_regenerate_repairs_a_catalog_without_touching_content(
     before = content(subtree)
     outcome = ocx.json("--index", str(index_dir), "index", "regenerate", NAMESPACE)
 
-    assert outcome[0]["removed"] == [f"{unique_repo}/ghost"], f"expected the ghost entry dropped, got {outcome}"
-    assert outcome[0]["corrected"] == [repositories[0]], f"expected the wrong digest corrected, got {outcome}"
-    assert outcome[0]["added"] == []
-    assert outcome[0]["roots"] == 2
+    assert outcome["items"][0]["removed"] == [f"{unique_repo}/ghost"], f"expected the ghost entry dropped, got {outcome}"
+    assert outcome["items"][0]["corrected"] == [repositories[0]], f"expected the wrong digest corrected, got {outcome}"
+    assert outcome["items"][0]["added"] == []
+    assert outcome["items"][0]["roots"] == 2
 
     assert content(subtree) == before, (
         "regenerate writes exactly one path — c/index.json — and must leave every root, every "
@@ -1000,7 +1000,7 @@ def test_regenerate_repairs_a_catalog_without_touching_content(
     # Idempotence: a second run over the repaired tree changes nothing at all.
     steady = snapshot(subtree)
     second = ocx.json("--index", str(index_dir), "index", "regenerate", NAMESPACE)
-    assert (second[0]["added"], second[0]["corrected"], second[0]["removed"]) == ([], [], [])
+    assert (second["items"][0]["added"], second["items"][0]["corrected"], second["items"][0]["removed"]) == ([], [], [])
     assert snapshot(subtree) == steady, "a clean regenerate must not even touch mtimes"
 
 
@@ -1421,7 +1421,10 @@ def test_a_registry_named_twice_is_one_snapshot_on_both_paths(
     )
 
     preview = ocx.run("--index", str(index_dir), "index", "sync", NAMESPACE, NAMESPACE, "--dry-run")
-    assert json.loads(preview.stdout) == [{"registry": NAMESPACE, "packages": [repository]}], (
+    assert json.loads(preview.stdout) == {
+        "schema_version": 1,
+        "items": [{"registry": NAMESPACE, "packages": [repository]}],
+    }, (
         f"the preview describes the run that would happen, so a repeat is one row: {preview.stdout}"
     )
 
@@ -1619,7 +1622,10 @@ def test_a_dry_run_previews_the_catalog_and_writes_nothing(
     del index_server.requests[:]
     preview = ocx.run("--index", str(index_dir), "index", "sync", NAMESPACE, "--dry-run")
     assert preview.returncode == 0
-    assert json.loads(preview.stdout) == [{"registry": NAMESPACE, "packages": sorted(repositories)}], (
+    assert json.loads(preview.stdout) == {
+        "schema_version": 1,
+        "items": [{"registry": NAMESPACE, "packages": sorted(repositories)}],
+    }, (
         f"the preview must list every package the source catalog holds, sorted: {preview.stdout}"
     )
     assert snapshot(index_dir) == before, "a dry run opens nothing under the index home for write"

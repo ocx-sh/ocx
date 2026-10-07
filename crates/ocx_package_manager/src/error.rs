@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_exit::{ClassifyExitCode, Pick, Row};
 use ocx_package::metadata::entrypoint::EntrypointName;
 use ocx_package::metadata::{BinaryError, BinaryName};
 use ocx_store::file_structure;
@@ -8,79 +9,121 @@ use ocx_store::file_structure;
 /// Task-level error: one variant per command, one [`PackageError`] per failed package.
 ///
 /// A batch's exit code comes from its first element's [`PackageError::kind`], so it depends on input order.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "PackageManagerError")]
 pub enum Error {
     /// A find operation failed for one or more packages.
     #[error("{}", format_batch("find", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     FindFailed(Vec<PackageError>),
     /// An install operation failed for one or more packages.
     #[error("{}", format_batch("install", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     InstallFailed(Vec<PackageError>),
     /// An uninstall operation failed for one or more packages.
     #[error("{}", format_batch("uninstall", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     UninstallFailed(Vec<PackageError>),
     /// A deselect operation failed for one or more packages.
     #[error("{}", format_batch("deselect", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     DeselectFailed(Vec<PackageError>),
     /// A resolve operation failed for one or more packages.
     #[error("{}", format_batch("resolve", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     ResolveFailed(Vec<PackageError>),
     /// An inspect operation failed for one or more packages.
     #[error("{}", format_batch("inspect", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     InspectFailed(Vec<PackageError>),
     /// A select operation failed for one or more packages.
     #[error("{}", format_batch("select", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     SelectFailed(Vec<PackageError>),
     /// Patch discovery failed for one or more base packages.
     #[error("{}", format_batch("discover patches for", _0))]
+    #[exit(with = first_failure, rows((defer(Failure), slug = "package_task_failed", summary = "A per-package operation failed with an unclassified cause")))]
     DiscoverFailed(Vec<PackageError>),
     /// The self-update check failed before any install was attempted (boxed: the type is recursive).
     #[error("self-update check failed: {}", render_entry(_0))]
+    #[exit(delegate = 0.kind)]
     SelfCheckFailed(Box<PackageError>),
 
     // ── The tier's own root error ───────────────────────────────────────────
-    // Each variant maps to an exit code in the binary's classifier; merging or splitting one moves that code.
+    // Each variant's `#[exit(...)]` fixes its exit code; merging or splitting one moves that code.
     /// A network operation was attempted while in offline mode.
     #[error("network operation attempted in offline mode")]
+    #[exit(
+        PolicyBlocked,
+        slug = "offline_mode",
+        summary = "A network operation was attempted in offline mode"
+    )]
     OfflineMode,
 
     /// JSON serialization or deserialization failed.
     #[error("JSON serialization error")]
+    #[exit(
+        DataError,
+        slug = "package_manager_serialization",
+        summary = "A package document could not be serialized"
+    )]
     SerializationFailure(#[from] serde_json::Error),
     /// An OCI index operation failed.
     // No `#[from]`: the hand-written `From` flattens three variants onto this enum's, or their exit code moves.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     OciIndex(ocx_index::error::Error),
 
     /// A dependency graph operation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Dependency(#[from] DependencyError),
     /// A package operation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Package(Box<ocx_package::error::Error>),
     /// An archive operation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Archive(#[from] ocx_util::archive::Error),
 
     /// A string baked into a generated launcher contains a launcher-unsafe character.
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
+    #[exit(
+        DataError,
+        slug = "launcher_unsafe_character",
+        summary = "A value baked into a generated launcher contains an unsafe character"
+    )]
     LauncherUnsafeCharacter { value: String, character: char },
 
     /// A path baked verbatim into a generated launcher or sidecar is not valid UTF-8; `path` is its lossy rendering.
     #[error("path baked into a generated launcher is not valid UTF-8: {path:?}")]
+    #[exit(
+        DataError,
+        slug = "launcher_path_not_utf8",
+        summary = "A path baked into a generated launcher is not valid UTF-8"
+    )]
     LauncherPathNotUtf8 { path: String },
 
     /// A toolchain home baked into a rendered trampoline or its `.exec` sidecar is not absolute.
     #[error("toolchain home is not an absolute path: {value:?}")]
+    #[exit(
+        DataError,
+        slug = "toolchain_home_not_absolute",
+        summary = "The toolchain home is not an absolute path"
+    )]
     ToolchainHomeNotAbsolute { value: String },
     /// An OCI signature verification failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Verify(#[from] Box<ocx_sign::verify::VerifyError>),
     /// A digest string could not be parsed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Digest(#[from] ocx_oci::digest::error::DigestError),
     /// A file structure operation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     FileStructure(#[from] ocx_store::file_structure::error::Error),
 
     /// A file I/O error with path context.
@@ -88,63 +131,124 @@ pub enum Error {
     /// The cause is interpolated, not `#[source]`: both prints it twice under `{err:#}`, and
     /// `#[source]` alone leaves every `to_string()` naming only the path.
     #[error("internal file error for '{path}': {cause}", path = .0.display(), cause = .1)]
+    #[exit(
+        IoError,
+        slug = "package_manager_internal_file",
+        summary = "Reading or writing an internal package file failed"
+    )]
     InternalFile(std::path::PathBuf, std::io::Error),
 
     /// An OCI signing operation failed (boxed for `clippy::result_large_err`).
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Sign(#[from] Box<ocx_sign::sign::SignError>),
 
     /// A singleflight coordination error.
     #[error("singleflight coordination failed")]
+    #[exit(delegate = 0)]
     Singleflight(#[from] ocx_util::singleflight::Error),
     /// A local materialization (`pull_local`) found a layer absent from the layer store.
     // Never fetched as a fallback: dialling the name as typed would bypass index routing.
     #[error(
         "layer {digest} of '{identifier}' is not staged locally, and a local materialization has no registry to fetch it from"
     )]
+    #[exit(
+        Failure,
+        slug = "layer_not_staged",
+        summary = "A layer the package needs was not staged"
+    )]
     LayerNotStaged { identifier: String, digest: String },
     /// An OCI client operation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     OciClient(#[from] ocx_oci::client::error::ClientError),
 
     /// A per-layer layout annotation could not be resolved into a placement.
     // A `#[source]` field, never `io::Error::other`: that hides the cause and exits 74 instead of 65.
     #[error("layer layout resolution failed")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "layer_layout_failed",
+            summary = "Resolving a layer layout failed with an unclassified cause"
+        )
+    )]
     LayerLayout(#[source] ocx_oci::layer_layout::LayerLayoutError),
 
     /// An unsupported OCI media type was encountered.
     #[error("unsupported media type '{media_type}', expected media types are: {supported}", media_type = .0, supported = .1.join(", "))]
+    #[exit(
+        DataError,
+        slug = "unsupported_media_type",
+        summary = "A manifest carries an unsupported media type"
+    )]
     UnsupportedMediaType(String, &'static [&'static str]),
 
     /// A metadata config blob exceeded the size cap, by declared or fetched length
     /// (`adr_inspect_metadata_closure.md` § "Config-blob size cap").
     #[error("metadata blob size {size} bytes exceeds the {max}-byte cap")]
+    #[exit(
+        DataError,
+        slug = "metadata_blob_too_large",
+        summary = "A package metadata blob exceeds the size cap"
+    )]
     MetadataBlobTooLarge { size: i64, max: usize },
 
     // Destinations for the flattening `From`s below; removing one nests it under a wrapper and can move its exit code.
     /// A platform parsing or validation error.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Platform(#[from] ocx_oci::platform::error::PlatformError),
     /// A pinned identifier validation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     PinnedIdentifier(#[from] ocx_oci::pinned_package_ref::PinnedIdentifierError),
     /// A path has an unexpected structure.
     #[error("path '{}' has an unexpected structure", .0.display())]
+    #[exit(
+        Failure,
+        slug = "internal_path_invalid",
+        summary = "An internal store path has an unexpected structure"
+    )]
     InternalPathInvalid(std::path::PathBuf),
 
     /// A project-tier configuration or lock operation failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Project(#[from] ocx_project::error::Error),
     /// A patch-domain operation failed outside per-package discovery (boxed: the enums are mutually recursive).
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Patch(Box<crate::patch::PatchError>),
 
     /// A symlink walk failed.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     SymlinkWalk(ocx_util::fs::SymlinkWalkError),
 
     #[error(transparent)]
+    #[exit(delegate = 0)]
     ProjectRegistry(#[from] ocx_project::registry::error::Error),
+}
+
+/// A batch answers as its first member when that member decides the exit code, else defers to the walker.
+fn first_failure(error: &Error, [row]: [Row; 1]) -> Pick<'_> {
+    let (Error::FindFailed(errors)
+    | Error::InstallFailed(errors)
+    | Error::UninstallFailed(errors)
+    | Error::DeselectFailed(errors)
+    | Error::ResolveFailed(errors)
+    | Error::InspectFailed(errors)
+    | Error::SelectFailed(errors)
+    | Error::DiscoverFailed(errors)) = error
+    else {
+        return Pick::row(row);
+    };
+    match errors.first() {
+        Some(first) if first.kind.classify().is_some() => Pick::delegate(&first.kind),
+        _ => Pick::row(row),
+    }
 }
 
 /// An error tied to a specific package.
@@ -190,10 +294,11 @@ pub struct ShimClaim {
 }
 
 /// The cause of a single-package failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum PackageErrorKind {
     /// The package was not found in the index or object store.
     #[error("package not found")]
+    #[exit(NotFound, slug = "package_not_found", summary = "The package does not exist")]
     NotFound,
     /// Offline mode: the tag pointer is cached locally but the manifest blob is not.
     #[error(
@@ -201,15 +306,31 @@ pub enum PackageErrorKind {
         _0.digest,
         _0.identifier
     )]
+    #[exit(
+        PolicyBlocked,
+        slug = "offline_manifest_missing",
+        summary = "Offline mode and the manifest is not stored locally"
+    )]
     OfflineManifestMissing(Box<OfflineManifestMissing>),
     /// A referenced blob was not present in the registry; the identifier carries the blob digest.
     #[error("blob not found: {0}")]
+    #[exit(NotFound, slug = "blob_not_found", summary = "The registry has no such blob")]
     BlobNotFound(Box<ocx_oci::PinnedOciIdentifier>),
     /// Multiple candidates matched the platform selection.
     #[error("ambiguous selection: {}", _0.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))]
+    #[exit(
+        DataError,
+        slug = "selection_ambiguous",
+        summary = "The selection matches more than one package"
+    )]
     SelectionAmbiguous(Vec<ocx_oci::PackageRef>),
     /// A symlink-based path was requested but the identifier carries a digest.
     #[error("symlink resolution requires a tag, not a digest")]
+    #[exit(
+        DataError,
+        slug = "symlink_requires_tag",
+        summary = "Symlink resolution needs a tag, not a digest"
+    )]
     SymlinkRequiresTag,
     /// The requested install link does not exist, or does not lead into the package store.
     #[error("{}", match _0 {
@@ -217,21 +338,42 @@ pub enum PackageErrorKind {
         crate::composer::LinkSource::Current => "no selected version".to_string(),
         crate::composer::LinkSource::Path(path) => format!("no installed package at '{}'", path.display()),
     })]
+    #[exit(
+        NotFound,
+        slug = "symlink_not_found",
+        summary = "The package has no candidate or current symlink to resolve"
+    )]
     SymlinkNotFound(crate::composer::LinkSource),
     /// `install --link` was given a path that holds something other than an ocx package link.
     #[error("'{}' exists and is not an ocx package link; refusing to replace it", _0.display())]
+    #[exit(
+        DataError,
+        slug = "link_path_occupied",
+        summary = "The install link path holds something other than an ocx package link"
+    )]
     LinkPathOccupied(std::path::PathBuf),
     /// A spawned task panicked unexpectedly.
     #[error("task panicked unexpectedly")]
+    #[exit(Failure, slug = "task_panicked", summary = "A package task panicked")]
     TaskPanicked,
     /// The identifier has no digest after resolution.
     #[error("identifier has no digest after resolution")]
+    #[exit(
+        DataError,
+        slug = "digest_missing",
+        summary = "The identifier carries no digest after resolution"
+    )]
     DigestMissing,
     /// Two or more packages in the closure's interface surface declare the same entrypoint name.
     #[error(
         "entrypoint name collision: '{name}' declared by {} packages: {}; deselect one before selecting another",
         owners.len(),
         owners.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    #[exit(
+        DataError,
+        slug = "entrypoint_collision",
+        summary = "Two packages declare the same entrypoint name"
     )]
     EntrypointCollision {
         name: EntrypointName,
@@ -240,6 +382,7 @@ pub enum PackageErrorKind {
 
     /// A `required = true` companion failed to install or compose, failing the whole operation.
     #[error("required companion '{companion}' could not be applied")]
+    #[exit(delegate = source)]
     RequiredCompanionFailed {
         /// Identifier of the companion package that failed to install.
         companion: ocx_oci::PackageRef,
@@ -250,6 +393,14 @@ pub enum PackageErrorKind {
 
     /// Patch discovery failed with a domain-level patch error.
     #[error("patch discovery error")]
+    #[exit(
+        chain = 0,
+        fallback(
+            Failure,
+            slug = "patch_discovery_failed",
+            summary = "Discovering patches failed with an unclassified cause"
+        )
+    )]
     PatchDiscovery(#[source] crate::patch::PatchError),
 
     /// No candidate sharing the host's os+arch has `os.features` the host provides.
@@ -257,6 +408,11 @@ pub enum PackageErrorKind {
         "feature mismatch: host provides {}; available platforms: {}; pass --platform <os/arch[+features]> to override",
         host_features.join(", "),
         available.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    #[exit(
+        DataError,
+        slug = "feature_mismatch",
+        summary = "The package needs a platform feature this host lacks"
     )]
     FeatureMismatch {
         /// The `os.features` values the host reported (e.g. `["libc.glibc"]`).
@@ -269,14 +425,29 @@ pub enum PackageErrorKind {
     #[error(
         "cannot defer '{package}': it claims no binaries and no entry points, so its interface names are not enumerable"
     )]
+    #[exit(
+        DataError,
+        slug = "shim_names_not_enumerable",
+        summary = "The package's interface names cannot be enumerated"
+    )]
     ShimNamesNotEnumerable { package: ocx_oci::PinnedPackageRef },
 
     /// A shim name is not a valid [`BinaryName`]; raised by both `ocx launcher shim` and `prepare_lazy`.
     #[error("invalid shim name")]
+    #[exit(
+        DataError,
+        slug = "shim_name_invalid",
+        summary = "A shim name is not a valid binary name"
+    )]
     ShimNameInvalid(#[source] BinaryError),
 
     /// `ocx launcher shim` was invoked under a name outside the composed name set.
     #[error("'{}' is not an interface name declared by '{}'", _0.name, _0.package)]
+    #[exit(
+        DataError,
+        slug = "shim_name_not_claimed",
+        summary = "A shim name is not an interface name the package declares"
+    )]
     ShimNameNotClaimed(Box<ShimClaim>),
 
     /// The package materialized, but a name its metadata claimed is not on the composed `PATH`.
@@ -285,14 +456,28 @@ pub enum PackageErrorKind {
         _0.package,
         _0.name
     )]
+    #[exit(
+        DataError,
+        slug = "shim_claim_unfulfilled",
+        summary = "A declared interface name does not exist in the package"
+    )]
     ShimClaimUnfulfilled(Box<ShimClaim>),
 
     /// A group or entry name cannot become a path component of a rendered toolchain tree.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     ToolchainPath(#[from] file_structure::ToolchainPathError),
 
     /// An underlying internal error.
     #[error(transparent)]
+    #[exit(
+        chain = 0,
+        fallback(
+            Failure,
+            slug = "package_internal",
+            summary = "A package operation failed with an unclassified cause"
+        )
+    )]
     Internal(#[from] crate::Error),
 }
 
@@ -331,16 +516,29 @@ fn render_entry(entry: &PackageError) -> String {
 }
 
 /// Errors from dependency resolution operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum DependencyError {
     /// Two or more packages on the active surface resolve the same repository to different digests.
     #[error("conflicting versions for {repository}: {}", identifiers.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "))]
+    #[exit(
+        DataError,
+        slug = "dependency_conflict",
+        summary = "Dependencies pin conflicting versions of one repository"
+    )]
     Conflict {
         repository: ocx_oci::Repository,
         identifiers: Vec<ocx_oci::PinnedPackageRef>,
     },
     /// Dependency setup coordination failed.
     #[error("dependency setup failed")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "dependency_setup_failed",
+            summary = "Setting up a dependency failed with an unclassified cause"
+        )
+    )]
     SetupFailed(#[from] ocx_util::singleflight::Error),
 }
 

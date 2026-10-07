@@ -964,7 +964,7 @@ def test_ec_fp_008_a_new_grant_is_visible_via_the_widened_watch_set(arena: Arena
     source = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     clone = _clone_of(source, arena.projects / "clone")
     first = matrix.shell_state(arena.ocx, clone, arena.env())
-    assert first["inert_reason"]["reason"] == "no_stamp_no_grant", f"clone must start inert: {first['inert_reason']}"
+    assert first["inert_reason"]["type"] == "no_stamp_no_grant", f"clone must start inert: {first['inert_reason']}"
     inert = matrix.reconcile(arena.ocx, "bash", clone, arena.env())
     match = re.search(rf"export {matrix.CARRIER}='([^']+)'", inert.stdout)
     assert match, f"even an inert verdict must cache a carrier:\n{inert.stdout}"
@@ -2920,7 +2920,7 @@ def test_ec_proc_014_env_channel_consent_namespace_activates_silently_at_shell_s
 
     granted = arena.env(OCX_CONSENT_NAMESPACES="ocx.sh/acme-corp/*")
     state = matrix.shell_state(arena.ocx, project, granted)
-    assert state["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] != "no_stamp_no_grant", (
         f"a namespaces env var set before shell start must activate the matching checkout silently: {state['inert_reason']}"
     )
     key = state["project_key"]
@@ -3715,7 +3715,7 @@ def test_ec_consent_012_a_paths_grant_activates_and_writes_no_stamp(arena: Arena
     _write_config(arena, f'[shell.consent]\npaths = [{json.dumps(str(project))}]\n')
 
     state = matrix.shell_state(arena.ocx, project, arena.env())
-    assert state["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] != "no_stamp_no_grant", (
         f"a paths grant must activate the project: {state['inert_reason']}"
     )
     key = state["project_key"]
@@ -3800,11 +3800,11 @@ def test_ec_cfg_012_a_new_grant_is_observed_at_the_very_next_prompt(arena: Arena
     matrix.write_lock(project, matrix.lock_tool("t", "ghcr.io/acme/tool"))
 
     before = matrix.shell_state(arena.ocx, project, arena.env())
-    assert before["inert_reason"]["reason"] == "no_stamp_no_grant", f"fixture sanity: must start inert; got {before['inert_reason']}"
+    assert before["inert_reason"]["type"] == "no_stamp_no_grant", f"fixture sanity: must start inert; got {before['inert_reason']}"
 
     _write_config(arena, f'[shell.consent]\npaths = [{json.dumps(str(project))}]\n')
     after = matrix.shell_state(arena.ocx, project, arena.env())
-    assert after["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert after["inert_reason"]["type"] != "no_stamp_no_grant", (
         f"a grant added to config.toml must be observed at the very next prompt — the config tier is in the "
         f"watch set (A-13), never requiring a shell restart: {after['inert_reason']}"
     )

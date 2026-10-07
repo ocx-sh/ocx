@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "PushEvent loses its unknown arm, so a reader no longer tolerates a variant it does not know.",
+  "findings": [
+    {
+      "code": "B05",
+      "pointer": "/$defs/PushEvent/oneOf/2",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

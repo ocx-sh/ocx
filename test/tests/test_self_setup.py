@@ -16,14 +16,14 @@ hard order (bootstrap FIRST, then shims, then profiles):
 
 Re-running is safe: an unchanged setup is a no-op; a stale ocx-authored fence
 is rewritten (format-upgrade); a fence the user edited is reported dirty and
-left untouched (exit 82) unless ``--force`` is passed; a legacy
+left untouched (exit 81) unless ``--force`` is passed; a legacy
 ``# BEGIN ocx`` block is migrated to the v1 fence.
 
 Test isolation: each test seeds a pre-placed candidate binary under the
 isolated ``OCX_HOME`` so the offline bootstrap resolves ``already_present`` and
 no registry is required for the non-bootstrap scenarios (shim/fence/dirty/
 dry-run logic). The single success-path bootstrap test (which DOES need the
-registry:2 fixture) follows the ``__OCX_SELF_IMAGE`` seam pattern from
+registry:2 fixture) follows the ``__OCX_TESTING_SELF_IMAGE`` seam pattern from
 ``test_self_update.py``.
 
 POSIX-only at module scope: the fence + shim behavior exercised here is
@@ -370,16 +370,16 @@ def test_setup_format_upgrade_rewrites_stale_fence(ocx: OcxRunner, tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
-# Dirty block: exit 82; --force rewrites
+# Dirty block: exit 81; --force rewrites
 # ---------------------------------------------------------------------------
 
 
-def test_setup_dirty_block_exits_82_and_preserves(ocx: OcxRunner, tmp_path: Path) -> None:
-    """A user-edited fence is reported dirty (exit 82) and left untouched.
+def test_setup_dirty_block_exits_81_and_preserves(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A user-edited fence is reported dirty (exit 81) and left untouched.
 
     The opener marker no longer matches the on-disk body hash (the user added a
     line inside the fence), so the block is classified dirty. Without ``--force``
-    setup refuses to overwrite it: exit 82, status ``skipped``, the path listed
+    setup refuses to overwrite it: exit 81, status ``skipped``, the path listed
     under ``dirty_profiles``, and the profile content preserved verbatim.
     """
     _seed_candidate(ocx)
@@ -393,8 +393,8 @@ def test_setup_dirty_block_exits_82_and_preserves(ocx: OcxRunner, tmp_path: Path
     profile.write_text(tampered)
 
     result = _setup(ocx, profile=profile)
-    assert result.returncode == 82, (
-        f"a dirty fence without --force must exit 82; rc={result.returncode}\n"
+    assert result.returncode == 81, (
+        f"a dirty fence without --force must exit 81; rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
@@ -637,9 +637,9 @@ def test_setup_persisted_modify_path_is_honoured_on_a_later_run(
     assert profile.read_text() == "# pristine\n", (
         f"the persisted opt-out must leave the profile byte-identical; got:\n{profile.read_text()}"
     )
-    outcomes = [entry["outcome"] for entry in payload["session_path"]]
+    outcomes = [entry["outcome"] for entry in payload["session_path_stores"]]
     assert outcomes and set(outcomes) == {"skipped_opt_out"}, (
-        f"the same rung suppresses the session-PATH arm; got: {payload['session_path']!r}"
+        f"the same rung suppresses the session-PATH arm; got: {payload['session_path_stores']!r}"
     )
 
 
@@ -670,7 +670,7 @@ def test_setup_no_profile_writes_no_block_but_registers_session_path(
         f"--no-profile must leave the profile byte-identical; got:\n{profile.read_text()}"
     )
 
-    entries = payload["session_path"]
+    entries = payload["session_path_stores"]
     assert entries, "this host reported no session-PATH store at all"
     assert [entry["outcome"] for entry in entries] == ["written"] * len(entries), (
         f"--no-profile must still register the session PATH; got: {entries!r}"
@@ -769,12 +769,12 @@ def test_setup_dry_run_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 def test_setup_dry_run_with_dirty_profile_exits_zero(ocx: OcxRunner, tmp_path: Path) -> None:
-    """``--dry-run`` over a DIRTY fence stays exit 0 (never the dirty exit 82).
+    """``--dry-run`` over a DIRTY fence stays exit 0 (never the dirty exit 81).
 
     The dry-run short-circuit must intercept BEFORE the dirty-skip branch fires:
     a user-edited fence under ``--dry-run`` is reported as would-skip, never as
-    the exit-82 dirty outcome. Seeds the same tampered fence as
-    ``test_setup_dirty_block_exits_82_and_preserves`` and asserts the profile is
+    the exit-81 dirty outcome. Seeds the same tampered fence as
+    ``test_setup_dirty_block_exits_81_and_preserves`` and asserts the profile is
     left verbatim and no shims are written.
     """
     _seed_candidate(ocx)
@@ -787,7 +787,7 @@ def test_setup_dry_run_with_dirty_profile_exits_zero(ocx: OcxRunner, tmp_path: P
 
     result = _setup(ocx, "--dry-run", profile=profile)
     assert result.returncode == 0, (
-        f"--dry-run over a dirty fence must exit 0, not 82; rc={result.returncode}\n"
+        f"--dry-run over a dirty fence must exit 0, not 81; rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
@@ -798,7 +798,7 @@ def test_setup_dry_run_with_dirty_profile_exits_zero(ocx: OcxRunner, tmp_path: P
         assert not (ocx_home / shim).exists(), f"--dry-run must write no {shim} even over a dirty profile"
 
     # The dirty profile is reported as a would-skip in the dry-run report (never
-    # the exit-82 dirty outcome): it appears in `profiles` with outcome
+    # the exit-81 dirty outcome): it appears in `profiles` with outcome
     # skipped_dirty, while the top-level status stays the non-skip dry-run shape.
     payload = json.loads(result.stdout)
     assert any(p["outcome"] == "skipped_dirty" for p in payload["profiles"]), (
@@ -842,7 +842,7 @@ def test_setup_forward_version_fence_collapses_to_v1(ocx: OcxRunner, tmp_path: P
     A forward-version opener (written by a hypothetical newer binary, body hash
     matching its marker) is ocx-authored, so it is a format upgrade -- NOT a
     dirty edit. The run must rewrite it to a single v1 block at exit 0; a
-    regression that treats the v2 opener as dirty (exit 82) would be invisible
+    regression that treats the v2 opener as dirty (exit 81) would be invisible
     to every other acceptance test.
     """
     _seed_candidate(ocx)
@@ -893,7 +893,7 @@ def test_setup_bootstrap_failure_writes_nothing(ocx: OcxRunner, tmp_path: Path) 
     # Redirect the canonical self identifier to a guaranteed-absent repo on the
     # loopback registry. Online (no --offline) so the miss is a real failure,
     # not the offline self-heal path.
-    env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/nonexistent_self_image_xyz"
+    env["__OCX_TESTING_SELF_IMAGE"] = f"{ocx.registry}/nonexistent_self_image_xyz"
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
     assert result.returncode != 0, (
@@ -946,7 +946,7 @@ def test_setup_offline_with_no_install_exits_81(ocx: OcxRunner, tmp_path: Path) 
 # Success-path bootstrap (registry:2) - installs latest published ocx/cli
 #
 # Mirrors test_self_update.py::test_self_update_installs_newer_version: the
-# `__OCX_SELF_IMAGE` loopback seam redirects the canonical `ocx.sh/ocx/cli`
+# `__OCX_TESTING_SELF_IMAGE` loopback seam redirects the canonical `ocx.sh/ocx/cli`
 # identifier to a fixture-published stand-in `ocx` package on localhost:5000.
 # The seam is loopback-only-asserted at runtime and compile-gated behind
 # `--features ocx/__testing` (test binary is built with it; see test/taskfile.yml).
@@ -960,7 +960,7 @@ def test_setup_bootstrap_pulls_latest_published(
 ) -> None:
     """A fresh ``ocx self setup`` bootstraps the latest published ocx/cli.
 
-    With an empty CAS and the ``__OCX_SELF_IMAGE`` seam pointing at a published
+    With an empty CAS and the ``__OCX_TESTING_SELF_IMAGE`` seam pointing at a published
     stand-in ``ocx`` package, the bootstrap installs it (``current`` symlink
     set), then writes the shims. The JSON bootstrap entry reports ``pulled``
     with the published version. Exit 0.
@@ -983,7 +983,7 @@ def test_setup_bootstrap_pulls_latest_published(
 
     cmd = [str(ocx.binary), "--format", "json", "self", "setup", "--no-modify-path"]
     env = dict(ocx.env)
-    env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
+    env["__OCX_TESTING_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
     assert result.returncode == 0, (
@@ -1020,7 +1020,7 @@ def test_setup_bootstrap_pulls_latest_published(
 # Version-selection tests (design record adr_self_setup.md)
 #
 # Each test covers one version-selection scenario the ADR encodes.
-# The `__OCX_SELF_IMAGE` seam redirects `ocx.sh/ocx/cli` to a fixture-published
+# The `__OCX_TESTING_SELF_IMAGE` seam redirects `ocx.sh/ocx/cli` to a fixture-published
 # stand-in package on localhost:5000.  The seam is loopback-only-asserted at
 # runtime and compiled only when built with `--features ocx/__testing`.
 #
@@ -1069,7 +1069,7 @@ def _setup_pinned(
     *extra_args: str,
     fmt_json: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``ocx self setup <version_spec>`` with the ``__OCX_SELF_IMAGE`` seam.
+    """Run ``ocx self setup <version_spec>`` with the ``__OCX_TESTING_SELF_IMAGE`` seam.
 
     Does NOT pass ``--offline`` — pinned setup must reach the local registry
     to resolve and install.  ``--no-modify-path`` keeps profile handling out of
@@ -1088,7 +1088,7 @@ def _setup_pinned(
         cmd += ["--format", "json"]
     cmd += [*root_args, "self", "setup", "--no-modify-path", *sub_args, version_spec]
     env = dict(ocx.env)
-    env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
+    env["__OCX_TESTING_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
     return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
@@ -2185,7 +2185,7 @@ def test_setup_extra_ca_certs_preexisting_managed_fence_stays_clean(
 ) -> None:
     """S-001 / C-008: persisting ``extra_ca_certs_pem`` beside an existing,
     unedited ``[managed]`` fence does not disturb it — a following ``ocx config
-    setup`` still classifies the fence ``Clean`` (does not exit 82) and the
+    setup`` still classifies the fence ``Clean`` (does not exit 81) and the
     fence text is byte-identical. Also pins that ``ocx config setup`` itself
     does NOT run phase 0.5: with the variable set, adoption persists no
     ``extra_ca_certs_pem``."""
@@ -2216,7 +2216,8 @@ def test_setup_extra_ca_certs_preexisting_managed_fence_stays_clean(
     assert fence_block in after, f"the managed fence must be byte-identical after the write:\n{after}"
 
     follow_up = ocx.run("--offline", "config", "setup", check=False)
-    assert follow_up.returncode != 82, (
+    # 81 is shared by every policy block, so name the dirty condition itself.
+    assert json.loads(follow_up.stdout)["managed_config"]["status"] != "dirty", (
         f"the fence must still classify Clean after persisting extra_ca_certs_pem; rc={follow_up.returncode}\n"
         f"stdout:\n{follow_up.stdout}\nstderr:\n{follow_up.stderr}"
     )

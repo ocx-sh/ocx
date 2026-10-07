@@ -19,13 +19,13 @@ pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
 
 /// SHA-256 of the committed blob: a corruption canary, not a provenance control; empty off Windows.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_SHA256: &str = "160b4e3aa3ddc985f0fe3860f5bf4f34fb8a38b8d3c92ff6accae021d3acf3be";
+pub const SHIM_SHA256: &str = "f04520165a5e92b5197e2fa09eaf7279732a4ad69810dd5e90ed84c78650d4ca";
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-aarch64.exe");
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_SHA256: &str = "a4307a731e96cc66eea09f6e06a2616be8c2aab3fcd6e9c7dbdc0614e17927b1";
+pub const SHIM_SHA256: &str = "d60ae9d331e02ff870c0ce54689edabcf1e3675acfc2a8c0991b23a7afbee05a";
 
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_BYTES: &[u8] = &[];

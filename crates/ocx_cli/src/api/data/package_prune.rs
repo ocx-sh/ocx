@@ -12,6 +12,9 @@ use crate::api::data::sanitize_for_terminal;
 pub type PackagePrune = ocx_package::prune::PruneOutcome;
 
 impl Printable for PackagePrune {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PackagePrune";
+
     /// Table `Action Tag Digest Reason`.
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();

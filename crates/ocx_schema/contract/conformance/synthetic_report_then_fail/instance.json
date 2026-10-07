@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "changes": [
+    {
+      "name": "cmake",
+      "group": "default",
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux",
+        "os.features": [
+          "libc.glibc"
+        ]
+      },
+      "tag": "3",
+      "from": "ocx.sh/cmake@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "to": "ocx.sh/cmake@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "unchanged": [],
+  "metadata_changed": true
+}

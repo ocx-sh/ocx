@@ -240,7 +240,7 @@ def test_direct_launcher_exec_rejects_conflicting_list_separators(
     )
     ocx.plain("package", "install", pkg.short)
 
-    which = ocx.json("package", "which", pkg.short)
+    which = ocx.json("package", "which", pkg.short)["paths"]
     pkg_root = which[pkg.short]["path"]
     result = ocx.run("launcher", "exec", str(pkg_root), "--", "hello", format=None, check=False)
 
@@ -282,7 +282,7 @@ def test_project_env_list_entry_without_a_separator_inherits_the_package_separat
 
     status = json.loads(_run_in(ocx, project, "--format", "json", "status").stdout)
     godebug = status["groups"]["default"]["env"]["GODEBUG"]
-    assert godebug == {"type": "list", "value": "madvdontneed=1"}, godebug
+    assert godebug == {"kind": "list", "value": "madvdontneed=1"}, godebug
 
 
 def test_env_flag_conflicting_separator_with_package_established_one_exits_data_error(
@@ -354,7 +354,7 @@ def test_package_env_json_list_entry_carries_type_and_separator(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """`ocx package env`'s JSON `entries` array tags a `list` entry with
-    `"type":"list"` and its `"separator"`; a `path` entry in the same
+    `"kind":"list"` and its `"separator"`; a `path` entry in the same
     response carries no `separator` key at all.
     """
     pkg = make_package(
@@ -366,9 +366,9 @@ def test_package_env_json_list_entry_carries_type_and_separator(
     )
 
     data = ocx.json("package", "env", pkg.short)
-    by_key = {e["key"]: e for e in data["entries"]}
+    by_key = {e["key"]: e for e in data["items"]}
 
-    assert by_key["GODEBUG"]["type"] == "list"
+    assert by_key["GODEBUG"]["kind"] == "list"
     assert by_key["GODEBUG"]["separator"] == ","
     assert "separator" not in by_key["PATH"], f"a path entry must never carry a separator key; got {by_key['PATH']}"
 

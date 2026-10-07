@@ -189,7 +189,7 @@ pub(crate) mod tests {
     /// pipeline stopped at `ensure_referrers_supported` before touching the
     /// transport at all. That gate was deleted, so the refusal has to come from
     /// the transport now — and the truthful outcome is `NoSignaturesFound` (79),
-    /// not exit 84 (84 is write-path only).
+    /// not exit 82 (82 is write-path only).
     pub(crate) fn transport_without_referrers() -> StubTransport {
         let data = StubTransportData::new();
         data.write().referrers_unsupported = true;

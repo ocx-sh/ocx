@@ -1,0 +1,10 @@
+{
+  "root": "VerboseShellState",
+  "exit_code": 0,
+  "decode": "ok",
+  "outcome": "success",
+  "unknown": [],
+  "fields": {
+    "/watch_set/0/size": 9007199254740991
+  }
+}

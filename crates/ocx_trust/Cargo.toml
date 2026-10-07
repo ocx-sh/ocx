@@ -16,6 +16,8 @@ publish = false
 # identity and scope strings alone, and listing a dependency the moved files
 # do not need would make the manifest claim a coupling that is not there.
 ocx_util.workspace = true
+# `env://VAR` key references read their data-named variable through `dynamic`.
+ocx_env.workspace = true
 
 # One `log::debug!`: `CosignVerificationKey::try_from_pem`'s rejection reason.
 # `KeyMalformed` carries a description rather than a `#[source]`, so the
@@ -43,9 +45,9 @@ thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-# `ocx_util::env::overrides`, the process-environment table the `key_env`
+# `ocx_env::overrides`, the process-environment table the `key_env`
 # resolution tests write through.
-ocx_util = { workspace = true, features = ["__testing"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 # `key_file` resolution reads real paths off disk.
 tempfile.workspace = true
 

@@ -630,11 +630,11 @@ impl schemars::JsonSchema for Platform {
             "type": "object",
             "description": "An OCI image-spec platform object. `Platform::Any` writes os and architecture as \"any\".",
             "properties": {
-                "architecture": {"type": "string"},
-                "os": {"type": "string"},
-                "os.version": {"type": "string"},
-                "os.features": {"type": "array", "items": {"type": "string"}},
-                "variant": {"type": "string"},
+                "architecture": {"type": "string", "description": "CPU architecture (`amd64`, `arm64`, …)."},
+                "os": {"type": "string", "description": "Operating system (`linux`, `darwin`, `windows`, …)."},
+                "os.version": {"type": "string", "description": "Operating system version the image requires."},
+                "os.features": {"type": "array", "items": {"type": "string"}, "description": "Features the image requires of the host (`libc.glibc`, …)."},
+                "variant": {"type": "string", "description": "CPU variant (`v7`, `v8`, …)."},
             },
             "required": ["architecture", "os"],
         })

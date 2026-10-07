@@ -69,8 +69,11 @@ impl<'de> Deserialize<'de> for Modifier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModifierKind {
+    /// Prepended to any existing value of the variable.
     Path,
+    /// Replaces any existing value of the variable.
     Constant,
+    /// Appended to any existing value of the variable, joined by its separator.
     List,
 }
 

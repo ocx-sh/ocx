@@ -243,7 +243,8 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
             }
         }
 
-        // A removal error with `to` already gone means a peer won; only a still-present `to` counts.
+        // A removal error with `to` already gone means a peer removed it and we proceed; only a
+        // still-present `to` counts as a failure.
         if (is_link(to) || to.exists())
             && let Err(error) = remove_link(to)
             && (is_link(to) || to.exists())

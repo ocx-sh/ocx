@@ -28,17 +28,17 @@ const DEFAULT_READ_MAX_BYTES: i32 = 1_048_576;
 
 /// Env keys an `ocx.run(env=...)` overlay may never override, or it changes which binary and OCX config the child
 /// resolves.
-const RESERVED_ENV_KEYS: &[&str] = &[
-    "PATH",
-    ocx_config::env::keys::OCX_HOME,
-    ocx_config::env::keys::OCX_BINARY_PIN,
-    ocx_config::env::keys::OCX_CONFIG,
-    ocx_config::env::keys::OCX_PROJECT,
-    ocx_config::env::keys::OCX_INDEX,
-    ocx_config::env::keys::OCX_NO_CONFIG,
-    ocx_config::env::keys::OCX_NO_PROJECT,
-    ocx_config::env::keys::OCX_OFFLINE,
-    ocx_config::env::keys::OCX_REMOTE,
+static RESERVED_ENV_KEYS: &[&ocx_env::EnvVar] = &[
+    &ocx_env::PATH,
+    &ocx_env::OCX_HOME,
+    &ocx_env::OCX_BINARY_PIN,
+    &ocx_env::OCX_CONFIG,
+    &ocx_env::OCX_PROJECT,
+    &ocx_env::OCX_INDEX,
+    &ocx_env::OCX_NO_CONFIG,
+    &ocx_env::OCX_NO_PROJECT,
+    &ocx_env::OCX_OFFLINE,
+    &ocx_env::OCX_REMOTE,
 ];
 
 /// Per-registry credential env vars; a script may neither read them from the inherited env nor set them on a child.
@@ -51,7 +51,7 @@ fn is_reserved_env_key(key: &str) -> bool {
         .as_bytes()
         .get(..CREDENTIAL_ENV_PREFIX.len())
         .is_some_and(|p| p.eq_ignore_ascii_case(CREDENTIAL_ENV_PREFIX.as_bytes()));
-    RESERVED_ENV_KEYS.iter().any(|r| r.eq_ignore_ascii_case(key)) || credential
+    RESERVED_ENV_KEYS.iter().any(|r| r.name.eq_ignore_ascii_case(key)) || credential
 }
 
 fn slash_path(p: &Path) -> String {
@@ -59,6 +59,10 @@ fn slash_path(p: &Path) -> String {
 }
 
 /// Spawns `program` on the composed env plus overlay, capturing capped output under the wall-clock deadline.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the Starlark host's `ocx.run`, reachable only from `package test` and `patch test`; callers bound it with `launch::exemption_allowed`"
+)]
 fn spawn_capture(
     program: &Path,
     args: &[String],
@@ -277,7 +281,7 @@ fn is_ocx_binary(base_env: &ocx_config::env::Env, resolved: &Path) -> bool {
     };
 
     let mut pins: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(pin) = base_env.get(ocx_config::env::keys::OCX_BINARY_PIN) {
+    if let Some(pin) = base_env.get(ocx_env::OCX_BINARY_PIN.name) {
         pins.push(Path::new(pin).to_path_buf());
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -528,9 +532,9 @@ mod tests {
     fn reserved_predicate_blocks_resolution_keys() {
         assert!(is_reserved_env_key("PATH"));
         assert!(is_reserved_env_key("OCX_HOME"));
-        assert!(is_reserved_env_key(ocx_config::env::keys::OCX_BINARY_PIN));
-        assert!(is_reserved_env_key(ocx_config::env::keys::OCX_CONFIG));
-        assert!(is_reserved_env_key(ocx_config::env::keys::OCX_INDEX));
+        assert!(is_reserved_env_key(ocx_env::OCX_BINARY_PIN.name));
+        assert!(is_reserved_env_key(ocx_env::OCX_CONFIG.name));
+        assert!(is_reserved_env_key(ocx_env::OCX_INDEX.name));
     }
 
     #[test]
@@ -561,6 +565,32 @@ mod tests {
         assert!(is_reserved_env_key("OcX_AuTh_FOO_TOKEN"));
     }
 
+    /// The reserved set, read over every registry declaration: a variable joining or leaving it
+    /// changes what a script may read and override, so the membership is pinned by name.
+    #[test]
+    fn reserved_set_over_the_registry_is_pinned() {
+        let reserved: std::collections::BTreeSet<&str> = ocx_env::all()
+            .map(|var| var.name)
+            .filter(|name| is_reserved_env_key(name))
+            .collect();
+        let expected = std::collections::BTreeSet::from([
+            "OCX_AUTH_{REGISTRY}_TOKEN",
+            "OCX_AUTH_{REGISTRY}_TYPE",
+            "OCX_AUTH_{REGISTRY}_USER",
+            "OCX_BINARY_PIN",
+            "OCX_CONFIG",
+            "OCX_HOME",
+            "OCX_INDEX",
+            "OCX_NO_CONFIG",
+            "OCX_NO_PROJECT",
+            "OCX_OFFLINE",
+            "OCX_PROJECT",
+            "OCX_REMOTE",
+            "PATH",
+        ]);
+        assert_eq!(reserved, expected);
+    }
+
     // ── W1: re-entrant ocx symlink bypass ────────────────────────────────────
     //
     // A PATH symlink `foo -> .../ocx` must be refused: the stem check fails
@@ -579,7 +609,7 @@ mod tests {
         std::os::unix::fs::symlink(&real_ocx, &link).unwrap();
 
         let mut env = ocx_config::env::Env::clean();
-        env.set(ocx_config::env::keys::OCX_BINARY_PIN, real_ocx.as_os_str());
+        env.set(ocx_env::OCX_BINARY_PIN.name, real_ocx.as_os_str());
 
         // Stem is `foo` (fast pre-filter must NOT match), yet the canonicalized
         // target equals the canonicalized pin → refused.
@@ -599,7 +629,7 @@ mod tests {
         std::fs::write(&pin, b"#!/bin/sh\n").unwrap();
 
         let mut env = ocx_config::env::Env::clean();
-        env.set(ocx_config::env::keys::OCX_BINARY_PIN, pin.as_os_str());
+        env.set(ocx_env::OCX_BINARY_PIN.name, pin.as_os_str());
 
         assert!(!is_ocx_binary(&env, &other), "an unrelated binary must not be refused");
     }

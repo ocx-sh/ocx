@@ -37,6 +37,7 @@ deleted outright at WP-37).
 classified to** (DEC-23): the first three delegate to the wrapped error's own `classify`,
 and `InternalFile` is `IoError` (74). Delegation is not a style choice —
 `ClientError` and the index error distinguish transient from terminal, and a
-flat code would collapse 69 into 74. The arms live in
-`crates/ocx_cli/src/exit/ocx_project.rs`; a new variant needs one there in the
-same commit, or the binary stops compiling, which is the intended tripwire.
+flat code would collapse 69 into 74. The arms are
+`#[exit(...)]` attributes on the variants in `crates/ocx_project/src/error.rs`;
+`#[derive(ocx_exit::Classify)]` rejects a variant without one, which is the
+intended tripwire.

@@ -4,7 +4,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ocx_config::env::keys;
 use ocx_config::refresh::RefreshPolicy;
 use ocx_config::shell::effective_consent;
 use ocx_package_manager::DRIFT_DEADLINE;
@@ -24,7 +23,7 @@ use super::{Context, background_check, project_context};
 /// Never fails the command: every failure logs at debug and yields no row.
 pub(crate) async fn check_for_toolchain_drift(ctx: &Context) -> Vec<NoticeRow> {
     let mut rows = Vec::new();
-    if let Some(reason) = background_check::skip_reason(keys::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
+    if let Some(reason) = background_check::skip_reason(&ocx_env::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
         log::debug!("Toolchain drift check skipped: {reason}");
         return rows;
     }

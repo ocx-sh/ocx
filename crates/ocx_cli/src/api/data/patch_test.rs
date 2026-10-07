@@ -10,25 +10,20 @@ use crate::api::data::env::EntrySource;
 
 /// A single composed environment variable entry shown by `ocx patch test`.
 ///
-/// JSON format: `{ "key": "...", "value": "...", "type": "constant"|"path"|"list"[,
-/// "separator": "..."][, "source": { "kind": "patch", "rule": "...", "companion": "..." }] }`.
-/// The optional `separator` field is present only for a `"type":"list"` entry. The
-/// optional `source` object is present only for companion overlay entries and
-/// names the rule glob + companion that produced the entry; base-native entries
-/// omit it. The `source` object has the same shape `--show-patches` reports.
+/// The `source` object has the same shape `--show-patches` reports.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchTestEntry {
+    /// The variable name.
     pub key: String,
+    /// The composed value.
     pub value: String,
-    #[serde(rename = "type")]
+    /// How the value folds into the environment.
     pub kind: ModifierKind,
-    /// The separator a `list` entry folds with; omitted for every other `type`.
+    /// The separator a `list` entry folds with; omitted for every other `kind`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub separator: Option<String>,
     /// Provenance for a companion overlay entry; `None` for base-native entries.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub source: Option<EntrySource>,
 }
 
@@ -41,9 +36,6 @@ pub struct PatchTestEntry {
 /// of composed env entries (`Key | Type | Value`, plus a `Source` column naming
 /// the rule glob + companion when any overlay entry is present).
 ///
-/// JSON format:
-/// `{ "base": "...", "companions": ["...", ...], "entries": [{ "key", "value", "type"[,
-/// "separator"][, "source": { "kind": "patch", "rule", "companion" }] }, ...] }`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchTestReport {
     /// The base identifier the descriptor was composed onto.
@@ -51,16 +43,16 @@ pub struct PatchTestReport {
     /// Companion identifiers that matched the base under the descriptor's rules.
     pub companions: Vec<String>,
     /// Composed env entries: the base's interface surface (private under `--self`), then the companion overlay.
-    pub entries: Vec<PatchTestEntry>,
+    pub items: Vec<PatchTestEntry>,
 }
 
 impl PatchTestReport {
     /// Build a patch-test env-inspection report.
-    pub fn new(base: String, companions: Vec<String>, entries: Vec<PatchTestEntry>) -> Self {
+    pub fn new(base: String, companions: Vec<String>, items: Vec<PatchTestEntry>) -> Self {
         Self {
             base,
             companions,
-            entries,
+            items,
         }
     }
 }
@@ -72,6 +64,9 @@ fn has_overlay_entry(entries: &[PatchTestEntry]) -> bool {
 }
 
 impl Printable for PatchTestReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PatchTestReport";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if self.companions.is_empty() {
             printer.print_hint(&format!("no companions matched '{}'", self.base));
@@ -83,9 +78,9 @@ impl Printable for PatchTestReport {
                 self.companions.join(", ")
             ));
         }
-        if has_overlay_entry(&self.entries) {
+        if has_overlay_entry(&self.items) {
             let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-            for entry in &self.entries {
+            for entry in &self.items {
                 rows[0].push(entry.key.clone());
                 rows[1].push(entry.kind.to_string());
                 rows[2].push(entry.value.clone());
@@ -97,7 +92,7 @@ impl Printable for PatchTestReport {
             );
         } else {
             let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-            for entry in &self.entries {
+            for entry in &self.items {
                 rows[0].push(entry.key.clone());
                 rows[1].push(entry.kind.to_string());
                 rows[2].push(entry.value.clone());
@@ -143,7 +138,7 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serializes");
         // The overlay entry's source names BOTH the rule glob and the companion.
         assert!(
-            json.contains(r#""kind":"patch""#),
+            json.contains(r#""type":"patch""#),
             "overlay source tagged patch: {json}"
         );
         assert!(
@@ -161,13 +156,13 @@ mod tests {
         let report = PatchTestReport::new("ocx.sh/cmake:3".to_owned(), Vec::new(), vec![entry("PATH", None)]);
         let json = serde_json::to_string(&report).expect("serializes");
         assert!(!json.contains("\"source\""), "native entry omits source: {json}");
-        assert!(!has_overlay_entry(&report.entries));
+        assert!(!has_overlay_entry(&report.items));
     }
 
     // ── separator field (W-10) ─────────────────────────────────────────────
 
     #[test]
-    fn list_entry_serializes_type_and_separator() {
+    fn list_entry_serializes_kind_and_separator() {
         let report = PatchTestReport::new(
             "ocx.sh/java:21".to_owned(),
             Vec::new(),
@@ -180,7 +175,11 @@ mod tests {
             }],
         );
         let json = serde_json::to_string(&report).expect("serializes");
-        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(json.contains(r#""kind":"list""#), "kind must serialize as list: {json}");
+        assert!(
+            json.starts_with(r#"{"base":"#) && json.contains(r#""items":["#),
+            "{json}"
+        );
         assert!(json.contains(r#""separator":" ""#), "separator must be present: {json}");
     }
 

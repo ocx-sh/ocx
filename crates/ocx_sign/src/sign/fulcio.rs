@@ -113,6 +113,7 @@ impl FulcioClient {
             // Read before the macro: an `.await` in its arguments makes `sign` non-`Send`.
             let body = ocx_oci::endpoint::read_body_capped(response)
                 .await
+                .ok()
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()); // LOSSY-OK: display
             // Say when the body was unreadable, or `fulcio_bad_request` reads as a positive finding.
             tracing::warn!(
@@ -130,7 +131,13 @@ impl FulcioClient {
         // Capped: the endpoint is operator-supplied (`--fulcio-url`).
         let raw = ocx_oci::endpoint::read_body_capped(response)
             .await
-            .ok_or_else(|| SignErrorKind::Internal("Fulcio response unreadable or over the size cap".into()))?;
+            .map_err(|fault| match fault {
+                // The stream broke after Fulcio answered 2xx: the same retry as a failed send.
+                ocx_oci::endpoint::BodyReadError::Transport => SignErrorKind::FulcioUnavailable,
+                ocx_oci::endpoint::BodyReadError::Oversize => {
+                    SignErrorKind::Internal("Fulcio response over the size cap".into())
+                }
+            })?;
         let parsed: SigningCertResponse =
             serde_json::from_slice(&raw).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         let certificates = parsed

@@ -14,7 +14,7 @@ pub mod update;
 pub enum SelfGroup {
     /// Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the
     /// current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects
-    /// completions (unless `OCX_NO_COMPLETIONS=1`), and evaluates the global
+    /// completions (unless `OCX_NO_COMPLETION=1`), and evaluates the global
     /// toolchain env. Safe to re-source: the PATH updates are idempotent
     /// (move-to-front), so a re-source never duplicates an entry.
     Activate(activate::SelfActivate),
@@ -38,7 +38,7 @@ pub enum SelfGroup {
         Safe to re-run: the shims and profile blocks are diff-gated, so an unchanged setup is a \
         no-op. Pass `--dry-run` to preview, `--no-modify-path` to skip the profiles and the session \
         PATH alike, and `--force` to overwrite a managed block you have edited by hand (otherwise \
-        exit 82). Pass `--no-profile` to skip only the profile blocks, or `--profile PATH` to \
+        exit 81). Pass `--no-profile` to skip only the profile blocks, or `--profile PATH` to \
         target specific files instead of the detected ones.\n\n\
         `--no-modify-path` and `--profile` / `--no-profile` persist as `[shell] modify_path` and \
         `[shell] profiles` in config.toml, so the choice applies to every later run too - not only \

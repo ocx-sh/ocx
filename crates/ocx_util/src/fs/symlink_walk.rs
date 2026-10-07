@@ -6,9 +6,19 @@
 use std::path::{Path, PathBuf};
 
 /// Failure mode of [`refuse_if_symlink_in_path`].
-#[derive(Debug)]
+#[derive(Debug, ocx_exit::Classify)]
 pub enum SymlinkWalkError {
+    #[exit(
+        UsageError,
+        slug = "destination_through_symlink",
+        summary = "A destination path resolves through a symlink"
+    )]
     Ancestor { path: PathBuf, ancestor: PathBuf },
+    #[exit(
+        IoError,
+        slug = "symlink_walk_io",
+        summary = "Inspecting a destination path component failed"
+    )]
     Io { path: PathBuf, source: std::io::Error },
 }
 

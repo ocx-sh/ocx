@@ -5,15 +5,16 @@
 //! GitLab CI (`SIGSTORE_ID_TOKEN`), CircleCI (`CIRCLE_OIDC_TOKEN_V2`).
 
 use async_trait::async_trait;
+use ocx_env::{EnvVar, SecretVar};
 use zeroize::Zeroizing;
 
 use super::error::SignErrorKind;
 use super::oidc::{AmbientProvider, OidcToken, TokenProvider};
 
-const GHA_URL: &str = "ACTIONS_ID_TOKEN_REQUEST_URL";
-const GHA_TOKEN: &str = "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
-const GITLAB_TOKEN: &str = "SIGSTORE_ID_TOKEN";
-const CIRCLE_TOKEN: &str = "CIRCLE_OIDC_TOKEN_V2";
+const GHA_URL: &EnvVar = &ocx_env::ACTIONS_ID_TOKEN_REQUEST_URL;
+const GHA_TOKEN: &SecretVar = &ocx_env::ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+const GITLAB_TOKEN: &SecretVar = &ocx_env::SIGSTORE_ID_TOKEN;
+const CIRCLE_TOKEN: &SecretVar = &ocx_env::CIRCLE_OIDC_TOKEN_V2;
 
 /// Inline env-inspection ambient token provider.
 pub struct InlineAmbientProvider {
@@ -21,18 +22,24 @@ pub struct InlineAmbientProvider {
     trusted_hosts: Vec<String>,
 }
 
-fn env_present(key: &str) -> bool {
-    std::env::var_os(key).is_some_and(|v| !v.is_empty())
-}
-
 /// Which ambient token source the environment selects.
 ///
-/// Carries the variable name, never the token: this type is `Debug`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Carries the variable's declaration, never the token: this type is `Debug`.
+#[derive(Debug, Clone, Copy)]
 enum AmbientSource {
     /// The token sits in this variable; no round trip, no endpoint to guard.
-    Direct(&'static str),
+    Direct(&'static SecretVar),
     GithubExchange,
+}
+
+impl PartialEq for AmbientSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Direct(left), Self::Direct(right)) => std::ptr::eq(*left, *right),
+            (Self::GithubExchange, Self::GithubExchange) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Pick the ambient source, given which variables are set and non-empty.
@@ -55,9 +62,9 @@ fn select_source(gitlab: bool, circle: bool, gha: bool) -> Option<AmbientSource>
 /// The one reader for `detect` and `acquire`, or they disagree on a set-but-empty variable.
 fn ambient_env() -> (bool, bool, bool) {
     (
-        env_present(GITLAB_TOKEN),
-        env_present(CIRCLE_TOKEN),
-        env_present(GHA_URL) && env_present(GHA_TOKEN),
+        GITLAB_TOKEN.get().is_some(),
+        CIRCLE_TOKEN.get().is_some(),
+        GHA_URL.get_os().is_some() && GHA_TOKEN.get().is_some(),
     )
 }
 
@@ -71,7 +78,7 @@ async fn guarded_request_url(url: &str, audience: &str, trusted_hosts: &[String]
     let request_url = format!("{url}&audience={audience}");
     // Scheme gate first: the SSRF guard never judges schemes, so plaintext would leak the bearer.
     // Keep the reasons distinct: only `..._forbidden` is fixed by `trusted_hosts`.
-    let parsed = ocx_oci::endpoint::validate_sigstore_url(&request_url, GHA_URL)
+    let parsed = ocx_oci::endpoint::validate_sigstore_url(&request_url, GHA_URL.name)
         .map_err(|_| refused("gha_id_token_url_insecure_scheme"))?;
     ocx_oci::endpoint::resolve_sigstore_url(&parsed, trusted_hosts)
         .await
@@ -99,16 +106,18 @@ impl TokenProvider for InlineAmbientProvider {
         let (gitlab, circle, gha) = ambient_env();
         match select_source(gitlab, circle, gha) {
             None => return Err(no_token()),
-            Some(AmbientSource::Direct(key)) => return Ok(OidcToken::new(std::env::var(key).map_err(|_| no_token())?)),
+            Some(AmbientSource::Direct(var)) => {
+                return Ok(OidcToken::new(var.get().ok_or_else(no_token)?.into_inner()));
+            }
             Some(AmbientSource::GithubExchange) => {}
         }
 
         {
             let (url, bearer) = (
-                std::env::var(GHA_URL).map_err(|_| no_token())?,
-                std::env::var(GHA_TOKEN).map_err(|_| no_token())?,
+                GHA_URL.get().ok_or_else(no_token)?,
+                GHA_TOKEN.get().ok_or_else(no_token)?,
             );
-            let bearer = Zeroizing::new(bearer);
+            let bearer = Zeroizing::new(bearer.into_inner());
             let request_url = guarded_request_url(&url, audience, &self.trusted_hosts).await?;
             let response = ocx_oci::endpoint::sigstore_http_client()
                 .get(&request_url)
@@ -128,11 +137,12 @@ impl TokenProvider for InlineAmbientProvider {
                 value: String,
             }
             // Capped: the endpoint comes from the runner environment, which a compromised job controls.
-            let raw = ocx_oci::endpoint::read_body_capped(response).await.ok_or_else(|| {
-                SignErrorKind::OidcPreCheckFailed {
-                    reason: "gha_id_token_malformed".to_string(),
-                }
-            })?;
+            let raw =
+                ocx_oci::endpoint::read_body_capped(response)
+                    .await
+                    .map_err(|_| SignErrorKind::OidcPreCheckFailed {
+                        reason: "gha_id_token_malformed".to_string(),
+                    })?;
             let body: IdTokenResponse =
                 serde_json::from_slice(&raw).map_err(|_| SignErrorKind::OidcPreCheckFailed {
                     reason: "gha_id_token_malformed".to_string(),
@@ -232,6 +242,31 @@ mod tests {
             .await
             .expect_err("trusted_hosts admits a private address, not a plaintext scheme");
         assert_eq!(reason(err), "gha_id_token_url_insecure_scheme");
+    }
+
+    /// A set-but-empty variable is absent, and the exchange needs both halves of the Actions pair.
+    #[test]
+    fn ambient_env_reads_presence_as_set_and_non_empty() {
+        let (gitlab, circle) = (GITLAB_TOKEN.declaration(), CIRCLE_TOKEN.declaration());
+        let (url, token) = (GHA_URL, GHA_TOKEN.declaration());
+        type Presence = (bool, bool, bool);
+        let rows: [(&[(&EnvVar, &str)], Presence); 5] = [
+            (&[], (false, false, false)),
+            (&[(gitlab, ""), (circle, "")], (false, false, false)),
+            (&[(gitlab, "t"), (circle, "t")], (true, true, false)),
+            (&[(url, "https://x"), (token, "")], (false, false, false)),
+            (&[(url, "https://x"), (token, "t")], (false, false, true)),
+        ];
+        let env = ocx_env::overrides::lock();
+        for (set, expected) in rows {
+            for key in [gitlab, circle, url, token] {
+                env.remove(key);
+            }
+            for (key, value) in set {
+                env.set(key, *value);
+            }
+            assert_eq!(ambient_env(), expected, "{set:?}");
+        }
     }
 
     // ── ambient-source precedence ────────────────────────────────────────────

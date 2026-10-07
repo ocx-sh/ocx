@@ -21,6 +21,7 @@ rust_library(
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_config",
+        "//crates/ocx_env",
         "//crates/ocx_oci",
         "//crates/ocx_util",
     ],

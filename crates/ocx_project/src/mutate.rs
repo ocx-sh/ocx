@@ -90,7 +90,7 @@ pub(crate) async fn publish_by_rename_async(path: &Path, bytes: Vec<u8>) -> Resu
     let error_path = path.to_path_buf();
     match tokio::task::spawn_blocking(move || publish_by_rename(&target, &bytes)).await {
         Ok(result) => result,
-        Err(join) => Err(Error::Project(ProjectError::new(
+        Err(join) => Err(Error::from(ProjectError::new(
             error_path,
             ProjectErrorKind::Io(std::io::Error::other(format!(
                 "project file publish task panicked: {join}"
@@ -151,7 +151,7 @@ fn validate_group_name(name: &str, path: &Path) -> Result<(), Error> {
 
 /// [`ProjectErrorKind::InvalidGroupName`] for `name`, attached to `path`.
 fn invalid_group_name(name: &str, path: &Path) -> Error {
-    Error::Project(ProjectError::new(
+    Error::from(ProjectError::new(
         path.to_path_buf(),
         ProjectErrorKind::InvalidGroupName { name: name.to_owned() },
     ))
@@ -181,13 +181,13 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
                 .await
                 .map(|metadata| metadata.len())
                 .unwrap_or(cap + 1);
-            return Err(Error::Project(ProjectError::new(
+            return Err(Error::from(ProjectError::new(
                 config_path.to_path_buf(),
                 ProjectErrorKind::FileTooLarge { size, limit: cap },
             )));
         }
         Err(error) => {
-            return Err(Error::Project(ProjectError::new(
+            return Err(Error::from(ProjectError::new(
                 config_path.to_path_buf(),
                 ProjectErrorKind::Io(error.into_io_error()),
             )));
@@ -197,7 +197,7 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
     let config = crate::config::ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.to_path_buf())?;
     // The parse above already established the bytes are UTF-8.
     let text = String::from_utf8(bytes).map_err(|e| {
-        Error::Project(ProjectError::new(
+        Error::from(ProjectError::new(
             config_path.to_path_buf(),
             ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         ))
@@ -235,7 +235,7 @@ pub fn add_binding_in_memory(
     match group {
         None => {
             if let Some(existing) = config.tools.get(&key) {
-                return Err(Error::Project(ProjectError::new(
+                return Err(Error::from(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingAlreadyExists {
                         group: "default".to_owned(),
@@ -249,7 +249,7 @@ pub fn add_binding_in_memory(
         }
         Some(group_name) => {
             if let Some(existing) = config.groups.get(group_name).and_then(|g| g.tools.get(&key)) {
-                return Err(Error::Project(ProjectError::new(
+                return Err(Error::from(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingAlreadyExists {
                         group: group_name.to_owned(),
@@ -292,7 +292,7 @@ pub fn remove_binding_in_memory(
     match group {
         Some("default") => {
             if config.tools.remove(&key).is_none() {
-                return Err(Error::Project(ProjectError::new(
+                return Err(Error::from(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingNotFound { name: key },
                 )));
@@ -303,7 +303,7 @@ pub fn remove_binding_in_memory(
             if let Some(g) = group {
                 g.tools.remove(&key);
             } else {
-                return Err(Error::Project(ProjectError::new(
+                return Err(Error::from(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingNotFound { name: key },
                 )));
@@ -323,7 +323,7 @@ pub fn remove_binding_in_memory(
 
             match hits.len() {
                 0 => {
-                    return Err(Error::Project(ProjectError::new(
+                    return Err(Error::from(ProjectError::new(
                         path.to_path_buf(),
                         ProjectErrorKind::BindingNotFound { name: key },
                     )));
@@ -342,7 +342,7 @@ pub fn remove_binding_in_memory(
                     }
                 }
                 _ => {
-                    return Err(Error::Project(ProjectError::new(
+                    return Err(Error::from(ProjectError::new(
                         path.to_path_buf(),
                         ProjectErrorKind::BindingAmbiguous {
                             name: key,
@@ -379,7 +379,7 @@ pub fn retag_binding_in_memory(
         config.groups.get_mut(group).map(|body| &mut body.tools)
     };
     let Some(binding) = table.and_then(|tools| tools.get_mut(name)) else {
-        return Err(Error::Project(ProjectError::new(
+        return Err(Error::from(ProjectError::new(
             path.to_path_buf(),
             ProjectErrorKind::BindingNotFound { name: name.to_owned() },
         )));
@@ -403,7 +403,7 @@ pub fn init_project(config_path: &Path) -> Result<PathBuf, Error> {
     // SAFETY: `symlink_metadata`, not `exists()`, which is `false` for a dangling
     // symlink, so a planted link would be written through.
     if config_path.symlink_metadata().is_ok() {
-        return Err(Error::Project(ProjectError::new(
+        return Err(Error::from(ProjectError::new(
             config_path.to_path_buf(),
             ProjectErrorKind::ConfigAlreadyExists {
                 path: config_path.to_path_buf(),

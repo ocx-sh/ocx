@@ -7,6 +7,7 @@ vars:
 
 includes:
   bazel: ./taskfiles/bazel.taskfile.yml
+  contract: ./taskfiles/contract.taskfile.yml
   git: ./taskfiles/git.taskfile.yml
   infra: ./taskfiles/infra.taskfile.yml
   rust: ./taskfiles/rust.taskfile.yml
@@ -125,8 +126,8 @@ tasks:
         it replaces the three-step cargo nextest bracket, whose listing step
         alone measured 536.5 s on CI against 173.5 s for the run it fenced,
         and runs the doctests too, as one rust_doc_test target per library
-        crate), then rust:test:workspace-structure (nextest over the
-        workspace_structure cases that Bazel target skips), then
+        crate), then rust:test:bazel-skipped (nextest over every
+        testcase a Bazel `rust_test` target `--skip`s, derived from its BUILD args), then
         bazel:test:accept — one concurrent `bazel test` over the acceptance
         package, the suite as one cached sh_test target per module, carrying the suite
         floor and the skip/xfail ceilings read off its own per-case JUnit
@@ -151,12 +152,6 @@ tasks:
       # Deliberately not named in the summary above: that text is checked
       # against what `.verify:lint` / `.verify:build-test` run, and this is
       # neither — it is the one-line bootstrap that installs the git hooks.
-      # C-017/AM-8 up front: during a merge, a working tree that differs from
-      # the index is refused now rather than at the mark step after the whole
-      # suite. A tree equal to its index is snapshot so the mark step records
-      # it as proven (and, merging, refuses one restaged mid-run); a dirty
-      # tree outside a merge gets no snapshot, so its mark carries no tree.
-      - python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --mark-precheck
       - task: git:hooks
       - task: .verify:lint
       - task: .verify:build-test
@@ -174,11 +169,8 @@ tasks:
                    crates/ocx_cli/ (permit-list default), a hub crate (≥ 4
                    reverse dependents), an ecosystem crate, a crate whose
                    [crates] row reads `escalate` (TABLE_ESCALATES:
-                   ocx_test_support, ocx_python — the table), a path
-                   with no route, or the gate tooling under `scripts/**`
-                   changed (its
-                   self-tests are routed too, and the full run's
-                   `.verify:lint` runs them)
+                   ocx_test_support, ocx_python, ocx_env — the table), a path
+                   with no route
         routed   → the lint tier (test:lint:structure) and the coverage guard
                    (test:rows:check), on every routed and scoped run (an
                    escalate reaches both through `verify`), then only the
@@ -186,6 +178,7 @@ tasks:
                    `.agents/**` and CLAUDE.md, actionlint (+ test_workflows.py)
                    for `.github/**`, test:parallel over the touched
                    `test/tests/test_*.py`, scripts:self-test for `scripts/**`,
+                   `task --list-all` (a parse) for any taskfile,
                    the workspace-structure guards
                    (`nextest -p ocx_test_support --test workspace_structure`)
                    for a changed `crates/<c>/Cargo.toml` or README, plus
@@ -229,6 +222,7 @@ tasks:
       ACCEPTANCE_GLOBS: '{{(fromJson .PLAN).acceptance_globs | join " "}}'
       ROUTE_SCRIPTS: '{{(fromJson .PLAN).routes.scripts | join " "}}'
       ROUTE_MANIFESTS: '{{(fromJson .PLAN).routes.manifests | join " "}}'
+      ROUTE_TASKFILES: '{{(fromJson .PLAN).routes.taskfiles | join " "}}'
       WORKFLOW_TEST_CMD: '{{(fromJson .PLAN).workflow_test_cmd}}'
     # Every step is a `cmds:` entry, never a precondition: `--force` skips
     # preconditions, and a gate must not be silently skippable.
@@ -262,11 +256,12 @@ tasks:
       - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_TESTS}}" ]'
         task: test:parallel
         vars: { CLI_ARGS: '{{.ROUTE_TESTS}}', OCX_GATE: inner }
-      # Today a `scripts/**` change always escalates (the full run's
-      # `.verify:lint` covers this); the step is the route's consumer for
-      # when the gate ever certifies a scripts edit on its own.
+      # Gate tooling: its self-tests certify the edit; no escalation.
       - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_SCRIPTS}}" ]'
         task: scripts:self-test
+      # A taskfile edit: listing every task parses the whole include graph.
+      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_TASKFILES}}" ]'
+        cmd: task --list-all
       # A crate's Cargo.toml / README is workspace structure: the guards over
       # it are one test target, and `nextest -p <that crate>` selects none of
       # them. Reaching them used to mean the full verify because they were a
@@ -394,16 +389,14 @@ tasks:
     internal: true
     desc: >-
       Write the JSON verify mark ({timestamp, head, scope, crates, toplevel,
-      tree, nocache}) the commit-msg hook and verify:scoped read. `nocache`
+      nocache}) the commit-msg hook and verify:scoped read. `nocache`
       is true when NOCACHE=1 reached the run with no CLI_ARGS alongside it —
       a `release:` commit needs it. CLI_ARGS (global, `task verify NOCACHE=1
       -- <args>`) rides into `bazel:test:accept` and can itself re-enable
       caching or filter which targets ran, so a CLI_ARGS present at all
       voids the nocache claim rather than recording a full-coverage promise
       the run may not have kept. Only `verify` passes SCOPE=full; only
-      `verify:scoped` passes LOG_RUN. During a merge it refuses a working
-      tree that differs from the index (C-017, AM-8), which fails `task
-      verify` at this step.
+      `verify:scoped` passes LOG_RUN. Never refuses.
     vars:
       SCOPE: '{{.SCOPE | default "scoped"}}'
     cmds:
@@ -411,14 +404,11 @@ tasks:
 
   verify:mark:
     desc: |
-      Mark the current tree as verified at scope *scoped* (5-min TTL) — the
-      deliberate escape hatch, and using it is allowed. For a cheaper tier run
-      on purpose with the expensive one deferred (unit tests green, acceptance
-      suite left for later) so intermediate commits on a branch stay fast, and
-      for a passing verify where only cherry-pick / rebase merge context
-      changed since. Name the deferral in the commit body. A hand mark is never
-      `full` — a `release:` commit, a commit on main and `task
-      release:prepare` need `task verify`.
+      Mark the current tree as verified at scope *scoped* (5-min TTL), no
+      questions asked — the unconditional escape hatch for any commit on a
+      branch, merge commits included. Run whatever checks the change needs
+      (none for a docs-only change), mark, commit; name the deferral in the
+      commit body. Only `main` and `release:` commits need `task verify`.
     cmds:
       # On main the gate refuses a scoped mark, so writing one reads as
       # "verify:mark does nothing". Say so instead of marking.
@@ -529,10 +519,10 @@ tasks:
       # convenience and as `verify-deep.yml`'s macOS and Windows legs; they
       # are simply not what the gate reads any more.
       - task: bazel:test:unit
-      # The 23 workspace_structure cases the Bazel target `--skip`s ran nowhere
-      # on Linux once the nextest bracket left: a new `pub` in ocx_util with no
-      # consumer passed this gate and redded verify-deep on macOS and Windows.
-      - task: rust:test:workspace-structure
+      # The testcases the `rust_test` targets `--skip` ran nowhere on Linux once
+      # the nextest bracket left: a new `pub` in ocx_util with no consumer, or a
+      # spawn outside launch, passed this gate and redded verify-deep on macOS.
+      - task: rust:test:bazel-skipped
       # The nextest ceiling parser's red/green proof is
       # scripts/tests/test_nextest_ceiling.py, run with the gate-tooling suite.
       # `rust:test:duration` is NOT here, for the reason `rust:test:ceiling`

@@ -41,7 +41,7 @@ Fire at attention even when rules don't auto-load:
 
 ## Task Runner
 
-Use `task` commands for standard workflows: `task verify:scoped --force` per task/review-fix iteration; full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself). `task test:quick` (acceptance). Run `task --list` to discover commands.
+Use `task` commands for standard workflows: `task verify:scoped --force` per task/review-fix iteration; full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). `task test:quick` (acceptance). Run `task --list` to discover commands.
 
 ## Constraints
 

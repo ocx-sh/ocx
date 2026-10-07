@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "version": "0.6.4",
+  "registry": "ocx.sh",
+  "platforms": [
+    {
+      "architecture": "amd64",
+      "os": "linux",
+      "os.features": [
+        "libc.glibc"
+      ]
+    }
+  ],
+  "features": [
+    "libc.glibc"
+  ],
+  "libc": [
+    "libc.glibc"
+  ],
+  "home": "/home/conformance/.ocx"
+}

@@ -10,7 +10,52 @@ use ocx_package_manager::record::ExecutionRecord;
 use ocx_project::{ProjectConfig, ProjectLock};
 use schemars::generate::SchemaSettings;
 
+/// `$id` of a published schema from its kind and version.
+///
+/// `concat!` takes only literals, so each document's version is a one-line macro that its `const` and its id both
+/// expand; macros are textually scoped, hence declared before the modules.
+macro_rules! schema_id {
+    ($kind:literal, $version:expr) => {
+        concat!("https://ocx.sh/schemas/", $kind, "/v", $version, ".json")
+    };
+}
+
+macro_rules! cli_version {
+    () => {
+        1
+    };
+}
+macro_rules! errors_version {
+    () => {
+        2
+    };
+}
+macro_rules! reports_version {
+    () => {
+        2
+    };
+}
+// A foreign crate owns the number behind each of the next two; a test below pins the equality.
+macro_rules! project_lock_version {
+    () => {
+        3
+    };
+}
+macro_rules! execution_record_version {
+    () => {
+        "1"
+    };
+}
+
+pub mod cli;
+pub mod errors;
 pub mod reports;
+
+/// `$id` of the project-lock schema; the version is `LockVersion::V3`'s.
+const PROJECT_LOCK_ID: &str = schema_id!("project-lock", project_lock_version!());
+
+/// `$id` of the execution-record schema; the version is the record's in-band `schemaVersion`.
+const EXECUTION_RECORD_ID: &str = schema_id!("execution-record", execution_record_version!());
 
 /// Top-level `$comment` of the project-lock schema, telling editors not to hand-author `ocx.lock`.
 const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across OCX versions — do not hand-edit";
@@ -21,8 +66,9 @@ const EXECUTION_RECORD_COMMENT: &str =
 
 /// Generate the JSON Schema for `kind`, or `None` for an unknown kind.
 ///
-/// Kinds: `metadata`, `config`, `project`, `project-lock`, `patch`, `reports`, `execution-record`.
-/// `$id` is `https://ocx.sh/schemas/<kind>/<version>.json`: `v1`, except `project-lock` at `v3`.
+/// Kinds: `metadata`, `config`, `project`, `project-lock`, `patch`, `reports`, `execution-record`, `errors`,
+/// `cli` (the grammar document itself) and `cli-schema` (the JSON Schema of `cli`).
+/// `$id` is `https://ocx.sh/schemas/<kind>/<version>.json`: `v1`, except `project-lock` at `v3`; `cli` has none.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         // Authoring form with digest-optional dependencies, so published blobs stay a valid subset of the
@@ -42,9 +88,8 @@ pub fn schema_for(kind: &str) -> Option<String> {
             None,
             Shape::Deserialized,
         )),
-        // `v3` moves with `LockVersion::V3`.
         "project-lock" => Some(generate_schema::<ProjectLock>(
-            "https://ocx.sh/schemas/project-lock/v3.json",
+            PROJECT_LOCK_ID,
             Some(PROJECT_LOCK_COMMENT),
             Shape::Deserialized,
         )),
@@ -53,13 +98,15 @@ pub fn schema_for(kind: &str) -> Option<String> {
             None,
             Shape::Deserialized,
         )),
-        // Bump this URL version and the record's in-band `schemaVersion` together.
         "execution-record" => Some(generate_schema::<ExecutionRecord>(
-            "https://ocx.sh/schemas/execution-record/v1.json",
+            EXECUTION_RECORD_ID,
             Some(EXECUTION_RECORD_COMMENT),
             Shape::Serialized,
         )),
         "reports" => Some(reports::reports_schema()),
+        "errors" => Some(errors::errors_schema()),
+        "cli" => Some(cli::cli_json()),
+        "cli-schema" => Some(cli::cli_schema()),
         _ => None,
     }
 }
@@ -101,6 +148,22 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    /// The cross-crate guard: an id's version literal lives here, the number it names lives in its owner.
+    #[test]
+    fn id_versions_equal_the_versions_their_owners_declare() {
+        assert_eq!(
+            project_lock_version!(),
+            ocx_project::LockVersion::V3 as u8,
+            "bump `project_lock_version!` with `LockVersion`"
+        );
+        assert_eq!(
+            execution_record_version!(),
+            ocx_package_manager::record::execution_record::SCHEMA_VERSION,
+            "bump `execution_record_version!` with the record's `SCHEMA_VERSION`"
+        );
+        assert_eq!(errors_version!(), ocx::error_document::ERRORS_SCHEMA_VERSION);
+    }
 
     /// The metadata schema is the published wire form plus exactly one
     /// relaxation: dependency identifiers are digest-optional (plain
@@ -469,7 +532,7 @@ mod tests {
 
         assert_eq!(
             value.get("$id").and_then(|v| v.as_str()),
-            Some("https://ocx.sh/schemas/execution-record/v1.json"),
+            Some(EXECUTION_RECORD_ID),
             "the published URL must move in lockstep with the in-band schemaVersion"
         );
 

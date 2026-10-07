@@ -14,6 +14,7 @@ pub mod config_push;
 pub mod config_setup;
 pub mod config_test;
 pub mod config_update;
+pub mod contract;
 pub mod deprecated;
 pub mod deps;
 pub mod deselect;
@@ -33,6 +34,7 @@ pub mod init;
 pub mod inspect;
 pub mod install;
 pub mod launcher;
+pub mod leaf;
 pub mod lock;
 pub mod login;
 pub mod logout;
@@ -83,6 +85,8 @@ pub mod update;
 pub mod upgrade;
 pub mod version;
 pub mod which;
+
+pub use contract::{CONTRACT, OutputMode};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -252,7 +256,7 @@ impl Command {
             Command::Remove(remove) => remove.execute(context).await,
             Command::Exec(exec) => exec.execute(context).await,
             Command::DeprecatedRun(exec) => {
-                deprecated::warn_renamed(&context, "run", "exec");
+                deprecated::warn_renamed(&context, &deprecated::RUN);
                 exec.execute(context).await
             }
             Command::Shell(shell) => shell.execute(context).await,

@@ -86,14 +86,14 @@ def test_cross_repo_dedup_preserves_query_repository(
     ocx.json("package", "install", mirrors_short)
 
     # --- find should report the repository the user queried --------------
-    find_result = ocx.json("package", "which", mirrors_short)
+    find_result = ocx.json("package", "which", mirrors_short)["paths"]
     assert mirrors_short in find_result, (
         f"find should key result by queried identifier, got keys {list(find_result)}"
     )
 
     # --- deps --flat entry for the root should carry the queried repo ---
     flat = ocx.json("package", "deps", "--flat", mirrors_short)
-    entries = flat["entries"]
+    entries = flat["items"]
     assert entries, f"expected at least one entry in deps --flat output, got {flat!r}"
 
     def entry_repo(ident: str) -> str:

@@ -44,7 +44,7 @@ pub enum TokenShape<'a> {
     /// `${installPath}` or its alias `${self.installPath}`: the package's `content/` directory.
     InstallPath,
     /// `${self.env.KEY}`: the resolved value of this package's earlier-declared var `KEY`,
-    /// which passes [`ocx_util::env::is_valid_env_key`], the emitters' own validator.
+    /// which passes [`ocx_env::is_valid_env_key`], the emitters' own validator.
     SelfEnv { key: &'a str },
     /// `${deps.NAME.installPath}`: a declared direct dependency's `content/` directory.
     // A `DependencyName`, not raw text: the pattern alone admits a 65-byte name the type refuses.
@@ -178,7 +178,7 @@ fn parse_shape<'a>(source: &str, base: &'a str) -> Result<TokenShape<'a>, Templa
     match path.as_slice() {
         [INSTALL_PATH] | ["self", INSTALL_PATH] => Ok(TokenShape::InstallPath),
         // The grammar admits a leading digit and `-`, which no settable env key has.
-        ["self", "env", key] if ocx_util::env::is_valid_env_key(key) => Ok(TokenShape::SelfEnv { key }),
+        ["self", "env", key] if ocx_env::is_valid_env_key(key) => Ok(TokenShape::SelfEnv { key }),
         ["self", "env", _] => Err(unknown_token(source, base)),
         ["self", field] => Err(unknown_field("self", field, &[INSTALL_PATH, "env.KEY"])),
         ["deps", name, field] => match DependencyName::try_from(*name) {
@@ -615,10 +615,7 @@ mod tests {
     #[test]
     fn self_env_applies_the_env_key_validator_as_a_second_filter() {
         for key in ["A_B1", "_UNDERSCORE", "TOOL_HOME"] {
-            assert!(
-                ocx_util::env::is_valid_env_key(key),
-                "premise: {key:?} is a settable key"
-            );
+            assert!(ocx_env::is_valid_env_key(key), "premise: {key:?} is a settable key");
             assert_eq!(
                 single_token(&format!("${{self.env.{key}}}")).shape,
                 TokenShape::SelfEnv { key },
@@ -635,7 +632,7 @@ mod tests {
         // `env`, which is a token refusal quietly downgraded to a leaf typo.
         for body in ["1ABC", "A-B", "9", ""] {
             assert!(
-                !ocx_util::env::is_valid_env_key(body),
+                !ocx_env::is_valid_env_key(body),
                 "premise: {body:?} is not a settable key"
             );
             let input = format!("${{self.env.{body}}}");

@@ -582,11 +582,8 @@ mod tests {
 
         assert!(
             matches!(
-                error,
-                Error::Project(ProjectError {
-                    kind: ProjectErrorKind::ManifestEditDiverged,
-                    ..
-                })
+                &error,
+                Error::Project(project_error) if matches!(project_error.kind, ProjectErrorKind::ManifestEditDiverged)
             ),
             "expected ManifestEditDiverged, got {error:?}"
         );
@@ -600,11 +597,8 @@ mod tests {
 
         assert!(
             matches!(
-                error,
-                Error::Project(ProjectError {
-                    kind: ProjectErrorKind::ManifestEditParse(_),
-                    ..
-                })
+                &error,
+                Error::Project(project_error) if matches!(project_error.kind, ProjectErrorKind::ManifestEditParse(_))
             ),
             "expected ManifestEditParse, got {error:?}"
         );

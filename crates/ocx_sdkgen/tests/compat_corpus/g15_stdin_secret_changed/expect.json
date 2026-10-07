@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --password-stdin` stops reading its secret from stdin.",
+  "findings": [
+    {
+      "code": "G15",
+      "pointer": "/root/commands/0/commands/0/args/6",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

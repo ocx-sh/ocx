@@ -104,7 +104,7 @@ pub fn parse_positional(input: &str, default_registry: &str) -> Result<Positiona
                     source: e,
                 },
             };
-            super::Error::Project(ProjectError::new(std::path::PathBuf::new(), kind))
+            super::Error::from(ProjectError::new(std::path::PathBuf::new(), kind))
         })?;
 
     let binding = match explicit_binding {
@@ -161,7 +161,7 @@ pub fn select_tool_set(
         _ if groups.is_empty() => Vec::new(),
         // The CLI reports `LockMissing` before calling; reaching here is a broken contract.
         None => {
-            return Err(super::Error::Project(ProjectError::new(
+            return Err(super::Error::from(ProjectError::new(
                 std::path::PathBuf::new(),
                 ProjectErrorKind::LockMissing,
             )));
@@ -261,7 +261,7 @@ pub fn check_duplicate_selection(selected: &[SelectedTool]) -> Result<(), super:
         let (Origin::Group(group_a), Origin::Group(group_b)) = (&selected[first].origin, &tool.origin) else {
             continue;
         };
-        return Err(super::Error::Project(ProjectError::new(
+        return Err(super::Error::from(ProjectError::new(
             std::path::PathBuf::new(),
             ProjectErrorKind::DuplicateToolAcrossSelectedGroups {
                 name: tool.binding.clone(),

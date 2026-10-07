@@ -1,12 +1,13 @@
 """Repo-wide structural check for every spelling the deprecation window retires.
 
-Two kinds of spelling are retired at once, and both are swept here:
+Three kinds of spelling are retired at once, and all are swept here:
 
 * the renamed **flag** (C-062) — ``ocx package announce`` took ``--package
   <PACKAGE>`` until the positional replaced it;
-* every renamed **command**, read out of ``command::deprecated::RENAMED``
-  rather than restated here, so the Rust side is the single authority and a
-  rename that opens a window cannot be forgotten on this side.
+* every renamed **command** and **flag**, read out of the ``deprecated`` field of
+  the published ``cli.json`` so the Rust side is the single authority;
+* every renamed **environment variable**, out of the in-window ``retired`` rows
+  beside it, stale wherever a whole token names it outside a declaring file.
 
 Nothing in this repository may keep *using* an old spelling — ocx would
 otherwise instruct an operator to run a form ocx itself warns about, and at the
@@ -40,16 +41,15 @@ Three renderings of "a rendered command line" exist in this tree, and the check
 decides each one mechanically -- see :data:`_SPELLED_RE`, :data:`_ARGV_RE` and
 :func:`_rename_renderings` for the rule and for what each one deliberately does
 *not* match.
-
-No Docker, no built binary, no registry: pure static file analysis.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from src.helpers import PROJECT_ROOT
 
@@ -100,39 +100,113 @@ invocation a permanent hiding place.
 # file it scans measures itself: spelling the command and the flag together in
 # one source line here would make this module its own first hit, in every state.
 # The same rule is why no renamed command spelling appears anywhere in this
-# file: they are read from `deprecated.rs` at run time.
+# file: they are read from `cli.json` at run time.
 _DEPRECATED_FLAG = "--package"
 _COMMAND = "ocx package announce"
 
-_DEPRECATED_RS = PROJECT_ROOT / "crates" / "ocx_cli" / "src" / "command" / "deprecated.rs"
+_CLI_JSON = PROJECT_ROOT / "crates" / "ocx_schema" / "tests" / "golden" / "cli.json"
+"""The committed ``cli.json`` -- the golden the schema tests hold equal to what ocx generates.
 
-_RENAMED_BLOCK_RE: re.Pattern[str] = re.compile(
-    r"pub const RENAMED: &\[\(&str, &str\)\] = &\[(.*?)\];", re.DOTALL
-)
-_RENAMED_PAIR_RE: re.Pattern[str] = re.compile(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)')
+``website/src/public/schemas`` is gitignored build output, absent from a fresh checkout, so the
+golden is the one copy of the published document this tier can always read.
+"""
+
+
+def _published_cli() -> dict[str, Any]:
+    document = json.loads(_CLI_JSON.read_text(encoding="utf-8"))
+    assert document["root"]["commands"], "cli.json lists no commands, so the sweep has no input"
+    return document
 
 
 def renamed_spellings() -> tuple[tuple[str, str], ...]:
-    """``command::deprecated::RENAMED``, parsed out of the Rust source.
+    """Every deprecated command and flag spelling as ``(old, new)``, commands first.
 
-    Read rather than restated.  A second list here would be a second source of
-    truth free to disagree with the one the binary dispatches on, and the
-    disagreement's shape is the silent one: a rename this file forgot is a
-    rename nothing sweeps for.  The Rust side guards its own half --
-    ``deprecated::tests::every_warn_renamed_dispatch_site_is_listed_in_renamed``
-    counts the dispatch sites against the list -- so the two halves together
-    close the loop from "a command warns" to "no invocation of it survives".
+    Read out of the ``deprecated`` field ``cli.json`` publishes on a command or an
+    argument, rather than restated: the Rust rows are the single authority, and a rename
+    that opens a window cannot be forgotten on this side.  A flag's old spelling is its
+    command path plus the spelling as typed (``package push -c``), its new one the
+    published ``replacement``.  The Rust side guards its own half --
+    ``deprecated::tests`` count the dispatch sites against the rows -- so the two halves
+    together close the loop from "a command warns" to "no invocation of it survives".
     """
-    source = _DEPRECATED_RS.read_text(encoding="utf-8")
-    block = _RENAMED_BLOCK_RE.search(source)
-    assert block is not None, (
-        f"{_DEPRECATED_RS.relative_to(PROJECT_ROOT)} no longer declares `pub const RENAMED`, so "
-        "this sweep has no input and its green means nothing. Retarget it, or retire it together "
-        "with the deprecation window."
-    )
-    pairs = tuple(_RENAMED_PAIR_RE.findall(block.group(1)))
-    assert pairs, "RENAMED parsed as empty — the sweep would report clean over nothing"
-    return pairs
+    commands: list[tuple[str, str]] = []
+    flags: list[tuple[str, str]] = []
+
+    def walk(command: dict[str, Any]) -> None:
+        path = command["path"]
+        if "deprecated" in command:
+            commands.append((" ".join(path), command["deprecated"]["replacement"]))
+        for arg in command["args"]:
+            if "deprecated" in arg:
+                spelling = f"--{arg['long']}" if "long" in arg else f"-{arg['short']}"
+                flags.append((" ".join([*path, spelling]), arg["deprecated"]["replacement"]))
+        for sub in command["commands"]:
+            walk(sub)
+
+    walk(_published_cli()["root"])
+    assert commands and flags, "cli.json publishes no deprecated command or flag — the sweep would report clean over nothing"
+    return (*commands, *flags)
+
+
+def renamed_env_spellings() -> tuple[tuple[str, str], ...]:
+    """The in-window rows of ``retired`` in ``cli.json``, as ``(old, new)`` variable names.
+
+    A row whose ``status`` is ``window`` is a variable ocx still honours and warns about, so
+    it is one this sweep looks for; a ``removed`` row is refused outright and is not.  A
+    ``value_rename`` row would need the old *value* to sweep for, which the published row
+    does not carry, so it fails here rather than being swept as its bare name.
+    """
+    rows = [row for row in _published_cli()["retired"] if row["status"] == "window"]
+    assert rows, "cli.json publishes no in-window retired row — the environment sweep would report clean over nothing"
+    unsupported = [row["name"] for row in rows if row["change"] == "value_rename"]
+    assert not unsupported, f"cli.json does not carry the old value of {unsupported}; publish it before sweeping for it"
+    return tuple((row["name"], row["replacement"]) for row in rows)
+
+
+ENV_DECLARATIONS: frozenset[Path] = frozenset(
+    {
+        PROJECT_ROOT / "crates" / "ocx_env" / "src" / "retired.rs",
+        PROJECT_ROOT / "crates" / "ocx_schema" / "tests" / "golden" / "cli.json",
+        PROJECT_ROOT / "CLAUDE.md",
+    }
+)
+"""Files that name an old environment spelling to declare the rename, not to use it."""
+
+ENV_WINDOW_TEST: Path = PROJECT_ROOT / "test" / "tests" / "test_env_contract.py"
+"""The acceptance module that sets every old environment spelling for real.
+
+It proves the window's behaviour -- the old name is still honoured and warns
+once on stderr -- so it must keep each spelling, and it is the sweep's positive
+control: every in-window ``retired`` spelling must still hit here.
+"""
+
+
+def env_hits_in_text(text: str, old: str) -> list[tuple[int, str]]:
+    """Every line of ``text`` naming ``old`` as a whole token."""
+    token = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(old) + r"(?![A-Za-z0-9_])")
+    return [
+        (number, line.strip())
+        for number, line in enumerate(text.splitlines(), start=1)
+        if token.search(line)
+    ]
+
+
+def find_env_spellings() -> list[Hit]:
+    """Every whole-token occurrence of every renamed environment spelling."""
+    renamed = renamed_env_spellings()
+    hits: list[Hit] = []
+    for path in _scan_files():
+        if not _is_text(path):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for old, _new in renamed:
+            if old not in text:
+                continue
+            hits.extend(Hit(old, path, number, line) for number, line in env_hits_in_text(text, old))
+    return hits
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +248,40 @@ of the sweep counts no ``package_announce.rs`` line among its invocations.
 _COMMAND_POSITION = r"(?:^|[|;&(]\s*|\$\s+|run:\s*)"
 
 
+#: Root options between ``ocx`` and its command: a flag, and the value it may take.
+_ROOT_OPTIONS = r"(?:\s+-\S+(?:\s+[^-\s]\S*)?)*"
+
+#: Where a flag ends: whitespace, ``=`` (``--flag=value``), or the end of the line.
+_FLAG_END = r"(?=[\s=]|$)"
+
+
+def _flag_renderings(command: str, flag: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """``(spelled, argv)`` patterns for one renamed flag of ``command``.
+
+    SPELLED: the command at a command position, after any root options, then the
+    flag on the same logical line short of a shell operator.  A flag before the
+    command is the root's own; a longer flag on the same prefix is another flag.
+
+    ARGV: the command's words adjacent *and* the quoted flag later on the line; a
+    bare ``"-c",`` is ``sh -c`` throughout ``test/``.  A helper-assembled argv
+    stays invisible, the one-word rename's trade.
+    """
+    spelled = re.compile(
+        _COMMAND_POSITION
+        + r"ocx"
+        + _ROOT_OPTIONS
+        + r"\s+"
+        + re.escape(command)
+        + r"\s(?:[^|;&]*\s)?"
+        + re.escape(flag)
+        + _FLAG_END
+    )
+    words = command.split()
+    adjacent = r"\s*,\s*".join(f"([\"']){re.escape(word)}\\{index + 1}" for index, word in enumerate(words))
+    argv = re.compile(adjacent + r"[^)]*?[\"']" + re.escape(flag) + r"[\"']")
+    return spelled, argv
+
+
 def _rename_renderings(old: str) -> tuple[re.Pattern[str], re.Pattern[str] | None]:
     """``(spelled, argv)`` patterns for one renamed command spelling.
 
@@ -204,6 +312,9 @@ def _rename_renderings(old: str) -> tuple[re.Pattern[str], re.Pattern[str] | Non
     invocation is still caught by SPELLED wherever the command is spelled --
     which is every shell script, every doc fence, and every YAML step.
     """
+    command, _, flag = old.rpartition(" ")
+    if command and flag.startswith("-"):
+        return _flag_renderings(command, flag)
     spelled = re.compile(_COMMAND_POSITION + r"ocx " + re.escape(old) + r"(?:\s|$)")
     words = old.split()
     if len(words) < 2:
@@ -479,7 +590,7 @@ def test_the_rename_renderings_separate_an_invocation_from_prose() -> None:
     """The rename half's permanent control, in both directions and for both
     renderings.
 
-    Every sample is assembled from a spelling read out of ``deprecated.rs``, for
+    Every sample is assembled from a spelling read out of ``cli.json``, for
     the reason the constants above exist: writing one out would make this module
     its own first hit.
 
@@ -516,3 +627,70 @@ def test_the_rename_renderings_separate_an_invocation_from_prose() -> None:
     assert rename_hits_in_text(f"    ocx.plain({argv}, path)\n", multi, argv_applies=False) == [], (
         "the ARGV rendering fired outside the tree it is decidable in"
     )
+
+
+def test_the_flag_renderings_separate_an_invocation_from_its_neighbours() -> None:
+    """The flag rows' permanent control, both directions, both renderings.
+
+    Rows are invented, so no real old spelling sits beside its command in this
+    file.  One short and one long, each with its own neighbour: a short letter
+    the root also binds, a long flag its replacement extends.
+    """
+    for command, flag, new in (("tool make", "-x", "--extra"), ("tool make", "--out", "--output")):
+        old = f"{command} {flag}"
+
+        def hits(text: str, *, argv: bool = False, old: str = old) -> list[tuple[int, str]]:
+            return rename_hits_in_text(text, old, argv_applies=argv)
+
+        assert hits(f"ocx {command} -i x {flag} y\n"), f"`{old}` after another option must be seen"
+        assert hits(f"ocx --format json {command} {flag}=y\n"), "root options before the command hid it"
+        assert hits(f"ocx {flag} y {command} z\n") == [], "a flag before the command is the root's own"
+        assert hits(f"ocx {command} {new} y\n") == [], f"the replacement `{new}` was read as `{flag}`"
+        assert hits(f"ocx {command} y | grep {flag}\n") == [], "a flag past a pipe belongs to another command"
+
+        argv = ", ".join(f'"{word}"' for word in command.split())
+        assert hits(f'    ocx.json({argv}, "{flag}", y)\n', argv=True), "an argv invocation under test/ must be seen"
+        assert hits(f'    run(["sh", "{flag}", script])\n', argv=True) == [], "a bare quoted flag names no command"
+
+
+def test_no_renamed_environment_spelling_survives_outside_its_declarations() -> None:
+    """No file uses an environment spelling this window renames, and the window test still does.
+
+    The negative alone is green when the window test is deleted, so the
+    positive control -- every spelling still set in :data:`ENV_WINDOW_TEST` --
+    is what makes it mean anything.
+    """
+    renamed = dict(renamed_env_spellings())
+    hits = find_env_spellings()
+
+    stray = [hit for hit in hits if hit.path not in ENV_DECLARATIONS and hit.path != ENV_WINDOW_TEST]
+    assert stray == [], (
+        "these lines name an environment spelling this deprecation window renames; use the new name:\n"
+        + "\n".join(
+            f"  {hit.path.relative_to(PROJECT_ROOT)}:{hit.number}: [{hit.spelling} -> "
+            f"{renamed[hit.spelling]}] {hit.line}"
+            for hit in stray
+        )
+    )
+
+    for old in renamed:
+        assert any(hit.spelling == old and hit.path == ENV_WINDOW_TEST for hit in hits), (
+            f"{ENV_WINDOW_TEST.relative_to(PROJECT_ROOT)} no longer sets the renamed `{old}`, so this "
+            "sweep cannot tell a complete sweep from one that never ran. Restore its window test."
+        )
+
+
+def test_the_env_token_rule_separates_the_old_spelling_from_its_neighbours() -> None:
+    """The environment sweep's permanent control, built from the parsed spelling.
+
+    A whole-token match: the old name in a shell export and a Python dict both
+    hit; the new name, and a longer variable that merely contains the old one,
+    do not -- a replacement can be a prefix of its old name, so a bare
+    substring rule would read every use of one name as a use of the other.
+    """
+    old, new = renamed_env_spellings()[0]
+
+    assert env_hits_in_text(f"export {old}=1\n", old) == [(1, f"export {old}=1")]
+    assert env_hits_in_text(f'    env={{"{old}": "1"}}\n', old), "a dict key is a use"
+    assert env_hits_in_text(f"export {new}=1\n", old) == [], "the replacement was read as the old name"
+    assert env_hits_in_text(f"{old}_EXTRA=1 X_{old}=1\n", old) == [], "a longer name was read as the old one"

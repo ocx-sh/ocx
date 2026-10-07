@@ -228,6 +228,10 @@ async fn run_with_env(
         let (_argv0, args) = argv
             .split_first()
             .expect("the caller pushes argv0 before any user argument");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "launcher re-entry inherits the exemption of the scratch root it was baked with"
+        )]
         let launch = Launch::exempt(process_env, &executable, args, reason, &policy)?;
         return Err(anyhow::Error::from(launch::exec(launch).await));
     }

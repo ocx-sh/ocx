@@ -179,7 +179,7 @@ EXPECTED_SET_ENV = {
     "LANGUAGE": "",
 }
 
-#: `git_command.rs`'s `UNIX_PASSTHROUGH`. The subset assertion in
+#: `git_command.rs`'s `COMMON`. The subset assertion in
 #: `::test_child_env_matches_the_allowlist` is written against this union, and
 #: that assertion is the falsifiable half of C-035 — a name added to the
 #: production table without being added here reds it.
@@ -461,8 +461,8 @@ def admit_publishing_project(fake_forge: FakeForge) -> None:
 
     Every **split-pair** row that must succeed needs this: the allowlist read
     only happens on a cross-project push, and an absent key is an EMPTY
-    allowlist — which is a miss, and refuses at 86. A row that forgot it would
-    measure `::test_allowlist_miss_86_names_both_projects` a second time while
+    allowlist — which is a miss, and refuses at 77. A row that forgot it would
+    measure `::test_allowlist_miss_77_names_both_projects` a second time while
     reading as a success row.
 
     A bare `job_token_env()` row must NOT call it, and that is the opposite
@@ -1513,11 +1513,11 @@ def test_persistent_non_fast_forward_exits_75(
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_job_token_push_disabled_86_before_any_push(
+def test_job_token_push_disabled_82_before_any_push(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
     """S-015/C-029: `ci_push_repository_for_job_token_allowed` reading **false**
-    refuses at **86 before any push** — before any `git` process at all.
+    refuses at **82 before any push** — before any `git` process at all.
 
     "Before any push" is provable rather than asserted: `ensure_push_access` runs
     before `commit_files`, and under `git` the clone is opened *inside*
@@ -1543,12 +1543,13 @@ def test_job_token_push_disabled_86_before_any_push(
         ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
-    assert result.returncode == 86, f"a disabled capability is an administrator's to fix: {result.stderr}"
+    assert result.returncode == 82, f"a disabled capability is an administrator's to fix: {result.stderr}"
     envelope = json.loads(result.stdout)
-    assert envelope["error"]["kind"] == "forge_capability_unavailable", (
+    assert envelope["error"]["kind"] == "unsupported", (
         "cli-contract.md EXIT-10 requires the machine-readable envelope to name the "
         f"category, not only the exit integer: {envelope}"
     )
+    assert envelope["error"]["detail"] == "forge_capability_unavailable", envelope
     assert "Job token permissions" in result.stderr, (
         f"the message must name the setting an administrator changes: {result.stderr!r}"
     )
@@ -1562,11 +1563,11 @@ def test_job_token_push_disabled_86_before_any_push(
     )
 
 
-def test_allowlist_miss_86_names_both_projects(
+def test_allowlist_miss_77_names_both_projects(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
     """S-016/C-029: a cross-project push whose publishing project is absent from
-    the index project's job-token allowlist refuses at **86**, naming both paths,
+    the index project's job-token allowlist refuses at **77**, naming both paths,
     before any push.
 
     `CI_PROJECT_PATH` is deliberately not the index path: the allowlist read only
@@ -1589,7 +1590,10 @@ def test_allowlist_miss_86_names_both_projects(
         ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
-    assert result.returncode == 86, f"an allowlist miss is a capability gate: {result.stderr}"
+    assert result.returncode == 77, f"an allowlist miss is a grant the operator can obtain: {result.stderr}"
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["kind"] == "permission_denied", envelope
+    assert envelope["error"]["detail"] == "forge_publisher_not_allowlisted", envelope
     assert INDEX_FULL in result.stderr and PUBLISHING_PROJECT in result.stderr, (
         "both project paths must be named — an operator adds one to the other's "
         f"allowlist: {result.stderr!r}"
@@ -1608,11 +1612,11 @@ def test_allowlist_admits_by_group_and_the_run_pushes(
 
     GitLab keeps two independent lists, and a group entry admits every project
     under it at any depth. ocx read only `job_token_scope/allowlist` and refused
-    at 86 an announce GitLab would have accepted — telling the operator to add a
+    at 77 an announce GitLab would have accepted — telling the operator to add a
     project entry that their group entry already covers.
 
     The **split pair**, for the same reason
-    `::test_job_token_push_disabled_86_before_any_push` uses it: both allowlist
+    `::test_job_token_push_disabled_82_before_any_push` uses it: both allowlist
     endpoints refuse a bare job token outright (401, #432), so the row is
     permanently `unknown` — the posture in which the defect is
     unreachable. The Maintainer token is the one an operator reaches for first,
@@ -1622,7 +1626,7 @@ def test_allowlist_admits_by_group_and_the_run_pushes(
     genuinely does not carry the publisher, so a build that stops at it has all
     the evidence it needs to refuse. Only the second list says otherwise.
 
-    Mutation: chain back to a single list — this reds at 86.
+    Mutation: chain back to a single list — this reds at 77.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     fake_forge.gitlab_job_token_push_allowed[INDEX_FULL] = True
@@ -1631,11 +1635,11 @@ def test_allowlist_admits_by_group_and_the_run_pushes(
 
     result = report(announce_over_git(ocx, fake_forge, package, shim, home, extra_env=split_pair_env()))
 
-    assert result["push_credential_kind"] == "job-token", (
+    assert result["push_credential_kind"] == "job_token", (
         f"the matrix is only armed when the PUSH half is the job token: {result}"
     )
     statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
-    assert statuses["job-token-allowlist"] == "passed", (
+    assert statuses["job_token_allowlist"] == "passed", (
         "a group entry is an admission, not an absence of evidence — `unknown` "
         f"here would mean the second list was never read: {result['capability_checks']}"
     )
@@ -1672,7 +1676,7 @@ def test_allowlist_group_entry_is_a_path_component_prefix(
         extra_env=split_pair_env(CI_PROJECT_PATH=SIBLING_NAMESPACE_PUBLISHER),
     )
 
-    assert result.returncode == 86, (
+    assert result.returncode == 77, (
         f"a sibling namespace is not under the group: {result.stderr}"
     )
     assert SIBLING_NAMESPACE_PUBLISHER in result.stderr and INDEX_FULL in result.stderr, (
@@ -1689,7 +1693,7 @@ def test_allowlist_group_admission_is_walked_past_the_first_page(
     Both admission lists are offset-paginated and GitLab's own default page is
     20, which is why `allowlist_walk` asks for `per_page=100` and continues
     until a short page. A client that read one page reports the admitting group
-    absent and refuses at **86** — a false refusal before any push, the
+    absent and refuses at **77** — a false refusal before any push, the
     direction #430 exists to remove. Every other group row seeds a single entry,
     so page one is the only page they reach and the walk is unfalsifiable there.
 
@@ -1707,7 +1711,7 @@ def test_allowlist_group_admission_is_walked_past_the_first_page(
 
     Mutations, both demonstrated: `ALLOWLIST_MAX_PAGES = 1` stops the walk on a
     full page and lands this on `unknown`; returning from page one whatever its
-    length — the shape that has no walk at all — refuses at **86**, which is the
+    length — the shape that has no walk at all — refuses at **77**, which is the
     false refusal itself.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
@@ -1723,7 +1727,7 @@ def test_allowlist_group_admission_is_walked_past_the_first_page(
     )
 
     statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
-    assert statuses["job-token-allowlist"] == "passed", (
+    assert statuses["job_token_allowlist"] == "passed", (
         "the admitting group is the 101st entry, so only a walk past the first "
         f"page reaches it: {result['capability_checks']}"
     )
@@ -1733,11 +1737,11 @@ def test_allowlist_group_admission_is_walked_past_the_first_page(
     assert pages >= 2, f"one read is page one; the walk never walked: {pages}"
 
 
-def test_two_signal_old_instance_86(
+def test_two_signal_old_instance_82(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
     """S-017/C-044: an instance that **hides** the field plus a push the server
-    refuses is the two-signal rule — **86**.
+    refuses is the two-signal rule — **82**.
 
     The field is left unset, which is the third state (`unknown`): the key is
     absent from the project body entirely, as on GitLab < 18.4 or a hidden
@@ -1766,7 +1770,7 @@ def test_two_signal_old_instance_86(
         ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
-    assert result.returncode == 86, (
+    assert result.returncode == 82, (
         f"unknown preflight + refused push is the capability signal: {result.stderr}"
     )
     assert invocations_named(shim, "push"), (
@@ -1779,7 +1783,7 @@ def test_same_line_with_passed_preflight_77(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
     """S-018/C-044: the **same refusal line** with a preflight that reported
-    `passed` is an ordinary `PushRefused` — **77**, not 86.
+    `passed` is an ordinary `PushRefused` — **77**, not 82.
 
     One knob apart from the row above, and that is the point: with the two rows
     the exit code is decided by the preflight status, which is what C-029 and
@@ -1789,7 +1793,7 @@ def test_same_line_with_passed_preflight_77(
 
     The split pair for the same reason the row above uses it: a preflight cannot
     report `passed` on a field the credential may not read, so a bare job token
-    would land this on 86 and measure the promotion instead of the refusal.
+    would land this on 82 and measure the promotion instead of the refusal.
 
     Mutation: promote on `Passed` as well — this reds.
     """
@@ -1817,15 +1821,15 @@ def test_unknown_preflight_with_successful_push_exits_0(
     Without it the three refusal rows above are satisfied by a build that refuses
     every job-token run, and the capability matrix would prove nothing. This is
     also the positive control for
-    `::test_job_token_push_disabled_86_before_any_push`'s two absences: the same
+    `::test_job_token_push_disabled_82_before_any_push`'s two absences: the same
     fixture with the knob unset produces both a git-bridge request log and a shim
     invocation log.
 
     No `admit_publishing_project`: under a bare job token both admission lists
-    answer 401, so `job-token-allowlist` is `unknown` here too and a seeded list
+    answer 401, so `job_token_allowlist` is `unknown` here too and a seeded list
     would never be read. Leaving it out is what makes this row depend on that
     refusal — with the fake serving the lists instead, the empty one is a miss
-    and this reds at 86.
+    and this reds at 77.
 
     Mutation: refuse on `unknown` — this reds.
     """
@@ -1835,13 +1839,13 @@ def test_unknown_preflight_with_successful_push_exits_0(
         announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
     )
 
-    assert result["push_credential_kind"] == "job-token", (
+    assert result["push_credential_kind"] == "job_token", (
         f"the matrix is only armed when the PUSH half is the job token: {result}"
     )
     assert fake_forge.git_http_requests, "the control: an unrefused run does reach the transport"
     assert workspace_invocations(shim), "the control: an unrefused run does open a workspace"
     statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
-    assert statuses["job-token-push"] == "unknown", (
+    assert statuses["job_token_push"] == "unknown", (
         f"a hidden field is `unknown`, never `passed` or `failed`: {result['capability_checks']}"
     )
 
@@ -1884,8 +1888,8 @@ def test_job_token_pickup_headers_and_push_user(
         announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
     )
 
-    assert result["credential_kind"] == "job-token", f"the REST half: {result}"
-    assert result["push_credential_kind"] == "job-token", f"the push half: {result}"
+    assert result["credential_kind"] == "job_token", f"the REST half: {result}"
+    assert result["push_credential_kind"] == "job_token", f"the push half: {result}"
     headers = [entry for entry in fake_forge.auth_headers if entry]
     assert headers, (
         "the REST fake enforces no authentication — only the git bridge does — so "
@@ -1961,7 +1965,7 @@ def test_job_token_run_reads_only_endpoints_a_job_token_may_call(
     result = report(
         announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
     )
-    assert result["credential_kind"] == "job-token", f"the row must really be a job-token run: {result}"
+    assert result["credential_kind"] == "job_token", f"the row must really be a job-token run: {result}"
 
     project = f"/projects/{ENCODED_INDEX}"
     reads = [path for method, path in fake_forge.requests if method == "GET"]
@@ -1980,14 +1984,14 @@ def test_job_token_run_reads_only_endpoints_a_job_token_may_call(
         f"refusal, not about avoiding it: {reads}"
     )
     statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
-    assert statuses["push-access"] == "unknown", (
+    assert statuses["push_access"] == "unknown", (
         "the refused project read leaves the access level unreadable rather than "
         f"zero; zero is what exited 80 before the push: {result['capability_checks']}"
     )
-    assert statuses["job-token-allowlist"] == "unknown", (
+    assert statuses["job_token_allowlist"] == "unknown", (
         "both admission lists want Maintainer or Owner, which no job token "
         "carries, so the probe buys `unreadable` and the run proceeds — the "
-        "branch this posture always takes and the one a miss would refuse at 86: "
+        "branch this posture always takes and the one a miss would refuse at 77: "
         f"{result['capability_checks']}"
     )
 
@@ -2170,7 +2174,7 @@ def test_empty_ocx_token_falls_through_to_job_token(
         )
     )
 
-    assert result["push_credential_kind"] == "job-token", f"the empty variable loses its rung: {result}"
+    assert result["push_credential_kind"] == "job_token", f"the empty variable loses its rung: {result}"
     _user, secret = decoded_injection(one_invocation(shim, "push"))
     assert secret == JOB_TOKEN, "an empty rung-1 value must not authenticate as nobody"
 
@@ -2278,9 +2282,9 @@ def test_no_helper_invoked_on_injecting_run(
     unwritable and is not shipped.** C-063 rung 3 needs `credentials.push()` to be
     `None`, which needs the API credential empty (rung 2 copies it otherwise) —
     and an empty API credential is refused at exit 80 by `require_credential`
-    before the forge is constructed, while the `--out` carve-out that exempts it
+    before the forge is constructed, while the `--output` carve-out that exempts it
     is itself refused with `--transport git` at exit 64. So
-    `push_credential_kind: "git-helper"` has no reachable state on any writing
+    `push_credential_kind: "git_helper"` has no reachable state on any writing
     run, and the reachable half of the pair is
     `::test_job_token_not_picked_up_outside_gitlab_ci_exits_80`.
 
@@ -2416,7 +2420,7 @@ def test_child_env_matches_the_allowlist(
     the row.
 
     Mutations: add `CI_JOB_TOKEN` or an `OCX_ANNOUNCE_`-matching name to
-    `UNIX_PASSTHROUGH` — the subset and a named absence both red; replace
+    `COMMON` — the subset and a named absence both red; replace
     `Env::clean()` with `Env::new()` — the subset reds hard.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
@@ -2486,7 +2490,7 @@ def test_ambient_http_proxy_passed_through(
     listens on, so a build that forwarded `http_proxy` without `no_proxy` would
     fail the run rather than pass this row silently.
 
-    Mutation: drop `http_proxy` from `UNIX_PASSTHROUGH` — this reds.
+    Mutation: drop `http_proxy` from `COMMON` — this reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     proxy = {"http_proxy": "http://127.0.0.1:1", "no_proxy": "127.0.0.1,localhost"}
@@ -2508,7 +2512,7 @@ def test_ambient_uppercase_https_proxy_passed_through(
     lowercase forms loses the proxy on every runner that exports `HTTPS_PROXY` —
     which is most CI images. The lowercase row above cannot see that.
 
-    Mutation: drop `HTTPS_PROXY` from `UNIX_PASSTHROUGH` — this reds.
+    Mutation: drop `HTTPS_PROXY` from `COMMON` — this reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     proxy = {"HTTPS_PROXY": "http://127.0.0.1:1", "NO_PROXY": "127.0.0.1,localhost"}
@@ -2722,7 +2726,7 @@ def test_api_credential_never_reaches_the_child_or_argv(
     `::test_secret_absent_from_every_surface_on_every_failure_path`, over every
     arm of `FAILURE_ARMS`; it is not repeated here.
 
-    Mutation: add `"OCX_ANNOUNCE_TOKEN"` to `UNIX_PASSTHROUGH` — this reds.
+    Mutation: add `"OCX_ANNOUNCE_TOKEN"` to `COMMON` — this reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
 
@@ -3041,7 +3045,7 @@ def test_claim_inside_a_gitlab_job_authors_with_the_job_token(
     token is refused outright on both (401, #432), which is `unknown` and
     proceeds. Seeding the list would make the run pass without ever depending on
     that refusal; with the lists served instead, the unseeded one is a miss and
-    this reds at 86.
+    this reds at 77.
 
     S-014's remaining clause — "the push authors as the invoking human" — is
     GitLab-side attribution the fixture cannot model; the half ocx controls is
@@ -3055,8 +3059,8 @@ def test_claim_inside_a_gitlab_job_authors_with_the_job_token(
 
     claimed = report(claim_over_git(ocx, fake_forge, shim, home, token=None, extra_env=job_token_env()))
 
-    assert claimed["credential_kind"] == "job-token", f"the REST half: {claimed}"
-    assert claimed["push_credential_kind"] == "job-token", f"the push half: {claimed}"
+    assert claimed["credential_kind"] == "job_token", f"the REST half: {claimed}"
+    assert claimed["push_credential_kind"] == "job_token", f"the push half: {claimed}"
     headers = [entry for entry in fake_forge.auth_headers if entry]
     assert headers, (
         "the REST fake enforces no authentication — only the git bridge does — so "
@@ -3137,7 +3141,7 @@ def test_claim_over_git_exits_80_when_the_remote_rejects_the_credential(
     Until the bridge grew an authorization gate this was unwritable, and the
     defect it hid was live: a 401 or a 403 on the git transport's fetch surfaced
     as an unclassified `GitCommandFailed` and exited **1**, while the table
-    promises 80 in every mode but `--out`. A fixture that served every read to
+    promises 80 in every mode but `--output`. A fixture that served every read to
     anyone had no state in which the promise could be tested at all.
 
     **The `WWW-Authenticate` challenge is NOT what either arm rests on**, and a

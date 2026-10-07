@@ -1,151 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_oci` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_oci` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_oci::auth::error::AuthError;
 use ocx_oci::client::error::ClientError;
-use ocx_oci::digest::error::DigestError;
 use ocx_oci::endpoint::UrlRejection;
-use ocx_oci::layer_layout::LayerLayoutError;
-use ocx_oci::package_ref::error::IdentifierError;
-use ocx_oci::pinned_package_ref::PinnedIdentifierError;
 use ocx_oci::platform::error::PlatformError;
 use ocx_oci::ssrf::SsrfError;
-
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for UrlRejection {
-    /// The code lives on the rejection, so a bare and a wrapped classification cannot disagree.
-    fn classify(&self) -> Option<ExitCode> {
-        Some(self.exit())
-    }
-}
-
-impl ClassifyExitCode for LayerLayoutError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for PinnedIdentifierError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for ocx_oci::ssrf::PhysicalDialRefused {
-    fn classify(&self) -> Option<ExitCode> {
-        self.source.classify()
-    }
-}
-
-impl ClassifyExitCode for SsrfError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            // Sigstore maps this to 64 in `From<SsrfError> for UrlRejection` (`ocx_oci/src/endpoint.rs`); change both together.
-            Self::ForbiddenTarget { .. } => ExitCode::ConfigError,
-            // A DNS failure at connect time is already 75; no portable split of NXDOMAIN from a flaky resolver.
-            Self::Resolution { .. } => ExitCode::TempFail,
-        })
-    }
-}
-
-impl ClassifyExitCode for ClientError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Mirrored { source, .. } => return source.classify(),
-            Self::Authentication(_) => ExitCode::AuthError,
-            Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_) => ExitCode::NotFound,
-            Self::Io { .. } => ExitCode::IoError,
-            // 75 means a rerun may succeed, 69 that it will not; wrappers retry on 75.
-            Self::Registry(_) => ExitCode::Unavailable,
-            Self::RegistryTransient(_) => ExitCode::TempFail,
-            Self::ShortBlobRead { .. } => ExitCode::TempFail,
-            Self::ReferrersUnsupported { .. } => ExitCode::ReferrersUnsupported,
-            Self::DeleteUnsupported { .. } => ExitCode::RegistryDeleteUnsupported,
-            Self::DeleteNeedsTag(_) | Self::InvalidTag(_) => ExitCode::UsageError,
-            Self::DigestMismatch { .. }
-            | Self::UnsafeDestination(_)
-            | Self::UnfollowedRedirect(_)
-            | Self::DecompressionCapExceeded { .. }
-            | Self::UnexpectedManifestType
-            | Self::InvalidManifest(_)
-            | Self::NotAManifest(_)
-            | Self::InvalidImageIndex(_)
-            | Self::UnexpectedArtifactType { .. }
-            | Self::WrongLayerCount { .. }
-            | Self::UnexpectedLayerMediaType { .. }
-            | Self::LayerSizeExceeded { .. }
-            | Self::TraversalLimitExceeded { .. }
-            | Self::Serialization(_)
-            | Self::InvalidEncoding(_) => ExitCode::DataError,
-            Self::Digest(e) => return e.classify(),
-            // `None` lets the chain walker reach the wrapped source; a `Some` would exit a hostile-layer `SymlinkEscape` as 1, not 65.
-            Self::Internal(_) => return None,
-        })
-    }
-}
-
-impl ClassifyExitCode for DigestError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Invalid(_) => ExitCode::DataError,
-        })
-    }
-}
-
-impl ClassifyExitCode for PlatformError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for IdentifierError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for AuthError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::InvalidType(_) | Self::MissingEnv(_, _) => ExitCode::ConfigError,
-            Self::DockerCredentialRetrieval(_) => ExitCode::AuthError,
-            Self::WriteConfigFailed { .. } => ExitCode::IoError,
-            Self::Helper(inner) => match inner {
-                docker_credential::CredentialRetrievalError::NotOnPath { .. }
-                | docker_credential::CredentialRetrievalError::UnsafePath { .. } => ExitCode::ConfigError,
-                docker_credential::CredentialRetrievalError::Timeout { .. } => ExitCode::TempFail,
-                docker_credential::CredentialRetrievalError::InvalidJson(_) => ExitCode::DataError,
-                _ => ExitCode::AuthError,
-            },
-            Self::NoCredentialStoreAvailable => ExitCode::ConfigError,
-            Self::LoginRejected { .. } => ExitCode::AuthError,
-            Self::ProbeFailed { source, .. } => return source.classify(),
-        })
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, ClientError);
-    downcast_arm!(cause, DigestError);
-    downcast_arm!(cause, IdentifierError);
-    downcast_arm!(cause, PlatformError);
-    downcast_arm!(cause, PinnedIdentifierError);
-    downcast_arm!(cause, SsrfError);
-    downcast_arm!(cause, UrlRejection);
-    downcast_arm!(cause, AuthError);
-    downcast_arm!(cause, LayerLayoutError);
-    None
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use docker_credential::CredentialRetrievalError as Helper;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
     use ocx_oci::endpoint::Url;
     use ocx_oci::endpoint::validate_sigstore_url;
     use std::net::IpAddr;
@@ -303,16 +171,17 @@ mod tests {
     /// both read as "retry", and a retry never helps here. Reached through the library-error chain
     /// walker as well, the way a raised error arrives.
     #[test]
-    fn a_registry_that_will_not_delete_tags_exits_87() {
+    fn a_registry_that_will_not_delete_tags_exits_82() {
         let error = ClientError::DeleteUnsupported {
             registry: "registry.test".to_string(),
             status: 405,
         };
-        assert_eq!(error.classify(), Some(ExitCode::RegistryDeleteUnsupported));
+        assert_eq!(error.classify(), Some(ExitCode::Unsupported));
         assert_eq!(
             crate::exit::classify_library_error(&error as &(dyn std::error::Error + 'static)),
-            ExitCode::RegistryDeleteUnsupported
+            ExitCode::Unsupported
         );
+        crate::exit::tests::assert_detail(&error, "registry_delete_unsupported");
     }
 
     #[test]
@@ -337,7 +206,7 @@ mod tests {
 
     /// The refusal keeps its code behind mirror routing, like every other client failure.
     #[test]
-    fn a_mirrored_delete_refusal_still_exits_87() {
+    fn a_mirrored_delete_refusal_still_exits_82() {
         let mirrored = ClientError::Mirrored {
             origin: "ghcr.io".to_string(),
             mirror: "artifactory.example.com".to_string(),
@@ -347,7 +216,7 @@ mod tests {
                 status: 405,
             }),
         };
-        assert_eq!(mirrored.classify(), Some(ExitCode::RegistryDeleteUnsupported));
+        assert_eq!(mirrored.classify(), Some(ExitCode::Unsupported));
     }
 
     #[test]
@@ -496,7 +365,6 @@ mod tests {
     /// resolution row reds.
     #[test]
     fn a_url_rejection_carrying_a_resolution_failure_classifies_as_unavailable() {
-        use crate::exit::ClassifyExitCode as _;
         use ocx_exit::ExitCode;
 
         let unresolvable = UrlRejection::from(ocx_oci::ssrf::SsrfError::Resolution {
@@ -541,6 +409,51 @@ mod tests {
             ip: ip("169.254.169.254"),
         };
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+    }
+
+    /// Reds on: an OCI slug, delegated, walked or read off a rejection's verdict, naming another
+    /// cause than the exit code does.
+    #[test]
+    fn oci_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+
+        let transient = || ClientError::RegistryTransient(Box::new(std::io::Error::other("connect refused")));
+        assert_detail(&transient(), "registry_transient");
+        let mirrored = ClientError::Mirrored {
+            origin: "ghcr.io".to_string(),
+            mirror: "artifactory.example.com".to_string(),
+            physical: "artifactory.example.com/ghcr-remote/owner/tool:1.0".to_string(),
+            source: Box::new(transient()),
+        };
+        assert_detail(&mirrored, "registry_transient");
+        let escape = ocx_util::archive::Error::SymlinkEscape {
+            link: PathBuf::from("escape"),
+            target: PathBuf::from("../../../../etc"),
+        };
+        assert_detail(&ClientError::internal(escape), "archive_symlink_escape");
+        assert_detail(
+            &ClientError::internal(std::io::Error::other("opaque cause")),
+            "client_internal",
+        );
+        let probe = AuthError::ProbeFailed {
+            registry: "localhost:5000".into(),
+            source: Box::new(transient()),
+        };
+        assert_detail(&probe, "registry_transient");
+        let unresolvable = || SsrfError::Resolution {
+            host: "fulcio.invalid".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "failed to lookup address information"),
+        };
+        assert_detail(&unresolvable(), "host_resolution_failed");
+        assert_detail(&UrlRejection::from(unresolvable()), "endpoint_unresolvable");
+        let forbidden = || SsrfError::ForbiddenTarget {
+            host: "169.254.169.254".to_string(),
+            ip: ip("169.254.169.254"),
+        };
+        assert_detail(&forbidden(), "ssrf_forbidden_target");
+        assert_detail(&UrlRejection::from(forbidden()), "invalid_endpoint_url");
+        let bad_scheme = unwrap_err(validate_sigstore_url("ftp://example.com/bundle", "--rekor-url"));
+        assert_detail(&bad_scheme, "invalid_endpoint_url");
     }
 
     // fixture from ocx_lib (oci/endpoint)

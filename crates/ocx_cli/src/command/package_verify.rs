@@ -135,7 +135,7 @@ impl PackageVerify {
         // `both` is a usage error (64): a verdict cannot report "either shape satisfied me".
         let signature_format = self.signature_format.pin().map_err(crate::error::UsageError::from)?;
 
-        // Parsed up front, or `--key awskms://…` fails later as a missing file instead of exit 85.
+        // Parsed up front, or `--key awskms://…` fails later as a missing file instead of exit 82.
         let key = self
             .key
             .reference()
@@ -192,21 +192,13 @@ impl PackageVerify {
             .map_err(package_sign_common::verify_error_into_anyhow)?
             .signatures;
 
-        let signatures: Vec<SignatureEntry> = verified.iter().map(Self::signature_entry).collect();
-        // `VerifyPipeline::run` puts the passing verdict first, so `signatures[0]` matches the flat fields.
-        let Some(result) = verified.into_iter().next() else {
+        // `VerifyPipeline::run` puts the passing verdict first.
+        let mut signatures = verified.iter().map(Self::signature_entry);
+        let Some(passing) = signatures.next() else {
             unreachable!("a successful verify returns at least one signature");
         };
-
-        // Empty under `--key`: the flat fields are frozen as `String`; `signatures[]` keeps the typed absence.
-        let mut report = VerificationReport::new(
-            result.subject_digest,
-            result.referrer_digest,
-            result.certificate_identity.unwrap_or_default(),
-            result.certificate_oidc_issuer.unwrap_or_default(),
-            result.signed_at.map(package_sign_common::iso8601).unwrap_or_default(),
-        );
-        report.signatures = signatures;
+        let subject_digest = verified[0].subject_digest.clone();
+        let report = VerificationReport::new(subject_digest, passing, signatures.collect());
         context.api().report(&report)?;
         Ok(ExitCode::SUCCESS)
     }
@@ -221,7 +213,7 @@ impl PackageVerify {
             referrer_digest: result.referrer_digest.clone(),
             certificate_identity: result.certificate_identity.clone(),
             certificate_oidc_issuer: result.certificate_oidc_issuer.clone(),
-            signed_at: result.signed_at.map(package_sign_common::iso8601),
+            signed_at: result.signed_at.and_then(package_sign_common::signed_at),
             rekor_log_index: result.rekor_log_index,
         }
     }
@@ -336,15 +328,11 @@ mod tests {
         assert_eq!(row["certificate_identity"], "ocx-test@example.com");
         assert_eq!(row["certificate_oidc_issuer"], "http://dex:5556/dex");
         assert_eq!(row["rekor_log_index"], 11);
-        assert_eq!(
-            row["signed_at"],
-            package_sign_common::iso8601(1_787_969_275),
-            "the row states the instant in the same spelling the flat report does",
-        );
+        assert_eq!(row["signed_at"], "2026-08-29T02:07:55Z");
 
         // A key-mode candidate with no Rekor upload: the absences survive the
-        // projection as absences, never as empty strings — the whole reason the
-        // typed `Option`s exist beside the flat `String` fields.
+        // projection as absences, never as empty strings — the same rule the flat
+        // report fields follow.
         let key_mode = VerifyResult {
             key_backend: KeyBackendKind::File,
             certificate_identity: None,

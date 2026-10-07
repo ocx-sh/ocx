@@ -43,17 +43,43 @@ impl std::error::Error for SharedError {
 }
 
 /// Error from a singleflight wait.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "SingleflightError")]
 pub enum Error {
     /// The leader failed; transparent, so a deduplicated call reports the message a direct call would.
+    ///
+    /// Classifies `None` so the walker reaches the leader's typed error; a `Some` would mask its code.
     #[error(transparent)]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "singleflight_failed",
+            summary = "Shared in-flight work failed with an unclassified cause"
+        )
+    )]
     Failed(SharedError),
     /// The leader's [`Handle`] was dropped without completing.
     #[error("singleflight leader abandoned")]
+    #[exit(
+        Failure,
+        slug = "singleflight_abandoned",
+        summary = "The leader of shared in-flight work stopped without a result"
+    )]
     Abandoned,
     #[error("singleflight wait timed out")]
+    #[exit(
+        TempFail,
+        slug = "singleflight_timeout",
+        summary = "Waiting for shared in-flight work timed out"
+    )]
     Timeout,
     #[error("singleflight capacity exceeded (max {max})")]
+    #[exit(
+        TempFail,
+        slug = "singleflight_capacity_exceeded",
+        summary = "Too many distinct operations were in flight at once"
+    )]
     CapacityExceeded { max: usize },
 }
 

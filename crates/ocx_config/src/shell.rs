@@ -48,7 +48,7 @@ pub struct ShellConfig {
     pub hook: Option<bool>,
 
     /// Whether shell completions load, with the same precedence as `hook`:
-    /// `--completion` / `--no-completion` and a truthy `OCX_NO_COMPLETIONS` win.
+    /// `--completion` / `--no-completion` and a truthy `OCX_NO_COMPLETION` win.
     pub completions: Option<bool>,
 
     /// Whether `ocx self setup` may write PATH surfaces — shell profiles and
@@ -589,7 +589,7 @@ pub fn consent_entry_defect(entry: &Path) -> Option<EntryDefect> {
 
 /// `entry` with a leading `~` expanded textually against this machine's home directory.
 fn expanded_entry(entry: &Path) -> Result<PathBuf, EntryDefect> {
-    expand_against(entry, ocx_util::env::home_dir().as_deref())
+    expand_against(entry, ocx_env::home_dir().as_deref())
 }
 
 /// [`expanded_entry`] against an explicit home directory.
@@ -674,8 +674,8 @@ fn parse_consent_namespaces(value: &str) -> Option<ConsentScopeSpec> {
 pub fn effective_consent(configured: Option<&ShellConfig>) -> ShellConsent {
     let mut consent = configured.and_then(|shell| shell.consent.clone()).unwrap_or_default();
     consent.merge(env_channel(
-        ocx_util::env::var(OCX_CONSENT_PATHS).as_deref(),
-        ocx_util::env::var(OCX_CONSENT_NAMESPACES).as_deref(),
+        ocx_env::OCX_CONSENT_PATHS.get().as_deref(),
+        ocx_env::OCX_CONSENT_NAMESPACES.get().as_deref(),
     ));
     consent
 }
@@ -1184,7 +1184,7 @@ mod tests {
         // End to end, against this machine's own home. Both branches assert:
         // a machine with no home directory must make the entry inert, not
         // make this test vacuous.
-        match ocx_util::env::home_dir() {
+        match ocx_env::home_dir() {
             Some(home) => {
                 assert!(
                     consent_path_matches(Path::new("~/dev/*"), &home.join("dev").join("acme")),

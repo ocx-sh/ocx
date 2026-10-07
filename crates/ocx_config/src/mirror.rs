@@ -118,13 +118,22 @@ pub struct MirrorConfig {
 }
 
 /// Error parsing a mirror `url` or `[mirrors]` value, or resolving the mirror map.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    ConfigError,
+    slug = "mirror_config_invalid",
+    summary = "A registry mirror setting is invalid"
+)]
 pub enum MirrorConfigError {
     /// A role's `url` was absent or empty — a no-op mirror that would silently
     /// egress to the blocked upstream host.
     #[error("mirror url is missing or empty")]
     MissingUrl,
+    /// A role's `url` carries userinfo (`user:password@host`); the message never echoes the url,
+    /// since that would print the credential.
+    #[error("mirror url must not carry credentials; configure registry authentication instead")]
+    CredentialsInUrl,
     /// A role's `url` had no host segment after stripping the scheme.
     #[error("mirror url has no host: {url}")]
     MissingHost {
@@ -308,8 +317,8 @@ where
 ///
 /// # Errors
 ///
-/// [`MirrorConfigError::MissingUrl`] for an empty `url`, [`MirrorConfigError::MissingHost`] for
-/// one with no host.
+/// [`MirrorConfigError::MissingUrl`] for an empty `url`, [`MirrorConfigError::CredentialsInUrl`]
+/// for one carrying userinfo, [`MirrorConfigError::MissingHost`] for one with no host.
 pub fn parse_url(url: &str) -> Result<ParsedMirror, MirrorConfigError> {
     if url.is_empty() {
         return Err(MirrorConfigError::MissingUrl);
@@ -325,6 +334,11 @@ pub fn parse_url(url: &str) -> Result<ParsedMirror, MirrorConfigError> {
         Some((host, prefix)) => (host, prefix),
         None => (rest, ""),
     };
+
+    // Checked before any error that echoes `url`, or the refusal prints the password.
+    if host.contains('@') {
+        return Err(MirrorConfigError::CredentialsInUrl);
+    }
 
     if host.is_empty() {
         return Err(MirrorConfigError::MissingHost { url: url.to_string() });
@@ -419,6 +433,33 @@ fn resolve_mirror_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mirror_url_with_userinfo_is_refused_without_echoing_it() {
+        for url in [
+            "http://user:s3cret-pw@mirror.corp:5000/v2",
+            "https://token-only@mirror.corp",
+            "user:s3cret-pw@mirror.corp",
+        ] {
+            let error = parse_url(url).expect_err(url);
+            assert!(matches!(error, MirrorConfigError::CredentialsInUrl), "{url}: {error:?}");
+            let wrapped = resolve_mirror_role("ghcr.io", url, &[]).expect_err(url);
+            let mut rendered = wrapped.to_string();
+            let mut cause = std::error::Error::source(&wrapped);
+            while let Some(inner) = cause {
+                rendered.push_str(&format!(": {inner}"));
+                cause = inner.source();
+            }
+            assert!(
+                !rendered.contains("s3cret-pw") && !rendered.contains("token-only"),
+                "{rendered}"
+            );
+        }
+        assert!(
+            parse_url("https://mirror.corp/a@b").is_ok(),
+            "an @ in the path is not userinfo"
+        );
+    }
 
     /// The refusal has to name the config key, quoted with its port, or the
     /// operator is told only half the fix. Asserting the rendered text is the

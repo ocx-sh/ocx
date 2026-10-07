@@ -27,12 +27,12 @@ def test_install_link_creates_link_and_which_reads_it(
     link = tmp_path / "tools" / "pkg"
 
     result = ocx.json("package", "install", "--link", str(link), pkg.short)
-    assert Path(result[pkg.short]["path"]) == link
+    assert Path(result["packages"][pkg.short]["path"]) == link
     assert_symlink_exists(link)
     assert (link / "content").is_dir()
 
     which = ocx.json("package", "which", "--link", str(link), pkg.short)
-    assert Path(which[pkg.short]["path"]) == link
+    assert Path(which["paths"][pkg.short]["path"]) == link
 
 
 def test_env_link_roots_values_in_the_link(
@@ -45,7 +45,7 @@ def test_env_link_roots_values_in_the_link(
 
     home_key = pkg.repo.upper().replace("-", "_") + "_HOME"
     env_result = ocx.json("package", "env", "--link", str(link), pkg.short)
-    home_entry = next(e for e in env_result["entries"] if e["key"] == home_key)
+    home_entry = next(e for e in env_result["items"] if e["key"] == home_key)
     assert home_entry["value"].startswith(str(link))
 
 

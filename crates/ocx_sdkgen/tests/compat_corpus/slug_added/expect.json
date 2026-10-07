@@ -1,0 +1,6 @@
+{
+  "kind": "errors",
+  "verdict": "non_break",
+  "change": "The slug `tag_not_found` is added.",
+  "findings": []
+}

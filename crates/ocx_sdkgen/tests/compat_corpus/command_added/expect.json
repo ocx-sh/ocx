@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "`package tag` is added.",
+  "findings": []
+}

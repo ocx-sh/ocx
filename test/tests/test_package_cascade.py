@@ -45,11 +45,11 @@ def _repair(ocx: OcxRunner, *args: str, index_dir: Path | None = None, check: bo
 
 
 def _reports(result) -> list[dict]:
-    return json.loads(result.stdout)["reports"]
+    return json.loads(result.stdout)["items"]
 
 
 def _entries(result) -> list[dict]:
-    return json.loads(result.stdout)["entries"]
+    return json.loads(result.stdout)["items"]
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def test_j2_repair_re_points_a_broken_alias_without_publishing_new_content(
     repaired = _repair(ocx, unique_repo)
     assert repaired.returncode == 0
     outcomes = [o for o in _entries(repaired)[0]["outcomes"] if o["tag"] == "latest"]
-    assert outcomes and outcomes[0]["outcome"]["outcome"] == "written"
+    assert outcomes and outcomes[0]["outcome"]["type"] == "written"
 
     healed = _check(ocx, unique_repo)
     assert healed.returncode == 0
@@ -166,7 +166,7 @@ def test_j3_never_created_aliases_become_present_after_repair(
     assert broken.returncode == 65
     broken_report = _reports(broken)[0]
     assert broken_report["aliases"], "the whole default track is in scope"
-    assert all(state["state"] == "absent" for state in broken_report["aliases"].values())
+    assert all(state["type"] == "absent" for state in broken_report["aliases"].values())
 
     repaired = _repair(ocx, unique_repo)
     assert repaired.returncode == 0
@@ -174,7 +174,7 @@ def test_j3_never_created_aliases_become_present_after_repair(
     healed = _check(ocx, unique_repo)
     assert healed.returncode == 0
     healed_report = _reports(healed)[0]
-    assert all(state["state"] == "present" for state in healed_report["aliases"].values())
+    assert all(state["type"] == "present" for state in healed_report["aliases"].values())
 
 
 def test_j4_a_scoped_repair_leaves_the_sibling_majors_alias_untouched(
@@ -258,25 +258,24 @@ def test_j8_json_key_sets_are_stable(ocx: OcxRunner, published_package: PackageI
     row's `platform` object carries.
     """
     check_payload = json.loads(_check(ocx, published_package.repo).stdout)
-    assert set(check_payload.keys()) == {"reports"}
-    report = check_payload["reports"][0]
+    assert set(check_payload.keys()) == {"schema_version", "items"}
+    report = check_payload["items"][0]
     assert set(report.keys()) == {
         "aliases",
         "identifier",
         "ignored_tags",
         "index_findings",
-        "logical",
         "rows",
         "unrepairable",
-    }
+    }, "a physical identifier has no `logical` name, so the key is omitted"
     assert report["rows"], "a single-version, single-platform package still reports its ok rows"
     assert set(report["rows"][0]["platform"].keys()) == {"architecture", "os"}, (
         "no null-valued variant/os.features cruft for an unqualified platform"
     )
 
     repair_payload = json.loads(_repair(ocx, published_package.repo, "--dry-run").stdout)
-    assert set(repair_payload.keys()) == {"dry_run", "entries", "tags_file"}
-    assert set(repair_payload["entries"][0].keys()) == {"outcomes", "planned", "report", "tags"}, (
+    assert set(repair_payload.keys()) == {"schema_version", "dry_run", "items"}, "no `--tags-file`, so no `tags_file`"
+    assert set(repair_payload["items"][0].keys()) == {"outcomes", "planned", "report", "tags"}, (
         "one vocabulary per document: the per-entry tag list is `tags`, beside the run-wide `tags_file`"
     )
 
@@ -373,7 +372,7 @@ def test_j10_logical_check_reports_index_staleness(
         report = _reports(stale)[0]
         findings = {finding["tag"]: finding for finding in report["index_findings"]}
         assert findings["latest"] == {
-            "finding": "stale",
+            "type": "stale",
             "tag": "latest",
             "committed": before_digests["latest"],
             "live": after_latest_digest,
@@ -439,7 +438,7 @@ def test_j12_tags_file_holds_exactly_the_created_aliases(
 
     created = sorted(line for line in tags_path.read_text().splitlines() if line)
     assert created == expected
-    assert json.loads(result.stdout)["entries"][0]["tags"] == created
+    assert json.loads(result.stdout)["items"][0]["tags"] == created
 
     again = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
     assert again.returncode == 0

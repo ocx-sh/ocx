@@ -1123,7 +1123,7 @@ has. [`ocx config push`][cmd-config-push] refuses a managed-config payload that 
 `kind = "key"` signer by path, naming `key_pem` as the fix (exit `78`, a configuration error):
 inline the key with `key_pem` before publishing it. A KMS reference is not a path and is not
 refused for this reason — it travels with the payload and means the same thing on every
-consumer — but a backend OCX has not implemented yet is refused as exit `85`
+consumer — but a backend OCX has not implemented yet is refused as exit `82`
 (`unsupported_key_backend`), the same code `--key` and a local tier answer for it. Local tiers — project, operator, and user
 config on the author's own disk — leave `key` unrestricted; the refusal applies only to a
 published payload.
@@ -1567,8 +1567,8 @@ direction, including a [`[managed]`](#keys-managed) tier over your own
 Whether [`ocx self activate`][cmd-self-activate] injects shell-completion definitions at
 shell start. Resolved by the identical four-rung ladder above, evaluated completely
 independently of `hook`: `--completion` / `--no-completion`, then
-[`OCX_NO_COMPLETIONS`][env-no-completions], then `[shell] completions`, then auto.
-[`OCX_NO_HOOK`][env-no-hook] never reaches this ladder, and `OCX_NO_COMPLETIONS` never
+[`OCX_NO_COMPLETION`][env-no-completion], then `[shell] completions`, then auto.
+[`OCX_NO_HOOK`][env-no-hook] never reaches this ladder, and `OCX_NO_COMPLETION` never
 reaches `hook`'s — each rung 2 reads its own environment key and nothing else.
 
 Set the same way as `hook`: [`ocx self setup`][cmd-self-setup]'s `--completion` /
@@ -2134,7 +2134,8 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 | `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v3.json`][schema-project-lock] |
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
 | Patch descriptor (`ocx patch publish --descriptor`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
-| `--format json` output (every command) | [`https://ocx.sh/schemas/reports/v1.json`][schema-reports] |
+| `--format json` output (every command) | [`https://ocx.sh/schemas/reports/v2.json`][schema-reports] |
+| Error document (`--format json` on failure) | [`https://ocx.sh/schemas/errors/v2.json`][schema-errors] |
 | Execution record (`[records]` sink) | [`https://ocx.sh/schemas/execution-record/v1.json`][schema-execution-record] |
 
 `ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. A patch descriptor is plain JSON, so add a `"$schema": "https://ocx.sh/schemas/patch/v1.json"` key to get the same autocompletion and validation while authoring it. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
@@ -2185,7 +2186,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [schema-project-lock]: https://ocx.sh/schemas/project-lock/v3.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
-[schema-reports]: https://ocx.sh/schemas/reports/v1.json
+[schema-reports]: https://ocx.sh/schemas/reports/v2.json
+[schema-errors]: https://ocx.sh/schemas/errors/v2.json
 [schema-execution-record]: https://ocx.sh/schemas/execution-record/v1.json
 
 <!-- in-depth -->
@@ -2240,7 +2242,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-remote]: ./environment.md#ocx-remote
 [env-insecure-registries]: ./environment.md#ocx-insecure-registries
 [env-mirrors]: ./environment.md#ocx-mirrors
-[env-log]: ./environment.md#ocx-log
+[env-log]: ./environment.md#ocx-log-level
 [env-ocx-patches]: ./environment.md#ocx-patches
 [env-ocx-launch-identities]: ./environment.md#ocx-launch-identities
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
@@ -2250,7 +2252,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-ocx-env]: ./environment.md#ocx-env
 [env-ocx-lazy-mode]: ./environment.md#ocx-lazy-mode
 [env-no-hook]: ./environment.md#ocx-no-hook
-[env-no-completions]: ./environment.md#ocx-no-completions
+[env-no-completion]: ./environment.md#ocx-no-completion
 [env-consent-paths]: ./environment.md#ocx-consent-paths
 [env-consent-namespaces]: ./environment.md#ocx-consent-namespaces
 [env-ocx-lazy-report]: ./environment.md#ocx-lazy-report

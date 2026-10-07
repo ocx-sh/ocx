@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --annotation` accepts one value per occurrence instead of many.",
+  "findings": [
+    {
+      "code": "G07",
+      "pointer": "/root/commands/0/commands/0/args/5",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

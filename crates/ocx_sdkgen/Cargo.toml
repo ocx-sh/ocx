@@ -1,0 +1,31 @@
+[package]
+name = "ocx_sdkgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "ocx-sdkgen"
+path = "src/main.rs"
+# The CLI only parses argv and calls the library, whose tests cover it.
+test = false
+
+[dependencies]
+# Reads the published documents and the `contract/` tables as data; links no `ocx_*` crate.
+clap.workspace = true
+serde.workspace = true
+# `preserve_order`: generated fields follow the document's order. Without it a
+# `-p ocx_sdkgen` build sorts them while a workspace or Bazel build (which
+# unify the feature in) does not, and the golden matches only one of them.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+# A scratch `OCX_HOME` for the SDK's integration run against the real binary.
+tempfile.workspace = true
+
+[lints]
+workspace = true

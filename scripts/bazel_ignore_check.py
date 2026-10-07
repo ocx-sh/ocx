@@ -75,8 +75,8 @@ SUITE_BUILD_FILES = 4
 `//test/doc_scripts:cast.bzl`. `buildfiles()` answers the BUILD files **and the
 `.bzl` files they load**, which is why a package can contribute more than one."""
 
-BUILDFILES_FLOOR = ROOT_BUILD_FILES + CRATE_PACKAGES + SUITE_BUILD_FILES  # 25
-"""Main-repository buildfiles in `//...`, measured: 25.
+BUILDFILES_FLOOR = ROOT_BUILD_FILES + CRATE_PACKAGES + SUITE_BUILD_FILES  # 29
+"""Main-repository buildfiles in `//...`, measured: 29.
 
 Written as a sum so a crate added without its floor rising cannot hide in a
 total. External repositories are excluded before this count — `@@bazel_features+//…`

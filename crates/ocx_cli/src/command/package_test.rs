@@ -516,6 +516,10 @@ impl PackageTest {
         // it rather than the exemption being taken for granted.
         let policy = context.records(ocx_package_manager::record::RecordsOptions::default())?;
         if td_guard.is_some() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "`ocx package test` is a maintainer preview over local artifacts; the resolved recording policy bounds the exemption"
+            )]
             // Bare invocation: spawn child, await exit, drop tempdir, propagate.
             let launch = Launch::exempt(process_env, &resolved, args, ExemptionReason::PackageTest, &policy)?;
             let status = launch::spawn_and_wait(launch).await.map_err(anyhow::Error::from)?;
@@ -526,6 +530,10 @@ impl PackageTest {
 
             Ok(child_process::propagate_exit_code(status))
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "`ocx package test` is a maintainer preview over local artifacts; the resolved recording policy bounds the exemption"
+            )]
             // --keep or --output path: directory persists; use execvp which
             // diverges on Unix (Drop never runs, but that's fine here because
             // td_guard is None).

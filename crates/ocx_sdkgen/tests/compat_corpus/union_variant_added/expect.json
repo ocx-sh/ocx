@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushEvent gains the `mounted` variant; the unknown arm's derived `not.enum` grows with it and reports nothing.",
+  "findings": []
+}

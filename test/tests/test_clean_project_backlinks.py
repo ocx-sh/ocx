@@ -190,7 +190,7 @@ def _run_clean_json(
         f"ocx clean --dry-run failed: rc={result.returncode}\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     )
-    entries: list[dict] = json.loads(result.stdout)
+    entries: list[dict] = json.loads(result.stdout)["items"]
     return entries
 
 
@@ -631,7 +631,7 @@ def test_transiently_unreachable_holder_survives_clean(
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     )
 
-    entries: list[dict] = json.loads(result.stdout)
+    entries: list[dict] = json.loads(result.stdout)["items"]
     object_entries = [e for e in entries if e.get("kind") == "object"]
     free_entries = [e for e in object_entries if not e.get("held_by")]
 
@@ -738,7 +738,7 @@ def test_live_holder_with_unreadable_lock_survives_clean(
         f"stdout:\n{result.stdout}"
     )
 
-    entries: list[dict] = json.loads(result.stdout)
+    entries: list[dict] = json.loads(result.stdout)["items"]
     object_entries = [e for e in entries if e.get("kind") == "object"]
     free_entries = [e for e in object_entries if not e.get("held_by")]
 

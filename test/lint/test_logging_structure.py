@@ -1,6 +1,6 @@
 """The logging oracle's row table is complete against the tree.
 
-`tests/test_logging.py` pins, per library crate, that an `OCX_LOG=<target>=<level>`
+`tests/test_logging.py` pins, per library crate, that an `OCX_LOG_LEVEL=<target>=<level>`
 directive selects that crate's `log::` lines. Its `LIBRARY_TARGETS` table is
 only as good as its coverage of the crates that actually log, and that is a
 fact about `crates/*/src/**/*.rs`, not about the binary — so the completeness

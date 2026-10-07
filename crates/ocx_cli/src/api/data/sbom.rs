@@ -19,8 +19,8 @@ pub struct SbomListingReport {
     /// One-glance counts, so a consumer branches on a field instead of
     /// measuring an array.
     pub summary: ListingSummary,
-    /// One entry per verified attestation, in listing order.
-    pub entries: Vec<SbomEntry>,
+    /// One entry per listed attestation, in listing order.
+    pub attestations: Vec<SbomEntry>,
     /// Every candidate examined and refused, in listing order. Never
     /// truncated in JSON.
     pub refused: Vec<RefusedEntry>,
@@ -42,21 +42,27 @@ pub enum ListingVerification {
     Unverified,
 }
 
+/// Whether every examined candidate was listed.
+///
+/// A refusal beside a listing is a partial failure the caller is told about and
+/// the run still exits 0, even when every document refused under `--summary`.
+/// Only a zero-match scan exits non-zero (79), and it prints no listing.
+#[derive(Debug, Serialize, schemars::JsonSchema, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ListingStatus {
+    /// Nothing was refused.
+    Success,
+    /// At least one candidate was refused; see `refused`.
+    PartialFailure,
+}
+
 /// The counts and the status a script branches on.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListingSummary {
-    /// `success` when nothing was refused, `partial_failure` otherwise.
-    pub status: &'static str,
+    /// Whether any candidate was refused.
+    pub status: ListingStatus,
     /// Which trust contract produced this listing: `verified` or `unverified`.
     pub verification: ListingVerification,
-    /// Mirrors the process exit code. Always 0 here, as a posture rather than
-    /// as an unreachability claim: a refusal beside a listing is a partial
-    /// failure the caller is told about and still exits 0 for, and under
-    /// `--summary` that includes a listing whose `entries` ended up empty
-    /// because every document refused. Only the library's own zero-match scan
-    /// exits non-zero — `AttestationNotFound` (79) — and it never reaches a
-    /// report at all.
-    pub exit_code: u8,
     /// `verified + unverified + refused` — every candidate the scan examined.
     pub total: usize,
     /// Attestations that passed every check.
@@ -93,7 +99,7 @@ pub struct SbomEntry {
     pub shadowed: bool,
     /// The target digest. Proven bound by the signed Statement when
     /// `verified`; claimed by the referrer otherwise.
-    pub subject_digest: String,
+    pub subject_digest: ocx_oci::Digest,
     /// What carried the document — **not always a manifest**.
     ///
     /// Almost always the OCI referrer manifest's digest; the **layer** blob's
@@ -104,22 +110,18 @@ pub struct SbomEntry {
     /// `ocx package verify --attestation --format json`, whose `signatures[]`
     /// rows carry `signature_format`.
     // Only the `.att` reader yields a layer digest here: an SBOM scan never enables `discover_simplesigning`.
-    pub referrer_digest: String,
+    pub referrer_digest: ocx_oci::Digest,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
-    /// Rekor integrated time, RFC 3339 with an explicit `Z`.
+    /// Rekor integrated time. Absent when no transparency record exists or its time is unrepresentable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub signed_at: Option<String>,
+    pub signed_at: Option<ocx_util::time::Timestamp>,
     /// Populated only under `--summary`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub summary: Option<SbomSummaryOut>,
 }
 
@@ -130,13 +132,11 @@ pub struct SbomSummaryOut {
     pub spec_version: String,
     /// `serialNumber`, when the document carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub serial_number: Option<String>,
     /// Length of the top-level `components` array.
     pub component_count: usize,
     /// `metadata.component.name`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub top_level_component: Option<String>,
 }
 
@@ -154,8 +154,11 @@ impl From<ocx_sign::sbom::SbomSummary> for SbomSummaryOut {
 /// One candidate that was examined and refused.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct RefusedEntry {
-    /// The referrer's digest, verbatim as the registry listed it.
-    pub referrer_digest: String,
+    /// The referrer's digest as the registry listed it. Absent when no
+    /// well-formed digest names the candidate: a budget-stop row, or a
+    /// registry listing a malformed digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referrer_digest: Option<ocx_oci::Digest>,
     /// Why this candidate was refused, as prose for a human. Registry-sourced
     /// either way: several kinds quote a field read off the wire.
     pub reason: String,
@@ -169,30 +172,29 @@ pub struct RefusedEntry {
 }
 
 impl SbomListingReport {
-    pub fn new(verification: ListingVerification, entries: Vec<SbomEntry>, refused: Vec<RefusedEntry>) -> Self {
-        let verified = entries.iter().filter(|entry| entry.verified).count();
+    pub fn new(verification: ListingVerification, attestations: Vec<SbomEntry>, refused: Vec<RefusedEntry>) -> Self {
+        let verified = attestations.iter().filter(|entry| entry.verified).count();
         // Asserted, not derived: derived, an empty demanded listing would read `unverified`.
         debug_assert!(
-            verification == ListingVerification::Unverified || verified == entries.len(),
+            verification == ListingVerification::Unverified || verified == attestations.len(),
             "a demanded listing must carry no unverified rows",
         );
         let summary = ListingSummary {
             verification,
             status: if refused.is_empty() {
-                "success"
+                ListingStatus::Success
             } else {
-                "partial_failure"
+                ListingStatus::PartialFailure
             },
-            exit_code: 0,
-            total: entries.len() + refused.len(),
+            total: attestations.len() + refused.len(),
             verified,
-            // Derived, so the two counts always sum to `entries.len()`.
-            unverified: entries.len() - verified,
+            // Derived, so the two counts always sum to `attestations.len()`.
+            unverified: attestations.len() - verified,
             refused: refused.len(),
         };
         Self {
             summary,
-            entries,
+            attestations,
             refused,
         }
     }
@@ -207,10 +209,10 @@ impl SbomListingReport {
         let mut detail = Vec::new();
 
         // Shadowed rows stay in JSON, marked; plain shows only the winner.
-        for entry in self.entries.iter().filter(|entry| !entry.shadowed) {
+        for entry in self.attestations.iter().filter(|entry| !entry.shadowed) {
             kind.push(sanitize_for_terminal(&entry.predicate_type));
-            subject.push(sanitize_for_terminal(&short_digest(&entry.subject_digest)));
-            referrer.push(sanitize_for_terminal(&entry.referrer_digest));
+            subject.push(sanitize_for_terminal(&entry.subject_digest.to_short_string()));
+            referrer.push(sanitize_for_terminal(&entry.referrer_digest.to_string()));
             detail.push(sanitize_for_terminal(&entry.describe_plain()));
         }
 
@@ -218,7 +220,7 @@ impl SbomListingReport {
         for refusal in self.refused.iter().take(MAX_PLAIN_REFUSALS) {
             kind.push("refused".to_string());
             subject.push(String::new());
-            referrer.push(sanitize_for_terminal(&refusal.referrer_digest));
+            referrer.push(sanitize_for_terminal(&refusal.digest_label()));
             detail.push(sanitize_for_terminal(&refusal.reason));
         }
         if let Some(hidden) = self.refused.len().checked_sub(MAX_PLAIN_REFUSALS).filter(|n| *n > 0) {
@@ -232,10 +234,14 @@ impl SbomListingReport {
     }
 }
 
-/// A wire digest in short form (`sha256:` + 12 hex), verbatim when it does not parse; `Referrer`
-/// already spends the view's one full digest.
-fn short_digest(digest: &str) -> String {
-    ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
+impl RefusedEntry {
+    /// The plain `Referrer` cell: the digest, or blank when none names the candidate.
+    fn digest_label(&self) -> String {
+        self.referrer_digest
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
 }
 
 impl SbomEntry {
@@ -245,7 +251,9 @@ impl SbomEntry {
         // Keyed on `verified`, never on the signing fields, or one missing field relabels a verified document.
         let mut detail = match (self.verified, &self.certificate_identity, &self.certificate_oidc_issuer) {
             (true, Some(identity), Some(issuer)) => {
-                let signed_at = self.signed_at.as_deref().unwrap_or("an unknown time");
+                let signed_at = self
+                    .signed_at
+                    .map_or_else(|| "an unknown time".to_string(), |at| at.to_string());
                 format!("{identity} ({issuer}) signed {signed_at}")
             }
             (true, _, _) => "verified".to_string(),
@@ -266,6 +274,9 @@ impl SbomEntry {
 }
 
 impl Printable for SbomListingReport {
+    const SCHEMA_VERSION: u32 = 2;
+    const ROOT: &'static str = "SbomListingReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let columns: [Column; 4] = ["Type".into(), "Subject".into(), "Referrer".into(), "Detail".into()];
         let rows = self
@@ -273,44 +284,43 @@ impl Printable for SbomListingReport {
             .map(|column| column.into_iter().map(Cell::from).collect::<Vec<_>>());
         data.print_table(&columns, &rows);
     }
-
-    /// Emits the success envelope `{"schema_version":1,"command":"package sbom","exit_code":0,"data":{...}}`.
-    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        let json = crate::error_envelope::render_success_envelope("package sbom", self)?;
-        let parsed: serde_json::Value = serde_json::from_str(&json)?;
-        Ok(data.print_json(&parsed)?)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A full-length sha256 digest of one repeated hex character.
+    fn digest(fill: char) -> ocx_oci::Digest {
+        ocx_oci::Digest::Sha256(fill.to_string().repeat(64))
+    }
+
+    fn at(instant: &str) -> ocx_util::time::Timestamp {
+        serde_json::from_value(serde_json::Value::from(instant)).expect("an RFC 3339 instant")
+    }
+
     fn entry(identity: &str) -> SbomEntry {
         SbomEntry {
             predicate_type: "https://cyclonedx.org/bom".into(),
             verified: true,
             shadowed: false,
-            subject_digest: "sha256:aaaa".into(),
-            referrer_digest: "sha256:bbbb".into(),
+            subject_digest: digest('a'),
+            referrer_digest: digest('b'),
             certificate_identity: Some(identity.into()),
             certificate_oidc_issuer: Some("https://token.actions.githubusercontent.com".into()),
-            signed_at: Some("2026-08-19T10:00:00Z".into()),
+            signed_at: Some(at("2026-08-19T10:00:00Z")),
             summary: None,
         }
     }
 
     /// The unsigned twin: same document, nothing vouching for it.
-    fn unverified_entry(referrer_digest: &str) -> SbomEntry {
+    fn unverified_entry(referrer_digest: ocx_oci::Digest) -> SbomEntry {
         SbomEntry {
             predicate_type: "https://cyclonedx.org/bom".into(),
             verified: false,
             shadowed: false,
-            subject_digest: "sha256:aaaa".into(),
-            referrer_digest: referrer_digest.into(),
+            subject_digest: digest('a'),
+            referrer_digest,
             certificate_identity: None,
             certificate_oidc_issuer: None,
             signed_at: None,
@@ -331,7 +341,7 @@ mod tests {
     fn the_summary_partitions_entries_by_trust_class() {
         let report = SbomListingReport::new(
             ListingVerification::Unverified,
-            vec![entry("signer@example.com"), unverified_entry("sha256:cccc")],
+            vec![entry("signer@example.com"), unverified_entry(digest('c'))],
             Vec::new(),
         );
 
@@ -339,7 +349,7 @@ mod tests {
         assert_eq!(report.summary.unverified, 1);
         assert_eq!(
             report.summary.verified + report.summary.unverified,
-            report.entries.len(),
+            report.attestations.len(),
             "the two counts must partition the entries, not overlap or leak",
         );
 
@@ -358,7 +368,7 @@ mod tests {
     /// them empty — an empty SAN reads as an identity that failed to render.
     #[test]
     fn an_unverified_entry_omits_the_signing_keys() {
-        let json = serde_json::to_value(unverified_entry("sha256:cccc")).expect("serialize");
+        let json = serde_json::to_value(unverified_entry(digest('c'))).expect("serialize");
         assert_eq!(json["verified"], false);
         for absent in ["certificate_identity", "certificate_oidc_issuer", "signed_at"] {
             assert!(json.get(absent).is_none(), "{absent} must be absent, not empty");
@@ -383,7 +393,7 @@ mod tests {
     /// `false` cannot pass.
     #[test]
     fn sbom_entry_json_shape_always_carries_shadowed() {
-        for entry in [entry("you@example.com"), unverified_entry("sha256:cccc")] {
+        for entry in [entry("you@example.com"), unverified_entry(digest('c'))] {
             let verified = entry.verified;
             let json = serde_json::to_value(entry).expect("serialize");
             let object = json.as_object().expect("entry serializes as an object");
@@ -412,7 +422,7 @@ mod tests {
     fn a_shadowed_document_leaves_the_table_and_stays_in_json() {
         let superseded = SbomEntry {
             shadowed: true,
-            referrer_digest: "sha256:dddd".into(),
+            referrer_digest: digest('d'),
             ..entry("you@example.com")
         };
         let report = SbomListingReport::new(
@@ -421,24 +431,24 @@ mod tests {
             Vec::new(),
         );
 
-        let json = crate::error_envelope::render_success_envelope("package sbom", &report).expect("render");
-        assert!(
-            json.contains("sha256:dddd"),
+        let superseded = digest('d').to_string();
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(
+            json["attestations"][1]["referrer_digest"], superseded,
             "a consumer that asked for machine output gets the full picture: {json}"
         );
-        assert!(
-            json.contains(r#""referrer_digest":"sha256:dddd","certificate_identity""#)
-                || json.contains(r#""shadowed":true"#),
+        assert_eq!(
+            json["attestations"][1]["shadowed"], true,
             "the superseded entry must be marked, not silently identical to the preferred one: {json}"
         );
 
         let out = rendered(&report);
         assert!(
-            !out.contains("sha256:dddd"),
+            !out.contains(&superseded),
             "the human default collapses to the preferred document: {out:?}"
         );
         assert!(
-            out.contains("sha256:bbbb"),
+            out.contains(&digest('b').to_string()),
             "positive control — the preferred document still renders, so the assertion above \
              cannot pass on an empty table: {out:?}"
         );
@@ -458,7 +468,7 @@ mod tests {
         let report = SbomListingReport::new(
             ListingVerification::Verified,
             vec![SbomEntry {
-                subject_digest: subject.clone(),
+                subject_digest: ocx_oci::Digest::try_from(subject.as_str()).expect("digest"),
                 ..entry("you@example.com")
             }],
             Vec::new(),
@@ -475,9 +485,9 @@ mod tests {
         );
     }
 
-    fn refusal(digest: &str, reason: &str) -> RefusedEntry {
+    fn refusal(referrer_digest: Option<ocx_oci::Digest>, reason: &str) -> RefusedEntry {
         RefusedEntry {
-            referrer_digest: digest.into(),
+            referrer_digest,
             reason: reason.into(),
             reason_kind: "payload_type_unsupported",
         }
@@ -507,7 +517,7 @@ mod tests {
             vec![entry("you@example.com")],
             Vec::new(),
         );
-        assert_eq!(clean.summary.status, "success");
+        assert_eq!(clean.summary.status, ListingStatus::Success);
         assert_eq!(
             (clean.summary.total, clean.summary.verified, clean.summary.refused),
             (1, 1, 0)
@@ -516,9 +526,9 @@ mod tests {
         let mixed = SbomListingReport::new(
             ListingVerification::Verified,
             vec![entry("you@example.com")],
-            vec![refusal("sha256:cccc", "payload type unsupported")],
+            vec![refusal(Some(digest('c')), "payload type unsupported")],
         );
-        assert_eq!(mixed.summary.status, "partial_failure");
+        assert_eq!(mixed.summary.status, ListingStatus::PartialFailure);
         assert_eq!(
             (mixed.summary.total, mixed.summary.verified, mixed.summary.refused),
             (2, 1, 1)
@@ -527,25 +537,30 @@ mod tests {
 
     /// The frozen `--format json` document. A change here is a wire change.
     #[test]
-    fn json_envelope_is_the_frozen_shape() {
+    fn json_document_is_the_frozen_shape() {
         let report = SbomListingReport::new(
             ListingVerification::Verified,
             vec![entry("you@example.com")],
-            vec![refusal("sha256:cccc", "payload type unsupported")],
+            vec![
+                refusal(Some(digest('c')), "payload type unsupported"),
+                refusal(None, "budget exhausted"),
+            ],
         );
-        let json = crate::error_envelope::render_success_envelope("package sbom", &report).expect("render");
+        let json = serde_json::to_string(&report).expect("serialize");
+        let (a, b, c) = (digest('a'), digest('b'), digest('c'));
         assert_eq!(
             json,
-            concat!(
-                r#"{"schema_version":1,"command":"package sbom","exit_code":0,"data":{"#,
-                r#""summary":{"status":"partial_failure","verification":"verified","exit_code":0,"total":2,"verified":1,"unverified":0,"refused":1},"#,
-                r#""entries":[{"predicate_type":"https://cyclonedx.org/bom","verified":true,"shadowed":false,"subject_digest":"sha256:aaaa","#,
-                r#""referrer_digest":"sha256:bbbb","certificate_identity":"you@example.com","#,
+            [
+                r#"{"summary":{"status":"partial_failure","verification":"verified","total":3,"verified":1,"unverified":0,"refused":2},"#,
+                r#""attestations":[{"predicate_type":"https://cyclonedx.org/bom","verified":true,"shadowed":false,"#,
+                &format!(r#""subject_digest":"{a}","referrer_digest":"{b}","certificate_identity":"you@example.com","#),
                 r#""certificate_oidc_issuer":"https://token.actions.githubusercontent.com","#,
                 r#""signed_at":"2026-08-19T10:00:00Z"}],"#,
-                r#""refused":[{"referrer_digest":"sha256:cccc","reason":"payload type unsupported","#,
-                r#""reason_kind":"payload_type_unsupported"}]}}"#,
-            ),
+                &format!(r#""refused":[{{"referrer_digest":"{c}","reason":"payload type unsupported","#),
+                r#""reason_kind":"payload_type_unsupported"},"#,
+                r#"{"reason":"budget exhausted","reason_kind":"payload_type_unsupported"}]}"#,
+            ]
+            .concat(),
         );
     }
 
@@ -560,7 +575,7 @@ mod tests {
             vec![entry("ev\u{202e}il@example.com")],
             Vec::new(),
         );
-        let json = crate::error_envelope::render_success_envelope("package sbom", &report).expect("render");
+        let json = serde_json::to_string(&report).expect("serialize");
         assert!(
             json.contains('\u{202e}'),
             "json must stay byte-verbatim so a consumer can diff it: {json}"
@@ -594,10 +609,7 @@ mod tests {
         let report = SbomListingReport::new(
             ListingVerification::Verified,
             Vec::new(),
-            vec![refusal(
-                "sha256:\u{202e}dead",
-                "predicate type mismatch: \u{202e}gpj.exe",
-            )],
+            vec![refusal(Some(digest('d')), "predicate type mismatch: \u{202e}gpj.exe")],
         );
         let out = rendered(&report);
         assert!(!out.contains('\u{202e}'), "RLO survived into a rendered cell: {out:?}");
@@ -611,7 +623,7 @@ mod tests {
             ListingVerification::Verified,
             Vec::new(),
             vec![refusal(
-                "sha256:dead",
+                Some(digest('d')),
                 "refused\nverified  sha256:beef  trusted@example.com",
             )],
         );
@@ -629,7 +641,7 @@ mod tests {
         let out = rendered(&report);
         for expected in [
             "https://cyclonedx.org/bom",
-            "sha256:bbbb",
+            &digest('b').to_string(),
             "you@example.com",
             "https://token.actions.githubusercontent.com",
             "2026-08-19T10:00:00Z",
@@ -643,7 +655,7 @@ mod tests {
     #[test]
     fn plain_truncates_the_refusal_fanout_and_json_does_not() {
         let refused: Vec<_> = (0..MAX_PLAIN_REFUSALS + 7)
-            .map(|n| refusal(&format!("sha256:{n:04}"), "payload type unsupported"))
+            .map(|n| refusal(None, &format!("payload type unsupported #{n:04}")))
             .collect();
         let report = SbomListingReport::new(ListingVerification::Verified, Vec::new(), refused);
 
@@ -659,19 +671,19 @@ mod tests {
             "the trailer must name the hidden count and where to read them: {out:?}"
         );
         assert!(
-            !out.contains("sha256:0026"),
+            !out.contains("#0026"),
             "the 27th refusal must not reach the terminal: {out:?}"
         );
 
-        let json = crate::error_envelope::render_success_envelope("package sbom", &report).expect("render");
-        assert!(json.contains("sha256:0026"), "--json is never truncated");
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(json.contains("#0026"), "--json is never truncated");
         assert_eq!(report.summary.refused, MAX_PLAIN_REFUSALS + 7);
     }
 
     #[test]
     fn an_exactly_full_head_gets_no_trailer() {
         let refused: Vec<_> = (0..MAX_PLAIN_REFUSALS)
-            .map(|n| refusal(&format!("sha256:{n:04}"), "payload type unsupported"))
+            .map(|_| refusal(None, "payload type unsupported"))
             .collect();
         let report = SbomListingReport::new(ListingVerification::Verified, Vec::new(), refused);
         assert_eq!(
@@ -696,10 +708,10 @@ mod tests {
         let body = module_code();
         for call in [
             "sanitize_for_terminal(&entry.predicate_type)",
-            "sanitize_for_terminal(&short_digest(&entry.subject_digest))",
-            "sanitize_for_terminal(&entry.referrer_digest)",
+            "sanitize_for_terminal(&entry.subject_digest.to_short_string())",
+            "sanitize_for_terminal(&entry.referrer_digest.to_string())",
             "sanitize_for_terminal(&entry.describe_plain())",
-            "sanitize_for_terminal(&refusal.referrer_digest)",
+            "sanitize_for_terminal(&refusal.digest_label())",
             "sanitize_for_terminal(&refusal.reason)",
         ] {
             assert!(

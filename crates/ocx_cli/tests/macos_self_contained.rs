@@ -14,9 +14,17 @@
 //! (ocx does none). Widen to a dlopen audit only if that ever changes.
 #![cfg(target_os = "macos")]
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running `otool` against the built binary"
+)]
 use std::process::Command;
 
 #[test]
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running `otool` against the built binary"
+)]
 fn ocx_links_only_system_dylibs() {
     let bin = env!("CARGO_BIN_EXE_ocx");
     let out = Command::new("otool").args(["-L", bin]).output().expect("run otool");

@@ -120,12 +120,12 @@ Otherwise, `AskUserQuestion`:
 - Stage files **by name**, never `git add -A` / `.`. Prevents accidentally-committed secrets **and** bug where pre-staged files from previous session get swept into commit whose message doesn't describe them.
 - Warn before staging anything matching `.env*`, `*credentials*`, `*.pem`, `*.key`, or `token` patterns; require explicit confirmation.
 - **`--amend` must fold dirty tree into HEAD.** When `/commit --amend` invoked and working tree has uncommitted changes, those changes **must** be staged and included in amend — `--amend` with nothing staged silently becomes message-only amend that drops user's active work. Always `git add <files>` before `git commit --amend`, even when user only asked to "amend". After amend, run `git show --stat HEAD` and confirm expected files appear in diff stat before reporting success.
-- Git's own `commit-msg` hook (a prek shim → `scripts/commit_gate.py`; `task git:hooks` installs it) blocks commits without fresh verify mark. When blocks, run `task verify:scoped --force` (or `task verify`; never `--no-verify`) — both write the mark themselves. **Before finalize, prefer the escape hatch** whenever the scoped run escalates or is slower than the change warrants: run the checks the change actually needs, then
+- Git's own `commit-msg` hook (a prek shim → `scripts/commit_gate.py`; `task git:hooks` installs it) blocks commits without fresh verify mark. When blocks, run `task verify:scoped --force` (or `task verify`; never `--no-verify`) — both write the mark themselves. **Before finalize, the escape hatch is always fine**: run the checks the change actually needs (none for docs), then
   ```sh
   task verify:mark
   ```
-  and name what was deferred in the commit body. The full `task verify` runs once, at finalize. Same hatch after a passing verify when only rebase / cherry-pick context changed.
-  Manual mark is `scoped`: never satisfies a `release:` commit (needs `task verify NOCACHE=1`), a commit on `main`, or a **merge commit** — while `MERGE_HEAD` exists only a full mark of the merged tree admits it, so a work-package merge is `git merge --no-ff --no-commit <branch>` → `task verify` → `git commit` (`workflow-git.md` § Work-Package Merges); `verify:mark` is always refused there (it only ever writes a `scoped` mark), and `verify:scoped` is refused too unless its plan escalates — an escalating run calls `task verify` itself and so writes the same full mark, which the merge accepts. Bare `echo $(date +%s) > …/commit-verified` reads as *not verified* and overwrites JSON mark a verify just wrote. A mark certifies one HEAD **and one working tree** — a sibling agent worktree at the same HEAD must earn its own. Then retry: staging survives, because the gate aborts the commit and never the `git add` before it.
+  and name what was deferred in the commit body. The full `task verify` runs once, at finalize.
+  Manual mark is `scoped`, unconditional on any branch — merge commits included; only a `release:` commit (needs `task verify NOCACHE=1`) and a commit on `main` need the full run. Level per change → `workflow-git.md` § Verification Levels. Bare `echo $(date +%s) > …/commit-verified` reads as *not verified* and overwrites JSON mark a verify just wrote. A mark certifies one HEAD **and one working tree** — a sibling agent worktree at the same HEAD must earn its own. Then retry: staging survives, because the gate aborts the commit and never the `git add` before it.
 - Commit with HEREDOC:
 
   ```sh
@@ -137,7 +137,7 @@ Otherwise, `AskUserQuestion`:
   )"
   ```
 
-- **Never** `--no-verify`, `--no-gpg-sign`, or any hook-skipping flags. If hook fails, fix root cause and create **new** commit (not `--amend` — previous commit stands).
+- **Never** `--no-verify`, `--no-gpg-sign`, or any hook-skipping flags. If hook fails, fix root cause and create **new** commit (not `--amend` — previous commit stands). One exception: inside a hex run, step commits and merges on hex-owned branches may use `--no-verify` (CLAUDE.md principle 2).
 - **Never push.** Human decides when to push.
 
 ### 7. Bump plan Status `Last update`

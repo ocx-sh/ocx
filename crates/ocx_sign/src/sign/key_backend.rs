@@ -55,7 +55,7 @@ pub enum KeyBackendError {
         /// What about the material was rejected.
         reason: String,
     },
-    /// A recognised backend with no implementation (exit 85).
+    /// A recognised backend with no implementation (exit 82).
     #[error("unsupported key backend `{scheme}`")]
     Unsupported {
         /// The backend named by the key reference.
@@ -63,18 +63,18 @@ pub enum KeyBackendError {
     },
 }
 
-/// The environment variable holding the password for an encrypted private key.
-///
-/// Spelled here, not read from `ocx_config` (a crate above this one); `the_signing_key_password_variable_is_spelled_once`
-/// pins the two spellings equal.
-pub const OCX_KEY_PASSWORD: &str = "OCX_KEY_PASSWORD";
+/// The environment variable holding the password for an encrypted private key, as the registry declares it.
+pub const OCX_KEY_PASSWORD: &str = ocx_env::OCX_KEY_PASSWORD.declaration().name;
 
 /// The password guarding an encrypted private key, from [`OCX_KEY_PASSWORD`].
 ///
 /// Unset reads as the empty password, a legal cosign key, never an error. Never a flag: `argv` is host-visible.
 #[must_use]
 pub fn key_password() -> String {
-    std::env::var(OCX_KEY_PASSWORD).unwrap_or_default()
+    ocx_env::OCX_KEY_PASSWORD
+        .get()
+        .map(ocx_env::Sensitive::into_inner)
+        .unwrap_or_default()
 }
 
 /// A key pair decrypted by `sigstore` from a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM (P-256).
@@ -292,6 +292,18 @@ mod tests {
         Sha256::digest(bytes).to_vec()
     }
 
+    /// Unset and empty both read as the empty password, and a set value is taken verbatim.
+    #[test]
+    fn the_key_password_is_the_variable_verbatim_or_empty() {
+        let env = ocx_env::overrides::lock();
+        env.remove(ocx_env::OCX_KEY_PASSWORD.declaration());
+        assert_eq!(key_password(), "");
+        env.set(ocx_env::OCX_KEY_PASSWORD.declaration(), "");
+        assert_eq!(key_password(), "");
+        env.set(ocx_env::OCX_KEY_PASSWORD.declaration(), " hunter2 ");
+        assert_eq!(key_password(), " hunter2 ");
+    }
+
     /// The key the key-mode golden fixtures were signed with. `include_str!`
     /// rather than a runtime read on purpose: a moved fixture becomes a
     /// compile error, which is the failure mode we want.
@@ -507,8 +519,8 @@ mod tests {
     /// nothing else to go on.
     #[test]
     fn opening_an_unset_env_key_is_an_io_error_naming_the_variable() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_SIGNING_KEY");
+        let env = ocx_env::overrides::lock();
+        env.remove(ocx_env::OCX_SIGNING_KEY.declaration());
         let error = PemKeyBackend::open_env("OCX_SIGNING_KEY").expect_err("an unset variable holds no key");
         let KeyBackendError::Io(io) = &error else {
             panic!("an absent key must be an I/O fault, got {error:?}");
@@ -519,7 +531,7 @@ mod tests {
             "the refusal must name the variable: {io}"
         );
 
-        env.set("OCX_SIGNING_KEY", "");
+        env.set(ocx_env::OCX_SIGNING_KEY.declaration(), "");
         assert!(
             matches!(PemKeyBackend::open_env("OCX_SIGNING_KEY"), Err(KeyBackendError::Io(_))),
             "an empty variable holds no key either"
@@ -531,9 +543,9 @@ mod tests {
     /// `read_key_pem` answers for an over-cap file, not the I/O code above.
     #[test]
     fn an_oversized_env_key_is_refused_by_the_shared_cap() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let cap = usize::try_from(MAX_KEY_PEM_BYTES).expect("the cap fits a usize");
-        env.set("OCX_SIGNING_KEY", "k".repeat(cap + 1));
+        env.set(ocx_env::OCX_SIGNING_KEY.declaration(), "k".repeat(cap + 1));
         let error = PemKeyBackend::open_env("OCX_SIGNING_KEY").expect_err("over the cap");
         let KeyBackendError::MalformedKey { reason } = &error else {
             panic!("an over-cap value is a data fault, got {error:?}");

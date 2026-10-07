@@ -87,7 +87,7 @@ impl PackageInspect {
             .map(|((raw, identifier), result)| {
                 PackageInspect::new(raw.raw().to_string(), identifier, platform.clone(), result)
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Default mode selects no platform, so reporting one would make `-p` observable where its help calls it inert.
         let selected_platform = (self.resolve || self.closure).then_some(&platform);

@@ -1,0 +1,23 @@
+# The breaks the current goldens make against `baseline/`, each acknowledged
+# once. `task contract:rotate` drops every `[[break]]` table, and keeps this header,
+# when it rotates the baseline.
+#
+# One `[[break]]` table per acknowledged finding:
+#
+#   [[break]]
+#   document = "reports"     # reports | errors | cli
+#   subjects = ["PushReport", "CopyReport"]
+#                            # reports: root names; cli: command paths such as
+#                            # "package push"; errors: ["*"]. Must list every
+#                            # root or command the pointer reaches.
+#   rule = "B02"             # a differ code, "doc" (reworded description, no
+#                            # bump) or "semantic" (changed meaning, bumps)
+#   pointer = "/$defs/PushReportRoot/properties/digest"
+#                            # the finding's pointer: into the baseline for a
+#                            # removal or change, into the current golden for
+#                            # an addition
+#   reason = "why the break is accepted"
+#
+# A listed root or command carries version baseline + 1; one no entry lists,
+# its baseline version. A `doc` entry bumps nothing. An entry that matches no
+# finding is stale and reds, except a `semantic` entry.

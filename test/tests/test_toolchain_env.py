@@ -221,10 +221,10 @@ def test_env_root_format_json_emits_json(ocx: OcxRunner, tmp_path: Path) -> None
             f"ocx --format json env output must be valid JSON; got:\n{result.stdout!r}\n"
             f"parse error: {exc}"
         )
-    assert "entries" in data, (
-        f"JSON must have 'entries' key; got keys: {list(data.keys())}"
+    assert "items" in data, (
+        f"JSON must have 'items' key; got keys: {list(data.keys())}"
     )
-    assert isinstance(data["entries"], list), "entries must be a list"
+    assert isinstance(data["items"], list), "items must be a list"
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +610,7 @@ def test_env_global_flag_override_survives_empty_toolchain(
         f"ocx --global env --env must exit {EXIT_SUCCESS} with no global toolchain; "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
     )
-    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["entries"]}
+    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["items"]}
     assert entries.get("X") == "1", (
         f"--env must survive the empty-toolchain short-circuit on the global "
         f"tier; entries={entries}"
@@ -1114,14 +1114,14 @@ def _env_json_keys(ocx: OcxRunner, project: Path, *group_args: str) -> list[str]
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     data = json.loads(result.stdout)
-    assert "entries" in data and isinstance(data["entries"], list), (
-        f"JSON must carry an 'entries' list; got:\n{result.stdout!r}"
+    assert "items" in data and isinstance(data["items"], list), (
+        f"JSON must carry an 'items' list; got:\n{result.stdout!r}"
     )
-    for entry in data["entries"]:
-        assert set(entry) == {"key", "value", "type"}, (
-            f"each entry must be {{key,value,type}}; got: {entry!r}"
+    for entry in data["items"]:
+        assert set(entry) == {"key", "value", "kind"}, (
+            f"each entry must be {{key,value,kind}}; got: {entry!r}"
         )
-    return [entry["key"] for entry in data["entries"]]
+    return [entry["key"] for entry in data["items"]]
 
 
 def _global_env_json_keys(ocx: OcxRunner, cwd: Path, *group_args: str) -> list[str]:
@@ -1142,10 +1142,10 @@ def _global_env_json_keys(ocx: OcxRunner, cwd: Path, *group_args: str) -> list[s
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     data = json.loads(result.stdout)
-    assert "entries" in data and isinstance(data["entries"], list), (
-        f"JSON must carry an 'entries' list; got:\n{result.stdout!r}"
+    assert "items" in data and isinstance(data["items"], list), (
+        f"JSON must carry an 'items' list; got:\n{result.stdout!r}"
     )
-    return [entry["key"] for entry in data["entries"]]
+    return [entry["key"] for entry in data["items"]]
 
 
 def test_env_single_group_scopes_to_that_group(ocx: OcxRunner, tmp_path: Path) -> None:
@@ -1422,7 +1422,7 @@ def test_env_global_unknown_group_is_empty_env(ocx: OcxRunner, tmp_path: Path) -
       exactly empty (the released-bug regression contract — see the
       no-toolchain sibling test).
     - ``--format json`` (the report path): stdout must decode to
-      ``{"entries": []}`` — the composed env is empty. The context-format
+      ``{"items": []}`` — the composed env is empty. The context-format
       *plain* report path is deliberately NOT asserted byte-empty here: the
       ``Printable`` single-table convention prints its column header row
       unconditionally, even with zero data rows (see
@@ -1463,7 +1463,7 @@ def test_env_global_unknown_group_is_empty_env(ocx: OcxRunner, tmp_path: Path) -
         f"got {report_result.returncode}\nstderr:\n{report_result.stderr}"
     )
     data = json.loads(report_result.stdout)
-    assert data.get("entries") == [], (
+    assert data.get("items") == [], (
         f"unknown --group on the global report path must compose an empty "
         f"env; got:\n{report_result.stdout!r}"
     )
@@ -1883,7 +1883,7 @@ def _env_path_dirs(
     result = run_in(ocx, project, "--format", "json", "env", *args, env_extra=extra_env)
     assert result.returncode == EXIT_SUCCESS, f"`ocx env` failed:\n{result.stderr}"
     payload = json.loads(result.stdout)
-    return [entry["value"] for entry in payload["entries"] if entry["key"] == "PATH"]
+    return [entry["value"] for entry in payload["items"] if entry["key"] == "PATH"]
 
 
 def _exec_path_dirs(

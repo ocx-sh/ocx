@@ -288,11 +288,11 @@ def _setup(
 
 
 def _session_path_entries(result: subprocess.CompletedProcess[str]) -> list[dict[str, str]]:
-    """The ``session_path`` rows of a ``self setup`` JSON payload."""
+    """The ``session_path_stores`` rows of a ``self setup`` JSON payload."""
     assert result.returncode == 0, f"self setup failed (rc={result.returncode})\nstderr: {result.stderr}"
     payload = json.loads(result.stdout)
-    entries = payload["session_path"]
-    assert entries, "session_path is empty — this host reported no session-PATH store at all"
+    entries = payload["session_path_stores"]
+    assert entries, "session_path_stores is empty — this host reported no session-PATH store at all"
     return entries
 
 

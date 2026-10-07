@@ -16,7 +16,7 @@ pub async fn sign_extracted_content(content_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if ocx_util::env::flag("OCX_NO_CODESIGN", false) {
+    if ocx_env::OCX_NO_CODESIGN.bool_or(false).unwrap_or(false) {
         log::debug!("Code signing disabled via OCX_NO_CODESIGN");
         return Ok(());
     }
@@ -181,6 +181,10 @@ fn codesign_available() -> bool {
     std::path::Path::new(CODESIGN_BIN).is_file()
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "runs the fixed macOS system utility `xattr` during extraction; not a tool launch"
+)]
 async fn remove_quarantine(content_path: &Path) {
     let result = tokio::process::Command::new(XATTR_BIN)
         .args(["-dr", "com.apple.quarantine"])
@@ -232,6 +236,10 @@ async fn sign_binary(path: &Path) {
     }
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "runs the fixed macOS system utility `codesign` during extraction; not a tool launch"
+)]
 async fn try_codesign(args: &[&str], path: &Path) -> bool {
     let result = tokio::process::Command::new(CODESIGN_BIN)
         .args(args)
@@ -558,8 +566,8 @@ mod tests {
 
     #[tokio::test]
     async fn sign_extracted_content_noop_when_disabled() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CODESIGN", "1");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CODESIGN, "1");
 
         let dir = TempDir::new().unwrap();
         create_file_with_magic(dir.path(), "binary", &0xFEED_FACFu32.to_be_bytes());
@@ -575,6 +583,10 @@ mod tests {
     /// On Apple Silicon, `ld` ad-hoc signs by default — we strip that so tests
     /// can verify that our signing code actually transforms unsigned → signed.
     #[cfg(target_os = "macos")]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only: builds and inspects Mach-O fixtures with the system toolchain"
+    )]
     fn build_unsigned_binary(dir: &std::path::Path, name: &str) -> PathBuf {
         let src = dir.join(format!("{name}.c"));
         std::fs::write(&src, "int main(){return 0;}\n").unwrap();
@@ -601,6 +613,10 @@ mod tests {
 
     /// Run `codesign --verify --verbose` and return whether the signature is valid.
     #[cfg(target_os = "macos")]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only: builds and inspects Mach-O fixtures with the system toolchain"
+    )]
     async fn verify_signature(path: &std::path::Path) -> bool {
         let output = tokio::process::Command::new("codesign")
             .args(["--verify", "--verbose"])
@@ -635,8 +651,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn sign_extracted_content_signs_real_binaries() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_CODESIGN");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_CODESIGN);
 
         let dir = TempDir::new().unwrap();
         let content = dir.path().join("content");
@@ -660,9 +676,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only: builds and inspects Mach-O fixtures with the system toolchain"
+    )]
     async fn sign_extracted_content_leaves_sealed_app_bundle_untouched() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_CODESIGN");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_CODESIGN);
 
         let dir = TempDir::new().unwrap();
         let content = dir.path().join("content");

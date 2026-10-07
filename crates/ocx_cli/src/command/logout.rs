@@ -8,6 +8,7 @@ use ocx_oci::auth::login::logout;
 use ocx_oci::auth::store::{DockerCredentialStore, StoreOptions};
 
 use crate::api::data::login::LogoutResult;
+use crate::command::login::registry_host;
 
 /// Remove credentials for a registry from the docker-compatible store.
 ///
@@ -26,9 +27,10 @@ impl Logout {
             .registry
             .clone()
             .unwrap_or_else(|| context.default_registry().to_string());
+        let host = registry_host(&registry)?;
 
         let ui = context.ui();
-        ui.status("Logging out", &registry);
+        ui.status("Logging out", host.as_str());
 
         // No store (no HOME, no $DOCKER_CONFIG) means nothing to log out from: exit 0, as `docker logout`.
         let store = match DockerCredentialStore::new(StoreOptions {
@@ -38,16 +40,16 @@ impl Logout {
             Ok(s) => s,
             Err(err) => {
                 tracing::debug!(%err, "logout: no credential store to act on, treating as noop");
-                context.api().report(&LogoutResult { registry })?;
+                context.api().report(&LogoutResult { registry: host })?;
                 return Ok(ExitCode::SUCCESS);
             }
         };
 
         // Not-logged-in is `Ok`; an `Err` means revocation did not complete and must not be swallowed.
-        logout(&registry, &store).await?;
+        logout(host.as_str(), &store).await?;
 
-        ui.success(format!("Logged out of {registry}"));
-        context.api().report(&LogoutResult { registry })?;
+        ui.success(format!("Logged out of {host}"));
+        context.api().report(&LogoutResult { registry: host })?;
         Ok(ExitCode::SUCCESS)
     }
 }

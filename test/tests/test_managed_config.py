@@ -22,7 +22,7 @@ fully covered at the Rust unit level instead):
 | 2 | ``test_onboard_syncs_before_fence_write`` |
 | 3 (amended) | ``test_resetup_refreshes_to_newer_payload_via_self_setup`` — setup now reconciles on every run instead of no-op'ing a Current fence; see also ``test_setup_refresh_syncs_patch_descriptors``, ``test_paused_setup_skips_refresh_and_keeps_pause`` |
 | 4 | ``test_resetup_different_ref_re_adopts`` |
-| 5 | ``test_dirty_fence_exit_82_force_overwrites`` |
+| 5 | ``test_dirty_fence_exit_81_force_overwrites`` |
 | 6 | ``test_required_no_snapshot_exit_78_online_and_offline`` |
 | 7 | unit: ``config::managed::tests::resolve_managed_config_snapshot_source_mismatch_treated_as_absent`` + ``..._tag_vs_digest_mismatch_treated_as_absent``; ``config::loader::tests::managed_snapshot_source_mismatch_is_never_merged`` |
 | 8 | unit: ``config::managed::tests::resolve_managed_config_required_false_absent_snapshot_returns_ok_some`` |
@@ -82,14 +82,14 @@ def write_home_config(ocx: OcxRunner, content: str) -> Path:
 
 def _publish_self_image(ocx: OcxRunner, tmp_path: Path, repo: str) -> str:
     """Publishes a stand-in `ocx` package to the LOCAL test registry and
-    returns the `__OCX_SELF_IMAGE` value that redirects the canonical
+    returns the `__OCX_TESTING_SELF_IMAGE` value that redirects the canonical
     `ocx.sh/ocx/cli` bootstrap identifier to it.
 
     `self setup`'s bootstrap phase always does a LIVE tag probe against the
     real `ocx.sh` registry for the unpinned path (`check_update` with
     `Duration::ZERO` + `TagProbe::Remote`), regardless of local state — a
     plain "seed a candidate file" trick cannot short-circuit that. The
-    sanctioned test-only escape hatch is the `__OCX_SELF_IMAGE` loopback seam
+    sanctioned test-only escape hatch is the `__OCX_TESTING_SELF_IMAGE` loopback seam
     (see `test_self_setup.py::test_setup_bootstrap_pulls_latest_published`),
     compile-gated behind `--features ocx/__testing` (the test binary must be
     built with it) and loopback-only-asserted at runtime.
@@ -138,7 +138,7 @@ def _self_setup(
 ) -> subprocess.CompletedProcess[str]:
     """Runs `ocx self setup --managed-config <ref> --no-modify-path [...]`.
 
-    `self_image` is the `__OCX_SELF_IMAGE` seam value from
+    `self_image` is the `__OCX_TESTING_SELF_IMAGE` seam value from
     [`_publish_self_image`] — required so bootstrap never reaches the real
     `ocx.sh` registry. Always passes `--no-modify-path` since these tests only
     care about the `[managed]` fence in `config.toml`, never the
@@ -146,7 +146,7 @@ def _self_setup(
     `--managed-config`). Deliberately does NOT pass `--offline` — the
     managed-config sync fetch needs the real (local) test registry.
     """
-    overrides = {"__OCX_SELF_IMAGE": self_image}
+    overrides = {"__OCX_TESTING_SELF_IMAGE": self_image}
     if env_overrides:
         overrides.update(env_overrides)
     return _run(
@@ -336,7 +336,7 @@ def test_setup_refresh_syncs_patch_descriptors(
     assert refreshed.returncode == 0, f"the refresh must succeed: {refreshed.stderr}"
     assert json.loads(refreshed.stdout)["managed_config"]["status"] == "refreshed", refreshed.stdout
 
-    entries = ocx.json("package", "env", base_pkg.short)["entries"]
+    entries = ocx.json("package", "env", base_pkg.short)["items"]
     ca_entry = next((e for e in entries if e["key"] == "MANAGED_PATCH_CA"), None)
     assert ca_entry is not None, (
         "the companion named by the payload's freshly-introduced [patches] pointer must "
@@ -375,11 +375,11 @@ def test_resetup_different_ref_re_adopts(
 
 
 # ---------------------------------------------------------------------------
-# Criterion 5 — dirty fence → exit 82; --force overwrites
+# Criterion 5 — dirty fence → exit 81; --force overwrites
 # ---------------------------------------------------------------------------
 
 
-def test_dirty_fence_exit_82_force_overwrites(
+def test_dirty_fence_exit_81_force_overwrites(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
     ref = f"{registry}/{unique_repo}:v1"
@@ -393,7 +393,7 @@ def test_dirty_fence_exit_82_force_overwrites(
     config_path.write_text(text.replace(_MANAGED_FENCE_CLOSER, f"# tampered by test\n{_MANAGED_FENCE_CLOSER}"))
 
     dirty = _self_setup(ocx, ref, self_image)
-    assert dirty.returncode == 82, f"a dirty managed fence must exit 82, got {dirty.returncode}: {dirty.stderr}"
+    assert dirty.returncode == 81, f"a dirty managed fence must exit 81, got {dirty.returncode}: {dirty.stderr}"
 
     forced = _self_setup(ocx, ref, self_image, "--force")
     assert forced.returncode == 0, f"--force must overwrite the dirty fence: {forced.stderr}"
@@ -944,7 +944,7 @@ def _bare_self_setup(
 ) -> subprocess.CompletedProcess[str]:
     """Runs `ocx self setup --no-modify-path` WITHOUT `--managed-config`, so the
     managed tier can only come from OCX_MANAGED_CONFIG or the existing seed."""
-    overrides = {"__OCX_SELF_IMAGE": self_image}
+    overrides = {"__OCX_TESTING_SELF_IMAGE": self_image}
     if env_overrides:
         overrides.update(env_overrides)
     return _run(ocx, "self", "setup", "--no-modify-path", env_overrides=overrides)
@@ -1094,14 +1094,14 @@ def test_config_update_pause_writes_and_bare_update_clears(
     paused = _run(ocx, "config", "update", "--pause", "4h", env_overrides=env)
     assert paused.returncode == 0, paused.stderr
     payload = json.loads(paused.stdout)
-    assert payload.get("paused_until"), payload
+    assert payload.get("pause_ends_at"), payload
     assert _pause_file(ocx).exists()
 
     # `--check` reports the pause without touching it.
     check = _run(ocx, "config", "update", "--check", env_overrides=env)
     assert check.returncode == 0
     check_payload = json.loads(check.stdout)
-    assert check_payload.get("paused_until"), check_payload
+    assert check_payload.get("pause_ends_at"), check_payload
     assert _pause_file(ocx).exists(), "--check must never modify the pause file"
 
     # A bare explicit update clears the pause.
@@ -1143,7 +1143,7 @@ def test_paused_setup_skips_refresh_and_keeps_pause(
     check = _run(ocx, "config", "update", "--check")
     assert check.returncode == 0, check.stderr
     check_payload = json.loads(check.stdout)
-    assert check_payload.get("paused_until"), check_payload
+    assert check_payload.get("pause_ends_at"), check_payload
 
 
 def test_config_update_pause_with_version_pins_then_pauses(
@@ -1163,7 +1163,7 @@ def test_config_update_pause_with_version_pins_then_pauses(
     assert held.returncode == 0, held.stderr
     payload = json.loads(held.stdout)
     assert payload["digest"] == digest_old
-    assert payload.get("paused_until"), payload
+    assert payload.get("pause_ends_at"), payload
     assert payload.get("pinned") == "user-1.0.0", payload
     pause = json.loads(_pause_file(ocx).read_text())
     assert pause["pinned_version"] == "user-1.0.0"
@@ -1171,7 +1171,7 @@ def test_config_update_pause_with_version_pins_then_pauses(
     check = _run(ocx, "config", "update", "--check", env_overrides=env)
     check_payload = json.loads(check.stdout)
     assert check_payload.get("pinned") == "user-1.0.0", check_payload
-    assert check_payload.get("paused_until"), check_payload
+    assert check_payload.get("pause_ends_at"), check_payload
 
 
 def test_config_update_resume_clears_pause_and_syncs(

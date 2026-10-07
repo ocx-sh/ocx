@@ -3,54 +3,65 @@
 
 //! Coarse error categories for the structured JSON error envelope.
 
-use crate::exit_code::ExitCode;
-use serde::Serialize;
+/// Declares [`ErrorCategory`] with its `ALL` and `summary` from one row per variant.
+///
+/// A row without its summary does not match, so a category cannot exist unexplained:
+///
+/// ```compile_fail
+/// ocx_exit::error_categories! {
+///     Fine => "Has a summary";
+///     Bare;
+/// }
+/// ```
+///
+/// The same table with every summary present compiles:
+///
+/// ```
+/// ocx_exit::error_categories! {
+///     Fine => "Has a summary";
+///     Other => "Also has one";
+/// }
+/// assert_eq!(ErrorCategory::ALL.len(), 2);
+/// assert_eq!(ErrorCategory::Other.summary(), "Also has one");
+/// ```
+// Exported only so the doctests above can reach it; `ErrorCategory` itself is declared once, below.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! error_categories {
+    ($($(#[$meta:meta])* $name:ident => $summary:literal;)*) => {
+        /// Frozen `error.kind` vocabulary: the snake_case serialization is a wire contract consumers match on.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, ::serde::Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum ErrorCategory {
+            $($(#[$meta])* $name,)*
+        }
 
-/// Frozen `error.kind` vocabulary: the snake_case serialization is a wire contract consumers match on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCategory {
-    UsageError,
-    ConfigError,
-    DataError,
-    AuthError,
-    PermissionDenied,
-    NotFound,
-    Unavailable,
-    TempFail,
-    TransparencyLogUnavailable,
-    ReferrersUnsupported,
-    UnsupportedKeyBackend,
-    ForgeCapabilityUnavailable,
-    RegistryDeleteUnsupported,
-    IoError,
-    Internal,
+        impl ErrorCategory {
+            /// Every variant, in declaration order: the source of the published `error.kind` table.
+            pub const ALL: &'static [ErrorCategory] = &[$(ErrorCategory::$name),*];
+
+            /// One-line user-facing meaning of this category, as the published contract states it.
+            pub const fn summary(self) -> &'static str {
+                match self {
+                    $(ErrorCategory::$name => $summary,)*
+                }
+            }
+        }
+    };
 }
 
-impl ErrorCategory {
-    /// Maps every [`ExitCode`] to its category; `Success` and `Failure` map to [`Self::Internal`].
-    pub fn from_exit_code(code: ExitCode) -> Self {
-        // No wildcard arm: a `_ => Internal` lets a new exit code compile and serialize as `internal`.
-        match code {
-            ExitCode::Success | ExitCode::Failure => Self::Internal,
-            ExitCode::UsageError => Self::UsageError,
-            ExitCode::DataError => Self::DataError,
-            ExitCode::Unavailable => Self::Unavailable,
-            ExitCode::IoError => Self::IoError,
-            ExitCode::TempFail => Self::TempFail,
-            ExitCode::PermissionDenied => Self::PermissionDenied,
-            ExitCode::ConfigError => Self::ConfigError,
-            ExitCode::NotFound => Self::NotFound,
-            ExitCode::AuthError => Self::AuthError,
-            ExitCode::PolicyBlocked => Self::PermissionDenied,
-            ExitCode::DirtyRcBlock => Self::PermissionDenied,
-            ExitCode::TransparencyLogUnavailable => Self::TransparencyLogUnavailable,
-            ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
-            ExitCode::UnsupportedKeyBackend => Self::UnsupportedKeyBackend,
-            ExitCode::ForgeCapabilityUnavailable => Self::ForgeCapabilityUnavailable,
-            ExitCode::RegistryDeleteUnsupported => Self::RegistryDeleteUnsupported,
-        }
-    }
+error_categories! {
+    UsageError => "The command line is invalid";
+    ConfigError => "Configuration is invalid or incomplete";
+    DataError => "Input data is malformed or fails verification";
+    AuthError => "Authentication failed or credentials are missing";
+    PermissionDenied => "The operation was refused: a permission or a local policy";
+    NotFound => "A named package, tag, file or resource does not exist";
+    Unavailable => "A required service is unavailable and rerunning will not help";
+    TempFail => "A transient failure; the same command may succeed on retry";
+    Unsupported => "The operation as requested is not supported or not enabled by this registry, forge or build; retrying will not help";
+    IoError => "A filesystem read or write failed";
+    Internal => "A failure with no more specific category";
 }
 
 #[cfg(test)]
@@ -61,6 +72,7 @@ mod tests {
     //! pattern-match against. Any change to these tests is a schema bump —
     //! review carefully.
     use super::*;
+    use crate::ExitCode;
 
     #[test]
     fn error_category_serializes_snake_case() {
@@ -75,20 +87,7 @@ mod tests {
             (ErrorCategory::NotFound, "\"not_found\""),
             (ErrorCategory::Unavailable, "\"unavailable\""),
             (ErrorCategory::TempFail, "\"temp_fail\""),
-            (
-                ErrorCategory::TransparencyLogUnavailable,
-                "\"transparency_log_unavailable\"",
-            ),
-            (ErrorCategory::ReferrersUnsupported, "\"referrers_unsupported\""),
-            (ErrorCategory::UnsupportedKeyBackend, "\"unsupported_key_backend\""),
-            (
-                ErrorCategory::ForgeCapabilityUnavailable,
-                "\"forge_capability_unavailable\"",
-            ),
-            (
-                ErrorCategory::RegistryDeleteUnsupported,
-                "\"registry_delete_unsupported\"",
-            ),
+            (ErrorCategory::Unsupported, "\"unsupported\""),
             (ErrorCategory::IoError, "\"io_error\""),
             (ErrorCategory::Internal, "\"internal\""),
         ];
@@ -97,7 +96,7 @@ mod tests {
         // is an array literal, so `len()` is a compile-time constant.
         assert_eq!(
             cases.len(),
-            15,
+            11,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
         for (variant, expected) in cases {
@@ -107,54 +106,130 @@ mod tests {
     }
 
     #[test]
-    fn error_category_round_trips_86() {
-        // C-002, both halves in one function.
+    fn error_category_round_trips_82() {
+        // Both halves in one function. Totality is the compiler's job -- the match is
+        // wildcard-free -- but nothing forces the *right* arm: `ExitCode::Unsupported =>
+        // Self::Internal` compiles clean and ships exit 82 with `"kind":"internal"`.
+        // Assertion 1 reds on that rewrite. Assertion 2 serializes the variant literal, so a
+        // serde rename reds it while the rewrite above leaves it green.
         //
-        // Totality is the compiler's job -- the match is wildcard-free, so 86
-        // cannot land without *an* arm. But nothing forces it to be the *right*
-        // arm: `ExitCode::ForgeCapabilityUnavailable => Self::Internal` compiles
-        // clean, passes clippy, and ships exit 86 with `"kind":"internal"`,
-        // which is the precise defect the wildcard-free match exists to
-        // prevent. Assertion 1 is what reds on that rewrite. Assertion 2 does
-        // not read the binding at all -- it serializes the variant literal, so
-        // a serde rename reds it while the rewrite above leaves it green.
-        // Neither assertion stands in for the other.
-        //
-        // "Round trips" is one direction. `ErrorCategory` derives `Serialize`
-        // and nothing else -- there is no `Deserialize` and no `FromStr` for it
-        // anywhere in the workspace, and none is added to widen this test.
-        let category = ErrorCategory::from_exit_code(ExitCode::ForgeCapabilityUnavailable);
+        // "Round trips" is one direction: `ErrorCategory` derives `Serialize` and nothing else.
         assert_eq!(
-            category,
-            ErrorCategory::ForgeCapabilityUnavailable,
-            "exit 86 must classify as its own category, never a fold into another"
+            ExitCode::Unsupported.category(),
+            ErrorCategory::Unsupported,
+            "exit 82 must classify as its own category, never a fold into another"
         );
         assert_eq!(
-            serde_json::to_string(&ErrorCategory::ForgeCapabilityUnavailable).expect("ErrorCategory serializes"),
-            "\"forge_capability_unavailable\"",
-            "envelope error.kind must be the dedicated category, never \"internal\""
+            serde_json::to_string(&ErrorCategory::Unsupported).expect("ErrorCategory serializes"),
+            "\"unsupported\"",
+            "error document error.kind must be the dedicated category, never \"internal\""
         );
     }
 
+    /// Wildcard-free: a new category is an `E0004` here until its wire value is pinned.
+    fn pinned_kind(category: ErrorCategory) -> &'static str {
+        match category {
+            ErrorCategory::UsageError => "usage_error",
+            ErrorCategory::ConfigError => "config_error",
+            ErrorCategory::DataError => "data_error",
+            ErrorCategory::AuthError => "auth_error",
+            ErrorCategory::PermissionDenied => "permission_denied",
+            ErrorCategory::NotFound => "not_found",
+            ErrorCategory::Unavailable => "unavailable",
+            ErrorCategory::TempFail => "temp_fail",
+            ErrorCategory::Unsupported => "unsupported",
+            ErrorCategory::IoError => "io_error",
+            ErrorCategory::Internal => "internal",
+        }
+    }
+
+    /// `ALL` is the published `error.kind` table, so a category missing from it is one consumers never learn.
+    ///
+    /// Reds on: a category dropped from `ALL`, listed twice, out of declaration order, or serializing
+    /// to other than its pinned value.
     #[test]
-    fn error_category_round_trips_87() {
-        // Same two halves as the 86 test: the arm must be the right one, and the wire slug must be
-        // the dedicated one rather than a fold into `internal`.
+    fn all_lists_every_category_once_in_declaration_order() {
+        let listed: Vec<&str> = ErrorCategory::ALL
+            .iter()
+            .map(|category| pinned_kind(*category))
+            .collect();
         assert_eq!(
-            ErrorCategory::from_exit_code(ExitCode::RegistryDeleteUnsupported),
-            ErrorCategory::RegistryDeleteUnsupported,
-            "exit 87 must classify as its own category, never a fold into another"
+            listed,
+            [
+                "usage_error",
+                "config_error",
+                "data_error",
+                "auth_error",
+                "permission_denied",
+                "not_found",
+                "unavailable",
+                "temp_fail",
+                "unsupported",
+                "io_error",
+                "internal",
+            ],
+            "ErrorCategory::ALL must list every variant exactly once, in declaration order"
         );
+        for category in ErrorCategory::ALL {
+            assert_eq!(
+                serde_json::to_value(category).expect("ErrorCategory serializes"),
+                pinned_kind(*category),
+                "{category:?}"
+            );
+        }
+    }
+
+    /// Every category exists to be some exit code's `error.kind`, so that image is what `ALL` must list.
+    ///
+    /// Reds on: a category dropped from or duplicated in `ALL`, and a category no exit code reports under.
+    #[test]
+    fn all_lists_exactly_the_categories_exit_codes_report_under() {
+        let mut reported: Vec<ErrorCategory> = Vec::new();
+        for code in ExitCode::ALL {
+            if !reported.contains(&code.category()) {
+                reported.push(code.category());
+            }
+        }
+        assert!(!reported.is_empty(), "nothing to check: ExitCode::ALL is empty");
+        for category in &reported {
+            assert_eq!(
+                ErrorCategory::ALL.iter().filter(|listed| *listed == category).count(),
+                1,
+                "{category:?} must appear in ErrorCategory::ALL exactly once"
+            );
+        }
         assert_eq!(
-            serde_json::to_string(&ErrorCategory::RegistryDeleteUnsupported).expect("ErrorCategory serializes"),
-            "\"registry_delete_unsupported\"",
-            "envelope error.kind must be the dedicated category, never \"internal\""
+            ErrorCategory::ALL.len(),
+            reported.len(),
+            "ALL lists a category no exit code uses"
         );
+    }
+
+    /// Each summary is copied verbatim into the published schema, so it is one plain line.
+    #[test]
+    fn every_category_has_a_one_line_summary() {
+        assert!(
+            !ErrorCategory::ALL.is_empty(),
+            "nothing to check: ErrorCategory::ALL is empty"
+        );
+        for category in ErrorCategory::ALL {
+            let summary = category.summary();
+            assert!(!summary.trim().is_empty(), "{category:?} has no summary");
+            assert!(!summary.contains('\n'), "{category:?} summary spans lines: {summary}");
+            assert!(
+                !summary.ends_with('.'),
+                "{category:?} summary ends with a period: {summary}"
+            );
+            assert!(
+                !summary.contains('[') && !summary.contains("::"),
+                "{category:?} summary carries a doc link or code path: {summary}"
+            );
+        }
     }
 
     #[test]
     fn error_category_total_over_exit_codes() {
-        // Totality itself is the compiler's job: `from_exit_code` is an in-crate
+        // Totality itself is the compiler's job: `category` is an in-crate
         // match with no wildcard, so an unclassified `ExitCode` variant is an
         // E0004 build failure, not a silent `internal`.
         //
@@ -175,21 +250,7 @@ mod tests {
             (ExitCode::NotFound, ErrorCategory::NotFound),
             (ExitCode::AuthError, ErrorCategory::AuthError),
             (ExitCode::PolicyBlocked, ErrorCategory::PermissionDenied),
-            (ExitCode::DirtyRcBlock, ErrorCategory::PermissionDenied),
-            (
-                ExitCode::TransparencyLogUnavailable,
-                ErrorCategory::TransparencyLogUnavailable,
-            ),
-            (ExitCode::ReferrersUnsupported, ErrorCategory::ReferrersUnsupported),
-            (ExitCode::UnsupportedKeyBackend, ErrorCategory::UnsupportedKeyBackend),
-            (
-                ExitCode::ForgeCapabilityUnavailable,
-                ErrorCategory::ForgeCapabilityUnavailable,
-            ),
-            (
-                ExitCode::RegistryDeleteUnsupported,
-                ErrorCategory::RegistryDeleteUnsupported,
-            ),
+            (ExitCode::Unsupported, ErrorCategory::Unsupported),
         ];
         // What this count pins, exactly: a row deleted from the table above.
         // It cannot force a row for a *new* `ExitCode` variant -- `cases` is an
@@ -197,14 +258,14 @@ mod tests {
         // the wildcard-free match's job, not this assertion's.
         assert_eq!(
             cases.len(),
-            18,
+            13,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
         for (code, expected) in cases {
             assert_eq!(
-                ErrorCategory::from_exit_code(code),
+                code.category(),
                 expected,
-                "exit code {} lost its arm in from_exit_code",
+                "exit code {} lost its arm in category()",
                 code as u8,
             );
         }

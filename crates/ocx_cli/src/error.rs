@@ -7,7 +7,12 @@
 /// always [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError) (`64`).
 ///
 /// The message is sentence-case: only the CLI shows it, as the chain's outer context.
-#[derive(Debug)]
+#[derive(Debug, ocx_exit::Classify)]
+#[exit(
+    UsageError,
+    slug = "usage",
+    summary = "The command was invoked with arguments it cannot act on"
+)]
 pub struct UsageError {
     message: String,
     source: Option<Box<dyn std::error::Error + Send + Sync>>,
@@ -44,13 +49,28 @@ impl UsageError {
 }
 
 /// Metadata-path resolution failures for `ocx package push` and `ocx package test`; all exit `64`.
-#[derive(Debug)]
+#[derive(Debug, ocx_exit::Classify)]
 pub enum MetadataResolutionError {
     /// No explicit `--metadata` and no file layers to infer a sibling from.
+    #[exit(
+        UsageError,
+        slug = "metadata_required",
+        summary = "No package metadata file was given or found"
+    )]
     Required,
     /// File layers point at distinct candidate metadata paths.
+    #[exit(
+        UsageError,
+        slug = "metadata_ambiguous",
+        summary = "More than one candidate package metadata file was found"
+    )]
     Ambiguous { candidates: Vec<std::path::PathBuf> },
     /// A file layer's path could not yield a metadata candidate.
+    #[exit(
+        UsageError,
+        slug = "metadata_invalid_layer_path",
+        summary = "A layer path cannot anchor a metadata file search"
+    )]
     InvalidLayerPath { layer: std::path::PathBuf, reason: String },
 }
 
@@ -81,6 +101,45 @@ impl std::fmt::Display for MetadataResolutionError {
 }
 
 impl std::error::Error for MetadataResolutionError {}
+
+/// Retired environment spellings that are set and no longer honoured; exit `78`.
+///
+/// Names keys only, never a value: the variable may hold a credential.
+#[derive(Debug, ocx_exit::Classify)]
+#[exit(
+    ConfigError,
+    slug = "retired_env",
+    summary = "A retired OCX environment variable is set"
+)]
+pub struct RetiredEnvError {
+    pub refused: Vec<&'static ocx_env::Retired>,
+}
+
+impl std::fmt::Display for RetiredEnvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ocx_env::Change;
+
+        let reasons: Vec<String> = self
+            .refused
+            .iter()
+            .map(|entry| {
+                let (name, replacement) = (entry.name, entry.replacement.name);
+                match entry.change {
+                    Change::Rename => format!("{name} is no longer read; set {replacement} instead"),
+                    Change::ValueRename { old, new } => {
+                        format!("{name}={old} is no longer accepted; set {name}={new} instead")
+                    }
+                    Change::Polarity => {
+                        format!("{name} is no longer read; set {replacement} instead, which has the opposite meaning")
+                    }
+                }
+            })
+            .collect();
+        f.write_str(&reasons.join("; "))
+    }
+}
+
+impl std::error::Error for RetiredEnvError {}
 
 #[cfg(test)]
 mod tests {

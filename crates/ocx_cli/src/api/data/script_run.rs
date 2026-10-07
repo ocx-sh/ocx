@@ -40,7 +40,6 @@ pub struct AssertionRecord {
     /// an outcome the engine could not locate (a timeout, a pre-engine host
     /// fault), never emitted as `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub location: Option<SourceLocation>,
 }
 
@@ -88,16 +87,15 @@ pub struct RunSummary {
 /// The `--script` result envelope.
 ///
 /// Plain format: one human status line on stdout.
-///
-/// JSON format: `{"status", "assertion", "run"}` — `assertion`/`run` are
-/// `null` when not applicable.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ScriptRunReport {
     /// Overall status (the structured mirror of the exit code).
     pub status: ScriptStatus,
-    /// The terminating assertion record, if the run failed on an assertion.
+    /// The terminating assertion record; absent unless the run failed on one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub assertion: Option<AssertionRecord>,
-    /// Surfaced `RunResult` fields, when a terminal `ocx.run` is reported.
+    /// Surfaced `RunResult` fields; absent unless a terminal `ocx.run` is reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSummary>,
 }
 
@@ -163,6 +161,9 @@ impl ScriptRunReport {
 }
 
 impl Printable for ScriptRunReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "ScriptRunReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let status = match self.status {
             ScriptStatus::Passed => "passed",
@@ -196,21 +197,18 @@ mod tests {
     // constructor; the plain renderer smoke proves the stub still panics.
 
     #[test]
-    fn json_envelope_has_status_assertion_run_keys() {
-        // U21: passed run → top-level envelope with all three keys present.
+    fn json_envelope_omits_the_absent_assertion_and_run() {
         let report = ScriptRunReport {
             status: ScriptStatus::Passed,
             assertion: None,
             run: None,
         };
         let v = serde_json::to_value(&report).expect("ScriptRunReport must serialize");
-        let obj = v.as_object().expect("envelope must be a JSON object");
-        assert!(obj.contains_key("status"), "envelope must carry `status`");
-        assert!(obj.contains_key("assertion"), "envelope must carry `assertion`");
-        assert!(obj.contains_key("run"), "envelope must carry `run`");
-        assert_eq!(obj["status"], serde_json::json!("passed"));
-        assert!(obj["assertion"].is_null());
-        assert!(obj["run"].is_null());
+        assert_eq!(
+            v,
+            serde_json::json!({"status": "passed"}),
+            "unset optionals are omitted, never null"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ VitePress (not Docusaurus/Astro) — Vue ecosystem, great code blocks, fast stat
 | `src/docs/reference/*.md` | Reference pages (command-line, environment, metadata) |
 | `src/docs/reference/dependencies.md` | **Generated** — SBOM dependency list |
 | `src/public/casts/*.cast` | **Generated** — asciinema recordings |
-| `src/public/schemas/{metadata,config,project,project-lock,patch}/v*.json` | **Generated** — JSON schemas from `ocx_schema` crate (`patch` = `ocx patch publish --descriptor` format) |
+| `src/public/schemas/{metadata,config,project,project-lock,patch,reports,execution-record,errors}/v*.json` | **Generated** — the eight published JSON schemas from `ocx_schema` crate (`patch` = `ocx patch publish --descriptor` format; `reports` and `errors` = the `--format json` output contract) |
 | `src/public/data/dependencies.json` | **Generated** — SBOM data |
 | `taskfile.yml` | Website tasks (install, serve, build, deploy) |
 
@@ -227,4 +227,4 @@ See `.claude/rules/docs-style.md` for narrative structure, link conventions, cal
 
 ## Quality Gate
 
-Per task / review-fix iteration for website-only changes: `task website:build` (validates generated content, schema, VitePress output), not full `task verify`. Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself).
+Per task / review-fix iteration for website-only changes: `task website:build` (validates generated content, schema, VitePress output), not full `task verify`. Full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels).

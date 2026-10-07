@@ -3,13 +3,17 @@
 Agent-specific guidance with no other home. `README.md` says what this crate
 owns; this file states only what a change here must not break.
 
-## No `ClassifyExitCode` impl belongs in this crate
+## Classification is declared on the types, never hand-implemented
 
-C-054 states it and the code holds it. The exit-code taxonomy lives in
-`ocx_cli` (`exit/ocx_config.rs` carries this crate's whole family), and three
-error types here reach a user without a `downcast_arm!` rung of their own, each
-for a stated reason recorded in `UNARMED_AT_THE_BOUNDARY` in
-`crates/ocx_test_support/tests/workspace_structure.rs`:
+The error types here derive `ocx_exit::Classify`: every variant carries one `#[exit(...)]`
+with its exit code, `error.detail` slug and summary, a guard or computed answer goes through
+`with = fn, rows(...)` (`TlsError` picks by origin: a file the operator named is data, inline
+text is the configuration), and a wrapper delegates (`error::Error::Toolchain`,
+`ManagedConfigUpdateError`). Nothing here writes a `ClassifyExitCode` or `ClassifyErrorKind`
+impl by hand. `ocx_cli`'s `exit/ocx_config.rs` holds the family's contract tests, its rungs
+being entries of the `families!` list in `exit.rs`, and three error types here reach a user
+without a rung of their own, each for a stated reason recorded in `UNARMED_AT_THE_BOUNDARY`
+in `crates/ocx_test_support/tests/workspace_structure.rs`:
 
 - `ToolchainRootError` — reaches the CLI only inside `error::Error::Toolchain`,
   whose classifier already delegates to this type's own. A second, closer
@@ -42,7 +46,7 @@ carries nothing, which is why it is a feature now.
 `sandbox_or_skip` pair it was in the monolith: under a feature gate — which,
 unlike `#[cfg(test)]`, the armed-error scan reads as production — the inner
 half's `Result<_, String>` was an error type crossing a boundary no
-`downcast_arm!` could ever register. Do not split it back apart.
+`families!` rung could ever cover. Do not split it back apart.
 
 ## `managed_config` is one module because a crate has only one
 

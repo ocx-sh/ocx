@@ -161,12 +161,10 @@ def test_attest_publishes_a_bundle_referrer_carrying_three_annotations(
     )
     assert result.returncode == 0, f"attest failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
-    envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
-    assert envelope["command"] == "package attest"
-    assert envelope["exit_code"] == 0
-
-    data = envelope["data"]
+    data = json.loads(result.stdout)
+    # The report is the document, led by its own version: no envelope wraps it.
+    assert not {"command", "exit_code", "data"} & data.keys(), data
+    assert next(iter(data)) == "schema_version" and data["schema_version"] == 2, data
     assert data["predicate_type"] == CYCLONEDX_URI, (
         "the report must echo the RESOLVED predicateType URI, not the --type alias"
     )
@@ -209,12 +207,12 @@ def test_attest_refuses_offline_without_reading_the_identity_token(
     sigstore_stack: SigstoreStack,
     tmp_path: Path,
 ) -> None:
-    """S-002: exit 77 ``offline_attest_refused``, and no credential is read.
+    """S-002: exit 81 ``offline_attest_refused``, and no credential is read.
 
     Ordering is the contract, not merely the code: ``refuse_when_offline`` sits
     above ``resolve_override_token`` in ``package_attest.rs`` precisely so a run
     that was already refused never opens a credential. Moving it below still
-    exits 77 and still passes every unit test, so this is where that regression
+    exits 81 and still passes every unit test, so this is where that regression
     would be caught.
 
     The probe is a token path that does not exist. Note what this does NOT
@@ -225,15 +223,15 @@ def test_attest_refuses_offline_without_reading_the_identity_token(
     DIFFERENT terminal state: reaching ``resolve_override_token`` with this
     same missing path is verified below (positive control, TEST-08) to fail
     as an I/O error — exit 74, ``error.kind`` ``"io_error"`` — never the
-    offline refusal's 77 / ``"permission_denied"``. A regression that moved
+    offline refusal's 81 / ``"permission_denied"``. A regression that moved
     the offline guard below token resolution would collapse an offline run
-    onto that same outcome instead of the clean 77 refusal, which is exactly
+    onto that same outcome instead of the clean 81 refusal, which is exactly
     what the assertions below would catch.
 
     The control was exit 1 ``internal`` until the token reads were typed
     through ``file_error``: a missing credential file is an operator's typo,
     not an ocx bug. Only the *value* moved — the control's job is to be a
-    terminal state distinct from 77, which 74 is.
+    terminal state distinct from 81, which 74 is.
     """
     missing_token = tmp_path / "identity-token-that-does-not-exist"
     assert not missing_token.exists()
@@ -244,8 +242,8 @@ def test_attest_refuses_offline_without_reading_the_identity_token(
         env_overrides={"OCX_OFFLINE": "1"},
     )
 
-    assert result.returncode == 77, (
-        f"an offline attest is a deliberate policy refusal (77), got {result.returncode}\n"
+    assert result.returncode == 81, (
+        f"an offline attest is a deliberate policy refusal (81), got {result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     envelope = json.loads(result.stdout)
@@ -451,8 +449,7 @@ def test_attest_with_no_signing_material_attaches_unsigned_and_lists_as_unverifi
     result = attest_unsigned(ocx, published_package, cyclonedx_predicate(tmp_path))
     assert result.returncode == 0, f"unsigned attach failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
-    envelope = json.loads(result.stdout)
-    data = envelope["data"]
+    data = json.loads(result.stdout)
     assert data["predicate_type"] == CYCLONEDX_URI
     assert data["signed"] is False
     assert "certificate_identity" not in data, "an unsigned attach has no certificate to name"
@@ -461,10 +458,10 @@ def test_attest_with_no_signing_material_attaches_unsigned_and_lists_as_unverifi
 
     listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
     assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
-    listing = json.loads(listed.stdout)["data"]
+    listing = json.loads(listed.stdout)
     assert listing["summary"]["unverified"] == 1
     assert listing["summary"]["verified"] == 0
-    [entry] = listing["entries"]
+    [entry] = listing["attestations"]
     assert entry["verified"] is False
     assert entry["predicate_type"] == CYCLONEDX_URI
     assert "certificate_identity" not in entry
@@ -479,7 +476,7 @@ def test_attest_with_no_signing_material_attaches_unsigned_and_lists_as_unverifi
         f"--summary must parse an unverified CycloneDX document like any other\n"
         f"stdout: {summarized.stdout}"
     )
-    [summary_entry] = json.loads(summarized.stdout)["data"]["entries"]
+    [summary_entry] = json.loads(summarized.stdout)["attestations"]
     assert summary_entry["summary"]["component_count"] == 2
 
 
@@ -510,9 +507,9 @@ def test_push_with_sbom_and_no_signing_material_reports_unsigned_and_reads_back_
 
     listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), pkg.short, check=False)
     assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
-    listing = json.loads(listed.stdout)["data"]
+    listing = json.loads(listed.stdout)
     assert listing["summary"]["unverified"] == 1
-    [entry] = listing["entries"]
+    [entry] = listing["attestations"]
     assert entry["verified"] is False
     assert entry["referrer_digest"] == attestation["referrer_digest"]
 
@@ -552,7 +549,7 @@ def test_attest_slsa_provenance_with_no_signing_material_refuses_naming_the_reme
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_offline_push_with_sbom_refuses_at_77_not_the_generic_offline_81(
+def test_offline_push_with_sbom_refuses_with_the_attest_slug_not_offline_mode(
     ocx: OcxRunner,
     unique_repo: str,
     sigstore_stack: SigstoreStack,
@@ -560,16 +557,15 @@ def test_offline_push_with_sbom_refuses_at_77_not_the_generic_offline_81(
 ) -> None:
     """S-018: the ``--sbom`` refusal beats the generic offline error.
 
-    Two exit codes are reachable for an offline ``push --sbom``: 77, because an
-    offline attestation is a deliberate policy refusal, and 81, because
-    ``remote_client()`` raises ``OfflineMode`` for any push. Which one arrives
-    is decided purely by statement order in ``package_push.rs`` — the refusal
-    block sits above ``Publisher::new``, and moving it below silently returns 81
+    Two refusals are reachable for an offline ``push --sbom``, both exit 81:
+    ``offline_attest_refused`` (a deliberate policy refusal) and ``offline_mode``
+    (``remote_client()`` raises ``OfflineMode`` for any push). Statement order in
+    ``package_push.rs`` decides which arrives -- the refusal block sits above
+    ``Publisher::new``, and moving it below silently returns ``offline_mode``
     with no unit test reddening, because none of them reaches ``remote_client``.
 
-    A script branching on 77 must see the same code here as it sees from
-    ``ocx package attest``, so 81 is asserted against by name rather than merely
-    being "not 77".
+    The codes are equal, so the ``error.detail`` slug is the discriminator: it must
+    match what ``ocx package attest`` reports.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
@@ -580,18 +576,15 @@ def test_offline_push_with_sbom_refuses_at_77_not_the_generic_offline_81(
         env_overrides={"OCX_OFFLINE": "1"},
     )
 
-    assert result.returncode != 81, (
-        "the generic offline error (81) beat the attest refusal — the "
-        "refuse_when_offline block has moved below the push client construction"
-    )
-    assert result.returncode == 77, (
-        f"expected the attest refusal (77), got {result.returncode}\n"
+    assert result.returncode == 81, (
+        f"expected the attest refusal (81), got {result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     envelope = json.loads(result.stdout)
     assert envelope["command"] == "package push", "the refusal is reported on the push route"
     assert envelope["error"]["detail"] == "offline_attest_refused", (
-        "the push route must report the same slug as the attest route"
+        "the push route must report the same slug as the attest route; `offline_mode` here means the "
+        "refuse_when_offline block has moved below the push client construction"
     )
 
 
@@ -968,7 +961,7 @@ def test_attest_lands_in_the_fallback_index_on_a_registry_without_the_referrers_
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """Attesting on a `registry:2` writes the fallback index instead of exiting 84.
+    """Attesting on a `registry:2` writes the fallback index instead of exiting 82.
 
     `adr_oci_referrers_signing_v1.md` Amendment 10 reverses S1-F for both
     pipelines. Wiring only `sign` would have left `attest` refusing on exactly
@@ -989,7 +982,7 @@ def test_attest_lands_in_the_fallback_index_on_a_registry_without_the_referrers_
         f"attest must succeed on a registry without the Referrers API, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
 
     status, _ = reg.list_referrers(legacy_registry, pkg.repo, data["subject_digest"])
     assert status == 404, (
@@ -1079,13 +1072,13 @@ def test_attest_without_platform_attaches_to_the_index(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == index_digest, (
         f"absent --platform must act on the resolved index ({index_digest}), "
         f"not narrow to the child ({platform_digest})"
     )
-    assert data["platform"] == "any", (
-        f"an absent narrowing reports as `any`, got {data['platform']!r}"
+    assert "platform" not in data, (
+        f"an absent narrowing reports no platform, got {data.get('platform')!r}"
     )
 
 
@@ -1169,7 +1162,7 @@ def test_attest_signature_format_decides_whether_the_att_sidecar_is_written(
     # Half 1 — the default. A referrer, and no sidecar tag at all.
     default = attest(ocx, sigstore_stack, identity_token, pkg, predicate)
     assert default.returncode == 0, f"attest failed\n{default.stderr}"
-    data = json.loads(default.stdout)["data"]
+    data = json.loads(default.stdout)
     assert FULL_SHA256_DIGEST_RE.match(data["referrer_digest"])
     assert "sidecar_digest" not in data, (
         f"the default wrote a sidecar: {data}"
@@ -1189,7 +1182,7 @@ def test_attest_signature_format_decides_whether_the_att_sidecar_is_written(
         check=False,
     )
     assert sidecar.returncode == 0, f"attest failed\n{sidecar.stderr}"
-    data = json.loads(sidecar.stdout)["data"]
+    data = json.loads(sidecar.stdout)
     assert FULL_SHA256_DIGEST_RE.match(data["sidecar_digest"])
     assert "referrer_digest" not in data, (
         f"--signature-format simplesigning must publish no referrer bundle: {data}"
@@ -1266,7 +1259,7 @@ def test_verify_reads_back_the_att_sidecar_attest_wrote(
         check=False,
     )
     assert written.returncode == 0, f"attest failed\n{written.stderr}"
-    assert "referrer_digest" not in json.loads(written.stdout)["data"], (
+    assert "referrer_digest" not in json.loads(written.stdout), (
         "the read-back below is only about the sidecar door if this run left no "
         "referrer for the bundle door to find"
     )
@@ -1287,7 +1280,7 @@ def test_verify_reads_back_the_att_sidecar_attest_wrote(
         f"published, got {verify.returncode}\n"
         f"stdout: {verify.stdout.strip()}\nstderr: {verify.stderr.strip()}"
     )
-    data = json.loads(verify.stdout)["data"]
+    data = json.loads(verify.stdout)
     [entry] = data["signatures"]
     assert entry["discovery_method"] == "sidecar_tag", (
         f"the sidecar tag is the only door open on this subject: {entry}"
@@ -1316,10 +1309,7 @@ def test_verify_reads_back_the_att_sidecar_attest_wrote(
 
 def _sweep_rows(result) -> dict[str, dict]:
     """The sweep report's rows, keyed by tag."""
-    envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
-    assert envelope["command"] == "package attest"
-    return {row["tag"]: row for row in envelope["data"]["tags"]}
+    return {row["tag"]: row for row in json.loads(result.stdout)["items"]}
 
 
 def test_attest_tags_sweeps_every_named_index(
@@ -1474,10 +1464,10 @@ def test_attest_without_tags_keeps_the_single_reference_report(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
-    assert "tags" not in data, f"an unswept run must not emit a sweep document: {data}"
+    data = json.loads(result.stdout)
+    assert "items" not in data, f"an unswept run must not emit a sweep document: {data}"
     assert data["subject_digest"] == index_digest
-    assert data["platform"] == "any"
+    assert "platform" not in data
 
 
 def test_attest_refuses_a_platform_alongside_a_sweep(

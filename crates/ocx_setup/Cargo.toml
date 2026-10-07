@@ -11,10 +11,7 @@ publish = false
 # reads, renders and clears the `[managed]` tier end to end, and `config.toml`
 # editing goes through `ocx_config::edit`.
 ocx_config.workspace = true
-# The process-outcome vocabulary. Reached only from an intra-doc link
-# (`session_path.rs:142`, `ocx_exit::ExitCode::ConfigError`), which `cargo
-# machete` cannot see and reports as unused — dropping the row would turn that
-# link into a `broken_intra_doc_links` entry, so it stays.
+# The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
 ocx_exit.workspace = true
 # Identifiers, digests and the `ocx` CLI's own identifier — bootstrap resolves
 # the published release through them.
@@ -30,8 +27,10 @@ ocx_shell.workspace = true
 # `FileStructure` — every path this tier writes (shims, state, managed dir) is
 # resolved through it rather than composed here.
 ocx_store.workspace = true
-# The bottom tier: `fs`, `env`, process helpers.
+# The bottom tier: `fs`, process helpers.
 ocx_util.workspace = true
+# The environment registry every variable this crate reads is declared in.
+ocx_env.workspace = true
 
 hex.workspace = true
 log.workspace = true
@@ -63,9 +62,9 @@ ocx_config = { workspace = true, features = ["__testing"] }
 # Dev-only: this tier reaches the index at runtime through `ocx_package_manager`,
 # never directly, so a runtime row would be an edge the crate does not have.
 ocx_index = { workspace = true, features = ["__testing"] }
-# `env::overrides::lock()` — the process-environment table the tier's tests
-# write through, on the same dev-only terms as the row above.
-ocx_util = { workspace = true, features = ["__testing"] }
+# `overrides::lock()` — the process-environment table the tier's tests write
+# through, on the same dev-only terms as the row above.
+ocx_env = { workspace = true, features = ["__testing"] }
 # `ocx_test_support::pki::pem_block`, which mints the malformed PEM the
 # extra-CA reader is shown refusing.
 ocx_test_support = { path = "../ocx_test_support" }

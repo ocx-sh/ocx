@@ -1,0 +1,200 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc_test", "rust_library", "rust_test")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+rust_library(
+    name = "ocx_sdkgen",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    aliases = aliases(),
+    # The SDK runtime, copied verbatim into every generated SDK by `include_str!`.
+    compile_data = glob(["templates/**"]),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True),
+)
+
+# The `ocx-sdkgen` CLI (`src/main.rs`, cargo's `[[bin]]`). It embeds the three
+# goldens, so they are compile inputs here and nowhere in the library: a golden
+# edit rebuilds this binary, not the lint or the gate.
+#
+# `stamp = 0`, spelled out: `bazel:tag:guard` clause 2 credits only an
+# explicitly specified `stamp = 0` (rules_rust defaults a `rust_binary` to -1).
+rust_binary(
+    name = "ocx_sdkgen_bin",
+    srcs = ["src/main.rs"],
+    aliases = aliases(),
+    compile_data = ["//crates/ocx_schema:golden"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    stamp = 0,
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [":ocx_sdkgen"],
+)
+
+# The generator's own tests compare a fresh run with the committed golden SDK,
+# so both the input documents and that golden are data.
+rust_test(
+    name = "ocx_sdkgen_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    crate = ":ocx_sdkgen",
+    data = glob(
+        ["tests/golden/**"],
+        allow_empty = True,
+    ) + ["//crates/ocx_schema:golden"],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    deps = all_crate_deps(normal_dev = True),
+)
+
+# Reads the goldens and the waiver tables as data: a waiver edit re-runs this
+# target without rebuilding the schema generator.
+rust_test(
+    name = "contract_lint",
+    srcs = [
+        "tests/contract_lint.rs",
+    ],
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    data = [
+        "tests/fixtures/contract_lint_red.json",
+        "tests/fixtures/contract_lint_red_cli.json",
+        "tests/fixtures/contract_lint_red_errors.json",
+        "//crates/ocx_schema:contract",
+        "//crates/ocx_schema:golden",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":ocx_sdkgen",
+    ],
+)
+
+# The differ over the mutation corpus, and the live goldens against the
+# committed baseline and ledger (both under `contract/`).
+rust_test(
+    name = "compat_gate",
+    srcs = [
+        "tests/compat_gate.rs",
+    ],
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    data = glob(["tests/compat_corpus/**"]) + [
+        "//crates/ocx_schema:contract",
+        "//crates/ocx_schema:golden",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":ocx_sdkgen",
+    ],
+)
+
+# The golden SDK decoding the conformance corpus. The SDK's sources are compiled
+# into this crate as a module, so they are `srcs`; `crate_root` is explicit
+# because the golden carries its own `lib.rs`, which inference would pick.
+rust_test(
+    name = "conformance",
+    srcs = ["tests/conformance.rs"] + glob(
+        ["tests/golden/rust/**/*.rs"],
+        allow_empty = True,
+    ),
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_root = "tests/conformance.rs",
+    data = ["//crates/ocx_schema:contract"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+# The golden SDK run against the Bazel-built `ocx`, and against the fake child
+# (`tests/fixtures/fake_ocx.sh`) the spawn rules are observed on.
+# `SDK_TEST_OCX_BINARY` is a compile-time `option_env!` input that only this
+# target sets; a `rootpath` is relative to the runfiles root, the test's working
+# directory under Bazel.
+rust_test(
+    name = "sdk_rust",
+    srcs = ["tests/sdk_rust.rs"] + glob(
+        ["tests/golden/rust/**/*.rs"],
+        allow_empty = True,
+    ),
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_root = "tests/sdk_rust.rs",
+    data = [
+        "tests/fixtures/fake_ocx.sh",
+        "//crates/ocx_cli:ocx",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ocx_sdkgen",
+        "SDK_TEST_OCX_BINARY": "$(rootpath //crates/ocx_cli:ocx)",
+    },
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_doc_test(
+    name = "ocx_sdkgen_doc_test",
+    crate = ":ocx_sdkgen",
+)

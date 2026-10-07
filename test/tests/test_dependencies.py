@@ -196,9 +196,9 @@ def test_env_includes_dependency_vars(ocx: OcxRunner, unique_repo: str, tmp_path
     assert env_result is not None
 
     # The leaf sets a {REPO_UPPER}_HOME constant. Check that key is present.
-    # env_result["entries"] is a list of {"key": "...", "value": "...", "type": "..."}
+    # env_result["items"] is a list of {"key": "...", "value": "...", "kind": "..."}
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert leaf_home_key in env_keys, (
         f"expected {leaf_home_key!r} from leaf dep in env output; got keys: {env_keys}"
     )
@@ -285,10 +285,10 @@ def test_install_with_missing_dep_reports_error(ocx: OcxRunner, unique_repo: str
 
 def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunner):
     """Packages without dependencies should continue to work unchanged."""
-    result = ocx.json("package", "install", "--select", published_package.short)
+    result = ocx.json("package", "install", "--select", published_package.short)["packages"]
     assert result is not None
 
-    find_result = ocx.json("package", "which", published_package.short)
+    find_result = ocx.json("package", "which", published_package.short)["paths"]
     assert find_result is not None
 
 
@@ -299,7 +299,7 @@ def test_package_without_deps_works(published_package: PackageInfo, ocx: OcxRunn
 
 def _find_package_root(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     """Return the package root for an installed package."""
-    result = ocx.json("package", "which", pkg.short)
+    result = ocx.json("package", "which", pkg.short)["paths"]
     return Path(result[pkg.short]["path"])
 
 
@@ -381,7 +381,7 @@ def test_deps_tree_shows_hierarchy(ocx: OcxRunner, unique_repo: str, tmp_path: P
     leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", app.short)
-    roots = result["roots"]
+    roots = result["items"]
     assert len(roots) == 1
 
     root_node = roots[0]
@@ -395,7 +395,7 @@ def test_deps_tree_leaf_has_empty_deps(published_package: PackageInfo, ocx: OcxR
     """Package with no deps shows single node with empty dependencies."""
     ocx.json("package", "install", "--select", published_package.short)
     result = ocx.json("package", "deps", published_package.short)
-    roots = result["roots"]
+    roots = result["items"]
     assert len(roots) == 1
     assert roots[0].get("dependencies", []) == []
 
@@ -405,7 +405,7 @@ def test_deps_tree_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: 
     c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", a.short)
-    root = result["roots"][0]
+    root = result["items"][0]
     assert a.repo in root["identifier"]
 
     # root -> B
@@ -425,7 +425,7 @@ def test_deps_tree_diamond_marks_repeated(ocx: OcxRunner, unique_repo: str, tmp_
     d, _b, _c, a = _setup_diamond(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", a.short)
-    root = result["roots"][0]
+    root = result["items"][0]
 
     # Collect all D nodes across the tree
     d_nodes = []
@@ -449,7 +449,7 @@ def test_deps_flat_evaluation_order(ocx: OcxRunner, unique_repo: str, tmp_path: 
     leaf, app = _setup_leaf_and_app_public(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", "--flat", app.short)
-    entries = result["entries"]
+    entries = result["items"]
     identifiers = [e["identifier"] for e in entries]
 
     leaf_idx = next(i for i, ident in enumerate(identifiers) if leaf.repo in ident)
@@ -474,7 +474,7 @@ def test_deps_flat_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: 
     c, b, a = _setup_chain_public(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", "--flat", a.short)
-    identifiers = [e["identifier"] for e in result["entries"]]
+    identifiers = [e["identifier"] for e in result["items"]]
 
     c_idx = next(i for i, ident in enumerate(identifiers) if c.repo in ident)
     b_idx = next(i for i, ident in enumerate(identifiers) if b.repo in ident)
@@ -581,7 +581,7 @@ def test_clean_dry_run_reports_without_removing(ocx: OcxRunner, unique_repo: str
     ocx.plain("package", "uninstall", "-d", app.short)
 
     before_count = _count_object_dirs(ocx)
-    result = ocx.json("clean", "--dry-run")
+    result = ocx.json("clean", "--dry-run")["items"]
     after_count = _count_object_dirs(ocx)
 
     assert after_count == before_count, "dry-run should not remove any objects"
@@ -638,7 +638,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
     ocx.json("package", "install", "--select", app.short)
 
     env_result = ocx.json("package", "env", app.short)
-    keys = [e["key"] for e in env_result["entries"]]
+    keys = [e["key"] for e in env_result["items"]]
 
     leaf_home_key = leaf_repo.upper().replace("-", "_") + "_HOME"
     app_home_key = app_repo.upper().replace("-", "_") + "_HOME"
@@ -663,7 +663,7 @@ def test_deps_tree_depth_limits_nesting(ocx: OcxRunner, unique_repo: str, tmp_pa
     _c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", "--depth", "1", a.short)
-    root = result["roots"][0]
+    root = result["items"][0]
 
     # Root should show B as a direct dependency
     assert len(root["dependencies"]) == 1, (
@@ -870,7 +870,7 @@ def test_deps_multi_root_shared_transitive(
     ocx.json("package", "install", "--select", c.short)
 
     result = ocx.json("package", "deps", "--flat", a.short, c.short)
-    ids = [e["identifier"] for e in result["entries"]]
+    ids = [e["identifier"] for e in result["items"]]
 
     # D and B should appear exactly once each (deduped across roots).
     d_count = sum(1 for x in ids if f"{unique_repo}_d" in x)
@@ -923,7 +923,7 @@ def test_clean_dry_run_transitive_chain(
     ocx.plain("package", "uninstall", "-d", a.short)
 
     before = _count_object_dirs(ocx)
-    result = ocx.json("clean", "--dry-run")
+    result = ocx.json("clean", "--dry-run")["items"]
     after = _count_object_dirs(ocx)
 
     assert after == before, "dry-run must not remove objects"
@@ -1046,7 +1046,7 @@ def test_env_candidate_deduplicates_root_that_is_also_dependency(
     env_result = ocx.json("package", "env", "--candidate", app.short, lib.short)
 
     lib_home_key = lib_repo.upper().replace("-", "_") + "_HOME"
-    occurrences = [e for e in env_result["entries"] if e["key"] == lib_home_key]
+    occurrences = [e for e in env_result["items"] if e["key"] == lib_home_key]
     assert len(occurrences) == 1, (
         f"expected {lib_home_key!r} exactly once, got {len(occurrences)} times"
     )
@@ -1070,7 +1070,7 @@ def test_sealed_suppresses_dep_env(
 
     env_result = ocx.json("package", "env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert b_home_key not in env_keys, (
         f"non-exported dep key {b_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1089,7 +1089,7 @@ def test_public_includes_dep_env(
 
     env_result = ocx.json("package", "env", a.short)
     b_home_key = f"{unique_repo}_b".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert b_home_key in env_keys, (
         f"exported dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1267,7 +1267,7 @@ def test_transitive_public_propagates(
 
     env_result = ocx.json("package", "env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert c_home_key in env_keys, (
         f"transitively exported dep key {c_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1290,7 +1290,7 @@ def test_sealed_blocks_transitive_chain(
 
     env_result = ocx.json("package", "env", a.short)
     c_home_key = f"{unique_repo}_c".upper().replace("-", "_") + "_HOME"
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert c_home_key not in env_keys, (
         f"blocked transitive dep key {c_home_key!r} should NOT appear in env; got keys: {env_keys}"
     )
@@ -1342,7 +1342,7 @@ def test_private_includes_dep_env_for_direct_target(
     ocx.json("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("package", "env", "--self", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert b_home_key in env_keys, (
         f"private dep key {b_home_key!r} MUST appear in env --mode=self for direct target; got keys: {env_keys}"
     )
@@ -1371,7 +1371,7 @@ def test_private_suppresses_dep_env_for_consumer(
     ocx.json("package", "install", "--select", f"{unique_repo}_root:1.0.0")
 
     env_result = ocx.json("package", "env", f"{unique_repo}_root:1.0.0")
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert b_home_key not in env_keys, (
         f"private transitive dep key {b_home_key!r} should NOT appear for consumer; got keys: {env_keys}"
     )
@@ -1399,7 +1399,7 @@ def test_interface_includes_dep_env(
     ocx.json("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
     env_result = ocx.json("package", "env", f"{unique_repo}_app:1.0.0")
-    env_keys = [e["key"] for e in env_result["entries"]]
+    env_keys = [e["key"] for e in env_result["items"]]
     assert b_home_key in env_keys, (
         f"interface dep key {b_home_key!r} MUST appear in env; got keys: {env_keys}"
     )
@@ -1417,7 +1417,7 @@ def test_deps_flat_shows_visibility_column(
     ocx.run("package", "install", "--select", f"{unique_repo}_app:1.0.0")
 
     result = ocx.json("package", "deps", "--flat", f"{unique_repo}_app:1.0.0")
-    entries = result["entries"]
+    entries = result["items"]
     leaf_entry = next(e for e in entries if f"{unique_repo}_leaf" in e["identifier"])
     app_entry = next(e for e in entries if f"{unique_repo}_app" in e["identifier"])
 
@@ -1465,7 +1465,7 @@ def _find_object_dir(ocx: OcxRunner, reg_slug: str, repo: str) -> Path:
     install symlink) we fall back to the bare repo name so ``ocx package which``
     resolves via the local index.
     """
-    find_result = ocx.json("package", "which", repo)
+    find_result = ocx.json("package", "which", repo)["paths"]
     assert len(find_result) == 1, f"one identifier in, one entry out: {find_result}"
     key = next(iter(find_result))
     package_root = Path(find_result[key]["path"]).resolve()
@@ -1519,7 +1519,7 @@ def test_public_dep_entrypoints_appear_in_consumer_path(
     ocx.plain("package", "install", "--select", pkg_a.short)
 
     env_result = ocx.json("package", "env", pkg_a.short)
-    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+    path_values = [e["value"] for e in env_result["items"] if e["key"] == "PATH"]
 
     assert any("entrypoints" in v for v in path_values), (
         f"expected B's entrypoints/ in PATH for public dep; PATH values: {path_values}"
@@ -1556,10 +1556,10 @@ def test_sealed_dep_entrypoints_excluded_from_consumer_path(
     ocx.plain("package", "install", "--select", pkg_a.short)
 
     env_result = ocx.json("package", "env", pkg_a.short)
-    path_values = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+    path_values = [e["value"] for e in env_result["items"] if e["key"] == "PATH"]
 
     # B's entrypoints/ dir must not appear in PATH for A (sealed dep not exported).
-    b_find = ocx.json("package", "which", pkg_b.short)
+    b_find = ocx.json("package", "which", pkg_b.short)["paths"]
     assert len(b_find) == 1, f"one identifier in, one entry out: {b_find}"
     b_pkg_root = str(Path(next(iter(b_find.values()))["path"]))
 
@@ -1596,7 +1596,7 @@ def test_deps_flat_surface_gating_without_self(
     ocx.json("package", "install", "--select", app.short)
 
     result = ocx.json("package", "deps", "--flat", app.short)
-    identifiers = [e["identifier"] for e in result["entries"]]
+    identifiers = [e["identifier"] for e in result["items"]]
 
     # App root is always included (public sentinel).
     assert any(app_repo in ident for ident in identifiers), (
@@ -1631,7 +1631,7 @@ def test_deps_flat_surface_gating_with_self(
 
     # Interface surface (no --self): private dep must not appear.
     result_consumer = ocx.json("package", "deps", "--flat", app.short)
-    ids_consumer = [e["identifier"] for e in result_consumer["entries"]]
+    ids_consumer = [e["identifier"] for e in result_consumer["items"]]
     assert not any(leaf_repo in ident for ident in ids_consumer), (
         f"private dep {leaf_repo!r} must NOT appear in default --flat (interface surface); "
         f"got: {ids_consumer}"
@@ -1639,7 +1639,7 @@ def test_deps_flat_surface_gating_with_self(
 
     # Private surface (--self): private dep must appear.
     result_self = ocx.json("package", "deps", "--flat", "--self", app.short)
-    ids_self = [e["identifier"] for e in result_self["entries"]]
+    ids_self = [e["identifier"] for e in result_self["items"]]
     assert any(leaf_repo in ident for ident in ids_self), (
         f"private dep {leaf_repo!r} MUST appear in --flat --self (private surface); "
         f"got: {ids_self}"

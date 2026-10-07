@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::loader::ConfigLoader;
 use crate::{Config, ConfigTier};
+use ocx_exit::{Pick, Row};
 use ocx_util::tls::{ExtraRoots, MAX_EXTRA_CA_CERTS_BYTES, PemBundleError};
 
 /// Where an [`ExtraRoots`] value's bytes came from.
@@ -96,13 +97,27 @@ fn truncated_tag(tag: &str) -> String {
 ///
 /// Variants carry no certificate or key bytes, only a source, count, index or truncated tag:
 /// a reachable `Display` can land in CI logs.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(
+    with = row_by_origin,
+    rows(
+        (DataError, slug = "extra_ca_file_invalid", summary = "The extra CA bundle file holds no usable certificate"),
+        (ConfigError, slug = "extra_ca_value_invalid", summary = "The configured extra CA bundle value holds no usable certificate"),
+    )
+)]
 pub enum TlsError {
     /// The PEM bundle exceeds [`MAX_EXTRA_CA_CERTS_BYTES`]; inline text only, since an
     /// over-cap file surfaces as [`TlsError::Unreadable`].
     #[error(
         "{origin} is {bytes} bytes, over the {}-byte limit for a CA bundle",
         MAX_EXTRA_CA_CERTS_BYTES
+    )]
+    #[exit(
+        with = row_by_origin,
+        rows(
+            (IoError, slug = "extra_ca_file_too_large", summary = "The extra CA bundle file exceeds the allowed size"),
+            (ConfigError, slug = "extra_ca_value_too_large", summary = "The configured extra CA bundle value exceeds the allowed size"),
+        )
     )]
     TooLarge {
         /// Where the oversized text came from.
@@ -156,6 +171,11 @@ pub enum TlsError {
 
     /// A path-typed source could not be read as a bounded, regular file.
     #[error("cannot read {origin}")]
+    #[exit(
+        IoError,
+        slug = "extra_ca_unreadable",
+        summary = "The extra CA bundle cannot be read"
+    )]
     Unreadable {
         /// The refused path-typed source.
         origin: ExtraRootsSource,
@@ -163,6 +183,23 @@ pub enum TlsError {
         #[source]
         io: std::io::Error,
     },
+}
+
+/// Picks the first row for a file origin (an unusable file) and the second for inline text (the configuration itself).
+///
+/// Exhaustive over [`TlsError`], so a new variant must name its origin or pick its own row.
+fn row_by_origin(error: &TlsError, rows: [Row; 2]) -> Pick<'_> {
+    let (TlsError::TooLarge { origin, .. }
+    | TlsError::NotACertificate { origin, .. }
+    | TlsError::Empty { origin }
+    | TlsError::Malformed { origin, .. }
+    | TlsError::Truncated { origin, .. }
+    | TlsError::Unreadable { origin, .. }) = error;
+    if origin.is_file() {
+        Pick::row(rows[0])
+    } else {
+        Pick::row(rows[1])
+    }
 }
 
 /// The environment arm of the extra-CA ladder: a non-empty value containing `-----BEGIN` is PEM

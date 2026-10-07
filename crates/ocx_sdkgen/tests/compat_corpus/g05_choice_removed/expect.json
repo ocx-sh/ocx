@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --compression` drops the choice `gzip`.",
+  "findings": [
+    {
+      "code": "G05",
+      "pointer": "/root/commands/0/commands/0/args/4/value/choices/2",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

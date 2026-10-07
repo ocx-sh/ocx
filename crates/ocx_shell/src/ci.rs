@@ -54,12 +54,13 @@ impl CiFlavor {
 
 /// Folds `values` onto the process value of path variable `key` with the same
 /// [`move_to_front`](ocx_util::path::move_to_front) `ocx exec` uses, so CI precedence matches it.
+/// A declared secret reads as absent, so its value never reaches the export file.
 fn prepend_existing(key: &str, values: &[String]) -> String {
     use std::ffi::{OsStr, OsString};
 
     use ocx_util::path::move_to_front;
 
-    let existing = ocx_util::env::var(key).unwrap_or_default();
+    let existing = ocx_env::dynamic(key).unwrap_or_default();
     let mut result = OsString::from(existing);
     for value in values {
         result = move_to_front(&result, OsStr::new(value));
@@ -69,10 +70,11 @@ fn prepend_existing(key: &str, values: &[String]) -> String {
 
 /// Folds `values` onto the process value of list variable `key` with the same
 /// [`append_unique`](ocx_util::list::append_unique) `ocx exec` uses, so CI precedence matches it.
+/// A declared secret reads as absent, so its value never reaches the export file.
 fn append_existing(key: &str, values: &[String], separator: &str) -> String {
     use ocx_util::list::append_unique;
 
-    let mut result = ocx_util::env::var(key).unwrap_or_default();
+    let mut result = ocx_env::dynamic(key).unwrap_or_default();
     for value in values {
         result = append_unique(&result, value, separator);
     }
@@ -135,14 +137,14 @@ mod tests {
     // direction; the first three assertions are unchanged by the flip
     // (single-value / identical-duplicate cases are order-independent), the
     // second one changes value and is the direct regression pin.
-    use ocx_util::env::PATH_SEPARATOR as SEP;
+    use ocx_util::path::PATH_SEPARATOR as SEP;
 
     #[test]
     fn prepend_existing_does_not_re_add_present_value() {
         // A single value already present is moved to front, not duplicated.
         // Order-independent under both the old and the fixed direction.
-        let env = ocx_util::env::overrides::lock();
-        env.set("PREPEND_TEST", format!("/pkg/bin{SEP}/usr/bin"));
+        let env = ocx_env::overrides::lock();
+        env.set_raw("PREPEND_TEST", format!("/pkg/bin{SEP}/usr/bin"));
         let result = super::prepend_existing("PREPEND_TEST", &["/pkg/bin".to_string()]);
         assert_eq!(result, format!("/pkg/bin{SEP}/usr/bin"));
     }
@@ -153,8 +155,8 @@ mod tests {
         // sequence: `/a/bin` first, `/b/bin` second. Pins last-applied-wins:
         // `/b/bin` lands at the front. Fails under the old first-wins
         // direction, which put `/a/bin` (applied first) at the front.
-        let env = ocx_util::env::overrides::lock();
-        env.set("PREPEND_TEST", "/usr/bin");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("PREPEND_TEST", "/usr/bin");
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/b/bin".to_string()]);
         assert_eq!(result, format!("/b/bin{SEP}/a/bin{SEP}/usr/bin"));
     }
@@ -164,8 +166,8 @@ mod tests {
         // Empty segments in the existing value are dropped regardless of
         // direction — order-independent under both the old and the fixed
         // direction (only one new value here).
-        let env = ocx_util::env::overrides::lock();
-        env.set("PREPEND_TEST", format!("/usr/bin{SEP}{SEP}/bin"));
+        let env = ocx_env::overrides::lock();
+        env.set_raw("PREPEND_TEST", format!("/usr/bin{SEP}{SEP}/bin"));
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string()]);
         assert_eq!(result, format!("/a/bin{SEP}/usr/bin{SEP}/bin"));
     }
@@ -175,8 +177,8 @@ mod tests {
         // Identical repeated values collapse to a single front occurrence
         // regardless of direction — order-independent under both the old and
         // the fixed direction (no distinct values to reorder).
-        let env = ocx_util::env::overrides::lock();
-        env.remove("PREPEND_TEST");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("PREPEND_TEST");
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/a/bin".to_string()]);
         assert_eq!(result, "/a/bin");
     }
@@ -189,8 +191,8 @@ mod tests {
         // front, ahead of both the earlier contribution and the pre-existing
         // value. Fails under the old first-wins behavior, which would have
         // put `/a/bin` first instead.
-        let env = ocx_util::env::overrides::lock();
-        env.set("PREPEND_TEST", "/existing/bin");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("PREPEND_TEST", "/existing/bin");
         let result = super::prepend_existing("PREPEND_TEST", &["/a/bin".to_string(), "/b/bin".to_string()]);
         assert_eq!(result, format!("/b/bin{SEP}/a/bin{SEP}/existing/bin"));
     }
@@ -203,8 +205,8 @@ mod tests {
 
     #[test]
     fn append_existing_on_an_empty_ambient_yields_the_bare_value() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("APPEND_TEST");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("APPEND_TEST");
         let result = super::append_existing("APPEND_TEST", &["-ea".to_string()], " ");
         assert_eq!(result, "-ea");
     }
@@ -214,8 +216,8 @@ mod tests {
         // A value already present (from the ambient process env) is removed
         // from its old position and re-appended at the back, so re-exporting
         // an already-exported variable does not grow it.
-        let env = ocx_util::env::overrides::lock();
-        env.set("APPEND_TEST", "-ea -Xmx1g");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("APPEND_TEST", "-ea -Xmx1g");
         let result = super::append_existing("APPEND_TEST", &["-ea".to_string()], " ");
         assert_eq!(result, "-Xmx1g -ea");
     }
@@ -225,8 +227,8 @@ mod tests {
         // Two distinct list contributions for the same key, applied in
         // sequence: `-ea` first, `-server` second. Last-applied-wins lands
         // `-server` at the back, after `-ea`.
-        let env = ocx_util::env::overrides::lock();
-        env.remove("APPEND_TEST");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("APPEND_TEST");
         let result = super::append_existing("APPEND_TEST", &["-ea".to_string(), "-server".to_string()], " ");
         assert_eq!(result, "-ea -server");
     }
@@ -234,13 +236,23 @@ mod tests {
     #[test]
     fn append_existing_uses_the_entrys_own_separator() {
         // `GODEBUG`-style comma separator, distinct from the space default.
-        let env = ocx_util::env::overrides::lock();
-        env.remove("APPEND_TEST");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("APPEND_TEST");
         let result = super::append_existing(
             "APPEND_TEST",
             &["gctrace=1".to_string(), "madvdontneed=1".to_string()],
             ",",
         );
         assert_eq!(result, "gctrace=1,madvdontneed=1");
+    }
+
+    #[test]
+    fn an_existing_ci_secret_is_never_folded_into_an_exported_value() {
+        let env = ocx_env::overrides::lock();
+        env.set(ocx_env::CI_JOB_TOKEN.declaration(), "glcbt-hunter2");
+        let prepended = super::prepend_existing("CI_JOB_TOKEN", &["/pkg/bin".to_string()]);
+        let appended = super::append_existing("CI_JOB_TOKEN", &["-ea".to_string()], " ");
+        assert_eq!(prepended, "/pkg/bin");
+        assert_eq!(appended, "-ea");
     }
 }

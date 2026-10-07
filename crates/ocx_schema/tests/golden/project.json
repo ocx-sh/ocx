@@ -126,11 +126,22 @@
     },
     "ModifierKind": {
       "description": "How a declared value combines with the variable's existing value.",
-      "type": "string",
-      "enum": [
-        "path",
-        "constant",
-        "list"
+      "oneOf": [
+        {
+          "description": "Prepended to any existing value of the variable.",
+          "type": "string",
+          "const": "path"
+        },
+        {
+          "description": "Replaces any existing value of the variable.",
+          "type": "string",
+          "const": "constant"
+        },
+        {
+          "description": "Appended to any existing value of the variable, joined by its separator.",
+          "type": "string",
+          "const": "list"
+        }
       ]
     },
     "Group": {

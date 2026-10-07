@@ -71,7 +71,7 @@ impl PackageCascadeRepair {
         report.index_layer_skipped = skipped;
         report.tags_file = self.tags_file.clone();
 
-        for (entry, (observation, expected)) in report.entries.iter_mut().zip(graphs) {
+        for (entry, (observation, expected)) in report.items.iter_mut().zip(graphs) {
             let planned = graph::plan_repairs(&entry.report, &observation, &expected);
 
             let attempted = self.writes_to_attempt(&planned);
@@ -95,7 +95,7 @@ impl PackageCascadeRepair {
         if let Some(path) = &self.tags_file {
             // Appended like `push --tags-file`, so a pipeline's earlier tags survive. Written on every
             // run, empty included, or an unconditional `announce --tags-file` finds no file.
-            crate::conventions::append_tags_file(path, &run_tags(&report.entries)).await?;
+            crate::conventions::append_tags_file(path, &run_tags(&report.items)).await?;
         }
 
         Ok(crate::conventions::cascade_repair_exit_code(&report).into())

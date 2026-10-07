@@ -10,10 +10,10 @@ use std::path::PathBuf;
 /// `OCX_HOME` if set and non-empty, else `~/.ocx`; every caller resolves it here so
 /// one invocation never sees two data roots.
 pub fn default_ocx_root() -> Option<PathBuf> {
-    if let Some(home) = ocx_util::env::var(crate::env::keys::OCX_HOME).filter(|value| !value.is_empty()) {
+    if let Some(home) = ocx_env::OCX_HOME.get() {
         return Some(PathBuf::from(home));
     }
-    ocx_util::env::home_dir().map(|home| home.join(".ocx"))
+    ocx_env::home_dir().map(|home| home.join(".ocx"))
 }
 
 #[cfg(test)]
@@ -29,7 +29,7 @@ mod tests {
     /// agree, not that both functions merely return `Some`.
     #[test]
     fn the_ocx_home_default_has_one_definition() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let home = env.isolate_project_home();
 
         assert_eq!(
@@ -50,8 +50,8 @@ mod tests {
 
         // An empty value is not a root. Falling back keeps `$OCX_HOME=""` from
         // resolving every store to the process working directory.
-        env.set("OCX_HOME", "");
-        let fallback = ocx_util::env::home_dir().map(|h| h.join(".ocx"));
+        env.set(&ocx_env::OCX_HOME, "");
+        let fallback = ocx_env::home_dir().map(|h| h.join(".ocx"));
         assert_eq!(default_ocx_root(), fallback, "an empty OCX_HOME must fall back");
         assert_eq!(
             crate::loader::ConfigLoader::home_path(),

@@ -20,6 +20,7 @@ use crate::sign::state::SigningStatePaths;
 use crate::sign::{SignError, SignErrorKind, SignatureFormat, Signer, TokenProvider};
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{Client, OciTransport};
+use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
 use ocx_oci::referrer::ReferrerManifest;
 use ocx_oci::referrer::capability::ReferrersSupport;
 use ocx_oci::referrer::manifest::{bundle_annotations, bundle_created, bundle_now};
@@ -29,12 +30,6 @@ use ocx_oci::referrer::media_types::{
 use ocx_oci::resolve_target::{ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
 use ocx_oci::{Algorithm, Descriptor, Digest, OCI_IMAGE_MEDIA_TYPE, PackageRef, Platform, native};
-
-/// Manifest media types accepted when fetching the per-platform target.
-const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
-    OCI_IMAGE_MEDIA_TYPE,
-    "application/vnd.docker.distribution.manifest.v2+json",
-];
 
 /// Whether the attach publishes a signed bundle or the raw document.
 ///
@@ -189,7 +184,7 @@ impl AttestPipeline {
         // Digest-only: a `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, served_digest) = transport
-            .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
+            .pull_manifest_raw(&subject_ref, SIGNABLE_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
         // Bind the mirror-served bytes to the resolved digest, or a wrong `size` yields an attestation strict verifiers reject.
@@ -746,7 +741,7 @@ mod tests {
 
     // ── S-002: the offline policy refusal ──────────────────────────────────
 
-    /// S1-E: an offline attest is a deliberate policy rejection (77), not a
+    /// S1-E: an offline attest is a deliberate policy rejection (81), not a
     /// passive transport failure — and it must land before the credential path
     /// is entered, or a refused run has already touched an OIDC token.
     #[tokio::test]
@@ -1045,7 +1040,7 @@ mod tests {
 
     /// **The attest half of C-009.** `attest/pipeline.rs` carried its own
     /// byte-identical copy of the sign gate, so wiring only `sign` would have
-    /// left `ocx package attest` refused with exit 84 on exactly the registries
+    /// left `ocx package attest` refused with exit 82 on exactly the registries
     /// `ocx package sign` had just started working on — with nothing in the
     /// build to notice, since `-D dead-code` cannot fire on a `pub` trait
     /// method in a library crate.

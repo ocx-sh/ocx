@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/errors/v1.json",
+  "title": "ErrorDocument",
+  "description": "L16: a free string under `error.context`.",
+  "type": "object",
+  "properties": {
+    "error": { "description": "The failure.", "$ref": "#/$defs/Body" }
+  },
+  "required": ["error"],
+  "$defs": {
+    "Body": {
+      "description": "Error body.",
+      "type": "object",
+      "properties": {
+        "context": { "description": "Structured context.", "$ref": "#/$defs/Context" }
+      },
+      "required": ["context"]
+    },
+    "Context": {
+      "description": "Context fields.",
+      "type": "object",
+      "properties": {
+        "source": { "description": "A raw URL.", "type": "string" }
+      }
+    }
+  }
+}

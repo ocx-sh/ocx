@@ -239,11 +239,11 @@ async fn render_and_warn(
     }
 }
 
-/// One dry-run probe: cached / would-fetch, plus the store path when present.
+/// One dry-run probe: cached / would_fetch, plus the store path when present.
 type DryRunProbe = (api::data::pull_dry_run::PullStatus, Option<std::path::PathBuf>);
 
-/// Reports cached / would-fetch per pinned id without writing the store; a resolution failure
-/// reads as would-fetch. Resolves before `find_plain`, since the lock pins the image index and the
+/// Reports cached / would_fetch per pinned id without writing the store; a resolution failure
+/// reads as would_fetch. Resolves before `find_plain`, since the lock pins the image index and the
 /// store keys by platform manifest, so a direct probe misses every multi-platform package.
 async fn run_dry_run(
     context: &crate::app::Context,

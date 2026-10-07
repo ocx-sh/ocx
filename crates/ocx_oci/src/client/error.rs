@@ -6,53 +6,114 @@ use std::path::PathBuf;
 use crate::{Digest, OciIdentifier, PinnedOciIdentifier, native};
 
 /// Errors that can occur during OCI client operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ClientError {
     /// Authentication with the registry failed.
     #[error("registry authentication failed: {0}")]
+    #[exit(
+        AuthError,
+        slug = "registry_auth_failed",
+        summary = "The registry rejected the request's authentication"
+    )]
     Authentication(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Digest mismatch between expected and actual content hash, for manifests and verified blobs.
     #[error("digest mismatch: expected '{expected}', got '{actual}'")]
+    #[exit(
+        DataError,
+        slug = "digest_mismatch",
+        summary = "Downloaded content does not hash to its expected digest"
+    )]
     DigestMismatch { expected: String, actual: String },
     /// The transport delivered fewer bytes than the manifest-declared blob size.
     ///
     /// Kept apart from [`ClientError::DigestMismatch`], or every truncated transfer reads as the registry
     /// serving wrong content.
     #[error("short blob read: got {actual} of {expected} bytes")]
+    #[exit(
+        TempFail,
+        slug = "short_blob_read",
+        summary = "The registry ended a blob download early"
+    )]
     ShortBlobRead { expected: u64, actual: u64 },
     /// A layer's decompressed output crossed the `cap`-byte decompression-bomb ceiling (CWE-400).
     #[error("decompressed layer exceeded the {cap}-byte cap (possible decompression bomb)")]
+    #[exit(
+        DataError,
+        slug = "decompression_cap_exceeded",
+        summary = "A layer decompressed past the size cap"
+    )]
     DecompressionCapExceeded { cap: u64 },
     /// Expected an image manifest but got an image index or unknown type.
     #[error("expected an image manifest, got an image index")]
+    #[exit(
+        DataError,
+        slug = "unexpected_manifest_type",
+        summary = "An image index arrived where an image manifest was expected"
+    )]
     UnexpectedManifestType,
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
     #[error("invalid manifest: {0}")]
+    #[exit(DataError, slug = "invalid_manifest", summary = "A manifest is invalid")]
     InvalidManifest(String),
     /// The registry answered a manifest request with something that cannot be a manifest (a login portal, a
     /// proxy error page).
     #[error("registry did not answer with a manifest")]
+    #[exit(
+        DataError,
+        slug = "not_a_manifest",
+        summary = "The registry did not answer with a manifest"
+    )]
     NotAManifest(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A served image index violates the OCI image spec; refused before its bytes reach the index.
     #[error(transparent)]
+    #[exit(
+        DataError,
+        slug = "invalid_image_index",
+        summary = "An image index document is invalid"
+    )]
     InvalidImageIndex(#[from] crate::manifest::InvalidImageIndex),
     /// A single-layer artifact's `artifactType` was not the expected one.
     #[error("unexpected artifact type: expected '{expected}', got {actual:?}")]
+    #[exit(
+        DataError,
+        slug = "unexpected_artifact_type",
+        summary = "An artifact carries an unexpected artifact type"
+    )]
     UnexpectedArtifactType { expected: String, actual: Option<String> },
     /// A single-layer artifact manifest had zero or more than one layer.
     #[error("expected exactly one layer, got {count}")]
+    #[exit(
+        DataError,
+        slug = "wrong_layer_count",
+        summary = "An artifact carries other than exactly one layer"
+    )]
     WrongLayerCount { count: usize },
     /// A single-layer artifact's layer `mediaType` was not the expected one.
     #[error("unexpected layer media type: expected '{expected}', got '{actual}'")]
+    #[exit(
+        DataError,
+        slug = "unexpected_layer_media_type",
+        summary = "A layer carries an unexpected media type"
+    )]
     UnexpectedLayerMediaType { expected: String, actual: String },
     /// A single-layer artifact's declared size exceeded the caller's ceiling, checked before any fetch.
     #[error("layer size {declared} exceeds the maximum allowed {maximum} bytes")]
+    #[exit(
+        DataError,
+        slug = "layer_size_exceeded",
+        summary = "A layer declares a size above the allowed maximum"
+    )]
     LayerSizeExceeded { declared: i64, maximum: u64 },
     /// A registry-supplied graph exceeded a traversal limit.
     ///
     /// Refused, never truncated: a copy that dropped a signature past the limit would report success for an
     /// unsigned target.
     #[error("{limit_kind} limit of {limit} exceeded (reached {actual}) while copying {subject}")]
+    #[exit(
+        DataError,
+        slug = "traversal_limit_exceeded",
+        summary = "Copying a manifest graph exceeded a traversal limit"
+    )]
     TraversalLimitExceeded {
         limit_kind: TraversalLimit,
         limit: usize,
@@ -61,34 +122,67 @@ pub enum ClientError {
     },
     /// The requested manifest does not exist in the registry.
     #[error("manifest not found: {0}")]
+    #[exit(NotFound, slug = "manifest_not_found", summary = "The registry has no such manifest")]
     ManifestNotFound(String),
     /// The requested repository does not exist; callers treat this (a first publish) apart from
     /// [`ClientError::Registry`].
     #[error("repository not found: {0}")]
+    #[exit(
+        NotFound,
+        slug = "repository_not_found",
+        summary = "The registry has no such repository"
+    )]
     RepositoryNotFound(String),
     /// A referenced blob does not exist: the looked-up image's `registry/repository[:tag]` plus the missing
     /// blob's digest.
     #[error("blob not found: {0}")]
+    #[exit(NotFound, slug = "blob_not_found", summary = "The registry has no such blob")]
     BlobNotFound(Box<PinnedOciIdentifier>),
     /// A registry operation failed.
     #[error("registry operation failed: {0}")]
+    // 75 means a rerun may succeed, 69 that it will not; wrappers retry on 75.
+    #[exit(
+        Unavailable,
+        slug = "registry_unavailable",
+        summary = "A registry operation failed in a way a retry does not clear"
+    )]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The registry named a destination the transport refuses: an off-origin upload `Location` (CWE-918)
     /// or a plaintext auth realm from an HTTPS registry (CWE-319).
     #[error("registry named a destination the transport refuses: {0}")]
+    #[exit(
+        DataError,
+        slug = "unsafe_destination",
+        summary = "The registry named a destination the transport refuses"
+    )]
     UnsafeDestination(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The registry answered with a redirect the transport did not follow: a declined `https`->`http` hop,
     /// a declined mid-upload handoff, the hop limit, or a missing or unparseable `Location`.
     #[error("registry answered with a redirect the transport did not follow: {0}")]
+    #[exit(
+        DataError,
+        slug = "unfollowed_redirect",
+        summary = "The registry answered with a redirect the transport did not follow"
+    )]
     UnfollowedRedirect(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A failure that may not repeat: connect or timeout, or a status [`crate::transport_policy::is_transient_status`]
     /// accepts.
     ///
     /// Kept apart from [`ClientError::Registry`], which answers the same way on a rerun.
     #[error("transient registry failure: {0}")]
+    #[exit(
+        TempFail,
+        slug = "registry_transient",
+        summary = "A registry operation failed in a way a retry may clear"
+    )]
     RegistryTransient(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// File I/O error with path context.
     #[error("I/O error for '{}': {source}", path.display())]
+    #[exit(
+        IoError,
+        slug = "client_io",
+        summary = "Reading or writing a local file during a registry operation failed"
+    )]
     Io {
         path: PathBuf,
         #[source]
@@ -96,21 +190,42 @@ pub enum ClientError {
     },
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
+    #[exit(
+        DataError,
+        slug = "client_serialization",
+        summary = "A registry document could not be serialized or parsed"
+    )]
     Serialization(#[source] serde_json::Error),
     /// Invalid UTF-8 encoding encountered.
     #[error("invalid UTF-8 encoding: {0}")]
+    #[exit(
+        DataError,
+        slug = "invalid_encoding",
+        summary = "Registry content is not valid UTF-8"
+    )]
     InvalidEncoding(#[source] std::string::FromUtf8Error),
     /// A digest string the registry served could not be parsed.
     #[error(transparent)]
+    #[exit(delegate)]
     Digest(#[from] crate::digest::error::DigestError),
     /// An internal library error (e.g. codesign, archive processing).
     #[error("{0}")]
+    // `None` lets the chain walker reach the wrapped source; a `Some` would exit a hostile-layer `SymlinkEscape` as 1, not 65.
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "client_internal",
+            summary = "A registry operation failed with an unclassified cause"
+        )
+    )]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// A read routed through a configured mirror failed, with the routing that caused it.
     ///
     /// Never wraps a not-found sentinel, or callers matching it as "absent" turn a missing tag into a hard failure.
     #[error("fetching '{physical}' via mirror '{mirror}' configured for '{origin}'")]
+    #[exit(delegate = source)]
     Mirrored {
         origin: String,
         mirror: String,
@@ -121,18 +236,38 @@ pub enum ClientError {
 
     /// The reachable registry has no referrers path this operation can use; the raising site logs the cause.
     #[error("registry {registry} has no usable OCI referrers path for this subject")]
+    #[exit(
+        Unsupported,
+        slug = "referrers_unsupported",
+        summary = "The registry supports neither the OCI Referrers API nor a referrers fallback tag"
+    )]
     ReferrersUnsupported { registry: String },
 
     /// The registry refused a tag delete as an operation it does not offer; retrying cannot help.
     #[error("registry {registry} does not support deleting tags (HTTP {status})")]
+    #[exit(
+        Unsupported,
+        slug = "registry_delete_unsupported",
+        summary = "The registry does not delete tags"
+    )]
     DeleteUnsupported { registry: String, status: u16 },
 
     /// A tag delete was handed a reference without an explicit tag, or with a digest.
     #[error("'{0}' does not name exactly one tag; a tag delete takes an explicit tag and no digest")]
+    #[exit(
+        UsageError,
+        slug = "delete_needs_tag",
+        summary = "A tag delete names no single tag, or also names a digest"
+    )]
     DeleteNeedsTag(String),
 
     /// A tag outside the OCI grammar, refused before it reaches a manifest URL.
     #[error("'{0}' is not a valid OCI tag")]
+    #[exit(
+        UsageError,
+        slug = "invalid_tag",
+        summary = "A tag is malformed, or not one the operation may act on"
+    )]
     InvalidTag(String),
 }
 

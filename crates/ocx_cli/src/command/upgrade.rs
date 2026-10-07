@@ -70,10 +70,10 @@ impl Upgrade {
             return Err(missing_lock(guard.lock_path()).into());
         };
         if context.is_offline() {
-            return Err(policy_blocked("ocx upgrade", "offline").into());
+            return Err(ocx_package_manager::Error::OfflineMode.into());
         }
         if context.config_view().frozen {
-            return Err(policy_blocked("ocx upgrade", "frozen").into());
+            return Err(policy_blocked("ocx upgrade").into());
         }
         let selected = select_touched(guard.config(), &self.groups, &self.names)?;
         previous.bind_current(guard.config())?;
@@ -151,7 +151,7 @@ impl Upgrade {
 
         // Nothing moves: no resolve and no write, so both files stay byte-identical.
         if upgrades.is_empty() {
-            let lock = UpdateReport::diff(Some(&previous), &previous, guard.config(), Some(&[]));
+            let lock = UpdateReport::diff(Some(&previous), &previous, guard.config(), Some(&[]))?;
             self.emit(
                 &context,
                 UpgradeReport {
@@ -190,7 +190,7 @@ impl Upgrade {
         )
         .await?;
 
-        let lock = lock_report(&index, &previous, &new_lock, guard.config(), staged.config(), &retagged).await;
+        let lock = lock_report(&index, &previous, &new_lock, guard.config(), staged.config(), &retagged).await?;
         let report = UpgradeReport {
             upgrades,
             skipped,
@@ -289,9 +289,9 @@ async fn lock_report(
     before: &ProjectConfig,
     after: &ProjectConfig,
     retagged: &[(String, String)],
-) -> UpdateReport {
-    let mut report = UpdateReport::diff(Some(previous), next, after, Some(retagged));
-    let mut old = UpdateReport::diff(Some(previous), next, before, Some(retagged));
+) -> Result<UpdateReport, ocx_oci::platform::error::PlatformError> {
+    let mut report = UpdateReport::diff(Some(previous), next, after, Some(retagged))?;
+    let mut old = UpdateReport::diff(Some(previous), next, before, Some(retagged))?;
     let mut lookups = report.version_lookups();
     lookups.extend(old.version_lookups());
     let versions = concrete_versions(index, lookups).await;
@@ -301,7 +301,7 @@ async fn lock_report(
     for (change, before) in report.changes.iter_mut().zip(old.changes) {
         change.from_version = before.from_version;
     }
-    report
+    Ok(report)
 }
 
 #[cfg(test)]

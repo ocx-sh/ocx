@@ -14,10 +14,10 @@ def test_find_returns_package_root(
 ):
     """ocx install <pkg>; ocx package which <pkg>"""
     pkg = published_package
-    install_result = ocx.json("package", "install", pkg.short)
+    install_result = ocx.json("package", "install", pkg.short)["packages"]
     candidate = Path(install_result[pkg.short]["path"])
 
-    find_result = ocx.json("package", "which", pkg.short)
+    find_result = ocx.json("package", "which", pkg.short)["paths"]
     # find (default) returns the package-store package root; the candidate
     # symlink also targets the package root, so resolving the symlink
     # yields the same path.
@@ -34,7 +34,7 @@ def test_find_candidate_returns_candidate_symlink(
     pkg = published_package
     ocx.json("package", "install", pkg.short)
 
-    find_result = ocx.json("package", "which", "--candidate", pkg.short)
+    find_result = ocx.json("package", "which", "--candidate", pkg.short)["paths"]
     candidate = Path(find_result[pkg.short]["path"])
 
     expected = (
@@ -55,7 +55,7 @@ def test_find_current_returns_current_symlink(
     pkg = published_package
     ocx.json("package", "install", "-s", pkg.short)
 
-    find_result = ocx.json("package", "which", "--current", pkg.short)
+    find_result = ocx.json("package", "which", "--current", pkg.short)["paths"]
     current = Path(find_result[pkg.short]["path"])
 
     expected = (
@@ -93,7 +93,7 @@ def test_find_returns_package_path_not_layer(
     pkg = published_package
     ocx.json("package", "install", pkg.short)
 
-    find_result = ocx.json("package", "which", pkg.short)
+    find_result = ocx.json("package", "which", pkg.short)["paths"]
     find_path = Path(find_result[pkg.short]["path"])
 
     # `ocx package which` (without `--candidate`/`--current`) returns the raw

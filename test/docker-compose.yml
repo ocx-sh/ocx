@@ -78,7 +78,7 @@ services:
   #      artifact-manager remote/proxy repository.
   #   2. Permanent referrers-NEGATIVE fixture (test_referrers_capability.py,
   #      #106, `legacy_registry` fixture) — a real registry WITHOUT the
-  #      Referrers API, so the ReferrersUnsupported path (exit 84) is exercised
+  #      Referrers API, so the ReferrersUnsupported path (exit 82) is exercised
   #      against a genuine v2 registry rather than a mock.
   # Session-scoped via the `mirror_registry` / `legacy_registry` fixtures in
   # test/conftest.py.  Gated behind the same OCX_TESTS_NO_REGISTRY skip flag as
@@ -96,7 +96,7 @@ services:
   # has no Referrers API by design, so a cross-registry copy carrying a
   # signature would fail there for a reason that has nothing to do with the
   # copy. Keeping both means the suite can assert the good path against this
-  # service AND the exit-84 refusal against that one, which is what proves the
+  # service AND the exit-82 refusal against that one, which is what proves the
   # 84 comes from the capability probe rather than merely from the target being
   # a different host.
   #
@@ -316,7 +316,7 @@ services:
     # as soon as Rekor can dial the log **server** -- it says nothing about the
     # sequencer, which is what a sign needs.  Measured: the signer spent
     # 13:40:53-13:57:01 unable to resolve `sigstore-mysql` while Rekor sat at
-    # `restarts=0`, and 44 signing rows failed with exit 83 inside that window
+    # `restarts=0`, and 44 signing rows failed with exit 75 inside that window
     # on a gate that had already gone green.
     ports:
       - "${OCX_TEST_TRILLIAN_SIGNER_PORT:-8091}:8091"

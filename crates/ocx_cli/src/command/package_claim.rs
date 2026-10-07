@@ -16,7 +16,7 @@ use crate::options;
 #[command(long_about = "\
     Claim a package in the index so its tags can be announced.\n\n\
     Renders the package's index entry and opens a pull or merge request against the index \
-    repository, or writes the entry to a local directory with `--out`. Claiming an already-claimed \
+    repository, or writes the entry to a local directory with `--output`. Claiming an already-claimed \
     package adds your owners to the entry and leaves everything else as committed; run it again \
     with nothing new to say and it reports `unchanged` and opens no request.\n\n\
     The entry carries the package description the registry serves at `__ocx.desc`, refreshed on \
@@ -25,7 +25,7 @@ use crate::options;
     credential. Name them explicitly with `--owner`, which replaces the detected list rather than \
     adding to it.\n\n\
     Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under \
-    `--transport git` inside a GitLab job. Writing to `--out` works without one.")]
+    `--transport git` inside a GitLab job. Writing to `--output` works without one.")]
 pub struct PackageClaim {
     /// Where the request is written, and how it gets there.
     #[command(flatten)]
@@ -210,10 +210,10 @@ impl PackageClaim {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// The write target `--out` / `--fork` select; neither means a branch on `--index-repo` itself.
+    /// The write target `--output` / `--fork` select; neither means a branch on `--index-repo` itself.
     fn target(&self) -> ClaimTarget {
-        match (&self.forge.out, &self.forge.fork) {
-            (Some(directory), _) => ClaimTarget::Out(directory.clone()),
+        match (self.forge.output(), &self.forge.fork) {
+            (Some(directory), _) => ClaimTarget::Out(directory.to_path_buf()),
             (None, Some(coordinate)) => ClaimTarget::Fork(coordinate.clone()),
             (None, None) => ClaimTarget::Direct,
         }
@@ -280,18 +280,18 @@ mod tests {
     ///
     /// A table rather than one assertion, because the inventory row's single
     /// name covers seven independent rules — one `try_parse_from` on
-    /// `--out --fork` satisfies the name while six rules go unasserted. Deleting
+    /// `--output --fork` satisfies the name while six rules go unasserted. Deleting
     /// any one `conflicts_with` or any one runtime arm reds exactly one row.
     ///
     /// Every row asserts a **refusal**, not a difference: with the
-    /// `--transport git` + `--out` arm deleted the run exits 0, writes the tree
+    /// `--transport git` + `--output` arm deleted the run exits 0, writes the tree
     /// and reports `transport: "git"` for a transport that never ran, which an
     /// exit-code-only table cannot see.
     ///
     /// Red at the stub: no `conflicts_with` is declared and `validate` is
     /// `unimplemented!()`.
     /// Mutation once implemented: delete any one runtime arm. For the
-    /// `--out`/`--fork` row the mutation is deleting **both** `conflicts_with`
+    /// `--output`/`--fork` row the mutation is deleting **both** `conflicts_with`
     /// attributes — clap's conflict check is symmetric
     /// (`Conflicts::gather_conflicts` tests each argument's blacklist against
     /// the other's), so one surviving attribute still refuses the pair. Two
@@ -302,7 +302,7 @@ mod tests {
         // (flags, site, a fragment the message must carry)
         let rows: &[(&[&str], Site, &[&str])] = &[
             (
-                &["--out", "d", "--fork", "ocx-contrib/index"],
+                &["--output", "d", "--fork", "ocx-contrib/index"],
                 Site::Clap(clap::error::ErrorKind::ArgumentConflict),
                 &[],
             ),
@@ -312,9 +312,9 @@ mod tests {
                 &["--transport", "--fork"],
             ),
             (
-                &["--transport", "git", "--out", "d"],
+                &["--transport", "git", "--output", "d"],
                 Site::Validate,
-                &["--transport", "--out"],
+                &["--transport", "--output"],
             ),
             // A GitHub index with the git transport, isolated from the two rows
             // above so it is the transport/forge rule that fires. The message is
@@ -380,7 +380,7 @@ mod tests {
     /// **conditional on the transport** rather than on the flag.
     ///
     /// Without the three accepting `api` cells, an implementation that refuses
-    /// `--fork` and `--out` unconditionally passes every refusal row above.
+    /// `--fork` and `--output` unconditionally passes every refusal row above.
     ///
     /// Red at the stub: `validate` is `unimplemented!()`.
     /// Mutation once implemented: make the `git` refusals unconditional; the
@@ -393,10 +393,10 @@ mod tests {
         let cells: &[(&[&str], bool)] = &[
             (&["--transport", "api"], true),
             (&["--transport", "api", "--fork", "gitlab.com/me/index"], true),
-            (&["--transport", "api", "--out", "d"], true),
+            (&["--transport", "api", "--output", "d"], true),
             (&["--transport", "git"], true),
             (&["--transport", "git", "--fork", "gitlab.com/me/index"], false),
-            (&["--transport", "git", "--out", "d"], false),
+            (&["--transport", "git", "--output", "d"], false),
         ];
         for (flags, accepted) in cells {
             let mut argv = gitlab.to_vec();
@@ -665,22 +665,22 @@ mod tests {
     ///
     /// [`super::PackageClaim::target`] decides **which repository gets written
     /// to**, and no other test observes it: a `target()` returning
-    /// `Direct` under `--out` compiles and passes every other assertion here,
+    /// `Direct` under `--output` compiles and passes every other assertion here,
     /// turning a local render into a pull request against the real index.
     ///
     /// **Green on arrival** — `target` is implemented.
-    /// Mutation: map `--out` to `ClaimTarget::Direct`; the `--out` row reds.
+    /// Mutation: map `--output` to `ClaimTarget::Direct`; the `--output` row reds.
     /// Measured, and worth recording: merely **reordering** the match arms does
-    /// **not** red, because `--out` ⟂ `--fork` is a clap `conflicts_with`, so
+    /// **not** red, because `--output` ⟂ `--fork` is a clap `conflicts_with`, so
     /// the both-present cell is unreachable and every arm order agrees on the
     /// three reachable ones. The discriminating mutation is a changed target,
     /// not a changed order.
     #[test]
     fn target_maps_each_flag_pair_to_its_claim_target() {
-        let out = parse(&["--out", "d"]).expect("parses").target();
+        let out = parse(&["--output", "d"]).expect("parses").target();
         assert!(
             matches!(&out, ClaimTarget::Out(directory) if directory == std::path::Path::new("d")),
-            "--out writes the entry under the directory it names; got {out:?}"
+            "--output writes the entry under the directory it names; got {out:?}"
         );
 
         let fork = parse(&["--fork", "ocx-contrib/index"]).expect("parses").target();

@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 //! The package names a composing ocx forwards to the entrypoint launchers it spawns, as
-//! [`keys::OCX_LAUNCH_IDENTITIES`], with the project's `no-patches` opt-out per package.
+//! [`ocx_env::OCX_LAUNCH_IDENTITIES`], with the project's `no-patches` opt-out per package.
 //!
 //! A package directory is keyed by digest and shared by every repository that resolves to
 //! it, so only the composing process knows which name a launch used.
@@ -10,10 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use ocx_config::env::keys;
 use ocx_oci::digest::error::DigestError;
 use ocx_oci::{Digest, IdentifierError, PackageRef};
-use ocx_util::env::var;
 
 use crate::install_info::InstallInfo;
 use crate::metadata::env::entry::Entry;
@@ -39,9 +37,15 @@ struct WireLaunch {
     no_patches: bool,
 }
 
-/// Failure modes of decoding [`keys::OCX_LAUNCH_IDENTITIES`]; each rejects the whole map.
-#[derive(Debug, thiserror::Error)]
+/// Failure modes of decoding [`ocx_env::OCX_LAUNCH_IDENTITIES`]; each rejects the whole map.
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+// 78, the same as a malformed `OCX_PATCHES`: both are the patch tier a parent ocx handed down.
+#[exit(
+    ConfigError,
+    slug = "launch_identities_invalid",
+    summary = "The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed"
+)]
 pub enum LaunchIdentityError {
     /// The value was present but not a JSON object of `{"names": [...]}` objects.
     #[error("malformed OCX_LAUNCH_IDENTITIES env value")]
@@ -117,7 +121,7 @@ impl LaunchIdentities {
             .collect()
     }
 
-    /// Serializes to the [`keys::OCX_LAUNCH_IDENTITIES`] wire form; `None` when empty.
+    /// Serializes to the [`ocx_env::OCX_LAUNCH_IDENTITIES`] wire form; `None` when empty.
     pub fn encode(&self) -> Option<String> {
         if self.0.is_empty() {
             return None;
@@ -145,20 +149,20 @@ impl LaunchIdentities {
         }
     }
 
-    /// Parses [`keys::OCX_LAUNCH_IDENTITIES`]; absent or empty yields `None`.
+    /// Parses [`ocx_env::OCX_LAUNCH_IDENTITIES`]; absent or empty yields `None`.
     ///
     /// # Errors
     ///
     /// [`LaunchIdentityError`] for a malformed value: a corrupt map must not degrade to
     /// "no identity" silently.
     pub fn from_env() -> Result<Option<Self>, LaunchIdentityError> {
-        match var(keys::OCX_LAUNCH_IDENTITIES) {
-            Some(raw) if !raw.is_empty() => Self::decode(&raw).map(Some),
-            _ => Ok(None),
-        }
+        ocx_env::OCX_LAUNCH_IDENTITIES
+            .get()
+            .map(|raw| Self::decode(&raw))
+            .transpose()
     }
 
-    /// Parses the [`keys::OCX_LAUNCH_IDENTITIES`] wire form.
+    /// Parses the [`ocx_env::OCX_LAUNCH_IDENTITIES`] wire form.
     ///
     /// # Errors
     ///
@@ -212,7 +216,7 @@ impl LaunchIdentities {
     /// The constant [`Entry`] an exported environment carries; `None` when empty.
     pub fn to_entry(&self) -> Option<Entry> {
         Some(Entry {
-            key: keys::OCX_LAUNCH_IDENTITIES.to_owned(),
+            key: ocx_env::OCX_LAUNCH_IDENTITIES.name.to_owned(),
             value: self.encode()?,
             kind: ModifierKind::Constant,
             separator: None,
@@ -325,8 +329,8 @@ mod tests {
             )
         );
 
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_LAUNCH_IDENTITIES, &encoded);
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, &encoded);
         assert_eq!(LaunchIdentities::from_env().unwrap(), Some(identities));
     }
 
@@ -351,7 +355,7 @@ mod tests {
         assert!(own.opted_out_repositories().is_empty(), "and so does the own opt-out");
 
         let entry = own.to_entry().expect("a non-empty map is an entry");
-        assert_eq!(entry.key, keys::OCX_LAUNCH_IDENTITIES);
+        assert_eq!(entry.key, ocx_env::OCX_LAUNCH_IDENTITIES.name);
         assert_eq!(entry.kind, ModifierKind::Constant);
         assert_eq!(LaunchIdentities::decode(&entry.value).unwrap(), own);
 
@@ -386,10 +390,10 @@ mod tests {
 
     #[test]
     fn an_absent_or_empty_variable_is_no_identity() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.remove(keys::OCX_LAUNCH_IDENTITIES);
+        let guard = ocx_env::overrides::lock();
+        guard.remove(&ocx_env::OCX_LAUNCH_IDENTITIES);
         assert_eq!(LaunchIdentities::from_env().unwrap(), None);
-        guard.set(keys::OCX_LAUNCH_IDENTITIES, "");
+        guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, "");
         assert_eq!(LaunchIdentities::from_env().unwrap(), None);
     }
 
@@ -404,7 +408,7 @@ mod tests {
 
     #[test]
     fn a_malformed_variable_is_a_typed_error() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         let cases = [
             ("not json {{{", "json"),
             (r#"{"sha256:aa":"ocx.sh/a"}"#, "json"),
@@ -423,7 +427,7 @@ mod tests {
             ),
         ];
         for (raw, expected) in cases {
-            guard.set(keys::OCX_LAUNCH_IDENTITIES, raw);
+            guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, raw);
             let error = LaunchIdentities::from_env().expect_err(raw);
             assert_eq!(kind(&error), expected, "{raw} gave {error:?}");
         }

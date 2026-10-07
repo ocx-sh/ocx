@@ -77,7 +77,7 @@ fi
 # is skipped. Output is completion-only (no PATH/env), so repeating it is cheap
 # and side-effect-free. `--if-enabled` is what makes this second call consult
 # the same policy the activation stream above does - without it the generator
-# prints unconditionally and OCX_NO_COMPLETIONS never reaches an installed
+# prints unconditionally and OCX_NO_COMPLETION never reaches an installed
 # shell. The interactivity answer rides along for that policy's last rung.
 if [ "$_ocx_interactive" = --interactive ] && [ -x "$_ocx_bin" ] && [ "$_ocx_shell" != sh ]; then
     eval "$("$_ocx_bin" shell completion --shell="$_ocx_shell" --if-enabled "$_ocx_interactive" 2>/dev/null)" || true
@@ -144,7 +144,7 @@ if (Test-Path $_ocxBin -PathType Leaf) {
     # and the per-prompt hook has no such version floor.
     #
     # Completions are NOT requested with --completion: that flag outranks
-    # OCX_NO_COMPLETIONS and `[shell] completions`, so a shim spelling its answer
+    # OCX_NO_COMPLETION and `[shell] completions`, so a shim spelling its answer
     # there would revoke both opt-outs for every session it starts. The
     # interactivity above is the input the policy's last rung wants; the policy
     # itself lives in the binary.
@@ -169,12 +169,12 @@ Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxInter, _ocxArgs, _ocxActivate -E
 
 /// The Nushell loop applying the `ocx --format json --global env` document bound to
 /// `$_ocx_json` to `$env`; shared verbatim with `self activate --shell=nushell`.
-// Dispatches on entry `type`, never `key == "PATH"`, since a package may declare any key as `path`.
+// Dispatches on entry `kind`, never `key == "PATH"`, since a package may declare any key as `path`.
 // `path` stores a joined string: Nushell drops a list-valued non-`PATH` var when spawning an external.
 // `list` must agree byte for byte with `Shell::export_list`.
 // No `else` arm: routing an unknown type to `constant` clobbers the caller's value.
 // No `get --optional`: it postdates Nushell 0.101.0 and its parse error voids the whole autoload.
-pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == \"path\" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != \"\" } | uniq | str join (char esep))} } else if $_ocx_e.type == \"list\" { let _ocx_s = ($_ocx_e.separator? | default \" \"); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == \"\" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s \"\") + $_ocx_e.value)} } else if $_ocx_e.type == \"constant\" { load-env {($_ocx_e.key): $_ocx_e.value} } }";
+pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.items? | default []) { if $_ocx_e.kind == \"path\" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != \"\" } | uniq | str join (char esep))} } else if $_ocx_e.kind == \"list\" { let _ocx_s = ($_ocx_e.separator? | default \" \"); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == \"\" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s \"\") + $_ocx_e.value)} } else if $_ocx_e.kind == \"constant\" { load-env {($_ocx_e.key): $_ocx_e.value} } }";
 
 /// `$OCX_HOME/env.nu` — Nushell shim, applying activation as data because Nushell has
 /// no string `eval` and `source` needs a parse-time-constant path.
@@ -195,7 +195,7 @@ if (($_ocx_bin | path join 'ocx') | path exists) {
     $env.PATH = ([$_ocx_bin] ++ ($env.PATH | (if ($in | describe) == 'string' { split row (char esep) } else { $in })) | where {|p| $p != "" } | uniq | str join (char esep))
     try {
         let _ocx_json = (^($_ocx_bin | path join 'ocx') --format json --global env | from json)
-        for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == "path" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_e.key): $_ocx_e.value} } }
+        for _ocx_e in ($_ocx_json.items? | default []) { if $_ocx_e.kind == "path" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else if $_ocx_e.kind == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.kind == "constant" { load-env {($_ocx_e.key): $_ocx_e.value} } }
     } catch { }
     # Per-directory-change hook. APPENDED with `++` onto the existing list and
     # assigned back - never a bare assignment to `.PWD` and never a wholesale
@@ -230,7 +230,7 @@ if (($_ocx_bin | path join 'ocx') | path exists) {
         $env.config.hooks = ($env.config.hooks? | default {})
         $env.config.hooks.env_change = ($env.config.hooks.env_change? | default {})
         let _ocx_pwd = ($env.config.hooks.env_change.PWD? | default [])
-        $env.config.hooks.env_change.PWD = ((if ($_ocx_pwd | describe | str starts-with 'list') { $_ocx_pwd } else { [$_ocx_pwd] }) ++ [{|_ocx_before, _ocx_after| try { let _ocx_json = (^($_ocx_bin | path join 'ocx') --format json --global env | from json); for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == "path" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_e.key): $_ocx_e.value} } } } catch { } }])
+        $env.config.hooks.env_change.PWD = ((if ($_ocx_pwd | describe | str starts-with 'list') { $_ocx_pwd } else { [$_ocx_pwd] }) ++ [{|_ocx_before, _ocx_after| try { let _ocx_json = (^($_ocx_bin | path join 'ocx') --format json --global env | from json); for _ocx_e in ($_ocx_json.items? | default []) { if $_ocx_e.kind == "path" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != "" } | uniq | str join (char esep))} } else if $_ocx_e.kind == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { "" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.kind == "constant" { load-env {($_ocx_e.key): $_ocx_e.value} } } } catch { } }])
     } catch { }
 }
 "#;
@@ -618,19 +618,19 @@ mod tests {
             "env.nu must prepend the ocx bin dir to PATH directly"
         );
         // The global-env apply must dispatch on the entry MODIFIER TYPE
-        // (`type == "path"`), not on `key == "PATH"`: a non-PATH path var such as
+        // (`kind == "path"`), not on `key == "PATH"`: a non-PATH path var such as
         // LD_LIBRARY_PATH must prepend (move-to-front), not be overwritten.
         assert!(
             ENV_NU.contains(NU_ENV_APPLY_LOOP),
             "env.nu must embed the shared apply loop verbatim (drift guard)"
         );
         assert!(
-            NU_ENV_APPLY_LOOP.contains(r#"$_ocx_e.type == "path""#),
+            NU_ENV_APPLY_LOOP.contains(r#"$_ocx_e.kind == "path""#),
             "the apply loop must dispatch on the entry modifier type"
         );
         assert!(
             !NU_ENV_APPLY_LOOP.contains(r#"$_ocx_e.key == "PATH""#),
-            "the apply loop must NOT branch on the key name (LD_LIBRARY_PATH etc. are type:path too)"
+            "the apply loop must NOT branch on the key name (LD_LIBRARY_PATH etc. are kind:path too)"
         );
         // Must NOT carry any of the parse-time-broken constructs.
         assert!(
@@ -654,11 +654,11 @@ mod tests {
     /// A-23(2): the apply loop dispatches four ways, not two.
     ///
     /// `path`, `list` and `constant` each get their own arm, and an entry whose
-    /// `type` is none of the three applies **nothing**. A two-way branch sent a
+    /// `kind` is none of the three applies **nothing**. A two-way branch sent a
     /// `list` entry down the `else` arm as a constant, so a global
     /// `CFLAGS = { type = "list", … }` CLOBBERED the caller's `CFLAGS` instead of
     /// folding into it — every emitted-stream arm appends. `list` has shipped on
-    /// the wire since `EnvEntry` gained `type` + `separator`, so the `else` arm
+    /// the wire since `EnvEntry` gained a modifier kind + `separator`, so the `else` arm
     /// was reachable in production, and the same fall-through would silently
     /// mis-apply any modifier kind added later.
     ///
@@ -668,7 +668,7 @@ mod tests {
     fn nu_apply_loop_dispatches_on_all_three_modifier_kinds() {
         for kind in ["path", "list", "constant"] {
             assert!(
-                NU_ENV_APPLY_LOOP.contains(&format!(r#"$_ocx_e.type == "{kind}""#)),
+                NU_ENV_APPLY_LOOP.contains(&format!(r#"$_ocx_e.kind == "{kind}""#)),
                 "the apply loop must carry its own arm for `{kind}`"
             );
         }
@@ -683,9 +683,9 @@ mod tests {
             "the list arm must remove every prior occurrence before appending (unique-append fold)"
         );
         // Four-way means the fourth way is "apply nothing": an unrecognised
-        // `type` must not fall through to a `load-env` that overwrites.
+        // `kind` must not fall through to a `load-env` that overwrites.
         let tail = NU_ENV_APPLY_LOOP
-            .rsplit_once(r#"$_ocx_e.type == "constant""#)
+            .rsplit_once(r#"$_ocx_e.kind == "constant""#)
             .expect("the constant arm anchors the tail")
             .1;
         assert!(
@@ -798,7 +798,7 @@ mod tests {
     /// C-039 (shim half) — no shim forces completions ON.
     ///
     /// `--completion` is rung 2 of the completions ladder, above
-    /// `OCX_NO_COMPLETIONS` and `[shell] completions`, so a shim that spells its
+    /// `OCX_NO_COMPLETION` and `[shell] completions`, so a shim that spells its
     /// answer there revokes both opt-outs for every shell it starts. This is the
     /// exact asymmetry the hook half already avoids: no shim passes `--hook`
     /// either, and interactivity travels on `--[no-]interactive`, which is rung
@@ -817,7 +817,7 @@ mod tests {
             assert!(
                 !code_only(body).contains("--completion"),
                 "{name} must not pass --completion: it is rung 2 of the ladder and outranks both \
-                 OCX_NO_COMPLETIONS and `[shell] completions`"
+                 OCX_NO_COMPLETION and `[shell] completions`"
             );
         }
     }
@@ -832,7 +832,7 @@ mod tests {
     /// with no ambient state deciding for it — so the shim has to ask for the
     /// ladder with `--if-enabled`, and hand it the interactivity its own
     /// language measured. Without both, every installed POSIX and elvish shell
-    /// loads completions no matter what `OCX_NO_COMPLETIONS` or
+    /// loads completions no matter what `OCX_NO_COMPLETION` or
     /// `[shell] completions` say.
     ///
     /// Positive and per-arm: the two families spell the same call differently,

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use console::{Style, Term};
 use ocx_shell::shell;
+use ocx_util::fs::path::AbsolutePath;
 
 use crate::api::Printable;
 use crate::app::Context;
@@ -47,9 +48,10 @@ impl About {
         let registry = context.default_registry().to_string();
         let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let current_shell = shell::Shell::from_process().map(|s| format!("{s}"));
-        let home = ocx_config::home::default_ocx_root()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~/.ocx".to_string());
+        let root = context.file_structure().root();
+        let absolute = std::path::absolute(root).map_err(|error| ocx_util::error::FileError::new(root, error))?;
+        let home = AbsolutePath::new(absolute)
+            .ok_or_else(|| ocx_util::error::FileError::new(root, std::io::ErrorKind::InvalidInput.into()))?;
         // The cache `Context::try_init` populated; no second probe.
         let libc: Vec<String> = ocx_oci::cached_libc_labels();
 
@@ -93,6 +95,7 @@ impl About {
         let platforms = info.plain_platforms.join(", ");
         let libc = info.libc.join(", ");
         let shell_str = info.shell.as_deref().unwrap_or("n/a");
+        let home = info.home.as_path().display().to_string();
         let commit_summary = info.commit_summary();
 
         let mut info_entries: Vec<(&str, &str)> = Vec::with_capacity(7);
@@ -109,7 +112,7 @@ impl About {
             info_entries.push(("Libc", &libc));
         }
         info_entries.push(("Shell", shell_str));
-        info_entries.push(("Home", &info.home));
+        info_entries.push(("Home", &home));
 
         let info_lines: Vec<String> = info_entries
             .iter()

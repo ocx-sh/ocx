@@ -14,6 +14,7 @@ use crate::command::index_common;
 /// from the `p/` walk, the only operation that clears an entry whose root is gone.
 #[derive(Parser)]
 pub struct IndexRegenerate {
+    /// Registries whose local catalog is rebuilt from the package roots on disk.
     #[clap(required = true, num_args = 1.., value_name = "REGISTRY")]
     registries: Vec<String>,
 }
@@ -112,7 +113,7 @@ mod tests {
     //! pins.
 
     use super::*;
-    use crate::exit::ClassifyExitCode;
+    use ocx_exit::ClassifyExitCode;
     use ocx_exit::ExitCode;
 
     fn config_with(entries: &[(&str, Option<&str>)]) -> ocx_config::Config {

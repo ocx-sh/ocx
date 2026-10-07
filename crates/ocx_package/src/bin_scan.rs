@@ -315,22 +315,46 @@ async fn resolve_binaries_on_host(
 }
 
 /// Errors from [`resolve_binaries`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum BinScanError {
     /// A scanned executable is absent from the declared `binaries`.
     #[error("scanned binary '{name}' at '{}' is not declared in binaries", path.display())]
+    #[exit(
+        DataError,
+        slug = "undeclared_binary",
+        summary = "A scanned executable is not declared in binaries"
+    )]
     UndeclaredBinary { name: BinaryName, path: std::path::PathBuf },
     /// A declared name is on disk but not executable under the platform's convention.
     #[error("declared binary '{name}' at '{}' is not executable", path.display())]
+    #[exit(
+        DataError,
+        slug = "declared_binary_not_executable",
+        summary = "A declared binary is not executable"
+    )]
     DeclaredNotExecutable { name: BinaryName, path: std::path::PathBuf },
     /// A scanned set fails [`Binaries`]' case-fold-collision check.
     #[error(transparent)]
+    #[exit(DataError, slug = "invalid_binary_name", summary = "A binary name is not valid")]
     Binary(#[from] BinaryError),
     /// The directory walk failed.
     #[error("interface-binaries scan failed")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "bin_scan_failed",
+            summary = "Scanning for interface binaries failed with an unclassified cause"
+        )
+    )]
     Scan(#[from] PackageError),
     /// A required scan cannot evaluate `platform`'s convention on this host.
     #[error("cannot scan for '{platform}' executables on this host; hand-author binaries or pass --no-bin-scan")]
+    #[exit(
+        DataError,
+        slug = "bin_scan_unsupported_host",
+        summary = "This host cannot scan for the target platform's executables"
+    )]
     UnsupportedHostScan { platform: Platform },
 }
 

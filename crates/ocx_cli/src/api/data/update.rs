@@ -25,8 +25,8 @@ pub type VersionKey = (PackageRef, String);
 /// One `(group, binding, platform)` pin that moved between the predecessor
 /// lock and the candidate.
 ///
-/// `from` is `None` when the pin is newly introduced (a binding or a platform
-/// the predecessor did not carry); `to` is `None` when it was dropped. Both
+/// `from` is absent when the pin is newly introduced (a binding or a platform
+/// the predecessor did not carry); `to` is absent when it was dropped. Both
 /// are the full pull identifier — `registry/repository@sha256:<hex>` — so a
 /// consumer can feed either straight back to `ocx pull` without rebuilding it
 /// from parts.
@@ -36,17 +36,22 @@ pub struct BindingChange {
     pub name: String,
     /// Owning group — `default` for the top-level `[tools]` table.
     pub group: String,
-    /// Canonical platform key the pin belongs to.
-    pub platform: String,
-    /// The tag the declaration spells, `null` when it is digest-pinned.
+    /// The platform the pin belongs to.
+    pub platform: Platform,
+    /// The tag the declaration spells; absent when it is digest-pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// Pull identifier before the update; `null` when newly pinned.
+    /// Pull identifier before the update; absent when newly pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<PackageRef>,
-    /// Pull identifier after the update; `null` when dropped.
+    /// Pull identifier after the update; absent when dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<PackageRef>,
-    /// The release `tag` named before the update (`3` -> `3.28.3`); `null` when unknown.
+    /// The release `tag` named before the update (`3` -> `3.28.3`); absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub from_version: Option<String>,
-    /// The release `tag` names after the update; `null` when unknown.
+    /// The release `tag` names after the update; absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub to_version: Option<String>,
 }
 
@@ -57,26 +62,26 @@ pub struct BindingState {
     pub name: String,
     /// Owning group — `default` for the top-level `[tools]` table.
     pub group: String,
-    /// Canonical platform key the pin belongs to.
-    pub platform: String,
-    /// The tag the declaration spells, `null` when it is digest-pinned.
+    /// The platform the pin belongs to.
+    pub platform: Platform,
+    /// The tag the declaration spells; absent when it is digest-pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// The unchanged pull identifier — the same
     /// `registry/repository@sha256:<hex>` form `changes[].from` / `to`
     /// carry, so the two arrays are directly comparable.
-    pub digest: PackageRef,
-    /// The release `tag` names (`3` -> `3.28.4`); `null` when unknown.
+    pub identifier: PackageRef,
+    /// The release `tag` names (`3` -> `3.28.4`); absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
 
 /// Report emitted by `ocx update` (and by `ocx update --check` before it
 /// exits 65).
 ///
-/// `tag` and the version fields, and in `changes` rows also `from`/`to`, are
-/// present and `null` rather than absent. A version is best effort: a miss,
-/// an `--offline` or `--frozen` run, or a digest-pinned binding reports
-/// `null`. **The payload is identical with and without `--verbose`**:
-/// verbosity changes the plain rendering only.
+/// A version is best effort: a miss, an `--offline` or `--frozen` run, or a digest-pinned binding
+/// omits it. **The payload is identical with and without `--verbose`**: verbosity changes the
+/// plain rendering only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct UpdateReport {
     /// Pins whose pull identifier differs between the two locks, ordered by
@@ -102,7 +107,7 @@ fn pull_identifier(tool: &LockedTool, leaf: &ocx_oci::Digest) -> PackageRef {
     tool.repository.pin_untagged(leaf.clone()).into()
 }
 
-/// Flatten a lock into `(group, name, platform) -> pull identifier`.
+/// Flatten a lock into `(group, name, platform key) -> pull identifier`.
 // `BTreeMap`, not the `tools` order: an in-memory candidate need not be sorted, and the report's order comes from here.
 fn pins(lock: &ProjectLock) -> BTreeMap<(String, String, String), PackageRef> {
     let mut out = BTreeMap::new();
@@ -155,12 +160,16 @@ impl UpdateReport {
     ///
     /// `examined` is a scoped run's `(group, name)` selection (`None` for a whole-lock run) and narrows
     /// [`Self::unchanged`] only: `changes` is never filtered, so an out-of-scope pin that moves still shows.
+    ///
+    /// # Errors
+    ///
+    /// A platform key that is not a canonical platform string; a lock that loaded has none.
     pub fn diff(
         previous: Option<&ProjectLock>,
         next: &ProjectLock,
         config: &ProjectConfig,
         examined: Option<&[(String, String)]>,
-    ) -> Self {
+    ) -> Result<Self, ocx_oci::platform::error::PlatformError> {
         let before = previous.map(pins).unwrap_or_default();
         let after = pins(next);
         let in_scope = |group: &String, name: &String| {
@@ -172,6 +181,7 @@ impl UpdateReport {
         let keys: BTreeSet<&(String, String, String)> = before.keys().chain(after.keys()).collect();
         for key in keys {
             let (group, name, platform) = key;
+            let platform: Platform = platform.parse()?;
             let tag = declared_tag(config, group, name);
             let from = before.get(key);
             let to = after.get(key);
@@ -181,9 +191,9 @@ impl UpdateReport {
                         unchanged.push(BindingState {
                             name: name.clone(),
                             group: group.clone(),
-                            platform: platform.clone(),
+                            platform,
                             tag,
-                            digest: to.clone(),
+                            identifier: to.clone(),
                             version: None,
                         });
                     }
@@ -191,7 +201,7 @@ impl UpdateReport {
                 _ => changes.push(BindingChange {
                     name: name.clone(),
                     group: group.clone(),
-                    platform: platform.clone(),
+                    platform,
                     tag,
                     from: from.cloned(),
                     to: to.cloned(),
@@ -201,7 +211,7 @@ impl UpdateReport {
             }
         }
 
-        Self {
+        Ok(Self {
             changes,
             unchanged,
             metadata_changed: previous.is_none_or(|prev| {
@@ -209,7 +219,7 @@ impl UpdateReport {
                     || next.metadata.declaration_hash_version != prev.metadata.declaration_hash_version
                     || next.metadata.lock_version != prev.metadata.lock_version
             }),
-        }
+        })
     }
 
     /// The concrete-version lookups the report needs, one per `(pull identifier, tag)`, each
@@ -224,7 +234,7 @@ impl UpdateReport {
         let held = self
             .unchanged
             .iter()
-            .map(|state| (&state.digest, state.tag.as_ref(), &state.platform));
+            .map(|state| (&state.identifier, state.tag.as_ref(), &state.platform));
         let mut lookups: BTreeMap<VersionKey, BTreeMap<String, Digest>> = BTreeMap::new();
         for (pull, tag, platform) in changed.chain(held) {
             let (Some(tag), Some(leaf)) = (tag, pull.digest()) else {
@@ -233,7 +243,7 @@ impl UpdateReport {
             lookups
                 .entry((pull.clone(), tag.clone()))
                 .or_default()
-                .insert(platform.clone(), leaf);
+                .insert(platform.to_string(), leaf);
         }
         lookups
     }
@@ -247,7 +257,7 @@ impl UpdateReport {
             change.to_version = find(change.to.as_ref(), &change.tag);
         }
         for state in &mut self.unchanged {
-            state.version = find(Some(&state.digest), &state.tag);
+            state.version = find(Some(&state.identifier), &state.tag);
         }
     }
 
@@ -326,10 +336,10 @@ impl UpdateReport {
     /// The `--verbose` table: one row per platform with its digests, then the pins that held still.
     fn render_pins(&self, printer: &DataInterface) {
         let mut rows: [Vec<Cell>; 5] = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        let mut push = |binding: String, group: &str, platform: &str, from: String, to: String| {
+        let mut push = |binding: String, group: &str, platform: &Platform, from: String, to: String| {
             rows[0].push(Cell::from(binding));
             rows[1].push(Cell::from(group.to_owned()));
-            rows[2].push(Cell::from(platform.to_owned()));
+            rows[2].push(Cell::from(platform.to_string()));
             rows[3].push(Cell::from(from));
             rows[4].push(Cell::from(to));
         };
@@ -343,7 +353,7 @@ impl UpdateReport {
             );
         }
         for state in &self.unchanged {
-            let pinned = pin_cell(Some(&state.digest), state.version.as_deref());
+            let pinned = pin_cell(Some(&state.identifier), state.version.as_deref());
             push(
                 binding_label(&state.name, state.tag.as_deref()),
                 &state.group,
@@ -411,7 +421,7 @@ fn host_row(binding: &[BindingChange], host: &Platform) -> Option<usize> {
     let candidates: Vec<(usize, Platform)> = binding
         .iter()
         .enumerate()
-        .filter_map(|(i, change)| Some((i, change.platform.parse().ok()?)))
+        .map(|(i, change)| (i, change.platform.clone()))
         .collect();
     match select_best(host, &candidates) {
         Selection::Found(i) => Some(i),
@@ -429,6 +439,9 @@ fn version_cell(pull: Option<&PackageRef>, version: Option<&str>) -> String {
 }
 
 impl Printable for UpdateReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "UpdateReport";
+
     fn print_plain(&self, printer: &DataInterface) {
         self.render_versions(printer);
     }
@@ -440,6 +453,9 @@ impl Printable for UpdateReport {
 pub struct VerboseUpdateReport(pub UpdateReport);
 
 impl Printable for VerboseUpdateReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "VerboseUpdateReport";
+
     fn print_plain(&self, printer: &DataInterface) {
         self.0.render_pins(printer);
     }
@@ -533,7 +549,7 @@ mod tests {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'b')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert!(report.unchanged.is_empty(), "the only pin moved");
         assert!(!report.metadata_changed, "the declaration did not change");
@@ -541,7 +557,7 @@ mod tests {
         let change = &report.changes[0];
         assert_eq!(change.name, "cmake");
         assert_eq!(change.group, DEFAULT_GROUP);
-        assert_eq!(change.platform, LINUX);
+        assert_eq!(change.platform.to_string(), LINUX);
         assert_eq!(change.tag.as_deref(), Some("3.28"), "the tag comes from ocx.toml");
         assert_eq!(
             change.from,
@@ -559,17 +575,17 @@ mod tests {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a'), (MAC, 'c')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 1);
-        assert_eq!(report.changes[0].platform, MAC);
+        assert_eq!(report.changes[0].platform.to_string(), MAC);
         assert_eq!(
             report.changes[0].from, None,
             "a newly shipped platform has no predecessor"
         );
         assert!(report.changes[0].to.is_some());
         assert_eq!(report.unchanged.len(), 1);
-        assert_eq!(report.unchanged[0].platform, LINUX);
+        assert_eq!(report.unchanged[0].platform.to_string(), LINUX);
     }
 
     /// The publisher stopped shipping a platform: `to` is `None`.
@@ -578,10 +594,10 @@ mod tests {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a'), (MAC, 'c')])]);
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 1);
-        assert_eq!(report.changes[0].platform, MAC);
+        assert_eq!(report.changes[0].platform.to_string(), MAC);
         assert!(report.changes[0].from.is_some());
         assert_eq!(report.changes[0].to, None, "a dropped platform has no successor");
     }
@@ -599,7 +615,7 @@ mod tests {
             ],
         );
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 1);
         assert_eq!(report.changes[0].name, "ninja");
@@ -623,7 +639,7 @@ mod tests {
         );
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 1);
         assert_eq!(report.changes[0].name, "ninja");
@@ -637,7 +653,7 @@ mod tests {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
         let next = lock('d', vec![tool("cmake", "mirror/cmake", &[(LINUX, 'a')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(
             report.changes.len(),
@@ -660,7 +676,7 @@ mod tests {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
         let next = lock('f', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert!(report.changes.is_empty(), "no pin moved");
         assert_eq!(report.unchanged.len(), 1);
@@ -674,7 +690,7 @@ mod tests {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
 
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert!(report.changes.is_empty());
         assert!(!report.metadata_changed);
@@ -690,7 +706,11 @@ mod tests {
         next.metadata.generated_at = "2030-01-01T00:00:00Z".to_string();
         next.metadata.generated_by = "ocx 99.0.0".to_string();
 
-        assert!(!UpdateReport::diff(Some(&previous), &next, &config(), None).moved());
+        assert!(
+            !UpdateReport::diff(Some(&previous), &next, &config(), None)
+                .expect("canonical platform keys")
+                .moved()
+        );
     }
 
     /// No predecessor lock (bare `ocx update` before any `ocx lock`): every
@@ -699,7 +719,7 @@ mod tests {
     fn absent_predecessor_reports_every_pin_as_new() {
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a'), (MAC, 'c')])]);
 
-        let report = UpdateReport::diff(None, &next, &config(), None);
+        let report = UpdateReport::diff(None, &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 2);
         assert!(report.changes.iter().all(|c| c.from.is_none()));
@@ -713,7 +733,7 @@ mod tests {
     fn verbose_serializes_identically() {
         let previous = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a'), (MAC, 'c')])]);
         let next = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'b'), (MAC, 'c')])]);
-        let report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 1, "one moved pin");
         assert_eq!(report.unchanged.len(), 1, "one held still");
@@ -757,7 +777,8 @@ mod tests {
         let next = lock('d', tools);
         let scope = [(DEFAULT_GROUP.to_string(), "cmake".to_string())];
 
-        let scoped = UpdateReport::diff(Some(&previous), &next, &config(), Some(&scope));
+        let scoped =
+            UpdateReport::diff(Some(&previous), &next, &config(), Some(&scope)).expect("canonical platform keys");
 
         assert!(scoped.changes.is_empty(), "nothing moved either way");
         assert_eq!(
@@ -767,7 +788,7 @@ mod tests {
         );
         assert!(!scoped.moved(), "an untouched scope still exits 0");
 
-        let whole = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let whole = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
         assert_eq!(
             whole.unchanged.len(),
             2,
@@ -793,7 +814,8 @@ mod tests {
             tool("cmake", "cmake", &[(LINUX, 'a'), (MAC, 'c')]),
             tool("ninja", "ninja", &[(LINUX, 'e'), (MAC, 'f')]),
         ];
-        let held = UpdateReport::diff(Some(&lock('d', tools.clone())), &lock('d', tools), &config(), None);
+        let held = UpdateReport::diff(Some(&lock('d', tools.clone())), &lock('d', tools), &config(), None)
+            .expect("canonical platform keys");
         assert_eq!(held.unchanged.len(), 4, "four pins held");
         assert_eq!(
             held.unchanged_hint().as_deref(),
@@ -815,7 +837,7 @@ mod tests {
                 tool("ninja", "ninja", &[(LINUX, 'e')]),
             ],
         );
-        let one = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let one = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
         assert_eq!(
             one.unchanged_hint().as_deref(),
             Some("1 unchanged tool not shown; re-run with --verbose to list it")
@@ -827,7 +849,8 @@ mod tests {
             &moved,
             &config(),
             None,
-        );
+        )
+        .expect("canonical platform keys");
         assert_eq!(none.unchanged_hint(), None, "nothing hidden, no hint");
     }
 
@@ -842,7 +865,7 @@ mod tests {
             'd',
             vec![tool("cmake", "cmake", &[(LINUX, 'd'), (MAC, 'e'), (WINDOWS, 'f')])],
         );
-        let mut report = UpdateReport::diff(Some(&previous), &next, &config(), None);
+        let mut report = UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys");
         // `changes` is ordered by platform: darwin, linux, windows.
         for (change, (from, to)) in report.changes.iter_mut().zip(versions) {
             change.from_version = from.map(str::to_owned);
@@ -904,11 +927,11 @@ mod tests {
         assert_eq!(report.summary(false).as_deref(), Some("1 tool moved"));
 
         let same = lock('d', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
-        let still = UpdateReport::diff(Some(&same), &same, &config(), None);
+        let still = UpdateReport::diff(Some(&same), &same, &config(), None).expect("canonical platform keys");
         assert_eq!((still.summary(true), still.summary(false)), (None, None));
 
         let rehashed = lock('f', vec![tool("cmake", "cmake", &[(LINUX, 'a')])]);
-        let metadata = UpdateReport::diff(Some(&same), &rehashed, &config(), None);
+        let metadata = UpdateReport::diff(Some(&same), &rehashed, &config(), None).expect("canonical platform keys");
         assert!(
             metadata.summary(true).is_some_and(|line| line.contains("metadata")),
             "a metadata-only move still explains the 65"
@@ -934,7 +957,7 @@ mod tests {
                 tool("pinned", "pinned", &[(LINUX, 'f')]),
             ],
         );
-        UpdateReport::diff(Some(&previous), &next, &config(), None)
+        UpdateReport::diff(Some(&previous), &next, &config(), None).expect("canonical platform keys")
     }
 
     fn key(repo: &str, byte: char) -> VersionKey {
@@ -974,13 +997,13 @@ mod tests {
             BTreeMap::from([("ci".to_string(), BTreeMap::from([("cmake".to_string(), declared)]))]),
         );
 
-        let report = UpdateReport::diff(None, &next, &config, None);
+        let report = UpdateReport::diff(None, &next, &config, None).expect("canonical platform keys");
 
         assert_eq!(report.changes.len(), 2, "one row per group");
         assert_eq!(report.version_lookups().len(), 1, "one probe for both rows");
     }
 
-    /// Every row reads its own key; a pin without an answer stays `null`.
+    /// Every row reads its own key; a pin without an answer stays `None`.
     #[test]
     fn fill_versions_sets_each_row_and_leaves_misses_null() {
         let mut report = versioned_report();
@@ -1030,12 +1053,34 @@ mod tests {
         assert_eq!(version_cell(None, Some("3.28.3")), ABSENT);
     }
 
-    /// The fields serialize as `null`, never absent.
+    /// The fields are omitted when unknown, never `null`.
     #[test]
-    fn version_fields_serialize_null_when_unknown() {
+    fn version_fields_are_omitted_when_unknown() {
         let json = serde_json::to_value(versioned_report()).expect("serializes");
-        assert!(json["changes"][0]["from_version"].is_null());
-        assert!(json["changes"][0].as_object().expect("row").contains_key("to_version"));
-        assert!(json["unchanged"][0].as_object().expect("row").contains_key("version"));
+        assert!(
+            !json["changes"][0]
+                .as_object()
+                .expect("row")
+                .contains_key("from_version")
+        );
+        assert!(!json["changes"][0].as_object().expect("row").contains_key("to_version"));
+        assert!(!json["unchanged"][0].as_object().expect("row").contains_key("version"));
+    }
+
+    /// Unset optionals are omitted, never `null`, and the platform is the OCI object.
+    #[test]
+    fn a_new_digest_pinned_pin_omits_tag_and_from() {
+        let next = lock('d', vec![tool("ninja", "ninja", &[(LINUX, 'e')])]);
+        let report = UpdateReport::diff(None, &next, &config(), None).expect("canonical platform keys");
+        let json = serde_json::to_value(&report).expect("the report serializes");
+        assert_eq!(
+            json["changes"][0],
+            serde_json::json!({
+                "name": "ninja",
+                "group": DEFAULT_GROUP,
+                "platform": {"architecture": "amd64", "os": "linux"},
+                "to": pull("ninja", 'e').to_string(),
+            })
+        );
     }
 }

@@ -15,4 +15,5 @@ ocx config test candidate.toml
 report=$(ocx --format json config test candidate.toml)
 echo "$report" | grep -q '"corp.example.com/ocx-patches"'
 echo "$report" | grep -q '"registry.defalt"'
-echo "$report" | grep -q '"registry_default": null'
+# The typo means nothing was set, so the key is absent rather than reported.
+if echo "$report" | grep -q '"registry_default"'; then exit 1; fi

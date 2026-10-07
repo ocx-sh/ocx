@@ -117,7 +117,7 @@ rust_test(
     # The testcase-level half of C-008's exclusion set. Every name here fails
     # under `bazel test` for a reason that is a property of the *test*, not of
     # this graph, and each is still executed by `cargo nextest` — in `task
-    # verify` by `rust:test:workspace-structure`, and on verify-deep's macOS and
+    # verify` by `rust:test:bazel-skipped`, and on verify-deep's macOS and
     # Windows legs — so nothing here drops out of the gate.
     # Two causes, both measured:
     #   (a) the testcase walks `crates/*/src` of crates this target does not
@@ -136,9 +136,13 @@ rust_test(
         "--test-threads=1",
         "--exact",
         "--skip=anyhow_only_in_cli_runtime",
+        "--skip=clap_env_feature_is_off_in_the_release_build",
         "--skip=crate_map_toml_matches_rust_table",
         "--skip=deps_direction",
+        "--skip=dynamic_read_ratchet",
+        "--skip=env_ban_is_wired_for_cargo_and_bazel",
         "--skip=every_boundary_needle_names_something_live",
+        "--skip=every_derived_classification_type_is_registered_or_reached",
         "--skip=every_public_item_of_ocx_util_has_a_consumer",
         "--skip=every_repo_path_literal_in_a_test_names_something_live",
         "--skip=every_source_file_is_reachable",
@@ -146,14 +150,16 @@ rust_test(
         "--skip=internal_crates_block_is_complete_and_sorted",
         "--skip=manifests_inherit_lints_and_never_publish",
         "--skip=needle_liveness_and_the_absence_exemption_discriminate",
-        "--skip=no_classification_in_libraries",
+        "--skip=no_hand_written_classification_impl_outside_command_error",
         "--skip=no_log_shim",
         "--skip=no_module_path_in_output",
         "--skip=oci_identifier_mint_ratchet",
+        "--skip=raw_env_reads_are_the_pinned_residue",
         "--skip=readme_may_depend_on_rows_match_the_crate_map",
         "--skip=release_feature_set_excludes_testing_seams",
         "--skip=resolver_resolves_aliases_that_name_unlike_error_types",
         "--skip=resolver_resolves_each_error_declaration_apart",
+        "--skip=shim_env_literals_are_registry_names",
         "--skip=ssrf_guard_ratchet",
         "--skip=test_scaffolding_is_declared_where_it_is_gated_and_forwarded_nowhere",
         "--skip=testing_feature_forward_list_matches_grep",
@@ -184,6 +190,7 @@ rust_test(
         normal_dev = True,
     ) + [
         ":ocx_test_support",
+        "//crates/ocx_env",
     ],
 )
 

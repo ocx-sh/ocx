@@ -482,8 +482,8 @@ request. Setting both lets each carry only what it is able to.
 
 Under `git`, ocx checks two things on the **index** project before it writes — that the
 project accepts job-token pushes, and that its job-token allowlist admits the publishing
-project — and exits 86 naming whichever is missing, because only an administrator there can
-grant it. It also refuses to run on a `git` older than 2.31.0, checked before the forge is
+project — and exits 82 when job-token pushes are off or 77 when the allowlist omits the
+publisher, because only an administrator there can grant either. It also refuses to run on a `git` older than 2.31.0, checked before the forge is
 constructed. [Announcing a package][authoring-announcing] walks a real pipeline through each
 posture.
 

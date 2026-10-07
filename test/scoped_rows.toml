@@ -14,7 +14,8 @@
 # other path under crates/ocx_cli/ escalates (permit-list default).
 [crates]
 # exit codes / error categories
-ocx_exit = ["tests/test_exit_codes.py"]
+ocx_exit = ["tests/test_error_document.py", "tests/test_exit_codes.py"]
+ocx_exit_derive = ["tests/test_error_document.py", "tests/test_exit_codes.py"]
 # fs, archive extraction, TLS roots
 ocx_util = [
     "tests/test_archive_containment.py",
@@ -155,8 +156,12 @@ ocx_test_support = "escalate"
 # ecosystem crate `ocx` does not link (ocx-mirror's PEP 751 translation):
 # no acceptance subset of its own, and the tier escalates anyway
 ocx_python = "escalate"
+# the environment registry: every crate reads through it
+ocx_env = "escalate"
 ocx_schema = ["tests/test_schema.py", "tests/test_execution_records.py", "tests/test_project_env.py"]
 ocx_shim = ["tests/test_windows_shim.py"]
+# the contract lint links no `ocx_*` crate; it reads the schema documents this module publishes
+ocx_sdkgen = ["tests/test_schema.py"]
 
 # Path under crates/ocx_cli/src/command/ (fnmatch) → "escalate", the only
 # value. These files are shared by several verbs, so no one module's marker
@@ -177,6 +182,8 @@ ocx_shim = ["tests/test_windows_shim.py"]
 "patch.rs" = "escalate"          # freeze / sync / publish / test / why
 "direnv.rs" = "escalate"         # init / export
 "launcher.rs" = "escalate"       # exec / shim
+"contract.rs" = "escalate"       # every verb's output modes, read by the cli.json export
+"leaf.rs" = "escalate"           # every leaf's name and path, the one place a command is spelled
 
 # Repo-relative globs that always escalate, checked before any other route.
 # Matched with fnmatch, where `*` also crosses `/`: `**` reads as "anything

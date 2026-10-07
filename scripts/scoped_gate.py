@@ -5,7 +5,6 @@
 
     scripts/scoped_gate.py --plan                          # JSON, consumed by the task
     scripts/scoped_gate.py --mark full|scoped [--crates <crate>...]
-    scripts/scoped_gate.py --mark-precheck                 # task verify's first step (C-017)
     scripts/scoped_gate.py --record-escapes --junit-dir <dir>  # bazel:test:accept, failed, merging
 
 The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
@@ -17,16 +16,15 @@ The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
   2. Non-member paths route. `.agents/**` (swarm memory), `CLAUDE.md` and the
      `.claude/` subtrees
      whose only gate is `claude:tests` (CLAUDE_TESTS_READS, a permit list —
-     any other `.claude/` path escalates, `.claude/taskfile.yml` included,
+     any other `.claude/` path escalates (a taskfile excepted),
      so a new subtree is loud until someone routes it) → `task
      claude:tests`;
      `.github/**` → actionlint plus `.claude/tests/test_workflows.py`; an
      existing `test/tests/test_<f>.py` → `task test:parallel --
-     tests/test_<f>.py`; `scripts/**` → `task scripts:self-test` AND the full
-     verify (the gate tooling decides what every other gate runs, so a change
-     there is never certified by less than the full run — the route is what
-     `--plan` reports, the escalation is what runs it). Every other
-     non-member path — root manifests, the lockfile, every taskfile,
+     tests/test_<f>.py`; `scripts/**` → `task scripts:self-test`; every
+     taskfile (root or nested) → `task --list-all` (a parse). Neither escalates:
+     the full verify runs at a run's integration and release gates. Every other
+     non-member path — root manifests, the lockfile,
      `test/src/**`, `test/conftest.py`, `test/tests/` helpers, `external/**`,
      the nextest floor files under `crates/` — escalates to `task verify` and
      is printed as the reason.
@@ -46,12 +44,8 @@ The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
 
 The mark, `.claude/hooks/.state/commit-verified`, is JSON:
 `{"timestamp": <epoch>, "head": "<sha>", "scope": "full"|"scoped",
-"crates": [...], "toplevel": "<working tree>", "tree": "<git write-tree>"}`.
-`tree` is the real index's tree, read by `commit_gate.py`'s merge-commit
-clause (C-017), and is recorded only when the run proved it built that tree:
-the working tree equalled the index at `--mark-precheck` and at `--mark`, with
-the index unchanged between (`proven_tree`); otherwise it is null. While
-`MERGE_HEAD` exists `--mark` refuses instead (AM-8).
+"crates": [...], "toplevel": "<working tree>", "nocache": bool}`. Writing it is
+never refused: `task verify:mark` is the unconditional escape hatch.
 `--mark scoped --log-run` (verify:scoped only) also appends the run to
 `<git-common-dir>/ocx-gate/scoped_runs.jsonl`, which `--record-escapes` reads
 when T2 fails during a merge (C-018, ADR C-ESC). A scoped mark also carries
@@ -156,6 +150,7 @@ MANIFEST_FILES = frozenset({"Cargo.toml", "README.md"})
 # change every satellite links, so the scoped gate never certifies it.
 ECOSYSTEM = frozenset(
     {
+        "ocx_env",
         "ocx_util",
         "ocx_console",
         "ocx_oci",
@@ -173,8 +168,9 @@ HUB_RDEPS = 4
 # the per-crate steps. Restated here for the `verify:scoped` summary's reader;
 # Its tests and `--check-coverage` both hold it equal to the table. `ocx`
 # left at WP-06 (C-014): its command files route by `command` markers now.
-# `ocx_python` has no acceptance subset: `ocx` does not link it.
-TABLE_ESCALATES = frozenset({"ocx_test_support", "ocx_python"})
+# `ocx_python` has no acceptance subset: `ocx` does not link it. `ocx_env` is
+# read by every crate, so its subset is the whole suite.
+TABLE_ESCALATES = frozenset({"ocx_test_support", "ocx_python", "ocx_env"})
 ROOT_TASKFILE = REPO_ROOT / "taskfile.yml"
 
 # C-012 — the selection table. Read here and nowhere else.
@@ -778,24 +774,12 @@ def merge_in_progress(repo: Path) -> bool:
     return (Path(git(repo, "rev-parse", "--absolute-git-dir").strip()) / "MERGE_HEAD").exists()
 
 
-def unstaged_or_untracked(repo: Path) -> list[str]:
-    """Paths where the working tree differs from the index (AM-8), sorted."""
-    listed = ""
-    for args in (("diff", "--name-only"), ("ls-files", "--others", "--exclude-standard")):
-        result = _git_run(repo, *args)
-        if result.returncode != 0:
-            raise SystemExit(f"git {' '.join(args)} failed (rc={result.returncode}):\n{result.stderr}")
-        listed += result.stdout
-    return sorted({line for line in listed.splitlines() if line})
-
-
 def write_mark(
     mark_file: Path,
     scope: str,
     crates: list[str],
     head: str,
     toplevel: str,
-    tree: str | None = None,
     nocache: bool = False,
 ) -> dict:
     """Write the mark; a scoped one carries the previous full head forward.
@@ -809,7 +793,6 @@ def write_mark(
         "scope": scope,
         "crates": sorted(set(crates)),
         "toplevel": toplevel,
-        "tree": tree,
         "nocache": nocache,
     }
     if scope != "full":
@@ -821,107 +804,11 @@ def write_mark(
     return mark
 
 
-def _dirty_merge_refusal(repo: Path) -> str | None:
-    """Why the working tree of an in-progress merge is not the tree to build, or None."""
-    if not merge_in_progress(repo):
-        return None
-    paths = unstaged_or_untracked(repo)
-    if paths:
-        return (
-            "scoped_gate: --mark: a merge is in progress and the working tree differs from the"
-            f" index at {len(paths)} path(s): {', '.join(paths)} — stage or remove them, then re-run"
-            " `task verify` (the merge commit is admitted only by a full mark of the tree it"
-            " commits, so the tree built must be the tree staged)"
-        )
-    if index_tree(repo) is None:
-        return (
-            "scoped_gate: --mark: a merge is in progress and `git write-tree` fails (unmerged"
-            " paths?) — resolve and stage every path, then re-run `task verify`"
-        )
-    return None
-
-
-def start_snapshot(repo: Path) -> Path:
-    """Where `--mark-precheck` records the merged index tree `task verify` started on.
-
-    The per-worktree git dir: never in the working tree (it would be the
-    untracked file AM-8 refuses) and never shared with a sibling worktree.
-    """
-    return Path(git(repo, "rev-parse", "--absolute-git-dir").strip()) / VERIFY_START
-
-
-def mark_precheck(repo: Path) -> str | None:
-    """`--mark-precheck`, `task verify`'s first step: AM-8 up front, and the start tree.
-
-    The refusal `--mark` would give after the whole suite is given before it.
-    Whenever the working tree equals the index — merging or not — the index
-    tree is snapshot: it is the only evidence `--mark` accepts that the run
-    built the tree it records (`proven_tree`). A dirty tree outside a merge
-    is not refused; it just earns no snapshot, so its mark carries no tree.
-    """
-    snapshot = start_snapshot(repo)
-    snapshot.unlink(missing_ok=True)
-    refusal = _dirty_merge_refusal(repo)
-    if refusal:
-        return refusal.replace("--mark:", "--mark-precheck:", 1)
-    tree = index_tree(repo)
-    if tree and not unstaged_or_untracked(repo):
-        snapshot.write_text(f"{tree}\n", encoding="utf-8")
-    return None
-
-
-def proven_tree(repo: Path) -> str | None:
-    """The mark's `tree`: the index tree, only when this run proved it built it.
-
-    Proof is index == working tree at the run's start (the precheck snapshot)
-    and again now, with the index unchanged in between. Anything else is
-    None, which the merge-commit clause refuses: a run over a working tree
-    that differs from its index (e.g. `wp`'s tree staged over an untouched
-    checkout) would otherwise certify a tree a later merge happens to stage.
-    """
-    try:
-        started = start_snapshot(repo).read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    now = index_tree(repo)
-    if not now or now != started or unstaged_or_untracked(repo):
-        return None
-    return now
-
-
-def mark_refusal(repo: Path) -> str | None:
-    """Why `--mark` must not write here, or None (C-017, AM-8).
-
-    Only while a merge is in progress: the merge commit's gate compares the
-    mark's `tree` with the index, so a working tree that differs from the index
-    would earn a mark for a tree nobody built — and so would an index restaged
-    after `task verify` started, which `--mark-precheck`'s snapshot catches.
-    """
-    refusal = _dirty_merge_refusal(repo)
-    if refusal or not merge_in_progress(repo):
-        return refusal
-    try:
-        started = start_snapshot(repo).read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return (
-            "scoped_gate: --mark: a merge is in progress and no `--mark-precheck` snapshot"
-            " records the tree this verify started on — run `task verify`, which takes it first"
-        )
-    now = index_tree(repo)
-    if started != now:
-        return (
-            f"scoped_gate: --mark: the index changed since `task verify` started ({started} ->"
-            f" {now}) — the run built the first tree, not the one staged now; re-run `task verify`"
-        )
-    return None
-
-
 # ---------------------------------------------------------------------------
 # The scoped-run log and escape records (C-018, ADR C-ESC)
 # ---------------------------------------------------------------------------
 
 RUN_LOG = "scoped_runs.jsonl"
-VERIFY_START = "ocx-gate-verify-start"
 ESCAPES_LOG = "escapes.jsonl"
 ESCAPE_MARKER = "gate_escape"
 
@@ -1115,6 +1002,7 @@ class Plan:
             "tests": [],
             "lint": [],
             "scripts": [],
+            "taskfiles": [],
             "manifests": [],
         }
     )
@@ -1187,15 +1075,16 @@ def classify(
             # like `.claude/**`, and `claude:tests` is the cheapest gate
             # that reads it — an escalation to the full run bought nothing.
             plan.routes["claude"].append(path)
+        elif parts[-1] == "taskfile.yml" or parts[-1].endswith(".taskfile.yml"):
+            # Root and nested taskfiles: a parse/listing (`task --list-all`)
+            # is the cheap check; the full verify runs only at a run's gates.
+            plan.routes["taskfiles"].append(path)
         elif parts[0] == ".github":
             plan.routes["workflows"].append(path)
         elif parts[0] == "scripts":
-            # Gate tooling: its self-tests run (`task scripts:self-test`), and
-            # the change still escalates — these scripts decide what every
-            # other gate runs, so nothing less than the full verify (whose
-            # `.verify:lint` runs `scripts:verify`) certifies an edit here.
+            # Gate tooling: its self-tests (`task scripts:self-test`) certify
+            # an edit here; the full verify runs only at a run's gates.
             plan.routes["scripts"].append(path)
-            plan.escalate.append(f"{path}: gate tooling — self-tests routed, full verify still required")
         elif parts[0] == "crates" and len(parts) == 3 and parts[2] in MANIFEST_FILES:
             # C-019 (2): a crate's manifest and README are workspace
             # structure, not that crate's code. Every guard over them —
@@ -1515,15 +1404,18 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             f"routing wrong: {plan.as_json()}",
         )
 
-    def nested_taskfile_escalates() -> str | None:
-        # `.claude/taskfile.yml` is not in the permit list, so it escalates
-        # like every other taskfile instead of riding the `.claude/` route.
-        plan = _plan_for([".claude/taskfile.yml", "website/sbom.taskfile.yml", ".claude/rules/x.md"], ws, root)
+    def taskfiles_route_without_escalating() -> str | None:
+        # Every taskfile, root or nested, rides the cheap `taskfiles` route
+        # (`task --list-all`) instead of escalating to the full verify.
+        plan = _plan_for(
+            ["taskfile.yml", ".claude/taskfile.yml", "website/sbom.taskfile.yml", ".claude/rules/x.md"], ws, root
+        )
         return expect(
-            plan.decision == "escalate"
+            plan.decision == "routed"
+            and plan.escalate == []
             and plan.routes["claude"] == [".claude/rules/x.md"]
-            and [r.split(":", 1)[0] for r in plan.escalate] == [".claude/taskfile.yml", "website/sbom.taskfile.yml"],
-            f"every taskfile must escalate by name: {plan.as_json()}",
+            and plan.routes["taskfiles"] == [".claude/taskfile.yml", "taskfile.yml", "website/sbom.taskfile.yml"],
+            f"every taskfile must route, none escalate: {plan.as_json()}",
         )
 
     def unlisted_claude_subtree_escalates() -> str | None:
@@ -1539,13 +1431,13 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             f"unlisted .claude/ path must escalate, listed ones route: {plan.as_json()} {listed.as_json()}",
         )
 
-    def scripts_route_and_escalate() -> str | None:
+    def scripts_route_without_escalating() -> str | None:
         plan = _plan_for(["scripts/scoped_gate.py"], ws, root)
         return expect(
             plan.routes["scripts"] == ["scripts/scoped_gate.py"]
-            and plan.decision == "escalate"
-            and any(r.startswith("scripts/scoped_gate.py:") and "self-tests routed" in r for r in plan.escalate),
-            f"scripts/** must be routed to the self-tests AND escalate: {plan.as_json()}",
+            and plan.decision == "routed"
+            and plan.escalate == [],
+            f"scripts/** must route to the self-tests and not escalate: {plan.as_json()}",
         )
 
     def manifest_routes_without_escalating() -> str | None:
@@ -1603,7 +1495,6 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             "test/tests/fake_forge.py",
             "test/conftest.py",
             "test/src/x.py",
-            "taskfile.yml",
             "Cargo.lock",
             "external/rust-oci-client/src/lib.rs",
             "crates/NEXTEST_FLOOR",
@@ -2100,7 +1991,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         )
 
     def escalation_keeps_crates_informational() -> str | None:
-        plan = _plan_for(["taskfile.yml", "crates/ocx_setup/src/lib.rs"], ws, root)
+        plan = _plan_for(["Cargo.lock", "crates/ocx_setup/src/lib.rs"], ws, root)
         return expect(
             plan.decision == "escalate" and plan.crates == ["ocx_setup"],
             f"escalation still lists the changed crates: {plan.as_json()}",
@@ -2209,7 +2100,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         # (b) the reader's contract: the same shape, this worktree's HEAD.
         mark = json.loads(at_project.read_text(encoding="utf-8"))
         head = git(wt, "rev-parse", "HEAD").strip()
-        if set(mark) != {"timestamp", "head", "scope", "crates", "toplevel", "tree", "nocache"}:
+        if set(mark) != {"timestamp", "head", "scope", "crates", "toplevel", "nocache"}:
             return f"mark key set drifted from the reader's contract: {sorted(mark)}"
         # A `release:` commit reads `nocache`: false unless the run said so.
         if mark["nocache"] is not False:
@@ -2218,10 +2109,6 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             at_project.read_text(encoding="utf-8")
         )["nocache"] is not True:
             return f"--nocache must record nocache true: {at_project.read_text(encoding='utf-8')}"
-        # C-017: no `--mark-precheck` ran, so no run proved the index is the
-        # tree it built — the mark carries no merge-eligible tree.
-        if mark["tree"] is not None:
-            return f"a mark with no precheck behind it must carry no tree: {mark}"
         if mark["head"] != head or mark["scope"] != "scoped" or not isinstance(mark["timestamp"], int):
             return f"mark must certify the worktree's HEAD {head}: {mark}"
         # The mark HOME is the project dir (DX-52) but the writer identity is
@@ -2287,7 +2174,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             f"test/scoped_rows.toml escalate rows {sorted(escalates)} != TABLE_ESCALATES {sorted(TABLE_ESCALATES)}",
         )
 
-    # -- C-017 AM-8: `--mark` under a merge, end to end --------------------
+    # -- `--mark` and the scoped-run log, end to end -----------------------
 
     def _commit(repo: Path, message: str) -> None:
         git(repo, "add", "-A")
@@ -2330,185 +2217,19 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             capture_output=True, encoding="utf-8", env=env, cwd=str(proj), check=False,
         )
 
-    remedy = "stage or remove them, then re-run `task verify`"
-
-    def _gate_cli(proj: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        env = {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
-        env["CLAUDE_PROJECT_DIR"] = str(proj)
-        return subprocess.run(
-            [sys.executable, str(proj / "scripts" / "scoped_gate.py"), *args],
-            capture_output=True, encoding="utf-8", env=env, cwd=str(proj), check=False,
-        )
-
-    def _start_snapshot(proj: Path) -> Path:
-        return Path(git(proj, "rev-parse", "--absolute-git-dir").strip()) / VERIFY_START
-
-    def fix1_precheck_refuses_a_dirty_merge_up_front() -> str | None:
-        """The AM-8 refusal at the START of `task verify`, not after the suite."""
-        proj = _am8_project("pre-dirty", merging=True)
-        (proj / "trunk_file.txt").write_text("an unstaged repair\n", encoding="utf-8")
-        run = _gate_cli(proj, "--mark-precheck")
-        if run.returncode != 1 or "trunk_file.txt" not in run.stderr or remedy not in run.stderr:
-            return f"--mark-precheck on a dirty merge must exit 1 naming the path: {run.returncode} {run.stderr!r}"
-        if _start_snapshot(proj).exists():
-            return "a refused precheck must leave no start snapshot"
-        git(proj, "checkout", "--", "trunk_file.txt")
-        run = _gate_cli(proj, "--mark-precheck")
+    def mark_under_a_dirty_merge_is_written() -> str | None:
+        """`--mark` is the unconditional hatch: a dirty paused merge still marks."""
+        proj = _am8_project("mark-dirty-merge", merging=True)
+        (proj / "trunk_file.txt").write_text("edited mid-merge\n", encoding="utf-8")
+        (proj / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+        run = _mark_cli(proj, "scoped")
         if run.returncode != 0:
-            return f"--mark-precheck on a clean merge must exit 0: {run.returncode} {run.stderr!r}"
-        snap = _start_snapshot(proj)
-        return expect(
-            snap.is_file() and snap.read_text(encoding="utf-8").strip() == git(proj, "write-tree").strip(),
-            "the precheck must snapshot the index tree it saw",
-        )
-
-    def fix1_a_tree_staged_during_the_run_refuses_the_mark() -> str | None:
-        """TOCTOU: what verify built is the tree at its start; a later `git add` is not it."""
-        proj = _am8_project("pre-toctou", merging=True)
-        if _gate_cli(proj, "--mark-precheck").returncode != 0:
-            return "fixture: the precheck must pass on a clean merge"
-        (proj / "trunk_file.txt").write_text("staged mid-run\n", encoding="utf-8")
-        git(proj, "add", "trunk_file.txt")
-        run = _mark_cli(proj, "full")
-        if run.returncode != 1 or "since `task verify` started" not in run.stderr:
-            return f"--mark after a mid-run stage must exit 1 and say why: {run.returncode} {run.stderr!r}"
-        return expect(not _project_mark(proj).exists(), "a refused --mark must write no mark")
-
-    def fix1_a_merge_mark_needs_the_precheck() -> str | None:
-        """No snapshot under a merge = no evidence of what was built: refuse."""
-        proj = _am8_project("pre-missing", merging=True)
-        run = _mark_cli(proj, "full")
-        if run.returncode != 1 or "--mark-precheck" not in run.stderr:
-            return f"--mark under a merge with no start snapshot must exit 1: {run.returncode} {run.stderr!r}"
-        return expect(not _project_mark(proj).exists(), "a refused --mark must write no mark")
-
-    def fix1_precheck_outside_a_merge_is_a_no_op() -> str | None:
-        proj = _am8_project("pre-no-merge", merging=False)
-        (proj / "trunk_file.txt").write_text("an unstaged edit\n", encoding="utf-8")
-        run = _gate_cli(proj, "--mark-precheck")
-        if run.returncode != 0:
-            return f"--mark-precheck outside a merge must exit 0: {run.returncode} {run.stderr!r}"
-        return expect(not _start_snapshot(proj).exists(), "outside a merge no snapshot is written")
-
-    def am8_unstaged_edit_under_a_merge_refuses() -> str | None:
-        proj = _am8_project("am8-unstaged", merging=True)
-        mark = _project_mark(proj)
-        write_mark(mark, "scoped", [], git(proj, "rev-parse", "HEAD").strip(), str(proj.resolve()))
-        before = mark.read_bytes()
-        (proj / "trunk_file.txt").write_text("an unstaged repair\n", encoding="utf-8")
-        run = _mark_cli(proj, "full")
-        if run.returncode != 1:
-            return f"--mark full under MERGE_HEAD with an unstaged edit must exit 1: {run.returncode} {run.stderr!r}"
-        if "trunk_file.txt" not in run.stderr or remedy not in run.stderr:
-            return f"the refusal must name the path and the remedy: {run.stderr!r}"
-        return expect(mark.read_bytes() == before, "a refused --mark must leave the existing mark unchanged")
-
-    def am8_untracked_file_under_a_merge_refuses() -> str | None:
-        proj = _am8_project("am8-untracked", merging=True)
-        (proj / "planted_untracked.txt").write_text("untracked\n", encoding="utf-8")
-        run = _mark_cli(proj, "full")
-        if run.returncode != 1:
-            return f"--mark full under MERGE_HEAD with an untracked file must exit 1: {run.returncode} {run.stderr!r}"
-        if "planted_untracked.txt" not in run.stderr or remedy not in run.stderr:
-            return f"the refusal must name the path and the remedy: {run.stderr!r}"
-        return expect(not _project_mark(proj).exists(), "a refused --mark must write no mark")
-
-    def am8_unstaged_edit_outside_a_merge_marks() -> str | None:
-        """Control: outside a merge a dirty tree still marks — but earns no merge-eligible tree."""
-        proj = _am8_project("am8-control", merging=False)
-        (proj / "trunk_file.txt").write_text("an unstaged edit\n", encoding="utf-8")
-        if _gate_cli(proj, "--mark-precheck").returncode != 0:
-            return "--mark-precheck outside a merge must exit 0"
-        run = _mark_cli(proj, "full")
-        if run.returncode != 0:
-            return f"--mark full outside a merge must exit 0: {run.returncode} {run.stderr!r}"
+            return f"--mark under a dirty merge must exit 0: {run.returncode} {run.stderr!r}"
         mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
         return expect(
-            mark.get("scope") == "full" and mark.get("tree") is None,
-            f"a run over a working tree that differs from the index proves no tree: {mark}",
+            mark["head"] == git(proj, "rev-parse", "HEAD").strip() and mark["scope"] == "scoped",
+            f"the mark must certify HEAD at scope scoped: {mark}",
         )
-
-    def a_clean_verify_outside_a_merge_records_its_tree() -> str | None:
-        """Green: precheck and mark both on a tree equal to its index → `tree` is that tree."""
-        proj = _am8_project("clean-outside", merging=False)
-        if _gate_cli(proj, "--mark-precheck").returncode != 0:
-            return "--mark-precheck on a clean tree must exit 0"
-        if _mark_cli(proj, "full").returncode != 0:
-            return "--mark full on a clean tree must exit 0"
-        mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
-        if mark.get("tree") != git(proj, "write-tree").strip():
-            return f"a clean verify must record the index tree: {mark}"
-        # One snapshot, one mark: the second mark has no run behind it.
-        if _mark_cli(proj, "full").returncode != 0:
-            return "a second --mark full outside a merge must still exit 0"
-        mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
-        return expect(mark.get("tree") is None, f"a mark with no precheck behind it proves no tree: {mark}")
-
-    def a_tree_dirtied_during_the_run_records_no_tree() -> str | None:
-        """Clean at the start is not enough: the tree at mark time must still be the index."""
-        proj = _am8_project("dirty-midrun", merging=False)
-        if _gate_cli(proj, "--mark-precheck").returncode != 0:
-            return "--mark-precheck on a clean tree must exit 0"
-        (proj / "trunk_file.txt").write_text("edited mid-run\n", encoding="utf-8")
-        if _mark_cli(proj, "full").returncode != 0:
-            return "--mark full outside a merge must exit 0"
-        mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
-        return expect(mark.get("tree") is None, f"a tree dirtied mid-run proves no tree: {mark}")
-
-    def a_premerge_mark_of_a_staged_foreign_tree_admits_no_merge() -> str | None:
-        """The adversary's repro: stage `wp`'s tree over an untouched working tree, verify, merge.
-
-        The run built HEAD's working tree while the index held `wp`'s tree;
-        the merge of `wp` then has exactly that index tree. The mark must not
-        carry it, so the merge-commit clause refuses — while the same merge,
-        verified during the merge, is admitted.
-        """
-        # The reader, in-process; imported here because it imports this module.
-        from commit_gate import merge_commit_refusal
-
-        proj = _am8_project("adv-staged", merging=False)
-        git(proj, "switch", "-q", "-c", "wp")
-        (proj / "regression.txt").write_text("a regression\n", encoding="utf-8")
-        _commit(proj, "wp")
-        git(proj, "switch", "-q", "work")
-        git(proj, "restore", "--source=wp", "--staged", ".")
-        staged = git(proj, "write-tree").strip()
-        if staged != git(proj, "rev-parse", "wp^{tree}").strip():
-            return "fixture: the index must hold wp's tree"
-        if _gate_cli(proj, "--mark-precheck").returncode != 0:
-            return "--mark-precheck outside a merge must exit 0"
-        run = _mark_cli(proj, "full")
-        if run.returncode != 0:
-            return f"--mark full outside a merge must exit 0: {run.returncode} {run.stderr!r}"
-        git(proj, "restore", "--source=HEAD", "--staged", "--worktree", ".")
-        git(proj, "merge", "--no-ff", "--no-commit", "wp")
-        if git(proj, "write-tree").strip() != staged:
-            return "fixture: the merge's index tree must equal the tree staged before the run"
-        mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
-        if merge_commit_refusal(mark, str(proj)) is None:
-            return f"a mark whose run built another working tree must not admit the merge: {mark}"
-        # Green: the same merge, verified now, is admitted.
-        if _gate_cli(proj, "--mark-precheck").returncode != 0:
-            return "--mark-precheck on the clean paused merge must exit 0"
-        if _mark_cli(proj, "full").returncode != 0:
-            return "--mark full on the clean paused merge must exit 0"
-        mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
-        refusal = merge_commit_refusal(mark, str(proj))
-        return expect(refusal is None, f"a merge-time verify must admit the merge: {refusal}")
-
-    def am8_a_clean_merge_marks_the_merged_tree() -> str | None:
-        proj = _am8_project("am8-clean-merge", merging=True)
-        pre = _gate_cli(proj, "--mark-precheck")
-        if pre.returncode != 0:
-            return f"--mark-precheck on a clean paused merge must exit 0: {pre.returncode} {pre.stderr!r}"
-        run = _mark_cli(proj, "full")
-        if run.returncode != 0:
-            return f"--mark full on a clean paused merge must exit 0: {run.returncode} {run.stderr!r}"
-        mark = json.loads(_project_mark(proj).read_text(encoding="utf-8"))
-        merged = git(proj, "write-tree").strip()
-        if merged == git(proj, "rev-parse", "HEAD^{tree}").strip():
-            return "fixture: the merged index must differ from HEAD's tree"
-        return expect(mark.get("tree") == merged, f"the mark must carry the merged index tree {merged}: {mark}")
 
     def c018_log_run_survives_a_plan_failure() -> str | None:
         """`--mark scoped --log-run` where `make_plan` cannot run: warn, no record, still mark."""
@@ -2774,9 +2495,9 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         ("reverse-dependent counts", rdeps),
         ("hub predicate", hubs),
         ("routing table", routes),
-        ("nested taskfile escalates", nested_taskfile_escalates),
+        ("taskfiles route without escalating", taskfiles_route_without_escalating),
         ("unlisted .claude/ subtree escalates", unlisted_claude_subtree_escalates),
-        ("scripts/** routes to the self-tests and escalates", scripts_route_and_escalate),
+        ("scripts/** routes to the self-tests without escalating", scripts_route_without_escalating),
         ("crate manifest/README routes to the workspace guards", manifest_routes_without_escalating),
         ("crate source stays scoped beside a manifest", crate_source_is_still_scoped_beside_a_manifest),
         ("a manifest never causes the escalation", a_manifest_beside_an_escalating_path_does_not_run_the_guards_twice),
@@ -2831,20 +2552,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         ("cargo metadata failure is loud", metadata_failure_is_loud),
         ("the manifest route reaches a workspace compile", the_manifest_route_reaches_a_workspace_compile),
         ("TABLE_ESCALATES matches test/scoped_rows.toml", table_rows_agree),
-        ("C-017 AM-8 an unstaged edit under a merge refuses --mark", am8_unstaged_edit_under_a_merge_refuses),
-        ("C-017 AM-8 an untracked file under a merge refuses --mark", am8_untracked_file_under_a_merge_refuses),
-        ("C-017 AM-8 outside a merge an unstaged edit still marks (control)", am8_unstaged_edit_outside_a_merge_marks),
-        ("C-017 AM-8 a clean paused merge marks the merged index tree", am8_a_clean_merge_marks_the_merged_tree),
-        ("C-017 a clean verify outside a merge records its tree", a_clean_verify_outside_a_merge_records_its_tree),
-        ("C-017 a tree dirtied during the run records no tree", a_tree_dirtied_during_the_run_records_no_tree),
-        (
-            "C-017 a pre-merge mark of a staged foreign tree admits no merge",
-            a_premerge_mark_of_a_staged_foreign_tree_admits_no_merge,
-        ),
-        ("C-017 AM-8 --mark-precheck refuses a dirty merge up front", fix1_precheck_refuses_a_dirty_merge_up_front),
-        ("C-017 AM-8 a tree staged during the run refuses the mark", fix1_a_tree_staged_during_the_run_refuses_the_mark),
-        ("C-017 AM-8 a merge mark needs the precheck's snapshot", fix1_a_merge_mark_needs_the_precheck),
-        ("C-017 AM-8 --mark-precheck outside a merge is a no-op", fix1_precheck_outside_a_merge_is_a_no_op),
+        ("--mark under a dirty merge is written", mark_under_a_dirty_merge_is_written),
         ("C-018 --log-run survives a plan failure", c018_log_run_survives_a_plan_failure),
         ("C-018 the run log lands in the common dir and never truncates", c018_run_log_lands_in_the_common_dir),
         ("C-018 append_jsonl unique_on skips a duplicate", c018_append_jsonl_unique_on_skips),
@@ -2876,11 +2584,6 @@ def main(argv: list[str]) -> int:
         help="hold test/scoped_rows.toml and the command markers to the tree (C-015)",
     )
     mode.add_argument(
-        "--mark-precheck",
-        action="store_true",
-        help="`task verify`'s first step: refuse a dirty merge now, snapshot its tree (C-017)",
-    )
-    mode.add_argument(
         "--record-escapes",
         action="store_true",
         help="attribute a failed T2 run's modules to the scoped runs (C-018)",
@@ -2901,29 +2604,14 @@ def main(argv: list[str]) -> int:
     ns = parser.parse_args(argv)
     if ns.check_coverage:
         return check_coverage(REPO_ROOT)
-    if ns.mark_precheck:
-        refusal = mark_precheck(REPO_ROOT)
-        if refusal:
-            print(refusal, file=sys.stderr)
-            return 1
-        return 0
     if ns.record_escapes:
         if ns.junit_dir is None:
             parser.error("--record-escapes needs --junit-dir <dir>")
         return record_escapes(REPO_ROOT, ns.junit_dir, ns.since)
     if ns.mark:
-        refusal = mark_refusal(REPO_ROOT)
-        if refusal:
-            print(refusal, file=sys.stderr)
-            return 1
         head = git(REPO_ROOT, "rev-parse", "HEAD").strip()
-        mark = write_mark(
-            mark_file(), ns.mark, ns.crates, head, worktree_id(REPO_ROOT), proven_tree(REPO_ROOT), ns.nocache
-        )
+        mark = write_mark(mark_file(), ns.mark, ns.crates, head, worktree_id(REPO_ROOT), ns.nocache)
         print(f"verify mark: {json.dumps(mark, sort_keys=True)}")
-        # One snapshot, one mark: a second `--mark` under the same merge must
-        # come from a second verify, not reuse this run's evidence.
-        start_snapshot(REPO_ROOT).unlink(missing_ok=True)
         if ns.log_run and ns.mark == "scoped":
             log_run(REPO_ROOT)
         return 0

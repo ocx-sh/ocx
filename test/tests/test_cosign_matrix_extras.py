@@ -69,21 +69,18 @@ from tests.fixtures.sigstore_stack import SigstoreStack
 #: What `discoverable_candidates` returns for a subject nothing has signed.
 _NO_DOORS = {"referrers_api": 0, "fallback_index": 0, "sidecar_tag": 0}
 
-#: Every member `ocx package verify` puts in `data` on a successful run, as
-#: `api/data/verification.rs::VerificationReport` declares them.
+#: Every member a successful `ocx package verify` report carries for a key-mode
+#: signature with no Rekor entry (no certificate, no signing time).
 #:
 #: Pinned as an exact set by X-02b, the one cell where an unpinned scan still
 #: succeeds on the weaker shape: the report says which shape it landed on and
 #: nothing about the bundle it did not find. An equality on the key set makes
 #: the day the report grows a member — a `refused`, a "bundle expected" signal —
-#: a red rather than a silent change nobody notices. `signatures` is
-#: `skip_serializing_if` empty, and X-02b has already asserted one verified.
+#: a red rather than a silent change nobody notices.
 _REPORT_KEYS = {
+    "schema_version",
     "subject_digest",
     "referrer_digest",
-    "certificate_identity",
-    "certificate_oidc_issuer",
-    "signed_at",
     "signatures",
 }
 
@@ -568,8 +565,8 @@ def test_an_unreachable_bundle_downgrades_the_unpinned_scan_onto_the_sidecar(
         "unpinned verify no longer downgrades onto the sidecar when the bundle stops being "
         f"served. If that is a deliberate change, this whole test is the record to update: {downgraded!r}"
     )
-    assert set(json.loads(downgraded_result.stdout)["data"]) == _REPORT_KEYS, (
-        "the successful `data` object gained or lost a member. If a `refused` or "
+    assert set(json.loads(downgraded_result.stdout)) == _REPORT_KEYS, (
+        "the verify report gained or lost a member. If a `refused` or "
         "\"bundle expected\" member arrived, update _REPORT_KEYS and assert what it now says "
         f"about the shape this scan did not find.\n{downgraded_result.stdout}"
     )
@@ -606,9 +603,9 @@ def test_a_key_signature_records_a_rekor_entry_only_when_asked(
 
     * `--key --rekor-upload` → the sign report carries `transparency_log_index`,
       and `ocx package verify` reports both `signed_at` and `rekor_log_index`.
-    * `--key --no-rekor-upload` → `transparency_log_index` is `null` and neither
+    * `--key --no-rekor-upload` → `transparency_log_index` is absent and neither
       verify field is emitted at all.
-    * `--key` and **neither flag** → `transparency_log_index` is `null` too. This
+    * `--key` and **neither flag** → `transparency_log_index` is absent too. This
       is the sample that earns the "only when asked" in this test's name: the
       first two prove the flags are *honoured*, and only the third proves the
       default is off. Without it the name would claim something asserted
@@ -634,7 +631,7 @@ def test_a_key_signature_records_a_rekor_entry_only_when_asked(
         identity_token=identity_token,
         extra_args=("--rekor-upload", "--rekor-url", sigstore_stack.rekor_url),
     )
-    uploaded_index = json.loads(signed.stdout)["data"]["transparency_log_index"]
+    uploaded_index = json.loads(signed.stdout)["transparency_log_index"]
     assert isinstance(uploaded_index, int), (
         f"`--rekor-upload` must report the log index it created, got {uploaded_index!r}"
     )
@@ -659,7 +656,7 @@ def test_a_key_signature_records_a_rekor_entry_only_when_asked(
         identity_token=identity_token,
         extra_args=("--no-rekor-upload", "--rekor-url", sigstore_stack.rekor_url),
     )
-    assert json.loads(signed_b.stdout)["data"]["transparency_log_index"] is None, (
+    assert "transparency_log_index" not in json.loads(signed_b.stdout), (
         f"`--no-rekor-upload` must report no log index at all: {signed_b.stdout}"
     )
 
@@ -679,7 +676,7 @@ def test_a_key_signature_records_a_rekor_entry_only_when_asked(
     #    second difference from sample 2, and the default reaches for none.
     runner_c, pkg_c, _subject_c, _size_c = subject_package(ocx, key, f"{unique_repo}_c", tmp_path / "c")
     signed_c = _sign(runner_c, key, pkg_c, stack=sigstore_stack, identity_token=identity_token)
-    assert json.loads(signed_c.stdout)["data"]["transparency_log_index"] is None, (
+    assert "transparency_log_index" not in json.loads(signed_c.stdout), (
         "with neither flag, `ocx package sign --key` must not upload: a default that quietly "
         f"created a log entry is what this sample exists to catch\n{signed_c.stdout}"
     )
@@ -742,10 +739,9 @@ def test_the_keyless_no_rekor_upload_refusal_carries_its_usage_exit_code(
     `options/rekor_upload.rs`.
 
     It was a strict xfail while the CLI answered 1 / `internal`: the bare
-    `SignErrorKind` propagated out of `RekorUploadOpt::enabled` and
-    `cli/classify.rs::try_classify` had a `try_downcast!(SignError)` arm but
-    none for the bare kind, so the chain walk fell through to
-    `ExitCode::Failure`. `40bddb87` taught the classifier the bare kind and the
+    `SignErrorKind` propagated out of `RekorUploadOpt::enabled` and the CLI
+    classifier had a `SignError` arm but none for the bare kind, so the chain
+    walk fell through to `ExitCode::Failure`. `40bddb87` taught the classifier the bare kind and the
     marker came off — the assertion below is the contract, asserted plainly,
     and it reds if the classifier ever forgets again.
     """

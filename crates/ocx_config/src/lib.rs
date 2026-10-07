@@ -363,10 +363,15 @@ impl std::fmt::Display for ToolchainRootTier {
 ///
 /// A missing root is accepted (the renderer creates it); ownership checks inspect the nearest
 /// existing ancestor, reported as `checked`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ToolchainRootError {
     /// A leading `~` that could not be expanded (`~user`, or no resolvable home directory).
     #[error("{tier} declares {}, whose leading '~' cannot be expanded: {defect}", declared.display())]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_unexpandable",
+        summary = "The toolchain_dir setting starts with a '~' that cannot be expanded"
+    )]
     Unexpandable {
         tier: ToolchainRootTier,
         declared: PathBuf,
@@ -378,6 +383,11 @@ pub enum ToolchainRootError {
         "{tier} is the relative path {}; a toolchain_dir root must be absolute, or one project resolves a different home from every working directory",
         declared.display()
     )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_relative",
+        summary = "The toolchain_dir setting is a relative path"
+    )]
     Relative { tier: ToolchainRootTier, declared: PathBuf },
 
     /// A `..` component anywhere in the value.
@@ -387,12 +397,22 @@ pub enum ToolchainRootError {
         "{tier} declares {}, which contains a '..' component; write the directory the root actually names",
         declared.display()
     )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_parent_component",
+        summary = "The toolchain_dir setting contains a '..' component"
+    )]
     ParentDirComponent { tier: ToolchainRootTier, declared: PathBuf },
 
     /// Neither the home directory nor `$OCX_HOME` could be resolved, so every value is refused.
     #[error(
         "{tier} declares {}, but neither a home directory nor $OCX_HOME could be resolved to contain it",
         declared.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_no_containment_anchor",
+        summary = "No home directory or OCX_HOME exists to contain toolchain_dir"
     )]
     NoContainmentAnchor { tier: ToolchainRootTier, declared: PathBuf },
 
@@ -403,6 +423,11 @@ pub enum ToolchainRootError {
         "{tier} resolves to {}, which is the containment anchor {} itself; name a directory beneath it",
         resolved.display(),
         anchor.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_is_containment_anchor",
+        summary = "The toolchain_dir setting names the home directory or OCX_HOME itself"
     )]
     IsContainmentAnchor {
         tier: ToolchainRootTier,
@@ -415,12 +440,22 @@ pub enum ToolchainRootError {
         "{tier} resolves to {}, which is outside both the home directory and $OCX_HOME",
         resolved.display()
     )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_outside_home",
+        summary = "The toolchain_dir setting resolves outside the home directory and OCX_HOME"
+    )]
     OutsideHome { tier: ToolchainRootTier, resolved: PathBuf },
 
     /// A filesystem root or a system prefix.
     ///
     /// Checked even when containment passed, or an absurd `$HOME` admits a system location.
     #[error("{tier} resolves to the system location {}", resolved.display())]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_system_prefix",
+        summary = "The toolchain_dir setting resolves to a system location"
+    )]
     SystemPrefix { tier: ToolchainRootTier, resolved: PathBuf },
 
     /// A root at or under `$OCX_HOME/toolchain`, where a global `ocx pull` prunes project trees as orphan groups.
@@ -428,6 +463,11 @@ pub enum ToolchainRootError {
         "{tier} resolves to {}, inside the global toolchain home {}; a global `ocx pull` would prune other projects' trees there",
         resolved.display(),
         global_home.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_inside_global_home",
+        summary = "The toolchain_dir setting resolves inside the global toolchain home"
     )]
     InsideGlobalToolchainHome {
         tier: ToolchainRootTier,
@@ -440,6 +480,11 @@ pub enum ToolchainRootError {
         "{tier} resolves to {}, whose nearest existing directory {} cannot be inspected",
         resolved.display(),
         checked.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_inaccessible",
+        summary = "The toolchain_dir setting names a path that cannot be inspected"
     )]
     Inaccessible {
         tier: ToolchainRootTier,
@@ -455,6 +500,11 @@ pub enum ToolchainRootError {
         resolved.display(),
         checked.display()
     )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_not_a_directory",
+        summary = "The toolchain_dir setting names something other than a directory"
+    )]
     NotADirectory {
         tier: ToolchainRootTier,
         resolved: PathBuf,
@@ -466,6 +516,11 @@ pub enum ToolchainRootError {
         "{tier} resolves to {}, whose nearest existing directory {} is owned by {owner} rather than by the effective user {effective_user}",
         resolved.display(),
         checked.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_not_owner_owned",
+        summary = "The toolchain_dir directory is not owned by the current user"
     )]
     NotOwnerOwned {
         tier: ToolchainRootTier,
@@ -481,6 +536,11 @@ pub enum ToolchainRootError {
         "{tier} resolves to {}, whose nearest existing directory {} has mode {mode:04o}, granting write to group or world",
         resolved.display(),
         checked.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_dir_group_or_world_writable",
+        summary = "The toolchain_dir directory is writable by other users"
     )]
     GroupOrWorldWritable {
         tier: ToolchainRootTier,
@@ -593,8 +653,8 @@ fn declared_root(config: &Config) -> Option<(ToolchainRootTier, PathBuf)> {
         return Some((ToolchainRootTier::ConfigFile, declared.clone()));
     }
     // Never `std::env::var`, or the test override seam is bypassed and these tests turn order-dependent.
-    ocx_util::env::var(crate::env::keys::OCX_TOOLCHAIN_DIR)
-        .filter(|value| !value.is_empty())
+    ocx_env::OCX_TOOLCHAIN_DIR
+        .get()
         .map(|value| (ToolchainRootTier::Environment, PathBuf::from(value)))
 }
 
@@ -611,7 +671,7 @@ impl ContainmentAnchors {
     /// The anchors this process resolves.
     fn from_environment() -> Self {
         Self {
-            home: ocx_util::env::home_dir(),
+            home: ocx_env::home_dir(),
             ocx_home: crate::home::default_ocx_root(),
         }
     }
@@ -798,17 +858,17 @@ const SYSTEM_LOCATIONS_MATCHED_EXACTLY: [&str; 2] = ["/", "/var"];
 /// The Windows system locations, from the environment with the default install paths as fallback.
 fn windows_system_prefixes() -> Vec<PathBuf> {
     [
-        ("SystemRoot", r"C:\Windows"),
-        ("ProgramFiles", r"C:\Program Files"),
-        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-        ("ProgramData", r"C:\ProgramData"),
+        (&ocx_env::SYSTEM_ROOT, r"C:\Windows"),
+        (&ocx_env::PROGRAM_FILES, r"C:\Program Files"),
+        (&ocx_env::PROGRAM_FILES_X86, r"C:\Program Files (x86)"),
+        (&ocx_env::PROGRAM_DATA, r"C:\ProgramData"),
     ]
     .into_iter()
-    .map(|(key, fallback)| {
-        ocx_util::env::var(key)
+    .map(|(var, fallback)| {
+        var.get()
             // POSIX-absolute is absent: a cross-compilation shell can export `ProgramFiles=/home/u`,
             // which would refuse the operator's own home.
-            .filter(|value| !value.is_empty() && !value.starts_with('/'))
+            .filter(|value| !value.starts_with('/'))
             .map_or_else(|| PathBuf::from(fallback), PathBuf::from)
     })
     .collect()
@@ -1619,7 +1679,7 @@ mod tests {
 /// `adr_toolchain_activation.md` (§ *`config.toml` placement key*, validation
 /// item 18), never from an implementation.
 ///
-/// `$OCX_HOME` is injectable through [`ocx_util::env::overrides`]; `$HOME` is
+/// `$OCX_HOME` is injectable through [`ocx_env::overrides`]; `$HOME` is
 /// `std::env::home_dir()`, which no in-process seam redirects. Home-anchored
 /// refusal rows touch no filesystem; rows that must be **accepted** first check
 /// the host can host them, else skip naming the uid and mode seen. Rows needing
@@ -1628,8 +1688,7 @@ mod tests {
 #[cfg(test)]
 mod toolchain_root_tests {
     use super::*;
-    use crate::env::keys::OCX_TOOLCHAIN_DIR;
-    use ocx_util::env::overrides::EnvLock;
+    use ocx_env::overrides::EnvLock;
 
     /// The system-location prefix set, written out here rather than read from
     /// the implementation.
@@ -1674,11 +1733,11 @@ mod toolchain_root_tests {
     /// Transcribed from the contract, like the two lists above. The value
     /// column is what the implementation falls back to when the variable is
     /// unset, which is the only branch a POSIX host can reach.
-    const C018_WINDOWS_LOCATIONS: [(&str, &str); 4] = [
-        ("SystemRoot", r"C:\Windows"),
-        ("ProgramFiles", r"C:\Program Files"),
-        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-        ("ProgramData", r"C:\ProgramData"),
+    const C018_WINDOWS_LOCATIONS: [(&ocx_env::EnvVar, &str); 4] = [
+        (&ocx_env::SYSTEM_ROOT, r"C:\Windows"),
+        (&ocx_env::PROGRAM_FILES, r"C:\Program Files"),
+        (&ocx_env::PROGRAM_FILES_X86, r"C:\Program Files (x86)"),
+        (&ocx_env::PROGRAM_DATA, r"C:\ProgramData"),
     ];
 
     /// The environment lock with both `toolchain_dir` inputs pinned:
@@ -1686,13 +1745,13 @@ mod toolchain_root_tests {
     /// from the developer's shell.
     ///
     /// Every value below is injected through this seam, which only
-    /// [`ocx_util::env::var`] consults — so a `resolve` reading `std::env::var`
+    /// `ocx_env`'s reads consult — so a `resolve` reading `std::env::var`
     /// directly would fail these rows rather than pass them by accident
     /// (the idiom `ActivateMode::from_env` states).
     fn anchored_env(anchor: &Path) -> EnvLock {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_HOME", anchor.to_str().expect("anchor path is utf-8"));
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_HOME, anchor.to_str().expect("anchor path is utf-8"));
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
         env
     }
 
@@ -1799,7 +1858,7 @@ mod toolchain_root_tests {
     fn refuses_a_root_that_is_a_containment_anchor_itself() {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let _env = anchored_env(sandbox.path());
-        let home = ocx_util::env::home_dir().expect("this host resolves a home directory");
+        let home = ocx_env::home_dir().expect("this host resolves a home directory");
 
         for anchor in [home.clone(), sandbox.path().to_path_buf()] {
             let error = refusal(ToolchainRoot::resolve(&config_tier(anchor.clone())));
@@ -1827,7 +1886,7 @@ mod toolchain_root_tests {
             "a direct child of $OCX_HOME resolves to the canonicalised anchor joined with the declared tail"
         );
 
-        let home = ocx_util::env::home_dir().expect("this host resolves a home directory");
+        let home = ocx_env::home_dir().expect("this host resolves a home directory");
         let under_home = home.join("ocx-wp4-spec-root");
         #[cfg(unix)]
         if let Err(reason) = host_can_accept(&under_home) {
@@ -1857,8 +1916,8 @@ mod toolchain_root_tests {
     #[test]
     fn refuses_a_sibling_whose_path_bytes_merely_start_with_an_anchor() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
 
         let home = sandbox.path().join("home");
         let ocx_home = sandbox.path().join("ocx");
@@ -1894,7 +1953,7 @@ mod toolchain_root_tests {
     fn refuses_a_parent_dir_component_rather_than_normalising_it_away() {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let _env = anchored_env(sandbox.path());
-        let home = ocx_util::env::home_dir().expect("this host resolves a home directory");
+        let home = ocx_env::home_dir().expect("this host resolves a home directory");
 
         for escape in [
             home.join("..").join("other"),
@@ -1962,8 +2021,8 @@ mod toolchain_root_tests {
     #[test]
     fn refuses_a_root_whose_final_component_symlinks_out_of_the_anchor() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
 
         let anchor = sandbox.path().join("anchor");
         let outside = sandbox.path().join("outside");
@@ -2116,7 +2175,7 @@ mod toolchain_root_tests {
     fn refuses_a_relative_root_from_the_environment_tier_too() {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let env = anchored_env(sandbox.path());
-        env.set(OCX_TOOLCHAIN_DIR, "./tc");
+        env.set(&ocx_env::OCX_TOOLCHAIN_DIR, "./tc");
 
         let error = refusal(ToolchainRoot::resolve(&Config::default()));
         assert!(
@@ -2149,7 +2208,7 @@ mod toolchain_root_tests {
             "toolchain_dir = \"\" declares no root"
         );
 
-        env.set(OCX_TOOLCHAIN_DIR, "");
+        env.set(&ocx_env::OCX_TOOLCHAIN_DIR, "");
         assert_eq!(
             ToolchainRoot::resolve(&Config::default()).expect("an empty OCX_TOOLCHAIN_DIR is absent, not invalid"),
             None,
@@ -2181,7 +2240,7 @@ mod toolchain_root_tests {
     fn expands_a_leading_tilde_before_testing_absoluteness() {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let _env = anchored_env(sandbox.path());
-        let home = ocx_util::env::home_dir().expect("this host resolves a home directory");
+        let home = ocx_env::home_dir().expect("this host resolves a home directory");
 
         // Scoped to the arm that uses it: `host_can_accept` is `#[cfg(unix)]`,
         // so a binding at test scope is an `unused_variable` error on Windows
@@ -2252,7 +2311,7 @@ mod toolchain_root_tests {
     fn performs_no_percent_variable_expansion_on_any_platform() {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let env = anchored_env(sandbox.path());
-        env.set("LOCALAPPDATA", sandbox.path().to_str().expect("anchor path is utf-8"));
+        env.set_raw("LOCALAPPDATA", sandbox.path().to_str().expect("anchor path is utf-8"));
 
         // The ADR's commented-out Windows spelling, verbatim. Unexpanded it is
         // a relative path on every platform — `%LOCALAPPDATA%` is an ordinary
@@ -2351,7 +2410,7 @@ mod toolchain_root_tests {
     /// can inject would put a candidate under `/var` on this host.
     #[test]
     fn treats_var_as_a_system_location_by_identity_and_not_as_a_subtree() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
 
         for admitted in ["/var/home/alice/.cache/ocx/toolchain", "/var/home/alice", "/var/home"] {
             assert!(
@@ -2391,7 +2450,7 @@ mod toolchain_root_tests {
     /// fire; the third is the control that pins what `/private` must not reach.
     #[test]
     fn keeps_private_as_a_subtree_prefix_for_the_macos_firmlink() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
 
         for refused in ["/private/etc/ocx", "/private/var/root/tc", "/private/tmp/tc"] {
             assert!(
@@ -2416,7 +2475,7 @@ mod toolchain_root_tests {
     /// Red against `Path::eq` / `Path::starts_with` on either arm.
     #[test]
     fn refuses_a_system_location_in_any_ascii_case() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
 
         for refused in ["/USR", "/USR/local/tc", "/library/tc", "/Var/Lib/ocx", "/VAR", "/var"] {
             assert!(
@@ -2484,19 +2543,20 @@ mod toolchain_root_tests {
     ///
     /// A Windows host that relocated `%ProgramFiles%` is covered by the
     /// variable; one that unset it is covered by the fallback. Both arms are
-    /// asserted here because only [`ocx_util::env::var`]'s injection seam can
+    /// asserted here because only `ocx_env`'s injection seam can
     /// reach the first one on a POSIX host.
     #[test]
     fn reads_the_windows_system_locations_from_the_environment() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
 
-        for (key, fallback) in C018_WINDOWS_LOCATIONS {
-            env.remove(key);
+        for (var, fallback) in C018_WINDOWS_LOCATIONS {
+            let key = var.name;
+            env.remove(var);
             assert!(
                 windows_system_prefixes().contains(&PathBuf::from(fallback)),
                 "with {key} unset the shipped {fallback} stands in"
             );
-            env.set(key, r"D:\Relocated");
+            env.set(var, r"D:\Relocated");
             assert!(
                 windows_system_prefixes().contains(&PathBuf::from(r"D:\Relocated")),
                 "{key} names the directory, and the fallback is only the fallback"
@@ -2514,18 +2574,18 @@ mod toolchain_root_tests {
             );
 
             // An empty value is absent, the rule the tier ladder applies.
-            env.set(key, "");
+            env.set(var, "");
             assert!(
                 windows_system_prefixes().contains(&PathBuf::from(fallback)),
                 "an empty {key} is absent rather than a directory named by the empty string"
             );
 
             // H-R2-1 — a POSIX-absolute value is absent too. A cross-compilation
-            // shell on Linux exports these, and `ocx_util::env::var`'s override arm
+            // shell on Linux exports these, and `ocx_env`'s override arm
             // is `#[cfg(test)]`-only, so in a release build the read is live.
             // Without the filter `/home/u` joins the prefix list and every root
             // under the operator's own home is refused as "the system location".
-            env.set(key, "/home/u");
+            env.set(var, "/home/u");
             assert!(
                 windows_system_prefixes().contains(&PathBuf::from(fallback)),
                 "a POSIX-absolute {key} is not a Windows system location"
@@ -2534,7 +2594,7 @@ mod toolchain_root_tests {
                 !is_system_location(Path::new("/home/u/.cache/ocx/toolchain")),
                 "a POSIX-absolute {key} must not turn the operator's home into a C-018 location"
             );
-            env.remove(key);
+            env.remove(var);
         }
     }
 
@@ -2830,7 +2890,7 @@ mod toolchain_root_tests {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let env = anchored_env(sandbox.path());
         env.set(
-            OCX_TOOLCHAIN_DIR,
+            &ocx_env::OCX_TOOLCHAIN_DIR,
             sandbox.path().join("from-env").to_str().expect("path is utf-8"),
         );
 
@@ -2849,7 +2909,7 @@ mod toolchain_root_tests {
     fn never_reaches_an_invalid_environment_value_when_the_config_file_declares_one() {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let env = anchored_env(sandbox.path());
-        env.set(OCX_TOOLCHAIN_DIR, "/usr");
+        env.set(&ocx_env::OCX_TOOLCHAIN_DIR, "/usr");
 
         let root = accepted(ToolchainRoot::resolve(&config_tier(sandbox.path().join("tc"))));
         assert_eq!(
@@ -2889,7 +2949,7 @@ mod toolchain_root_tests {
             "the config.toml tier is refused, naming itself; got {from_file}"
         );
 
-        env.set(OCX_TOOLCHAIN_DIR, value.as_str());
+        env.set(&ocx_env::OCX_TOOLCHAIN_DIR, value.as_str());
         let from_env = refusal(ToolchainRoot::resolve(&Config::default()));
         assert!(
             matches!(
@@ -2971,8 +3031,8 @@ mod toolchain_root_tests {
     /// outside two directories that do not exist.
     #[test]
     fn refuses_every_root_when_no_containment_anchor_resolves() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
         let anchors = ContainmentAnchors {
             home: None,
             ocx_home: None,
@@ -3004,8 +3064,8 @@ mod toolchain_root_tests {
     #[test]
     fn drops_an_anchor_that_cannot_be_canonicalised_and_keeps_the_other() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
         let anchors = ContainmentAnchors {
             home: Some(sandbox.path().join("no-such-home-directory")),
             ocx_home: Some(sandbox.path().to_path_buf()),
@@ -3035,8 +3095,8 @@ mod toolchain_root_tests {
     #[test]
     fn refuses_an_absent_ocx_home_and_the_toolchain_directory_under_it() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
         let absent = sandbox.path().join("not-created-yet");
         let anchors = ContainmentAnchors {
             home: Some(sandbox.path().to_path_buf()),
@@ -3078,8 +3138,8 @@ mod toolchain_root_tests {
     #[test]
     fn refuses_the_anchor_and_the_global_toolchain_home_in_any_ascii_case() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
         let ocx_home = sandbox.path().join("ocx-home");
         std::fs::create_dir(&ocx_home).expect("create the $OCX_HOME anchor");
         let anchors = ContainmentAnchors {
@@ -3111,7 +3171,7 @@ mod toolchain_root_tests {
 
     /// **A symlinked home directory contains its own
     /// descendants.** The shipped row proves this against `$OCX_HOME` because
-    /// that is the only anchor `ocx_util::env::overrides` can redirect; with the anchors
+    /// that is the only anchor `ocx_env::overrides` can redirect; with the anchors
     /// passed in, the home directory itself can carry the symlink.
     ///
     /// Red: canonicalise only the candidate and not the anchors, and this
@@ -3120,8 +3180,8 @@ mod toolchain_root_tests {
     #[test]
     fn accepts_a_root_under_a_symlinked_home_directory() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
 
         let real = sandbox.path().join("real-home");
         std::fs::create_dir(&real).expect("create the real home directory");
@@ -3153,8 +3213,8 @@ mod toolchain_root_tests {
     #[test]
     fn refuses_a_tilde_root_on_a_machine_with_no_home_directory() {
         let Some(sandbox) = sandbox_or_skip() else { return };
-        let env = ocx_util::env::overrides::lock();
-        env.remove(OCX_TOOLCHAIN_DIR);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
         let anchors = ContainmentAnchors {
             home: None,
             ocx_home: Some(sandbox.path().to_path_buf()),
@@ -3186,7 +3246,7 @@ mod toolchain_root_tests {
         // `reads_the_windows_system_locations_from_the_environment` sets exactly
         // those four. `OVERRIDES` is process-global, so under any thread-parallel
         // runner the two rows collide without this.
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
 
         assert_eq!(
             C018_PREFIXES.len(),

@@ -6,11 +6,12 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::api;
+use crate::command::deprecated;
 
 /// A per-repository tag-fetch outcome, keyed by input index so failures surface in input order.
 type IndexedTagResult = (usize, anyhow::Result<(String, Vec<String>)>);
 
-/// How many per-repository tag listings `--tags` keeps in flight.
+/// How many per-repository tag listings `--with-tags` keeps in flight.
 ///
 /// Its own permit class, never `INDEX_REFRESH_CONCURRENCY`: one class shared across an inner fan-out
 /// deadlocks when an ancestor holds a permit its children wait for (ocx-sh/ocx#316, ocx-sh/ocx#167).
@@ -20,8 +21,12 @@ const CATALOG_TAG_CONCURRENCY: usize = 16;
 #[derive(Parser)]
 pub struct IndexCatalog {
     /// List tags for each repository in the catalog.
-    #[clap(long)]
-    tags: bool,
+    #[clap(long = "with-tags")]
+    with_tags: bool,
+
+    // 0.7 removal: the `--tags` spelling of `--with-tags`.
+    #[clap(id = deprecated::INDEX_CATALOG_TAGS.arg_id(), long = "tags", hide = true)]
+    deprecated_tags: bool,
 
     /// Registries to list repositories from (defaults to OCX_DEFAULT_REGISTRY).
     #[arg(value_name = "REGISTRY")]
@@ -43,7 +48,7 @@ impl IndexCatalog {
         }
         repositories.sort();
 
-        if !self.tags {
+        if !(self.with_tags || self.deprecated_tags) {
             let names = repositories.iter().map(|r| r.to_string()).collect();
             let catalog = api::data::catalog::Catalog::without_tags(names);
             context.api().report(&catalog)?;

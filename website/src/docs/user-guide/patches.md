@@ -291,7 +291,7 @@ ocx package env java:21 --show-patches
 
 Plain output adds a `Source` column naming the companion and the descriptor rule glob that
 admitted it (e.g. `corp/jdk-trust:1.0 (rule: ocx.sh/java:*)`) for every companion-sourced
-entry; JSON output carries the same provenance as `"source": { "kind": "patch", "rule": "...",
+entry; JSON output carries the same provenance as `"source": { "type": "patch", "rule": "...",
 "companion": "..." }`.
 
 A companion's `integrations` row needs none of that provenance machinery. It appears in

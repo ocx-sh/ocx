@@ -5,9 +5,10 @@ owns; this file states only what a change here must not break.
 
 ## No `ClassifyExitCode` impl belongs in this crate
 
-C-054 states it and the code holds it: nothing here implements
-`ClassifyExitCode`, and nothing here should. The exit-code taxonomy lives in
-`ocx_cli`, and every error this crate raises reaches a user only after a caller
+C-054 states it and the code holds it: nothing here implements or derives
+`ClassifyExitCode`, and nothing here should (the crate has no `ocx_exit`
+dependency). The classified families live in `ocx_cli`'s `families!` list, and
+every error this crate raises reaches a user only after a caller
 has consumed it **by value** into that caller's own kind:
 
 - `KeyEnvError` → `TrustPolicyError::KeyMalformed`, or `KeyBackendError::{Io,
@@ -17,7 +18,7 @@ has consumed it **by value** into that caller's own kind:
 - `TrustPolicyError` → `VerifyErrorKind::TrustPolicyInvalid`, whose armed
   classifier matches on the inner variant.
 
-So none of the three has a `downcast_arm!` rung, and all three are recorded in
+So none of the three has a `families!` rung, and all three are recorded in
 `UNARMED_AT_THE_BOUNDARY` in `crates/ocx_test_support/tests/workspace_structure.rs`
 with that reasoning. **Arming any of them moves an exit code**, which is a
 behaviour decision and not a refactor. If you think one needs a code, that is an

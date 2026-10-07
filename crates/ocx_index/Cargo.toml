@@ -11,8 +11,9 @@ publish = false
 # (`subsystem-tests.md` "Test-Only Seams"). Gates the `__OCX_TESTING_*` clock
 # and index-host seams: `lib.rs`'s `current_timestamp` (so an announce or
 # claim writes byte-deterministic output) and `ocx_index.rs`'s hosted-index
-# base URL. Forwarded by `ocx_lib`'s and `ocx`'s own `__testing`.
-__testing = []
+# base URL. Forwarded by `ocx_lib`'s and `ocx`'s own `__testing`; forwards
+# `ocx_env`'s, which declares those seams.
+__testing = ["ocx_env/__testing"]
 
 [dependencies]
 # `$OCX_HOME` and the index-collection root the local index is homed under.
@@ -28,6 +29,8 @@ ocx_store.workspace = true
 # The bottom tier: `fs` (locks, atomic publish), `error::FileError`, the
 # extension-trait prelude.
 ocx_util.workspace = true
+# The environment registry the clock and timeout seams are declared in.
+ocx_env.workspace = true
 
 async-trait.workspace = true
 # The `observed` timestamp on a changed tag, in the index bot's seconds-Z form.
@@ -68,11 +71,11 @@ ocx_config = { workspace = true, features = ["__test_scaffolding"] }
 ocx_oci = { workspace = true, features = ["__testing"] }
 # The wire-conformance and dispatch harnesses' shared fixture helpers.
 ocx_test_support.workspace = true
-# `ocx_util::env::overrides`, the process-environment table these tests write
+# `ocx_env::overrides`, the process-environment table these tests write
 # through. A dev edge enabling `__testing` is allowed from every crate
 # (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps the
 # feature out of the normal build, so the runtime row above stays seamless.
-ocx_util = { workspace = true, features = ["__testing"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 # `tokio::time::pause()` for the tag-refresh and retry tests' virtual clock.
 tokio = { workspace = true, features = ["test-util"] }
 # The bundled Mozilla root set the index HTTP client seeds, counted by the

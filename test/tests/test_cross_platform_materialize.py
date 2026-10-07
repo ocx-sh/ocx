@@ -69,10 +69,10 @@ def _project_with_lock(ocx: OcxRunner, repo: str, tmp_path: Path, *, lock: bool 
 
 
 def _dry_run_status(ocx: OcxRunner, project_dir: Path, platform: str) -> str:
-    """Return the single tool's dry-run status (`cached` / `would-fetch`)."""
+    """Return the single tool's dry-run status (`cached` / `would_fetch`)."""
     result = _run(ocx, project_dir, "--format", "json", "pull", f"--platform={platform}", "--dry-run")
     assert result.returncode == EXIT_SUCCESS, f"dry-run for {platform} failed: {result.stderr}"
-    rows = json.loads(result.stdout)
+    rows = json.loads(result.stdout)["items"]
     assert len(rows) == 1, f"expected one tool row, got: {rows}"
     return rows[0]["status"]
 
@@ -81,19 +81,19 @@ def test_pull_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: st
     """`ocx pull --platform=linux/arm64` warms the arm64 leaf and ONLY that leaf.
 
     End-to-end proof of cross-platform selection: after pulling arm64, arm64 is
-    cached while the sibling amd64 leaf is still would-fetch — the flag drove the
+    cached while the sibling amd64 leaf is still would_fetch — the flag drove the
     materialization, not the host.
     """
     _publish_multiplatform(ocx, unique_repo, tmp_path)
     project_dir = _project_with_lock(ocx, unique_repo, tmp_path)
 
-    assert _dry_run_status(ocx, project_dir, ARM64) == "would-fetch", "arm64 must start uncached"
+    assert _dry_run_status(ocx, project_dir, ARM64) == "would_fetch", "arm64 must start uncached"
 
     pull = _run(ocx, project_dir, "pull", f"--platform={ARM64}")
     assert pull.returncode == EXIT_SUCCESS, f"cross-platform pull failed: {pull.stderr}"
 
     assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 must be cached after pull"
-    assert _dry_run_status(ocx, project_dir, AMD64) == "would-fetch", (
+    assert _dry_run_status(ocx, project_dir, AMD64) == "would_fetch", (
         "amd64 must stay uncached — only the requested arm64 leaf was materialized"
     )
 
@@ -112,7 +112,7 @@ def test_lock_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: st
     assert result.returncode == EXIT_SUCCESS, f"cross-platform lock failed: {result.stderr}"
 
     assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 leaf must be warmed"
-    assert _dry_run_status(ocx, project_dir, AMD64) == "would-fetch", (
+    assert _dry_run_status(ocx, project_dir, AMD64) == "would_fetch", (
         "amd64 must stay uncached — only the requested arm64 leaf was materialized"
     )
 
@@ -160,13 +160,13 @@ def test_update_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: 
     make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_amd64", platform=AMD64)
     make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_arm64", platform=ARM64)
 
-    assert _dry_run_status(ocx, project_dir, ARM64) == "would-fetch", "arm64 must start uncached"
+    assert _dry_run_status(ocx, project_dir, ARM64) == "would_fetch", "arm64 must start uncached"
 
     update = _run(ocx, project_dir, "update", f"--platform={ARM64}")
     assert update.returncode == EXIT_SUCCESS, f"cross-platform update failed: {update.stderr}"
 
     assert _dry_run_status(ocx, project_dir, ARM64) == "cached", "arm64 must be cached after update"
-    assert _dry_run_status(ocx, project_dir, AMD64) == "would-fetch", (
+    assert _dry_run_status(ocx, project_dir, AMD64) == "would_fetch", (
         "amd64 must stay uncached — only the requested arm64 leaf of the "
         "newly-resolved digest was materialized"
     )

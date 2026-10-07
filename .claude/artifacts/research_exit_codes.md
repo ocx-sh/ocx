@@ -1,5 +1,7 @@
 # Research: CLI Exit Code Conventions (2026)
 
+**Superseded in part by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (2026-10-07):** § Direct Recommendation's "private range for tool-specific codes" no longer holds. A code names the caller's next action, never a feature; 83-87 are retired forever and 82 is `Unsupported`. Read the rest as survey material only.
+
 <!--
 Research Artifact
 Filename: artifacts/research_exit_codes.md

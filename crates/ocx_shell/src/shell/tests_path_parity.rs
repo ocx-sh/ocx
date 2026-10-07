@@ -22,7 +22,7 @@
 
 use std::ffi::{OsStr, OsString};
 
-use ocx_util::env::PATH_SEPARATOR as SEP;
+use ocx_util::path::PATH_SEPARATOR as SEP;
 use ocx_util::path::{move_to_front, remove_segment};
 
 /// Build a separator-joined path string for the host platform so the

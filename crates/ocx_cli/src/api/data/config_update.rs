@@ -2,6 +2,8 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_console::Cell;
+use ocx_oci::Digest;
+use ocx_util::time::Timestamp;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -46,56 +48,47 @@ impl std::fmt::Display for ConfigUpdateStatus {
 /// `--check` probe-only path (mirrors `ocx self update --check`).
 ///
 /// Plain format: key/value table; rows with no payload are suppressed.
-///
-/// JSON format:
-/// `{"status":"…","source":"…","digest":"…","fetched_at":"…","policy":"…","kill_switches":["…"],"drift":true}`
-/// — optional fields present only when the underlying probe produced them.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigUpdateData {
+    /// What the run found or did.
     pub(crate) status: ConfigUpdateStatus,
     /// The effective managed-config source (flag > env > seed).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) source: Option<String>,
     /// The local snapshot's manifest digest.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub(crate) digest: Option<String>,
-    /// ISO-8601 UTC timestamp of the snapshot's last fetch.
+    pub(crate) digest: Option<Digest>,
+    /// When the snapshot was last fetched.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub(crate) fetched_at: Option<String>,
+    pub(crate) fetched_at: Option<Timestamp>,
     /// The tier's refresh policy (`apply` / `notify` / `manual`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) policy: Option<String>,
     /// Active kill switches (e.g. `OCX_NO_CONFIG_REFRESH`), by env-var name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) kill_switches: Vec<String>,
     /// Whether the registry's current digest differs from the local
     /// snapshot; present only when reachable (`--check`, online).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) drift: Option<bool>,
     /// The tag the local snapshot was fetched under (snapshot v2 bookkeeping —
     /// shows which floating/pinned tag the tier tracks).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) tag: Option<String>,
-    /// ISO-8601 UTC instant until which the background tick is paused
+    /// The instant until which the background tick is paused
     /// (`ocx config update --pause`); absent when no pause is in force.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub(crate) paused_until: Option<String>,
+    pub(crate) pause_ends_at: Option<Timestamp>,
     /// The version spec pinned alongside an in-force pause
     /// (`--pause <d> <VERSION>`); absent when the pause carries no pin.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) pinned: Option<String>,
 }
 
 impl Printable for ConfigUpdateData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "ConfigUpdateData";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut fields: Vec<Cell> = vec!["Status".into()];
         let mut values: Vec<Cell> = vec![Cell::from(self.status.to_string())];
@@ -106,11 +99,11 @@ impl Printable for ConfigUpdateData {
         }
         if let Some(digest) = &self.digest {
             fields.push("Digest".into());
-            values.push(Cell::from(digest.clone()));
+            values.push(Cell::from(digest.to_string()));
         }
         if let Some(fetched_at) = &self.fetched_at {
             fields.push("Fetched at".into());
-            values.push(Cell::from(fetched_at.clone()));
+            values.push(Cell::from(fetched_at.to_string()));
         }
         if let Some(policy) = &self.policy {
             fields.push("Policy".into());
@@ -133,9 +126,9 @@ impl Printable for ConfigUpdateData {
             fields.push("Tag".into());
             values.push(Cell::from(tag.clone()));
         }
-        if let Some(paused_until) = &self.paused_until {
+        if let Some(pause_ends_at) = &self.pause_ends_at {
             fields.push("Paused until".into());
-            values.push(Cell::from(paused_until.clone()));
+            values.push(Cell::from(pause_ends_at.to_string()));
         }
         if let Some(pinned) = &self.pinned {
             fields.push("Pinned".into());
@@ -143,5 +136,24 @@ impl Printable for ConfigUpdateData {
         }
 
         printer.print_table(&["Field".into(), "Value".into()], &[fields, values]);
+    }
+}
+
+/// Reads a persisted RFC 3339 instant; an unreadable one is reported as absent rather than as text.
+pub fn parse_timestamp(raw: &str) -> Option<Timestamp> {
+    raw.parse::<Timestamp>()
+        .inspect_err(|error| tracing::debug!(%error, raw, "unreadable timestamp left out of the report"))
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_persisted_instant_reports_in_utc_whole_seconds() {
+        let at = parse_timestamp("2026-07-08T14:00:00.123456789+02:00").expect("valid RFC 3339");
+        assert_eq!(at.to_string(), "2026-07-08T12:00:00Z");
+        assert!(parse_timestamp("old").is_none());
     }
 }

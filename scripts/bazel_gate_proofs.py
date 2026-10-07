@@ -33,13 +33,13 @@ reported.
 
 **And the ADR picked the wrong two crates.** Over the repository's own
 allowed-edge table (`scripts/crate_map.toml`), `rdeps(ocx_exit)` and
-`rdeps(ocx_util)` are the same 17 crates — 18 of 21 each, jointly the largest
+`rdeps(ocx_util)` are the same 17 crates — 18 of 23 each, jointly the largest
 reverse closures in the workspace. `ocx_exit` is a leaf in the *dependency*
 direction and a hub in the *reverse* one, which is the direction this test
 reads, so the ADR's pair differs by exactly one target each and discriminates
 nothing. `a1_verdict` refuses that shape rather than report MET on a one-label
 margin, and names the small probes: `ocx_announce`, `ocx_script` and
-`ocx_setup` re-run 3 of 21.
+`ocx_setup` re-run 3 of 23.
 
 **Evidence is the BEP, never the terminal summary.** `--build_event_json_file`
 emits one JSON object per line; a test target's verdict lives in a `TestResult`
@@ -88,17 +88,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # wrong. WP-12's BUILD files are the subject, `bazel query` is the instrument,
 # and every value below is the answer one query gave on this tree:
 #
-#   kind(rust_library, //crates/...)          20
-#   kind(rust_test, //crates/...)             35
-#   kind(rust_binary, //crates/...)            3   (`ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
-#                                                  `ocx_shim:ocx_shim`)
-#   kind(rust_doc_test, //crates/...)         20
-#   kind("^rust_.*rule$", //crates/...)       78
-#   kind(filegroup, //crates/...)              4
-#   kind(rule, //crates/...)                  84   (floor 82: the `sh_test` seam twin and
+#   kind(rust_library, //crates/...)          22
+#   kind(rust_proc_macro, //crates/...)        1   (`ocx_exit_derive`)
+#   kind(rust_test, //crates/...)             42
+#   kind(rust_binary, //crates/...)            4   (`ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
+#                                                  `ocx_sdkgen:ocx_sdkgen_bin`, `ocx_shim:ocx_shim`)
+#   kind(rust_doc_test, //crates/...)         22
+#   kind("^rust_.*rule$", //crates/...)       91
+#   kind(filegroup, //crates/...)              6
+#   kind(rule, //crates/...)                  99   (floor 97: the `sh_test` seam twin and
 #                                                  the `ocx_schema:schemas` genrule are not
 #                                                  summands)
-#   kind(rule, //crates/...) --output=package 21
+#   kind(rule, //crates/...) --output=package 24
+#
+# The `ocx_sdkgen` SDK targets (three `rust_test`, one `rust_binary`) were added
+# to these by reading their BUILD file, before a query had run over them.
 #
 # They stay written as sums, not literals, so a later correction to one summand
 # cannot quietly leave a floor at the old total.
@@ -110,7 +114,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # disagreement between the two is the finding.
 # ---------------------------------------------------------------------------
 
-CRATE_PACKAGES = 21
+CRATE_PACKAGES = 24
 """`crates/*/BUILD.bazel`: one per workspace member, `ocx_shim` included.
 
 M-02 subtracted `ocx_shim` on the ground that it builds no target.
@@ -131,16 +135,20 @@ ordinary `@crates//oci-client-0.17.0:oci-client-0.17.0` aliases, not as
 that do exist on disk are crate_universe output, untracked, and depended on by
 nothing."""
 
-CRATES_LIB_TARGETS = 20
-"""One `rust_library` per crate that has a lib — every member but `ocx_shim`."""
+CRATES_LIB_TARGETS = 22
+"""One `rust_library` per crate that has a lib — every member but `ocx_shim` and the proc-macro `ocx_exit_derive`."""
 
-CRATES_TEST_TARGETS = 35
-"""20 lib unit-test targets + 13 `crates/<name>/tests/*.rs` integration targets
+CRATES_PROC_MACRO_TARGETS = 1
+"""`ocx_exit_derive:ocx_exit_derive`, a `rust_proc_macro`. It has no unit-test or doctest target of its own:
+its expansions are tested by `ocx_exit:derive_test` and the `compile_fail` doctests on `ocx_exit`."""
+
+CRATES_TEST_TARGETS = 42
+"""22 lib unit-test targets + 18 `crates/<name>/tests/*.rs` integration targets
 + 2 `[[bin]]` unit-test targets (`ocx_cli:ocx_cli_bin_test`,
 `ocx_shim:ocx_shim_bin_test`).
 
 M-02's 33 was 19 + 14 and wrong twice over in ways that nearly cancelled: there
-are 14 integration *suites* but only 13 Bazel targets — `ocx::linux_self_contained`
+are 15 integration *suites* but only 14 Bazel targets — `ocx::linux_self_contained`
 needs `env!("CARGO_BIN_EXE_ocx")`, which needs a `rust_binary` in `data` — and
 the two `[[bin]]` unit-test targets it did not expect make up the difference and
 one more.
@@ -160,9 +168,9 @@ the `seam::` cases again, under a poisoned `env`). An `sh_test` over
 holds `CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS` rows and the drift
 reader's parity counts `rust_test` and `sh_test` alike."""
 
-CRATES_DOC_TEST_TARGETS = 20
+CRATES_DOC_TEST_TARGETS = 22
 """One `rust_doc_test(name = "<crate>_doc_test")` per crate with a `src/lib.rs`
-— every member but `ocx_shim` (plan_bazel_cargo_port.md C-030). All 20, not only
+— every member but `ocx_shim` (plan_bazel_cargo_port.md C-030). All 22, not only
 the crates carrying a fence today, so a crate's first doctest is run with no
 BUILD edit (BZL-RUST-28's silent gap). `cargo nextest` runs no doctest, so like
 the seam twin these have no nextest suite: each holds its own
@@ -171,27 +179,32 @@ the seam twin these have no nextest suite: each holds its own
 skip ceiling leaves them out — an `ignore` fence is documentation, not a skipped
 test (C-034)."""
 
-CRATES_BINARY_TARGETS = 3
+CRATES_BINARY_TARGETS = 4
 """`ocx_schema:ocx_schema_bin`, built so the schema consumers (its own
 `schema_outputs` test and two acceptance modules) never read cargo's `target/`
-(plan_test_speed_tiers.md C-020), and `ocx_cli:ocx` + `ocx_shim:ocx_shim`, the
+(plan_test_speed_tiers.md C-020), `ocx_cli:ocx` + `ocx_shim:ocx_shim`, the
 acceptance suite's binary under test and launcher, which every `//test` target
-takes as `data`."""
+takes as `data`, and `ocx_sdkgen:ocx_sdkgen_bin`, the SDK generator's CLI."""
 
-CRATES_FILEGROUP_TARGETS = 4
+CRATES_FILEGROUP_TARGETS = 6
 """`ocx_cli:api_data`, `ocx_index:index_wire_fixtures`, `ocx_test_support:data`
-— fixture trees named as `data`/`compile_data` by a sibling target — and
+— fixture trees named as `data`/`compile_data` by a sibling target —
 `ocx_store:shim_blobs`, the committed launcher blobs an acceptance module reads
-(C-020)."""
+(C-020), and `ocx_schema:golden` + `ocx_schema:contract`, the published
+documents and waiver tables `ocx_sdkgen:contract_lint` reads."""
 
 CRATES_RULE_TARGETS = (
-    CRATES_LIB_TARGETS + CRATES_TEST_TARGETS + CRATES_BINARY_TARGETS + CRATES_DOC_TEST_TARGETS
-)  # 78
+    CRATES_LIB_TARGETS
+    + CRATES_PROC_MACRO_TARGETS
+    + CRATES_TEST_TARGETS
+    + CRATES_BINARY_TARGETS
+    + CRATES_DOC_TEST_TARGETS
+)  # 91
 """Every **Rust** rule target under `//crates/...` — the stage-1 tag-guard
 floor, which reads `kind("^rust_.*rule$", ...)` and so does not see filegroups."""
 
-DRIFT_PACKAGE_FLOOR = CRATE_PACKAGES + EXTERNAL_PACKAGES  # 21
-DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 82
+DRIFT_PACKAGE_FLOOR = CRATE_PACKAGES + EXTERNAL_PACKAGES  # 24
+DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 97
 """`bazel:build:drift` reads `kind(rule, //crates/...)`, which is every rule
 target of every kind, so its target floor counts the filegroups too. The
 package floor keeps `+ EXTERNAL_PACKAGES` rather than dropping the term: the
@@ -231,10 +244,10 @@ rule targets to 87. The tag guard printed `143 rule targets read` against a
 floor of 101 and passed: 42 of headroom is a floor that has stopped
 discriminating, which is the state this constant exists to close."""
 
-ACCEPTANCE_MODULE_TARGETS = 176
+ACCEPTANCE_MODULE_TARGETS = 178
 """One `sh_test` per `test/tests/test_*.py` (C-024) — `bazel query
-'kind(sh_test, //test:all)'` answers 176 and `ls test/tests/test_*.py` answers
-176 (175 before `test_upgrade.py`; 174 before `test_toolchain_drift_notice.py`; 173 before `test_update_config.py`; 172 before `test_install_link.py`; 181 until eight source-only sweep modules moved to the lint tier,
+'kind(sh_test, //test:all)'` answers 178 and `ls test/tests/test_*.py` answers
+178 (177 before `test_upgrade.py`; 176 before `test_toolchain_drift_notice.py`; 175 before `test_update_config.py`; 174 before `test_install_link.py`; 173 until `test_env_contract.py` was added; 172 until `test_error_document.py` was added; 181 until eight source-only sweep modules moved to the lint tier,
 plan_test_speed_tiers.md C-009; 173 until `test_schema_generation.py` was
 ported into `crates/ocx_schema/tests/schema_outputs.rs`, C-020; 172 until
 `test_pull_progress.py`, whose only assertions were on log message text, was
@@ -251,7 +264,7 @@ per-module groups that left `:suite_inputs` (`:bench_inputs`,
 `:vendored_specs`). No `sh_test`, but `kind(rule, ...)` counts them, so the
 floor has to."""
 
-ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 185
+ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 187
 
 GRAPH_TAIL_TARGETS = 8
 """What `//...` holds that no earlier stage's universe names: `//:all` (4 —
@@ -270,7 +283,7 @@ binary under test and launcher (`ocx_cli:ocx`, `ocx_shim:ocx_shim`) take them
 to 63 and 338; the `//crates/ocx_schema:schemas` genrule (plan_bazel_cargo_port.md
 C-001) and the 20 `rust_doc_test` targets (C-030) take them to 84 and 359; the
 `//:rustdoc_error_format` setting takes the total to 360 (84 + 181 + 87 + 8);
-deleting `test_pull_progress.py` takes it to 359 today. The floor stays two under: it counts the drift floor's 82,
+deleting `test_pull_progress.py` takes it to 359, and adding `test_error_document.py` to 360 today. The floor stays two under: it counts the drift floor's 82,
 which excludes the seam twin and the schemas genrule."""
 
 # ---------------------------------------------------------------------------
@@ -377,7 +390,7 @@ A1_SAME_MSG = (
 #: Measured, and it refutes the ADR's own choice of probes. Over the repository's
 #: allowed-edge table (`scripts/crate_map.toml`), the transitive reverse closures
 #: of `ocx_exit` and `ocx_util` are **the same 17 crates** — both probes re-run
-#: 18 of 21, and the two re-run sets then differ by exactly one target each: the
+#: 18 of 23, and the two re-run sets then differ by exactly one target each: the
 #: probe's own. `ocx_exit` is a leaf in the dependency direction and the joint
 #: *most*-depended-on crate in the reverse one, which is the direction this test
 #: reads. A discriminator run on two interchangeable probes has no power in the
@@ -1629,23 +1642,23 @@ def prove_counts() -> int:
     constants block above. They are asserted rather than computed so that a
     correction to one summand that forgot the total cannot pass.
     """
-    expect(CRATE_PACKAGES == 21, f"crate packages is {CRATE_PACKAGES}, the tree has 21")
+    expect(CRATE_PACKAGES == 24, f"crate packages is {CRATE_PACKAGES}, the tree has 24")
     expect(EXTERNAL_PACKAGES == 0, f"external packages is {EXTERNAL_PACKAGES}, the tree has 0")
-    expect(CRATES_LIB_TARGETS == 20, f"crates lib targets is {CRATES_LIB_TARGETS}, the tree has 20")
-    expect(CRATES_TEST_TARGETS == 35, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 35")
-    expect(CRATES_BINARY_TARGETS == 3, f"crates binaries is {CRATES_BINARY_TARGETS}, the tree has 3")
+    expect(CRATES_LIB_TARGETS == 22, f"crates lib targets is {CRATES_LIB_TARGETS}, the tree has 22")
+    expect(CRATES_TEST_TARGETS == 42, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 42")
+    expect(CRATES_BINARY_TARGETS == 4, f"crates binaries is {CRATES_BINARY_TARGETS}, the tree has 4")
     expect(
-        CRATES_DOC_TEST_TARGETS == CRATES_LIB_TARGETS == 20,
+        CRATES_DOC_TEST_TARGETS == CRATES_LIB_TARGETS == 22,
         f"crates doctest targets is {CRATES_DOC_TEST_TARGETS}; C-030 puts one on each of the "
         f"{CRATES_LIB_TARGETS} crates with a src/lib.rs",
     )
     expect(
-        CRATES_FILEGROUP_TARGETS == 4,
-        f"crates filegroups is {CRATES_FILEGROUP_TARGETS}, the tree has 4",
+        CRATES_FILEGROUP_TARGETS == 6,
+        f"crates filegroups is {CRATES_FILEGROUP_TARGETS}, the tree has 6",
     )
-    expect(CRATES_RULE_TARGETS == 78, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 78")
-    expect(DRIFT_PACKAGE_FLOOR == 21, f"package floor is {DRIFT_PACKAGE_FLOOR}, the tree has 21")
-    expect(DRIFT_TARGET_FLOOR == 82, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 82")
+    expect(CRATES_RULE_TARGETS == 91, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 91")
+    expect(DRIFT_PACKAGE_FLOOR == 24, f"package floor is {DRIFT_PACKAGE_FLOOR}, the tree has 24")
+    expect(DRIFT_TARGET_FLOOR == 97, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 97")
     expect(
         CAST_GENRULE_TARGETS == 40,
         f"cast genrules is {CAST_GENRULE_TARGETS}, the tree has 40 (39 casts + manifest_drift)",
@@ -1661,20 +1674,20 @@ def prove_counts() -> int:
     expect(GIF_SUPPORT_TARGETS == 3, f"gif support targets is {GIF_SUPPORT_TARGETS}, the tree has 3")
     expect(GIF_RULE_TARGETS == 42, f"gif rule targets is {GIF_RULE_TARGETS}, the tree has 42")
     expect(
-        STAGE_FLOORS["stage-3"].minimum == 169,
-        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 169",
+        STAGE_FLOORS["stage-3"].minimum == 184,
+        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 184",
     )
     expect(
-        ACCEPTANCE_MODULE_TARGETS == 176,
-        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 176",
+        ACCEPTANCE_MODULE_TARGETS == 178,
+        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 178",
     )
     expect(
-        ACCEPTANCE_RULE_TARGETS == 185,
-        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 185",
+        ACCEPTANCE_RULE_TARGETS == 187,
+        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 187",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 362,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 362",
+        STAGE_FLOORS["stage-4"].minimum == 379,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 379",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1683,8 +1696,8 @@ def prove_counts() -> int:
         "read the acceptance modules and nothing else would clear it",
     )
     print(
-        "counts  OK : 21 = 21 + 0, 78 = 20 + 35 + 3 + 20, 82 = 78 + 4, 45 = 40 + 5, 42 = 39 + 3, "
-        "169 = 82 + 45 + 42, 185 = 176 + 9, 362 = 169 + 185 + 8 — internal consistency only; "
+        "counts  OK : 24 = 24 + 0, 91 = 22 + 1 + 42 + 4 + 22, 97 = 91 + 6, 45 = 40 + 5, 42 = 39 + 3, "
+        "184 = 97 + 45 + 42, 187 = 178 + 9, 379 = 184 + 187 + 8 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )

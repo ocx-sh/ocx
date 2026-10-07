@@ -1071,7 +1071,7 @@ def accepted_signature(result: subprocess.CompletedProcess[str], what: str) -> d
     assert result.returncode == 0, (
         f"ocx refused {what}\nstdout: {result.stdout}\nstderr: {result.stderr.strip()}"
     )
-    [entry] = json.loads(result.stdout)["data"]["signatures"]
+    [entry] = json.loads(result.stdout)["signatures"]
     return entry
 
 

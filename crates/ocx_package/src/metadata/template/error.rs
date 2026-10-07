@@ -66,12 +66,17 @@ fn render_declared_before(declared_before: &[String]) -> String {
 }
 
 /// Template resolution errors; [`crate::error::Error::EnvVarInterpolation`] adds the var key.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum TemplateError {
     /// A `${deps.NAME.*}` token names a dependency that is not declared.
     #[error(
         "references unknown dependency '{ref_name}'; declared: [{declared}]",
         declared = declared.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+    )]
+    #[exit(
+        DataError,
+        slug = "template_unknown_dependency_ref",
+        summary = "An interpolation token names an unknown dependency"
     )]
     UnknownDependencyRef {
         ref_name: DependencyName,
@@ -84,6 +89,11 @@ pub enum TemplateError {
         "references ambiguous dependency name '{ref_name}': \
          matches both {first} and {second}"
     )]
+    #[exit(
+        DataError,
+        slug = "template_ambiguous_dependency_ref",
+        summary = "An interpolation token names an ambiguous dependency"
+    )]
     AmbiguousDependencyRef {
         ref_name: DependencyName,
         // Boxed, like `second` and `dep_identifier`, or every `Result<_, TemplateError>` trips `result_large_err`.
@@ -93,6 +103,11 @@ pub enum TemplateError {
 
     /// A `${deps.NAME.*}` token names a known dependency that is not installed on disk.
     #[error("references dependency '{ref_name}' ({dep_identifier}) which is not installed")]
+    #[exit(
+        NotFound,
+        slug = "template_dependency_not_installed",
+        summary = "An interpolation token names a dependency that is not installed"
+    )]
     DependencyNotInstalled {
         ref_name: DependencyName,
         dep_identifier: Box<ocx_oci::PinnedPackageRef>,
@@ -102,12 +117,22 @@ pub enum TemplateError {
     // `hint` comes from the scanner at construction, never re-derived from `token`, or a
     // second recogniser could disagree with the first.
     #[error("unknown token '{token}'{advice}", advice = hint.advice_for(token))]
+    #[exit(
+        DataError,
+        slug = "template_unknown_token",
+        summary = "An interpolation token is not recognised"
+    )]
     UnknownToken { token: String, hint: UnknownTokenHint },
 
     /// A recognised namespace with one unknown leaf (`${self.foo}`, `${deps.cmake.version}`).
     #[error(
         "unknown field '{field}' under '{namespace}'; supported: [{supported}]",
         supported = supported.join(", ")
+    )]
+    #[exit(
+        DataError,
+        slug = "template_unknown_field",
+        summary = "An interpolation token names an unknown field"
     )]
     UnknownField {
         namespace: String,
@@ -120,6 +145,11 @@ pub enum TemplateError {
         "unknown render modifier '{modifier}'; supported: [{supported}]",
         supported = supported.join(", ")
     )]
+    #[exit(
+        DataError,
+        slug = "template_unknown_modifier",
+        summary = "An interpolation token carries an unknown modifier"
+    )]
     UnknownModifier { modifier: String, supported: Vec<String> },
 
     /// A render modifier on `${self.env.KEY}`, whose value may not be a path.
@@ -128,6 +158,11 @@ pub enum TemplateError {
         "render modifier '{modifier}' does not apply to '{token}'; \
          modifiers apply to install-path tokens only — set it where the var is declared"
     )]
+    #[exit(
+        DataError,
+        slug = "template_modifier_not_applicable",
+        summary = "An interpolation modifier does not apply to its token"
+    )]
     ModifierNotApplicable { modifier: String, token: String },
 
     /// `${self.env.KEY}` where `KEY` is not declared strictly earlier (forward or self reference).
@@ -135,22 +170,42 @@ pub enum TemplateError {
         "references undefined env var '{key}'; declared before it: [{declared_before}]",
         declared_before = render_declared_before(declared_before)
     )]
+    #[exit(
+        DataError,
+        slug = "template_undefined_self_env_ref",
+        summary = "An interpolation token names an env var not declared before it"
+    )]
     UndefinedSelfEnvRef { key: String, declared_before: Vec<String> },
 
     /// `${self.env.KEY}` where `KEY` is declared more than once earlier; neither is privileged.
     #[error("references ambiguous env var '{key}': declared more than once before it")]
+    #[exit(
+        DataError,
+        slug = "template_ambiguous_self_env_ref",
+        summary = "An interpolation token names an env var declared more than once"
+    )]
     AmbiguousSelfEnvRef { key: String },
 
     /// A recognised token the active [`AllowedTokens`] forbids.
     ///
     /// [`AllowedTokens`]: super::AllowedTokens
     #[error("token '{token}' is not permitted here; '${{deps.*}}' and '${{self.env.*}}' are only valid in env values")]
+    #[exit(
+        DataError,
+        slug = "template_disallowed_token",
+        summary = "An interpolation token is not permitted in this field"
+    )]
     DisallowedToken { token: String },
 
     /// The resolved value grew past [`MAX_RESOLVED_VALUE_BYTES`].
     ///
     /// [`MAX_RESOLVED_VALUE_BYTES`]: super::MAX_RESOLVED_VALUE_BYTES
     #[error("resolved value exceeds the {limit}-byte budget")]
+    #[exit(
+        DataError,
+        slug = "template_value_too_large",
+        summary = "An interpolated value exceeds its size budget"
+    )]
     ResolvedValueTooLarge { limit: usize },
 }
 

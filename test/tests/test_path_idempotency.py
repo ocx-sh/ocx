@@ -98,7 +98,7 @@ RECIPES: dict[str, ShellRecipe] = {
 def _bin_dir(ocx: OcxRunner, pkg: PackageInfo) -> str:
     """The package's resolved PATH directory (from the structured env report)."""
     env_json = ocx.json("package", "env", pkg.short)
-    path_entry = next(e for e in env_json["entries"] if e["key"] == "PATH")
+    path_entry = next(e for e in env_json["items"] if e["key"] == "PATH")
     # The composed PATH value is the package bin dir (single package, clean env).
     return path_entry["value"].split(SEP)[0]
 

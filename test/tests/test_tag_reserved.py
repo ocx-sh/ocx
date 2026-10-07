@@ -133,7 +133,7 @@ def test_announce_drops_every_reserved_form_from_explicit_tags(
         fake_forge,
         "--tags",
         ",".join([*RESERVED_FORMS, "1.2.3"]),
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         package,
     )
@@ -173,7 +173,7 @@ def test_announce_refresh_drops_a_reserved_tag_already_in_the_committed_root(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     report = announce_json(
-        ocx, fake_forge, "--refresh", "--out", str(tmp_path / "out"), package
+        ocx, fake_forge, "--refresh", "--output", str(tmp_path / "out"), package
     )
 
     assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocx.desc", _LEGACY_KEEP])
@@ -204,7 +204,7 @@ def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     tags_file.write_text(f"2.0.0,{_LEGACY_KEEP}")
 
     report = announce_json(
-        ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(tmp_path / "out"), package
+        ocx, fake_forge, "--tags-file", str(tags_file), "--output", str(tmp_path / "out"), package
     )
 
     assert report["reserved_tags_dropped"] == [_LEGACY_KEEP], (
@@ -242,7 +242,7 @@ def test_announce_entirely_reserved_selection_is_the_existing_empty_set_error(
         fake_forge,
         "--tags",
         ",".join(RESERVED_FORMS),
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         package,
         check=False,

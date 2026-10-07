@@ -126,10 +126,9 @@ pub(crate) async fn read_lock_config(
 ) -> Result<Option<ocx_project::ProjectConfig>, ocx_project::Error> {
     match ocx_project::ProjectConfig::from_path(&lock_path.with_file_name("ocx.toml")).await {
         Ok(config) => Ok(Some(config)),
-        Err(ocx_project::Error::Project(ocx_project::ProjectError {
-            kind: ocx_project::ProjectErrorKind::Io(error),
-            ..
-        })) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(ocx_project::Error::Project(project_error)) if matches!(&project_error.kind, ocx_project::ProjectErrorKind::Io(error) if error.kind() == std::io::ErrorKind::NotFound) => {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }

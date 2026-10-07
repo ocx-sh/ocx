@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use ocx_package::{description::Description, publisher::Publisher};
 
-use crate::api::data::package_description::{Inner, PackageDescription, PackageDescriptions};
+use crate::api::data::package_description::{PackageDescription, PackageDescriptions};
 use crate::options;
 
 /// Show description metadata (title, description, keywords) for one or more
@@ -116,12 +116,16 @@ impl PackageDescriptionPull {
             .zip(identifiers)
             .zip(descriptions)
             .map(|((raw, identifier), desc)| {
-                let inner = desc.as_ref().map(|d| Inner {
-                    title: d.annotations.get(ocx_oci::annotations::TITLE).cloned(),
-                    description: d.annotations.get(ocx_oci::annotations::DESCRIPTION).cloned(),
-                    keywords: d.annotations.get(ocx_oci::annotations::KEYWORDS).cloned(),
-                });
-                (raw.raw().to_string(), PackageDescription::new(inner, identifier))
+                let description = match desc {
+                    Some(d) => PackageDescription::published(
+                        identifier,
+                        d.annotations.get(ocx_oci::annotations::TITLE).cloned(),
+                        d.annotations.get(ocx_oci::annotations::DESCRIPTION).cloned(),
+                        d.annotations.get(ocx_oci::annotations::KEYWORDS).cloned(),
+                    ),
+                    None => PackageDescription::absent(identifier),
+                };
+                (raw.raw().to_string(), description)
             })
             .collect();
 

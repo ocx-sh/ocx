@@ -4,7 +4,6 @@
   "crates/ocx_announce/src/forge/error.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_announce/src/forge/error.rs::rustdoc::private_intra_doc_links": 1,
   "crates/ocx_announce/src/forge/gitlab.rs::rustdoc::private_intra_doc_links": 1,
-  "crates/ocx_cli/src/api/data/lock.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_cli/src/api/data/script_run.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_cli/src/app/context.rs::rustdoc::broken_intra_doc_links": 2,
   "crates/ocx_cli/src/app/context.rs::rustdoc::private_intra_doc_links": 2,

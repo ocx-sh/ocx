@@ -32,7 +32,7 @@ tasks:
     cmd: uv run --project test ruff check --config test/pyproject.toml scripts
 
   self-test:
-    desc: Run the gate scripts' tests (scripts/tests, pytest, in parallel; budgeted at 20 s)
+    desc: Run the gate scripts' tests (scripts/tests, pytest, in parallel; budgeted at 30 s)
     # No `sources:` cache, for the reason `ci:actionlint` and `test:lint` have
     # none: a fingerprint-cached run reports the last run's verdict, and a
     # cached green cannot be told from one that never ran.

@@ -294,7 +294,7 @@ tasks:
       binary the Bazel acceptance targets run, copied into `test/bin/` for the
       pytest entry points and for `verify-basic.yml`'s `ocx-binary` upload.
       It carries the `__testing` provenance placeholders and seams (currently
-      the `__OCX_SELF_IMAGE` env var override that acceptance tests use to
+      the `__OCX_TESTING_SELF_IMAGE` env var override that acceptance tests use to
       redirect the canonical `ocx.sh/ocx/cli` identifier to a localhost test
       registry — see `crates/ocx_cli/BUILD.bazel`). The seams are
       loopback-only-asserted at runtime — safe in all non-release binaries.
@@ -385,6 +385,9 @@ tasks:
     internal: true
     deps:
       - install:nextest
+    # `real_binary::` is the generated SDK's run against the Bazel-built `ocx`,
+    # whose path only that Bazel target compiles in; under cargo it fails by
+    # design, so it is filtered here as in verify-deep.yml's cargo legs.
     # `set -o pipefail` so nextest's own exit status survives the `tee`; the
     # tee is what lets `test:ceiling` read the Summary line of the run that
     # just happened rather than of some earlier one (same shape as
@@ -393,7 +396,7 @@ tasks:
       - mkdir -p {{.ROOT_DIR}}/target/nextest
       - >-
         set -o pipefail;
-        cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+        cargo nextest run --workspace --release --locked -E 'not test(real_binary::)' {{.CLI_ARGS}}
         2>&1 | tee {{.NEXTEST_RUN_LOG}}
       # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
       # configured for it (taskfiles/telemetry.taskfile.yml). The default
@@ -697,18 +700,22 @@ tasks:
     # toolchain accident rather than a property of this repository.
     cmd: cargo nextest run -p ocx_test_support --test workspace_structure --release --locked --no-tests=fail deps_direction
 
-  test:workspace-structure:
-    desc: Every workspace-structure guard, including the ones `bazel:test:unit` skips
+  test:bazel-skipped:
+    desc: Every testcase a `rust_test` target `--skip`s, run under cargo nextest
     summary: |
-      Runs all of crates/ocx_test_support/tests/workspace_structure.rs under
-      nextest. The Bazel target `--skip`s 23 of its cases because they walk
-      `crates/*/src` of crates it does not depend on (see that BUILD file), so
-      on Linux this step is the only thing in `task verify` that runs them —
-      the ocx_util consumer scan, deps_direction, the SSRF and mint ratchets.
-      Without it they ran on verify-deep's macOS and Windows legs alone.
+      `bazel:test:unit` is the only unit-test run in `task verify`, and its
+      `rust_test` targets `--skip` testcases that walk `crates/*/src` of
+      crates they do not depend on or need a process of their own. Without this
+      step those ran on verify-deep's macOS and Windows legs alone.
+
+      scripts/bazel_skipped_tests.py derives the list from the `--skip=` args
+      of every crates/*/BUILD.bazel and maps each to its cargo package and test
+      binary. It reds on zero parsed skips, on a skip that names no testcase,
+      and on fewer testcases run than skips parsed.
     deps:
       - install:nextest
-    cmd: cargo nextest run -p ocx_test_support --test workspace_structure --locked --no-tests=fail
+    dir: '{{.ROOT_DIR}}'
+    cmd: python3 scripts/bazel_skipped_tests.py
 
   test:loop-guard:
     desc: No test holds a loop whose body can neither fail nor be observed
@@ -721,7 +728,7 @@ tasks:
       the keyword — the shape WP-10's in-place strip left behind thirteen
       times, which compiled and passed.
 
-      Reachable without this entry (`test:workspace-structure` runs the whole
+      Reachable without this entry (`test:bazel-skipped` runs the whole
       target in `task verify`, and so does the `verify:scoped` manifest route), so it gates
       nothing on its own; it exists because the crate-split batches want the
       guard alone, in seconds, between moves.

@@ -1,0 +1,16 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package --remote` stops being global, so the subcommands below `package` no longer accept it.",
+  "findings": [
+    {
+      "code": "G08",
+      "pointer": "/root/commands/0/args/0",
+      "subjects": [
+        "package describe",
+        "package push",
+        "package status"
+      ]
+    }
+  ]
+}

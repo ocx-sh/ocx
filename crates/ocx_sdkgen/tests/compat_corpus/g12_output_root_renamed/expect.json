@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package status` names a different report root.",
+  "findings": [
+    {
+      "code": "G12",
+      "pointer": "/root/commands/0/commands/1/output/0",
+      "subjects": [
+        "package status"
+      ]
+    }
+  ]
+}

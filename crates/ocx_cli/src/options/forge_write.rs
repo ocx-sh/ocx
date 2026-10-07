@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ocx_console::UserInterface;
 use ocx_exit::ExitCode;
 
+use crate::command::deprecated;
 use crate::error::UsageError;
 use ocx_announce::forge::{ForgeCredentials, ForgeError, ForgeKind, RepoCoordinate, WriteTransport};
-// Imported, never a local copy, so the refusal names the variable the ladder reads.
-use ocx_config::env::keys::OCX_ANNOUNCE_TOKEN;
 
 use crate::app::CommandError;
 
@@ -19,7 +18,7 @@ const PUSH_IDENTITY_NOTICE: &str = "in a GitLab job, --transport git pushes with
 
 /// The write-target flags every forge-writing command shares.
 ///
-/// Arg ids: `index_repo`, `forge`, `transport`, `fork`, `out`.
+/// Arg ids: `index_repo`, `forge`, `transport`, `fork`, `output`, `deprecated_out`.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ForgeWriteOptions {
     /// Index repository the request targets, as `[HOST/]NAMESPACE/PROJECT`.
@@ -59,19 +58,29 @@ pub struct ForgeWriteOptions {
     /// request from there, which needs push access on that repository.
     /// Whichever of the two you choose, the change lands as a pull or merge
     /// request, never as a direct commit to the index's default branch.
-    /// `--out` writes locally instead and opens neither.
-    #[clap(long = "fork", value_name = "REPOSITORY", conflicts_with = "out")]
+    /// `--output` writes locally instead and opens neither.
+    #[clap(long = "fork", value_name = "REPOSITORY", conflicts_with_all = ["output", deprecated::ANNOUNCE_OUT.arg_id()])]
     pub fork: Option<RepoCoordinate>,
 
     /// Write the rendered index entry under this directory instead of opening
     /// a request. Works without a credential.
     //
     // The `--fork` conflict lives on both fields: the flattening command has no field to hang it on.
-    #[clap(long = "out", value_name = "DIRECTORY", conflicts_with = "fork")]
-    pub out: Option<PathBuf>,
+    #[clap(long = "output", short = 'o', value_name = "DIRECTORY", conflicts_with = "fork")]
+    output: Option<PathBuf>,
+
+    // 0.7 removal: the `--out` spelling of `--output`.
+    #[clap(id = deprecated::ANNOUNCE_OUT.arg_id(), long = "out", value_name = "DIRECTORY", hide = true, conflicts_with_all = ["output", "fork"])]
+    deprecated_out: Option<PathBuf>,
 }
 
 impl ForgeWriteOptions {
+    /// The directory `--output` names, under either spelling.
+    #[must_use]
+    pub fn output(&self) -> Option<&Path> {
+        self.output.as_deref().or(self.deprecated_out.as_deref())
+    }
+
     /// Refuses every argv fault decidable from these five flags alone and
     /// returns the resolved [`ForgeKind`]; call it before any credential resolves.
     ///
@@ -89,9 +98,9 @@ impl ForgeWriteOptions {
                 )
                 .into());
             }
-            if self.out.is_some() {
+            if self.output().is_some() {
                 return Err(UsageError::new(
-                    "--transport git cannot be combined with --out; --out writes the entry locally and opens no request",
+                    "--transport git cannot be combined with --output; --output writes the entry locally and opens no request",
                 )
                 .into());
             }
@@ -131,7 +140,7 @@ impl ForgeWriteOptions {
     }
 
     /// A write mode with no resolved API credential is exit 80, naming
-    /// `OCX_ANNOUNCE_TOKEN`; `--out` proceeds unauthenticated.
+    /// `OCX_ANNOUNCE_TOKEN`; `--output` proceeds unauthenticated.
     ///
     /// Takes the resolved [`ForgeCredentials`], never the environment, or a
     /// GitLab job the ladder answers with `CI_JOB_TOKEN` is refused.
@@ -140,12 +149,14 @@ impl ForgeWriteOptions {
     ///
     /// [`crate::app::CommandError`] at [`ocx_exit::ExitCode::AuthError`].
     pub fn require_credential(&self, credentials: &ForgeCredentials) -> anyhow::Result<()> {
-        if self.out.is_some() || credentials.api_is_present() {
+        if self.output().is_some() || credentials.api_is_present() {
             return Ok(());
         }
         Err(CommandError::new(
+            // The declaration's name, never a local copy, so the refusal names the variable the ladder reads.
             format!(
-                "a forge write needs a credential in {OCX_ANNOUNCE_TOKEN}; use --out to write the entry locally instead"
+                "a forge write needs a credential in {}; use --output to write the entry locally instead",
+                ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name
             ),
             ExitCode::AuthError,
         )
@@ -248,8 +259,8 @@ mod tests {
         );
         assert_eq!(
             derived,
-            vec!["index-repo", "forge", "transport", "fork", "out"],
-            "the five shared flags, and nothing command-specific"
+            vec!["index-repo", "forge", "transport", "fork", "output", "out"],
+            "the five shared flags plus the deprecated `--out`, and nothing command-specific"
         );
 
         let claim = PackageClaim::command();
@@ -262,7 +273,7 @@ mod tests {
         }
     }
 
-    /// `--out` ⟂ `--fork` is declared on the shared struct, so both write
+    /// `--output` ⟂ `--fork` is declared on the shared struct, so both write
     /// commands inherit one rule.
     ///
     /// Asserted through the flatten alone rather than through a command, so
@@ -279,10 +290,20 @@ mod tests {
     #[test]
     fn out_and_fork_conflict_is_declared_on_the_shared_struct() {
         assert!(
-            probe(&["--out", "d", "--fork", "o/r"]).is_err(),
-            "--out and --fork together must be a clap usage error, declared on the flatten"
+            probe(&["--output", "d", "--fork", "o/r"]).is_err(),
+            "--output and --fork together must be a clap usage error, declared on the flatten"
         );
-        assert!(probe(&["--out", "d"]).is_ok(), "--out alone parses");
+        assert!(probe(&["--output", "d"]).is_ok(), "--output alone parses");
+        assert!(
+            probe(&["--out", "d", "--fork", "o/r"]).is_err(),
+            "the deprecated --out conflicts with --fork too"
+        );
+        assert!(
+            probe(&["--out", "d", "--output", "e"]).is_err(),
+            "both spellings together are refused"
+        );
+        let deprecated = probe(&["--out", "d"]).expect("the deprecated --out still parses");
+        assert_eq!(deprecated.output(), Some(std::path::Path::new("d")));
         assert!(probe(&["--fork", "o/r"]).is_ok(), "--fork alone parses");
     }
 
@@ -338,7 +359,7 @@ mod tests {
     }
 
     /// The exit-80 refusal is keyed on the credential the **ladder** resolved,
-    /// and `--out` is exempt.
+    /// and `--output` is exempt.
     ///
     /// This is the CLI-boundary half of that guard; the ladder itself is
     /// already tested where it lives
@@ -369,7 +390,7 @@ mod tests {
     /// Red at the stub: `require_credential` is `unimplemented!()`.
     /// Mutation once implemented: key the refusal on
     /// `std::env::var(OCX_ANNOUNCE_TOKEN)` (the shape `package_announce.rs`
-    /// carried before this migration); or drop the `--out` carve-out.
+    /// carried before this migration); or drop the `--output` carve-out.
     #[test]
     fn empty_token_resolves_the_job_token_at_the_cli_boundary() {
         let resolved = ForgeCredentials::new(ForgeToken::new("resolved-by-the-ladder".to_string()));
@@ -393,9 +414,9 @@ mod tests {
             "the refusal names the variable to set, got: {error}"
         );
 
-        let out = probe(&["--out", "d"]).expect("parses");
+        let out = probe(&["--output", "d"]).expect("parses");
         out.require_credential(&nothing)
-            .expect("--out reads the forge but writes nothing, so it proceeds unauthenticated");
+            .expect("--output reads the forge but writes nothing, so it proceeds unauthenticated");
     }
 
     /// The push-credential-kind vocabulary reaches stderr and the report with
@@ -456,7 +477,7 @@ mod tests {
              party this notice says did NOT author the request: {notice}"
         );
         assert!(
-            notice.contains(ocx_config::env::keys::OCX_ANNOUNCE_TOKEN),
+            notice.contains(ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name),
             "the notice must name the variable the push secret came from: {notice}"
         );
         assert!(

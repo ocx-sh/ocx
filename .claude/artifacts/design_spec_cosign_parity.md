@@ -1,5 +1,7 @@
 # Design Spec — cosign parity for signing, attestation and SBOM
 
+**Amended by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (2026-10-07):** exit codes 82-87 and the `error.kind` values that twinned 83-87 are folded into next-action codes (82 `DirtyRcBlock` -> 81; 83 -> 75, 69, 65 or 81; 84, 85, 86 and 87 -> 82, with the job-token allowlist case of 86 -> 77). Every exit-code row below is historical; the `error.detail` slugs are unchanged.
+
 **Status:** Approved (design), not started
 **Date:** 2026-08-29
 **Origin:** [#356](https://github.com/ocx-sh/ocx/issues/356), scoping discussion 2026-08-28/29

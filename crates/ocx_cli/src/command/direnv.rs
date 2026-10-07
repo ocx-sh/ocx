@@ -25,6 +25,14 @@ enum DirenvCommand {
 }
 
 impl Direnv {
+    /// The leaf this invocation runs; bare `ocx direnv` is `init`.
+    pub fn leaf(&self) -> super::leaf::Leaf {
+        match &self.command {
+            Some(DirenvCommand::Export(_)) => super::leaf::Leaf::DirenvExport,
+            Some(DirenvCommand::Init(_)) | None => super::leaf::Leaf::DirenvInit,
+        }
+    }
+
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match &self.command {
             Some(DirenvCommand::Init(init)) => init.execute(context).await,

@@ -31,8 +31,8 @@ pub(super) struct GitHubFlavor {
 impl GitHubFlavor {
     /// Reads `$GITHUB_PATH` and `$GITHUB_ENV` from the environment.
     pub fn from_env() -> Result<Self, crate::ci::error::Error> {
-        let path_file = required_env_path("GITHUB_PATH")?;
-        let env_file = required_env_path("GITHUB_ENV")?;
+        let path_file = required_env_path(&ocx_env::GITHUB_PATH)?;
+        let env_file = required_env_path(&ocx_env::GITHUB_ENV)?;
         Ok(Self {
             path_file,
             env_file,
@@ -82,7 +82,7 @@ impl Flavor for GitHubFlavor {
         separator: Option<&str>,
     ) -> Result<(), crate::ci::error::Error> {
         // A key with a newline injects a second `KEY=value` line into `$GITHUB_ENV` (CWE-77).
-        if !ocx_util::env::is_valid_env_key(key) {
+        if !ocx_env::is_valid_env_key(key) {
             warn!("skipping invalid env-var key {key:?} for CI export");
             return Ok(());
         }
@@ -136,7 +136,7 @@ impl Drop for GitHubFlavor {
 
 /// Whether this process runs inside GitHub Actions.
 pub(super) fn detect() -> bool {
-    ocx_util::env::var("GITHUB_ACTIONS").as_deref() == Some("true")
+    ocx_env::GITHUB_ACTIONS.get().as_deref() == Some("true")
 }
 
 /// Appends `KEY=value`, heredoc-delimited when the value holds a line break or `"`.
@@ -173,10 +173,11 @@ fn append_line_raw(file: &Path, content: &str) -> Result<(), error::Error> {
     })
 }
 
-fn required_env_path(name: &str) -> Result<PathBuf, error::Error> {
-    ocx_util::env::var(name)
+fn required_env_path(var: &'static ocx_env::EnvVar) -> Result<PathBuf, error::Error> {
+    var.get_raw()
+        .and_then(|value| value.into_string().ok())
         .map(PathBuf::from)
-        .ok_or_else(|| error::Error::MissingEnv(name.to_string()))
+        .ok_or_else(|| error::Error::MissingEnv(var.name.to_string()))
 }
 
 fn unique_delimiter(value: &str) -> String {
@@ -201,14 +202,14 @@ mod tests {
     use crate::ci::flavor::Flavor;
     use ocx_package::metadata::env::modifier::ModifierKind;
 
-    fn setup_github_env(env: &ocx_util::env::overrides::EnvLock, tmp: &tempfile::TempDir) -> super::GitHubFlavor {
+    fn setup_github_env(env: &ocx_env::overrides::EnvLock, tmp: &tempfile::TempDir) -> super::GitHubFlavor {
         let path_file = tmp.path().join("github_path");
         let env_file = tmp.path().join("github_env");
         std::fs::write(&path_file, "").unwrap();
         std::fs::write(&env_file, "").unwrap();
-        env.set("GITHUB_ACTIONS", "true");
-        env.set("GITHUB_PATH", path_file.to_str().unwrap());
-        env.set("GITHUB_ENV", env_file.to_str().unwrap());
+        env.set(&ocx_env::GITHUB_ACTIONS, "true");
+        env.set(&ocx_env::GITHUB_PATH, path_file.to_str().unwrap());
+        env.set(&ocx_env::GITHUB_ENV, env_file.to_str().unwrap());
         super::GitHubFlavor::from_env().unwrap()
     }
 
@@ -218,7 +219,7 @@ mod tests {
 
     #[test]
     fn path_export() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -232,10 +233,10 @@ mod tests {
 
     #[test]
     fn non_path_prepend_empty() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.remove("LD_LIBRARY_PATH");
+        env.remove_raw("LD_LIBRARY_PATH");
 
         targets
             .write_entry(
@@ -255,10 +256,10 @@ mod tests {
 
     #[test]
     fn non_path_prepend_existing() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.set("LD_LIBRARY_PATH", "/existing/lib");
+        env.set_raw("LD_LIBRARY_PATH", "/existing/lib");
 
         targets
             .write_entry(
@@ -274,14 +275,14 @@ mod tests {
             read(&targets.env_file),
             format!(
                 "LD_LIBRARY_PATH=/home/user/.ocx/objects/foo/lib{0}/existing/lib\n",
-                ocx_util::env::PATH_SEPARATOR
+                ocx_util::path::PATH_SEPARATOR
             )
         );
     }
 
     #[test]
     fn constant_export() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -300,7 +301,7 @@ mod tests {
 
     #[test]
     fn multiline_constant() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -314,7 +315,7 @@ mod tests {
 
     #[test]
     fn multiline_with_eof_in_value() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -330,24 +331,24 @@ mod tests {
 
     #[test]
     fn detect_github_actions() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("GITHUB_ACTIONS", "true");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::GITHUB_ACTIONS, "true");
         assert_eq!(CiFlavor::detect(), Some(CiFlavor::GitHubActions));
     }
 
     #[test]
     fn detect_no_ci() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("GITHUB_ACTIONS");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::GITHUB_ACTIONS);
         assert_eq!(CiFlavor::detect(), None);
     }
 
     #[test]
     fn missing_github_path_env_errors() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("GITHUB_ACTIONS", "true");
-        env.remove("GITHUB_PATH");
-        env.set("GITHUB_ENV", "/tmp/fake");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::GITHUB_ACTIONS, "true");
+        env.remove(&ocx_env::GITHUB_PATH);
+        env.set(&ocx_env::GITHUB_ENV, "/tmp/fake");
 
         let result = super::GitHubFlavor::from_env();
         assert!(result.is_err());
@@ -355,10 +356,10 @@ mod tests {
 
     #[test]
     fn non_path_accumulates_across_entries() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.remove("LD_LIBRARY_PATH");
+        env.remove_raw("LD_LIBRARY_PATH");
 
         targets
             .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path, None)
@@ -374,16 +375,19 @@ mod tests {
         let content = read(&targets.env_file);
         assert_eq!(
             content,
-            format!("LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib\n", ocx_util::env::PATH_SEPARATOR)
+            format!(
+                "LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib\n",
+                ocx_util::path::PATH_SEPARATOR
+            )
         );
     }
 
     #[test]
     fn non_path_accumulates_with_existing_env() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.set("LD_LIBRARY_PATH", "/existing/lib");
+        env.set_raw("LD_LIBRARY_PATH", "/existing/lib");
 
         targets
             .write_entry("LD_LIBRARY_PATH", "/pkg1/lib", &ModifierKind::Path, None)
@@ -402,7 +406,7 @@ mod tests {
             content,
             format!(
                 "LD_LIBRARY_PATH=/pkg2/lib{0}/pkg1/lib{0}/existing/lib\n",
-                ocx_util::env::PATH_SEPARATOR
+                ocx_util::path::PATH_SEPARATOR
             )
         );
     }
@@ -412,7 +416,7 @@ mod tests {
         // A constant key bearing a newline would inject a second `KEY=value`
         // line into `$GITHUB_ENV` (Finding 2, CWE-77). The entry is dropped,
         // so the env file stays empty — no injected second variable.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -434,7 +438,7 @@ mod tests {
         // A `$GITHUB_PATH` value with an embedded newline would inject extra
         // PATH directories (Finding 1, CWE-426/77). The value is rejected, so
         // the path file does not contain the injected dir.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -457,7 +461,7 @@ mod tests {
     /// injection the `$GITHUB_PATH` guard above already refuses.
     #[test]
     fn env_value_with_carriage_return_uses_heredoc() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -482,7 +486,7 @@ mod tests {
         // Keys containing `=` or spaces are not valid env-var identifiers.
         // They must be rejected before reaching `$GITHUB_ENV` to prevent
         // corrupting the KEY=value line format (parity with GitLab charset test).
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -506,15 +510,15 @@ mod tests {
         // The Drop impl flushes any buffered entries that were never explicitly
         // flushed. GitHubFlavor writes to files, so we observe the output by
         // reading the env file after the flavor is dropped.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let env_file = tmp.path().join("github_env");
         let path_file = tmp.path().join("github_path");
         std::fs::write(&path_file, "").unwrap();
         std::fs::write(&env_file, "").unwrap();
-        env.set("GITHUB_ACTIONS", "true");
-        env.set("GITHUB_PATH", path_file.to_str().unwrap());
-        env.set("GITHUB_ENV", env_file.to_str().unwrap());
+        env.set(&ocx_env::GITHUB_ACTIONS, "true");
+        env.set(&ocx_env::GITHUB_PATH, path_file.to_str().unwrap());
+        env.set(&ocx_env::GITHUB_ENV, env_file.to_str().unwrap());
 
         {
             let mut targets = super::GitHubFlavor::from_env().unwrap();
@@ -537,7 +541,7 @@ mod tests {
     fn duplicate_path_dir_dedups_keeping_last() {
         // Two packages contributing the same PATH dir must collapse to a single
         // `$GITHUB_PATH` line (keep-last order), so re-export does not grow it.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -559,7 +563,7 @@ mod tests {
 
     #[test]
     fn constant_conflict_warns() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
 
@@ -580,10 +584,10 @@ mod tests {
 
     #[test]
     fn list_export_on_an_empty_ambient() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.remove("JDK_JAVA_OPTIONS");
+        env.remove_raw("JDK_JAVA_OPTIONS");
 
         targets
             .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, Some(" "))
@@ -598,10 +602,10 @@ mod tests {
         // A value already present in the ambient process env is removed from
         // its old position and re-appended at the back — re-exporting an
         // already-exported list variable must not grow it.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.set("JDK_JAVA_OPTIONS", "-ea -Xmx1g");
+        env.set_raw("JDK_JAVA_OPTIONS", "-ea -Xmx1g");
 
         targets
             .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, Some(" "))
@@ -613,10 +617,10 @@ mod tests {
 
     #[test]
     fn list_entry_with_an_explicit_separator() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.remove("GODEBUG");
+        env.remove_raw("GODEBUG");
 
         targets
             .write_entry("GODEBUG", "gctrace=1", &ModifierKind::List, Some(","))
@@ -634,10 +638,10 @@ mod tests {
         // By the time an entry reaches `write_entry`, `reconcile_list_separators`
         // has already settled every contributor to a key — a bare `None` here
         // legitimately means "nobody declared one", which folds with `" "`.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.remove("JDK_JAVA_OPTIONS");
+        env.remove_raw("JDK_JAVA_OPTIONS");
 
         targets
             .write_entry("JDK_JAVA_OPTIONS", "-ea", &ModifierKind::List, None)
@@ -662,10 +666,10 @@ mod tests {
         // constant is written FIRST and the list SECOND, but the constant
         // bucket flushes last, so the constant's line wins anyway — the
         // inverse of call order. Documented, not fixed.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let tmp = tempfile::tempdir().unwrap();
         let mut targets = setup_github_env(&env, &tmp);
-        env.remove("OPTS");
+        env.remove_raw("OPTS");
 
         targets
             .write_entry("OPTS", "constant-value", &ModifierKind::Constant, None)

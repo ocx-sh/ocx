@@ -13,11 +13,13 @@ publish = false
 __testing = []
 
 [dependencies]
-# The only `ocx_*` row. `ocx_util::error::SerializationError` is what
-# `DataInterface::print_json` raises; `ocx_exit` is in this crate's allowed set
-# (`scripts/crate_map.toml`) but nothing here names a process outcome, so it is
-# not listed — the console renders, it does not decide what a run costs.
+# `ocx_util::error::SerializationError` is what `DataInterface::print_json`
+# raises; `ocx_exit` is in this crate's allowed set (`scripts/crate_map.toml`)
+# but nothing here names a process outcome, so it is not listed — the console
+# renders, it does not decide what a run costs.
 ocx_util.workspace = true
+# The environment registry `ColorModeConfig` reads `NO_COLOR` and its peers through.
+ocx_env.workspace = true
 
 # `ColorMode` is a `ValueEnum` and `clap_styles` builds a `Styles`, so the
 # `--color` flag and clap's own help rendering share one decision.
@@ -48,6 +50,10 @@ thiserror.workspace = true
 # `task_local!` for the parent bar and `spawn_blocking` for the
 # controlling-terminal probe, which `open(2)` can block on.
 tokio.workspace = true
+
+[dev-dependencies]
+# `ocx_env::overrides`, the process-environment table the color tests write through.
+ocx_env = { workspace = true, features = ["__testing"] }
 
 [lints]
 workspace = true

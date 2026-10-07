@@ -50,7 +50,7 @@ def crate_path_in(text: str) -> str | None:
     Hand-rolled rather than a regex so the rule is readable at the call site:
     a crate prefix, at least one lowercase-or-underscore character, then the
     path separator. ``ocx::app`` (the CLI crate, no underscore) and
-    ``ocx_lib=debug`` (an ``OCX_LOG`` directive, no separator) are not crate
+    ``ocx_lib=debug`` (an ``OCX_LOG_LEVEL`` directive, no separator) are not crate
     paths and are not forbidden — both appear in ``test_logging.py`` as live,
     correct values.
     """
@@ -124,7 +124,7 @@ def test_the_matcher_sees_a_crate_path_and_spares_the_near_misses() -> None:
     assert crate_path_in(_PREFIX + _SEP + "app") is None
     assert crate_path_in(_PREFIX + "_lib=debug") is None
     assert crate_path_in(_PREFIX + "_lib") is None
-    assert crate_path_in("OCX_LOG") is None
+    assert crate_path_in("OCX_LOG_LEVEL") is None
 
 
 def test_the_walk_reaches_the_whole_suite() -> None:

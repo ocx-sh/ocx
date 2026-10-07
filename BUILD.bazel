@@ -125,6 +125,9 @@ filegroup(
     visibility = ["//test:__pkg__"],
 )
 
+# The clippy configuration `.bazelrc` hands the clippy aspect by label.
+exports_files(["clippy.toml"])
+
 # The `--error-format` `rustdoc_diagnostics_aspect` (`rustdoc_diagnostics.bzl`)
 # hands rustdoc: rustc-native JSON lines, which `scripts/lint_ratchet.py --bep`
 # reads. Its own setting rather than `@rules_rust//rust/settings:error_format`,

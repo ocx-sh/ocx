@@ -1,6 +1,6 @@
 // Witness for `every_utility_error_reaching_the_cli_is_armed`.
 //
-// `NeverArmedError` is named by no `downcast_arm!` anywhere under
+// `NeverArmedError` is named by no `families!` entry anywhere under
 // `crates/ocx_cli/src/`, so a scanner that still reads a `pub fn` signature
 // reports exactly one reach here. A scanner that stopped reading signatures —
 // or an armed set that grew to swallow everything — reports none, and the

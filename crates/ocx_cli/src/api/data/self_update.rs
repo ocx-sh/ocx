@@ -2,23 +2,112 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_console::Cell;
+use ocx_oci::PackageRef;
 use ocx_package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::api::Printable;
 
-// The `snake_case` names are wire format, pinned by the snapshot tests.
-/// Outcome of an update check or a self-update, as a `snake_case` slug.
+/// Outcome of an update check or a self-update.
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "SelfUpdateStatus")]
 enum StatusKind {
+    /// The installed version is the latest.
     UpToDate,
+    /// The check did not run; `skipped_reason` says why.
     Skipped,
+    /// A newer version is available (`--check`).
     UpdateAvailable,
+    /// A newer version was pulled and activated.
     Installed,
     /// The release was downloaded but nothing was activated — `current` still
     /// names the previously installed binary.
     Pulled,
+}
+
+/// Why an update check was skipped.
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(rename = "SkippedReason")]
+enum SkippedReasonData<'a> {
+    /// The installed version could not be queried, so the check cannot compare versions.
+    Bootstrap,
+    /// Offline mode blocked the registry probe.
+    Offline,
+    /// The 24-hour throttle window has not elapsed since the last probe.
+    Throttled,
+    /// The registry probe failed.
+    RegistryProbeFailed {
+        /// The probe error.
+        detail: &'a str,
+    },
+    /// The package was not found in the registry.
+    NotFound,
+    /// The installed version string is not a version.
+    UnparseableCurrent {
+        /// The installed version string.
+        version: &'a str,
+    },
+    /// The registry's latest tag is not a version.
+    UnparseableLatest,
+    /// The registry lists no `major.minor.patch` release tag.
+    NoReleaseTag,
+}
+
+impl<'a> From<&'a SkippedReason> for SkippedReasonData<'a> {
+    fn from(reason: &'a SkippedReason) -> Self {
+        match reason {
+            SkippedReason::Bootstrap => Self::Bootstrap,
+            SkippedReason::Offline => Self::Offline,
+            SkippedReason::Throttled => Self::Throttled,
+            SkippedReason::RegistryProbeFailed(detail) => Self::RegistryProbeFailed { detail },
+            SkippedReason::NotFound => Self::NotFound,
+            SkippedReason::UnparseableCurrent(version) => Self::UnparseableCurrent { version },
+            SkippedReason::UnparseableLatest => Self::UnparseableLatest,
+            SkippedReason::NoReleaseTag => Self::NoReleaseTag,
+        }
+    }
+}
+
+fn serialize_skipped_reason<S: Serializer>(reason: &Option<SkippedReason>, serializer: S) -> Result<S::Ok, S::Error> {
+    reason.as_ref().map(SkippedReasonData::from).serialize(serializer)
+}
+
+/// How the hand-off to the new binary's own `ocx self setup` ended, when it did not end cleanly.
+#[derive(Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(rename = "HandoffFailure")]
+enum HandoffFailureData<'a> {
+    /// The new binary could not be started.
+    SpawnFailed {
+        /// The underlying error.
+        detail: &'a str,
+    },
+    /// The new binary's setup exited non-zero; `81` means it left a user-edited profile alone.
+    Exited {
+        /// The setup's exit code.
+        exit_code: i32,
+    },
+    /// The new binary's setup was killed by a signal (Unix only).
+    Signalled {
+        /// The signal number.
+        signal: i32,
+    },
+}
+
+impl<'a> From<&'a HandoffFailure> for HandoffFailureData<'a> {
+    fn from(failure: &'a HandoffFailure) -> Self {
+        match failure {
+            HandoffFailure::SpawnFailed(detail) => Self::SpawnFailed { detail },
+            HandoffFailure::Exited(exit_code) => Self::Exited { exit_code: *exit_code },
+            HandoffFailure::Signalled(signal) => Self::Signalled { signal: *signal },
+        }
+    }
+}
+
+fn serialize_handoff<S: Serializer>(handoff: &Option<HandoffFailure>, serializer: S) -> Result<S::Ok, S::Error> {
+    handoff.as_ref().map(HandoffFailureData::from).serialize(serializer)
 }
 
 impl std::fmt::Display for StatusKind {
@@ -34,23 +123,18 @@ impl std::fmt::Display for StatusKind {
     }
 }
 
-/// Result of an update check, discriminated by `status`.
-///
-/// - `{"status": "up_to_date"}` — no payload
-/// - `{"status": "update_available", "identifier": "<id>"}` — newer version
-///   available at `identifier`
-/// - `{"status": "skipped", "skipped_reason": {"reason": "<variant>"[, "detail": "…"]}}`
+/// Result of `ocx self update --check`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct UpdateCheckData {
+    /// What the check found.
     status: StatusKind,
     /// Identifier of the available update; present iff status = `update_available`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    identifier: Option<String>,
-    /// Why the check was skipped; present iff status = `skipped`. Scripts
-    /// dispatch on its `reason` slug without string parsing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    identifier: Option<PackageRef>,
+    /// Why the check was skipped; present iff status = `skipped`.
+    // Serialized through the report's own tagged shape; plain output keeps the library's prose.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_skipped_reason")]
+    #[schemars(with = "Option<SkippedReasonData<'static>>")]
     skipped_reason: Option<SkippedReason>,
 }
 
@@ -69,7 +153,7 @@ impl UpdateCheckData {
             },
             UpdateCheckResult::UpdateAvailable(identifier) => Self {
                 status: StatusKind::UpdateAvailable,
-                identifier: Some(identifier.to_string()),
+                identifier: Some(identifier.clone()),
                 skipped_reason: None,
             },
         }
@@ -77,6 +161,9 @@ impl UpdateCheckData {
 }
 
 impl Printable for UpdateCheckData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "UpdateCheckData";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Only fields with a payload get a row.
         let mut fields: Vec<Cell> = vec!["Status".into()];
@@ -84,7 +171,7 @@ impl Printable for UpdateCheckData {
 
         if let Some(identifier) = &self.identifier {
             fields.push("Identifier".into());
-            values.push(Cell::from(identifier.clone()));
+            values.push(Cell::from(identifier.to_string()));
         }
         if let Some(reason) = &self.skipped_reason {
             fields.push("Skipped reason".into());
@@ -95,40 +182,29 @@ impl Printable for UpdateCheckData {
     }
 }
 
-// `handoff` stays absent on a clean hand-off, keeping the `installed` payload byte-identical.
-/// Result of `ocx self update`, discriminated by `status`.
-///
-/// - `{"status": "up_to_date"}` — no payload
-/// - `{"status": "installed", "from": "0.0.1", "to": "0.0.2"}` (`from` omitted
-///   when the old binary's version query failed)
-/// - `{"status": "installed", …, "handoff": {"reason": "exited", "detail": 82}}`
-///   — the swap landed, but the new binary's own setup did not finish
-/// - `{"status": "pulled", "to": "0.0.2", "handoff": {…}}` — downloaded, nothing activated
-/// - `{"status": "skipped", "skipped_reason": {"reason": "<variant>"[, "detail": "…"]}}`
+/// Result of `ocx self update`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfUpdateData {
+    /// What the update did.
     status: StatusKind,
     /// Previously installed version; present on `installed` and `pulled` when
     /// the old binary's version query succeeded. Absent when that query was not
     /// available (binary absent, non-zero exit, malformed JSON output).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     from: Option<String>,
     /// Newly downloaded version; present iff status is `installed` or `pulled`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     to: Option<String>,
-    /// Why the update was skipped; present iff status = `skipped`. Scripts
-    /// dispatch on its `reason` slug without string parsing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    /// Why the update was skipped; present iff status = `skipped`.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_skipped_reason")]
+    #[schemars(with = "Option<SkippedReasonData<'static>>")]
     skipped_reason: Option<SkippedReason>,
     /// How the hand-off to the new binary's own `ocx self setup` ended, when it
     /// did not end cleanly. Present on `installed` (the swap landed, some setup
     /// surface may not have been written) and on `pulled` (nothing was
     /// activated); absent whenever the child completed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_handoff")]
+    #[schemars(with = "Option<HandoffFailureData<'static>>")]
     handoff: Option<HandoffFailure>,
 }
 
@@ -168,6 +244,9 @@ impl SelfUpdateData {
 }
 
 impl Printable for SelfUpdateData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "SelfUpdateData";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Only fields with a payload get a row.
         let mut fields: Vec<Cell> = vec!["Status".into()];
@@ -229,31 +308,31 @@ mod tests {
     }
 
     /// `Skipped(Bootstrap)` serializes the `SkippedReason` as a structured
-    /// object — `{"reason": "bootstrap"}` — not a Display string.
+    /// object — `{"type": "bootstrap"}` — not a Display string.
     #[test]
     fn update_check_data_skipped_bootstrap_serializes_structured() {
         let data = UpdateCheckData::from_result(&UpdateCheckResult::Skipped(SkippedReason::Bootstrap));
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(
             value,
-            json!({"status": "skipped", "skipped_reason": {"reason": "bootstrap"}})
+            json!({"status": "skipped", "skipped_reason": {"type": "bootstrap"}})
         );
     }
 
-    /// `Skipped(Offline)` → `{"reason":"offline"}`.
+    /// `Skipped(Offline)` → `{"type":"offline"}`.
     #[test]
     fn update_check_data_skipped_offline_serializes_structured() {
         let data = UpdateCheckData::from_result(&UpdateCheckResult::Skipped(SkippedReason::Offline));
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["skipped_reason"], json!({"reason": "offline"}));
+        assert_eq!(value["skipped_reason"], json!({"type": "offline"}));
     }
 
-    /// `Skipped(Throttled)` → `{"reason":"throttled"}`.
+    /// `Skipped(Throttled)` → `{"type":"throttled"}`.
     #[test]
     fn update_check_data_skipped_throttled_serializes_structured() {
         let data = UpdateCheckData::from_result(&UpdateCheckResult::Skipped(SkippedReason::Throttled));
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["skipped_reason"], json!({"reason": "throttled"}));
+        assert_eq!(value["skipped_reason"], json!({"type": "throttled"}));
     }
 
     /// `Skipped(RegistryProbeFailed)` carries the detail string under the
@@ -266,7 +345,7 @@ mod tests {
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(
             value["skipped_reason"],
-            json!({"reason": "registry_probe_failed", "detail": "connection refused"})
+            json!({"type": "registry_probe_failed", "detail": "connection refused"})
         );
     }
 
@@ -279,7 +358,7 @@ mod tests {
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(
             value["skipped_reason"],
-            json!({"reason": "unparseable_current", "detail": "not-a-version"})
+            json!({"type": "unparseable_current", "version": "not-a-version"})
         );
     }
 
@@ -288,7 +367,7 @@ mod tests {
     fn update_check_data_skipped_unparseable_latest_serializes_unit() {
         let data = UpdateCheckData::from_result(&UpdateCheckResult::Skipped(SkippedReason::UnparseableLatest));
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["skipped_reason"], json!({"reason": "unparseable_latest"}));
+        assert_eq!(value["skipped_reason"], json!({"type": "unparseable_latest"}));
     }
 
     /// `Skipped(NoReleaseTag)` unit variant.
@@ -296,7 +375,7 @@ mod tests {
     fn update_check_data_skipped_no_release_tag_serializes_unit() {
         let data = UpdateCheckData::from_result(&UpdateCheckResult::Skipped(SkippedReason::NoReleaseTag));
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["skipped_reason"], json!({"reason": "no_release_tag"}));
+        assert_eq!(value["skipped_reason"], json!({"type": "no_release_tag"}));
     }
 
     /// `Skipped(NotFound)` unit variant.
@@ -304,7 +383,7 @@ mod tests {
     fn update_check_data_skipped_not_found_serializes_unit() {
         let data = UpdateCheckData::from_result(&UpdateCheckResult::Skipped(SkippedReason::NotFound));
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["skipped_reason"], json!({"reason": "not_found"}));
+        assert_eq!(value["skipped_reason"], json!({"type": "not_found"}));
     }
 
     // ── SelfUpdateData JSON shape snapshots ───────────────────────────────────
@@ -352,7 +431,7 @@ mod tests {
         let data = SelfUpdateData::from_result(&SelfUpdateResult::Installed {
             from: Some("0.6.0".to_string()),
             to: "0.6.1".to_string(),
-            handoff: Some(HandoffFailure::Exited(82)),
+            handoff: Some(HandoffFailure::Exited(81)),
         });
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(
@@ -361,7 +440,7 @@ mod tests {
                 "status": "installed",
                 "from": "0.6.0",
                 "to": "0.6.1",
-                "handoff": {"reason": "exited", "detail": 82},
+                "handoff": {"type": "exited", "exit_code": 81},
             })
         );
     }
@@ -382,7 +461,7 @@ mod tests {
                 "status": "pulled",
                 "from": "0.6.0",
                 "to": "0.6.1",
-                "handoff": {"reason": "spawn_failed", "detail": "permission denied"},
+                "handoff": {"type": "spawn_failed", "detail": "permission denied"},
             })
         );
     }
@@ -396,7 +475,7 @@ mod tests {
             handoff: Some(HandoffFailure::Signalled(9)),
         });
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["handoff"], json!({"reason": "signalled", "detail": 9}));
+        assert_eq!(value["handoff"], json!({"type": "signalled", "signal": 9}));
     }
 
     /// `Skipped(Bootstrap)` serializes the structured `SkippedReason`.
@@ -406,7 +485,7 @@ mod tests {
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(
             value,
-            json!({"status": "skipped", "skipped_reason": {"reason": "bootstrap"}})
+            json!({"status": "skipped", "skipped_reason": {"type": "bootstrap"}})
         );
     }
 
@@ -415,7 +494,7 @@ mod tests {
     fn self_update_data_skipped_throttled_serializes_structured() {
         let data = SelfUpdateData::from_result(&SelfUpdateResult::Skipped(SkippedReason::Throttled));
         let value = serde_json::to_value(&data).unwrap();
-        assert_eq!(value["skipped_reason"], json!({"reason": "throttled"}));
+        assert_eq!(value["skipped_reason"], json!({"type": "throttled"}));
     }
 
     /// `Skipped(RegistryProbeFailed)` through `SelfUpdateData` carries detail.
@@ -427,7 +506,7 @@ mod tests {
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(
             value["skipped_reason"],
-            json!({"reason": "registry_probe_failed", "detail": "503"})
+            json!({"type": "registry_probe_failed", "detail": "503"})
         );
     }
 }

@@ -5,6 +5,14 @@
 
 use std::ffi::{OsStr, OsString};
 
+/// The host's `PATH` list separator: `;` on Windows, `:` elsewhere.
+#[cfg(target_os = "windows")]
+pub const PATH_SEPARATOR: &str = ";";
+
+/// The host's `PATH` list separator: `;` on Windows, `:` elsewhere.
+#[cfg(not(target_os = "windows"))]
+pub const PATH_SEPARATOR: &str = ":";
+
 /// Whether a `PATH` segment names `value`: exact on Unix, ASCII-case-insensitive on Windows.
 ///
 /// Must match every `Shell::export_path` / `remove_list_element` arm, or emitted and in-process `PATH`s diverge.
@@ -56,7 +64,7 @@ fn join_segments(segments: &[OsString]) -> OsString {
         let mut joined = OsString::new();
         for segment in segments {
             if !joined.is_empty() {
-                joined.push(crate::env::PATH_SEPARATOR);
+                joined.push(PATH_SEPARATOR);
             }
             joined.push(segment);
         }
@@ -109,7 +117,7 @@ pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
     let mut result = OsString::with_capacity(value.len() + 1 + survivors.len());
     result.push(value);
     if !survivors.is_empty() {
-        result.push(crate::env::PATH_SEPARATOR);
+        result.push(PATH_SEPARATOR);
         result.push(survivors);
     }
     result
@@ -117,8 +125,8 @@ pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
 
 #[cfg(test)]
 mod tests {
+    use super::PATH_SEPARATOR as SEP;
     use super::{move_to_front, remove_segment};
-    use crate::env::PATH_SEPARATOR as SEP;
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
 

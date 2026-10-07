@@ -96,7 +96,7 @@ def _rows(report: dict) -> dict[str, dict]:
 
 
 def _actions(report: dict) -> list[tuple[str, str, str | None]]:
-    return [(row["tag"], row["action"], row["reason"]) for row in report["tags"]]
+    return [(row["tag"], row["action"], row.get("reason")) for row in report["tags"]]
 
 
 def _tags_file(path: Path) -> list[str]:
@@ -190,9 +190,9 @@ def test_prune_deletes_a_tag_the_index_marks_ephemeral(
     assert _tags(ocx.registry, unique_repo) == [BUILD_2], "exactly the named tag left the registry"
     report = _report(result)
     assert _actions(report) == [(BUILD_1, "deleted", None)]
-    assert report["selection"] == {"tags": [BUILD_1]}
+    assert report["selection"] == {"type": "tags", "tags": [BUILD_1]}
     assert report["force"] is False and report["dry_run"] is False
-    assert report["tags"][0]["digest"] is not None, "a deleted row keeps the digest the index recorded"
+    assert "digest" in report["tags"][0], "a deleted row keeps the digest the index recorded"
     assert report["index"] == {
         "url": index_server.base_url,
         "root_sha256": "sha256:" + hashlib.sha256(served_root.read_bytes()).hexdigest(),
@@ -217,7 +217,7 @@ def test_a_dry_run_of_a_structural_selection_reports_and_deletes_nothing(
     assert not tags_file.exists(), "a dry run writes no tags file"
     report = _report(dry)
     assert report["dry_run"] is True
-    assert report["selection"] == {"prerelease": ROLLING, "keep_builds": 1}
+    assert report["selection"] == {"type": "prerelease", "prerelease": ROLLING, "keep_builds": 1}
     assert _actions(report) == [
         (BUILD_1, "would_delete", None),
         (BUILD_2, "would_delete", None),
@@ -316,7 +316,7 @@ def test_no_index_refuses_and_force_then_deletes(ocx: OcxRunner, unique_repo: st
     assert forced.returncode == 0, forced.stderr
     assert _tags(ocx.registry, unique_repo) == [BUILD_2]
     report = _report(forced)
-    assert report["index"] is None
+    assert "index" not in report
     assert report["force"] is True
     assert _actions(report) == [(BUILD_1, "deleted", None)]
 
@@ -375,7 +375,7 @@ def test_a_tags_file_that_cannot_be_written_exits_74_after_the_deletes(
 # ---------------------------------------------------------------------------
 
 
-def test_a_registry_that_cannot_delete_tags_exits_87_and_deletes_nothing(
+def test_a_registry_that_cannot_delete_tags_exits_82_and_deletes_nothing(
     ocx: OcxRunner, mirror_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
@@ -385,7 +385,7 @@ def test_a_registry_that_cannot_delete_tags_exits_87_and_deletes_nothing(
 
     result = _prune(mirror_ocx, "--force", f"{mirror_registry}/{unique_repo}", "1.0.0")
 
-    assert result.returncode == 87, result.stderr
+    assert result.returncode == 82, result.stderr
     assert _tags(mirror_registry, unique_repo) == before, "nothing was deleted"
     assert _actions(_report(result)) == [("1.0.0", "not_attempted", None)], (
         "the report is the one document; the exit code carries the failure"
@@ -632,7 +632,7 @@ def test_canary_recipe_replaces_old_builds_in_the_registry_and_the_written_root(
     )
 
     report = announce_json(
-        ocx, fake_forge, *INDEX_FORGE, "--tags-file", str(tags_file), "--ephemeral", "--out", str(out_dir), package
+        ocx, fake_forge, *INDEX_FORGE, "--tags-file", str(tags_file), "--ephemeral", "--output", str(out_dir), package
     )
 
     assert sorted(report["removed"]) == sorted([BUILD_1, BUILD_2])
@@ -661,7 +661,7 @@ def test_teardown_recipe_removes_the_track_and_leaves_the_release_tags(
     assert not [tag for tag in remaining if tag.startswith(MR_ROLLING)], f"the whole track is gone, left {remaining}"
     assert set(RELEASE_TAGS) <= set(remaining), "latest, 0.5 and 0 are untouched"
 
-    report = announce_json(ocx, fake_forge, *INDEX_FORGE, "--tags-file", str(tags_file), "--out", str(out_dir), package)
+    report = announce_json(ocx, fake_forge, *INDEX_FORGE, "--tags-file", str(tags_file), "--output", str(out_dir), package)
 
     assert sorted(report["removed"]) == sorted([MR_BUILD_1, MR_BUILD_2, MR_ROLLING])
     assert _written_tags(out_dir, package) == {tag: seeded[tag] for tag in RELEASE_TAGS}, (
@@ -691,10 +691,10 @@ def test_a_rerun_teardown_selects_nothing_and_a_refresh_then_removes_the_rows(
     assert tags_file.read_text() == "", "the file exists and is empty"
     assert _tags(ocx.registry, unique_repo) == before
 
-    empty = announce_json(ocx, fake_forge, *INDEX_FORGE, "--tags-file", str(tags_file), "--out", str(out_dir), package)
+    empty = announce_json(ocx, fake_forge, *INDEX_FORGE, "--tags-file", str(tags_file), "--output", str(out_dir), package)
     assert not out_dir.exists(), f"an empty tags file writes nothing, got {empty}"
 
-    refreshed = announce_json(ocx, fake_forge, *INDEX_FORGE, "--refresh", "--out", str(out_dir), package)
+    refreshed = announce_json(ocx, fake_forge, *INDEX_FORGE, "--refresh", "--output", str(out_dir), package)
 
     assert sorted(refreshed["removed"]) == sorted([MR_BUILD_1, MR_BUILD_2, MR_ROLLING])
     assert _written_tags(out_dir, package) == {tag: seeded[tag] for tag in RELEASE_TAGS}

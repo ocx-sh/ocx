@@ -193,7 +193,7 @@ impl PackageAttest {
             .map_err(package_sign_common::attest_error_into_anyhow)?
             .result;
 
-        let report = AttestationReport::new(identifier.to_string(), self.platform.as_ref(), result);
+        let report = AttestationReport::new(identifier.clone(), self.platform.as_ref(), result);
         context.api().report(&report)?;
         Ok(ExitCode::SUCCESS)
     }
@@ -226,16 +226,14 @@ impl PackageAttest {
                 }
                 SweptOutcome::Done(report) => SweptTagReport::completed(
                     entry.tag.clone(),
-                    AttestationReport::new(identifier.clone_with_tag(entry.tag).to_string(), None, report.result),
+                    AttestationReport::new(identifier.clone_with_tag(entry.tag), None, report.result),
                 ),
             };
             rows.push(row);
         }
 
         let exit_code = package_sign_common::sweep_exit_code(&failures);
-        context
-            .api()
-            .report(&SweepReport::new("package attest", rows, exit_code))?;
+        context.api().report(&SweepReport::new(rows))?;
         Ok(ExitCode::from(exit_code))
     }
 }

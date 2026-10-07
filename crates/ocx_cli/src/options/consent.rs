@@ -29,7 +29,7 @@ pub struct Consent {
 impl Consent {
     /// What the user typed, or `None` when they typed neither flag.
     ///
-    /// Collapsing `None` to a `bool` lets [`OCX_NO_CONSENT`](ocx_config::env::keys::OCX_NO_CONSENT),
+    /// Collapsing `None` to a `bool` lets [`OCX_NO_CONSENT`](ocx_env::OCX_NO_CONSENT),
     /// read at the write seam, outrank a typed flag.
     pub fn explicit(&self) -> Option<bool> {
         if self.consent {

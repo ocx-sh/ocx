@@ -13,6 +13,7 @@ use crate::options;
 /// over a registry's whole catalog.
 #[derive(Parser)]
 pub struct IndexUpdate {
+    /// Packages to refresh; a bare name resolves against the default registry.
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
     packages: Vec<options::Identifier>,
 }
@@ -26,7 +27,7 @@ impl IndexUpdate {
         // Before any fetch: moving pins is what `--frozen` exists to stop. The only frozen gate here;
         // `exactly_one_frozen_gate` fails a second one.
         if context.config_view().frozen {
-            return Err(index_common::policy_blocked("`ocx index update`", "frozen").into());
+            return Err(index_common::policy_blocked("`ocx index update`").into());
         }
 
         let oci_index = ocx_index::Index::from_remote(remote_index.clone());

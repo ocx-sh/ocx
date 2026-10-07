@@ -20,6 +20,7 @@ rust_library(
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sign"},
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_env",
         "//crates/ocx_exit",
         "//crates/ocx_oci",
         "//crates/ocx_trust",

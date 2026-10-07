@@ -10,10 +10,6 @@ use std::path::Path;
 use super::execution_record::{Host, Os, ParentProcess, Process, User};
 use ocx_oci::{Architecture, OperatingSystem};
 
-/// Testing seam: comma-separated record key paths (e.g. `process.user.id`) whose probes fail.
-#[cfg(any(test, feature = "__testing"))]
-const FAIL_PROBES_VAR: &str = "__OCX_TESTING_RECORDS_FAIL_PROBES";
-
 /// Collect the host block.
 pub fn host() -> Host {
     Host {
@@ -38,7 +34,7 @@ pub fn process(pid: u32, executable: &Path) -> Process {
         user: user(),
         arch: probe("process.arch", Architecture::current),
         executable: executable.to_path_buf(),
-        working_directory: probe("process.working_directory", || ocx_util::env::current_dir().ok()),
+        working_directory: probe("process.working_directory", || ocx_env::current_dir().ok()),
     }
 }
 
@@ -76,13 +72,15 @@ fn user_id() -> Option<String> {
 ///
 /// Not read from passwd, which costs a directory round-trip per launch on LDAP/SSSD-backed hosts.
 fn user_name() -> Option<String> {
+    // Verbatim, so a set-but-empty name stops the fallback like any other set value.
+    let verbatim = |var: &'static ocx_env::EnvVar| var.get_raw().and_then(|value| value.into_string().ok());
     #[cfg(windows)]
     {
-        ocx_util::env::var("USERNAME")
+        verbatim(&ocx_env::USERNAME)
     }
     #[cfg(not(windows))]
     {
-        ocx_util::env::var("USER").or_else(|| ocx_util::env::var("LOGNAME"))
+        verbatim(&ocx_env::USER).or_else(|| verbatim(&ocx_env::LOGNAME))
     }
 }
 
@@ -102,7 +100,9 @@ fn parent_pid() -> Option<u32> {
 /// Whether a test has forced the probe at `key` to fail.
 #[cfg(any(test, feature = "__testing"))]
 fn forced_to_fail(key: &str) -> bool {
-    ocx_util::env::var(FAIL_PROBES_VAR).is_some_and(|forced| forced.split(',').any(|probe| probe.trim() == key))
+    ocx_env::__OCX_TESTING_RECORDS_FAIL_PROBES
+        .get()
+        .is_some_and(|forced| forced.split(',').any(|probe| probe.trim() == key))
 }
 
 #[cfg(not(any(test, feature = "__testing")))]
@@ -120,9 +120,9 @@ mod tests {
     /// nothing errors: an undetectable hostname must never cost an invocation.
     #[test]
     fn every_forced_probe_omits_its_key() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         env.set(
-            FAIL_PROBES_VAR,
+            &ocx_env::__OCX_TESTING_RECORDS_FAIL_PROBES,
             "host.name,os.type,process.arch,process.user.id,process.user.name,process.parent.pid,process.working_directory",
         );
 
@@ -157,10 +157,10 @@ mod tests {
     /// Windows case for the id and the scratch-container case for the name.
     #[test]
     fn the_user_block_survives_either_half_going_missing() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(FAIL_PROBES_VAR, "process.user.id");
-        env.set("USER", "auditor");
-        env.set("USERNAME", "auditor");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::__OCX_TESTING_RECORDS_FAIL_PROBES, "process.user.id");
+        env.set(&ocx_env::USER, "auditor");
+        env.set(&ocx_env::USERNAME, "auditor");
 
         let user = process(1, &PathBuf::from("/bin/true"))
             .user
@@ -168,7 +168,7 @@ mod tests {
         assert!(user.id.is_none());
         assert_eq!(user.name.as_deref(), Some("auditor"));
 
-        env.set(FAIL_PROBES_VAR, "process.user.name");
+        env.set(&ocx_env::__OCX_TESTING_RECORDS_FAIL_PROBES, "process.user.name");
         let user = process(1, &PathBuf::from("/bin/true")).user;
         if cfg!(unix) {
             let user = user.expect("a determinable id alone still records the user");
@@ -187,9 +187,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_environment_can_rename_the_user_but_not_reidentify_them() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("USER", "root");
-        env.set("LOGNAME", "root");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::USER, "root");
+        env.set(&ocx_env::LOGNAME, "root");
 
         let user = process(1, &PathBuf::from("/bin/true")).user.expect("user block");
         assert_eq!(user.name.as_deref(), Some("root"), "the name follows the environment");
@@ -206,10 +206,10 @@ mod tests {
     /// missing key would pass against an implementation that dropped every key.
     #[test]
     fn a_forced_probe_leaves_its_siblings_alone() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(FAIL_PROBES_VAR, "host.name");
-        env.set("USER", "auditor");
-        env.set("USERNAME", "auditor");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::__OCX_TESTING_RECORDS_FAIL_PROBES, "host.name");
+        env.set(&ocx_env::USER, "auditor");
+        env.set(&ocx_env::USERNAME, "auditor");
 
         assert!(host().name.is_none(), "host.name was forced to fail");
 
@@ -231,7 +231,7 @@ mod tests {
     /// unimplemented collector.
     #[test]
     fn unforced_probes_resolve_on_an_ordinary_host() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
 
         assert_eq!(operating_system().os_type, OperatingSystem::current());
 

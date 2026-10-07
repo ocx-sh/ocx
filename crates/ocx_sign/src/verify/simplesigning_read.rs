@@ -20,9 +20,8 @@ use super::DiscoveryMethod;
 use super::error::VerifyErrorKind;
 use super::identity::{self, matching_policies, oidc_issuer, parse_certificate, subject_identity};
 use super::pipeline::{
-    ACCEPTED_MANIFEST_TYPES, MAX_REFERRER_MANIFEST_BYTES, MAX_SIGNATURE_CANDIDATES, PolicyDeferredToOcx,
-    RefusedCandidate, RekorKeyMemo, VerifiedSignature, VerifyResult, map_client_error, map_verification_error,
-    pull_blob_capped,
+    MAX_REFERRER_MANIFEST_BYTES, MAX_SIGNATURE_CANDIDATES, PolicyDeferredToOcx, RefusedCandidate, RekorKeyMemo,
+    VerifiedSignature, VerifyResult, map_client_error, map_verification_error, pull_blob_capped,
 };
 use super::signing_instant::SigningInstant;
 use super::tlog;
@@ -31,6 +30,7 @@ use crate::sign::SignatureFormat;
 use crate::simplesigning::{SIMPLESIGNING_CLAIM_TYPE, SimpleSigningClaim};
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{OciTransport, sibling_tag_reference};
+use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
 use ocx_oci::referrer::media_types::{
     ANNOTATION_COSIGN_BUNDLE, ANNOTATION_COSIGN_CERTIFICATE, ANNOTATION_COSIGN_CHAIN, ANNOTATION_COSIGN_SIGNATURE,
     SIMPLESIGNING_MEDIA_TYPE,
@@ -115,7 +115,7 @@ pub async fn read_sidecar_tag(
     via: DiscoveryMethod,
 ) -> Result<Option<SidecarScan>, VerifyErrorKind> {
     let target = sibling_tag_reference(image, sidecar_tag(subject_digest, kind));
-    let bytes = match transport.pull_manifest_raw(&target, ACCEPTED_MANIFEST_TYPES).await {
+    let bytes = match transport.pull_manifest_raw(&target, SIGNABLE_MANIFEST_TYPES).await {
         Ok((bytes, _digest)) => bytes,
         Err(ClientError::ManifestNotFound(_)) => return Ok(None),
         Err(other) => return Err(map_client_error(other)),
@@ -355,7 +355,7 @@ async fn verify_keyless(
 /// # Errors
 ///
 /// [`VerifyErrorKind::BundleParseFailed`] for malformed JSON; [`VerifyErrorKind::RekorSetInvalid`] when its base64
-/// or SET does not hold; [`VerifyErrorKind::TransparencyLogUnavailable`] when the log's key can be neither read nor
+/// or SET does not hold; the Rekor-key failures of [`super::pipeline::RekorKeyMemo::resolve`] when the log's key can be neither read nor
 /// fetched.
 pub(super) async fn logged_entry(
     layer: &Descriptor,

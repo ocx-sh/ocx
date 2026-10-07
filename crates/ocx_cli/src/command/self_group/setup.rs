@@ -7,7 +7,6 @@ use std::str::FromStr;
 
 use clap::Parser;
 use ocx_config::ConfigTier;
-use ocx_config::env;
 use ocx_config::shell::ShellConfig;
 use ocx_exit::ExitCode as OcxExitCode;
 use ocx_project::activate::ActivateMode;
@@ -23,7 +22,7 @@ use crate::options::{ModifyPath, Profiles};
 /// Arguments of `ocx self setup`.
 ///
 /// An edited managed profile fence (`# >>> ocx v1 <hash> >>>`) is reported dirty
-/// and left alone (exit 82) unless `--force`. A `[shell]` toggle writes one key and
+/// and left alone (exit 81) unless `--force`. A `[shell]` toggle writes one key and
 /// keeps the rest of `config.toml`, comments included; it is never reported dirty,
 /// and a tier above `$OCX_HOME` still wins. A Windows `Restricted` execution policy
 /// makes the profile block inert; setup says how to relax it, never changes it.
@@ -44,7 +43,7 @@ use crate::options::{ModifyPath, Profiles};
 /// | package not found in registry | 79 |
 /// | authentication failed while fetching the managed-config snapshot | 80 |
 /// | bootstrap blocked (offline, not installed) | 81 |
-/// | a profile was dirty and skipped (no `--force`) | 82 |
+/// | a profile was dirty and skipped (no `--force`) | 81 |
 ///
 /// The registry codes (69 / 79 / 80) apply to the managed-config tier only
 /// when it is being adopted for the first time, or when the snapshot on disk
@@ -180,7 +179,7 @@ impl SelfSetup {
 
     /// Write the requested `[shell]` toggles into `$OCX_HOME/config.toml`, warning when a higher tier still decides.
     ///
-    /// `--config` and `OCX_CONFIG` never redirect this write; a failure is 74, never 82.
+    /// `--config` and `OCX_CONFIG` never redirect this write; a failure is 74, never 81.
     async fn apply_shell_flags(&self, context: &crate::app::Context) -> anyhow::Result<()> {
         let writes = shell_writes(self);
         if writes.is_empty() {
@@ -302,15 +301,15 @@ fn requested(on: bool, off: bool) -> Option<bool> {
 
 /// Read `OCX_NO_MODIFY_PATH` as a tri-state in `modify_path`'s positive sense; `None` when absent or unrecognised.
 ///
-/// Not [`ocx_util::env::flag`]: it folds both into a default, so a lower rung could never answer.
+/// Not [`ocx_env::EnvVar::bool_or`]: it folds both into a default, so a lower rung could never answer.
 fn env_modify_path() -> Option<bool> {
-    let raw = ocx_util::env::var(env::keys::OCX_NO_MODIFY_PATH)?;
+    let raw = ocx_env::OCX_NO_MODIFY_PATH.get_raw()?.into_string().ok()?;
     match BooleanString::try_from(raw.as_str()) {
         Ok(boolean) => Some(!bool::from(boolean)),
         Err(error) => {
             log::warn!(
                 "environment variable '{}' has invalid boolean value: {error}",
-                env::keys::OCX_NO_MODIFY_PATH
+                ocx_env::OCX_NO_MODIFY_PATH.name
             );
             None
         }
@@ -406,13 +405,13 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
     }
 }
 
-/// Decide the exit code: [`OcxExitCode::DirtyRcBlock`] (82) for a dirty profile or `[managed]` fence left
+/// Decide the exit code: [`OcxExitCode::PolicyBlocked`] (81) for a dirty profile or `[managed]` fence left
 /// untouched, never under `--force` or `--dry-run`.
 fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode {
     let profile_dirty = setup::profiles_dirty(&outcome.profiles);
     let managed_config_dirty = matches!(outcome.managed_config, ocx_setup::ManagedConfigSetupOutcome::Dirty);
     if (profile_dirty || managed_config_dirty) && !force && !dry_run {
-        return OcxExitCode::DirtyRcBlock.into();
+        return OcxExitCode::PolicyBlocked.into();
     }
     ExitCode::SUCCESS
 }
@@ -743,18 +742,13 @@ mod tests {
     /// `options::hook::resolve_ladder`'s rung tests pin for `[shell] hook` /
     /// `[shell] completions`.
     ///
-    /// The only test in this file touching `OCX_NO_MODIFY_PATH`'s real
-    /// process environment; same single-`#[test]` precedent as
-    /// `options::hook::tests::each_ladder_reads_its_own_environment_key`.
-    ///
     /// Red-state: swap two arms of the `.or_else(...).or(...)` chain in
     /// `resolve_modify_path` and the assertion for the swapped pair
     /// disagrees.
     #[test]
     fn modify_path_ladder_order() {
-        // SAFETY: see the doc comment above — this is the one test that
-        // touches this key.
-        unsafe { std::env::remove_var(env::keys::OCX_NO_MODIFY_PATH) };
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_MODIFY_PATH);
 
         // Rung 4 (the floor): nothing set anywhere -> modify allowed.
         assert!(!resolve_modify_path(None, None), "the default is to modify the PATH");
@@ -772,14 +766,12 @@ mod tests {
 
         // Rung 2: the environment outranks the config file, in both
         // directions.
-        // SAFETY: see above.
-        unsafe { std::env::set_var(env::keys::OCX_NO_MODIFY_PATH, "1") };
+        env.set(&ocx_env::OCX_NO_MODIFY_PATH, "1");
         assert!(
             resolve_modify_path(None, Some(true)),
             "OCX_NO_MODIFY_PATH=1 must outrank `[shell] modify_path = true`"
         );
-        // SAFETY: see above.
-        unsafe { std::env::set_var(env::keys::OCX_NO_MODIFY_PATH, "0") };
+        env.set(&ocx_env::OCX_NO_MODIFY_PATH, "0");
         assert!(
             !resolve_modify_path(None, Some(false)),
             "OCX_NO_MODIFY_PATH=0 must outrank `[shell] modify_path = false`"
@@ -790,9 +782,6 @@ mod tests {
             resolve_modify_path(Some(false), Some(true)),
             "the explicit flag must outrank both an env override and the config"
         );
-
-        // SAFETY: see above.
-        unsafe { std::env::remove_var(env::keys::OCX_NO_MODIFY_PATH) };
     }
 
     // The `resolve_managed_config_arg` precedence tests live with the shared
@@ -822,11 +811,11 @@ mod tests {
         format!("{actual:?}") == format!("{:?}", std::process::ExitCode::from(expected))
     }
 
-    /// A dirty profile without `--force` maps to exit 82.
+    /// A dirty profile without `--force` maps to exit 81.
     #[test]
-    fn dirty_without_force_is_exit_82() {
+    fn dirty_without_force_is_exit_81() {
         let base = outcome(vec![(PathBuf::from(".zshrc"), ProfileOutcome::SkippedDirty)]);
-        assert!(exit_code_equals(exit_code_for(&base, false, false), 82));
+        assert!(exit_code_equals(exit_code_for(&base, false, false), 81));
     }
 
     /// `--force` rewrites the block (no SkippedDirty in the outcome), so it is
@@ -837,7 +826,7 @@ mod tests {
         assert!(exit_code_equals(exit_code_for(&base, true, false), 0));
     }
 
-    /// Dry-run never returns 82 even when a profile would be skipped dirty.
+    /// Dry-run never returns 81 even when a profile would be skipped dirty.
     #[test]
     fn dirty_dry_run_is_success() {
         let base = outcome(vec![(PathBuf::from(".zshrc"), ProfileOutcome::SkippedDirty)]);

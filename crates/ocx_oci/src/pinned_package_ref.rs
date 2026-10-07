@@ -113,8 +113,13 @@ impl schemars::JsonSchema for PinnedPackageRef {
 }
 
 /// A pinned identifier requires a digest but none was present.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[error("pinned identifier requires a digest: {identifier}")]
+#[exit(
+    DataError,
+    slug = "pinned_identifier_missing_digest",
+    summary = "An identifier that must be pinned carries no digest"
+)]
 pub struct PinnedIdentifierError {
     pub identifier: PackageRef,
 }

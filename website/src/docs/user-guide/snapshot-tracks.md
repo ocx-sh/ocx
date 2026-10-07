@@ -49,7 +49,7 @@ ocx package push --platform linux/amd64 --cascade --no-keep-tag --build-timestam
   --tags-file tags.txt -i "$REG:0.5.0-canary" dist/tool.tar.xz
 ocx package prune --prerelease 0.5.0-canary --keep-builds 1 --tags-file tags.txt "$PKG"
 ocx package cascade repair --tags-file tags.txt "$REG"
-ocx package announce $FORGE --tags-file tags.txt --ephemeral --out index-out "$PKG"
+ocx package announce $FORGE --tags-file tags.txt --ephemeral --output index-out "$PKG"
 ```
 
 The recipes use three shell variables.
@@ -58,14 +58,14 @@ The recipes use three shell variables.
 - `$REG` is the registry repository the tags live in, such as `registry.acme.example/acme/tool`.
 - `$FORGE` names the index repository, such as `--index-repo gitlab.example.com/platform/ocx-index --forge gitlab`.
 
-Announce reads the committed entry from that index repository even when `--out` writes the result to a directory. All four commands share one tags file, and each appends to it.
+Announce reads the committed entry from that index repository even when `--output` writes the result to a directory. All four commands share one tags file, and each appends to it.
 
 - **push** creates the new build and moves `0.5.0-canary` onto it.
 - **prune** deletes every older build of `0.5.0-canary` and keeps the newest one and the rolling tag. It appends each deleted tag that the index lists to the file.
 - **cascade repair** moves nothing here, because the kept rolling tag already points at the newest build. It is part of the recipe for a prune that does delete a rolling tag's source.
 - **announce** adds the new build as an ephemeral row, refreshes the rolling row, and removes the rows of the deleted builds.
 
-`--out index-out` writes the rebuilt index entry to a local directory instead of opening a request. In a pipeline, drop `--out` so announce opens a request against the index repository, as the [CI examples](#snapshot-tracks-ci) do.
+`--output index-out` writes the rebuilt index entry to a local directory instead of opening a request. In a pipeline, drop `--output` so announce opens a request against the index repository, as the [CI examples](#snapshot-tracks-ci) do.
 
 The rolling row keeps the marker it already has. `--ephemeral` marks only the rows a run adds and never changes an existing row.
 
@@ -78,7 +78,7 @@ A change request gets its own track, such as `0.5.0-mr42`, and the track should 
 ```sh
 rm -f tags.txt
 ocx package prune --prerelease 0.5.0-mr42 --tags-file tags.txt "$PKG"
-ocx package announce $FORGE --tags-file tags.txt --out index-out "$PKG"
+ocx package announce $FORGE --tags-file tags.txt --output index-out "$PKG"
 ```
 
 Every build and the rolling tag are deleted from the registry, and announce removes their rows. `latest`, `0.5` and `0` are untouched.
@@ -92,8 +92,8 @@ A teardown can stop halfway, or run twice. Rerun it. A prune that finds the regi
 ```sh
 rm -f tags.txt
 ocx package prune --prerelease 0.5.0-mr42 --tags-file tags.txt "$PKG"
-ocx package announce $FORGE --tags-file tags.txt --out index-out "$PKG"
-ocx package announce $FORGE --refresh --out index-out "$PKG"
+ocx package announce $FORGE --tags-file tags.txt --output index-out "$PKG"
+ocx package announce $FORGE --refresh --output index-out "$PKG"
 ```
 
 The first announce receives the empty file. It exits 0 and changes nothing, before any forge or registry work. The `--refresh` announce re-observes every row in the index and removes each ephemeral row whose tag is gone. That is how rows a lost run left behind are cleaned up.
@@ -106,14 +106,14 @@ Two variants need no structural selection.
 
 ```sh
 ./compute-stale-tags.sh | xargs ocx package prune --tags-file tags.txt "$PKG"
-ocx package announce $FORGE --tags-file tags.txt --out index-out "$PKG"
+ocx package announce $FORGE --tags-file tags.txt --output index-out "$PKG"
 ```
 
 **Lazy sync.** A teardown job only prunes, and a scheduled job converges the index.
 
 ```sh
 ocx package prune --prerelease 0.5.0-mr42 "$PKG"
-ocx package announce $FORGE --refresh --out index-out "$PKG"
+ocx package announce $FORGE --refresh --output index-out "$PKG"
 ```
 
 Schedule `--refresh` to converge the index. Never schedule `--tags-from-registry` for that. It adds every tag the registry holds as a durable row, so a snapshot that was pushed but not yet announced with `--ephemeral` becomes durable. Prune then refuses it with exit 81.
@@ -141,7 +141,7 @@ Announce it as an ephemeral row. Put its tag in the file, and prune can then del
 
 ```sh
 printf '%s\n' 0.5.0-canary_20260930101500 >> tags.txt
-ocx package announce $FORGE --tags-file tags.txt --ephemeral --out index-out "$PKG"
+ocx package announce $FORGE --tags-file tags.txt --ephemeral --output index-out "$PKG"
 ```
 
 Prune never announces on its own, because announce is the only command that writes the index. Splitting the push job from the announce job, as the CI examples do, keeps a retry from pushing twice.
@@ -156,7 +156,7 @@ Run the jobs of one track one at a time. [GitLab CI][gitlab-ci] has [`resource_g
 
 Both examples split the push from the announce. A retried announce job reuses the pushed `tags.txt`, so it never pushes a second build. Registry credentials need push and delete rights on the repository. Set them with [`OCX_AUTH_<REGISTRY>_TYPE`][env-auth-type], `_USER` and `_TOKEN`. The index credential is [`OCX_ANNOUNCE_TOKEN`][env-announce-token].
 
-Retry exit 75. Never retry exit 69 or 87.
+Retry exit 75. Never retry exit 69 or 82.
 
 ### GitLab CI {#snapshot-tracks-ci-gitlab}
 
@@ -288,19 +288,19 @@ The workflow-level `concurrency` group serializes each pull request's runs. The 
 
 ## Registry support {#snapshot-tracks-registries}
 
-Prune needs a registry that deletes tags. Tag deletion is optional in the [OCI distribution spec][oci-delete-tags]. A registry that refuses it fails the first delete with exit 87 and `error.kind` `registry_delete_unsupported`. Nothing was deleted.
+Prune needs a registry that deletes tags. Tag deletion is optional in the [OCI distribution spec][oci-delete-tags]. A registry that refuses it fails the first delete with exit 82, `error.kind` `unsupported` and `error.detail` `registry_delete_unsupported`. Nothing was deleted.
 
 Measured against running registries:
 
 | Registry | Tag delete | Prune |
 |---|---|---|
 | [zot][zot] v2.1.18 | Answers 202 and removes the tag | Works |
-| [`registry:2`][distribution] with delete disabled | Answers 405 `UNSUPPORTED` | Exit 87 |
-| [`registry:2`][distribution] with delete enabled | Answers 400 `DIGEST_INVALID` and the tag stays | Exit 87 |
+| [`registry:2`][distribution] with delete disabled | Answers 405 `UNSUPPORTED` | Exit 82 |
+| [`registry:2`][distribution] with delete enabled | Answers 400 `DIGEST_INVALID` and the tag stays | Exit 82 |
 
-[GHCR][ghcr], [Docker Hub][docker-hub] and [Amazon ECR][ecr] do not offer tag deletion through the registry API, so prune exits 87 against them. This comes from their documentation, and no run against them is recorded here.
+[GHCR][ghcr], [Docker Hub][docker-hub] and [Amazon ECR][ecr] do not offer tag deletion through the registry API, so prune exits 82 against them. This comes from their documentation, and no run against them is recorded here.
 
-Exit 87 is never transient, so do not retry it. Use a registry that deletes tags, or delete through the registry's own tooling and skip prune.
+Exit 82 is never transient, so do not retry it. Use a registry that deletes tags, or delete through the registry's own tooling and skip prune.
 
 ## Limits {#snapshot-tracks-limits}
 

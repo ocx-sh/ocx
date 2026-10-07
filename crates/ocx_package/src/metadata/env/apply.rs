@@ -12,8 +12,8 @@ use super::entry::Entry;
 use super::list;
 use super::modifier::ModifierKind;
 use crate::launch::LaunchIdentities;
-use ocx_config::env::{Env, EnvKey, OcxConfigView, keys};
-use ocx_util::env::{is_reserved_ocx_key, is_valid_env_key, var};
+use ocx_config::env::{Env, EnvKey, OcxConfigView};
+use ocx_env::{is_reserved_ocx_key, is_valid_env_key};
 
 /// The two entry slices [`EnvEntriesExt::apply_child_env`] needs, named so they cannot transpose.
 pub struct ChildEnv<'a> {
@@ -79,25 +79,30 @@ impl EnvEntriesExt for Env {
             && let Some(identities) = env.identities
         {
             match identities.encode() {
-                Some(json) => self.set(keys::OCX_LAUNCH_IDENTITIES, json),
-                None => self.remove(keys::OCX_LAUNCH_IDENTITIES),
+                Some(json) => self.set(ocx_env::OCX_LAUNCH_IDENTITIES.name, json),
+                None => self.remove(ocx_env::OCX_LAUNCH_IDENTITIES.name),
             }
         }
     }
 }
 
-/// Writes the forwarded payload as [`keys::OCX_ENV`] for a launcher re-entry;
+/// Writes the forwarded payload as [`ocx_env::OCX_ENV`] for a launcher re-entry;
 /// an empty slice leaves the key absent.
 fn set_forwarded_env(env: &mut Env, entries: &[Entry]) {
     match encode_forwarded_env(entries) {
-        Some(json) => env.set(keys::OCX_ENV, json),
-        None => env.remove(keys::OCX_ENV),
+        Some(json) => env.set(ocx_env::OCX_ENV.name, json),
+        None => env.remove(ocx_env::OCX_ENV.name),
     }
 }
 
 /// A `list` key's separator agreement could not be settled.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    DataError,
+    slug = "list_separator_invalid",
+    summary = "A list-valued environment entry conflicts with or edges on its separator"
+)]
 pub enum ListSeparatorError {
     /// Two entries for one key declare different separators.
     #[error(
@@ -183,12 +188,17 @@ pub fn reconcile_list_separators<'a>(
     Ok(())
 }
 
-/// Failure modes of decoding the forwarded [`keys::OCX_ENV`] payload.
+/// Failure modes of decoding the forwarded [`ocx_env::OCX_ENV`] payload.
 ///
 /// Each rejects the whole envelope: a partially applied payload matches neither
 /// what the parent composed nor what the user declared.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    DataError,
+    slug = "forwarded_env_invalid",
+    summary = "The OCX_ENV value a parent ocx forwarded is malformed"
+)]
 pub enum ForwardedEnvError {
     /// The value was present but not valid JSON.
     #[error("malformed OCX_ENV env value")]
@@ -259,7 +269,7 @@ pub enum ForwardedEnvError {
     },
 }
 
-/// Serializes entries into the [`keys::OCX_ENV`] envelope; `None` for an empty slice.
+/// Serializes entries into the [`ocx_env::OCX_ENV`] envelope; `None` for an empty slice.
 fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
     if entries.is_empty() {
         return None;
@@ -294,7 +304,7 @@ fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
     }
 }
 
-/// Parses [`keys::OCX_ENV`] back into the forwarded entries; absent or empty yields none.
+/// Parses [`ocx_env::OCX_ENV`] back into the forwarded entries; absent or empty yields none.
 ///
 /// The payload is untrusted: the reserved-key gate keeps a forged `OCX_*` key
 /// out of a grandchild ocx, since [`Env::apply_ocx_config`] overwrites only keys it knows.
@@ -303,12 +313,9 @@ fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
 ///
 /// [`ForwardedEnvError`] for any malformed entry.
 pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
-    let Some(raw) = var(keys::OCX_ENV) else {
+    let Some(raw) = ocx_env::OCX_ENV.get() else {
         return Ok(Vec::new());
     };
-    if raw.is_empty() {
-        return Ok(Vec::new());
-    }
     let envelope = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
         .map_err(|source| ForwardedEnvError::MalformedJson { source })?;
 
@@ -460,7 +467,7 @@ mod tests {
     fn forwarded_env_round_trips_both_kinds_in_order() {
         use crate::metadata::env::modifier::ModifierKind;
 
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         let original = vec![
             entry("CI", "1", ModifierKind::Constant),
             entry("PATH", "/project/node_modules/.bin", ModifierKind::Path),
@@ -470,12 +477,12 @@ mod tests {
         let mut child = Env::clean();
         set_forwarded_env(&mut child, &original);
         let encoded = child
-            .get(keys::OCX_ENV)
+            .get(ocx_env::OCX_ENV.name)
             .expect("a non-empty payload must set OCX_ENV")
             .to_str()
             .expect("OCX_ENV must be valid UTF-8")
             .to_string();
-        guard.set(keys::OCX_ENV, encoded);
+        guard.set(&ocx_env::OCX_ENV, encoded);
 
         let parsed = forwarded_env().expect("a self-encoded payload must decode");
         assert_eq!(parsed.len(), original.len());
@@ -493,7 +500,7 @@ mod tests {
     /// spaces, and `GODEBUG` ignores settings it cannot parse.
     #[test]
     fn forwarded_env_round_trips_a_list_entry_with_its_separator() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         let original = vec![
             list_entry("GODEBUG", "gctrace=1", ","),
             list_entry("JDK_JAVA_OPTIONS", "-ea", " "),
@@ -502,12 +509,12 @@ mod tests {
         let mut child = Env::clean();
         set_forwarded_env(&mut child, &original);
         let encoded = child
-            .get(keys::OCX_ENV)
+            .get(ocx_env::OCX_ENV.name)
             .expect("a non-empty payload must set OCX_ENV")
             .to_str()
             .expect("OCX_ENV must be valid UTF-8")
             .to_string();
-        guard.set(keys::OCX_ENV, encoded);
+        guard.set(&ocx_env::OCX_ENV, encoded);
 
         let parsed = forwarded_env().expect("a self-encoded list payload must decode");
         assert_eq!(parsed.len(), original.len());
@@ -529,7 +536,7 @@ mod tests {
     fn forwarded_env_fills_in_the_effective_separator_for_a_list_without_one() {
         use crate::metadata::env::{entry::Entry, modifier::ModifierKind};
 
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         let mut child = Env::clean();
         set_forwarded_env(
             &mut child,
@@ -541,12 +548,12 @@ mod tests {
             }],
         );
         let encoded = child
-            .get(keys::OCX_ENV)
+            .get(ocx_env::OCX_ENV.name)
             .expect("payload present")
             .to_str()
             .expect("UTF-8")
             .to_string();
-        guard.set(keys::OCX_ENV, encoded);
+        guard.set(&ocx_env::OCX_ENV, encoded);
 
         let parsed = forwarded_env().expect("a separator-less list entry must still decode");
         assert_eq!(parsed.len(), 1);
@@ -565,7 +572,7 @@ mod tests {
         let mut child = Env::clean();
         set_forwarded_env(&mut child, &[entry("CI", "1", ModifierKind::Constant)]);
         let encoded = child
-            .get(keys::OCX_ENV)
+            .get(ocx_env::OCX_ENV.name)
             .expect("payload present")
             .to_str()
             .expect("UTF-8")
@@ -582,9 +589,9 @@ mod tests {
     /// prevent.
     #[test]
     fn forwarded_env_rejects_a_list_entry_without_a_separator() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"GODEBUG","value":"gctrace=1","type":"list"}]}"#,
         );
         let error = forwarded_env().expect_err("a list without a separator must not decode");
@@ -598,10 +605,10 @@ mod tests {
     /// degrades the flank match to a bare substring scan.
     #[test]
     fn forwarded_env_rejects_an_unusable_list_separator() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         for separator in ["", "="] {
             guard.set(
-                keys::OCX_ENV,
+                &ocx_env::OCX_ENV,
                 format!(r#"{{"entries":[{{"key":"OPTS","value":"-ea","type":"list","separator":"{separator}"}}]}}"#),
             );
             let error = forwarded_env().expect_err("an unusable separator must not decode");
@@ -616,9 +623,9 @@ mod tests {
     /// `EnvResolver` runs post-resolution applies here verbatim.
     #[test]
     fn forwarded_env_rejects_a_separator_edged_list_value() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"GODEBUG","value":",gctrace=1","type":"list","separator":","}]}"#,
         );
         let error = forwarded_env().expect_err("an edged value must not decode");
@@ -633,30 +640,30 @@ mod tests {
     /// directly (no `ocx exec` parent) is the normal no-payload case.
     #[test]
     fn forwarded_env_empty_payload_removes_key_and_decodes_empty() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
         let mut child = Env::clean();
         child.set(
-            keys::OCX_ENV,
+            ocx_env::OCX_ENV.name,
             r#"{"entries":[{"key":"STALE","value":"1","type":"constant"}]}"#,
         );
         set_forwarded_env(&mut child, &[]);
         assert!(
-            child.get(keys::OCX_ENV).is_none(),
+            child.get(ocx_env::OCX_ENV.name).is_none(),
             "an empty payload must remove OCX_ENV, not write an empty envelope"
         );
 
-        guard.remove(keys::OCX_ENV);
+        guard.remove(&ocx_env::OCX_ENV);
         assert!(forwarded_env().expect("absent OCX_ENV is not an error").is_empty());
-        guard.set(keys::OCX_ENV, "");
+        guard.set(&ocx_env::OCX_ENV, "");
         assert!(forwarded_env().expect("empty OCX_ENV is not an error").is_empty());
     }
 
     /// Malformed JSON is a hard error, never a silent empty decode.
     #[test]
     fn forwarded_env_rejects_malformed_json() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_ENV, "not json {{{");
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_ENV, "not json {{{");
         assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MalformedJson { .. })));
     }
 
@@ -664,11 +671,14 @@ mod tests {
     /// produced by our encoder, so it is corrupted or injected.
     #[test]
     fn forwarded_env_rejects_missing_entries_sentinel() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_ENV, r#"{"env":[{"key":"CI","value":"1","type":"constant"}]}"#);
+        let guard = ocx_env::overrides::lock();
+        guard.set(
+            &ocx_env::OCX_ENV,
+            r#"{"env":[{"key":"CI","value":"1","type":"constant"}]}"#,
+        );
         assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MissingEntries)));
         // Present but not an array is the same fault.
-        guard.set(keys::OCX_ENV, r#"{"entries":"CI=1"}"#);
+        guard.set(&ocx_env::OCX_ENV, r#"{"entries":"CI=1"}"#);
         assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MissingEntries)));
     }
 
@@ -678,9 +688,9 @@ mod tests {
     /// with no signal.
     #[test]
     fn forwarded_env_rejects_unknown_modifier_kind() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"CI","value":"1","type":"append"}]}"#,
         );
         let error = forwarded_env().expect_err("an unknown modifier type must not decode");
@@ -689,7 +699,7 @@ mod tests {
             "expected UnknownKind naming the key and the value; got: {error}"
         );
         // An absent `type` is equally refused — never defaulted to constant.
-        guard.set(keys::OCX_ENV, r#"{"entries":[{"key":"CI","value":"1"}]}"#);
+        guard.set(&ocx_env::OCX_ENV, r#"{"entries":[{"key":"CI","value":"1"}]}"#);
         assert!(matches!(
             forwarded_env(),
             Err(ForwardedEnvError::InvalidEntry { index: 0 })
@@ -698,7 +708,7 @@ mod tests {
         // on the JSON env surface, so accepting both spellings here would be
         // two vocabularies for one concept.
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"CI","value":"1","kind":"constant"}]}"#,
         );
         assert!(matches!(
@@ -711,9 +721,9 @@ mod tests {
     /// and keeping the rest would let an attacker shape the surviving set.
     #[test]
     fn forwarded_env_reserved_key_fails_the_whole_payload_closed() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"CI","value":"1","type":"constant"},
                           {"key":"OCX_DEFAULT_REGISTRY","value":"evil.example.com","type":"constant"}]}"#,
         );
@@ -725,7 +735,7 @@ mod tests {
 
         // `__OCX_*` is gated identically.
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"__OCX_TESTING_INSTALL_BINARY","value":"/tmp/x","type":"constant"}]}"#,
         );
         assert!(matches!(forwarded_env(), Err(ForwardedEnvError::ReservedKey { .. })));
@@ -735,9 +745,9 @@ mod tests {
     /// validator the shell emitters and CI flavors use.
     #[test]
     fn forwarded_env_rejects_invalid_key_grammar() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         guard.set(
-            keys::OCX_ENV,
+            &ocx_env::OCX_ENV,
             r#"{"entries":[{"key":"A\nB","value":"1","type":"constant"}]}"#,
         );
         assert!(matches!(forwarded_env(), Err(ForwardedEnvError::InvalidKey { .. })));
@@ -758,14 +768,14 @@ mod tests {
     const IDENTITIES: &str = r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"names":["ocx.sh/plantuml:1"]}}"#;
 
     fn identities() -> crate::launch::LaunchIdentities {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_LAUNCH_IDENTITIES, IDENTITIES);
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, IDENTITIES);
         crate::launch::LaunchIdentities::from_env().unwrap().unwrap()
     }
 
     fn child_env_with(identities: Option<&crate::launch::LaunchIdentities>, view: &OcxConfigView) -> Env {
         let mut child = Env::clean();
-        child.set(keys::OCX_LAUNCH_IDENTITIES, "inherited");
+        child.set(ocx_env::OCX_LAUNCH_IDENTITIES.name, "inherited");
         child.apply_child_env(
             ChildEnv {
                 composed: &[],
@@ -783,7 +793,9 @@ mod tests {
         let identities = identities();
         let child = child_env_with(Some(&identities), &patched_view());
         assert_eq!(
-            child.get(keys::OCX_LAUNCH_IDENTITIES).and_then(|value| value.to_str()),
+            child
+                .get(ocx_env::OCX_LAUNCH_IDENTITIES.name)
+                .and_then(|value| value.to_str()),
             Some(IDENTITIES)
         );
     }
@@ -792,7 +804,7 @@ mod tests {
     #[test]
     fn apply_child_env_clears_inherited_identities_for_an_empty_map() {
         let child = child_env_with(Some(&crate::launch::LaunchIdentities::default()), &patched_view());
-        assert!(child.get(keys::OCX_LAUNCH_IDENTITIES).is_none());
+        assert!(child.get(ocx_env::OCX_LAUNCH_IDENTITIES.name).is_none());
     }
 
     /// No `[patches]` tier means no change, and `None` keeps a nested launch's inherited map.
@@ -804,7 +816,9 @@ mod tests {
             child_env_with(None, &patched_view()),
         ] {
             assert_eq!(
-                child.get(keys::OCX_LAUNCH_IDENTITIES).and_then(|value| value.to_str()),
+                child
+                    .get(ocx_env::OCX_LAUNCH_IDENTITIES.name)
+                    .and_then(|value| value.to_str()),
                 Some("inherited")
             );
         }

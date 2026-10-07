@@ -166,7 +166,7 @@ examples, is in [Snapshot tracks][ug-snapshot-tracks].
 ## Choosing a posture {#announcing-postures}
 
 `claim` and `announce` share their whole write path: the same `--index-repo`, `--forge`,
-`--transport`, `--fork` and `--out` flags, the same credential ladder, the same capability
+`--transport`, `--fork` and `--output` flags, the same credential ladder, the same capability
 checks. So the posture you pick applies to both, and the recipes below run the pair.
 
 Four ways to run them, differing in what credential you have and therefore in how the request
@@ -183,7 +183,7 @@ The version column is the floor ocx enforces itself: under `--transport git` it 
 `git --version` before it constructs the forge and exits 69 below 2.31.0. There is no
 GitLab version number ocx checks. Instead it asks the instance the two questions that
 actually matter — does this project accept job-token pushes, and do its allowlists admit
-the publishing project — and exits 86 naming whichever answer is missing. The second
+the publishing project — and exits 82 or 77 naming whichever answer is missing. The second
 question has two answers, because GitLab keeps a project list and a group list.
 
 The index does not have to be on GitHub. Both commands speak **GitHub and GitLab**, each on
@@ -323,12 +323,12 @@ This posture needs the index project to have enabled job-token pushes and to hav
 allowlisted the publishing project. Either allowlist is enough: the project by name, or
 any group it sits under. One group entry covers every publisher in that group, at any
 depth. Both are settings on the **index** project, not yours, and if either is missing the
-run exits 86; an administrator there has to act.
+run exits 82 (pushes disabled) or 77 (allowlist miss); an administrator there has to act.
 
 A job token may read only [the endpoints GitLab opens to
 it](https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access), which does not include
 the settings above — so in this posture ocx cannot check them before it pushes. It pushes
-and lets GitLab's own rejection decide. The exit code is 86 either way, but the message is
+and lets GitLab's own rejection decide. The exit code is 82 either way, but the message is
 not: GitLab's rejection carries no field saying which setting was missing, so the message
 is generic rather than naming one. The [split pair](#announcing-split) below reads the same
 two settings up front, because its API half is an ordinary token — and gets the specific
@@ -392,13 +392,14 @@ uniform across forges**:
 | Value | What it means | Where it happens |
 |---|---|---|
 | `resolved` | The forge's users API answered; its canonical spelling, id and bot flag were taken from it | GitHub and GitLab |
-| `ci-environment` | The CI variables named the list, confirmed against the users API | GitHub and GitLab |
+| `ci_environment` | The CI variables named the list and the users API was out of reach, so nothing confirmed it | **GitLab only**, and only under a job token |
 | `asserted` | The users API was out of reach and a `LOGIN:ID` pair was taken on your word | **GitLab only**, and only under a job token |
 
-`asserted` is unreachable on GitHub. It needs the users API to be closed while a `LOGIN:ID`
-was supplied, and the only credential that closes it is a GitLab job token — which is
-exactly why the [job-token recipe](#announcing-gitlab-job-token) passes `--owner` explicitly.
-Without it, a bare login with no reachable users API is a usage error naming the `LOGIN:ID`
+`asserted` and `ci_environment` are unreachable on GitHub. Both need the users API to be
+closed, and the only credential that closes it is a GitLab job token: `asserted` when a
+`LOGIN:ID` was supplied, `ci_environment` when the CI variables named the list. That is why
+the [job-token recipe](#announcing-gitlab-job-token) passes `--owner` explicitly. Without an
+id, a bare login with no reachable users API is a usage error naming the `LOGIN:ID`
 form, because guessing an id would write a stranger into a governance field.
 
 The report also carries `author`, which is who opened the request rather than who owns the
@@ -434,7 +435,7 @@ registry. If the tag is still present, or the bot cannot check, a person reviews
 The removal of a durable row always goes to a person, whichever identity announced it. Adding or
 changing the `ephemeral` marker on an existing row is reviewed too.
 
-With `--out`, or on an index no bot governs, nothing reviews the change. A durable tag you name
+With `--output`, or on an index no bot governs, nothing reviews the change. A durable tag you name
 is then removed on your word. A durable row you did not name is never touched.
 
 Re-running a claim is always safe, before or after its request merges. Nothing new to say
@@ -485,7 +486,7 @@ Codes marked *claim* or *announce* are reachable from that command only; the res
 
 | Exit | What ocx says | What to do |
 |---|---|---|
-| 64 | `--out` and `--fork` cannot both be given; or `--transport git` was given with `--fork`, with `--out`, or against a GitHub forge | Drop one. `--out` opens no request, so a fork has nothing to open from; the `git` transport pushes to the index itself and is GitLab-only |
+| 64 | `--output` and `--fork` cannot both be given; or `--transport git` was given with `--fork`, with `--output`, or against a GitHub forge | Drop one. `--output` opens no request, so a fork has nothing to open from; the `git` transport pushes to the index itself and is GitLab-only |
 | 64 | `--forge` is required for a self-hosted host | A hostname says nothing about which forge runs behind it, and a wrong guess would send your credential to the wrong API. Say `--forge gitlab` or `--forge github` |
 | 64 | *claim* — `malformed --repository`: expected `oci://host/path` | The pointer names the registry repository, scheme included — `oci://ghcr.io/acme/widget`, not `ghcr.io/acme/widget` and not the index |
 | 64 | *claim* — `--owner` is neither a `LOGIN` nor a `LOGIN:ID` pair | The id is a non-negative whole number, split on the first colon. `alice:7`, not `alice:7:8` and not `:7` |
@@ -497,16 +498,17 @@ Codes marked *claim* or *announce* are reachable from that command only; the res
 | 65 | *announce* — the committed root's `name` disagrees with the identifier this run announces | Fix the mismatch: either the registry you typed differs from the one the root already committed, or the identifier itself changed. A publisher whose configured default registry differs from the index domain must type the full identifier — no `[registries."<domain>"]` entry is required to announce |
 | 65 | *announce* — the recorded description no longer exists on the registry, or an unchanged run's open request can no longer merge | Republish the description with [`ocx package description push`][cmd-package-describe]; for the second, close the request or delete the branch and announce again |
 | 69 | the forge returned a 5xx other than 502, 503 or 504, dropped the connection after accepting it, or presented a TLS certificate the verifier refused; or no `git` was found, or it is older than 2.31.0 | Check the forge's status; install a newer git for the second — the floor is checked before the forge is even constructed |
-| 74 | writing under `--out` failed, or `--tags-file` could not be read | Check the path's permissions. Parent directories are created for you; a parent that is a regular file is not |
+| 74 | writing under `--output` failed, or `--tags-file` could not be read | Check the path's permissions. Parent directories are created for you; a parent that is a regular file is not |
 | 75 | the forge's API could not be connected to, timed out, or answered 408, 429, 502, 503 or 504 (a `git` clone or push that cannot reach it exits 1); the registry could not be resolved or connected to, or timed out; or a concurrent run kept winning the branch | Retry with backoff |
 | 77 | the push was refused by the forge's own policy | A protected branch or a push rule on the index project. Its administrator has to relax it, or use `--transport api` with a token that may push |
+| 77 | `forge_publisher_not_allowlisted` — neither of the index project's job-token allowlists admits your project or one of its groups | Only an administrator of the index project can add it; `--transport api` with a stored token is the way around it |
 | 78 | *announce* — a curated tag's physical host resolves to a private, loopback, link-local or metadata address | Add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] — the entry is keyed on the package name's domain, not the registry host: `[registries."ocx.corp.example"] trusted_hosts = ["gitlab.corp.example"]`. The error names the exact key |
 | 79 | *announce* — a curated tag does not resolve on the registry, or the package is unclaimed | Check the tag for a typo; for the second, run [`ocx package claim`][cmd-package-claim] first |
 | 79 | *claim* — `unknown owner …: the forge has no such account` | Check the spelling, or pass `LOGIN:ID` to skip the lookup |
 | 80 | no credential, a rejected one, or one that cannot push to `--index-repo` | Set [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. Without `--fork` the credential also needs push access, which ocx checks up front and names |
-| 86 | a capability the transport needs is absent | Job-token pushes are disabled on the index project, or neither of its allowlists admits your project or one of its groups. Only an administrator of the index project can grant either; `--transport api` with a stored token is the way around it |
+| 82 | a capability the transport needs is absent | Job-token pushes are disabled on the index project. Only an administrator of the index project can enable them; `--transport api` with a stored token is the way around it |
 
-`--out` is the way to see what a run would commit without opening anything: it needs no
+`--output` is the way to see what a run would commit without opening anything: it needs no
 credential and writes the whole entry every time, including on a run that changes nothing.
 
 ::: tip Learn more

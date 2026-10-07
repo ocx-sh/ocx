@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "Only the wording of PushEvent's unknown arm changes.",
+  "findings": [
+    {
+      "code": "D01",
+      "pointer": "/$defs/PushEvent/oneOf/2",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

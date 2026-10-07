@@ -137,7 +137,7 @@ mod tests {
     /// binary the user asked for is the one `current` names.
     #[test]
     fn update_installed_is_success() {
-        for handoff in [None, Some(HandoffFailure::Exited(OcxExitCode::DirtyRcBlock as i32))] {
+        for handoff in [None, Some(HandoffFailure::Exited(OcxExitCode::PolicyBlocked as i32))] {
             assert!(
                 exit_code_equals(
                     exit_code_for_update(&SelfUpdateResult::Installed {

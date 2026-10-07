@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --cascade` now conflicts with `--platform`.",
+  "findings": [
+    {
+      "code": "G10",
+      "pointer": "/root/commands/0/commands/0/args/2",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

@@ -2,14 +2,25 @@
 // Copyright 2026 The OCX Authors
 
 /// Errors specific to file structure operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "FileStructureError")]
 pub enum Error {
     /// An identifier was expected to carry a digest but did not.
     #[error("identifier requires a digest: {0}")]
+    #[exit(
+        DataError,
+        slug = "missing_digest",
+        summary = "An identifier the store needs pinned carries no digest"
+    )]
     MissingDigest(String),
 
     /// A dispatch object's bytes did not hash to the digest naming them, on write or on read (`adr_index_indirection.md#a3`).
     #[error("dispatch object digest mismatch: claimed '{claimed}', computed '{computed}'")]
+    #[exit(
+        DataError,
+        slug = "dispatch_object_digest_mismatch",
+        summary = "A stored dispatch object does not hash to its claimed digest"
+    )]
     DigestMismatch {
         /// The digest the caller claimed (write) or the on-disk filename encodes (read).
         claimed: ocx_oci::Digest,
@@ -19,6 +30,11 @@ pub enum Error {
 
     /// A root document (`p/<ns>/<pkg>.json`) failed to parse (`adr_index_indirection.md#a2`); never raised for a root/catalog digest disagreement, which self-heals.
     #[error("malformed root document for source '{index_source}', repository '{repository}': {cause}")]
+    #[exit(
+        DataError,
+        slug = "malformed_root_document",
+        summary = "A local index root document is not valid JSON of the expected shape"
+    )]
     MalformedRootDocument {
         index_source: String,
         repository: String,
@@ -28,6 +44,11 @@ pub enum Error {
 
     /// A `repository` would join outside the source subtree (CWE-22) (`adr_index_indirection.md#f2`).
     #[error("index repository path '{repository}' escapes the source root")]
+    #[exit(
+        DataError,
+        slug = "repository_escapes_index_home",
+        summary = "An index repository path escapes its source directory"
+    )]
     RepositoryEscapesIndexHome {
         repository: String,
         #[source]
@@ -38,5 +59,10 @@ pub enum Error {
     ///
     /// Raised, never skipped: the walk derives a wholesale `c/index.json`, so a dropped name deletes a package from the catalog.
     #[error("index path is not valid UTF-8: {}", path.display())]
+    #[exit(
+        DataError,
+        slug = "non_utf8_wire_name",
+        summary = "A local index path is not valid UTF-8"
+    )]
     NonUtf8WireName { path: std::path::PathBuf },
 }

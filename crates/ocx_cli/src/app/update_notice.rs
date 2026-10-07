@@ -35,7 +35,7 @@ impl NoticeRow {
 
     /// Drifted tools in the project toolchain rooted at `dir`; `None` when nothing moved.
     pub(crate) fn project(dir: &Path, names: &[&str]) -> Option<Self> {
-        let home = ocx_util::env::home_dir();
+        let home = ocx_env::home_dir();
         let dir = sanitize_for_terminal(&shorten_home(dir, home.as_deref()));
         Some(Self {
             text: format!("project ({dir}): {}", tool_list(names)?),

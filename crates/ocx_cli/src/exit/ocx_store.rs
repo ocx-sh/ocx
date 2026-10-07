@@ -1,51 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_store` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_store` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_store::file_structure::ToolchainPathError;
 use ocx_store::file_structure::error::Error as FileStructureError;
 
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for FileStructureError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::MissingDigest(_) => ExitCode::DataError,
-            Self::DigestMismatch { .. } => ExitCode::DataError,
-            Self::MalformedRootDocument { .. } => ExitCode::DataError,
-            Self::RepositoryEscapesIndexHome { .. } => ExitCode::DataError,
-            Self::NonUtf8WireName { .. } => ExitCode::DataError,
-        })
-    }
-}
-
-impl ClassifyExitCode for ToolchainPathError {
-    /// Exhaustive, not a blanket `Some`, so a new variant cannot ship unclassified.
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Empty { .. }
-            | Self::ControlCharacter { .. }
-            | Self::Separator { .. }
-            | Self::PathPrefix { .. }
-            | Self::TrailingDotOrSpace { .. }
-            | Self::Relative { .. } => Some(ExitCode::ConfigError),
-        }
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, FileStructureError);
-    downcast_arm!(cause, ToolchainPathError);
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_exit::ExitCode;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
     use ocx_store::file_structure::ToolchainPathComponent;
     use std::collections::BTreeSet;
 
@@ -103,6 +67,32 @@ mod tests {
                 value: "..".to_string(),
             },
         ]
+    }
+
+    /// Reds on: a store slug filed under another code than its variant exits with.
+    #[test]
+    fn store_details_are_registered_under_their_codes() {
+        use crate::exit::tests::assert_detail;
+
+        assert_detail(
+            &FileStructureError::MissingDigest("ocx.sh/cmake:3".to_string()),
+            "missing_digest",
+        );
+        let wire = FileStructureError::NonUtf8WireName { path: "index/o".into() };
+        assert_detail(&wire, "non_utf8_wire_name");
+        let expected = [
+            "toolchain_name_empty",
+            "toolchain_name_control_character",
+            "toolchain_name_separator",
+            "toolchain_name_path_prefix",
+            "toolchain_name_trailing_dot_or_space",
+            "toolchain_name_relative",
+        ];
+        let samples = one_of_every_variant();
+        assert_eq!(samples.len(), expected.len(), "one slug per sampled variant");
+        for (error, slug) in samples.iter().zip(expected) {
+            assert_detail(error, slug);
+        }
     }
 
     // recovered from ocx_lib::file_structure::toolchain_store

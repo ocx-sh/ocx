@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --jobs` is renamed `--workers` together with its id, keeping `-j`.",
+  "findings": [
+    {
+      "code": "G02",
+      "pointer": "/root/commands/0/commands/0/args/3",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

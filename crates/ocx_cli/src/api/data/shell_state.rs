@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 use ocx_console::{DataInterface, Theme, human_bytes, human_instant, human_time};
 use ocx_project::activate::ActivateMode;
 use ocx_project::consent::{Grant, Reason};
-use ocx_shell::shell::coexistence::{Observation, Tool};
+use ocx_shell::shell::coexistence::Observation;
 use ocx_shell::shell::reconcile::{CARRIER_KEY, Ledger, LedgerEntry, MAX_CARRIER_BYTES, Prior, ScopeId, Verdict};
+use ocx_util::fs::path::AbsolutePath;
+use ocx_util::size::ByteSize;
+use ocx_util::time::Timestamp;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -40,23 +43,9 @@ fn human_size(bytes: u64) -> String {
     human_bytes(i64::try_from(bytes).unwrap_or(-1))
 }
 
-/// A watch member's mtime as an age and the instant it stands for, or the raw epoch when it will not convert.
-fn modified_description(mtime: u64) -> String {
-    let converted = i64::try_from(mtime)
-        .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0));
-    let Some(at) = converted else {
-        return format!("mtime {mtime}");
-    };
-    format!("{}, {}", human_time(at), human_instant(at))
-}
-
-/// The consent stamp's recorded instant as an age and the instant; an unparseable (untrusted) value is [`quoted`].
-fn written_description(written: &str) -> String {
-    let Ok(at) = chrono::DateTime::parse_from_rfc3339(written) else {
-        return quoted(written);
-    };
-    let at = at.with_timezone(&chrono::Utc);
+/// An instant as an age and the instant it stands for.
+fn instant_description(at: Timestamp) -> String {
+    let at = chrono::DateTime::<chrono::Utc>::from(at);
     format!("{}, {}", human_time(at), human_instant(at))
 }
 
@@ -70,11 +59,13 @@ pub struct WatchMember {
     pub path: PathBuf,
     /// Whether it exists right now.
     pub present: bool,
-    /// Size in bytes, when present.
-    pub size: Option<u64>,
-    /// Modification time as whole seconds since the Unix epoch, when present —
-    /// the same granularity the per-prompt fast path compares.
-    pub mtime: Option<u64>,
+    /// Size in bytes; absent when the member is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<ByteSize>,
+    /// When it was last modified, at the whole-second granularity the per-prompt
+    /// fast path compares; absent when the member is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<Timestamp>,
 }
 
 /// Whether the project scope still holds the prior for one constant it owns.
@@ -97,10 +88,12 @@ pub struct PriorStatus {
 pub struct HookStatus {
     /// The deciding rung, rendered the way a user spells it.
     pub rung: String,
-    /// The config tier that **actually** set it, when rung 4 decided.
+    /// The config tier that **actually** set it; present only when rung 4 decided.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
-    /// The resolved answer, or `None` on rung 5: "auto" is decided shell-side
+    /// The resolved answer; absent on rung 5, where "auto" is decided shell-side
     /// by the shim's interactivity probe, which a diagnostic cannot observe.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
 
@@ -108,7 +101,7 @@ pub struct HookStatus {
 /// shell inert on its own: it explains an answer the user would otherwise get
 /// wrong.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "note")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum Note {
     /// The CWD walk skipped a symlinked `ocx.toml` candidate and promoted an
     /// ancestor.
@@ -187,7 +180,7 @@ pub struct ShellStateReport {
     ///
     /// A missing home is an ordinary state on a fresh install and exits 0; only
     /// a home that cannot be *read* exits 74.
-    pub ocx_home: PathBuf,
+    pub ocx_home: AbsolutePath,
     /// Whether `$OCX_HOME` exists on disk.
     pub ocx_home_present: bool,
 
@@ -207,6 +200,7 @@ pub struct ShellStateReport {
     /// resolves. **Always present, never `null`**: an invalid `toolchain_dir`
     /// fails config load with exit 78 instead.
     // Non-optional because once the configuration parses the home is always spellable, rendered or not.
+    #[schemars(with = "AbsolutePath")]
     pub toolchain_home: PathBuf,
 
     /// The **PATH-facing trampoline directory** for the same tier, which a consumer outside ocx puts on `PATH`.
@@ -238,6 +232,7 @@ pub struct ShellStateReport {
     /// and the scope never reaches the ledger.
     // The only field telling this state apart from a genuine first prompt.
     // `LockCurrency`'s `Display`; not a `Reason` arm, since the consent predicate did not refuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_refusal: Option<String>,
 
     /// Whether the `__OCX_ENV_STATE` carrier is set at all.
@@ -249,48 +244,56 @@ pub struct ShellStateReport {
     pub carrier_present: bool,
 
     /// The carrier's encoded length in bytes, measured against the carrier cap.
-    pub carrier_bytes: usize,
+    pub carrier_bytes: ByteSize,
 
     /// The decoded ledger, **rendered as fields, never as base64**.
     ///
-    /// Envelope tag, schema `v`, and the payload; `None` when the carrier is
-    /// absent or fails to decode. Carries what is applied per scope (`global` and
-    /// `project` separately), whether `priors` are intact for each constant the
-    /// project scope owns (the one datum nothing can reconstruct) and, through
-    /// `over_cap`, the abandoned-scope marker.
+    /// Schema `v` and the payload; absent when the carrier is absent or fails to
+    /// decode. Carries what is applied per scope (`global` and `project`
+    /// separately), the recorded prior of each constant the project scope owns
+    /// (the one datum nothing can reconstruct) and, through `over_cap`, the
+    /// abandoned-scope marker.
+    // Published through its own report shape: the carrier's spelling is a persisted format live shells decode.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ledger_report")]
+    #[schemars(with = "Option<LedgerReport>")]
     pub ledger: Option<Ledger>,
 
     /// Whether the ledger's recorded `fp` still matches the watch set on disk now.
     ///
-    /// `None` when there is no recorded fingerprint to compare against, **and**
+    /// Absent when there is no recorded fingerprint to compare against, **and**
     /// when no fold is available to compare with.
     // Compared with the reconciler's own `reconcile::fingerprint`; a second fold here reports every fresh shell stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint_current: Option<bool>,
 
-    /// The watch set, with each member's presence, size and mtime.
+    /// The watch set, with each member's presence, size and modification time.
     pub watch_set: Vec<WatchMember>,
 
-    /// The project the CWD walk resolved, canonicalized.
+    /// The project the CWD walk resolved, canonicalized; absent when none resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
     pub project_dir: Option<PathBuf>,
-    /// The 16-hex state key of `project_dir`.
+    /// The 16-hex state key of `project_dir`; absent with it.
     // `ReferenceManager::name_for_path` of `project_dir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_key: Option<String>,
     /// Whether a usable consent stamp exists for that key; an unusable stamp
     /// counts as absent.
     pub project_stamped: bool,
 
-    /// **Which clause activated this project**, or `None` when it is inert.
+    /// **Which clause activated this project**; absent when it is inert.
     ///
-    /// `"stamp"`, `"namespace"` or `"path"`. A consent stamp outranks the
-    /// `[shell.consent]` table.
+    /// A consent stamp outranks the `[shell.consent]` table.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub grant: Option<Grant>,
 
-    /// When the consent stamp was written (RFC 3339, UTC), when there is one.
+    /// When the consent stamp was written, when there is one.
     ///
-    /// The stamp's own recorded instant, not its file time. `None` whenever
+    /// The stamp's own recorded instant, not its file time. Absent whenever
     /// `project_stamped` is `false`.
     // Taken from the same read as `project_stamped`, or the two can disagree.
-    pub stamp_written_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp_written_at: Option<Timestamp>,
 
     /// Prior intactness for each constant the ledger's project scope owns.
     pub priors: Vec<PriorStatus>,
@@ -305,7 +308,8 @@ pub struct ShellStateReport {
     pub yielded_to: Vec<Observation>,
 
     /// Why the shell is not active, when it is not — **the command's reason to
-    /// exist**. `None` when the project is active.
+    /// exist**. Absent when the project is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub inert_reason: Option<Reason>,
 
     /// Reason rows that explain an answer without being an inertness verdict of
@@ -353,9 +357,9 @@ impl ShellStateReport {
     /// Where OCX lives and which project is in effect.
     fn summary_lines(&self, theme: &Theme, detail: Detail, out: &mut Vec<String>) {
         let home = if self.ocx_home_present {
-            quoted_path(&self.ocx_home)
+            quoted_path(self.ocx_home.as_path())
         } else {
-            format!("{} {}", quoted_path(&self.ocx_home), theme.alert("(absent)"))
+            format!("{} {}", quoted_path(self.ocx_home.as_path()), theme.alert("(absent)"))
         };
         out.push(format!("{} {home}", theme.label("ocx home:")));
 
@@ -400,7 +404,7 @@ impl ShellStateReport {
             "bytes",
             format!(
                 "{} {}",
-                self.carrier_bytes,
+                self.carrier_bytes.get(),
                 theme.note(format!("of {MAX_CARRIER_BYTES}"))
             ),
         ));
@@ -442,7 +446,14 @@ impl ShellStateReport {
             if ledger.over_cap.is_empty() {
                 "none".to_owned()
             } else {
-                theme.alert(ledger.over_cap.iter().map(scope_name).collect::<Vec<_>>().join(", "))
+                theme.alert(
+                    ledger
+                        .over_cap
+                        .iter()
+                        .map(|scope| scope.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
             },
         ));
 
@@ -506,12 +517,12 @@ impl ShellStateReport {
             out.push("    - empty".to_owned());
         }
         for member in &self.watch_set {
-            let detail = match (member.size, member.mtime) {
-                (Some(size), Some(mtime)) => {
+            let detail = match (member.size.map(ByteSize::get), member.modified_at) {
+                (Some(size), Some(modified_at)) => {
                     format!(
                         "present, {}, modified {}",
                         human_size(size),
-                        modified_description(mtime)
+                        instant_description(modified_at)
                     )
                 }
                 (Some(size), None) => format!("present, {}", human_size(size)),
@@ -676,8 +687,8 @@ impl ShellStateReport {
 
     /// The consent stamp's presence and, when present, the instant it records.
     fn stamp_description(&self) -> String {
-        match (self.project_stamped, self.stamp_written_at.as_deref()) {
-            (true, Some(written)) => format!("present (written {})", written_description(written)),
+        match (self.project_stamped, self.stamp_written_at) {
+            (true, Some(written)) => format!("present (written {})", instant_description(written)),
             (true, None) => "present".to_owned(),
             (false, _) => "absent".to_owned(),
         }
@@ -783,7 +794,7 @@ impl ShellStateReport {
                         "live",
                         format!(
                             "{} {}",
-                            tool_name(observation.tool),
+                            observation.tool.as_str(),
                             theme.note(format!("(signal {})", quoted(&observation.signal)))
                         ),
                     ));
@@ -796,7 +807,7 @@ impl ShellStateReport {
             }
             Reason::LedgerOverCap { scope } => {
                 headline(out, "the ledger exceeded its cap and a scope was abandoned");
-                out.push(theme.field("  ", "abandoned scope", scope_name(scope)));
+                out.push(theme.field("  ", "abandoned scope", scope.as_str()));
                 out.push("  read from the over_cap marker the carrier still holds".to_owned());
                 push_fix(
                     theme,
@@ -816,7 +827,7 @@ impl ShellStateReport {
                         out.push(format!(
                             "  no {} under {}: `ocx self setup` has not run",
                             quoted(ocx_setup::shims::WITNESS_SHIM),
-                            quoted_path(&self.ocx_home)
+                            quoted_path(self.ocx_home.as_path())
                         ));
                         push_fix(theme, out, "run `ocx self setup`, then start a new shell");
                     }
@@ -871,21 +882,10 @@ fn push_fix(theme: &Theme, out: &mut Vec<String>, fix: &str) {
     out.push(format!("{} {fix}", theme.label("fix:")));
 }
 
-fn scope_name(scope: &ScopeId) -> &'static str {
-    match scope {
-        ScopeId::Global => "global",
-        ScopeId::Project => "project",
-    }
-}
-
-fn tool_name(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Direnv => "direnv",
-        Tool::Mise => "mise",
-    }
-}
-
 impl Printable for ShellStateReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "ShellStateReport";
+
     /// The answer only ([`Detail::Answer`]).
     fn print_plain(&self, data: &DataInterface) {
         for line in self.lines(&data.theme(), Detail::Answer) {
@@ -900,6 +900,9 @@ impl Printable for ShellStateReport {
 pub struct VerboseShellState(pub ShellStateReport);
 
 impl Printable for VerboseShellState {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "VerboseShellState";
+
     fn print_plain(&self, data: &DataInterface) {
         for line in self.0.lines(&data.theme(), Detail::Diagnostics) {
             println!("{line}");
@@ -924,6 +927,175 @@ impl schemars::JsonSchema for VerboseShellState {
     }
 }
 
+// ── The ledger as the report publishes it ──
+// Mirrors of the carrier types: the carrier spells an entry's kind `type` and a prior as an
+// externally tagged enum, and changing those spellings breaks every live shell's decode.
+
+fn ledger_report<S: serde::Serializer>(ledger: &Option<Ledger>, serializer: S) -> Result<S::Ok, S::Error> {
+    ledger.as_ref().map(LedgerReport::from).serialize(serializer)
+}
+
+/// The decoded `__OCX_ENV_STATE` payload.
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "Ledger")]
+struct LedgerReport {
+    /// Schema version of the payload shape.
+    v: u8,
+    /// Watch-set fingerprint; the cached verdict expires when it changes.
+    fp: String,
+    /// The cached negative verdict: `inert` or `no_project`, never `activate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<VerdictReport>,
+    /// The config-tier paths in effect at compose time; omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tiers: Vec<PathBuf>,
+    /// Digest of the ordered watch-path list baked into the shell's gate; omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    ws: String,
+    /// Digest of the deferred diagnostics the previous prompt printed; omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    messages_fp: String,
+    /// Scopes the carrier size cap dropped; omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    over_cap: Vec<ScopeId>,
+    /// What each scope applied.
+    scopes: ScopesReport,
+}
+
+/// The two scope slots.
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "Scopes")]
+struct ScopesReport {
+    /// The global toolchain tier's applied entries; absent when the tier applied nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    global: Option<Vec<LedgerEntryReport>>,
+    /// Pre-apply values for the global scope's constants, keyed by variable; omitted when empty.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    global_priors: std::collections::BTreeMap<String, PriorReport>,
+    /// The resolved project tier; absent when none applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectScopeReport>,
+}
+
+/// The project scope's record.
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "ProjectScope")]
+struct ProjectScopeReport {
+    /// The project key derived from the canonical project directory.
+    key: String,
+    /// The canonical project directory, an advisory label.
+    dir: PathBuf,
+    /// What this scope applied, in emission order.
+    applied: Vec<LedgerEntryReport>,
+    /// Pre-apply values for this scope's constants, keyed by variable.
+    priors: std::collections::BTreeMap<String, PriorReport>,
+}
+
+/// One environment binding the reconciler applied, recorded literally.
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "LedgerEntry")]
+struct LedgerEntryReport {
+    /// Environment-variable name.
+    key: String,
+    /// The exact string ocx wrote, byte for byte.
+    value: String,
+    /// How the value combines.
+    kind: ocx_package::metadata::env::modifier::ModifierKind,
+    /// The effective list separator; present only for a `list` entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    separator: Option<String>,
+}
+
+/// A cached activation verdict; a change to the watch set expires it.
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "Verdict")]
+#[serde(rename_all = "snake_case")]
+enum VerdictReport {
+    /// Activate the project; ocx never caches it, so a carrier holding it was not written by ocx.
+    Activate,
+    /// Consent refused activation for the project in effect.
+    Inert,
+    /// No project resolved from the working directory; entering one expires it.
+    NoProject,
+}
+
+impl From<Verdict> for VerdictReport {
+    fn from(verdict: Verdict) -> Self {
+        match verdict {
+            Verdict::Activate => Self::Activate,
+            Verdict::Inert => Self::Inert,
+            Verdict::NoProject => Self::NoProject,
+        }
+    }
+}
+
+/// What a variable held before ocx set it.
+///
+/// A set-but-empty variable is `value` with an empty string, never `unset`.
+#[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "Prior")]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PriorReport {
+    /// The variable did not exist; reverting removes it.
+    Unset,
+    /// The variable held a value; reverting restores it.
+    Value {
+        /// The exact string the variable held.
+        value: String,
+    },
+}
+
+impl From<&Ledger> for LedgerReport {
+    fn from(ledger: &Ledger) -> Self {
+        Self {
+            v: ledger.v,
+            fp: ledger.fp.clone(),
+            verdict: ledger.verdict.map(VerdictReport::from),
+            tiers: ledger.tiers.clone(),
+            ws: ledger.ws.clone(),
+            messages_fp: ledger.messages_fp.clone(),
+            over_cap: ledger.over_cap.clone(),
+            scopes: ScopesReport {
+                global: ledger.scopes.global.as_deref().map(entries_report),
+                global_priors: priors_report(&ledger.scopes.global_priors),
+                project: ledger.scopes.project.as_ref().map(|project| ProjectScopeReport {
+                    key: project.key.clone(),
+                    dir: project.dir.clone(),
+                    applied: entries_report(&project.applied),
+                    priors: priors_report(&project.priors),
+                }),
+            },
+        }
+    }
+}
+
+fn entries_report(entries: &[LedgerEntry]) -> Vec<LedgerEntryReport> {
+    entries
+        .iter()
+        .map(|entry| LedgerEntryReport {
+            key: entry.key.clone(),
+            value: entry.value.clone(),
+            kind: entry.kind.clone(),
+            separator: entry.separator.clone(),
+        })
+        .collect()
+}
+
+fn priors_report(
+    priors: &std::collections::BTreeMap<String, Prior>,
+) -> std::collections::BTreeMap<String, PriorReport> {
+    priors
+        .iter()
+        .map(|(key, prior)| {
+            let prior = match prior {
+                Prior::Unset => PriorReport::Unset,
+                Prior::Value(value) => PriorReport::Value { value: value.clone() },
+            };
+            (key.clone(), prior)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -931,6 +1103,7 @@ mod tests {
     use ocx_console::Theme;
     use ocx_package::metadata::env::modifier::ModifierKind;
     use ocx_shell::shell::Shell;
+    use ocx_shell::shell::coexistence::Tool;
     use ocx_shell::shell::reconcile::{ProjectScope, Scopes};
 
     use super::*;
@@ -1204,6 +1377,43 @@ mod tests {
         }
     }
 
+    /// The published ledger spells an entry's kind `kind`, a prior as a `type`-tagged object and a
+    /// verdict in snake_case, whatever the carrier spells them; live shells decode the carrier's own.
+    #[test]
+    fn published_ledger_spells_kind_tagged_priors_and_snake_case_verdict() {
+        let mut report = base(None);
+        let ledger = report.ledger.as_mut().expect("the fixture carries a ledger");
+        ledger.verdict = Some(Verdict::NoProject);
+        let project = ledger
+            .scopes
+            .project
+            .as_mut()
+            .expect("the fixture carries a project scope");
+        project.applied = vec![LedgerEntry {
+            key: "CFLAGS".to_owned(),
+            value: "-O2".to_owned(),
+            kind: ModifierKind::List,
+            separator: Some(" ".to_owned()),
+        }];
+        project.priors = BTreeMap::from([
+            ("CFLAGS".to_owned(), Prior::Value("-g".to_owned())),
+            ("JAVA_HOME".to_owned(), Prior::Unset),
+        ]);
+
+        let json = serde_json::to_value(&report).expect("the report serializes");
+        let ledger = &json["ledger"];
+        assert_eq!(
+            ledger["scopes"]["project"]["applied"][0],
+            serde_json::json!({"key": "CFLAGS", "value": "-O2", "kind": "list", "separator": " "}),
+            "an applied entry carries `kind` and no `type`"
+        );
+        assert_eq!(
+            ledger["scopes"]["project"]["priors"],
+            serde_json::json!({"CFLAGS": {"type": "value", "value": "-g"}, "JAVA_HOME": {"type": "unset"}})
+        );
+        assert_eq!(ledger["verdict"], "no_project");
+    }
+
     fn base(reason: Option<Reason>) -> ShellStateReport {
         let ledger = ledger_with_project();
         let priors = ShellStateReport::priors_for(Some(&ledger));
@@ -1214,7 +1424,8 @@ mod tests {
         // inside the never-eval-able corpus.
         let granted = reason.is_none();
         ShellStateReport {
-            ocx_home: PathBuf::from("/home/u/.ocx"),
+            ocx_home: AbsolutePath::new(if cfg!(windows) { r"C:\u\.ocx" } else { "/home/u/.ocx" })
+                .expect("host-absolute fixture"),
             ocx_home_present: true,
             shell_integration_installed: true,
             // A relocated home, not the in-project default: the never-eval-able
@@ -1226,7 +1437,7 @@ mod tests {
             pinned: false,
             lock_refusal: None,
             carrier_present: true,
-            carrier_bytes: 412,
+            carrier_bytes: ByteSize::from(412),
             ledger: Some(ledger),
             fingerprint_current: None,
             watch_set: vec![
@@ -1234,20 +1445,20 @@ mod tests {
                     path: PathBuf::from("/etc/ocx/config.toml"),
                     present: false,
                     size: None,
-                    mtime: None,
+                    modified_at: None,
                 },
                 WatchMember {
                     path: PathBuf::from("/home/u/.ocx/config.toml"),
                     present: true,
-                    size: Some(1290),
-                    mtime: Some(1_756_000_000),
+                    size: Some(ByteSize::from(1290)),
+                    modified_at: Some("2025-08-24T01:46:40Z".parse().expect("valid instant")),
                 },
             ],
             project_dir: Some(PathBuf::from("/work/proj")),
             project_key: Some("0123456789abcdef".to_owned()),
             project_stamped: granted,
             grant: granted.then_some(Grant::Stamp),
-            stamp_written_at: granted.then(|| "2026-08-27T07:12:03Z".to_owned()),
+            stamp_written_at: granted.then(|| "2026-08-27T07:12:03Z".parse().expect("valid instant")),
             priors,
             hook: HookStatus {
                 rung: "auto".to_owned(),
@@ -1367,7 +1578,7 @@ mod tests {
 
         let mut absent = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
         absent.carrier_present = false;
-        absent.carrier_bytes = 0;
+        absent.carrier_bytes = ByteSize::from(0);
         absent.ledger = None;
         absent.priors = Vec::new();
         arms.push(("ledger_absent_first_prompt", absent));
@@ -1375,7 +1586,7 @@ mod tests {
         let mut never_set_up = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
         never_set_up.shell_integration_installed = false;
         never_set_up.carrier_present = false;
-        never_set_up.carrier_bytes = 0;
+        never_set_up.carrier_bytes = ByteSize::from(0);
         never_set_up.ledger = None;
         never_set_up.priors = Vec::new();
         arms.push(("ledger_absent_setup_never_ran", never_set_up));
@@ -2006,7 +2217,7 @@ mod tests {
         }
     }
 
-    /// C-050 — the watch set reports each member's presence, size and mtime,
+    /// C-050 — the watch set reports each member's presence, size and modification time,
     /// including members that do not exist (A-13: a tier file becoming present
     /// is itself the change).
     #[test]
@@ -2363,9 +2574,13 @@ mod tests {
     /// sees less because a human flag was absent.
     #[test]
     fn the_structured_report_is_complete_at_both_tiers() {
-        let bare = serde_json::to_value(base(Some(Reason::LockUnavailable))).expect("the report serializes");
-        let verbose = serde_json::to_value(VerboseShellState(base(Some(Reason::LockUnavailable))))
-            .expect("the verbose wrapper serializes");
+        // Every optional set, since an unset optional is absent from the document by contract.
+        let complete = || ShellStateReport {
+            fingerprint_current: Some(true),
+            ..base(Some(Reason::LockUnavailable))
+        };
+        let bare = serde_json::to_value(complete()).expect("the report serializes");
+        let verbose = serde_json::to_value(VerboseShellState(complete())).expect("the verbose wrapper serializes");
         assert_eq!(bare, verbose, "`--verbose` must not change the structured payload");
 
         // Every field the default *rendering* drops is still in the document.
@@ -2399,7 +2614,7 @@ mod tests {
         // is keyed by that same 16 hex characters (`<root>/<key>/toolchain`).
         // The row this assertion is about is the verbose `key:` field, and
         // anchoring on the label is what keeps it about that row.
-        for needle in ["watch set", "carrier:", "bytes:", "key: 0123456789abcdef", "mtime"] {
+        for needle in ["watch set", "carrier:", "bytes:", "key: 0123456789abcdef", "modified"] {
             assert!(
                 !default.contains(needle),
                 "the default rendering must not carry {needle:?}: {default}"
@@ -2477,8 +2692,8 @@ mod tests {
         // Both are `null` rather than absent when inert, so a consumer can
         // index them unconditionally.
         let inert = serde_json::to_value(base(Some(Reason::LockUnavailable))).expect("the report serializes");
-        assert!(inert["grant"].is_null(), "an inert project names no grant: {inert}");
-        assert!(inert["stamp_written_at"].is_null(), "no stamp, no instant: {inert}");
+        assert!(inert.get("grant").is_none(), "an inert project names no grant: {inert}");
+        assert!(inert.get("stamp_written_at").is_none(), "no stamp, no instant: {inert}");
     }
 
     /// The never-eval-able assertion's own red state. A green result is

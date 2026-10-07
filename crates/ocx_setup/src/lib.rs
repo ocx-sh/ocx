@@ -127,7 +127,7 @@ pub fn launch_agent_written(session_path: &[(PathBuf, SessionPathOutcome)]) -> O
 }
 
 /// True when a profile's managed fence carried user edits and was left untouched;
-/// drives exit 82 and the `self update` `--force` advisory.
+/// drives exit 81 and the `self update` `--force` advisory.
 pub fn profiles_dirty(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
     profiles
         .iter()
@@ -228,7 +228,7 @@ pub enum ManagedConfigSetupOutcome {
     },
     /// `--managed-config ""` cleared the fence and deleted the snapshot dir.
     Cleared,
-    /// The `[managed]` fence carries user edits and `--force` was not passed (exit 82).
+    /// The `[managed]` fence carries user edits and `--force` was not passed (exit 81).
     Dirty,
     /// `--dry-run`: an adopt/re-adopt would run, but nothing was fetched or
     /// written.
@@ -261,7 +261,7 @@ pub async fn run(
     let extra_ca_certs = persist_extra_ca_certs(
         &file_structure.locks,
         file_structure.root(),
-        ocx_util::env::var(ocx_config::env::keys::OCX_EXTRA_CA_CERTS).as_deref(),
+        ocx_env::OCX_EXTRA_CA_CERTS.get().as_deref(),
         options.dry_run,
         config.extra_ca_certs_system_locked,
     )
@@ -643,7 +643,7 @@ async fn clear_managed_config(
             })?;
     }
 
-    if ocx_util::env::var(ocx_config::env::keys::OCX_MANAGED_CONFIG).is_some_and(|value| !value.is_empty()) {
+    if ocx_env::OCX_MANAGED_CONFIG.get().is_some() {
         log::warn!(
             "OCX_MANAGED_CONFIG is still exported; it will re-activate the managed-config tier \
              on the next command unless unset"
@@ -841,18 +841,18 @@ fn write_profile_blocking(path: &Path, content: &str) -> Result<(), error::Error
 
 /// Build a [`HomeEnv`] from the real process environment for profile detection.
 fn home_env_from_environment(ocx_home: &Path) -> HomeEnv {
-    let read = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
-    let home = read("HOME")
+    let home = ocx_env::HOME
+        .get()
         .map(PathBuf::from)
-        .or_else(std::env::home_dir)
+        .or_else(ocx_env::home_dir)
         .unwrap_or_else(|| ocx_home.to_path_buf());
     HomeEnv {
         home,
-        zdotdir: read("ZDOTDIR").map(PathBuf::from),
-        xdg_config_home: read("XDG_CONFIG_HOME").map(PathBuf::from),
-        xdg_data_home: read("XDG_DATA_HOME").map(PathBuf::from),
+        zdotdir: ocx_env::ZDOTDIR.get().map(PathBuf::from),
+        xdg_config_home: ocx_env::XDG_CONFIG_HOME.get().map(PathBuf::from),
+        xdg_data_home: ocx_env::XDG_DATA_HOME.get().map(PathBuf::from),
         ocx_home: ocx_home.to_path_buf(),
-        shell: read("SHELL"),
+        shell: ocx_env::SHELL.get(),
     }
 }
 
@@ -860,7 +860,7 @@ fn home_env_from_environment(ocx_home: &Path) -> HomeEnv {
 async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathBuf> {
     let shim_bin_dir = file_structure.ocx_install_bin_path();
 
-    let path_var = std::env::var_os("PATH")?;
+    let path_var = ocx_env::PATH.get_raw()?;
     let executable = if cfg!(windows) { "ocx.exe" } else { "ocx" };
 
     for dir in std::env::split_paths(&path_var) {
@@ -1015,8 +1015,8 @@ mod tests {
     /// re-fetching (outcome `Adopted`), fence untouched.
     #[tokio::test]
     async fn apply_managed_config_current_fence_missing_snapshot_self_heals() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1071,8 +1071,8 @@ mod tests {
     /// before any store or filesystem access, so no fence is written.
     #[tokio::test]
     async fn apply_managed_config_rejects_locked_tier_override() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let locked_ref = "corp.example.com/ocx-config:user";
@@ -1123,8 +1123,8 @@ mod tests {
     /// as absent, self-heals by re-fetching.
     #[tokio::test]
     async fn apply_managed_config_current_fence_mismatched_snapshot_self_heals() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1221,8 +1221,8 @@ mod tests {
     /// disk carries the new content. Restoring the old early return reds this.
     #[tokio::test]
     async fn apply_managed_config_current_fence_matching_snapshot_refreshes() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1278,8 +1278,8 @@ mod tests {
     /// a fetch rather than assumed from the fence.
     #[tokio::test]
     async fn apply_managed_config_rerun_same_content_stays_already_adopted() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1327,8 +1327,8 @@ mod tests {
     /// refresh that did not run must not look healthy).
     #[tokio::test]
     async fn apply_managed_config_refresh_failure_keeps_snapshot() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
@@ -1374,8 +1374,8 @@ mod tests {
     /// matching snapshot it stays best-effort, exactly like a fetch fault.
     #[tokio::test]
     async fn apply_managed_config_refresh_invalid_payload_stays_best_effort() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let unusable_pem = format!(
             "extra_ca_certs_pem = '''\n{}'''\n",
             ocx_test_support::pki::pem_block("CERTIFICATE", b"this is not DER at all")
@@ -1427,8 +1427,8 @@ mod tests {
     async fn apply_managed_config_refresh_snapshot_write_failure_propagates() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1480,8 +1480,8 @@ mod tests {
     /// exist with no snapshot behind it.
     #[tokio::test]
     async fn apply_managed_config_first_adopt_fetch_failure_hard_fails_without_fence() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let broken = manager_with_failing_fetch(home.path());
@@ -1515,8 +1515,8 @@ mod tests {
     /// instead of reporting `RefreshUnavailable`.
     #[tokio::test]
     async fn apply_managed_config_self_heal_fetch_failure_hard_fails() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
@@ -1552,8 +1552,8 @@ mod tests {
     /// stderr warning.
     #[tokio::test]
     async fn apply_managed_config_offline_rerun_is_already_adopted() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1590,8 +1590,8 @@ mod tests {
     /// that could only fail the fetch.
     #[tokio::test]
     async fn apply_managed_config_digest_pinned_seed_skips_refresh() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let payload = "[registry]\ndefault = \"pinned\"\n";
         // The stub's index digest does not depend on the identifier, so it can
@@ -1628,8 +1628,8 @@ mod tests {
     /// not an explicit fetch request).
     #[tokio::test]
     async fn apply_managed_config_pause_skips_refresh_and_keeps_pause() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1676,8 +1676,8 @@ mod tests {
     /// `WouldRefresh` and leaves the snapshot exactly as it was.
     #[tokio::test]
     async fn apply_managed_config_dry_run_on_adopted_seed_would_refresh() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
         let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
@@ -1758,8 +1758,8 @@ mod tests {
     /// the snapshot directory — no ghost tier survives.
     #[tokio::test]
     async fn clear_managed_config_removes_fence_and_snapshot_dir() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let config_path = home.path().join("config.toml");
@@ -1800,8 +1800,8 @@ mod tests {
     /// the lock differently) and the clear finishes inside the 50 ms.
     #[tokio::test(flavor = "multi_thread")]
     async fn clear_managed_config_waits_behind_the_config_edit_lock() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let config_path = home.path().join("config.toml");
@@ -1844,8 +1844,8 @@ mod tests {
     /// idempotent clears never error.
     #[tokio::test]
     async fn clear_managed_config_is_idempotent_when_nothing_exists() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_MANAGED_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let config_path = home.path().join("config.toml");
@@ -1862,8 +1862,8 @@ mod tests {
     /// advisory, not a failure).
     #[tokio::test]
     async fn clear_managed_config_with_env_still_set_clears_and_succeeds() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_MANAGED_CONFIG", "corp.example.com/ocx-config:user");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_MANAGED_CONFIG, "corp.example.com/ocx-config:user");
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let config_path = home.path().join("config.toml");

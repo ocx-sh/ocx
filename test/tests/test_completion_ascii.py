@@ -34,7 +34,7 @@ from src.runner import OcxRunner
 pytestmark = pytest.mark.command("shell_completion")
 
 # Shells that clap_complete has a backend for -- the only values
-# `ocx shell completion` emits a script for (others exit 64).
+# `ocx shell completion` emits a script for (the other `--shell` names exit 64).
 _BACKEND_SHELLS = ("bash", "zsh", "fish", "elvish", "powershell")
 
 # `ocx self activate` accepts the full `--shell` value enum and always emits a
@@ -89,6 +89,17 @@ def test_shell_completion_is_ascii(ocx: OcxRunner, shell: str) -> None:
     )
     assert result.stdout, f"`shell completion --shell={shell}` produced no completion script"
     _assert_ascii(f"`shell completion --shell={shell}`", result.stdout)
+
+
+@pytest.mark.parametrize("shell", ("nushell", "ash", "batch"))
+def test_shell_completion_refuses_a_shell_without_a_backend(ocx: OcxRunner, shell: str) -> None:
+    """`--shell` takes every shell name `ocx env` takes; one with no completion
+    backend is a usage error naming the shells that have one."""
+    result = _capture(ocx, "shell", "completion", f"--shell={shell}")
+    stderr = result.stderr.decode(errors="replace")
+    assert result.returncode == 64, f"rc={result.returncode}\nstderr:\n{stderr}"
+    assert "bash, elvish, fish, powershell or zsh" in stderr, stderr
+    assert not result.stdout, "a refused shell prints no script"
 
 
 # ---------------------------------------------------------------------------

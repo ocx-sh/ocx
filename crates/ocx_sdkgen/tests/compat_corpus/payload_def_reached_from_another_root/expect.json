@@ -1,0 +1,15 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "PushReport's `message` changes from string to integer; its payload `$def` is also reached from CopyReport, so the wrapper's inline mirror reports nothing and the one finding sits on the `$def`.",
+  "findings": [
+    {
+      "code": "B04",
+      "pointer": "/$defs/PushReport/properties/message",
+      "subjects": [
+        "CopyReport",
+        "PushReport"
+      ]
+    }
+  ]
+}

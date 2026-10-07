@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocx.sh/schemas/reports/v2.json",
+  "reports": {
+    "PushReport": {
+      "$ref": "#/$defs/PushReportRoot"
+    },
+    "StatusReport": {
+      "$ref": "#/$defs/StatusReportRoot"
+    }
+  },
+  "$defs": {
+    "PushReportRoot": {
+      "description": "Result of a push.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Version of this root's shape.",
+          "const": 1
+        },
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package that was pushed."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the pushed manifest."
+        },
+        "status": {
+          "$ref": "#/$defs/PushStatus",
+          "description": "What the push did."
+        },
+        "layers": {
+          "description": "Digests of the pushed layers, in manifest order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Digest"
+          }
+        },
+        "event": {
+          "$ref": "#/$defs/PushEvent",
+          "description": "How the manifest reached the registry."
+        },
+        "size": {
+          "$ref": "#/$defs/ByteSize",
+          "description": "Compressed size of the pushed layers in bytes."
+        },
+        "pushed_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the push finished."
+        },
+        "annotations": {
+          "description": "Manifest annotations, by key.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "provenance": {
+          "x-ocx-opaque": true,
+          "description": "The provenance statement, passed through unchanged."
+        },
+        "message": {
+          "description": "A note for the operator.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "identifier",
+        "digest",
+        "status",
+        "layers",
+        "event"
+      ]
+    },
+    "PushReport": {
+      "description": "Result of a push.",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package that was pushed."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the pushed manifest."
+        },
+        "status": {
+          "$ref": "#/$defs/PushStatus",
+          "description": "What the push did."
+        },
+        "layers": {
+          "description": "Digests of the pushed layers, in manifest order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Digest"
+          }
+        },
+        "event": {
+          "$ref": "#/$defs/PushEvent",
+          "description": "How the manifest reached the registry."
+        },
+        "size": {
+          "$ref": "#/$defs/ByteSize",
+          "description": "Compressed size of the pushed layers in bytes."
+        },
+        "pushed_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When the push finished."
+        },
+        "annotations": {
+          "description": "Manifest annotations, by key.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "provenance": {
+          "x-ocx-opaque": true,
+          "description": "The provenance statement, passed through unchanged."
+        },
+        "message": {
+          "description": "A note for the operator.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier",
+        "digest",
+        "status",
+        "layers",
+        "event"
+      ]
+    },
+    "StatusReportRoot": {
+      "description": "Registry state of a package.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Version of this root's shape.",
+          "const": 1
+        },
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package that was checked."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest the registry serves."
+        }
+      },
+      "required": [
+        "schema_version",
+        "identifier",
+        "digest"
+      ]
+    },
+    "StatusReport": {
+      "description": "Registry state of a package.",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package that was checked."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest the registry serves."
+        }
+      },
+      "required": [
+        "identifier",
+        "digest"
+      ]
+    },
+    "PackageRef": {
+      "description": "A package reference.",
+      "type": "string"
+    },
+    "Digest": {
+      "description": "A content digest.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "ByteSize": {
+      "description": "A size in bytes.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "Timestamp": {
+      "description": "An RFC 3339 instant.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "PushStatus": {
+      "description": "What a push did.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "pushed",
+          "name": "Pushed",
+          "description": "The manifest was written."
+        },
+        {
+          "value": "skipped",
+          "name": "Skipped",
+          "description": "The registry already held the manifest."
+        }
+      ]
+    },
+    "PushEvent": {
+      "description": "How the manifest reached the registry.",
+      "oneOf": [
+        {
+          "description": "The manifest was uploaded.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "description": "Variant tag.",
+              "type": "string",
+              "const": "uploaded"
+            },
+            "chunks": {
+              "description": "Number of upload chunks.",
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "type",
+            "chunks"
+          ]
+        },
+        {
+          "description": "An existing manifest was reused.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "description": "Variant tag.",
+              "type": "string",
+              "const": "reused"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A variant this reader does not know.",
+          "x-ocx-unknown-variant": true,
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "description": "Variant tag.",
+              "type": "string",
+              "not": {
+                "enum": [
+                  "uploaded",
+                  "reused"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "RetiredShape": {
+      "description": "A shape no root reaches.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "description": "A label.",
+          "type": "string"
+        },
+        "note": {
+          "description": "A note.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label"
+      ]
+    }
+  }
+}

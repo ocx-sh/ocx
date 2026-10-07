@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "Hidden `package describe` is removed at or after its named removal release (0.6).",
+  "findings": []
+}

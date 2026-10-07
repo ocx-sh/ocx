@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -20,18 +22,49 @@ use crate::app::build_info::Provenance;
 ///   "channel":            "dev",
 ///   "commit":             { ... },
 ///   "build":              { ... },
-///   "ci":                 { ... }
+///   "ci":                 { ... },
+///   "contract":           { "errors": 2, "commands": { ... }, "reports": { ... } }
 /// }
 /// ```
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct VersionData {
+    /// The version ocx reports for itself.
     // Always present: `ocx self update` parses this key to compare against the latest tag.
     version: String,
+    /// The crate version, when it differs from `version`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     cargo_pkg_version: Option<String>,
     #[serde(flatten)]
     provenance: Provenance,
+    /// The machine-interface versions this binary speaks.
+    contract: ContractVersions,
+}
+
+/// The version of every gated machine document, so a caller can refuse a command before running it.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ContractVersions {
+    /// The error document's `schema_version`.
+    errors: u32,
+    /// Each command's contract version, keyed by its path below `ocx`, space-separated.
+    commands: BTreeMap<String, u32>,
+    /// Each `--format json` root's `schema_version`, keyed by the root name the command grammar uses.
+    reports: BTreeMap<String, u32>,
+}
+
+impl ContractVersions {
+    fn current() -> Self {
+        Self {
+            errors: crate::error_document::ERRORS_SCHEMA_VERSION,
+            commands: crate::command::CONTRACT
+                .iter()
+                .map(|(path, version, _)| (path.join(" "), *version))
+                .collect(),
+            reports: crate::api::report_versions()
+                .into_iter()
+                .map(|(name, version)| (name.to_owned(), version))
+                .collect(),
+        }
+    }
 }
 
 impl VersionData {
@@ -44,11 +77,15 @@ impl VersionData {
             version,
             cargo_pkg_version,
             provenance: Provenance::current(),
+            contract: ContractVersions::current(),
         }
     }
 }
 
 impl Printable for VersionData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "VersionData";
+
     fn print_plain(&self, _data: &ocx_console::DataInterface) {
         // Bare version only: scripts parse this stdout as one semver token.
         println!("{}", self.version);
@@ -61,6 +98,9 @@ impl Printable for VersionData {
 pub struct VerboseVersionData(pub VersionData);
 
 impl Printable for VerboseVersionData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "VerboseVersionData";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         let inner = &self.0;
@@ -241,9 +281,33 @@ mod tests {
         );
         for key in object.keys() {
             assert!(
-                ["version", "cargo_pkg_version", "channel", "commit", "build", "ci"].contains(&key.as_str()),
+                [
+                    "version",
+                    "cargo_pkg_version",
+                    "channel",
+                    "commit",
+                    "build",
+                    "ci",
+                    "contract"
+                ]
+                .contains(&key.as_str()),
                 "unexpected top-level key {key:?} in verbose version JSON wire shape"
             );
         }
+    }
+
+    #[test]
+    fn contract_names_every_command_and_root_with_its_version() {
+        let value = serde_json::to_value(VersionData::enriched("1.0.0", "1.0.0")).unwrap();
+        let contract = &value["contract"];
+        assert_eq!(contract["errors"], crate::error_document::ERRORS_SCHEMA_VERSION);
+        assert_eq!(contract["commands"]["package sign"], 1);
+        assert_eq!(
+            contract["commands"].as_object().map(serde_json::Map::len),
+            Some(crate::command::CONTRACT.len())
+        );
+        assert_eq!(contract["reports"]["SignatureReport"], 2);
+        assert_eq!(contract["reports"]["SweepReport<AttestationReport>"], 2);
+        assert_eq!(contract["reports"]["VersionData"], 1);
     }
 }

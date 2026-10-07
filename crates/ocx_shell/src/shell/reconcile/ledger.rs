@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::{effective_separator, element_eq, is_never_constant, key_eq};
 use ocx_package::metadata::env::entry::Entry;
 use ocx_package::metadata::env::modifier::ModifierKind;
+use ocx_util::wire_words;
 
 /// The private session carrier holding the encoded [`Ledger`].
 ///
@@ -43,7 +44,7 @@ const ENCODER_TAG: &str = "1";
 /// `separator` holds the **effective** separator, resolved once at record time: always
 /// present for `list` (defaulting to a single space), omitted otherwise; for `path` it
 /// means the platform's `PATH` separator.
-// `type`, not `kind`: the spelling `EnvEntry` emits and the nushell shim parses.
+// `type`, not `kind`: live shells decode this persisted spelling; the report publishes `kind` via its own mirror.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct LedgerEntry {
     /// Environment-variable name.
@@ -74,17 +75,18 @@ impl From<&Entry> for LedgerEntry {
     }
 }
 
-/// Which scope a ledger datum belongs to: `global` or `project`.
-///
-/// Exactly two slots. A project nested inside a project does not layer; the inner
-/// one *replaces* the outer, so moving between them is a switch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ScopeId {
-    /// The `--global` toolchain tier.
-    Global,
-    /// The project resolved by the CWD walk.
-    Project,
+wire_words! {
+    /// Which scope a ledger datum belongs to: `global` or `project`.
+    ///
+    /// Exactly two slots. A project nested inside a project does not layer; the inner
+    /// one *replaces* the outer, so moving between them is a switch.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
+    pub enum ScopeId {
+        /// The `--global` toolchain tier.
+        Global = "global",
+        /// The project resolved by the CWD walk.
+        Project = "project",
+    }
 }
 
 /// The cached activation verdict.
@@ -680,8 +682,8 @@ mod codec_tests {
     #[test]
     fn c012_the_carrier_key_is_inside_the_reserved_namespace() {
         assert_eq!(CARRIER_KEY, "__OCX_ENV_STATE");
-        assert!(ocx_util::env::is_reserved_ocx_key(CARRIER_KEY));
-        assert!(ocx_util::env::is_valid_env_key(CARRIER_KEY));
+        assert!(ocx_env::is_reserved_ocx_key(CARRIER_KEY));
+        assert!(ocx_env::is_valid_env_key(CARRIER_KEY));
     }
 
     #[test]

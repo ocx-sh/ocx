@@ -1,56 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_setup` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_setup` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_setup::error::Error as SetupError;
 use ocx_setup::session_path::SessionPathError;
-
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for SetupError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            // `None` lets the chain walker reach the root cause; a `Some` here would replace its code.
-            SetupError::Bootstrap(_) => None,
-            SetupError::Io { .. } => Some(ExitCode::IoError),
-            SetupError::Subprocess(_) => Some(ExitCode::Unavailable),
-            SetupError::InvalidVersionSpec { .. } => Some(ExitCode::UsageError),
-            SetupError::PinDigestMismatch { .. } => Some(ExitCode::DataError),
-            SetupError::InvalidManagedConfigSource { .. } => Some(ExitCode::ConfigError),
-            SetupError::ManagedConfigUpdateFailed(_) => None,
-            SetupError::ManagedConfigLocked(_) => Some(ExitCode::ConfigError),
-            // `SessionPathError` is not in the downcast ladder; without this arm it exits 1.
-            SetupError::SessionPath(inner) => inner.classify(),
-            // `#[error(transparent)]` hides this node from the chain walker, so `None` would exit 1.
-            SetupError::ExtraCaCerts(inner) => inner.classify(),
-            SetupError::ConfigEdit(inner) => inner.classify(),
-            SetupError::ExtraCaCertsNotUtf8 { .. } => Some(ExitCode::DataError),
-            SetupError::RenderedConfigTooLarge { .. } => Some(ExitCode::ConfigError),
-        }
-    }
-}
-
-impl ClassifyExitCode for SessionPathError {
-    /// Exhaustive, not a blanket `Some`, so a new variant cannot ship unclassified.
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Unencodable { .. } | Self::NotUtf8 { .. } | Self::NotAbsolute { .. } => Some(ExitCode::ConfigError),
-        }
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, SetupError);
-    None
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use ocx_exit::{ClassifyExitCode, ExitCode};
     use ocx_setup::session_path::SessionPathFormat;
 
     use std::path::PathBuf;
@@ -88,6 +48,35 @@ mod tests {
             ocx_setup::error::Error::from(refusal).classify(),
             Some(ExitCode::ConfigError)
         );
+    }
+
+    /// Reds on: a setup slug, delegated or walked, naming another cause than the exit code does.
+    #[test]
+    fn setup_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+
+        let io = SetupError::Io {
+            path: PathBuf::from("/home/user/.profile"),
+            source: std::io::Error::other("disk full"),
+        };
+        assert_detail(&io, "setup_io");
+        let spec = SetupError::InvalidVersionSpec {
+            input: "1.2.3@".to_string(),
+            reason: "empty digest".to_string(),
+        };
+        assert_detail(&spec, "invalid_version_spec");
+        let refusal = SessionPathError::NotUtf8 {
+            path: PathBuf::from("/opt"),
+            format: SessionPathFormat::EnvironmentD,
+        };
+        // A bare `SessionPathError` is no ladder rung; only its wrapper reaches the classifier.
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&refusal)),
+            "session_path_not_utf8"
+        );
+        assert_detail(&SetupError::from(refusal), "session_path_not_utf8");
+        let offline = SetupError::Bootstrap(ocx_package_manager::Error::OfflineMode);
+        assert_detail(&offline, "offline_mode");
     }
 
     // ── moved from ocx_setup::session_path::linux with the impl ──

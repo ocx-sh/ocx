@@ -40,7 +40,11 @@ const OFFLINE: &str = "--offline";
 /// The live-session sentinels every arm records in its checkpoint and re-reads in its guard.
 ///
 /// Must mirror what [`super::coexistence::detect`] reads, or a sentinel it honours never triggers a yield.
-const YIELD_SIGNALS: [&str; 3] = ["DIRENV_DIR", "MISE_SHELL", "__MISE_ORIG_PATH"];
+const YIELD_SIGNALS: [&str; 3] = [
+    ocx_env::DIRENV_DIR.name,
+    ocx_env::MISE_SHELL.name,
+    ocx_env::MISE_ORIG_PATH.name,
+];
 
 // The guard compares `GRANT_SIGNALS` too, or an `OCX_CONSENT_*` export mid-session never runs ocx.
 
@@ -134,7 +138,7 @@ fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -
 /// In [`registration`], not `main`, so a gate aimed at a command that emits no hook cannot fake its red.
 #[cfg(any(test, feature = "__testing"))]
 fn inject_latency_fault() {
-    let Some(raw) = std::env::var_os("__OCX_TESTING_LATENCY_INJECT_MS") else {
+    let Some(raw) = ocx_env::__OCX_TESTING_LATENCY_INJECT_MS.get_os() else {
         return;
     };
     let Some(milliseconds) = raw.to_str().and_then(|text| text.trim().parse::<f64>().ok()) else {
@@ -1076,7 +1080,7 @@ mod tests {
     }
 
     /// The EC-HOOK-019 (#442) tripwire, fold side: `current_fingerprint` reads
-    /// its environment through [`GRANT_SIGNALS`] and nowhere else.
+    /// its environment through `GRANT_SIGNAL_VARS` and nowhere else.
     ///
     /// The guard test above proves every name in the list is a guard term; this
     /// proves the list is the fold's whole env read set, so the two layers of
@@ -1097,24 +1101,26 @@ mod tests {
             let end = source[start..].find("\n}\n").expect("the fold function ends") + start;
             &source[start..end]
         };
-        // `env::var` and not `env::var(`: the read is passed as a function
-        // value, so a needle with the call paren would match nothing and this
-        // guard would be green for the wrong reason.
+        // `.get` covers every registry read (`get`, `get_os`, `get_raw`, `get_slot`); `env::var`
+        // covers a raw `std::env::var`/`var_os` that bypasses the registry.
+        let reads = |text: &str| {
+            text.matches(".get").count() + text.matches("ocx_env::dynamic").count() + text.matches("env::var").count()
+        };
         assert_eq!(
-            body("fingerprint").matches("env::var").count(),
+            reads(body("fingerprint")),
             0,
             "the pure fold read the environment; its inputs are parameters (A-13)"
         );
         let current = body("current_fingerprint");
         assert_eq!(
-            current.matches("env::var").count(),
+            reads(current),
             1,
-            "current_fingerprint reads the environment somewhere other than the GRANT_SIGNALS map; a \
-             variable folded there that the guard does not watch is #442 again"
+            "current_fingerprint reads the environment somewhere other than the GRANT_SIGNAL_VARS map; \
+             a variable folded there that the guard does not watch is #442 again"
         );
         assert!(
-            current.contains("GRANT_SIGNALS.map(ocx_util::env::var)"),
-            "current_fingerprint must read its names through GRANT_SIGNALS so the guard and the \
+            current.contains("GRANT_SIGNAL_VARS.map("),
+            "current_fingerprint must read its names through GRANT_SIGNAL_VARS so the guard and the \
              fold share one list"
         );
     }
@@ -1155,27 +1161,38 @@ mod tests {
     /// The tripwire against the two lists coming apart.
     ///
     /// [`YIELD_SIGNALS`] is a second spelling of what
-    /// [`super::super::coexistence::detect`] reads, and the consts it reads them
-    /// from are private to that module — so this scans its source text instead.
-    /// Both directions matter: a name here that the detector does not read costs
-    /// a pointless reconcile, and a name the detector reads that is missing here
-    /// is the A-36 defect all over again, silently, for that one tool.
+    /// [`super::super::coexistence::detect`] reads. Both directions matter: a
+    /// name here that the detector does not read costs a pointless reconcile,
+    /// and a name the detector reads that is missing here is the A-36 defect
+    /// all over again, silently, for that one tool.
     ///
-    /// The count half is a tripwire, not a contract — it keys on the number of
-    /// env reads `detect` performs, which is the cheapest observable that moves
-    /// when a fourth sentinel is added.
+    /// The first half sets each sentinel alone and expects a yield. The count
+    /// half is a tripwire, not a contract — it keys on the number of env reads
+    /// `detect` performs, which is the cheapest observable that moves when a
+    /// fourth sentinel is added.
     #[test]
     fn the_yield_sentinels_are_exactly_what_the_detector_reads() {
-        let detector = include_str!("coexistence.rs");
+        fn declared(name: &str) -> &'static ocx_env::EnvVar {
+            ocx_env::all()
+                .find(|var| var.name == name)
+                .expect("a yield sentinel is a declared variable")
+        }
+        let project = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = project.path().to_str().expect("utf8 tempdir path");
         for key in YIELD_SIGNALS {
+            let env = ocx_env::overrides::lock();
+            for other in YIELD_SIGNALS {
+                env.remove(declared(other));
+            }
+            env.set(declared(key), format!("-{project_dir}"));
             assert!(
-                detector.contains(&format!("\"{key}\"")),
-                "coexistence.rs names no {key}, so the guard reconciles on a sentinel nothing \
-                 yields for"
+                !super::super::coexistence::detect(project.path()).observed.is_empty(),
+                "detect ignores {key}, so the guard reconciles on a sentinel nothing yields for"
             );
         }
+        let detector = include_str!("coexistence.rs");
         assert_eq!(
-            detector.matches("ocx_util::env::var(").count(),
+            detector.matches("verbatim(&").count(),
             YIELD_SIGNALS.len(),
             "`detect` reads a different number of environment variables than the guard watches; \
              a sentinel it honours and the guard cannot see is a yield that never happens (A-36)"
@@ -1915,7 +1932,7 @@ mod tests {
 /// failure — because a skip and a pass otherwise carry the same evidence.
 #[cfg(test)]
 fn absence_may_skip(name: &str) -> bool {
-    let Ok(raw) = std::env::var("__OCX_TESTING_REQUIRE_LIVE_SHELLS") else {
+    let Some(raw) = ocx_env::__OCX_TESTING_REQUIRE_LIVE_SHELLS.get() else {
         return true;
     };
     let raw = raw.trim();
@@ -1951,6 +1968,10 @@ fn absence_may_skip(name: &str) -> bool {
 /// alone, so a red cannot be mistaken for a rig that stopped working.
 #[cfg(all(test, unix))]
 mod live_shell_tests {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness proving the per-prompt hook fires"
+    )]
     use std::process::Command;
 
     use super::*;
@@ -1988,6 +2009,10 @@ mod live_shell_tests {
     // ponytail: `ZDOTDIR` is deliberately not set. `zsh -c` does read
     // `$HOME/.zshenv`, but ocx's zsh activation writes to `.zshrc`, which `-c`
     // never reads — so there is no leak to close yet. Add it the day one shows up.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness proving the per-prompt hook fires"
+    )]
     fn run(argv: &[&str], script: &str) -> Option<String> {
         let (bin, head) = argv.split_first()?;
         let config = tempfile::TempDir::new().expect("an empty config home");
@@ -2614,6 +2639,10 @@ mod live_shell_tests {
 /// it runs.
 #[cfg(test)]
 mod live_power_shell_wrapper_tests {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness proving the per-prompt hook fires"
+    )]
     use std::process::Command;
 
     use super::*;
@@ -2724,6 +2753,10 @@ mod live_power_shell_wrapper_tests {
     ///
     /// A file rather than `-Command`, because the repair reads
     /// `$MyInvocation.Line` and a file is what a profile or a user script is.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness proving the per-prompt hook fires"
+    )]
     fn run(interpreter: &str, dir: &Path, script: &str) -> Option<String> {
         let file = dir.join(format!("{interpreter}-cases.ps1"));
         std::fs::write(&file, script).expect("write the case script");

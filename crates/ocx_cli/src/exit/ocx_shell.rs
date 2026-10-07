@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the CI-detection error family — the `ocx_shell` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the CI-detection error family; its type declares its own codes.
 
 use ocx_shell::ci::error::Error as CiError;
 
-use super::{ClassifyExitCode, downcast_arm};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl ClassifyExitCode for CiError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::MissingEnv(_) => ExitCode::ConfigError,
-            Self::File { .. } | Self::Write(_) => ExitCode::IoError,
-        })
+    /// Reds on: a CI-export slug filed under another code than its variant exits with.
+    #[test]
+    fn ci_details_are_registered_under_their_codes() {
+        use crate::exit::tests::assert_detail;
+
+        assert_detail(&CiError::MissingEnv("GITHUB_ENV".to_string()), "ci_missing_env");
+        let file = CiError::File {
+            path: "/github/env".into(),
+            source: std::io::Error::other("disk full"),
+        };
+        assert_detail(&file, "ci_file_write");
+        assert_detail(&CiError::Write(std::io::Error::other("broken pipe")), "ci_export_write");
     }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, CiError);
-    None
 }

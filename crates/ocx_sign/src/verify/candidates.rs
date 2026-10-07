@@ -8,11 +8,12 @@ use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{bundle, verification_ma
 use super::DiscoveryMethod;
 use super::dsse::is_cosign_image_signature;
 use super::identity::{oidc_issuer, parse_certificate, subject_identity};
-use super::pipeline::{ACCEPTED_MANIFEST_TYPES, MAX_REFERRER_MANIFEST_BYTES, MAX_SIGNATURE_CANDIDATES};
+use super::pipeline::{MAX_REFERRER_MANIFEST_BYTES, MAX_SIGNATURE_CANDIDATES};
 use super::simplesigning_read::{SidecarKind, sidecar_tag};
 use crate::sign::bundle::{MAX_BUNDLE_SIZE_BYTES, parse_bundle};
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{OciTransport, sibling_tag_reference};
+use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
 use ocx_oci::referrer::media_types::{COSIGN_SIG_ARTIFACT_TYPE, SIGSTORE_BUNDLE_V03};
 
 /// A signature candidate attached to a subject — **no verification performed on any field**.
@@ -151,7 +152,7 @@ async fn read_signature_sidecar(
     subject: &ocx_oci::Digest,
 ) -> Result<Option<SignerCandidate>, ClientError> {
     let target = sibling_tag_reference(image, sidecar_tag(subject, SidecarKind::Signature));
-    let digest = match transport.pull_manifest_raw(&target, ACCEPTED_MANIFEST_TYPES).await {
+    let digest = match transport.pull_manifest_raw(&target, SIGNABLE_MANIFEST_TYPES).await {
         Ok((_bytes, digest)) => digest,
         Err(ClientError::ManifestNotFound(_)) => return Ok(None),
         Err(other) => return Err(other),
@@ -187,7 +188,7 @@ async fn read_referrer_identity(
 ) -> Result<Option<BundleIdentity>, ClientError> {
     let referrer_ref = image.clone_with_digest(descriptor.digest.clone());
     let (manifest_bytes, _) = transport
-        .pull_manifest_raw(&referrer_ref, ACCEPTED_MANIFEST_TYPES)
+        .pull_manifest_raw(&referrer_ref, SIGNABLE_MANIFEST_TYPES)
         .await?;
     if manifest_bytes.len() as u64 > MAX_REFERRER_MANIFEST_BYTES {
         return Ok(Some(BundleIdentity::default()));

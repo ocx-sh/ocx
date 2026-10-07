@@ -69,7 +69,9 @@ ocx = { path = "crates/ocx_cli" }
 ocx_announce = { path = "crates/ocx_announce" }
 ocx_config = { path = "crates/ocx_config" }
 ocx_console = { path = "crates/ocx_console" }
+ocx_env = { path = "crates/ocx_env" }
 ocx_exit = { path = "crates/ocx_exit" }
+ocx_exit_derive = { path = "crates/ocx_exit_derive" }
 ocx_index = { path = "crates/ocx_index" }
 ocx_oci = { path = "crates/ocx_oci" }
 ocx_package = { path = "crates/ocx_package" }
@@ -78,6 +80,7 @@ ocx_project = { path = "crates/ocx_project" }
 ocx_python = { path = "crates/ocx_python" }
 ocx_schema = { path = "crates/ocx_schema" }
 ocx_script = { path = "crates/ocx_script" }
+ocx_sdkgen = { path = "crates/ocx_sdkgen" }
 ocx_setup = { path = "crates/ocx_setup" }
 ocx_shell = { path = "crates/ocx_shell" }
 ocx_sign = { path = "crates/ocx_sign" }

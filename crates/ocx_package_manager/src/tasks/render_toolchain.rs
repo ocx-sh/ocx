@@ -346,13 +346,16 @@ const TOOLCHAIN_LOCK_TIMEOUT: Duration = super::pull::PULL_LOCAL_LOCK_TIMEOUT;
 
 /// Test-only override of [`TOOLCHAIN_LOCK_TIMEOUT`], in milliseconds.
 #[cfg(any(test, feature = "__testing"))]
-const TESTING_LOCK_TIMEOUT_ENV: &str = "__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS";
+const TESTING_LOCK_TIMEOUT_ENV: &str = ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS.name;
 
 /// [`TOOLCHAIN_LOCK_TIMEOUT`], or the [`TESTING_LOCK_TIMEOUT_ENV`] override. Panics on a malformed
 /// value: a fallback would let a typo out-wait the real deadline and still pass.
 #[cfg(any(test, feature = "__testing"))]
 fn toolchain_lock_timeout() -> Duration {
-    let Some(raw) = ocx_util::env::var(TESTING_LOCK_TIMEOUT_ENV) else {
+    let Some(raw) = ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS
+        .get_raw()
+        .and_then(|raw| raw.into_string().ok())
+    else {
         return TOOLCHAIN_LOCK_TIMEOUT;
     };
     Duration::from_millis(
@@ -1727,9 +1730,9 @@ enum RenderStage {
 /// seam (`subsystem-tests.md`), so a release build lacks the path.
 #[cfg(any(test, feature = "__testing"))]
 fn read_fault_hook() -> Option<String> {
-    std::env::var_os("__OCX_TESTING_RENDER_FAULT")
+    ocx_env::__OCX_TESTING_RENDER_FAULT
+        .get_os()
         .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.is_empty())
 }
 
 /// Fail the render when `fault` names `stage`.
@@ -3800,10 +3803,7 @@ mod tests {
     /// holding at least one entry, no new stamp, and any previous stamp
     /// unmodified.
     ///
-    /// The fault is a **parameter**, not an environment write: the override
-    /// table `ocx_util::env::overrides::EnvLock` maintains is consulted only by
-    /// `ocx_util::env::var`, never by `std::env::var_os`, so an env-only seam
-    /// would have forced `unsafe { std::env::set_var }` into this test.
+    /// The fault is a **parameter**, so the test needs no environment write.
     ///
     /// RED: write the stamp before the entry pass — the tree then reports as
     /// finished while it is half-written.
@@ -4071,14 +4071,14 @@ mod tests {
         assert_eq!(TOOLCHAIN_LOCK_TIMEOUT, super::super::pull::PULL_LOCAL_LOCK_TIMEOUT);
         assert_eq!(TOOLCHAIN_LOCK_TIMEOUT, Duration::from_secs(5));
 
-        let environment = ocx_util::env::overrides::lock();
-        environment.remove(TESTING_LOCK_TIMEOUT_ENV);
+        let environment = ocx_env::overrides::lock();
+        environment.remove(&ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS);
         assert_eq!(
             toolchain_lock_timeout(),
             TOOLCHAIN_LOCK_TIMEOUT,
             "with no override in play the seam resolves to the shipped budget"
         );
-        environment.set(TESTING_LOCK_TIMEOUT_ENV, "150");
+        environment.set(&ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS, "150");
         assert_eq!(
             toolchain_lock_timeout(),
             Duration::from_millis(150),
@@ -4104,8 +4104,8 @@ mod tests {
     /// second terminal happened to be pulling.
     #[tokio::test]
     async fn a_render_lock_timeout_is_a_skip_and_never_an_error() {
-        let environment = ocx_util::env::overrides::lock();
-        environment.set(TESTING_LOCK_TIMEOUT_ENV, "150");
+        let environment = ocx_env::overrides::lock();
+        environment.set(&ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS, "150");
 
         let tree = Tree::new();
         tree.create_home_root();
@@ -5951,8 +5951,8 @@ mod tests {
     /// RED: propagate the failure — one busy link then fails the whole compose.
     #[tokio::test]
     async fn healing_leaves_a_contended_entry_unrepaired_and_uncounted() {
-        let environment = ocx_util::env::overrides::lock();
-        environment.set(TESTING_LOCK_TIMEOUT_ENV, "150");
+        let environment = ocx_env::overrides::lock();
+        environment.set(&ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS, "150");
 
         let tree = Tree::new();
         // The per-entry lock keys on the group directory's file identity.
@@ -7989,12 +7989,8 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_render_never_leaves_active_pointing_at_an_absent_shell() {
         let tree = Tree::new();
-        let _lock = ocx_util::env::overrides::lock();
-        // SAFETY: nextest gives every test its own process, and `EnvLock`
-        // serialises this write against every test that goes through
-        // `ocx_util::env::overrides`. `read_fault_hook` reads `std::env::var_os`, which
-        // the override table does not reach, so the variable has to be real.
-        unsafe { std::env::set_var("__OCX_TESTING_RENDER_FAULT", FAULT_AFTER_SHELL_TREE) };
+        let environment = ocx_env::overrides::lock();
+        environment.set(&ocx_env::__OCX_TESTING_RENDER_FAULT, FAULT_AFTER_SHELL_TREE);
 
         let lock = lock_of(vec![locked_tool(
             "cmake",
@@ -8017,8 +8013,7 @@ mod tests {
                 dry_run: false,
             })
             .await;
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("__OCX_TESTING_RENDER_FAULT") };
+        environment.remove(&ocx_env::__OCX_TESTING_RENDER_FAULT);
 
         assert!(outcome.is_err(), "precondition: the seam aborted the render");
         assert!(

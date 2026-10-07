@@ -25,6 +25,10 @@
 //! gate. Tests that fail today (the architect's `$comment` requirement)
 //! drive the implement-phase deliverable.
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running the built schema generator binary as its subject"
+)]
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -37,6 +41,10 @@ use serde_json::Value;
 /// `:ocx_schema_bin` runfile.
 const SCHEMA_BINARY: &str = env!("CARGO_BIN_EXE_ocx_schema");
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running the built schema generator binary as its subject"
+)]
 fn run_binary(kind: &str) -> Output {
     Command::new(SCHEMA_BINARY)
         .arg(kind)
@@ -173,11 +181,18 @@ fn project_schema_env_value_is_a_string_or_table_union() {
         .get("type")
         .map(|node| resolve(&schema, node))
         .expect("table arm must declare a `type` discriminant");
-    let variants: Vec<&str> = modifier
-        .get("enum")
-        .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    // A documented variant set renders as a `oneOf` of `const`s, an undocumented one as `enum`.
+    let variants: Vec<&str> = match modifier.get("oneOf").and_then(Value::as_array) {
+        Some(arms) => arms
+            .iter()
+            .filter_map(|arm| arm.get("const").and_then(Value::as_str))
+            .collect(),
+        None => modifier
+            .get("enum")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default(),
+    };
     assert!(
         variants.contains(&"path") && variants.contains(&"constant"),
         "`type` must be constrained to exactly the two modifiers; got {variants:?}"
@@ -608,6 +623,9 @@ fn every_schema_kind_the_binary_prints_carries_its_canonical_id() {
         ("project", "https://ocx.sh/schemas/project/v1.json"),
         ("project-lock", "https://ocx.sh/schemas/project-lock/v3.json"),
         ("execution-record", "https://ocx.sh/schemas/execution-record/v1.json"),
+        ("reports", "https://ocx.sh/schemas/reports/v2.json"),
+        ("errors", "https://ocx.sh/schemas/errors/v2.json"),
+        ("cli-schema", "https://ocx.sh/schemas/cli/v1.json"),
     ] {
         let output = run_binary(kind);
         assert!(
@@ -625,6 +643,54 @@ fn every_schema_kind_the_binary_prints_carries_its_canonical_id() {
             "ocx_schema {kind}: schema $id mismatch"
         );
     }
+}
+
+/// `cli` prints the grammar document itself, led by its in-band version, rather than a schema.
+#[test]
+fn the_cli_kind_prints_the_versioned_grammar_document() {
+    let output = run_binary("cli");
+    assert!(output.status.success(), "ocx_schema cli failed ({})", output.status);
+    let document: Value = serde_json::from_slice(&output.stdout).expect("ocx_schema cli prints JSON");
+    assert_eq!(document.get("schema_version").and_then(Value::as_u64), Some(1));
+    assert_eq!(
+        document.pointer("/root/path").and_then(Value::as_array).map(Vec::len),
+        Some(0),
+        "the root command has an empty path"
+    );
+    assert!(
+        document.get("$id").is_none(),
+        "the grammar document is data, not a schema"
+    );
+}
+
+/// Every public boolean variable set truthy leaves `cli.json` byte-identical: no clap default
+/// reads the environment. A fresh process per run, because clap's derive caches a computed
+/// default for the life of the process.
+#[test]
+#[expect(
+    clippy::disallowed_types,
+    reason = "integration test running the built schema generator binary as its subject"
+)]
+fn public_switches_leave_cli_json_unchanged() {
+    let switches: Vec<&str> = ocx_env::all()
+        .filter(|var| var.visibility == ocx_env::Visibility::Public && var.value == ocx_env::EnvValue::Bool)
+        .map(|var| var.name)
+        .collect();
+    assert!(switches.len() >= 5, "only {} public switches", switches.len());
+    let run = |value: Option<&str>| {
+        let mut command = Command::new(SCHEMA_BINARY);
+        command.arg("cli");
+        for name in &switches {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        let output = command.output().expect("ocx_schema runs");
+        assert!(output.status.success(), "ocx_schema cli failed ({})", output.status);
+        output.stdout
+    };
+    assert!(run(None) == run(Some("1")), "a clap default read the environment");
 }
 
 /// An unknown kind is a usage error at the process boundary, so a caller

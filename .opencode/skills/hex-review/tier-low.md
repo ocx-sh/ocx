@@ -1,7 +1,8 @@
 # Tier: low
 
 Inline review for **trivial** diffs — one file, ≤30 lines, no structural
-marker ([`classify.md`](classify.md#tier-metric-table)). **Zero spawns:
+marker, or a docs-only delta of any size
+([`classify.md`](classify.md#tier-metric-table)). **Zero spawns:
 the orchestrator reads the diff itself** (`adr_0017` C-994). The
 adversarial stance still applies; what shrinks is the seat count, to none.
 Anything Discover reveals to be larger stops and re-runs as
@@ -19,7 +20,7 @@ Read the diff against the resolved baseline ([`SKILL.md`](SKILL.md)
 step 2) and the one area's quality rules (project context, cached in
 `hex.md › Pointers`).
 
-**Gate** — one file, its rules loaded.
+**Gate** — the diff and its rules are loaded.
 
 ## Phase 2: Stage 1 — Correctness (inline)
 
@@ -55,7 +56,7 @@ Produce the review report using the skeleton from
 - Verdict: Approve | Needs Work | Request Changes
 - Tier: low (inline — 0 spawns)
 - Baseline: <base>
-- Diff: 1 file, +L / -L lines, 1 area
+- Diff: N files, +L / -L lines, S areas
 ### Stage 1 — Correctness
 [findings with file:line, description, remediation]
 ### Convergence   <!-- when the target traces to a plan -->
@@ -73,7 +74,7 @@ Produce the review report using the skeleton from
 the handoff from [`SKILL.md`](SKILL.md) with:
 
 ```
-- Scope: trivial (one file)
+- Scope: trivial (one file, or docs-only)
 - Tier: low
 - Baseline: <base>
 - Overlays: breadth=minimal, rca=off, adversary=off

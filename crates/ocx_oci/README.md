@@ -6,7 +6,7 @@ capability detection, registry auth, and the SSRF guard.
 
 **Tier:** ecosystem
 
-**May depend on:** `ocx_util`, `ocx_console`, `ocx_exit`
+**May depend on:** `ocx_util`, `ocx_console`, `ocx_exit`, `ocx_env`
 
 **Named dependency exceptions:** none
 

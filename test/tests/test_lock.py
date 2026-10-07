@@ -1412,7 +1412,7 @@ def test_fault_injected_add_rolls_back_committed_lock_without_panic(
 
     Setup: publish two packages, ``ocx lock`` the first to establish a
     predecessor, then a fault-injected ``ocx add`` of the second
-    (``OCX_TEST_FAULT=after_lock_write``) reaches the commit's post-lock-
+    (``__OCX_TESTING_FAULT=after_lock_write``) reaches the commit's post-lock-
     rename rollback boundary.
     """
     short = uuid4().hex[:8]
@@ -1446,7 +1446,7 @@ existing = "{ocx.registry}/{repo_existing}:1.0.0"
         cwd=project,
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_TEST_FAULT": "after_lock_write"}, check=False,
+        env={**ocx.env, "__OCX_TESTING_FAULT": "after_lock_write"}, check=False,
     )
 
     assert failed.returncode != EXIT_SUCCESS, (

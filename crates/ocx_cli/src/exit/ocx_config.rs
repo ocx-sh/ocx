@@ -1,245 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_config` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_config` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_config::ToolchainRootError;
 use ocx_config::edit::EditError;
 use ocx_config::env::CommandResolutionError;
-use ocx_config::error::Error as ConfigError;
-use ocx_config::managed::ManagedConfigError;
-use ocx_config::managed_config::ManagedConfigFetchError;
-use ocx_config::managed_config::ManagedConfigPersistError;
-use ocx_config::managed_config::ManagedConfigUpdateError;
-use ocx_config::mirror::MirrorConfigError;
-use ocx_config::patch::PatchConfigError;
-use ocx_config::refresh::IntervalError;
 use ocx_config::tls::TlsError;
-use ocx_package::launch::LaunchIdentityError;
 use ocx_package::metadata::env::apply::ForwardedEnvError;
 use ocx_package::metadata::env::apply::ListSeparatorError;
 use ocx_package_manager::managed_config::ManagedConfigPublishError;
 
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for ToolchainRootError {
-    /// Exhaustive, not a blanket `Some`, so a new refusal cannot ship unclassified.
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Unexpandable { .. }
-            | Self::Relative { .. }
-            | Self::ParentDirComponent { .. }
-            | Self::NoContainmentAnchor { .. }
-            | Self::IsContainmentAnchor { .. }
-            | Self::OutsideHome { .. }
-            | Self::SystemPrefix { .. }
-            | Self::InsideGlobalToolchainHome { .. }
-            | Self::Inaccessible { .. }
-            | Self::NotADirectory { .. }
-            | Self::NotOwnerOwned { .. }
-            | Self::GroupOrWorldWritable { .. } => ExitCode::ConfigError,
-        })
-    }
-}
-
-impl ClassifyExitCode for ListSeparatorError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for CommandResolutionError {
-    /// Keep exhaustive even though every arm is 65: a blanket `Some` would classify a new variant silently, and no test can tell.
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::NotExecutable { .. } => Some(ExitCode::DataError),
-            Self::NotFound { .. } => Some(ExitCode::DataError),
-            Self::TrampolineRefused { .. } => Some(ExitCode::DataError),
-        }
-    }
-}
-
-impl ClassifyExitCode for ForwardedEnvError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for ManagedConfigFetchError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::FetchFailed { source } => source.classify(),
-            Self::UnexpectedManifest { .. }
-            | Self::NoAnyPlatformEntry
-            | Self::NoGzipLayer
-            | Self::MissingConfigToml
-            | Self::LayerSizeExceeded { .. }
-            | Self::LayerDigestMismatch { .. }
-            | Self::ConfigEntryTooLarge { .. }
-            | Self::InvalidArchive { .. } => Some(ExitCode::DataError),
-        }
-    }
-}
-
-impl ClassifyExitCode for ManagedConfigPersistError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::InvalidToml { .. } => Some(ExitCode::DataError),
-            Self::SnapshotWriteFailed { .. } => Some(ExitCode::IoError),
-            Self::ExtraCaCertsInvalid { source } => source.classify(),
-        }
-    }
-}
-
-impl ClassifyExitCode for ManagedConfigUpdateError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Fetch(source) => source.classify(),
-            Self::Persist(source) => source.classify(),
-            Self::SourceNotFound { .. } => Some(ExitCode::NotFound),
-            Self::PinDigestMismatch { .. } => Some(ExitCode::DataError),
-        }
-    }
-}
-
-impl ClassifyExitCode for ManagedConfigPublishError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::PayloadTooLarge { .. }
-            | Self::InvalidToml { .. }
-            | Self::ContainsManagedSection
-            | Self::AmbiguousTrustRoot
-            | Self::AmbiguousExtraCaCerts
-            | Self::ManagedConfigKeyByPath
-            | Self::TrustedRootInvalid { .. }
-            | Self::ExtraCaCertsPemInvalid { .. } => Some(ExitCode::ConfigError),
-            // Parity with `--key` and the local config tiers, which answer 85 for the same value.
-            Self::InvalidTrustPolicy { source } if source.names_unsupported_backend() => {
-                Some(ExitCode::UnsupportedKeyBackend)
-            }
-            Self::InvalidTrustPolicy { .. } => Some(ExitCode::ConfigError),
-            Self::ExtraCaCertsInvalid { .. } | Self::ExtraCaCertsNotUtf8 { .. } => Some(ExitCode::DataError),
-            Self::ReadFailed { source, .. }
-            | Self::TrustedRootReadFailed { source, .. }
-            | Self::ExtraCaCertsReadFailed { source, .. } => Some(match source.kind() {
-                std::io::ErrorKind::NotFound => ExitCode::NotFound,
-                std::io::ErrorKind::PermissionDenied => ExitCode::PermissionDenied,
-                _ => ExitCode::IoError,
-            }),
-            Self::StageFailed { .. } => Some(ExitCode::IoError),
-            // Delegated explicitly: a boxed source never downcasts in the chain walker.
-            Self::BundleFailed { source } | Self::ListTagsFailed { source, .. } | Self::PushFailed { source } => {
-                source.classify()
-            }
-        }
-    }
-}
-
-impl ClassifyExitCode for EditError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::TooLarge { .. } => ExitCode::ConfigError,
-            // `adr_file_lock_unification.md`: the holder is another ocx, gone on retry.
-            Self::Locked { .. } => ExitCode::TempFail,
-            Self::Io { .. } | Self::Parse { .. } | Self::Malformed { .. } => ExitCode::IoError,
-        })
-    }
-}
-
-impl ClassifyExitCode for ConfigError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::FileNotFound { .. } => ExitCode::NotFound,
-            Self::FileTooLarge { .. }
-            | Self::Parse { .. }
-            | Self::SystemConfig { .. }
-            | Self::AmbiguousExtraCaCerts { .. } => ExitCode::ConfigError,
-            Self::Io { .. } => ExitCode::IoError,
-            // Delegated, not restated as 78, or the two mappings drift apart silently.
-            Self::Toolchain(refusal) => return refusal.classify(),
-        })
-    }
-}
-
-impl ClassifyExitCode for ManagedConfigError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::ConfigError)
-    }
-}
-
-impl ClassifyExitCode for IntervalError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::ConfigError)
-    }
-}
-
-impl ClassifyExitCode for MirrorConfigError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::ConfigError)
-    }
-}
-
-impl ClassifyExitCode for PatchConfigError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::ConfigError)
-    }
-}
-
-/// 78, the same as a malformed `OCX_PATCHES`: both are the patch tier a parent ocx handed down.
-impl ClassifyExitCode for LaunchIdentityError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::ConfigError)
-    }
-}
-
-impl ClassifyExitCode for TlsError {
-    fn classify(&self) -> Option<ExitCode> {
-        let code = match self {
-            Self::Unreadable { .. } => ExitCode::IoError,
-            Self::TooLarge { origin, .. } if origin.is_file() => ExitCode::IoError,
-            Self::TooLarge { .. } => ExitCode::ConfigError,
-            Self::NotACertificate { origin, .. }
-            | Self::Empty { origin }
-            | Self::Malformed { origin, .. }
-            | Self::Truncated { origin, .. } => {
-                if origin.is_file() {
-                    ExitCode::DataError
-                } else {
-                    ExitCode::ConfigError
-                }
-            }
-        };
-        Some(code)
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, ConfigError);
-    downcast_arm!(cause, EditError);
-    downcast_arm!(cause, ForwardedEnvError);
-    downcast_arm!(cause, ListSeparatorError);
-    downcast_arm!(cause, CommandResolutionError);
-    downcast_arm!(cause, ManagedConfigError);
-    downcast_arm!(cause, IntervalError);
-    downcast_arm!(cause, MirrorConfigError);
-    downcast_arm!(cause, PatchConfigError);
-    downcast_arm!(cause, LaunchIdentityError);
-    downcast_arm!(cause, ManagedConfigFetchError);
-    downcast_arm!(cause, ManagedConfigPersistError);
-    downcast_arm!(cause, ManagedConfigUpdateError);
-    downcast_arm!(cause, ManagedConfigPublishError);
-    downcast_arm!(cause, TlsError);
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exit::detail_slug;
     use ocx_config::ConfigTier;
     use ocx_config::ToolchainRootTier;
     use ocx_config::tls::ExtraRootsSource;
+    use ocx_exit::ClassifyExitCode as _;
+    use ocx_exit::ExitCode;
     use ocx_util::tls::MAX_EXTRA_CA_CERTS_BYTES;
 
     use std::path::PathBuf;
@@ -307,7 +87,7 @@ mod tests {
     }
 
     /// C-004 / C-010: the chain walker reaches a `TlsError` behind a wrapper —
-    /// the `try_downcast!` registration in `cli/classify.rs`, without which 78
+    /// the `families!` entry for `TlsError` in `exit.rs`, without which 78
     /// is unreachable from `Context::try_init`.
     #[test]
     fn extra_ca_tls_error_is_classified_through_the_error_chain_walker() {
@@ -364,8 +144,7 @@ mod tests {
     /// WP-10 moved this impl out of `ocx_util::tls` and left both `classify()`
     /// assertions behind in the library test, which kept only a message check;
     /// no test asserted either value between that merge and this one. The two
-    /// expected codes are read from the pre-split baseline
-    /// (`classify_baseline_7adaea62.json`, `TlsError` / `ClassifyExitCode`),
+    /// expected codes are read from the pre-split `ocx_lib` impl (commit `7adaea62`),
     /// never off the arms below — a test written by looking at the code it
     /// guards asserts only that the code equals itself, and would have been
     /// just as green had the split been inverted.
@@ -384,6 +163,74 @@ mod tests {
                 bytes: MAX_EXTRA_CA_CERTS_BYTES + 1,
             };
             assert_eq!(error.classify(), Some(ExitCode::IoError), "{error:?}");
+        }
+    }
+
+    /// Reds on: a config slug, chosen by origin or io kind or delegated, filed under another code
+    /// than the error exits with.
+    #[test]
+    fn config_details_follow_the_code_each_error_exits_with() {
+        use crate::exit::tests::assert_detail;
+
+        for origin in file_origins() {
+            let empty = TlsError::Empty { origin: origin.clone() };
+            assert_detail(&empty, "extra_ca_file_invalid");
+            let bytes = MAX_EXTRA_CA_CERTS_BYTES + 1;
+            assert_detail(
+                &TlsError::TooLarge {
+                    origin: origin.clone(),
+                    bytes,
+                },
+                "extra_ca_file_too_large",
+            );
+            let io = std::io::Error::from(std::io::ErrorKind::NotFound);
+            assert_detail(&TlsError::Unreadable { origin, io }, "extra_ca_unreadable");
+        }
+        for origin in inline_origins() {
+            assert_detail(&TlsError::Empty { origin: origin.clone() }, "extra_ca_value_invalid");
+            let bytes = MAX_EXTRA_CA_CERTS_BYTES + 1;
+            assert_detail(&TlsError::TooLarge { origin, bytes }, "extra_ca_value_too_large");
+        }
+
+        type Reader = fn(std::io::Error) -> ManagedConfigPublishError;
+        let readers: [(&str, Reader); 3] = [
+            ("managed_config_payload_read_failed", |source| {
+                ManagedConfigPublishError::ReadFailed {
+                    path: PathBuf::from("/etc/ocx/config.toml"),
+                    source,
+                }
+            }),
+            ("trusted_root_read_failed", |source| {
+                ManagedConfigPublishError::TrustedRootReadFailed {
+                    path: PathBuf::from("/etc/ocx/trusted_root.json"),
+                    source,
+                }
+            }),
+            ("extra_ca_certs_read_failed", |source| {
+                ManagedConfigPublishError::ExtraCaCertsReadFailed {
+                    origin: ExtraRootsSource::EnvPath(PathBuf::from("/etc/ocx/roots.pem")),
+                    source,
+                }
+            }),
+        ];
+        for (read_failed, build) in readers {
+            let ladder = [
+                (std::io::ErrorKind::NotFound, "managed_config_input_not_found"),
+                (std::io::ErrorKind::PermissionDenied, "permission_denied"),
+                (std::io::ErrorKind::InvalidData, read_failed),
+            ];
+            for (kind, slug) in ladder {
+                assert_detail(&build(std::io::Error::from(kind)), slug);
+            }
+        }
+        let pushed = ManagedConfigPublishError::PushFailed {
+            source: Box::new(ocx_package_manager::Error::OfflineMode),
+        };
+        assert_detail(&pushed, "offline_mode");
+
+        for refusal in every_refusal_variant() {
+            let slug = detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&refusal));
+            assert_detail(&ocx_config::error::Error::from(refusal), slug);
         }
     }
 
@@ -492,10 +339,10 @@ mod tests {
     /// A malformed `OCX_LAUNCH_IDENTITIES` exits as a malformed `OCX_PATCHES` does.
     #[test]
     fn launch_identity_error_classifies_as_a_malformed_patch_tier() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES, "not json {{{");
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, "not json {{{");
         let identity_error = ocx_package::launch::LaunchIdentities::from_env().expect_err("malformed");
-        guard.set(ocx_config::env::keys::OCX_PATCHES, "not json {{{");
+        guard.set(&ocx_env::OCX_PATCHES, "not json {{{");
         let patches_error = ocx_config::patch::patches_from_env().expect_err("malformed");
 
         let identity_code = crate::exit::classify_error(&identity_error);
@@ -546,7 +393,7 @@ mod tests {
             searched: vec![PathBuf::from("/p/.ocx/toolchain/bin")],
         };
         assert_eq!(
-            ClassifyExitCode::classify(&error),
+            ocx_exit::ClassifyExitCode::classify(&error),
             Some(ExitCode::DataError),
             "S-010: a trampoline invoked under a name the composition lacks exits 65"
         );
@@ -568,7 +415,7 @@ mod tests {
             command: "cmake".into(),
             path: PathBuf::from("/p/.ocx/toolchain/bin/cmake"),
         };
-        assert_eq!(ClassifyExitCode::classify(&error), Some(ExitCode::DataError));
+        assert_eq!(ocx_exit::ClassifyExitCode::classify(&error), Some(ExitCode::DataError));
         assert_eq!(
             crate::exit::classify_library_error(&error),
             ExitCode::DataError,

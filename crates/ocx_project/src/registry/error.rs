@@ -6,10 +6,12 @@
 use std::path::PathBuf;
 
 /// Error returned from [`super::ProjectRegistry`] methods.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "ProjectRegistryError")]
 pub enum Error {
     /// A registry operation failed; see [`ProjectRegistryError`] for context.
     #[error("{0}")]
+    #[exit(delegate = 0.kind)]
     Registry(#[from] ProjectRegistryError),
 }
 
@@ -47,9 +49,15 @@ impl std::error::Error for ProjectRegistryError {
 }
 
 /// Registry failure kind; the symlink store's only failure class is I/O.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "ProjectRegistryError")]
 pub enum ProjectRegistryErrorKind {
     /// Filesystem I/O failure.
     #[error("I/O error: {0}")]
+    #[exit(
+        IoError,
+        slug = "project_registry_io",
+        summary = "Reading or writing the project registry failed"
+    )]
     Io(#[source] std::io::Error),
 }

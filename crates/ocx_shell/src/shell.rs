@@ -73,7 +73,7 @@ impl Shell {
 
     /// Tries to resolve the shell from the `SHELL` environment variable.
     pub fn from_env() -> Option<Self> {
-        ocx_util::env::var("SHELL").and_then(Self::from_path)
+        ocx_env::SHELL.get().and_then(Self::from_path)
     }
 
     /// Tries to resolve the shell by inspecting the current and parent process information.
@@ -129,7 +129,7 @@ impl Shell {
     /// or for [`Shell::Batch`] when `value` is one `cmd.exe` cannot carry (`batch_cannot_express`).
     pub fn export_path(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
-        if !ocx_util::env::is_valid_env_key(key) {
+        if !ocx_env::is_valid_env_key(key) {
             return None;
         }
         let raw = value.as_ref();
@@ -144,7 +144,7 @@ impl Shell {
         // (`split_paths` unquotes it into one segment), but every arm here splits on the raw separator
         // with no quote awareness, drops the interior field and re-joins `"C:\a;b"`. The precondition
         // keeps this away from `value` itself.
-        let separator = ocx_util::env::PATH_SEPARATOR;
+        let separator = ocx_util::path::PATH_SEPARATOR;
         // A throwaway `__ocx_p` carries the value through one escape context and is unset in the same
         // statement, so the match references the quoted variable, not a re-interpolated literal,
         // closing the glob / second-escape gap.
@@ -270,7 +270,7 @@ impl Shell {
         separator: impl AsRef<str>,
     ) -> Option<String> {
         let key = key.as_ref();
-        if !ocx_util::env::is_valid_env_key(key) {
+        if !ocx_env::is_valid_env_key(key) {
             return None;
         }
         let raw = value.as_ref();
@@ -371,7 +371,7 @@ impl Shell {
         separator: Option<&str>,
     ) -> Option<String> {
         let key = key.as_ref();
-        if !ocx_util::env::is_valid_env_key(key) || self == Self::Batch {
+        if !ocx_env::is_valid_env_key(key) || self == Self::Batch {
             return None;
         }
         // Path-kind normalises the operand the same way it normalises the
@@ -385,7 +385,7 @@ impl Shell {
         if raw.is_empty() {
             return Some(self.comment(format!("ocx: {key} removal value is empty, nothing to remove")));
         }
-        let raw_separator = separator.unwrap_or(ocx_util::env::PATH_SEPARATOR);
+        let raw_separator = separator.unwrap_or(ocx_util::path::PATH_SEPARATOR);
         // Escaping is per arm, never one shared escaper: the fish/nushell double-quote escaper leaves
         // `'` untouched, so an element like `/tmp/a';id;'b` from a project `[env]` value would run at
         // every prompt if it reached a single-quoted arm.
@@ -521,7 +521,7 @@ impl Shell {
     /// Returns `None` for an invalid key, or for [`Shell::Batch`] when `value` contains `%`, `"`, LF or CR.
     pub fn export_constant(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
-        if !ocx_util::env::is_valid_env_key(key) {
+        if !ocx_env::is_valid_env_key(key) {
             return None;
         }
         let raw = value.as_ref();
@@ -557,7 +557,7 @@ impl Shell {
     /// `key` is not a valid POSIX environment-variable name.
     pub fn unset(self, key: impl AsRef<str>) -> Option<String> {
         let key = key.as_ref();
-        if !ocx_util::env::is_valid_env_key(key) {
+        if !ocx_env::is_valid_env_key(key) {
             return None;
         }
         Some(match self {
@@ -616,7 +616,7 @@ fn batch_cannot_express(value: &str) -> bool {
 /// One admission rule for both emit sites: the reconciler's planner ([`reconcile`]) keeps
 /// `L ⊆ emittable(D)` with it, and `conventions::emit_lines` refuses the same set for the export commands.
 /// Each refusal is because the *revert* is impossible, not the apply: an invalid env-var name (a ledger
-/// entry would name a key no arm can remove); a path-kind value embedding [`ocx_util::env::PATH_SEPARATOR`]
+/// entry would name a key no arm can remove); a path-kind value embedding [`ocx_util::path::PATH_SEPARATOR`]
 /// (split-based arms read two segments, so every re-source prepends another copy); an empty element (an
 /// empty `PATH` segment is the current directory); an element with LF or CR (the removal fold cannot
 /// address a re-wrapped span, and Batch's `SET` splits on it). A per-shell refusal stays the emitter's own.
@@ -628,10 +628,10 @@ pub fn is_emittable(entry: &ocx_package::metadata::env::entry::Entry) -> Result<
     use ocx_package::metadata::env::modifier::ModifierKind;
 
     let element = matches!(entry.kind, ModifierKind::Path | ModifierKind::List);
-    if !ocx_util::env::is_valid_env_key(&entry.key) {
+    if !ocx_env::is_valid_env_key(&entry.key) {
         return Err("not a valid environment-variable name");
     }
-    if matches!(entry.kind, ModifierKind::Path) && entry.value.contains(ocx_util::env::PATH_SEPARATOR) {
+    if matches!(entry.kind, ModifierKind::Path) && entry.value.contains(ocx_util::path::PATH_SEPARATOR) {
         return Err("a path value may not embed the platform path separator");
     }
     if element && entry.value.is_empty() {
@@ -645,7 +645,7 @@ pub fn is_emittable(entry: &ocx_package::metadata::env::entry::Entry) -> Result<
 
 /// The `StringComparison` a PATH element is compared under, chosen at emit time: the emitter
 /// and the shell it emits for run on the same host, so `cfg!(windows)` is the platform test, the
-/// same rule [`ocx_util::env::PATH_SEPARATOR`] follows.
+/// same rule [`ocx_util::path::PATH_SEPARATOR`] follows.
 fn path_element_comparison() -> &'static str {
     if cfg!(windows) { "OrdinalIgnoreCase" } else { "Ordinal" }
 }
@@ -775,12 +775,12 @@ mod tests {
 
     #[test]
     fn test_from_env() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("SHELL", "/bin/bash");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::SHELL, "/bin/bash");
         assert_eq!(Shell::from_env(), Some(Shell::Bash));
-        env.set("SHELL", "/usr/bin/fish");
+        env.set(&ocx_env::SHELL, "/usr/bin/fish");
         assert_eq!(Shell::from_env(), Some(Shell::Fish));
-        env.remove("SHELL");
+        env.remove(&ocx_env::SHELL);
         assert_eq!(Shell::from_env(), None);
     }
 
@@ -1221,7 +1221,7 @@ mod tests {
     // absent) to prove idempotency / move-to-front / injection-safety end to end.
 
     fn sep() -> &'static str {
-        ocx_util::env::PATH_SEPARATOR
+        ocx_util::path::PATH_SEPARATOR
     }
 
     #[test]
@@ -1495,6 +1495,10 @@ mod tests {
     // exercised by a real parser, proving the three invariants end to end:
     // move-to-front, idempotency (source twice), and injection safety.
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness sourcing generated export lines in a real shell"
+    )]
     use std::process::Command;
 
     // The interpreter binaries `run_output` actually executed on this thread.
@@ -1523,7 +1527,7 @@ mod tests {
     /// of passing silently.
     #[cfg(unix)]
     fn required_live_interpreters() -> Option<Vec<String>> {
-        let raw = std::env::var("__OCX_TESTING_REQUIRE_LIVE_SHELLS").ok()?;
+        let raw = ocx_env::__OCX_TESTING_REQUIRE_LIVE_SHELLS.get()?;
         let raw = raw.trim();
         if raw.is_empty() {
             return None;
@@ -1545,6 +1549,10 @@ mod tests {
     /// only distinction drawn here, because presence is what separates an
     /// environment fact from a defect.
     #[cfg(unix)]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness sourcing generated export lines in a real shell"
+    )]
     fn interpreter_present(bin: &str) -> bool {
         !matches!(
             Command::new(bin).arg("--version").output(),
@@ -1642,6 +1650,10 @@ mod tests {
     /// meaningful on unix. Windows emit is covered by the `live_batch_*` cmd tests
     /// (cross-platform, below) and the `shell-activation-deep.yml` pwsh harness.
     #[cfg(unix)]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness sourcing generated export lines in a real shell"
+    )]
     fn run_output(argv: &[&str], script: &str) -> Option<std::process::Output> {
         let (bin, head) = argv.split_first()?;
         let run = |body: &str| match Command::new(bin).args(head).arg(body).output() {
@@ -1917,6 +1929,10 @@ mod tests {
     /// move-to-front emit is multi-line and relies on per-statement `%PATH%`
     /// re-expansion, which only a sequentially-parsed `.bat` provides. CRLF line
     /// endings keep legacy cmd parsers happy.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness sourcing generated export lines in a real shell"
+    )]
     fn run_batch(body: &str) -> Option<String> {
         // Unique per invocation: nextest runs the batch live-tests concurrently and
         // they share `temp_dir()`. A fixed name raced (one test's `SET "PATH="` body
@@ -2693,7 +2709,7 @@ mod tests {
     #[test]
     fn remove_list_element_uses_the_given_separator_not_the_platform_one() {
         // S-034 / A-08: `CFLAGS` is `{type = "list", separator = " "}`. A build
-        // that ignored the parameter and assumed `ocx_util::env::PATH_SEPARATOR` would
+        // that ignored the parameter and assumed `ocx_util::path::PATH_SEPARATOR` would
         // emit `:` flanks, and the contribution would be permanently
         // unremovable. Asserted per arm, on the emitted bytes.
         let platform = sep();

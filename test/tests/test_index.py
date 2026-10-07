@@ -482,13 +482,13 @@ def test_index_list_platforms_accepts_digest_offline(
 def test_index_catalog_tags_local_mode_empty_listing_succeeds(
     ocx: OcxRunner,
 ):
-    """`ocx index catalog --tags` (no `--remote`, nothing indexed yet) is a
+    """`ocx index catalog --with-tags` (no `--remote`, nothing indexed yet) is a
     legitimate empty listing, not a failure — must exit 0.
 
     Distinguishes "no tags exist locally" (success) from "a fetch failed"
     (see `test_index_catalog_tags_remote_fetch_failure_exits_nonzero`).
     """
-    result = ocx.plain("index", "catalog", "--tags")
+    result = ocx.plain("index", "catalog", "--with-tags")
     assert result.returncode == 0
 
 
@@ -496,13 +496,13 @@ def test_index_catalog_tags_remote_fetch_failure_exits_nonzero(
     ocx: OcxRunner,
     index_server: static_index.StaticIndexServer,
 ):
-    """`ocx --remote index catalog --tags` must not report SUCCESS with an
+    """`ocx --remote index catalog --with-tags` must not report SUCCESS with an
     empty or partial catalog when a per-repository tag fetch fails.
 
     Regression test: the per-repository `list_tags` failure inside the
     `--tags` fan-out used to be logged and swallowed — the command still
     printed a catalog and returned exit 0, so a script consuming
-    `ocx --format json index catalog --tags` could not tell "no tags exist"
+    `ocx --format json index catalog --with-tags` could not tell "no tags exist"
     from "the fetch failed". Here the catalog listing succeeds (the fixture's
     `c/index.json` lists a real repository name) but that repository's root
     document is malformed, so `list_tags` errors for it; the command must
@@ -524,7 +524,7 @@ def test_index_catalog_tags_remote_fetch_failure_exits_nonzero(
     config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n')
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
-    result = ocx.plain("--remote", "index", "catalog", "--tags", namespace, check=False)
+    result = ocx.plain("--remote", "index", "catalog", "--with-tags", namespace, check=False)
     assert result.returncode != 0, (
         f"total remote tag-fetch failure must not read as success: {result.stdout}"
     )
@@ -543,7 +543,7 @@ def test_index_catalog_tags_bounds_its_in_flight_listings(
     ocx: OcxRunner,
     index_server: static_index.StaticIndexServer,
 ):
-    """`ocx --remote index catalog --tags` fans out over a whole registry's
+    """`ocx --remote index catalog --with-tags` fans out over a whole registry's
     repository list, and that fan-out is bounded.
 
     Every number here is measured, not reasoned. A static file is served far
@@ -589,14 +589,14 @@ def test_index_catalog_tags_bounds_its_in_flight_listings(
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
 
     index_server.hold_seconds = 0.5
-    catalog = ocx.json("--remote", "index", "catalog", "--tags", namespace)
+    catalog = ocx.json("--remote", "index", "catalog", "--with-tags", namespace)
 
     # Non-vacuity first, three ways: the run listed every repository, each
     # listing actually resolved its tags off the fixture, and the requests
     # overlapped at all. Without these a run that fanned out over nothing
     # satisfies the bound trivially — a green indistinguishable from the test
     # never having run.
-    listed = catalog["repositories"]
+    listed = {item["repository"]: item["tags"] for item in catalog["items"]}
     assert len(listed) == CATALOG_REPOSITORY_COUNT, (
         f"precondition: every repository must have been listed, got {len(listed)}"
     )
@@ -610,7 +610,7 @@ def test_index_catalog_tags_bounds_its_in_flight_listings(
     # would red on the catalog listing's trailing handler; doubling to 32 lands
     # inside the widened build's own range and passes on unbounded code.
     assert index_server.peak_in_flight <= CATALOG_TAG_CONCURRENCY + 8, (
-        f"`index catalog --tags` must hold roughly CATALOG_TAG_CONCURRENCY "
+        f"`index catalog --with-tags` must hold roughly CATALOG_TAG_CONCURRENCY "
         f"({CATALOG_TAG_CONCURRENCY}) tag listings in flight rather than one per repository; "
         f"the fixture saw {index_server.peak_in_flight} over {CATALOG_REPOSITORY_COUNT} repositories"
     )

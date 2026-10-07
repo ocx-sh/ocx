@@ -37,6 +37,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Shell activation / per-prompt env reconciliation, consent stamps | [subsystem-cli.md](./rules/subsystem-cli.md) (`ocx shell state`), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) (`state/projects/<key>/` layout), `arch-principles.md` (ADR index + State glossary) |
+| Changing a machine-facing surface (`--format json` report, error document, exit code or slug, `OCX_*` env variable, flag grammar, `cli.json`) | [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) — style guide IC-01…IC-22, counterpart table, semantic-break checklist; [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
 | CLI help / `--help` text wording | [quality-cli-help.md](./rules/quality-cli-help.md), [subsystem-cli.md](./rules/subsystem-cli.md), [quality-rust.md](./rules/quality-rust.md) (two-register) |
 | Adding a CLI verb (smoke marker + `SUITE_FLOOR` obligation) | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) § Command Summary, [subsystem-tests.md](./rules/subsystem-tests.md) § Smoke Tier and Guards |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
@@ -46,7 +47,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
 | GitHub issues & PRs / planning artifacts | [workflow-github.md](./rules/workflow-github.md), [workflow-feature.md](./rules/workflow-feature.md) |
 | Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `hex-finalize` |
-| Merging a work package (the merge commit needs a full mark of the merged tree) | [workflow-git.md](./rules/workflow-git.md) § Work-Package Merges — `git merge --no-ff --no-commit <branch>` → `task verify` → `git commit`; its named residuals |
+| Choosing how much to verify before a commit (docs: none; batches; merges; `verify:mark` always allowed) | [workflow-git.md](./rules/workflow-git.md) § Verification Levels |
 | Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", skills `hex-plan`, `hex-execute`, `hex-review`, `commit`, `hex-finalize`, `next` |
 | Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `hex-plan`, `hex-execute`, `hex-review` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
@@ -90,6 +91,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Dependencies | [subsystem-deps.md](./rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml` |
 | Taskfiles | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` |
+| Machine interface | [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, `crates/ocx_cli/src/{api/data,command,options,exit}/**`, `crates/ocx_cli/src/{error_document,app/context_options}.rs`, `website/src/docs/reference/{environment,command-line}.md` |
 | Bazel workspace | [bazel-quality.md](./rules/bazel-quality.md) (shareable) | `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `.bazelversion`, `.bazelignore`, `**/BUILD.bazel`, `**/*.bzl` |
 
 ## By auto-load path — "what fires when you edit"
@@ -108,6 +110,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `crates/ocx_package/src/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
 | `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [quality-cli-help.md](./rules/quality-cli-help.md) |
 | `crates/ocx_cli/src/api/**`, `crates/ocx_cli/src/command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
+| `crates/ocx_env/**`, `crates/ocx_cli/src/api/data/**`, `crates/ocx_cli/src/command/**`, `crates/ocx_cli/src/options/**`, `crates/ocx_cli/src/app/context_options.rs`, `crates/ocx_cli/src/error_document.rs`, `crates/ocx_cli/src/exit/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, `website/src/docs/reference/environment.md`, `website/src/docs/reference/command-line.md` | + [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) |
 | `**/pyproject.toml`, `**/uv.lock` | [python-packaging.md](./rules/python-packaging.md) |
@@ -150,7 +153,8 @@ Exempt from overlap detection (intended broad coupling):
 | `workflow-git.md` + `workflow-release.md` + `docs-quality.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
 | `docs-style.md` + `subsystem-website.md` + `product-context.md` + `docs-quality.md` | `website/**` |
 | `product-context.md` + `workflow-feature.md` | `.claude/artifacts/**` |
-| `subsystem-cli-api.md` + `subsystem-cli-commands.md` | `crates/ocx_cli/src/command/**` |
+| `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-interface-contract.md` | `crates/ocx_cli/src/command/**` |
+| `subsystem-metadata-schema.md` + `subsystem-interface-contract.md` | `crates/ocx_schema/**` |
 | `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/hex-*/**` |
 | `subsystem-script.md` + `subsystem-tests.md` | `test/tests/test_package_test_script.py` |
 | `code-docs.md` + `rust-quality.md` | `**/*.rs` |

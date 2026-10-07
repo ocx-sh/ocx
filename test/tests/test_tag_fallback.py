@@ -81,7 +81,7 @@ def test_ac1_fresh_install_empty_index_succeeds(
     _wipe_local_index(ocx)
 
     # The install must succeed — ChainedIndex fetches from remote on cache miss.
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
 
     # Basic smoke check: install returned data for this package.
     assert pkg.short in result, f"install result missing package key {pkg.short!r}"
@@ -205,7 +205,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
     tag_file.write_text(v1_tag_snapshot)
 
     # Install again — ChainedIndex must hit the cache (digest A) and NOT refresh.
-    result = ocx.json("package", "install", pkg_v1.short)
+    result = ocx.json("package", "install", pkg_v1.short)["packages"]
     assert pkg_v1.short in result, "second install must succeed"
 
     # The local index must still contain digest A (not updated to B).
@@ -237,7 +237,7 @@ def test_ac5_batch_install_empty_index_both_succeed(
     # Wipe the local index so both packages must fall through to remote.
     _wipe_local_index(ocx)
 
-    result = ocx.json("package", "install", pkg1.short, pkg2.short)
+    result = ocx.json("package", "install", pkg1.short, pkg2.short)["packages"]
 
     assert pkg1.short in result, f"AC5: pkg1 {pkg1.short!r} missing from install result"
     assert pkg2.short in result, f"AC5: pkg2 {pkg2.short!r} missing from install result"

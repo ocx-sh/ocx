@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "command": "package receipt",
+  "exit_code": 79,
+  "error": {
+    "kind": "not_found",
+    "message": "no build receipt at x-receipt.json; `ocx package create` writes one beside the bundle",
+    "context": {}
+  }
+}

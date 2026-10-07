@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "`package push` lists its named flags `--cascade` and `--jobs` in a different order; no positional moves.",
+  "findings": []
+}

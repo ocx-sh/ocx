@@ -10,7 +10,7 @@ publish = false
 # Internal-only escape hatch, the project's one seam convention
 # (`subsystem-tests.md` "Test-Only Seams"). Forwarded by `ocx_lib`'s and `ocx`'s
 # own `__testing`.
-__testing = []
+__testing = ["ocx_env/__testing"]
 
 [dependencies]
 # The resolution index, for the dependency pins this tier verifies.
@@ -22,6 +22,10 @@ ocx_oci.workspace = true
 ocx_store.workspace = true
 # `$OCX_HOME` and the composed environment a metadata document declares.
 ocx_config.workspace = true
+# The environment registry: `OCX_ENV`, `OCX_LAUNCH_IDENTITIES` and the env-key validators.
+ocx_env.workspace = true
+# The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
+ocx_exit.workspace = true
 # `FileError`, the archive helpers, the extension-trait prelude.
 ocx_util.workspace = true
 
@@ -59,6 +63,8 @@ tracing.workspace = true
 [dev-dependencies]
 # The registry double the prune tests drive the delete loop through.
 ocx_oci = { workspace = true, features = ["__testing"] }
+# `cfg(test)` writes the environment through `ocx_env::overrides`.
+ocx_env = { workspace = true, features = ["__testing"] }
 # The bundler and scan tests build a package root and a scratch root.
 tempfile.workspace = true
 

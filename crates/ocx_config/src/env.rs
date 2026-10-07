@@ -6,159 +6,6 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::records::RecordsOptions;
-use ocx_util::env::{flag, string, var};
-
-/// Canonical names for `OCX_*` environment variables read or written by ocx.
-pub mod keys {
-    /// Absolute path to the running `ocx`, set on every spawn so a child ocx runs the
-    /// same binary, not whatever `$PATH` resolves.
-    pub const OCX_BINARY_PIN: &str = "OCX_BINARY_PIN";
-    /// The OCX data root — `$OCX_HOME`, else `~/.ocx` ([`crate::home::default_ocx_root`]).
-    ///
-    /// Forwarded set-always as the resolved root, or an `ocx exec --clean` child (no `HOME`)
-    /// resolves another root and misses the package the parent just materialized.
-    pub const OCX_HOME: &str = "OCX_HOME";
-    /// Boolean — disables network access when truthy. Mirrors `--offline`.
-    pub const OCX_OFFLINE: &str = "OCX_OFFLINE";
-    /// Boolean — a tag-only reference missing from the local index errors instead of
-    /// being fetched; digest-pinned content still fetches. Mirrors `--frozen`.
-    pub const OCX_FROZEN: &str = "OCX_FROZEN";
-    /// Boolean — uses the remote index by default when truthy. Mirrors `--remote`.
-    pub const OCX_REMOTE: &str = "OCX_REMOTE";
-    /// Path to an explicit configuration file. Mirrors `--config`.
-    pub const OCX_CONFIG: &str = "OCX_CONFIG";
-    /// Boolean — skip the discovered config-tier chain; explicit `--config` / [`OCX_CONFIG`]
-    /// paths still load and a system-scope lock survives. Forwarded to child ocx.
-    pub const OCX_NO_CONFIG: &str = "OCX_NO_CONFIG";
-    /// Path to an explicit project `ocx.toml`. Mirrors `--project`.
-    pub const OCX_PROJECT: &str = "OCX_PROJECT";
-    /// Boolean — skip the CWD walk and [`OCX_PROJECT`]; explicit `--project` paths still load.
-    /// Forwarded only when this invocation resolved no project.
-    pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
-    /// Boolean — commands that stamp shell-activation consent as a side effect write none;
-    /// `--consent` / `--no-consent` outrank it and `ocx shell allow` ignores it.
-    ///
-    /// Forwarded, else a script run by `ocx exec` that calls `ocx pull` stamps after all.
-    pub const OCX_NO_CONSENT: &str = "OCX_NO_CONSENT";
-    /// Boolean — select the global toolchain (`$OCX_HOME/ocx.toml`). Mirrors `--global`.
-    pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
-    /// Path to the local index directory. Mirrors `--index`.
-    pub const OCX_INDEX: &str = "OCX_INDEX";
-    /// The registry a bare identifier resolves under; outranks `[registry] default`, else
-    /// `ocx.sh`. Empty is unset. Forwarded so every frame of a launch chain agrees.
-    pub const OCX_DEFAULT_REGISTRY: &str = "OCX_DEFAULT_REGISTRY";
-    /// Comma-separated `host[:port]` authorities that may be dialled over plain HTTP.
-    ///
-    /// Forwarded, or a child with a narrower set cannot reach a registry the parent just pulled from.
-    pub const OCX_INSECURE_REGISTRIES: &str = "OCX_INSECURE_REGISTRIES";
-    /// Boolean — allow a tag resolving to a yanked index entry. Forwarded to child ocx.
-    pub const OCX_ALLOW_YANKED: &str = "OCX_ALLOW_YANKED";
-    /// Path to the active patch snapshot file, whose pinned digests win over live tag lookups.
-    /// Forwarded to child ocx.
-    pub const OCX_PATCH_SNAPSHOT: &str = "OCX_PATCH_SNAPSHOT";
-    /// JSON object mapping an upstream host to a mirror string or `{"registry"?, "index"?}`,
-    /// the same union `[mirrors."<host>"]` accepts. Forwarded to child ocx.
-    pub const OCX_MIRRORS: &str = "OCX_MIRRORS";
-    /// JSON object encoding the resolved `[patches]` config; forwarded only when configured.
-    pub const OCX_PATCHES: &str = "OCX_PATCHES";
-    /// JSON envelope of the resolved project `[env]` entries plus `ocx exec --env` overrides,
-    /// or a launcher re-entry silently reverts them.
-    ///
-    /// Decode fails closed on the whole envelope (reserved key, unknown `kind`): a forged entry
-    /// can set a value, so [`OCX_PATCHES`]'s leniency must not be copied.
-    pub const OCX_ENV: &str = "OCX_ENV";
-    /// JSON map from a content digest to the `registry/repository[:tag]` names one composition
-    /// resolved it under; read by `ocx launcher exec` to match targeted patch rules.
-    ///
-    /// Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
-    /// `--env` cannot set it. [`crate::env::Env::apply_ocx_config`] leaves it alone, or a launcher nested
-    /// under another launcher loses the outer composition's names.
-    pub const OCX_LAUNCH_IDENTITIES: &str = "OCX_LAUNCH_IDENTITIES";
-    /// Boolean — `ocx self setup` modifies no shell profile. Mirrors `--no-modify-path`.
-    pub const OCX_NO_MODIFY_PATH: &str = "OCX_NO_MODIFY_PATH";
-    /// OCI reference overriding `[managed].source` for this invocation only; empty is unset,
-    /// [`OCX_NO_CONFIG`] suppresses it. Forwarded to child ocx.
-    pub const OCX_MANAGED_CONFIG: &str = "OCX_MANAGED_CONFIG";
-    /// Boolean — kill switch for the managed-config background refresh; `ocx config update` still works.
-    ///
-    /// Forwarded, or a child's refresh replaces the managed tier with config the parent never saw.
-    pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
-    /// Boolean — kill switch for the background self-update and toolchain drift checks.
-    ///
-    /// Forwarded, or a `--clean` child probes the registry the parent was told not to.
-    pub const OCX_NO_UPDATE_CHECK: &str = "OCX_NO_UPDATE_CHECK";
-    /// Throttle interval of the background update checks, `\d+[smhd]?`; beats `[update] interval`.
-    /// Not forwarded: a personal preference, like [`OCX_LAZY_MODE`].
-    pub const OCX_UPDATE_CHECK_INTERVAL: &str = "OCX_UPDATE_CHECK_INTERVAL";
-    /// `RefreshPolicy` wire value for ocx's own update check; beats `[update] self`. Not forwarded.
-    pub const OCX_SELF_UPDATE: &str = "OCX_SELF_UPDATE";
-    /// `RefreshPolicy` wire value for the toolchain drift check; beats `[update] toolchain`. Not forwarded.
-    pub const OCX_TOOLCHAIN_UPDATE: &str = "OCX_TOOLCHAIN_UPDATE";
-    /// Directory execution records are written to; absent or empty turns recording off.
-    /// Forwarded so every frame of a launch chain records into the outermost sink.
-    pub const OCX_RECORDS_DIR: &str = "OCX_RECORDS_DIR";
-    /// Filename template for each execution record; forwarded alongside [`OCX_RECORDS_DIR`].
-    ///
-    /// No `OCX_RECORDS_REQUIRED` exists: fail-closed recording is config-file-only operator policy.
-    pub const OCX_RECORDS_NAME: &str = "OCX_RECORDS_NAME";
-    /// `LazyMode` wire value (`never` / `always`), the weakest tier of the `lazy-mode` ladder.
-    ///
-    /// Not forwarded: it changes when content materializes, never which digest resolves.
-    pub const OCX_LAZY_MODE: &str = "OCX_LAZY_MODE";
-    /// `LazyReport` wire value (`silent` / `progress`); not forwarded, like [`OCX_LAZY_MODE`].
-    pub const OCX_LAZY_REPORT: &str = "OCX_LAZY_REPORT";
-    /// `ActivateMode` wire value (`env` / `bin` / `none`), the weakest tier of the `activate`
-    /// ladder (`adr_toolchain_activation.md`). Not forwarded, like [`OCX_LAZY_MODE`].
-    pub const OCX_TOOLCHAIN_ACTIVATE: &str = "OCX_TOOLCHAIN_ACTIVATE";
-    /// Boolean — composed paths pin to digest roots; the weakest tier of the `pinned` ladder.
-    ///
-    /// Never read via [`ocx_util::env::flag`], which collapses unset and `false` and hides an explicit `false`.
-    pub const OCX_TOOLCHAIN_PINNED: &str = "OCX_TOOLCHAIN_PINNED";
-    /// Root under which project toolchain homes render — the env tier of `toolchain_dir`.
-    ///
-    /// Forwarded set-or-remove; the containment refusals apply to it like to every tier.
-    pub const OCX_TOOLCHAIN_DIR: &str = "OCX_TOOLCHAIN_DIR";
-    /// Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child ocx.
-    pub const OCX_NO_VERIFY: &str = "OCX_NO_VERIFY";
-
-    /// Extra CA roots — a path or inline PEM (contains `-----BEGIN`); empty is unset.
-    ///
-    /// Not forwarded: an inline PEM can exceed Windows' 32,767-character per-variable limit.
-    pub const OCX_EXTRA_CA_CERTS: &str = "OCX_EXTRA_CA_CERTS";
-
-    /// OIDC bearer token for keyless signing, below `--identity-token-file`/`-stdin`. In [`CREDENTIAL_KEYS`].
-    pub const OCX_IDENTITY_TOKEN: &str = "OCX_IDENTITY_TOKEN";
-
-    /// Password for an encrypted signing key; never a flag, since `argv` is visible host-wide.
-    /// In [`CREDENTIAL_KEYS`].
-    pub const OCX_KEY_PASSWORD: &str = "OCX_KEY_PASSWORD";
-
-    /// The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`. In [`CREDENTIAL_KEYS`];
-    /// any other `env://` name works but is not scrubbed from plugins.
-    pub const OCX_SIGNING_KEY: &str = "OCX_SIGNING_KEY";
-
-    /// The API half of the forge credential pair (a forge access token).
-    ///
-    /// Not in [`CREDENTIAL_KEYS`], so a plugin-dispatched `ocx-mirror` inherits it to announce.
-    /// `ocx_cli::command::package_announce` declares a private copy, so a rename here leaves it reading the old name.
-    pub const OCX_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
-
-    /// The push-only forge credential (the secret half of `git push`'s Basic pair). In [`CREDENTIAL_KEYS`].
-    pub const OCX_ANNOUNCE_GIT_TOKEN: &str = "OCX_ANNOUNCE_GIT_TOKEN";
-
-    /// Every env var carrying a bearer credential, stripped from child envs by
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config).
-    ///
-    /// `Command::envs` only adds, so any other spawn site inheriting the ambient env must remove
-    /// each entry itself, or the credential leaks to the child.
-    /// The `OCX_AUTH_<slug>_TOKEN` pattern cannot be listed here and is never scrubbed.
-    pub const CREDENTIAL_KEYS: &[&str] = &[
-        OCX_IDENTITY_TOKEN,
-        OCX_KEY_PASSWORD,
-        OCX_SIGNING_KEY,
-        OCX_ANNOUNCE_GIT_TOKEN,
-    ];
-}
 
 /// Resolution-affecting policy snapshot that `Env::apply_ocx_config` writes onto a child env.
 ///
@@ -170,14 +17,14 @@ pub struct OcxConfigView {
     pub self_exe: PathBuf,
     pub offline: bool,
     pub remote: bool,
-    /// Tag resolution may only consult the local index. Forwarded as [`keys::OCX_FROZEN`].
+    /// Tag resolution may only consult the local index. Forwarded as [`ocx_env::OCX_FROZEN`].
     pub frozen: bool,
     pub config: Option<PathBuf>,
     pub project: Option<PathBuf>,
-    /// The global toolchain is the in-effect project file. Forwarded as [`keys::OCX_GLOBAL`];
+    /// The global toolchain is the in-effect project file. Forwarded as [`ocx_env::OCX_GLOBAL`];
     /// only `apply_ocx_config_sets_ocx_global_when_set` observes it, no acceptance test can.
     pub global: bool,
-    /// This invocation's `--no-consent`, forwarded as [`keys::OCX_NO_CONSENT`].
+    /// This invocation's `--no-consent`, forwarded as [`ocx_env::OCX_NO_CONSENT`].
     ///
     /// Suppression-only: `--consent` never clears an ambient `OCX_NO_CONSENT`, since it covers
     /// only this invocation's project, not everything the child touches.
@@ -188,17 +35,17 @@ pub struct OcxConfigView {
     /// Every producer writes `None` today, but its remove arm strips a stale inherited export,
     /// so the field is not dead.
     pub toolchain_dir: Option<PathBuf>,
-    /// Per-host mirrors from [`crate::mirror::ResolvedMirrors::merged`], forwarded as [`keys::OCX_MIRRORS`].
+    /// Per-host mirrors from [`crate::mirror::ResolvedMirrors::merged`], forwarded as [`ocx_env::OCX_MIRRORS`].
     pub mirrors: Vec<(String, crate::mirror::MirrorConfig)>,
-    /// Resolved `[patches]` config, forwarded as [`keys::OCX_PATCHES`].
+    /// Resolved `[patches]` config, forwarded as [`ocx_env::OCX_PATCHES`].
     pub patches: Option<crate::patch::ResolvedPatchConfig>,
-    /// Active patch snapshot file, forwarded as [`keys::OCX_PATCH_SNAPSHOT`].
+    /// Active patch snapshot file, forwarded as [`ocx_env::OCX_PATCH_SNAPSHOT`].
     pub patch_snapshot: Option<PathBuf>,
-    /// The effective managed-config source (flag > env > seed), forwarded as [`keys::OCX_MANAGED_CONFIG`].
+    /// The effective managed-config source (flag > env > seed), forwarded as [`ocx_env::OCX_MANAGED_CONFIG`].
     pub managed_config_source: Option<String>,
-    /// Ambient `OCX_NO_VERIFY`, forwarded as [`keys::OCX_NO_VERIFY`]; the `--no-verify` flag is not.
+    /// Ambient `OCX_NO_VERIFY`, forwarded as [`ocx_env::OCX_NO_VERIFY`]; the `--no-verify` flag is not.
     pub no_verify: bool,
-    /// The discovered config chain was skipped, forwarded as [`keys::OCX_NO_CONFIG`].
+    /// The discovered config chain was skipped, forwarded as [`ocx_env::OCX_NO_CONFIG`].
     ///
     /// A field, not an ambient read at the forwarding site, which could disagree with what the loader used.
     pub no_config: bool,
@@ -242,7 +89,7 @@ impl EnvKey {
         #[cfg(windows)]
         let key = {
             use std::os::windows::ffi::{OsStrExt, OsStringExt};
-            let upper: Vec<u16> = key.encode_wide().map(|c| wide_to_upper(c)).collect();
+            let upper: Vec<u16> = key.encode_wide().map(wide_to_upper).collect();
             OsString::from_wide(&upper)
         };
         Self(key)
@@ -274,10 +121,24 @@ impl Default for Env {
     }
 }
 
+/// Forwards a variable to a child env, refusing at compile time any not declared `child = Forward`.
+macro_rules! forward {
+    ($env:expr, $var:path, $value:expr $(,)?) => {{
+        const _: () = assert!(
+            matches!($var.child, ocx_env::Child::Forward),
+            "only a variable declared `child = Forward` may be forwarded to a child"
+        );
+        $env.forward_unchecked(&$var, $value)
+    }};
+}
+
 impl Env {
     pub fn new() -> Self {
         Self {
-            vars: std::env::vars_os().map(|(k, v)| (EnvKey::new(k), v)).collect(),
+            vars: ocx_env::snapshot()
+                .into_iter()
+                .map(|(k, v)| (EnvKey::new(k), v))
+                .collect(),
             package_path: OsString::new(),
         }
     }
@@ -339,135 +200,118 @@ impl Env {
     }
 
     /// Writes resolution-affecting OCX configuration onto this env so a child ocx sees the
-    /// parent's policy, and strips [`keys::CREDENTIAL_KEYS`]. Idempotent.
+    /// parent's policy, and strips [`ocx_env::credential_keys`]. Idempotent.
     ///
     /// Every key but the binary pin and `OCX_HOME` is set-or-remove, so a stale parent-shell
     /// export cannot beat the parsed state.
     pub fn apply_ocx_config(&mut self, cfg: &OcxConfigView) {
-        for credential in keys::CREDENTIAL_KEYS {
+        for credential in ocx_env::credential_keys() {
             self.remove(credential);
         }
-        self.set(keys::OCX_BINARY_PIN, cfg.self_exe.as_os_str());
+        forward!(self, ocx_env::OCX_BINARY_PIN, Some(cfg.self_exe.as_os_str()));
         if let Some(root) = crate::home::default_ocx_root() {
             // Absolutized here: a child may run from another CWD and read another directory.
             let absolute = std::path::absolute(&root).unwrap_or_else(|error| {
                 log::debug!("could not absolutize OCX_HOME '{}': {error}", root.display());
                 root.clone()
             });
-            self.set(keys::OCX_HOME, absolute.as_os_str());
+            forward!(self, ocx_env::OCX_HOME, Some(absolute.as_os_str()));
         }
-        if cfg.offline {
-            self.set(keys::OCX_OFFLINE, "1");
-        } else {
-            self.remove(keys::OCX_OFFLINE);
-        }
-        if cfg.remote {
-            self.set(keys::OCX_REMOTE, "1");
-        } else {
-            self.remove(keys::OCX_REMOTE);
-        }
-        if cfg.frozen {
-            self.set(keys::OCX_FROZEN, "1");
-        } else {
-            self.remove(keys::OCX_FROZEN);
-        }
-        if cfg.global {
-            self.set(keys::OCX_GLOBAL, "1");
-        } else {
-            self.remove(keys::OCX_GLOBAL);
-        }
-        match &cfg.config {
-            Some(path) => self.set(keys::OCX_CONFIG, path.as_os_str()),
-            None => self.remove(keys::OCX_CONFIG),
-        }
-        match &cfg.project {
-            Some(path) => self.set(keys::OCX_PROJECT, path.as_os_str()),
-            None => self.remove(keys::OCX_PROJECT),
-        }
-        match &cfg.index {
-            Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
-            None => self.remove(keys::OCX_INDEX),
-        }
+        forward!(self, ocx_env::OCX_OFFLINE, cfg.offline.then_some("1"));
+        forward!(self, ocx_env::OCX_REMOTE, cfg.remote.then_some("1"));
+        forward!(self, ocx_env::OCX_FROZEN, cfg.frozen.then_some("1"));
+        forward!(self, ocx_env::OCX_GLOBAL, cfg.global.then_some("1"));
+        forward!(
+            self,
+            ocx_env::OCX_CONFIG,
+            cfg.config.as_deref().map(std::path::Path::as_os_str),
+        );
+        forward!(
+            self,
+            ocx_env::OCX_PROJECT,
+            cfg.project.as_deref().map(std::path::Path::as_os_str),
+        );
+        forward!(
+            self,
+            ocx_env::OCX_INDEX,
+            cfg.index.as_deref().map(std::path::Path::as_os_str),
+        );
         // Without the remove, a stale exported `OCX_TOOLCHAIN_DIR` makes two frames of one launch use two trees.
-        match &cfg.toolchain_dir {
-            Some(path) => self.set(keys::OCX_TOOLCHAIN_DIR, path.as_os_str()),
-            None => self.remove(keys::OCX_TOOLCHAIN_DIR),
-        }
-        match encode_mirrors(&cfg.mirrors) {
-            Some(json) => self.set(keys::OCX_MIRRORS, json),
-            None => self.remove(keys::OCX_MIRRORS),
-        }
-        match crate::patch::encode_patches(cfg.patches.as_ref()) {
-            Some(json) => self.set(keys::OCX_PATCHES, json),
-            None => self.remove(keys::OCX_PATCHES),
-        }
-        match &cfg.patch_snapshot {
-            Some(path) => self.set(keys::OCX_PATCH_SNAPSHOT, path.as_os_str()),
-            None => self.remove(keys::OCX_PATCH_SNAPSHOT),
-        }
-        match &cfg.managed_config_source {
-            Some(source) => self.set(keys::OCX_MANAGED_CONFIG, source.as_str()),
-            None => self.remove(keys::OCX_MANAGED_CONFIG),
-        }
-        if cfg.no_verify {
-            self.set(keys::OCX_NO_VERIFY, "1");
-        } else {
-            self.remove(keys::OCX_NO_VERIFY);
-        }
+        forward!(
+            self,
+            ocx_env::OCX_TOOLCHAIN_DIR,
+            cfg.toolchain_dir.as_deref().map(std::path::Path::as_os_str),
+        );
+        forward!(self, ocx_env::OCX_MIRRORS, encode_mirrors(&cfg.mirrors));
+        forward!(
+            self,
+            ocx_env::OCX_PATCHES,
+            crate::patch::encode_patches(cfg.patches.as_ref()),
+        );
+        forward!(
+            self,
+            ocx_env::OCX_PATCH_SNAPSHOT,
+            cfg.patch_snapshot.as_deref().map(std::path::Path::as_os_str),
+        );
+        forward!(self, ocx_env::OCX_MANAGED_CONFIG, cfg.managed_config_source.as_deref());
+        forward!(self, ocx_env::OCX_NO_VERIFY, cfg.no_verify.then_some("1"));
         // Each set-or-remove, or a defaulted template picks up the parent shell's pattern.
-        match &cfg.records.dir {
-            Some(path) => self.set(keys::OCX_RECORDS_DIR, path.as_os_str()),
-            None => self.remove(keys::OCX_RECORDS_DIR),
-        }
-        match &cfg.records.name {
-            Some(template) => self.set(keys::OCX_RECORDS_NAME, template.as_str()),
-            None => self.remove(keys::OCX_RECORDS_NAME),
-        }
+        forward!(
+            self,
+            ocx_env::OCX_RECORDS_DIR,
+            cfg.records.dir.as_deref().map(std::path::Path::as_os_str),
+        );
+        forward!(self, ocx_env::OCX_RECORDS_NAME, cfg.records.name.as_deref());
         // Always cleared, or a stale shell value reaches the child; `apply_child_env` writes the real one after.
-        self.remove(keys::OCX_ENV);
+        forward!(self, ocx_env::OCX_ENV, None::<&str>);
         // Without this a hermetic parent's child re-reads the full config chain and resolves differently.
-        if cfg.no_config {
-            self.set(keys::OCX_NO_CONFIG, "1");
-        } else {
-            self.remove(keys::OCX_NO_CONFIG);
-        }
+        forward!(self, ocx_env::OCX_NO_CONFIG, cfg.no_config.then_some("1"));
         // Ambient-only keys: without them a `--clean` child resolves against defaults the parent overrode.
-        if flag(keys::OCX_ALLOW_YANKED, false) {
-            self.set(keys::OCX_ALLOW_YANKED, "1");
-        } else {
-            self.remove(keys::OCX_ALLOW_YANKED);
-        }
+        let ambient = |var: &'static ocx_env::EnvVar| var.bool_or(false).unwrap_or(false).then_some("1");
+        forward!(self, ocx_env::OCX_ALLOW_YANKED, ambient(&ocx_env::OCX_ALLOW_YANKED));
         // Gated on the view: `explicit_project` reads the prune before `OCX_PROJECT`, so forwarding
         // both makes the child discard the project.
-        if cfg.project.is_none() && flag(keys::OCX_NO_PROJECT, false) {
-            self.set(keys::OCX_NO_PROJECT, "1");
-        } else {
-            self.remove(keys::OCX_NO_PROJECT);
-        }
-        if flag(keys::OCX_NO_CONFIG_REFRESH, false) {
-            self.set(keys::OCX_NO_CONFIG_REFRESH, "1");
-        } else {
-            self.remove(keys::OCX_NO_CONFIG_REFRESH);
-        }
-        if flag(keys::OCX_NO_UPDATE_CHECK, false) {
-            self.set(keys::OCX_NO_UPDATE_CHECK, "1");
-        } else {
-            self.remove(keys::OCX_NO_UPDATE_CHECK);
-        }
+        forward!(
+            self,
+            ocx_env::OCX_NO_PROJECT,
+            if cfg.project.is_none() {
+                ambient(&ocx_env::OCX_NO_PROJECT)
+            } else {
+                None
+            },
+        );
+        forward!(
+            self,
+            ocx_env::OCX_NO_CONFIG_REFRESH,
+            ambient(&ocx_env::OCX_NO_CONFIG_REFRESH),
+        );
+        forward!(
+            self,
+            ocx_env::OCX_NO_UPDATE_CHECK,
+            ambient(&ocx_env::OCX_NO_UPDATE_CHECK),
+        );
         // An empty value must not travel, or the child reads it as "no default registry at all".
-        match var(keys::OCX_DEFAULT_REGISTRY).filter(|value| !value.is_empty()) {
-            Some(registry) => self.set(keys::OCX_DEFAULT_REGISTRY, registry),
-            None => self.remove(keys::OCX_DEFAULT_REGISTRY),
-        }
-        match var(keys::OCX_INSECURE_REGISTRIES).filter(|value| !value.is_empty()) {
-            Some(authorities) => self.set(keys::OCX_INSECURE_REGISTRIES, authorities),
-            None => self.remove(keys::OCX_INSECURE_REGISTRIES),
-        }
+        forward!(self, ocx_env::OCX_DEFAULT_REGISTRY, ocx_env::OCX_DEFAULT_REGISTRY.get());
+        forward!(
+            self,
+            ocx_env::OCX_INSECURE_REGISTRIES,
+            ocx_env::OCX_INSECURE_REGISTRIES.get(),
+        );
         // `cfg.no_consent` is argv's only channel, else `--no-consent` fails open; the ambient read survives `--clean`.
-        if cfg.no_consent || flag(keys::OCX_NO_CONSENT, false) {
-            self.set(keys::OCX_NO_CONSENT, "1");
-        } else {
-            self.remove(keys::OCX_NO_CONSENT);
+        forward!(
+            self,
+            ocx_env::OCX_NO_CONSENT,
+            (cfg.no_consent || no_consent_env()).then_some("1"),
+        );
+    }
+
+    /// Writes `value` onto the declared `var`, or strips a stale inherited export when it is `None`.
+    ///
+    /// Call it through `forward!`, which refuses a variable not declared `child = Forward`; a direct call skips that.
+    fn forward_unchecked(&mut self, var: &'static ocx_env::EnvVar, value: Option<impl Into<OsString>>) {
+        match value {
+            Some(value) => self.set(var.name, value),
+            None => self.remove(var.name),
         }
     }
 
@@ -486,7 +330,7 @@ impl Env {
 
     /// The one lookup both public resolvers route through, over an already-prepared `PATH` copy.
     fn resolve_command_in(&self, command: &OsStr, path: Option<OsString>) -> Result<PathBuf, CommandResolutionError> {
-        let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        let cwd = ocx_env::current_dir().unwrap_or_else(|e| {
             log::debug!("Could not determine current directory: {}", e);
             PathBuf::new()
         });
@@ -762,10 +606,15 @@ impl IntoIterator for Env {
 
 /// Failure modes of [`Env::resolve_command`],
 /// [`Env::resolve_command_excluding`] and [`Env::resolve_test_command`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum CommandResolutionError {
     /// A bare command name resolves in no directory of the composed `PATH`.
     #[error("{command:?} does not resolve in the composed environment; searched: {searched:?}")]
+    #[exit(
+        DataError,
+        slug = "command_not_found",
+        summary = "The command does not resolve in the composed environment"
+    )]
     NotFound {
         /// The bare command name as invoked.
         command: String,
@@ -776,6 +625,11 @@ pub enum CommandResolutionError {
     /// The resolution answer is an ocx launcher trampoline, which would re-enter `ocx exec`.
     #[error(
         "{command:?} resolves to an ocx launcher trampoline at {path:?}; running it would re-enter ocx against itself"
+    )]
+    #[exit(
+        DataError,
+        slug = "command_trampoline_refused",
+        summary = "The command resolves to a toolchain launcher that would re-enter itself"
     )]
     TrampolineRefused {
         /// The command name as invoked.
@@ -790,6 +644,11 @@ pub enum CommandResolutionError {
     #[error(
         "{command:?} is present in the package under test at {path:?} but is not executable (mode {mode:04o}); \
          re-create the package with the executable bit set - ocx does not fall through to a host copy on PATH"
+    )]
+    #[exit(
+        DataError,
+        slug = "command_not_executable",
+        summary = "The command resolves to a file that is not executable"
     )]
     NotExecutable {
         /// The bare command name as invoked.
@@ -864,16 +723,26 @@ fn trampoline_signal(path: &std::path::Path) -> bool {
     std::fs::metadata(path.with_extension("exec")).is_ok_and(|sidecar| sidecar.is_file())
 }
 
-/// Parses [`keys::OCX_INSECURE_REGISTRIES`] into a list of registry hostnames.
+/// Ambient `OCX_NO_CONSENT`; an invalid spelling warns and reads as unset.
+fn no_consent_env() -> bool {
+    ocx_env::OCX_NO_CONSENT.bool_or(false).unwrap_or_else(|error| {
+        log::warn!("{error}");
+        false
+    })
+}
+
+/// Parses [`ocx_env::OCX_INSECURE_REGISTRIES`] into a list of registry hostnames.
 pub fn insecure_registries() -> Vec<String> {
-    string(keys::OCX_INSECURE_REGISTRIES, String::new())
+    ocx_env::OCX_INSECURE_REGISTRIES
+        .get()
+        .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
 
-/// Serializes mirrors into the [`keys::OCX_MIRRORS`] JSON object that [`mirrors`] parses back;
+/// Serializes mirrors into the [`ocx_env::OCX_MIRRORS`] JSON object that [`mirrors`] parses back;
 /// `None` for an empty list.
 fn encode_mirrors(mirrors: &[(String, crate::mirror::MirrorConfig)]) -> Option<String> {
     if mirrors.is_empty() {
@@ -904,7 +773,7 @@ fn encode_mirrors(mirrors: &[(String, crate::mirror::MirrorConfig)]) -> Option<S
     }
 }
 
-/// Parses [`keys::OCX_MIRRORS`] into `(host, MirrorConfig)` pairs; absent or empty is an empty list.
+/// Parses [`ocx_env::OCX_MIRRORS`] into `(host, MirrorConfig)` pairs; absent or empty is an empty list.
 ///
 /// A broken value is a hard error: degrading it would route reads to the blocked origin.
 ///
@@ -917,12 +786,9 @@ fn encode_mirrors(mirrors: &[(String, crate::mirror::MirrorConfig)]) -> Option<S
 /// [`MirrorConfigError::InvalidShape`]: crate::mirror::MirrorConfigError::InvalidShape
 /// [`MirrorConfigError::NonStringRoleValue`]: crate::mirror::MirrorConfigError::NonStringRoleValue
 pub fn mirrors() -> Result<Vec<(String, crate::mirror::MirrorConfig)>, crate::mirror::MirrorConfigError> {
-    let Some(raw) = var(keys::OCX_MIRRORS) else {
+    let Some(raw) = ocx_env::OCX_MIRRORS.get() else {
         return Ok(Vec::new());
     };
-    if raw.is_empty() {
-        return Ok(Vec::new());
-    }
     let map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&raw).map_err(|source| crate::mirror::MirrorConfigError::MalformedEnvJson { source })?;
 
@@ -941,30 +807,31 @@ mod tests {
     // Test-only here since the package-aware half left: the residual module
     // reads neither validator, but the grammar they define is still this
     // module's contract to state.
-    use ocx_util::env::{PATH_SEPARATOR, is_reserved_ocx_key, is_valid_env_key};
+    use ocx_env::{is_reserved_ocx_key, is_valid_env_key};
+    use ocx_util::path::PATH_SEPARATOR;
 
     /// `OCX_NO_MODIFY_PATH` is read through `flag` (the same `BooleanString`
     /// path as `--remote`/`--offline`), so both `=1` and `=true` set it true and
     /// an unset var is the `false` default (contract 8, item 7).
     #[test]
     fn ocx_no_modify_path_flag_is_truthy_for_one_and_true() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
 
-        env.set(keys::OCX_NO_MODIFY_PATH, "1");
+        env.set(&ocx_env::OCX_NO_MODIFY_PATH, "1");
         assert!(
-            flag(keys::OCX_NO_MODIFY_PATH, false),
+            ocx_env::OCX_NO_MODIFY_PATH.bool_or(false).unwrap_or(false),
             "OCX_NO_MODIFY_PATH=1 must be true"
         );
 
-        env.set(keys::OCX_NO_MODIFY_PATH, "true");
+        env.set(&ocx_env::OCX_NO_MODIFY_PATH, "true");
         assert!(
-            flag(keys::OCX_NO_MODIFY_PATH, false),
+            ocx_env::OCX_NO_MODIFY_PATH.bool_or(false).unwrap_or(false),
             "OCX_NO_MODIFY_PATH=true must be true"
         );
 
-        env.remove(keys::OCX_NO_MODIFY_PATH);
+        env.remove(&ocx_env::OCX_NO_MODIFY_PATH);
         assert!(
-            !flag(keys::OCX_NO_MODIFY_PATH, false),
+            !ocx_env::OCX_NO_MODIFY_PATH.bool_or(false).unwrap_or(false),
             "unset OCX_NO_MODIFY_PATH must fall back to the false default"
         );
     }
@@ -976,7 +843,7 @@ mod tests {
         assert!(is_reserved_ocx_key("OCX_OFFLINE"));
         assert!(is_reserved_ocx_key("OCX_DEFAULT_REGISTRY"));
         assert!(is_reserved_ocx_key("__OCX_TESTING_INSTALL_BINARY"));
-        assert!(is_reserved_ocx_key(keys::OCX_LAUNCH_IDENTITIES));
+        assert!(is_reserved_ocx_key(ocx_env::OCX_LAUNCH_IDENTITIES.name));
         // Windows env names are case-insensitive, so a lowercase spelling
         // lands in the same slot and must be caught by the same gate.
         assert!(is_reserved_ocx_key("ocx_offline"));
@@ -1000,14 +867,43 @@ mod tests {
     fn apply_ocx_config_removes_stale_forwarded_env() {
         let mut env = Env::clean();
         env.set(
-            keys::OCX_ENV,
+            ocx_env::OCX_ENV.name,
             r#"{"entries":[{"key":"STALE","value":"1","type":"constant"}]}"#,
         );
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_ENV).is_none(),
+            env.get(ocx_env::OCX_ENV.name).is_none(),
             "apply_ocx_config must clear an inherited OCX_ENV"
         );
+    }
+
+    /// Every `child = Forward` declaration is written or stripped by `apply_ocx_config`, and nothing else is.
+    ///
+    /// A sentinel on every declaration survives only where no forward touched the name; credentials, which
+    /// are stripped rather than forwarded, are left out.
+    #[test]
+    fn apply_ocx_config_forwards_exactly_the_declared_forward_set() {
+        const STALE: &str = "stale-sentinel";
+        let guard = ocx_env::overrides::lock();
+        let _home = guard.isolate_project_home();
+        let mut env = Env::clean();
+        for var in ocx_env::all() {
+            env.set(var.name, STALE);
+        }
+
+        env.apply_ocx_config(&view("/abs/ocx"));
+
+        let mut touched: Vec<&str> = ocx_env::all()
+            .filter(|var| var.child != ocx_env::Child::Scrub && env.get(var.name) != Some(OsStr::new(STALE)))
+            .map(|var| var.name)
+            .collect();
+        let mut declared: Vec<&str> = ocx_env::all()
+            .filter(|var| var.child == ocx_env::Child::Forward)
+            .map(|var| var.name)
+            .collect();
+        touched.sort_unstable();
+        declared.sort_unstable();
+        assert_eq!(touched, declared);
     }
 
     #[test]
@@ -1220,11 +1116,11 @@ mod tests {
     fn apply_ocx_config_sets_binary_and_skips_unset_flags() {
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
-        assert_eq!(env.get(keys::OCX_BINARY_PIN).unwrap(), "/abs/ocx");
-        assert!(env.get(keys::OCX_OFFLINE).is_none());
-        assert!(env.get(keys::OCX_REMOTE).is_none());
-        assert!(env.get(keys::OCX_CONFIG).is_none());
-        assert!(env.get(keys::OCX_INDEX).is_none());
+        assert_eq!(env.get(ocx_env::OCX_BINARY_PIN.name).unwrap(), "/abs/ocx");
+        assert!(env.get(ocx_env::OCX_OFFLINE.name).is_none());
+        assert!(env.get(ocx_env::OCX_REMOTE.name).is_none());
+        assert!(env.get(ocx_env::OCX_CONFIG.name).is_none());
+        assert!(env.get(ocx_env::OCX_INDEX.name).is_none());
     }
 
     /// A child env carries the home the parent resolved.
@@ -1237,25 +1133,25 @@ mod tests {
     /// hand the child a root the parent never used either.
     #[test]
     fn apply_ocx_config_sets_ocx_home_from_the_resolved_root() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
         let home = guard.isolate_project_home();
 
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_HOME).map(std::path::Path::new),
+            env.get(ocx_env::OCX_HOME.name).map(std::path::Path::new),
             Some(home.path()),
             "a clean child env must carry the OCX_HOME the parent resolved"
         );
 
         // Ambient `OCX_HOME=""` is "unset" to `default_ocx_root`, so the child
         // gets the absolute fallback the parent's own stores used.
-        guard.set(keys::OCX_HOME, "");
+        guard.set(&ocx_env::OCX_HOME, "");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
-        let fallback = ocx_util::env::home_dir().expect("a home directory").join(".ocx");
+        let fallback = ocx_env::home_dir().expect("a home directory").join(".ocx");
         assert_eq!(
-            env.get(keys::OCX_HOME).map(std::path::Path::new),
+            env.get(ocx_env::OCX_HOME.name).map(std::path::Path::new),
             Some(fallback.as_path()),
             "an empty ambient OCX_HOME must become the absolute fallback, never the empty string"
         );
@@ -1263,10 +1159,10 @@ mod tests {
         // A relative ambient value means "relative to *this* process' working
         // directory". The child may run somewhere else entirely, so what
         // crosses the spawn is the absolutized form.
-        guard.set(keys::OCX_HOME, "rel/dir");
+        guard.set(&ocx_env::OCX_HOME, "rel/dir");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
-        let forwarded = std::path::Path::new(env.get(keys::OCX_HOME).expect("OCX_HOME is set"));
+        let forwarded = std::path::Path::new(env.get(ocx_env::OCX_HOME.name).expect("OCX_HOME is set"));
         assert!(
             forwarded.is_absolute(),
             "a relative ambient OCX_HOME must be absolutized before it crosses a spawn, got {forwarded:?}"
@@ -1287,10 +1183,10 @@ mod tests {
 
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
-        assert_eq!(env.get(keys::OCX_OFFLINE).unwrap(), "1");
-        assert_eq!(env.get(keys::OCX_REMOTE).unwrap(), "1");
-        assert_eq!(env.get(keys::OCX_CONFIG).unwrap(), "/cfg.toml");
-        assert_eq!(env.get(keys::OCX_INDEX).unwrap(), "/idx");
+        assert_eq!(env.get(ocx_env::OCX_OFFLINE.name).unwrap(), "1");
+        assert_eq!(env.get(ocx_env::OCX_REMOTE.name).unwrap(), "1");
+        assert_eq!(env.get(ocx_env::OCX_CONFIG.name).unwrap(), "/cfg.toml");
+        assert_eq!(env.get(ocx_env::OCX_INDEX.name).unwrap(), "/idx");
     }
 
     #[test]
@@ -1305,17 +1201,17 @@ mod tests {
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
         assert_eq!(
-            env.get(keys::OCX_FROZEN).unwrap(),
+            env.get(ocx_env::OCX_FROZEN.name).unwrap(),
             "1",
             "cfg.frozen=true must forward OCX_FROZEN=1 to the child env"
         );
 
         // Unset: a stale inherited OCX_FROZEN must be cleared.
         let mut env = Env::clean();
-        env.set(keys::OCX_FROZEN, "1");
+        env.set(ocx_env::OCX_FROZEN.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_FROZEN).is_none(),
+            env.get(ocx_env::OCX_FROZEN.name).is_none(),
             "cfg.frozen=false must clear any inherited OCX_FROZEN"
         );
     }
@@ -1330,16 +1226,16 @@ mod tests {
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
         assert_eq!(
-            env.get(keys::OCX_NO_VERIFY).unwrap(),
+            env.get(ocx_env::OCX_NO_VERIFY.name).unwrap(),
             "1",
             "cfg.no_verify=true must forward OCX_NO_VERIFY=1 to the child env"
         );
 
         let mut env = Env::clean();
-        env.set(keys::OCX_NO_VERIFY, "1");
+        env.set(ocx_env::OCX_NO_VERIFY.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_NO_VERIFY).is_none(),
+            env.get(ocx_env::OCX_NO_VERIFY.name).is_none(),
             "cfg.no_verify=false must clear any inherited OCX_NO_VERIFY"
         );
     }
@@ -1357,14 +1253,14 @@ mod tests {
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
         assert_eq!(
-            env.get(keys::OCX_GLOBAL).unwrap(),
+            env.get(ocx_env::OCX_GLOBAL.name).unwrap(),
             "1",
             "cfg.global=true must forward OCX_GLOBAL=1 to the child env"
         );
         // OCX_GLOBAL travels with the resolution-affecting set, never the
         // presentation set (which is never forwarded — it would leak into
         // entrypoint child streams).
-        for presentation in ["OCX_LOG", "OCX_LOG_CONSOLE", "OCX_FORMAT", "OCX_COLOR"] {
+        for presentation in ["OCX_LOG_LEVEL", "OCX_LOG_CONSOLE", "OCX_FORMAT", "OCX_COLOR"] {
             assert!(
                 env.get(presentation).is_none(),
                 "presentation key `{presentation}` must never ride along with OCX_GLOBAL"
@@ -1374,10 +1270,10 @@ mod tests {
         // Unset: a stale inherited OCX_GLOBAL must be cleared so the outer
         // ocx's parsed state (global=false) wins.
         let mut env = Env::clean();
-        env.set(keys::OCX_GLOBAL, "1");
+        env.set(ocx_env::OCX_GLOBAL.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_GLOBAL).is_none(),
+            env.get(ocx_env::OCX_GLOBAL.name).is_none(),
             "cfg.global=false must clear any inherited OCX_GLOBAL"
         );
     }
@@ -1395,8 +1291,8 @@ mod tests {
         env.apply_ocx_config(&view("/abs/ocx"));
         // Positive control: the forwarding path really ran, so the two
         // absence assertions below are not passing vacuously.
-        assert_eq!(env.get(keys::OCX_BINARY_PIN).unwrap(), "/abs/ocx");
-        for key in [keys::OCX_LAZY_MODE, keys::OCX_LAZY_REPORT] {
+        assert_eq!(env.get(ocx_env::OCX_BINARY_PIN.name).unwrap(), "/abs/ocx");
+        for key in [ocx_env::OCX_LAZY_MODE.name, ocx_env::OCX_LAZY_REPORT.name] {
             assert!(
                 env.get(key).is_none(),
                 "`{key}` must never be forwarded as resolution-affecting config"
@@ -1406,11 +1302,11 @@ mod tests {
         // An ambient value the caller already placed on the child env is left
         // alone — non-forwarded is not the same as scrubbed.
         let mut env = Env::clean();
-        env.set(keys::OCX_LAZY_MODE, "always");
-        env.set(keys::OCX_LAZY_REPORT, "progress");
+        env.set(ocx_env::OCX_LAZY_MODE.name, "always");
+        env.set(ocx_env::OCX_LAZY_REPORT.name, "progress");
         env.apply_ocx_config(&view("/abs/ocx"));
-        assert_eq!(env.get(keys::OCX_LAZY_MODE).unwrap(), "always");
-        assert_eq!(env.get(keys::OCX_LAZY_REPORT).unwrap(), "progress");
+        assert_eq!(env.get(ocx_env::OCX_LAZY_MODE.name).unwrap(), "always");
+        assert_eq!(env.get(ocx_env::OCX_LAZY_REPORT.name).unwrap(), "progress");
     }
 
     #[test]
@@ -1420,24 +1316,33 @@ mod tests {
         // export. The outer's parsed state must win — child ocx must NOT see
         // the stale flags.
         let mut env = Env::clean();
-        env.set(keys::OCX_OFFLINE, "1");
-        env.set(keys::OCX_REMOTE, "1");
-        env.set(keys::OCX_CONFIG, "/stale.toml");
-        env.set(keys::OCX_INDEX, "/stale-idx");
+        env.set(ocx_env::OCX_OFFLINE.name, "1");
+        env.set(ocx_env::OCX_REMOTE.name, "1");
+        env.set(ocx_env::OCX_CONFIG.name, "/stale.toml");
+        env.set(ocx_env::OCX_INDEX.name, "/stale-idx");
 
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_OFFLINE).is_none(),
+            env.get(ocx_env::OCX_OFFLINE.name).is_none(),
             "stale OCX_OFFLINE must be cleared"
         );
-        assert!(env.get(keys::OCX_REMOTE).is_none(), "stale OCX_REMOTE must be cleared");
-        assert!(env.get(keys::OCX_CONFIG).is_none(), "stale OCX_CONFIG must be cleared");
-        assert!(env.get(keys::OCX_INDEX).is_none(), "stale OCX_INDEX must be cleared");
+        assert!(
+            env.get(ocx_env::OCX_REMOTE.name).is_none(),
+            "stale OCX_REMOTE must be cleared"
+        );
+        assert!(
+            env.get(ocx_env::OCX_CONFIG.name).is_none(),
+            "stale OCX_CONFIG must be cleared"
+        );
+        assert!(
+            env.get(ocx_env::OCX_INDEX.name).is_none(),
+            "stale OCX_INDEX must be cleared"
+        );
     }
 
     /// The conventional `env://` key variable is on the credential list.
     ///
-    /// The scrub test below iterates `CREDENTIAL_KEYS`, so it would stay green
+    /// The scrub test below iterates `credential_keys`, so it would stay green
     /// with this entry removed — it would simply test one variable fewer. The
     /// membership is therefore asserted by name: an `env://OCX_SIGNING_KEY`
     /// that a plugin can read is a raw private key handed to third-party code,
@@ -1445,7 +1350,7 @@ mod tests {
     #[test]
     fn the_conventional_signing_key_variable_is_a_credential() {
         assert!(
-            keys::CREDENTIAL_KEYS.contains(&keys::OCX_SIGNING_KEY),
+            ocx_env::credential_keys().any(|key| key == ocx_env::OCX_SIGNING_KEY.declaration().name),
             "OCX_SIGNING_KEY holds a private key PEM and must be scrubbed from every child env"
         );
     }
@@ -1460,27 +1365,26 @@ mod tests {
     ///
     /// Asserted **by name**, like `the_conventional_signing_key_variable_is_a_credential`
     /// above and for the same reason: `apply_ocx_config_never_forwards_credential_tokens`
-    /// iterates `CREDENTIAL_KEYS`, so removing an entry leaves it green — it
+    /// iterates `credential_keys`, so removing an entry leaves it green — it
     /// simply tests one variable fewer.
     ///
-    /// The names are spelled as literals rather than read from a `keys`
-    /// constant on purpose: a constant would be compared against itself, so a
+    /// The names are spelled as literals rather than read from a declaration's
+    /// `name` on purpose: a declaration would be compared against itself, so a
     /// typo in its value would satisfy both sides. The literal is the contract's
-    /// own spelling, quoted the way `exit_code_forge_capability_unavailable_is_86`
-    /// quotes 86.
+    /// own spelling, quoted the way `exit_code_unsupported_is_82`
+    /// quotes 82.
     ///
-    /// Red at the stub: the constant is not in the set.
-    /// Mutation once implemented: remove `OCX_ANNOUNCE_GIT_TOKEN` from the array
-    /// (the positive reds and the scrub test above does not); add
-    /// `OCX_ANNOUNCE_GIT_USERNAME` to it (the negative reds).
+    /// Mutation: drop `child = Scrub` from `OCX_ANNOUNCE_GIT_TOKEN`'s declaration
+    /// (the positive reds and the scrub test above does not); scrub
+    /// `OCX_ANNOUNCE_GIT_USERNAME` (the negative reds).
     #[test]
     fn credential_keys_contains_git_token_not_username() {
         assert!(
-            keys::CREDENTIAL_KEYS.contains(&"OCX_ANNOUNCE_GIT_TOKEN"),
+            ocx_env::credential_keys().any(|key| key == "OCX_ANNOUNCE_GIT_TOKEN"),
             "OCX_ANNOUNCE_GIT_TOKEN is a push credential and must be scrubbed from every child env"
         );
         assert!(
-            !keys::CREDENTIAL_KEYS.contains(&"OCX_ANNOUNCE_GIT_USERNAME"),
+            !ocx_env::credential_keys().any(|key| key == "OCX_ANNOUNCE_GIT_USERNAME"),
             "OCX_ANNOUNCE_GIT_USERNAME is the user half of an HTTP Basic pair, not a credential"
         );
     }
@@ -1497,11 +1401,11 @@ mod tests {
         // OCX_IDENTITY_TOKEN set (e.g. inherited via Env::new()), the call to
         // apply_ocx_config must leave the child-env entry absent.
         let mut env = Env::clean();
-        for credential in keys::CREDENTIAL_KEYS {
-            env.set(*credential, "tok-secret");
+        for credential in ocx_env::credential_keys() {
+            env.set(credential, "tok-secret");
         }
         env.apply_ocx_config(&view("/abs/ocx"));
-        for credential in keys::CREDENTIAL_KEYS {
+        for credential in ocx_env::credential_keys() {
             assert!(
                 env.get(credential).is_none(),
                 "credential token `{credential}` must never be forwarded by apply_ocx_config",
@@ -1514,13 +1418,13 @@ mod tests {
         // Presentation flags (--log-level, --format, --color) must not
         // propagate via env — they would leak into a launcher's child stream.
         // The view does not even carry them, but assert the corresponding
-        // canonical keys are absent regardless. `OCX_LOG` and `OCX_LOG_CONSOLE`
+        // canonical keys are absent regardless. `OCX_LOG_LEVEL` and `OCX_LOG_CONSOLE`
         // are the real env vars consumed by the CLI's `LogSettings::build_env_filter`;
         // `OCX_FORMAT` / `OCX_COLOR` are the canonical names that would bind
         // to `--format` / `--color` if those ever gained env counterparts.
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
-        for forbidden in ["OCX_LOG", "OCX_LOG_CONSOLE", "OCX_FORMAT", "OCX_COLOR"] {
+        for forbidden in ["OCX_LOG_LEVEL", "OCX_LOG_CONSOLE", "OCX_FORMAT", "OCX_COLOR"] {
             assert!(
                 env.get(forbidden).is_none(),
                 "presentation key `{forbidden}` must never be set by apply_ocx_config",
@@ -1539,7 +1443,7 @@ mod tests {
         let mut env = Env::clean();
         env.apply_ocx_config(&config);
         assert_eq!(
-            env.get(keys::OCX_NO_CONFIG).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_CONFIG.name).and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "a view resolved hermetic must forward OCX_NO_CONFIG to the child env"
         );
@@ -1552,10 +1456,10 @@ mod tests {
     #[test]
     fn apply_ocx_config_removes_stale_no_config_when_the_view_says_false() {
         let mut env = Env::clean();
-        env.set(keys::OCX_NO_CONFIG, "1");
+        env.set(ocx_env::OCX_NO_CONFIG.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_NO_CONFIG).is_none(),
+            env.get(ocx_env::OCX_NO_CONFIG.name).is_none(),
             "an inherited OCX_NO_CONFIG must be removed when the view resolved false"
         );
     }
@@ -1568,36 +1472,37 @@ mod tests {
     /// env at all. Reds against the ambient-read form this replaced.
     #[test]
     fn apply_ocx_config_ignores_an_ambient_no_config_the_view_did_not_carry() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_NO_CONFIG, "1");
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_NO_CONFIG, "1");
 
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_NO_CONFIG).is_none(),
+            env.get(ocx_env::OCX_NO_CONFIG.name).is_none(),
             "the ambient OCX_NO_CONFIG is not the authority — the view is"
         );
     }
 
     #[test]
     fn apply_ocx_config_forwards_the_update_kill_switch_from_ambient() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
-        guard.set(keys::OCX_NO_UPDATE_CHECK, "1");
+        guard.set(&ocx_env::OCX_NO_UPDATE_CHECK, "1");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_NO_UPDATE_CHECK).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_UPDATE_CHECK.name)
+                .and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "a truthy OCX_NO_UPDATE_CHECK must reach a --clean child"
         );
 
-        guard.remove(keys::OCX_NO_UPDATE_CHECK);
+        guard.remove(&ocx_env::OCX_NO_UPDATE_CHECK);
         let mut env = Env::clean();
-        env.set(keys::OCX_NO_UPDATE_CHECK, "1");
+        env.set(ocx_env::OCX_NO_UPDATE_CHECK.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_NO_UPDATE_CHECK).is_none(),
+            env.get(ocx_env::OCX_NO_UPDATE_CHECK.name).is_none(),
             "an absent ambient OCX_NO_UPDATE_CHECK must clear a stale child value"
         );
     }
@@ -1605,57 +1510,62 @@ mod tests {
     /// The update postures are personal preferences: a child ocx reads its own, never a forwarded copy.
     #[test]
     fn apply_ocx_config_never_writes_the_update_preference_keys() {
-        let guard = ocx_util::env::overrides::lock();
-        let preference_keys = [
-            keys::OCX_SELF_UPDATE,
-            keys::OCX_TOOLCHAIN_UPDATE,
-            keys::OCX_UPDATE_CHECK_INTERVAL,
+        let guard = ocx_env::overrides::lock();
+        let preference_vars = [
+            &ocx_env::OCX_SELF_UPDATE,
+            &ocx_env::OCX_TOOLCHAIN_UPDATE,
+            &ocx_env::OCX_UPDATE_CHECK_INTERVAL,
         ];
-        for key in preference_keys {
-            guard.set(key, "apply");
+        for var in preference_vars {
+            guard.set(var, "apply");
         }
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
-        assert_eq!(env.get(keys::OCX_BINARY_PIN).unwrap(), "/abs/ocx");
-        for key in preference_keys {
-            assert!(env.get(key).is_none(), "`{key}` must never be forwarded to a child");
+        assert_eq!(env.get(ocx_env::OCX_BINARY_PIN.name).unwrap(), "/abs/ocx");
+        for var in preference_vars {
+            assert!(
+                env.get(var.name).is_none(),
+                "`{}` must never be forwarded to a child",
+                var.name
+            );
         }
     }
 
     /// Package metadata and `ocx.toml` `[env]` both gate on this predicate, so neither can set an update posture.
     #[test]
     fn every_update_key_is_reserved() {
-        for key in [
-            keys::OCX_NO_UPDATE_CHECK,
-            keys::OCX_UPDATE_CHECK_INTERVAL,
-            keys::OCX_SELF_UPDATE,
-            keys::OCX_TOOLCHAIN_UPDATE,
+        for var in [
+            &ocx_env::OCX_NO_UPDATE_CHECK,
+            &ocx_env::OCX_UPDATE_CHECK_INTERVAL,
+            &ocx_env::OCX_SELF_UPDATE,
+            &ocx_env::OCX_TOOLCHAIN_UPDATE,
         ] {
-            assert!(is_reserved_ocx_key(key), "{key}");
+            assert!(is_reserved_ocx_key(var.name), "{}", var.name);
         }
     }
 
     #[test]
     fn apply_ocx_config_forwards_yanked_optin_from_ambient() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
         // A truthy ambient opt-in forwards to the child env so a nested ocx
         // resolving an index-sourced yanked tag honours the same override.
-        guard.set(keys::OCX_ALLOW_YANKED, "1");
+        guard.set(&ocx_env::OCX_ALLOW_YANKED, "1");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_ALLOW_YANKED).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_ALLOW_YANKED.name)
+                .and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "a truthy OCX_ALLOW_YANKED must forward to the child env"
         );
 
         // Absent (or falsy) → not set on the child env.
-        guard.remove(keys::OCX_ALLOW_YANKED);
+        guard.remove(&ocx_env::OCX_ALLOW_YANKED);
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_ALLOW_YANKED).is_none(),
+            env.get(ocx_env::OCX_ALLOW_YANKED.name).is_none(),
             "an absent OCX_ALLOW_YANKED must not be set on the child env"
         );
     }
@@ -1669,19 +1579,20 @@ mod tests {
     /// `OCX_NO_CONFIG_REFRESH` block in `apply_ocx_config`.
     #[test]
     fn apply_ocx_config_forwards_the_ambient_resolution_kill_switches() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
-        guard.set(keys::OCX_NO_PROJECT, "1");
-        guard.set(keys::OCX_NO_CONFIG_REFRESH, "1");
+        guard.set(&ocx_env::OCX_NO_PROJECT, "1");
+        guard.set(&ocx_env::OCX_NO_CONFIG_REFRESH, "1");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_NO_PROJECT).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_PROJECT.name).and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "a truthy OCX_NO_PROJECT must forward, or the child walks up and adopts a project"
         );
         assert_eq!(
-            env.get(keys::OCX_NO_CONFIG_REFRESH).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_CONFIG_REFRESH.name)
+                .and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "a truthy OCX_NO_CONFIG_REFRESH must forward, or the child re-fetches the managed tier"
         );
@@ -1693,18 +1604,18 @@ mod tests {
         // on a key `Env::clean()` never held is a no-op, so asserting absence
         // from an empty map would hold with the remove arms deleted — a green
         // indistinguishable from the check never running.
-        guard.remove(keys::OCX_NO_PROJECT);
-        guard.set(keys::OCX_NO_CONFIG_REFRESH, "0");
+        guard.remove(&ocx_env::OCX_NO_PROJECT);
+        guard.set(&ocx_env::OCX_NO_CONFIG_REFRESH, "0");
         let mut env = Env::clean();
-        env.set(keys::OCX_NO_PROJECT, "1");
-        env.set(keys::OCX_NO_CONFIG_REFRESH, "1");
+        env.set(ocx_env::OCX_NO_PROJECT.name, "1");
+        env.set(ocx_env::OCX_NO_CONFIG_REFRESH.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_NO_PROJECT).is_none(),
+            env.get(ocx_env::OCX_NO_PROJECT.name).is_none(),
             "an absent OCX_NO_PROJECT must clear an inherited value, not leave it standing"
         );
         assert!(
-            env.get(keys::OCX_NO_CONFIG_REFRESH).is_none(),
+            env.get(ocx_env::OCX_NO_CONFIG_REFRESH.name).is_none(),
             "a falsy OCX_NO_CONFIG_REFRESH must clear an inherited value, not leave it standing"
         );
     }
@@ -1717,8 +1628,8 @@ mod tests {
     /// Red state: drop the `cfg.project.is_none() &&` guard.
     #[test]
     fn apply_ocx_config_suppresses_the_project_prune_when_a_project_is_explicit() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_NO_PROJECT, "1");
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_NO_PROJECT, "1");
 
         let mut cfg = view("/abs/ocx");
         cfg.project = Some(std::path::PathBuf::from("/abs/repo/ocx.toml"));
@@ -1726,12 +1637,12 @@ mod tests {
         env.apply_ocx_config(&cfg);
 
         assert_eq!(
-            env.get(keys::OCX_PROJECT).map(std::path::Path::new),
+            env.get(ocx_env::OCX_PROJECT.name).map(std::path::Path::new),
             Some(std::path::Path::new("/abs/repo/ocx.toml")),
             "the explicit project must reach the child"
         );
         assert!(
-            env.get(keys::OCX_NO_PROJECT).is_none(),
+            env.get(ocx_env::OCX_NO_PROJECT.name).is_none(),
             "the prune must not travel beside a project path the child would then discard"
         );
     }
@@ -1746,41 +1657,43 @@ mod tests {
     /// Red state: delete either arm of either `match` in `apply_ocx_config`.
     #[test]
     fn apply_ocx_config_forwards_the_ambient_registry_settings() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
-        guard.set(keys::OCX_DEFAULT_REGISTRY, "registry.example:5000");
-        guard.set(keys::OCX_INSECURE_REGISTRIES, "registry.example:5000,other.example");
+        guard.set(&ocx_env::OCX_DEFAULT_REGISTRY, "registry.example:5000");
+        guard.set(&ocx_env::OCX_INSECURE_REGISTRIES, "registry.example:5000,other.example");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_DEFAULT_REGISTRY).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_DEFAULT_REGISTRY.name)
+                .and_then(std::ffi::OsStr::to_str),
             Some("registry.example:5000"),
             "the default registry must forward, or a bare identifier names another repository"
         );
         assert_eq!(
-            env.get(keys::OCX_INSECURE_REGISTRIES).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_INSECURE_REGISTRIES.name)
+                .and_then(std::ffi::OsStr::to_str),
             Some("registry.example:5000,other.example"),
             "the insecure authorities must forward verbatim, comma-joined as the parser reads them"
         );
 
-        // Empty and absent are the same state to `ocx_util::env::string`, so
+        // Empty and absent are the same state to `ocx_env::EnvVar::get`, so
         // both clear — an empty value travelling onward would read as a
         // deliberate "no default registry" the parent never resolved. Seeded
         // onto the child map first for the reason the sibling above states:
         // `remove` on a key `Env::clean()` never held cannot fail, so the
         // assertion would hold with the remove arms deleted.
-        guard.set(keys::OCX_DEFAULT_REGISTRY, "");
-        guard.remove(keys::OCX_INSECURE_REGISTRIES);
+        guard.set(&ocx_env::OCX_DEFAULT_REGISTRY, "");
+        guard.remove(&ocx_env::OCX_INSECURE_REGISTRIES);
         let mut env = Env::clean();
-        env.set(keys::OCX_DEFAULT_REGISTRY, "stale.example");
-        env.set(keys::OCX_INSECURE_REGISTRIES, "stale.example:5000");
+        env.set(ocx_env::OCX_DEFAULT_REGISTRY.name, "stale.example");
+        env.set(ocx_env::OCX_INSECURE_REGISTRIES.name, "stale.example:5000");
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_DEFAULT_REGISTRY).is_none(),
+            env.get(ocx_env::OCX_DEFAULT_REGISTRY.name).is_none(),
             "an empty OCX_DEFAULT_REGISTRY must clear the inherited value, not forward either one"
         );
         assert!(
-            env.get(keys::OCX_INSECURE_REGISTRIES).is_none(),
+            env.get(ocx_env::OCX_INSECURE_REGISTRIES.name).is_none(),
             "an absent OCX_INSECURE_REGISTRIES must clear an inherited value, not leave it standing"
         );
     }
@@ -1800,24 +1713,24 @@ mod tests {
     /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config).
     #[test]
     fn apply_ocx_config_forwards_no_consent_from_ambient() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
-        guard.set(keys::OCX_NO_CONSENT, "1");
+        guard.set(&ocx_env::OCX_NO_CONSENT, "1");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_NO_CONSENT).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_CONSENT.name).and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "a truthy OCX_NO_CONSENT must forward to the child env"
         );
 
         // Absent (or falsy) → not set on the child env, so a stale export in
         // the parent shell cannot suppress a stamp the child should write.
-        guard.remove(keys::OCX_NO_CONSENT);
+        guard.remove(&ocx_env::OCX_NO_CONSENT);
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert!(
-            env.get(keys::OCX_NO_CONSENT).is_none(),
+            env.get(ocx_env::OCX_NO_CONSENT.name).is_none(),
             "an absent OCX_NO_CONSENT must not be set on the child env"
         );
     }
@@ -1839,17 +1752,17 @@ mod tests {
     /// an ambient refusal on the way down.
     #[test]
     fn apply_ocx_config_forwards_no_consent_from_the_invocation_flag() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
         // The flag refused, the ambient environment said nothing: the refusal
         // must still reach the child.
-        guard.remove(keys::OCX_NO_CONSENT);
+        guard.remove(&ocx_env::OCX_NO_CONSENT);
         let mut cfg = view("/abs/ocx");
         cfg.no_consent = true;
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
         assert_eq!(
-            env.get(keys::OCX_NO_CONSENT).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_CONSENT.name).and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "an invocation's own --no-consent must forward to the child env"
         );
@@ -1857,11 +1770,11 @@ mod tests {
         // The mirror image: no flag refusal, but the environment refused. A
         // `--consent` decides the one project this invocation targets and must
         // not grant anything the child goes on to touch.
-        guard.set(keys::OCX_NO_CONSENT, "1");
+        guard.set(&ocx_env::OCX_NO_CONSENT, "1");
         let mut env = Env::clean();
         env.apply_ocx_config(&view("/abs/ocx"));
         assert_eq!(
-            env.get(keys::OCX_NO_CONSENT).and_then(std::ffi::OsStr::to_str),
+            env.get(ocx_env::OCX_NO_CONSENT.name).and_then(std::ffi::OsStr::to_str),
             Some("1"),
             "--consent must not clear an inherited OCX_NO_CONSENT from the child env"
         );
@@ -1874,11 +1787,11 @@ mod tests {
         // `apply_ocx_config`, not the parent shell.
         let env = Env::clean();
         for key in [
-            keys::OCX_BINARY_PIN,
-            keys::OCX_OFFLINE,
-            keys::OCX_REMOTE,
-            keys::OCX_CONFIG,
-            keys::OCX_INDEX,
+            ocx_env::OCX_BINARY_PIN.name,
+            ocx_env::OCX_OFFLINE.name,
+            ocx_env::OCX_REMOTE.name,
+            ocx_env::OCX_CONFIG.name,
+            ocx_env::OCX_INDEX.name,
         ] {
             assert!(env.get(key).is_none(), "Env::clean must not contain `{key}`");
         }
@@ -1896,7 +1809,7 @@ mod tests {
     /// review A3.
     #[test]
     fn ocx_mirrors_json_roundtrip_basic() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let input = vec![(
             "ghcr.io".to_string(),
             crate::mirror::MirrorConfig {
@@ -1916,12 +1829,12 @@ mod tests {
         // Retrieve the encoded value and inject it via the test env override
         // so mirrors() reads it.
         let encoded = child_env
-            .get(keys::OCX_MIRRORS)
+            .get(ocx_env::OCX_MIRRORS.name)
             .expect("OCX_MIRRORS must be set when mirrors is non-empty")
             .to_str()
             .expect("OCX_MIRRORS must be valid UTF-8")
             .to_string();
-        env.set(keys::OCX_MIRRORS, encoded);
+        env.set(&ocx_env::OCX_MIRRORS, encoded);
 
         let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
         assert_eq!(parsed.len(), 1, "parsed mirrors must have one entry");
@@ -1939,7 +1852,7 @@ mod tests {
     /// and a url with a query string"; ADR review A3 (JSON not comma/`=`).
     #[test]
     fn ocx_mirrors_json_roundtrip_localhost_and_query_string() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let input = vec![
             (
                 "localhost:5000".to_string(),
@@ -1966,12 +1879,12 @@ mod tests {
         child_env.apply_ocx_config(&cfg);
 
         let encoded = child_env
-            .get(keys::OCX_MIRRORS)
+            .get(ocx_env::OCX_MIRRORS.name)
             .expect("OCX_MIRRORS must be set when mirrors is non-empty")
             .to_str()
             .expect("OCX_MIRRORS must be valid UTF-8")
             .to_string();
-        env.set(keys::OCX_MIRRORS, encoded);
+        env.set(&ocx_env::OCX_MIRRORS, encoded);
 
         let mut parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
         // Sort for deterministic comparison (HashMap iteration order may differ).
@@ -2003,11 +1916,11 @@ mod tests {
 
         let mut env = Env::clean();
         // Pre-set a stale value to confirm it is removed.
-        env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":"https://old.corp/remote"}"#);
+        env.set(ocx_env::OCX_MIRRORS.name, r#"{"ghcr.io":"https://old.corp/remote"}"#);
         env.apply_ocx_config(&cfg);
 
         assert!(
-            env.get(keys::OCX_MIRRORS).is_none(),
+            env.get(ocx_env::OCX_MIRRORS.name).is_none(),
             "empty mirrors must remove OCX_MIRRORS from the child env"
         );
     }
@@ -2025,8 +1938,8 @@ mod tests {
     fn malformed_ocx_mirrors_is_hard_error() {
         use crate::mirror::MirrorConfigError;
 
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_MIRRORS, "this is not valid json {{{");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_MIRRORS, "this is not valid json {{{");
 
         let result = mirrors();
         assert!(
@@ -2046,9 +1959,9 @@ mod tests {
     fn non_string_ocx_mirrors_value_is_hard_error() {
         use crate::mirror::MirrorConfigError;
 
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         // ghcr.io maps to a number, not a string url or a {registry?, index?} object.
-        env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":42}"#);
+        env.set(&ocx_env::OCX_MIRRORS, r#"{"ghcr.io":42}"#);
 
         let result = mirrors();
         assert!(
@@ -2062,8 +1975,8 @@ mod tests {
     /// TOML string.
     #[test]
     fn ocx_mirrors_plain_string_value_sets_both_roles() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_MIRRORS, r#"{"ghcr.io":"https://mirror.corp/both-roles"}"#);
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_MIRRORS, r#"{"ghcr.io":"https://mirror.corp/both-roles"}"#);
 
         let parsed = mirrors().expect("a plain string per-host value must parse");
         assert_eq!(parsed.len(), 1);
@@ -2076,9 +1989,9 @@ mod tests {
     /// with a `[mirrors."<host>"]` TOML table entry.
     #[test]
     fn ocx_mirrors_object_value_splits_per_role() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         env.set(
-            keys::OCX_MIRRORS,
+            &ocx_env::OCX_MIRRORS,
             r#"{"index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}"#,
         );
 
@@ -2095,8 +2008,8 @@ mod tests {
     /// An absent `OCX_MIRRORS` yields an empty list, not an error.
     #[test]
     fn ocx_mirrors_absent_env_yields_empty_vec() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(keys::OCX_MIRRORS);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_MIRRORS);
 
         let parsed = mirrors().expect("an absent OCX_MIRRORS must not error");
         assert!(parsed.is_empty(), "absent OCX_MIRRORS must yield an empty vec");
@@ -2105,8 +2018,8 @@ mod tests {
     /// An explicit empty JSON object also yields an empty list.
     #[test]
     fn ocx_mirrors_empty_object_yields_empty_vec() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_MIRRORS, "{}");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_MIRRORS, "{}");
 
         let parsed = mirrors().expect("an empty object must not error");
         assert!(parsed.is_empty(), "OCX_MIRRORS=\"{{}}\" must yield an empty vec");
@@ -2120,7 +2033,7 @@ mod tests {
     /// same URL, an identity round trip.
     #[test]
     fn ocx_mirrors_encode_roundtrip_string_form_collapses_to_bare_json_string() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let input = vec![(
             "ghcr.io".to_string(),
             crate::mirror::MirrorConfig {
@@ -2136,7 +2049,7 @@ mod tests {
         child_env.apply_ocx_config(&cfg);
 
         let encoded = child_env
-            .get(keys::OCX_MIRRORS)
+            .get(ocx_env::OCX_MIRRORS.name)
             .expect("OCX_MIRRORS must be set")
             .to_str()
             .expect("OCX_MIRRORS must be valid UTF-8")
@@ -2148,7 +2061,7 @@ mod tests {
             "when registry == index the entry must collapse to a bare JSON string, got: {value}"
         );
 
-        env.set(keys::OCX_MIRRORS, encoded);
+        env.set(&ocx_env::OCX_MIRRORS, encoded);
         let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
         assert_eq!(parsed.len(), 1);
         assert_eq!(
@@ -2161,7 +2074,7 @@ mod tests {
     /// value — encode/parse identity for the split form.
     #[test]
     fn ocx_mirrors_encode_roundtrip_split_form_preserves_registry_only() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let input = vec![(
             "index.ocx.sh".to_string(),
             crate::mirror::MirrorConfig {
@@ -2177,12 +2090,12 @@ mod tests {
         child_env.apply_ocx_config(&cfg);
 
         let encoded = child_env
-            .get(keys::OCX_MIRRORS)
+            .get(ocx_env::OCX_MIRRORS.name)
             .expect("OCX_MIRRORS must be set")
             .to_str()
             .expect("OCX_MIRRORS must be valid UTF-8")
             .to_string();
-        env.set(keys::OCX_MIRRORS, encoded);
+        env.set(&ocx_env::OCX_MIRRORS, encoded);
 
         let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
         assert_eq!(parsed.len(), 1);
@@ -2201,7 +2114,7 @@ mod tests {
     /// URLs) round-trips with both values preserved distinctly.
     #[test]
     fn ocx_mirrors_encode_roundtrip_both_roles_differing_preserved() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let input = vec![(
             "index.ocx.sh".to_string(),
             crate::mirror::MirrorConfig {
@@ -2217,12 +2130,12 @@ mod tests {
         child_env.apply_ocx_config(&cfg);
 
         let encoded = child_env
-            .get(keys::OCX_MIRRORS)
+            .get(ocx_env::OCX_MIRRORS.name)
             .expect("OCX_MIRRORS must be set")
             .to_str()
             .expect("OCX_MIRRORS must be valid UTF-8")
             .to_string();
-        env.set(keys::OCX_MIRRORS, encoded);
+        env.set(&ocx_env::OCX_MIRRORS, encoded);
 
         let parsed = mirrors().expect("well-formed OCX_MIRRORS must parse");
         assert_eq!(parsed.len(), 1);
@@ -2254,13 +2167,13 @@ mod tests {
         let mut env = Env::clean();
         // Pre-set a stale value to confirm it is removed.
         env.set(
-            keys::OCX_PATCHES,
+            ocx_env::OCX_PATCHES.name,
             r#"{"registry":"stale","path_template":"x","required":true}"#,
         );
         env.apply_ocx_config(&cfg);
 
         assert!(
-            env.get(keys::OCX_PATCHES).is_none(),
+            env.get(ocx_env::OCX_PATCHES.name).is_none(),
             "patches=None must remove any stale OCX_PATCHES from the child env"
         );
     }
@@ -2285,7 +2198,7 @@ mod tests {
         env.apply_ocx_config(&cfg);
 
         let raw = env
-            .get(keys::OCX_PATCHES)
+            .get(ocx_env::OCX_PATCHES.name)
             .expect("OCX_PATCHES must be set when patches is Some")
             .to_str()
             .expect("OCX_PATCHES must be valid UTF-8");
@@ -2307,7 +2220,7 @@ mod tests {
     fn apply_ocx_config_ocx_patches_round_trip_via_patches_from_env() {
         use crate::patch::patches_from_env;
 
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
 
         let original = crate::patch::ResolvedPatchConfig {
             system_required: false,
@@ -2329,12 +2242,12 @@ mod tests {
         // Inject the encoded OCX_PATCHES from child_env into the test env override
         // so patches_from_env() can read it.
         let encoded = child_env
-            .get(keys::OCX_PATCHES)
+            .get(ocx_env::OCX_PATCHES.name)
             .expect("OCX_PATCHES must be set when patches is Some")
             .to_str()
             .expect("OCX_PATCHES must be valid UTF-8")
             .to_string();
-        env_guard.set(keys::OCX_PATCHES, encoded);
+        env_guard.set(&ocx_env::OCX_PATCHES, encoded);
 
         let parsed = patches_from_env()
             .expect("well-formed OCX_PATCHES must parse")
@@ -2366,7 +2279,7 @@ mod tests {
         env.apply_ocx_config(&cfg);
 
         let value = env
-            .get(keys::OCX_PATCH_SNAPSHOT)
+            .get(ocx_env::OCX_PATCH_SNAPSHOT.name)
             .expect("OCX_PATCH_SNAPSHOT must be set when patch_snapshot is Some");
         assert_eq!(
             value.to_str().unwrap(),
@@ -2390,11 +2303,11 @@ mod tests {
 
         let mut env = Env::clean();
         // Pre-set a stale value to confirm it is cleared.
-        env.set(keys::OCX_PATCH_SNAPSHOT, "/stale/patches.snapshot.json");
+        env.set(ocx_env::OCX_PATCH_SNAPSHOT.name, "/stale/patches.snapshot.json");
         env.apply_ocx_config(&cfg);
 
         assert!(
-            env.get(keys::OCX_PATCH_SNAPSHOT).is_none(),
+            env.get(ocx_env::OCX_PATCH_SNAPSHOT.name).is_none(),
             "patch_snapshot=None must remove any stale OCX_PATCH_SNAPSHOT from the child env"
         );
     }
@@ -2467,12 +2380,12 @@ mod tests {
         env.apply_ocx_config(&cfg);
 
         assert_eq!(
-            env.get(keys::OCX_RECORDS_DIR).unwrap(),
+            env.get(ocx_env::OCX_RECORDS_DIR.name).unwrap(),
             "/var/log/ocx-records",
             "a resolved sink must forward as OCX_RECORDS_DIR"
         );
         assert_eq!(
-            env.get(keys::OCX_RECORDS_NAME).unwrap(),
+            env.get(ocx_env::OCX_RECORDS_NAME.name).unwrap(),
             "{time}-{host}-{pid}.json",
             "the resolved template must forward as OCX_RECORDS_NAME"
         );
@@ -2488,16 +2401,16 @@ mod tests {
         assert!(cfg.records.dir.is_none(), "the default view resolves recording off");
 
         let mut env = Env::clean();
-        env.set(keys::OCX_RECORDS_DIR, "/stale/sink");
-        env.set(keys::OCX_RECORDS_NAME, "{time}-stale.json");
+        env.set(ocx_env::OCX_RECORDS_DIR.name, "/stale/sink");
+        env.set(ocx_env::OCX_RECORDS_NAME.name, "{time}-stale.json");
         env.apply_ocx_config(&cfg);
 
         assert!(
-            env.get(keys::OCX_RECORDS_DIR).is_none(),
+            env.get(ocx_env::OCX_RECORDS_DIR.name).is_none(),
             "an inherited OCX_RECORDS_DIR must be removed, not left to survive"
         );
         assert!(
-            env.get(keys::OCX_RECORDS_NAME).is_none(),
+            env.get(ocx_env::OCX_RECORDS_NAME.name).is_none(),
             "an inherited OCX_RECORDS_NAME must be removed, not left to survive"
         );
     }
@@ -2512,12 +2425,12 @@ mod tests {
         assert!(cfg.records.name.is_none());
 
         let mut env = Env::clean();
-        env.set(keys::OCX_RECORDS_NAME, "{time}-stale.json");
+        env.set(ocx_env::OCX_RECORDS_NAME.name, "{time}-stale.json");
         env.apply_ocx_config(&cfg);
 
-        assert_eq!(env.get(keys::OCX_RECORDS_DIR).unwrap(), "/var/log/ocx-records");
+        assert_eq!(env.get(ocx_env::OCX_RECORDS_DIR.name).unwrap(), "/var/log/ocx-records");
         assert!(
-            env.get(keys::OCX_RECORDS_NAME).is_none(),
+            env.get(ocx_env::OCX_RECORDS_NAME.name).is_none(),
             "an inherited OCX_RECORDS_NAME must be removed even when a sink is set"
         );
     }
@@ -2633,7 +2546,7 @@ mod tests {
         env.apply_ocx_config(&cfg);
 
         assert_eq!(
-            env.get(keys::OCX_TOOLCHAIN_DIR)
+            env.get(ocx_env::OCX_TOOLCHAIN_DIR.name)
                 .expect("OCX_TOOLCHAIN_DIR must be set when toolchain_dir is Some"),
             "/home/u/toolchains",
             "the child must resolve the same toolchain root as the parent"
@@ -2652,11 +2565,11 @@ mod tests {
         assert!(cfg.toolchain_dir.is_none(), "the default view carries no root");
 
         let mut env = Env::clean();
-        env.set(keys::OCX_TOOLCHAIN_DIR, "/stale/toolchains");
+        env.set(ocx_env::OCX_TOOLCHAIN_DIR.name, "/stale/toolchains");
         env.apply_ocx_config(&cfg);
 
         assert!(
-            env.get(keys::OCX_TOOLCHAIN_DIR).is_none(),
+            env.get(ocx_env::OCX_TOOLCHAIN_DIR.name).is_none(),
             "toolchain_dir=None must strip a stale inherited OCX_TOOLCHAIN_DIR"
         );
     }

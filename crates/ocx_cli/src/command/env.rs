@@ -12,7 +12,7 @@ use ocx_shell::shell::Shell;
 /// Print the resolved environment variables for one or more installed packages.
 ///
 /// Plain format: aligned table with Key, Value, and Type columns where Type is `constant` or `path`.
-/// JSON format:  `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"}, ...]}`.
+/// JSON format:  `{"items": [{"key": "...", "value": "...", "kind": "constant"|"path"|"list"}, ...], …}`.
 /// External tools (Python scripts, Bazel rules, CI steps) use it to configure
 /// child process environments without going through `ocx exec`.
 ///
@@ -179,7 +179,9 @@ impl Env {
                 &platform,
             )
             .await?;
-        let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+        let inherited = ocx_env::OCX_LAUNCH_IDENTITIES
+            .get_raw()
+            .and_then(|v| v.into_string().ok());
         entries.extend(manager.launch_identity_entry(&info, &std::collections::BTreeSet::new(), inherited.as_deref()));
         // Before any of the three output branches reads `entries`.
         reconcile_list_separators(entries.iter_mut())?;

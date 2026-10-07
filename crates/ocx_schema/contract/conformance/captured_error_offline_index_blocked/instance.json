@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "command": "package env",
+  "exit_code": 81,
+  "error": {
+    "kind": "permission_denied",
+    "detail": "index_resolution_blocked",
+    "message": "failed to find package: ocx.sh/nope/x:1 — offline mode refused to resolve unpinned reference 'ocx.sh/nope/x:1'; run `ocx index update` or pin a digest",
+    "context": {}
+  }
+}

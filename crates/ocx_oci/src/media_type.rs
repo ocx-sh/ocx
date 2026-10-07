@@ -20,6 +20,13 @@ pub const MEDIA_TYPE_SVG: &str = "image/svg+xml";
 
 pub const ACCEPTED_MANIFEST_MEDIA_TYPES: &[&str; 2] = &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX];
 
+/// Manifest media types a signer or verifier accepts when it fetches a subject or a referrer: the OCI image manifest
+/// and the Docker v2 manifest, never an index.
+pub const SIGNABLE_MANIFEST_TYPES: &[&str] = &[
+    MEDIA_TYPE_OCI_IMAGE_MANIFEST,
+    "application/vnd.docker.distribution.manifest.v2+json",
+];
+
 /// Infers a package layer's media type from its archive file name, or `None` for an unrecognized extension.
 pub fn media_type_from_filename(file_name: impl AsRef<str>) -> Option<&'static str> {
     let file_name = file_name.as_ref();
@@ -81,6 +88,17 @@ pub fn media_type_select<S: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signable_manifest_types_are_the_oci_and_docker_v2_manifests() {
+        assert_eq!(
+            SIGNABLE_MANIFEST_TYPES,
+            [
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json"
+            ]
+        );
+    }
 
     #[test]
     fn filename_infers_gzip_and_xz() {

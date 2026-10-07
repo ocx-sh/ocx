@@ -7,7 +7,12 @@
 pub(crate) const POSSIBLE: &str = "1, y, yes, true, 0, n, no, false";
 
 /// A value that is not one of ocx's boolean spellings.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, ocx_exit::Classify)]
+#[exit(
+    DataError,
+    slug = "invalid_boolean_string",
+    summary = "A value is not one of the accepted boolean spellings"
+)]
 #[error("invalid boolean string '{value}', possible values are: {possible}")]
 pub struct BooleanStringError {
     /// The value that failed to parse, as the user spelled it.

@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushEvent lists its known variants in a different order; the unknown arm's derived `not.enum` follows.",
+  "findings": []
+}

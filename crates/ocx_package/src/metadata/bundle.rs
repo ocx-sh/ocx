@@ -22,9 +22,8 @@ impl schemars::JsonSchema for Version {
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "type": "integer",
             "description": "Bundle metadata format version.",
-            "enum": [1]
+            "oneOf": [{"type": "integer", "const": 1, "description": "The first bundle metadata format."}]
         })
     }
 }
@@ -47,6 +46,7 @@ pub struct Bundle {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub strip_components: Option<u8>,
 
+    /// Environment variables the package declares, in declaration order.
     #[serde(skip_serializing_if = "env::Env::is_empty", default)]
     pub env: env::Env,
 

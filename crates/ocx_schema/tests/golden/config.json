@@ -569,7 +569,7 @@
           ]
         },
         "completions": {
-          "description": "Whether shell completions load, with the same precedence as `hook`:\n`--completion` / `--no-completion` and a truthy `OCX_NO_COMPLETIONS` win.",
+          "description": "Whether shell completions load, with the same precedence as `hook`:\n`--completion` / `--no-completion` and a truthy `OCX_NO_COMPLETION` win.",
           "type": [
             "boolean",
             "null"

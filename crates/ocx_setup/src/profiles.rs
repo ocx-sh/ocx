@@ -184,6 +184,10 @@ pub async fn detect_powershell_profile() -> Option<PathBuf> {
 /// Run one PowerShell host and parse `$PROFILE.CurrentUserAllHosts` from stdout.
 ///
 /// Returns `None` on any failure, so detection never fails setup.
+#[expect(
+    clippy::disallowed_types,
+    reason = "shell detection asks a candidate shell what it is"
+)]
 async fn query_powershell_profile(host: &str) -> Option<PathBuf> {
     let output = tokio::process::Command::new(host)
         .args([
@@ -226,6 +230,10 @@ pub async fn execution_policy_is_restricted() -> bool {
 
 /// Run one PowerShell host's `Get-ExecutionPolicy -Scope CurrentUser` and return
 /// the trimmed stdout, or `None` when the host is absent or the probe fails.
+#[expect(
+    clippy::disallowed_types,
+    reason = "shell detection asks a candidate shell what it is"
+)]
 async fn query_execution_policy(host: &str) -> Option<String> {
     let output = tokio::process::Command::new(host)
         .args([

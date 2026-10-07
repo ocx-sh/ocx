@@ -4,108 +4,113 @@
 //! The published `--format json` report contract over every `Printable` root in [`ocx::api::data`].
 
 use schemars::generate::SchemaSettings;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Canonical published URL of the report contract.
-pub const REPORTS_ID: &str = "https://ocx.sh/schemas/reports/v1.json";
+pub const REPORTS_ID: &str = schema_id!("reports", reports_version!());
 
-const REPORTS_COMMENT: &str =
-    "machine-generated from the CLI's own report types; `reports` maps each --format json root to its definition";
+/// Version the six formerly wrapped roots publish at; the contract's own version is the same number.
+pub const REPORTS_VERSION: u32 = reports_version!();
 
-/// Marks a field serde omits instead of writing `null`; an unmarked `skip_serializing_if` field publishes as nullable.
+/// Marks a field serde omits instead of writing `null`; read by [`normalize`] for the execution record only.
 const ABSENT_WHEN_NONE: &str = "x-ocx-absent-when-none";
 
-/// Every `--format json` root, published under its last path segment or, for a generic root, `as "<name>"`.
-macro_rules! report_roots {
-    ($generator:expr, $($path:ty $(as $alias:literal)?),* $(,)?) => {{
-        let mut roots = Map::new();
-        $(
-            #[allow(unused_mut, unused_assignments)]
-            let mut name = stringify!($path).rsplit("::").next().expect("a path has a last segment").trim();
-            $(name = $alias;)?
-            let schema = $generator.subschema_for::<$path>();
-            roots.insert(
-                name.to_owned(),
-                serde_json::to_value(&schema).expect("a schemars Schema is always serializable"),
-            );
-        )*
-        roots
-    }};
+/// Marks a publisher-supplied leaf; nothing below it is rewritten.
+const OPAQUE: &str = "x-ocx-opaque";
+
+/// Annotations a published document drops: none of them constrains a value.
+const ANNOTATIONS: &[&str] = &["default", "examples", "$comment"];
+
+/// Collects each registered root's name, payload `$def` and version while the generator records the payloads.
+struct Roots<'a> {
+    generator: &'a mut schemars::SchemaGenerator,
+    roots: Vec<(&'static str, String, u32)>,
+}
+
+impl ocx::api::RootVisitor for Roots<'_> {
+    fn root<T: ocx::api::Printable + schemars::JsonSchema>(&mut self) {
+        let name = T::ROOT;
+        let schema = serde_json::to_value(self.generator.subschema_for::<T>())
+            .expect("a schemars Schema is always serializable");
+        let payload = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|target| target.strip_prefix("#/$defs/"))
+            .unwrap_or_else(|| panic!("report root `{name}` is not a `$def`: {schema}"))
+            .to_owned();
+        self.roots.push((name, payload, T::SCHEMA_VERSION));
+    }
+}
+
+/// The settings of a document ocx writes: `required` lists exactly the fields serde always emits.
+pub fn settings() -> SchemaSettings {
+    let mut settings = SchemaSettings::draft2020_12().for_serialize();
+    settings.meta_schema = Some("https://json-schema.org/draft/2020-12/schema".into());
+    settings
+}
+
+/// A published root: the payload's object schema with a pinned `schema_version` leading its properties.
+///
+/// # Panics
+///
+/// When `payload` is not an object schema with `properties`: `#[serde(flatten)]` could not emit it.
+pub fn wrapper(name: &str, payload: &Value, version: u32) -> Value {
+    let properties = payload
+        .get("properties")
+        .and_then(Value::as_object)
+        .filter(|_| payload.get("type") == Some(&json!("object")))
+        .unwrap_or_else(|| {
+            panic!("report root `{name}` must be an object schema with `properties`; a union payload goes under a named property: {payload}")
+        });
+    let mut leading = Map::new();
+    leading.insert(
+        "schema_version".to_owned(),
+        json!({
+            "description": "The version of this root's shape; a breaking change increments it.",
+            "type": "integer",
+            "const": version
+        }),
+    );
+    leading.extend(properties.clone());
+    let mut required = vec![Value::from("schema_version")];
+    required.extend(
+        payload
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    );
+
+    let mut wrapper = payload.clone();
+    wrapper["properties"] = Value::Object(leading);
+    wrapper["required"] = Value::Array(required);
+    wrapper
 }
 
 /// Generate the report contract as pretty-printed JSON.
 pub fn reports_schema() -> String {
-    let mut settings = SchemaSettings::draft2020_12();
-    settings.meta_schema = Some("https://json-schema.org/draft/2020-12/schema".into());
-    let mut generator = settings.into_generator();
+    let mut generator = settings().into_generator();
+    let mut visitor = Roots {
+        generator: &mut generator,
+        roots: Vec::new(),
+    };
+    ocx::api::visit_report_roots(&mut visitor);
+    let registered = visitor.roots;
 
-    let roots = report_roots![
-        generator,
-        ocx::api::data::about::About,
-        ocx::api::data::announce::AnnounceReport,
-        ocx::api::data::attestation::AttestationReport,
-        ocx::api::data::catalog::Catalog,
-        ocx::api::data::claim::ClaimReport,
-        ocx::api::data::clean::Clean,
-        ocx::api::data::config_setup::ConfigSetupData,
-        ocx::api::data::config_test::ConfigTestData,
-        ocx::api::data::config_update::ConfigUpdateData,
-        ocx::api::data::deps::Dependencies,
-        ocx::api::data::deps::DependenciesTrace,
-        ocx::api::data::deps::FlatDependencies,
-        ocx::api::data::env::EnvVars,
-        ocx::api::data::index::CatalogPreview,
-        ocx::api::data::index::RegenerateReport,
-        ocx::api::data::install::Installs,
-        ocx::api::data::lock::LockReport,
-        ocx::api::data::login::LoginResult,
-        ocx::api::data::login::LogoutResult,
-        ocx::api::data::package_cascade_check::PackageCascadeCheck,
-        ocx::api::data::package_cascade_repair::PackageCascadeRepair,
-        ocx::api::data::package_copy::CopyReport,
-        ocx::api::data::package_description::PackageDescription,
-        ocx::api::data::package_description::PackageDescriptions,
-        ocx::api::data::package_inspect::InspectReport,
-        ocx::api::data::package_inspect::PackageInspect,
-        ocx::api::data::package_prune::PackagePrune,
-        ocx::api::data::package_receipt::PackageReceipt,
-        ocx::api::data::patch_freeze::PatchFreezeReport,
-        ocx::api::data::patch_publish::PatchPublishReport,
-        ocx::api::data::patch_sync::PatchSyncReport,
-        ocx::api::data::patch_test::PatchTestReport,
-        ocx::api::data::patch_why::PatchWhyReport,
-        ocx::api::data::paths::LocatedPaths,
-        ocx::api::data::paths::Paths,
-        ocx::api::data::pull_dry_run::PullDryRun,
-        ocx::api::data::push::PushReport,
-        ocx::api::data::removed::Removed,
-        ocx::api::data::sbom::SbomListingReport,
-        ocx::api::data::script_run::ScriptRunReport,
-        ocx::api::data::self_setup::SelfSetupData,
-        ocx::api::data::self_update::SelfUpdateData,
-        ocx::api::data::self_update::UpdateCheckData,
-        ocx::api::data::shell_state::ShellStateReport,
-        ocx::api::data::shell_state::VerboseShellState,
-        ocx::api::data::signature::SignatureReport,
-        ocx::api::data::status::StatusReport,
-        // The CLI prints exactly these two instantiations, from `package sign` and `package attest`.
-        ocx::api::data::sweep::SweepReport<ocx::api::data::signature::SignatureReport>
-            as "SweepReport<SignatureReport>",
-        ocx::api::data::sweep::SweepReport<ocx::api::data::attestation::AttestationReport>
-            as "SweepReport<AttestationReport>",
-        ocx::api::data::tag::Tags,
-        ocx::api::data::update::UpdateReport,
-        ocx::api::data::update::VerboseUpdateReport,
-        ocx::api::data::upgrade::UpgradeReport,
-        ocx::api::data::upgrade::VerboseUpgradeReport,
-        ocx::api::data::verification::VerificationReport,
-        ocx::api::data::version::VerboseVersionData,
-        ocx::api::data::version::VersionData,
-        ocx::api::data::warmed_paths::WarmedPaths,
-    ];
-
-    let mut defs = Value::Object(generator.take_definitions(true));
-    normalize(&mut defs);
+    let mut defs = generator.take_definitions(true);
+    for def in defs.values_mut() {
+        publish(def);
+    }
+    let mut roots = Map::new();
+    for (name, payload, version) in registered {
+        let root = format!("{payload}Root");
+        let schema = wrapper(name, &defs[&payload], version);
+        assert!(
+            defs.insert(root.clone(), schema).is_none(),
+            "two report roots share the payload `{payload}`"
+        );
+        roots.insert(name.to_owned(), json!({ "$ref": format!("#/$defs/{root}") }));
+    }
 
     let mut document = Map::new();
     document.insert(
@@ -113,18 +118,134 @@ pub fn reports_schema() -> String {
         Value::String("https://json-schema.org/draft/2020-12/schema".to_owned()),
     );
     document.insert("$id".to_owned(), Value::String(REPORTS_ID.to_owned()));
-    document.insert("$comment".to_owned(), Value::String(REPORTS_COMMENT.to_owned()));
     document.insert("reports".to_owned(), Value::Object(roots));
-    document.insert("$defs".to_owned(), defs);
+    document.insert("$defs".to_owned(), Value::Object(defs));
 
     serde_json::to_string_pretty(&Value::Object(document))
         .expect("a serde_json::Value is always serializable to a JSON string")
 }
 
+/// The name of every published report root, in registry order.
+pub fn root_names() -> Vec<String> {
+    let document: Value = serde_json::from_str(&reports_schema()).expect("the report contract is JSON");
+    document
+        .get("reports")
+        .and_then(Value::as_object)
+        .map(|roots| roots.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Rewrite one generated schema into its published form, in place.
+///
+/// Drops the annotation keywords; strips `null` from every property serde can omit (absent from `required`), so a
+/// `null` left standing is one serde writes; lists a documented `const` set as an open `x-ocx-enum`; and gives a
+/// union tagged by `type` its unknown arm. A node marked `x-ocx-opaque` and everything below it pass through
+/// untouched.
+pub fn publish(schema: &mut Value) {
+    let Value::Object(map) = schema else { return };
+    if map.get(OPAQUE) == Some(&Value::Bool(true)) {
+        return;
+    }
+    for annotation in ANNOTATIONS {
+        map.remove(*annotation);
+    }
+    for (keyword, child) in map.iter_mut() {
+        match keyword.as_str() {
+            "properties" | "$defs" => child
+                .as_object_mut()
+                .into_iter()
+                .flat_map(Map::values_mut)
+                .for_each(publish),
+            "oneOf" | "anyOf" | "allOf" => child.as_array_mut().into_iter().flatten().for_each(publish),
+            "items" | "additionalProperties" | "not" | "propertyNames" => publish(child),
+            _ => {}
+        }
+    }
+    let required: Vec<String> = map
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(Value::Object(properties)) = map.get_mut("properties") {
+        for (name, property) in properties.iter_mut() {
+            if !required.contains(name) {
+                strip_null(property);
+            }
+        }
+    }
+    open_enum(map);
+    open_union(map);
+}
+
+/// A `oneOf` of documented string or integer `const`s becomes `{"type": …, "x-ocx-enum": [{value, description}]}`.
+fn open_enum(map: &mut Map<String, Value>) {
+    let Some(Value::Array(arms)) = map.get("oneOf") else {
+        return;
+    };
+    let scalar = |value: &Value| match value {
+        Value::String(_) => Some("string"),
+        Value::Number(number) if number.is_i64() || number.is_u64() => Some("integer"),
+        _ => None,
+    };
+    let Some(kind) = arms.first().and_then(|arm| arm.get("const")).and_then(scalar) else {
+        return;
+    };
+    let entries: Option<Vec<Value>> = arms
+        .iter()
+        .map(|arm| {
+            let arm = arm.as_object()?;
+            let value = arm.get("const").filter(|value| scalar(value) == Some(kind))?;
+            let description = arm.get("description").and_then(Value::as_str)?;
+            let plain = arm.get("type") == Some(&Value::from(kind)) && arm.len() == 3;
+            plain.then(|| json!({"value": value, "description": description}))
+        })
+        .collect();
+    let Some(entries) = entries.filter(|entries| !entries.is_empty()) else {
+        return;
+    };
+    map.remove("oneOf");
+    map.insert("type".to_owned(), Value::from(kind));
+    map.insert("x-ocx-enum".to_owned(), Value::Array(entries));
+}
+
+/// A `oneOf` whose every arm is tagged by a required `type` `const` gains the unknown arm.
+///
+/// A newtype variant's arm is a `$ref` with the tag beside it; under 2020-12 the siblings apply too.
+fn open_union(map: &mut Map<String, Value>) {
+    let Some(Value::Array(arms)) = map.get_mut("oneOf") else {
+        return;
+    };
+    let tags: Option<Vec<Value>> = arms
+        .iter()
+        .map(|arm| {
+            let tag = arm.pointer("/properties/type/const").filter(|tag| tag.is_string())?;
+            let tagged = arm
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|names| names.iter().any(|name| name == "type"));
+            tagged.then(|| tag.clone())
+        })
+        .collect();
+    let Some(tags) = tags.filter(|tags| !tags.is_empty()) else {
+        return;
+    };
+    arms.push(json!({
+        "x-ocx-unknown-variant": true,
+        "type": "object",
+        "required": ["type"],
+        "properties": {"type": {"type": "string", "not": {"enum": tags}}}
+    }));
+}
+
 /// Rewrite `required` and nullability to match what serde emits: a plain `Option<T>` (written as `null`)
 /// becomes required, an [`ABSENT_WHEN_NONE`] field becomes optional and non-null.
 ///
-/// Only for schemas ocx writes; on one it reads (`config`, `metadata`, `project`) raw `required` is already right.
+/// For the execution record, generated under the deserialize contract; the report contract uses [`publish`].
 pub fn normalize(node: &mut Value) {
     match node {
         Value::Array(items) => {
@@ -295,84 +416,430 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "printable report roots missing from `report_roots!`: {missing:?}"
+            "printable report roots missing from `visit_report_roots`: {missing:?}"
         );
     }
 
-    /// The marker is what tells `absent` from `null`. A `skip_serializing_if`
-    /// field without one is published as always-present-and-nullable, which is
-    /// the single most expensive thing this contract can get wrong.
-    #[test]
-    fn every_skip_serializing_if_field_carries_the_marker() {
-        let mut unmarked = Vec::new();
-        for (file, body) in data_sources() {
-            let lines: Vec<&str> = body.lines().collect();
-            for (index, line) in lines.iter().enumerate() {
-                if !line.contains("skip_serializing_if") {
-                    continue;
-                }
-                let marked = lines[index + 1..]
-                    .iter()
-                    .take_while(|next| next.trim_start().starts_with('#'))
-                    .any(|next| next.contains(ABSENT_WHEN_NONE));
-                if !marked {
-                    unmarked.push(format!("{file}:{}", index + 1));
+    /// Every `$ref` target in `node`, with the pointer it sits at.
+    fn refs<'a>(node: &'a Value, pointer: String, out: &mut Vec<(String, &'a str)>) {
+        match node {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "$ref"
+                        && let Some(target) = child.as_str()
+                    {
+                        out.push((pointer.clone(), target));
+                    }
+                    refs(child, format!("{pointer}/{key}"), out);
                 }
             }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    refs(item, format!("{pointer}/{index}"), out);
+                }
+            }
+            _ => {}
         }
+    }
+
+    #[test]
+    fn every_root_is_a_top_level_wrapper_over_its_payload() {
+        let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
+        let versions = ocx::api::report_versions();
+        let roots = document["reports"].as_object().expect("`reports` is an object");
+        assert_eq!(roots.len(), 56);
+        assert_eq!(roots.len(), versions.len());
+        for (name, entry) in roots {
+            let target = entry["$ref"].as_str().expect("a root is a `$ref`");
+            let wrapper_name = target.strip_prefix("#/$defs/").expect("a `$defs` pointer");
+            let payload_name = wrapper_name.strip_suffix("Root").expect("a `*Root` wrapper");
+            let wrapper = &document["$defs"][wrapper_name];
+            let payload = &document["$defs"][payload_name];
+            let keys = |schema: &Value| -> Vec<String> {
+                schema["properties"]
+                    .as_object()
+                    .expect("an object schema")
+                    .keys()
+                    .cloned()
+                    .collect()
+            };
+            let mut expected = vec!["schema_version".to_owned()];
+            expected.extend(keys(payload));
+            assert_eq!(keys(wrapper), expected, "{name}");
+            assert_eq!(wrapper["required"][0], "schema_version", "{name}");
+            assert_eq!(
+                wrapper["properties"]["schema_version"]["const"],
+                versions[name.as_str()],
+                "{name}"
+            );
+            assert!(payload["properties"].get("schema_version").is_none(), "{name}");
+        }
+
+        let mut found = Vec::new();
+        refs(&document["$defs"], "/$defs".to_owned(), &mut found);
+        let nested: Vec<_> = found.iter().filter(|(_, target)| target.ends_with("Root")).collect();
+        assert!(nested.is_empty(), "a wrapper referenced from a payload: {nested:?}");
+        // A root type nested in another report reaches the payload, so the scan above judged real nesting.
         assert!(
-            unmarked.is_empty(),
-            "`skip_serializing_if` fields missing #[schemars(extend(\"{ABSENT_WHEN_NONE}\" = true))]: {unmarked:?}"
+            found
+                .iter()
+                .any(|(at, target)| at.starts_with("/$defs/SignatureReportSweptTag")
+                    && *target == "#/$defs/SignatureReport"),
+            "the sweep row no longer nests `SignatureReport`: {found:?}"
         );
     }
 
-    /// The two corrections, pinned on real fields rather than on a fixture.
-    ///
-    /// `DryRunEntry::path` is a plain `Option<PathBuf>` — always written, `null`
-    /// when absent. `EnvEntry::source` is `skip_serializing_if` — omitted
-    /// entirely, never `null`. schemars renders both identically; a parser that
-    /// believes it has broken on both, and the SDK's `pull --dry-run` parser
-    /// once did.
     #[test]
-    fn the_two_option_shapes_are_published_differently() {
+    fn roots_start_at_one_and_the_six_formerly_wrapped_at_two() {
+        let at_two: Vec<&str> = ocx::api::report_versions()
+            .into_iter()
+            .filter(|(_, version)| *version != 1)
+            .map(|(name, version)| {
+                assert_eq!(version, REPORTS_VERSION, "{name}");
+                name
+            })
+            .collect();
+        assert_eq!(
+            at_two,
+            [
+                "AttestationReport",
+                "SbomListingReport",
+                "SignatureReport",
+                "SweepReport<AttestationReport>",
+                "SweepReport<SignatureReport>",
+                "VerificationReport",
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must be an object schema with `properties`")]
+    fn a_payload_that_is_not_an_object_has_no_wrapper() {
+        wrapper(
+            "Listing",
+            &json!({"description": "A list.", "type": "array", "items": {"type": "string"}}),
+            1,
+        );
+    }
+
+    #[test]
+    fn the_report_contract_is_published_as_v2() {
+        let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
+        assert_eq!(
+            document["$id"],
+            format!("https://ocx.sh/schemas/reports/v{REPORTS_VERSION}.json")
+        );
+    }
+
+    /// Unset optionals are omitted, pinned on real fields rather than on a fixture.
+    ///
+    /// `DryRunEntry::path` and `EnvEntry::source` are both omitted when unset, never
+    /// `null`, so neither is required; the SDK's `pull --dry-run` parser once broke on
+    /// a `path` that was written as `null`. The written-`null` shape is pinned on a
+    /// fixture by `null_is_stripped_only_from_properties_serde_can_omit`.
+    #[test]
+    fn unset_optionals_are_omitted_from_real_report_fields() {
         let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
         let defs = &document["$defs"];
 
-        let entry = &defs["DryRunEntry"];
-        assert!(
-            entry["required"]
-                .as_array()
-                .expect("DryRunEntry has required fields")
-                .iter()
-                .any(|name| name == "path"),
-            "a plain Option<T> is always written, so it is required"
-        );
-        assert_eq!(
-            entry["properties"]["path"]["type"],
-            serde_json::json!(["string", "null"])
-        );
-
-        let env = &defs["EnvEntry"];
-        assert!(
-            !env["required"]
-                .as_array()
-                .expect("EnvEntry has required fields")
-                .iter()
-                .any(|name| name == "source"),
-            "a skip_serializing_if field is absent, not null, so it is not required"
-        );
-        assert!(
-            env["properties"]["source"].get("anyOf").is_none(),
-            "and its null alternative is stripped: {}",
-            env["properties"]["source"]
-        );
+        for (def, field) in [("DryRunEntry", "path"), ("EnvEntry", "source")] {
+            let entry = &defs[def];
+            assert!(
+                !entry["required"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{def} has required fields"))
+                    .iter()
+                    .any(|name| name == field),
+                "{def}.{field} is absent when unset, so it is not required"
+            );
+            let property = &entry["properties"][field];
+            assert!(property.is_object(), "{def}.{field} is published: {entry}");
+            assert!(
+                property.get("anyOf").is_none() && !property["type"].is_array(),
+                "{def}.{field} carries no null alternative: {property}"
+            );
+        }
     }
 
-    /// The marker is an internal handshake between the derive and `normalize`;
-    /// publishing it would invite consumers to depend on it.
+    /// The marker is an internal handshake with `normalize`, which the report
+    /// contract no longer runs; publishing it would invite consumers to depend on it.
     #[test]
     fn the_marker_never_reaches_the_published_document() {
         assert!(!reports_schema().contains(ABSENT_WHEN_NONE));
+    }
+
+    /// One fixture type through the report pipeline: generated, then published.
+    fn published<T: schemars::JsonSchema>() -> Value {
+        let mut schema =
+            serde_json::to_value(settings().into_generator().into_root_schema_for::<T>()).expect("schema serialises");
+        publish(&mut schema);
+        for def in schema
+            .get_mut("$defs")
+            .and_then(Value::as_object_mut)
+            .into_iter()
+            .flat_map(Map::values_mut)
+        {
+            publish(def);
+        }
+        schema
+    }
+
+    fn required(schema: &Value) -> Vec<&str> {
+        schema["required"]
+            .as_array()
+            .map(|names| names.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// A `null` survives exactly where serde writes one, so the contract lint's no-null rule
+    /// reds on an `Option` that lost its `skip_serializing_if`.
+    #[test]
+    fn null_is_stripped_only_from_properties_serde_can_omit() {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        struct Inner {
+            /// A field.
+            x: u8,
+        }
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        struct Fixture {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            omitted: Option<String>,
+            written: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            omitted_ref: Option<Inner>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            omitted_list: Vec<String>,
+        }
+        let schema = published::<Fixture>();
+        assert_eq!(required(&schema), ["written"], "{schema}");
+        assert_eq!(schema["properties"]["omitted"], json!({"type": "string"}));
+        assert_eq!(schema["properties"]["written"]["type"], json!(["string", "null"]));
+        assert_eq!(schema["properties"]["omitted_ref"], json!({"$ref": "#/$defs/Inner"}));
+    }
+
+    /// Paired with its control: the same subtree without the marker is
+    /// rewritten, so an unchanged opaque leaf is the guard holding, not a no-op.
+    #[test]
+    fn an_opaque_leaf_is_never_rewritten() {
+        let leaf = json!({
+            "description": "Publisher payload.",
+            "properties": {"camelKey": {"type": ["string", "null"], "default": null}},
+            "default": {"Kebab-Key": null}
+        });
+        let mut opaque = leaf.clone();
+        opaque[OPAQUE] = json!(true);
+        let wrap = |payload: &Value| json!({"type": "object", "properties": {"payload": payload}});
+
+        let mut published_opaque = wrap(&opaque);
+        publish(&mut published_opaque);
+        assert_eq!(published_opaque, wrap(&opaque));
+
+        let mut published_plain = wrap(&leaf);
+        publish(&mut published_plain);
+        assert_ne!(published_plain, wrap(&leaf), "control: a plain subtree is rewritten");
+    }
+
+    #[test]
+    fn annotations_are_dropped_but_properties_named_like_them_stay() {
+        let mut schema = json!({
+            "$comment": "c",
+            "type": "object",
+            "properties": {
+                "default": {"type": "string", "description": "d", "default": "x"},
+                "examples": {"type": "string", "description": "e", "examples": ["y"]}
+            },
+            "required": ["default", "examples"]
+        });
+        publish(&mut schema);
+        assert_eq!(
+            schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "default": {"type": "string", "description": "d"},
+                    "examples": {"type": "string", "description": "e"}
+                },
+                "required": ["default", "examples"]
+            })
+        );
+    }
+
+    #[test]
+    fn a_documented_const_set_publishes_as_an_open_enum() {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        #[serde(rename_all = "snake_case")]
+        /// A documented set.
+        #[expect(dead_code, reason = "a schema fixture, never constructed")]
+        enum Documented {
+            /// The first.
+            First,
+            /// The second.
+            Second,
+        }
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        struct Holder {
+            value: Documented,
+        }
+        let schema = published::<Holder>();
+        assert_eq!(
+            schema["$defs"]["Documented"],
+            json!({
+                "description": "A documented set.",
+                "type": "string",
+                "x-ocx-enum": [
+                    {"value": "first", "description": "The first."},
+                    {"value": "second", "description": "The second."}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn a_documented_integer_const_set_publishes_as_an_open_integer_enum() {
+        let mut schema = json!({
+            "description": "A version.",
+            "oneOf": [{"type": "integer", "const": 1, "description": "The first."}]
+        });
+        publish(&mut schema);
+        assert_eq!(
+            schema,
+            json!({
+                "description": "A version.",
+                "type": "integer",
+                "x-ocx-enum": [{"value": 1, "description": "The first."}]
+            })
+        );
+    }
+
+    #[test]
+    fn a_union_tagged_by_type_gains_one_unknown_arm_and_a_kind_union_does_not() {
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[expect(dead_code, reason = "a schema fixture, never constructed")]
+        enum Tagged {
+            One { x: u8 },
+            Two,
+        }
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        #[expect(dead_code, reason = "a schema fixture, never constructed")]
+        enum Kinded {
+            One { x: u8 },
+            Two,
+        }
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        struct Inner {
+            /// A field.
+            x: u8,
+        }
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[expect(dead_code, reason = "a schema fixture, never constructed")]
+        enum Wrapped {
+            One(Inner),
+        }
+        #[derive(serde::Serialize, schemars::JsonSchema)]
+        struct Holder {
+            tagged: Tagged,
+            kinded: Kinded,
+            wrapped: Wrapped,
+        }
+        let schema = published::<Holder>();
+        let arms = schema["$defs"]["Tagged"]["oneOf"].as_array().expect("a union");
+        assert_eq!(arms.len(), 3);
+        assert_eq!(
+            arms[2],
+            json!({
+                "x-ocx-unknown-variant": true,
+                "type": "object",
+                "required": ["type"],
+                "properties": {"type": {"type": "string", "not": {"enum": ["one", "two"]}}}
+            })
+        );
+        let kinded = schema["$defs"]["Kinded"]["oneOf"].as_array().expect("a union");
+        assert_eq!(kinded.len(), 2, "a `kind` tag is not a contract union: {kinded:?}");
+        let wrapped = schema["$defs"]["Wrapped"]["oneOf"].as_array().expect("a union");
+        assert_eq!(
+            wrapped.get(1),
+            Some(&json!({
+                "x-ocx-unknown-variant": true,
+                "type": "object",
+                "required": ["type"],
+                "properties": {"type": {"type": "string", "not": {"enum": ["one"]}}}
+            })),
+            "a `$ref` arm's tag sits beside the `$ref`: {wrapped:?}"
+        );
+    }
+
+    /// Walks schema positions only: a key of `properties` or `$defs` is a name.
+    fn annotation_pointers(node: &Value, pointer: &str, out: &mut Vec<String>) {
+        let Value::Object(map) = node else {
+            if let Value::Array(items) = node {
+                for (index, item) in items.iter().enumerate() {
+                    annotation_pointers(item, &format!("{pointer}/{index}"), out);
+                }
+            }
+            return;
+        };
+        for (key, child) in map {
+            let at = format!("{pointer}/{key}");
+            if ANNOTATIONS.contains(&key.as_str()) {
+                out.push(at.clone());
+            }
+            if matches!(key.as_str(), "properties" | "$defs" | "reports") {
+                for (name, schema) in child.as_object().into_iter().flatten() {
+                    annotation_pointers(schema, &format!("{at}/{name}"), out);
+                }
+            } else {
+                annotation_pointers(child, &at, out);
+            }
+        }
+    }
+
+    #[test]
+    fn the_report_contract_carries_no_annotation() {
+        let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
+        let mut found = Vec::new();
+        annotation_pointers(&document, "", &mut found);
+        assert!(found.is_empty(), "annotations in the report contract: {found:?}");
+    }
+
+    /// schemars appends a counter when two types share a `$def` name; the
+    /// second one's name then depends on registration order.
+    #[test]
+    fn no_def_name_is_a_collision_counter() {
+        let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
+        let defs = document["$defs"].as_object().expect("`$defs` is an object");
+        let collided: Vec<&String> = defs
+            .keys()
+            .filter(|name| {
+                let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+                base.len() < name.len() && defs.contains_key(base)
+            })
+            .collect();
+        assert!(!defs.is_empty());
+        assert!(collided.is_empty(), "`$def` names schemars disambiguated: {collided:?}");
+    }
+
+    /// Fields serde skips when empty are not `required`, wherever the type lives.
+    #[test]
+    fn serde_optional_fields_are_not_required() {
+        let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
+        let defs = &document["$defs"];
+        let written = defs["WriteOutcome"]["oneOf"]
+            .as_array()
+            .expect("WriteOutcome is a union")
+            .iter()
+            .find(|arm| arm["properties"].get("dropped").is_some())
+            .expect("an arm carries `dropped`");
+        for (schema, field) in [
+            (&defs["Bundle"], "strip_components"),
+            (&defs["Dependency"], "name"),
+            (written, "dropped"),
+        ] {
+            assert!(schema["properties"].get(field).is_some(), "`{field}` exists: {schema}");
+            assert!(!required(schema).contains(&field), "`{field}` is required: {schema}");
+        }
     }
 
     /// Every `.rs` under `crates/`, with its `#[cfg(test)]` half removed.

@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "PushReport's `layers` items change their resolved target from Digest to ByteSize.",
+  "findings": [
+    {
+      "code": "B04",
+      "pointer": "/$defs/PushReportRoot/properties/layers/items",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

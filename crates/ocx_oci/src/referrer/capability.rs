@@ -110,7 +110,7 @@ impl ReferrersApiCapability {
     ///
     /// A future `probed_at` (rewound clock) is stale; the on-disk `ttl_seconds`
     /// is clamped, or a planted `u64::MAX` `Unsupported` fails every sign and
-    /// verify against that registry with exit 84 forever.
+    /// verify against that registry with exit 82 forever.
     pub fn is_fresh(&self) -> bool {
         match SystemTime::now().duration_since(self.probed_at) {
             Ok(elapsed) => elapsed < Duration::from_secs(self.ttl_seconds.min(TTL_SECS)),
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn a_file_declared_ttl_cannot_outlive_the_built_in_ceiling() {
         // The file's own TTL is attacker-controllable: a planted `Unsupported`
-        // record declaring `u64::MAX` would pin exit 84 for that registry for
+        // record declaring `u64::MAX` would pin exit 82 for that registry for
         // the life of the machine, and no reprobe would ever run. Clamping to
         // `TTL_SECS` bounds the damage to one ceiling-length window.
         let cap = ReferrersApiCapability {

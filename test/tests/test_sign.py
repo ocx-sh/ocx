@@ -112,11 +112,10 @@ def test_sign_then_verify_happy_path(
         env=ocx.env, check=False,
     )
     assert sign_result.returncode == 0, sign_result.stderr
-    sign_envelope = json.loads(sign_result.stdout)
-    assert sign_envelope["schema_version"] == 1
-    assert sign_envelope["command"] == "package sign"
-    assert sign_envelope["exit_code"] == 0
-    data = sign_envelope["data"]
+    data = json.loads(sign_result.stdout)
+    # The report is the document, led by its own version: no envelope wraps it.
+    assert not {"command", "exit_code", "data"} & data.keys(), data
+    assert next(iter(data)) == "schema_version" and data["schema_version"] == 2, data
     assert data["subject_digest"].startswith("sha256:")
     assert bundle_payload_digest(data).startswith("sha256:")
     # The identity sign reports is the SAN of the certificate it just had
@@ -141,12 +140,12 @@ def test_sign_then_verify_happy_path(
     )
     assert verify_result.returncode == 0, verify_result.stderr
     verify_envelope = json.loads(verify_result.stdout)
-    assert verify_envelope["schema_version"] == 1
-    assert verify_envelope["command"] == "package verify"
-    assert verify_envelope["data"]["subject_digest"] == data["subject_digest"]
+    assert not {"command", "exit_code", "data"} & verify_envelope.keys(), verify_envelope
+    assert verify_envelope["schema_version"] == 2, verify_envelope
+    assert verify_envelope["subject_digest"] == data["subject_digest"]
     # Both commands read one certificate; they must name one identity.
-    assert verify_envelope["data"]["certificate_identity"] == data["certificate_identity"]
-    assert verify_envelope["data"]["certificate_oidc_issuer"] == data["certificate_oidc_issuer"]
+    assert verify_envelope["certificate_identity"] == data["certificate_identity"]
+    assert verify_envelope["certificate_oidc_issuer"] == data["certificate_oidc_issuer"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -253,7 +252,7 @@ def test_sign_reads_env_token(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    bundle_digest = bundle_payload_digest(envelope["data"])
+    bundle_digest = bundle_payload_digest(envelope)
     assert FULL_SHA256_DIGEST_RE.fullmatch(bundle_digest), (
         f"JSON bundle_digest must stay the full sha256:<64hex> form, not the "
         f"12-hex short form plain-mode uses, got: {bundle_digest!r}"
@@ -284,7 +283,7 @@ def test_sign_reads_stdin_token(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    bundle_digest = bundle_payload_digest(envelope["data"])
+    bundle_digest = bundle_payload_digest(envelope)
     assert FULL_SHA256_DIGEST_RE.fullmatch(bundle_digest), (
         f"JSON bundle_digest must stay the full sha256:<64hex> form, not the "
         f"12-hex short form plain-mode uses, got: {bundle_digest!r}"
@@ -299,11 +298,11 @@ def test_sign_reads_stdin_token(
 def test_sign_offline_refused(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
-    """``--offline`` with ``package sign`` is a policy rejection (exit 77).
+    """``--offline`` with ``package sign`` is a policy rejection (exit 81).
 
     Per ADR Risks: offline signing is unsupported in v1 because Fulcio + Rekor
-    are hard dependencies. The rejection is a deliberate policy, not a network
-    failure — hence ``PermissionDenied`` (77) not ``OfflineBlocked`` (81).
+    are hard dependencies. The rejection is a deliberate local policy, not a
+    network failure — ``PolicyBlocked`` (81), like every other offline refusal.
 
     Phase 5a wired the ``OfflineSignRefused`` early-exit in ``package_sign.rs``;
     this test pins that contract and will fail if the offline check regresses.
@@ -322,17 +321,17 @@ def test_sign_offline_refused(
         text=True,
         env=ocx.env, check=False,
     )
-    assert result.returncode == 77, (
-        f"expected exit 77 (PermissionDenied / OfflineSignRefused), "
+    assert result.returncode == 81, (
+        f"expected exit 81 (PolicyBlocked / OfflineSignRefused), "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    # 77 alone is also IdentityTokenFilePermissive and OidcPreCheckFailed (and
-    # any bare filesystem EPERM) — assert the frozen slug so this test cannot
-    # pass for a cause other than the offline policy refusal it names.
+    # 81 alone is every offline or frozen refusal — assert the frozen slug so
+    # this test cannot pass for a cause other than the offline signing refusal
+    # it names.
     envelope = json.loads(result.stdout)
     assert envelope["error"]["detail"] == "offline_sign_refused", (
-        f"exit 77 must be the offline-policy refusal, not a different "
-        f"PermissionDenied cause; got {envelope['error']}"
+        f"exit 81 must be the offline signing refusal, not a different "
+        f"PolicyBlocked cause; got {envelope['error']}"
     )
 
 
@@ -373,10 +372,7 @@ def test_sign_token_file_only(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
-    assert envelope["command"] == "package sign"
-    assert envelope["exit_code"] == 0
-    assert bundle_payload_digest(envelope["data"]).startswith("sha256:")
+    assert bundle_payload_digest(envelope).startswith("sha256:")
 
 
 def test_sign_token_stdin_overrides_env(
@@ -415,8 +411,7 @@ def test_sign_token_stdin_overrides_env(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["exit_code"] == 0
-    assert bundle_payload_digest(envelope["data"]).startswith("sha256:")
+    assert bundle_payload_digest(envelope).startswith("sha256:")
 
 
 def test_sign_token_file_overrides_stdin_and_env(
@@ -457,8 +452,7 @@ def test_sign_token_file_overrides_stdin_and_env(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["exit_code"] == 0
-    assert bundle_payload_digest(envelope["data"]).startswith("sha256:")
+    assert bundle_payload_digest(envelope).startswith("sha256:")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -526,7 +520,7 @@ def test_sign_lands_in_the_fallback_index_on_a_registry_without_the_referrers_ap
     """No Referrers API is no longer a refusal — it selects the fallback write.
 
     `adr_oci_referrers_signing_v1.md` Amendment 10 reverses S1-F: the pipeline
-    used to exit 84 here, before doing any signing work. It now pushes the
+    used to exit 82 here, before doing any signing work. It now pushes the
     referrer manifest and names it in the OCI tag-schema fallback index, which
     is the only way a `registry:2` can answer a referrers query at all.
 
@@ -556,7 +550,7 @@ def test_sign_lands_in_the_fallback_index_on_a_registry_without_the_referrers_ap
         f"sign must succeed on a registry without the Referrers API, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
 
     status, _ = list_referrers(legacy_registry, pkg.repo, data["subject_digest"])
     assert status == 404, (
@@ -618,7 +612,7 @@ def test_signature_format_both_writes_a_bundle_referrer_and_a_cosign_sidecar(
         env=ocx.env, check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert [entry["format"] for entry in data["legs"]] == ["bundle", "simplesigning"]
 
     status, index = list_referrers(ocx.registry, pkg.repo, data["subject_digest"])
@@ -676,9 +670,8 @@ def test_sign_with_a_cosign_key_reports_a_key_backend_and_writes_no_certificate(
 
     No Sigstore stack, and deliberately so: key mode contacts neither Fulcio nor
     (without `--rekor-upload`) Rekor, so a test that needed either would be
-    proving the opposite of what key mode is for. `transparency_log_index` is
-    asserted `None` rather than merely absent — the field is emitted
-    unconditionally so an operator can *see* that no record was made.
+    proving the opposite of what key mode is for. The schema states that an
+    absent `transparency_log_index` means no record was made.
     """
     pkg = published_package
     key = Path(__file__).parent / "fixtures" / "golden" / "keys" / "cosign.key"
@@ -697,14 +690,14 @@ def test_sign_with_a_cosign_key_reports_a_key_backend_and_writes_no_certificate(
         env=env, check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["key_backend"] == "file"
     assert data["signer"] == "file", "signer must not still say keyless-fulcio under a key"
     assert data["public_key_hint"], "a key-mode signature reports the key's cosign hint"
-    assert data["transparency_log_index"] is None, (
-        "no --rekor-upload means no transparency record, reported as null"
+    assert "transparency_log_index" not in data, (
+        "no --rekor-upload means no transparency record, reported by the key's absence"
     )
-    assert data["certificate_identity"] == "", "there is no certificate to take an identity from"
+    assert "certificate_identity" not in data, "there is no certificate to take an identity from"
 
     bundle = json.loads(get_blob(ocx.registry, pkg.repo, bundle_payload_digest(data)))
     material = bundle["verificationMaterial"]
@@ -751,14 +744,14 @@ def test_sign_with_an_env_held_key_reports_the_env_backend(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["key_backend"] == "env", (
         "the reported backend must name the reference that produced the "
         "signature, not the envelope it happens to share with a file key"
     )
     assert data["signer"] == "env", "signer must not still say keyless-fulcio under a key"
     assert data["public_key_hint"], "a key-mode signature reports the key's cosign hint"
-    assert data["certificate_identity"] == "", "there is no certificate to take an identity from"
+    assert "certificate_identity" not in data, "there is no certificate to take an identity from"
 
     bundle = json.loads(get_blob(ocx.registry, pkg.repo, bundle_payload_digest(data)))
     material = bundle["verificationMaterial"]
@@ -955,7 +948,7 @@ def test_sign_then_sign_again_is_idempotent(
             env=ocx.env, check=False,
         )
         assert result.returncode == 0, result.stderr
-        subject_digest = json.loads(result.stdout)["data"]["subject_digest"]
+        subject_digest = json.loads(result.stdout)["subject_digest"]
 
     assert subject_digest is not None
     status, index = list_referrers(
@@ -1010,7 +1003,7 @@ def test_sign_no_tty_skips_browser_fallback_exits_77(
         f"expected exit 77 (PermissionDenied / OidcPreCheckFailed), got {result.returncode}\n"
         f"stderr: {result.stderr.strip()}"
     )
-    # 77 alone is also OfflineSignRefused and IdentityTokenFilePermissive —
+    # 77 alone is also IdentityTokenFilePermissive and a bare filesystem EPERM —
     # assert the frozen slug so this test cannot pass for a cause other than
     # the no-tty/no-ambient-token precheck it names.
     envelope = json.loads(result.stdout)
@@ -1021,27 +1014,28 @@ def test_sign_no_tty_skips_browser_fallback_exits_77(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rekor unavailable DURING SIGN — exit 83 (TransparencyLogUnavailable)
+# Rekor unavailable DURING SIGN — exit 75 (TransparencyLogUnavailable)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_sign_transparency_log_unavailable_exits_83(
+def test_sign_transparency_log_unavailable_exits_75(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """Rekor unreachable during the sign-time log upload → exit 83.
+    """Rekor unreachable during the sign-time log upload → exit 75.
 
     Signing requires a Rekor transparency-log entry; when the log is down the
     sign cannot complete. This is a service-availability failure (retry may
-    help), so it maps to ``TransparencyLogUnavailable`` (83), distinct from a data
+    help), so it maps to ``TransparencyLogUnavailable`` (75, ``TempFail``), distinct from a data
     failure. Fulcio stays real, so the failure is isolated to the log step.
     """
     pkg = published_package
     result = subprocess.run(
         [
             str(ocx.binary),
+            "--format", "json",
             "package", "sign",
             "--platform", current_platform(),
             "--fulcio-url", sigstore_stack.fulcio_url,
@@ -1053,10 +1047,12 @@ def test_sign_transparency_log_unavailable_exits_83(
         text=True,
         env=ocx.env, check=False,
     )
-    assert result.returncode == 83, (
-        f"expected exit 83 (TransparencyLogUnavailable) when Rekor 503s during sign, got "
+    assert result.returncode == 75, (
+        f"expected exit 75 (TransparencyLogUnavailable) when Rekor 503s during sign, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
+    # Exit 75 alone also admits a Fulcio or registry outage; the slug names the log.
+    assert json.loads(result.stdout)["error"]["detail"] == "transparency_log_unavailable", result.stdout
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1157,8 +1153,7 @@ def test_sign_still_accepts_the_explicitly_named_local_stack(
     guard that refused everything would look identical to a guard that worked.
     """
     envelope = ocx.json("package", "sign", *sigstore_stack.sign_args(identity_token), published_package.short)
-    assert envelope["exit_code"] == 0, envelope
-    assert bundle_payload_digest(envelope["data"]).startswith("sha256:"), envelope
+    assert bundle_payload_digest(envelope).startswith("sha256:"), envelope
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1341,13 +1336,13 @@ def test_sign_without_platform_signs_the_index_the_tag_resolves_to(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == index_digest, (
         f"absent --platform must act on what the reference resolved to "
         f"({index_digest}), not narrow to the child ({platform_digest})"
     )
-    assert data["platform"] == "any", (
-        f"an absent narrowing reports as `any`, got {data['platform']!r}"
+    assert "platform" not in data, (
+        f"an absent narrowing reports no platform, got {data.get('platform')!r}"
     )
 
 
@@ -1372,11 +1367,11 @@ def test_sign_with_platform_narrows_into_the_index(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == platform_digest, (
         f"--platform {current_platform()} must narrow to the child manifest"
     )
-    assert data["platform"] == current_platform()
+    assert data["platform"] == dict(zip(("os", "architecture"), current_platform().split("/"), strict=True))
 
 
 def test_sign_with_platform_against_a_bare_manifest_is_refused(
@@ -1432,7 +1427,7 @@ def test_sign_without_platform_signs_a_reference_that_is_a_bare_manifest(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == platform_digest
 
 
@@ -1476,9 +1471,7 @@ def _sweep_rows(result: subprocess.CompletedProcess[str]) -> dict[str, dict]:
     contract (sweep order, so a reader can follow the run), so it is checked
     here once rather than being silently discarded by the dict build.
     """
-    envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
-    rows = envelope["data"]["tags"]
+    rows = json.loads(result.stdout)["items"]
     assert [row["tag"] for row in rows] == [row["tag"] for row in rows], "rows carry their tag"
     return {row["tag"]: row for row in rows}
 
@@ -1751,8 +1744,8 @@ def test_sign_without_tags_keeps_the_single_reference_report(
     """No `--tags`: the document is the single-reference report, unchanged.
 
     The sweep must be reachable only by asking for it. Without the flags the
-    envelope carries `subject_digest` at the top of `data` — not a `tags`
-    array — which is the contract every existing consumer parses.
+    document carries `subject_digest` at its top — not an `items` array —
+    which is the contract every existing consumer parses.
     """
     pkg = published_package
     index_digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
@@ -1764,11 +1757,11 @@ def test_sign_without_tags_keeps_the_single_reference_report(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)["data"]
-    assert "tags" not in data, f"an unswept run must not emit a sweep document: {data}"
+    data = json.loads(result.stdout)
+    assert "items" not in data, f"an unswept run must not emit a sweep document: {data}"
     assert data["subject_digest"] == index_digest
     assert data["identifier"].endswith(pkg.short)
-    assert data["platform"] == "any"
+    assert "platform" not in data
 
 
 def test_sign_refuses_a_platform_alongside_a_sweep(

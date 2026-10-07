@@ -17,7 +17,7 @@ pytestmark = pytest.mark.command("exec")
 
 def _store_path(ocx: OcxRunner, short: str) -> Path:
     """The package-store directory ``ocx package which`` resolves ``short`` to."""
-    return Path(ocx.json("package", "which", short)[short]["path"])
+    return Path(ocx.json("package", "which", short)["paths"][short]["path"])
 
 
 def test_exec_rm_removes_the_package_it_leaves_behind(
@@ -74,7 +74,7 @@ def test_exec_rm_keeps_an_installed_package(
     ocx.plain("package", "install", pkg.short)
     store_path = _store_path(ocx, pkg.short)
     candidate = Path(
-        ocx.json("package", "which", "--candidate", pkg.short)[pkg.short]["path"]
+        ocx.json("package", "which", "--candidate", pkg.short)["paths"][pkg.short]["path"]
     )
 
     ocx.plain("package", "exec", "--rm", pkg.short, "--", "hello")

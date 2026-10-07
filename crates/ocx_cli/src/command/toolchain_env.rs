@@ -235,7 +235,9 @@ impl ToolchainEnv {
             let (mut entries, patch_start, provenance, attribution) = composing
                 .resolve_env_with_attribution(&infos, false, scope, &target)
                 .await?;
-            let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+            let inherited = ocx_env::OCX_LAUNCH_IDENTITIES
+                .get_raw()
+                .and_then(|v| v.into_string().ok());
             entries.extend(manager.launch_identity_entry(&infos, &no_patches, inherited.as_deref()));
             (entries, patch_start, provenance, attribution)
         };
@@ -413,7 +415,9 @@ pub(crate) async fn resolve_global_pinned_env(
     let (mut entries, patch_start, provenance, attribution) = manager
         .resolve_env_with_attribution(&infos, false, scope, target)
         .await?;
-    let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+    let inherited = ocx_env::OCX_LAUNCH_IDENTITIES
+        .get_raw()
+        .and_then(|v| v.into_string().ok());
     entries.extend(manager.launch_identity_entry(&infos, &no_patches, inherited.as_deref()));
     Ok(Some((entries, patch_start, provenance, attribution)))
 }
@@ -624,11 +628,8 @@ mod tests {
         use crate::app::{Cli, Context, ManagedConfigGate};
 
         let home = global_home(config_body);
-        // SAFETY: `OCX_HOME` is read through `ocx_util::env::var`, whose
-        // `#[cfg(test)]` override seam is internal to `ocx_lib` and therefore
-        // unavailable from this crate; the process variable is the only seam.
-        // nextest runs one test per process, so this cannot race a sibling.
-        unsafe { std::env::set_var("OCX_HOME", home.path()) };
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().expect("temp path is utf-8"));
 
         let mut argv = vec!["ocx", "--global", "env"];
         argv.extend_from_slice(flags);
@@ -667,17 +668,15 @@ mod tests {
             root.display()
         );
 
-        let Some(crate::command::Command::Env(env)) = cli.command else {
+        let Some(crate::command::Command::Env(command)) = cli.command else {
             panic!("`ocx --global env` must parse to the env command");
         };
-        env.execute(context)
+        command
+            .execute(context)
             .await
             .expect("the global tier never fails on a well-formed home");
 
-        let ran = root.exists();
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("OCX_HOME") };
-        ran
+        root.exists()
     }
 
     /// `ocx --global env --pinned` composes the DIGEST lane.

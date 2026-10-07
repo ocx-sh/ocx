@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use ocx_exit::{Pick, Row};
 use ocx_index::{IndexRoot, OcxIndex};
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{DeleteOutcome, ManifestPresence, ReadAddressing};
@@ -22,16 +23,21 @@ pub const CONFIRM_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Which tags a run considers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum PruneSelection {
     /// Exactly these tags, deduplicated, in input order.
-    Tags { tags: Vec<String> },
+    Tags {
+        /// The named tags.
+        tags: Vec<String>,
+    },
     /// Every build of one pre-release, plus its rolling tag.
     Prerelease {
         /// A pre-release without a build, e.g. `0.5.0-canary`.
         prerelease: Version,
         /// Keep the newest this many builds and the rolling tag; at least 1.
+        /// Absent when every build is selected.
         #[schemars(range(min = 1))]
+        #[serde(skip_serializing_if = "Option::is_none")]
         keep_builds: Option<u32>,
     },
 }
@@ -125,10 +131,15 @@ impl std::fmt::Display for PruneReason {
 /// One row of the report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PruneTag {
+    /// The selected tag.
     pub tag: String,
-    /// The root row's content, else the digest the registry served, else `null`.
+    /// The root row's content, else the digest the registry served; absent when neither is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub digest: Option<Digest>,
+    /// The tag's final state.
     pub action: PruneAction,
+    /// Why the tag was kept or refused; absent for every other action.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<PruneReason>,
     /// Whether the served root lists this tag; a tag it does not list never reaches the tags file.
     #[serde(skip)]
@@ -138,19 +149,29 @@ pub struct PruneTag {
 /// The index a run read, as reported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PruneIndexReport {
+    /// Where the served root was read from.
     pub url: String,
+    /// sha256 of the root bytes as served.
     pub root_sha256: Digest,
 }
 
 /// What a run did, in processing order; printed whether or not the run failed.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PruneOutcome {
+    /// The package as named, without tag or digest.
     pub package: OciIdentifier,
+    /// The repository the tags live in: the index's pointer, else `package`.
     pub repository: OciIdentifier,
+    /// Which tags the run considered.
     pub selection: PruneSelection,
+    /// Whether `--force` overrode the index safeguard.
     pub force: bool,
+    /// Whether `--dry-run` was in force, so nothing was deleted.
     pub dry_run: bool,
+    /// The index the safeguard judged; absent for a namespace with no configured index.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<PruneIndexReport>,
+    /// One row per selected tag, in processing order.
     pub tags: Vec<PruneTag>,
     /// Selection finished, so a real run owes the tags file even when nothing was deleted.
     #[serde(skip)]
@@ -183,26 +204,47 @@ pub struct PruneRun {
 }
 
 /// Why a prune stopped.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum PruneError {
     /// `--prerelease` names no pre-release, or one with a build.
     #[error("--prerelease {value:?} must be a pre-release without a build, e.g. 0.5.0-canary")]
+    #[exit(
+        UsageError,
+        slug = "prune_not_a_prerelease",
+        summary = "The --prerelease value is not a pre-release without a build"
+    )]
     NotAPrereleaseFamily { value: String },
 
     /// A TAG names a digest; deleting by digest removes every tag sharing it.
     #[error("{value:?} is a digest, not a tag; prune deletes tags only")]
+    #[exit(
+        UsageError,
+        slug = "prune_digest_tag",
+        summary = "A digest was given where prune takes a tag"
+    )]
     DigestTag { value: String },
 
     /// A TAG is outside the OCI tag grammar, or names an internal keep tag.
     #[error("{value:?} is not a tag prune may delete: {reason}")]
+    #[exit(
+        UsageError,
+        slug = "invalid_tag",
+        summary = "A tag is malformed, or not one the operation may act on"
+    )]
     InvalidTag { value: String, reason: &'static str },
 
     /// The package carries a tag or digest; tags are selected separately.
     #[error("package {package} names a tag or digest; pass the package alone and the tags after it")]
+    #[exit(
+        UsageError,
+        slug = "prune_package_not_bare",
+        summary = "The package argument carries a tag or digest"
+    )]
     PackageNotBare { package: String },
 
     /// The served root could not be read, so the registry location is unknown.
     #[error("reading the index root of {package} from {url}{}", transport_hint(.source))]
+    #[exit(delegate = source)]
     RootUnreadable {
         package: String,
         url: String,
@@ -212,10 +254,12 @@ pub enum PruneError {
 
     /// The index has no root for the package.
     #[error("the index at {url} has no package {package}")]
+    #[exit(NotFound, slug = "not_in_index", summary = "The package is not listed in the index")]
     NotInIndex { package: String, url: String },
 
     /// The root's `repository` pointer failed to parse or names a forbidden host.
     #[error("the index root of {package} names a registry repository prune may not use")]
+    #[exit(delegate = source)]
     RepositoryPointer {
         package: String,
         #[source]
@@ -227,10 +271,30 @@ pub enum PruneError {
         "refusing to delete tags of {package}: no index is configured for its namespace to mark them \
          ephemeral; nothing was deleted; pass --force to delete them anyway"
     )]
+    #[exit(
+        PolicyBlocked,
+        slug = "prune_no_index",
+        summary = "No index is configured to check the tags against"
+    )]
     NoIndex { package: String },
 
     /// The safeguard refused tags; nothing was deleted. A durable refusal wins over a pending one.
     #[error("{}", refusal_message(.package, .url, .durable, .not_in_index))]
+    #[exit(
+        with = refused,
+        rows(
+            (
+                PolicyBlocked,
+                slug = "prune_refused_durable",
+                summary = "The index still lists a tag prune would delete, and the tag is durable"
+            ),
+            (
+                TempFail,
+                slug = "prune_refused_pending",
+                summary = "The index still lists a tag prune would delete, pending an announce"
+            ),
+        )
+    )]
     Refused {
         package: String,
         url: String,
@@ -242,6 +306,7 @@ pub enum PruneError {
 
     /// The registry refused this run's credential on the first DELETE.
     #[error("deleting {tag} from {repository}: the credential lacks delete rights, or the tag is protected")]
+    #[exit(delegate = source)]
     DeleteDenied {
         repository: String,
         tag: String,
@@ -251,11 +316,28 @@ pub enum PruneError {
 
     /// A deleted tag was still served after every confirmation GET.
     #[error("{tag} is still present in {repository} after its delete; retry")]
+    #[exit(
+        TempFail,
+        slug = "prune_tag_still_present",
+        summary = "A deleted tag is still present in the registry"
+    )]
     StillPresent { repository: String, tag: String },
 
     /// Any other registry failure, including a registry that cannot delete tags.
     #[error(transparent)]
+    #[exit(delegate)]
     Registry(#[from] ClientError),
+}
+
+/// A retry cannot fix a durable tag; a pending announce can merge.
+fn refused(error: &PruneError, [durable, pending]: [Row; 2]) -> Pick<'_> {
+    Pick::row(
+        if matches!(error, PruneError::Refused { durable, .. } if !durable.is_empty()) {
+            durable
+        } else {
+            pending
+        },
+    )
 }
 
 // Only a transient transport failure is worth a retry; a refused certificate or a malformed root is not.

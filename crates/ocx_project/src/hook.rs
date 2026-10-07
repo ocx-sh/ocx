@@ -84,7 +84,7 @@ mod tests {
     /// `MissingState::NoProject`.
     #[tokio::test]
     async fn load_returns_no_project_when_cwd_walk_misses() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         // `home = None` disables this helper's own home probe, but
         // `load_project_state` → `ConfigLoader::project_path` Tier 4 still
         // reads `$OCX_HOME` (default `~/.ocx/ocx.toml`). Sandbox it so a

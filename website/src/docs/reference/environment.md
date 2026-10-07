@@ -28,6 +28,8 @@ for enabling an option, and
 
 for disabling an option.
 
+A value outside both lists depends on the variable. For [`OCX_OFFLINE`](#ocx-offline), [`OCX_FROZEN`](#ocx-frozen), [`OCX_NO_CONSENT`](#ocx-no-consent) and [`OCX_NO_VERIFY`](#ocx-no-verify), whose value decides how far OCX trusts the network, the invocation exits 78 naming the variable. Every other boolean variable logs a warning and uses its default.
+
 ## Internal
 
 ::: info Presentation flags do not propagate
@@ -138,7 +140,7 @@ This is **not** a credential — holding it authenticates nobody — so it is no
 
 ### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
 
-A forge personal access token, read by [`ocx package announce`][cmd-package-announce] and by `ocx package claim` when they open or update a pull or merge request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--out` does not need one.
+A forge personal access token, read by [`ocx package announce`][cmd-package-announce] and by `ocx package claim` when they open or update a pull or merge request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--output` does not need one.
 
 One variable serves both forges; which kind of token to put in it follows the forge the run targets:
 
@@ -154,7 +156,7 @@ What this variable has to carry depends on the write transport:
 | `--transport api` (default) | Every REST call: reading the committed entry, creating the branch and the commit, opening the request | none — nothing is written over git |
 | `--transport git` | The REST reads and the merge-request confirmation only | [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) when set, otherwise this token |
 
-A GitLab **CI job token** (`CI_JOB_TOKEN`) has **no write access** through the API — it is read-only for branches, commits, raw files, merge requests and tags. That is the reason the `git` transport exists: a job token may write to the repository over HTTP **when the index project allows job-token pushes and its job-token allowlist admits the publishing project**. A bare job token cannot read either setting — both live behind endpoints closed to it — so ocx pushes and lets GitLab's own rejection decide; the [split credential pair][authoring-announcing-split], whose API half is an ordinary token, reads both up front instead. Either posture exits `86` on a missing capability, but only the pre-push check names which one — the post-push rejection carries no field saying which setting was missing. GitLab then creates the merge request from the transmitted options rather than from an API call. Under `--transport git` inside a GitLab job (`GITLAB_CI` set to a non-empty value), an unset or empty `OCX_ANNOUNCE_TOKEN` falls through to `CI_JOB_TOKEN` automatically. Under `--transport api` it does not, because a job token cannot open the request there: that run needs a real access token in a masked variable.
+A GitLab **CI job token** (`CI_JOB_TOKEN`) has **no write access** through the API — it is read-only for branches, commits, raw files, merge requests and tags. That is the reason the `git` transport exists: a job token may write to the repository over HTTP **when the index project allows job-token pushes and its job-token allowlist admits the publishing project**. A bare job token cannot read either setting — both live behind endpoints closed to it — so ocx pushes and lets GitLab's own rejection decide; the [split credential pair][authoring-announcing-split], whose API half is an ordinary token, reads both up front instead. Either posture exits `82` on disabled job-token pushes, and the split pair exits `77` on an allowlist miss; only the pre-push check names which one — the post-push rejection carries no field saying which setting was missing. GitLab then creates the merge request from the transmitted options rather than from an API call. Under `--transport git` inside a GitLab job (`GITLAB_CI` set to a non-empty value), an unset or empty `OCX_ANNOUNCE_TOKEN` falls through to `CI_JOB_TOKEN` automatically. Under `--transport api` it does not, because a job token cannot open the request there: that run needs a real access token in a masked variable.
 
 ```sh
 # GitHub
@@ -163,7 +165,7 @@ export OCX_ANNOUNCE_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 export OCX_ANNOUNCE_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 ```
 
-Together with [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) this is the whole credential surface for a forge write — neither token ever enters the registry credential store `ocx login` writes to. This one is sent as a request header — `Authorization: Bearer` on GitHub, `PRIVATE-TOKEN` on GitLab, or `JOB-TOKEN` when the resolved credential is this job's own `CI_JOB_TOKEN` — never logged and never placed in a URL. Under `--transport git` with no [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) set it is additionally presented to `git` as the secret half of an HTTP Basic pair, through git's own configuration environment. Redirects are disabled on the forge client, so a cross-host redirect cannot replay the header at another host. A forge's error body is echoed back in diagnostics, so the token is redacted out of it first — a reverse proxy that reflects request headers cannot put your credential in a CI log. The host in `--index-repo` and `--fork` must be a well-formed hostname; anything that could shift the URL's authority (userinfo, a query, a path) is refused rather than interpreted. Any mode other than `--out` fails immediately (exit `80`) when the credential ladder resolves nothing, rather than falling back to an unauthenticated attempt. Without `--fork` the credential must also carry write permission on the index repository, which the run verifies before writing anything.
+Together with [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) this is the whole credential surface for a forge write — neither token ever enters the registry credential store `ocx login` writes to. This one is sent as a request header — `Authorization: Bearer` on GitHub, `PRIVATE-TOKEN` on GitLab, or `JOB-TOKEN` when the resolved credential is this job's own `CI_JOB_TOKEN` — never logged and never placed in a URL. Under `--transport git` with no [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) set it is additionally presented to `git` as the secret half of an HTTP Basic pair, through git's own configuration environment. Redirects are disabled on the forge client, so a cross-host redirect cannot replay the header at another host. A forge's error body is echoed back in diagnostics, so the token is redacted out of it first — a reverse proxy that reflects request headers cannot put your credential in a CI log. The host in `--index-repo` and `--fork` must be a well-formed hostname; anything that could shift the URL's authority (userinfo, a query, a path) is refused rather than interpreted. Any mode other than `--output` fails immediately (exit `80`) when the credential ladder resolves nothing, rather than falling back to an unauthenticated attempt. Without `--fork` the credential must also carry write permission on the index repository, which the run verifies before writing anything.
 
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 
@@ -684,7 +686,7 @@ Distinct from [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check): that variable silen
 
 This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — keep the tick suppressed. The refresh can replace the `[managed]` tier mid-chain, so a child that re-enabled it would resolve against configuration the parent never saw — and a [`--clean`][cmd-run] child re-enables it by starting from an empty environment.
 
-### `OCX_LOG` {#ocx-log}
+### `OCX_LOG_LEVEL` {#ocx-log-level}
 
 The log level for OCX.
 You can set this variable to the same values as the [`--log-level`][arg-log-level] command line option (e.g. `warn`, `info`, etc.).
@@ -693,8 +695,8 @@ For more information on log levels, see the [command line reference][arg-log-lev
 
 ### `OCX_LOG_CONSOLE` {#ocx-log-console}
 
-Similar to [`OCX_LOG`](#ocx-log), but specifically for configuring the log level of messages emitted to the console.
-If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) for console messages.
+Similar to [`OCX_LOG_LEVEL`](#ocx-log-level), but specifically for configuring the log level of messages emitted to the console.
+If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG_LEVEL`](#ocx-log-level) for console messages.
 
 ### `OCX_NO_CONFIG` {#ocx-no-config}
 
@@ -712,17 +714,17 @@ OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml install cmake:3.28
 
 `OCX_NO_CONFIG` is available only as an environment variable. A `--no-config` CLI flag would duplicate surface without solving a new problem: the hermetic-CI use case is best expressed via env vars, which are how CI systems already inject policy. A flag would require callers to both export the env var and pass the flag in every per-command invocation — two sources of truth for the same intent.
 
-### `OCX_NO_COMPLETIONS` {#ocx-no-completions}
+### `OCX_NO_COMPLETION` {#ocx-no-completion}
 
 When set to a [truthy value](#truthy-values), `ocx self activate` skips the shell-completion injection block. `PATH` prepend and global toolchain env eval still run.
 
 Use this when you manage completions through a separate framework (e.g. [oh-my-zsh][oh-my-zsh] or a Nix-generated completion store) and do not want OCX to overwrite them on every shell start.
 
 ```sh
-export OCX_NO_COMPLETIONS=1
+export OCX_NO_COMPLETION=1
 ```
 
-This variable has no effect on [`ocx shell completion`][cmd-shell-completion], which always generates the completion script regardless.
+Without `--if-enabled`, [`ocx shell completion`][cmd-shell-completion] generates the completion script regardless. With it, this variable is the first rung of the policy that decides whether anything is printed.
 
 ### `OCX_NO_HOOK` {#ocx-no-hook}
 
@@ -732,7 +734,7 @@ When set to a [truthy value](#truthy-values), disables the per-prompt shell reco
 export OCX_NO_HOOK=1
 ```
 
-This is a boolean, not a tri-state — there is no `OCX_HOOK=0|1|auto` — mirroring every other `OCX_NO_*` toggle in this reference (`OCX_NO_CONFIG`, `OCX_NO_COMPLETIONS`, `OCX_NO_MODIFY_PATH`, `OCX_NO_PROJECT`, `OCX_NO_VERIFY`). The positive channel is the `--hook` flag on [`ocx self setup`][cmd-self-setup] and [`ocx self activate`][cmd-self-activate], and an unset variable already means "auto" (on, for an interactive shell).
+This is a boolean, not a tri-state — there is no `OCX_HOOK=0|1|auto` — mirroring every other `OCX_NO_*` toggle in this reference (`OCX_NO_CONFIG`, `OCX_NO_COMPLETION`, `OCX_NO_MODIFY_PATH`, `OCX_NO_PROJECT`, `OCX_NO_VERIFY`). The positive channel is the `--hook` flag on [`ocx self setup`][cmd-self-setup] and [`ocx self activate`][cmd-self-activate], and an unset variable already means "auto" (on, for an interactive shell).
 
 **Read once, at shell start — never on the per-prompt path.** Exporting `OCX_NO_HOOK=1` mid-session takes effect at the *next* shell start, not the next prompt: the per-prompt reconciler's own budget forbids reading configuration or environment toggles on every prompt, so whether the hook runs at all is decided once, when the shell's activation shim sources `ocx self activate`.
 
@@ -812,7 +814,7 @@ The equivalent CLI flag is [`--no-modify-path`][cmd-self-setup] on `ocx self set
 This variable is the second rung of a four-rung ladder, most specific first: `--no-modify-path` on `ocx self setup`, then this variable, then [`[shell] modify_path`][config-keys-shell-modify-path] in `config.toml`, then the floor (modification allowed). Rung 2 sits above the config key, so exporting this variable for a run outranks whatever `config.toml` already holds.
 
 ::: warning Truthy values only — not "any non-empty"
-`OCX_NO_MODIFY_PATH` follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized non-empty value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — both PATH surfaces are written, the profile blocks and the session-level registration). An empty string is also treated as false.
+`OCX_NO_MODIFY_PATH` follows the [truthy and falsy rules](#truthy-values) of every non-hardening boolean variable. Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized non-empty value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false`: both PATH surfaces are written, the profile blocks and the session-level registration). An empty string is also treated as false.
 :::
 
 **The opt-out persists.** Passing `--no-modify-path` writes `[shell] modify_path = false` to `config.toml`, so a later `ocx self setup` run — with or without the flag — still skips both PATH surfaces, from whichever tier decides. There is no positive `--modify-path` flag: the opt-out fails safe toward touching less of the user's machine, so re-enabling it is a hand edit to `config.toml`, or a run made after that edit. See [`[shell] modify_path`][config-keys-shell-modify-path] for the full ladder and merge rule across `config.toml` tiers.
@@ -854,6 +856,16 @@ When set to a [truthy value](#truthy-values), OCX disables all network access. T
 Combined with [`OCX_REMOTE`](#ocx-remote), enables [pinned-only mode][cmd-pinned-only-mode]: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of falling back.
 
 For [`ocx package verify`][cmd-package-verify], offline scopes to the **Sigstore trust services** — the Rekor-key fetch and TUF — not the artifact registry, which verify still reads the signature from (a local mirror, in air-gapped deployments). Offline verify reuses cached or supplied trust material and must have a pinned Rekor key, so it comes from [`OCX_SIGSTORE_TRUSTED_ROOT`](#ocx-sigstore-trusted-root) or one of the other trust-root rungs, or from the `$OCX_HOME/state/trust_root/` cache a prior online verify wrote. With no such material, verify fails with exit 78 naming the remedy — it never silently skips verification.
+
+### `OCX_CEILING_PATH` {#ocx-ceiling-path}
+
+A directory at which the CWD walk for a project `ocx.toml` stops. The walk probes that directory and never ascends above it. A project file at the ceiling is found, and one in a parent is not. A relative value joins onto the working directory the walk starts from.
+
+```sh
+OCX_CEILING_PATH=/work/checkout ocx pull
+```
+
+The walk already stops at the first directory that holds a `.git` entry. This variable bounds it where no repository marks the edge, such as a CI workspace mounted under a shared parent. An explicit [`--project`][arg-project] or [`OCX_PROJECT`](#ocx-project) is not bounded by it. The variable is not forwarded to child `ocx` processes.
 
 ### `OCX_PROJECT` {#ocx-project}
 
@@ -1040,6 +1052,7 @@ export OCX_TOOLCHAIN_UPDATE=manual
 | Value | Behaviour |
 |-------|-----------|
 | `notify` | Print one stderr line per toolchain file with drift, naming [`ocx update`][cmd-update]. The default when no tier sets the key. |
+| `apply` | Read as `notify`. |
 | `manual` | Never check. |
 
 `apply` is accepted but read as `notify`: only [`ocx update`][cmd-update] moves a pin, so the background check never rewrites a lock. Other values are logged at debug level and ignored. Values are lowercase, and an empty value reads as unset.
@@ -1202,7 +1215,7 @@ These variables expect **PEM** armor (`-----BEGIN CERTIFICATE-----`), regardless
 To skip HTTPS entirely for a development registry that has no certificate, use [`OCX_INSECURE_REGISTRIES`](#ocx-insecure-registries) instead. It is scoped to the hosts you name and never weakens verification for public registries.
 :::
 
-### Proxies — `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` {#external-proxies}
+### Proxies: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, `https_proxy`, `http_proxy`, `all_proxy`, `no_proxy` {#external-proxies}
 
 On a network where outbound traffic is routed through a corporate HTTP proxy, OCX reads the same forward-proxy variables [curl][curl-proxy-env], [git][git-http-proxy], and [reqwest][reqwest-proxy] already read — there is no separate `OCX_PROXY` variable. This matters for more than routing: on many such networks OCX cannot resolve an external hostname itself at all, only the proxy can, so the SSRF guard that runs before every index-indirected registry dial (see [`trusted_hosts`][config-registries-trusted-hosts]) adapts to a proxied destination instead of failing on a lookup only the proxy is able to make.
 
@@ -1248,8 +1261,69 @@ Overrides [`CLICOLOR`](#external-clicolor) but is itself overridden by [`NO_COLO
 ### `RUST_LOG` {#external-rust-log}
 
 A fallback for configuring the log level of OCX and its dependencies.
-If [`OCX_LOG`](#ocx-log) is not set, OCX will respect the log level configured via `RUST_LOG`.
-The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
+If [`OCX_LOG_LEVEL`](#ocx-log-level) is not set, OCX will respect the log level configured via `RUST_LOG`.
+The format for this variable is the same as for [`OCX_LOG_LEVEL`](#ocx-log-level).
+
+### GitHub run identity: `GITHUB_RUN_ID`, `GITHUB_ACTOR`, `GITHUB_ACTOR_ID` {#external-github-run-identity}
+
+Set by [GitHub Actions][github-actions-docs]. [`ocx package announce`][cmd-package-announce] joins `GITHUB_RUN_ID` with [`GITHUB_SERVER_URL`](#external-github-server-url) and [`GITHUB_REPOSITORY`](#external-github-repository) into the URL of the run making the announce. `ocx package claim` reads `GITHUB_ACTOR` and `GITHUB_ACTOR_ID` as the claiming owner's login and numeric id when no `--owner` is given. Neither value is confirmed by the forge.
+
+### GitHub OIDC: `ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN` {#external-github-oidc}
+
+Set by [GitHub Actions][github-actions-docs] in a job granted the `id-token: write` permission. `ACTIONS_ID_TOKEN_REQUEST_URL` is where the runner serves OIDC tokens, and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` is the bearer token that authorizes the request. [`ocx package sign`][cmd-package-sign] and [`ocx package attest`][cmd-package-attest] use the pair for keyless signing when no explicit token is given. See the precedence list under [`OCX_IDENTITY_TOKEN`](#ocx-identity-token).
+
+`ACTIONS_ID_TOKEN_REQUEST_TOKEN` is a secret. OCX treats it as a secret, and a tool run under [`ocx exec`][cmd-run] still inherits it so that tool can sign keylessly itself.
+
+### GitLab job variables: `CI_JOB_TOKEN`, `CI_JOB_URL`, `CI_PROJECT_PATH`, `GITLAB_USER_LOGIN`, `GITLAB_USER_ID` {#external-gitlab-job}
+
+Set by [GitLab CI/CD][gitlab-ci-docs] in every job.
+
+| Variable | Read for |
+|----------|----------|
+| `CI_JOB_TOKEN` | The credential of [`ocx package announce --transport git`][cmd-package-announce] inside a GitLab job. A secret. |
+| `CI_JOB_URL` | The URL of the run making the announce. |
+| `CI_PROJECT_PATH` | The `group/project` path of the project the job runs in. |
+| `GITLAB_USER_LOGIN`, `GITLAB_USER_ID` | The claiming owner's login and numeric id for `ocx package claim` when no `--owner` is given. Not confirmed by the forge. |
+
+### Other OIDC token sources: `SIGSTORE_ID_TOKEN`, `CIRCLE_OIDC_TOKEN_V2` {#external-oidc-tokens}
+
+OIDC tokens a CI provider injects into the job: `SIGSTORE_ID_TOKEN` on [GitLab CI][gitlab-ci-docs], `CIRCLE_OIDC_TOKEN_V2` on [CircleCI][circleci-oidc]. Both are secrets. [`ocx package sign`][cmd-package-sign] and [`ocx package attest`][cmd-package-attest] take them as the ambient token source, below [`OCX_IDENTITY_TOKEN`](#ocx-identity-token) in the precedence list.
+
+### Home directory: `HOME`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH` {#external-home}
+
+The user's home directory. `HOME` is the POSIX spelling and `USERPROFILE` the Windows one. OCX resolves the default [`OCX_HOME`](#ocx-home) (`~/.ocx`) and the shell profiles [`ocx self setup`][cmd-self-setup] edits from the home directory. `HOMEDRIVE` and `HOMEPATH` are not used to derive it: they are only passed through to the `git` process that `ocx package announce --transport git` runs.
+
+### User name: `USER`, `USERNAME`, `LOGNAME` {#external-user-name}
+
+The account name. [Execution records][config-records] store it as a readable label, taken from `USER`, then `LOGNAME`, with `USERNAME` as the Windows spelling. The caller controls all three, so the name is a label and never an identity. A scratch container that sets none of them leaves the field out.
+
+### Windows system directories: `SYSTEMROOT`, `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramData`, `APPDATA` {#external-windows-directories}
+
+Set by Windows. OCX reads `SYSTEMROOT` / `SystemRoot`, `ProgramFiles`, `ProgramFiles(x86)` and `ProgramData` to refuse a [`toolchain_dir`][config-toolchain_dir] under a system location. Each falls back to its default install path: `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)` and `C:\ProgramData`. `APPDATA` is the roaming application data directory the user-tier [configuration file][config-ref] lives under.
+
+### Temporary directory: `TMPDIR`, `TEMP`, `TMP` {#external-temp}
+
+The directory for scratch files. `TMPDIR` is the POSIX spelling, `TEMP` and `TMP` the Windows ones. OCX also passes all three through to the `git` process [`ocx package announce --transport git`][cmd-package-announce] runs.
+
+### Shell and terminal: `SHELL`, `TERM`, `ZDOTDIR` {#external-shell-terminal}
+
+`SHELL` names the login shell. [`ocx env --shell`][cmd-env-root] and [`ocx self activate`][cmd-self-activate] fall back to it, then to the parent process, when no shell is named. `TERM=dumb` turns color off, below [`NO_COLOR`](#external-no-color) and [`CLICOLOR_FORCE`](#external-clicolor-force) in the color precedence. `ZDOTDIR` moves the directory zsh reads its startup files from, and [`ocx self setup`][cmd-self-setup] writes the zsh activation block there instead of into `$HOME`.
+
+### `XDG_DATA_HOME` {#external-xdg-data-home}
+
+User-level data base directory from the [XDG Base Directory Specification][xdg-basedir]. [`ocx self setup`][cmd-self-setup] writes the nushell autoload file under `$XDG_DATA_HOME/nushell/vendor/autoload/`, falling back to `~/.local/share` when the variable is unset. See [`XDG_CONFIG_HOME`](#external-xdg-config-home) for the configuration counterpart.
+
+### `PATH` {#external-path}
+
+The executable search path. [`ocx exec`][cmd-run] prepends the composed package `bin/` directories to it for the child. The [per-prompt hook][in-depth-shell-integration] keeps the same prepend current in your shell as you change directory. [`ocx self setup`][cmd-self-setup] scans it for an `ocx` that would shadow the installed one.
+
+### Git trust store: `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH` {#external-git-ca}
+
+The CA bundle and CA directory `git` reads. [`ocx package announce --transport git`][cmd-package-announce] passes both through to the `git` process it spawns, next to `SSL_CERT_FILE` and `SSL_CERT_DIR` from [CA certificates](#external-ca-certificates). A push carries libcurl's own trust. [`OCX_EXTRA_CA_CERTS`](#ocx-extra-ca-certs) reaches OCX's REST client only and is never exported to `git`, where it would replace the whole trust store.
+
+### direnv and mise: `DIRENV_DIR`, `MISE_SHELL`, `__MISE_ORIG_PATH` {#external-coexisting-tools}
+
+Set by [direnv][direnv] inside an allowed directory (`DIRENV_DIR`) and by [mise][mise]'s shell activation (`MISE_SHELL`, with `__MISE_ORIG_PATH` holding `PATH` from before mise changed it). The [per-prompt reconciler][in-depth-shell-integration] reads them as the signal that another tool manages the environment, and [yields to it][in-depth-shell-coexistence]. [`ocx shell state`][cmd-shell-state] names the tool it observed.
 
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O
@@ -1259,6 +1333,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [github-multiline-env]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
 [ocx-mirror-env]: https://ocx-sh.github.io/ocx-mirror/reference/environment/
 [gitlab-ci-docs]: https://docs.gitlab.com/ee/ci/
+[circleci-oidc]: https://circleci.com/docs/openid-connect-tokens/
 [bazel-rules]: https://bazel.build/extending/rules
 [devcontainer-features]: https://containers.dev/implementors/features/
 [xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/

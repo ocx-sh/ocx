@@ -47,7 +47,7 @@ Assigned **per line, first match wins**. A file appears under the most severe ti
 | Tier | Rule | Why it ranks here |
 |---|---|---|
 | **T0 WIRE** | `#[serde(`, `deny_unknown_fields`, or a wire-file path (`oci/index/wire*.rs`, `oci/manifest.rs`, `project/{config,lock}.rs`, `package/metadata*`, `ocx_schema/`, `fixtures/index_wire/`) | Breaks *other programs*, including already-published packages. Nothing else in a diff can do that. |
-| **T1 CLI & EXIT** | anything under `crates/ocx_cli/src/`, `cli/exit_code.rs`, `cli/classify.rs`, `*/error.rs`, `try_downcast!` | What a calling script types, parses and branches on. Flags, `--format json` shapes and exit codes are one contract. |
+| **T1 CLI & EXIT** | anything under `crates/ocx_cli/src/`, `crates/ocx_exit*/`, `*/error.rs`, `#[derive(Classify)]` | What a calling script types, parses and branches on. Flags, `--format json` shapes and exit codes are one contract. |
 | **T2 API** | `pub fn/struct/enum/trait/type/const`, or `impl … for …` | New types and changed signatures. |
 | **T3 LOGIC** | any other non-comment line under `crates/*/src/` | No contract signal — **read anyway**. |
 | **T4 DOC** | `///`, `//!`, `website/`, `*.md` | In this repo rustdoc is design record; skim, don't skip. |

@@ -5,7 +5,7 @@
 Exercises the self-activate contract:
 
 - PATH prepend uses an absolute resolved path (no $OCX_HOME variable reference).
-- Completion script included by default; excluded when OCX_NO_COMPLETIONS=1.
+- Completion script included by default; excluded when OCX_NO_COMPLETION=1.
 - Shell auto-detected from $SHELL when --shell flag is omitted.
 
 All tests run against the compiled binary via `OcxRunner.plain()`.  Shell-
@@ -216,12 +216,12 @@ def test_activate_skips_completion_when_non_interactive(ocx: OcxRunner) -> None:
 
 @requires_pty
 def test_activate_excludes_completion_when_opt_out(ocx: OcxRunner) -> None:
-    """OCX_NO_COMPLETIONS=1 skips completions even in an interactive session."""
-    result = _run_activate_interactive(ocx, "--shell=bash", extra_env={"OCX_NO_COMPLETIONS": "1"})
+    """OCX_NO_COMPLETION=1 skips completions even in an interactive session."""
+    result = _run_activate_interactive(ocx, "--shell=bash", extra_env={"OCX_NO_COMPLETION": "1"})
     stdout = result.stdout
 
     assert "source '" not in stdout and "complete -F" not in stdout and "compdef" not in stdout, (
-        f"OCX_NO_COMPLETIONS=1 must emit no completion; got:\n{stdout}"
+        f"OCX_NO_COMPLETION=1 must emit no completion; got:\n{stdout}"
     )
 
 
@@ -684,32 +684,32 @@ def test_activate_falls_back_to_home_when_ocx_home_unset(
 def test_activate_excludes_ocx_function_when_opt_out(
     ocx: OcxRunner,
 ) -> None:
-    """When OCX_NO_COMPLETIONS=1, the completion function body must not appear.
+    """When OCX_NO_COMPLETION=1, the completion function body must not appear.
 
     Strengthens test_activate_excludes_completion_when_opt_out: clap_complete
     generates a bash completion function named '_ocx' with a function definition
     form '_ocx()' or '#compdef _ocx ocx' for zsh. Neither form must appear when
-    OCX_NO_COMPLETIONS=1 is set.
+    OCX_NO_COMPLETION=1 is set.
 
     Also verifies that output is short (< 10 lines) since the full completion
     script is always substantial (100+ lines for any shell).
     """
-    result = _run_activate(ocx, "--shell=bash", extra_env={"OCX_NO_COMPLETIONS": "1"})
+    result = _run_activate(ocx, "--shell=bash", extra_env={"OCX_NO_COMPLETION": "1"})
     stdout = result.stdout
 
     # The completion function definition form (not substring of a path) must be absent.
     # '_ocx()' is the bash function definition; '#compdef _ocx' is the zsh preamble.
     assert "_ocx()" not in stdout, (
-        "stdout must not contain '_ocx()' (bash completion function def) when OCX_NO_COMPLETIONS=1; "
+        "stdout must not contain '_ocx()' (bash completion function def) when OCX_NO_COMPLETION=1; "
         f"got:\n{stdout}"
     )
     assert "#compdef _ocx" not in stdout, (
-        "stdout must not contain '#compdef _ocx' (zsh completion preamble) when OCX_NO_COMPLETIONS=1; "
+        "stdout must not contain '#compdef _ocx' (zsh completion preamble) when OCX_NO_COMPLETION=1; "
         f"got:\n{stdout}"
     )
     line_count = len(stdout.splitlines())
     assert line_count < 10, (
-        f"stdout must be < 10 lines when OCX_NO_COMPLETIONS=1 (no completion body); "
+        f"stdout must be < 10 lines when OCX_NO_COMPLETION=1 (no completion body); "
         f"got {line_count} lines:\n{stdout}"
     )
 
@@ -973,7 +973,7 @@ def test_real_env_sh_loads_bash_completions_when_interactive(ocx_binary: Path, o
 
 
 def test_real_env_sh_honours_completion_opt_out_when_interactive(ocx_binary: Path, ocx_home: Path) -> None:
-    """OCX_NO_COMPLETIONS=1 reaches the completions env.sh injects SEPARATELY.
+    """OCX_NO_COMPLETION=1 reaches the completions env.sh injects SEPARATELY.
 
     The activation stream is not the only place completions load. env.sh passes
     ``--no-completion`` to ``self activate`` and re-injects completions on every
@@ -994,14 +994,14 @@ def test_real_env_sh_honours_completion_opt_out_when_interactive(ocx_binary: Pat
         ["bash", "-i", "-c", f'. "{env_sh}"; type -P ocx; complete -p ocx'],
         capture_output=True,
         text=True,
-        env={**env, "OCX_NO_COMPLETIONS": "1"}, check=False,
+        env={**env, "OCX_NO_COMPLETION": "1"}, check=False,
     )
     assert str(ocx_home) in result.stdout, (
-        "env.sh must still prepend the ocx bin dir to PATH under OCX_NO_COMPLETIONS=1; "
+        "env.sh must still prepend the ocx bin dir to PATH under OCX_NO_COMPLETION=1; "
         f"`type -P ocx` output:\n{result.stdout!r}\nstderr:\n{result.stderr}"
     )
     assert "_ocx" not in result.stdout, (
-        "OCX_NO_COMPLETIONS=1 must suppress the completions env.sh re-injects through "
+        "OCX_NO_COMPLETION=1 must suppress the completions env.sh re-injects through "
         f"`ocx shell completion`; `complete -p ocx` output:\n{result.stdout!r}\n"
         f"stderr:\n{result.stderr}"
     )

@@ -682,10 +682,11 @@ fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
 /// Why the `ocx.lock` beside an `ocx.toml` cannot be used. Shared by the
 /// command prologue and the per-prompt reconciler, so both print one sentence
 /// and one exit code.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum LockCurrency {
     /// `ocx.toml` resolved but its sibling `ocx.lock` is absent.
     #[error("ocx.lock not found at {path}; run `ocx lock` to create it")]
+    #[exit(ConfigError, slug = "lock_missing", summary = "ocx.lock does not exist")]
     Missing {
         /// The `ocx.lock` that was looked for.
         path: PathBuf,
@@ -694,6 +695,7 @@ pub enum LockCurrency {
     /// `ocx.lock` exists but does not bind to `ocx.toml`: a moved
     /// `declaration_hash`, or an entry whose repository is not the declared one.
     #[error("ocx.lock is stale (it does not match ocx.toml); run `ocx lock`")]
+    #[exit(DataError, slug = "lock_stale", summary = "ocx.lock does not match ocx.toml")]
     Stale {
         /// The stale lock.
         lock_path: PathBuf,
@@ -2091,8 +2093,8 @@ repository = "ocx.sh/cmake"
         let lock_path = std::path::PathBuf::from("/tmp/test.lock");
 
         // `Ok(None)` = contended → Locked; `Err(e)` = real I/O → Io.
-        let locked_err = super::super::Error::Project(ProjectError::new(lock_path.clone(), ProjectErrorKind::Locked));
-        let io_err = super::super::Error::Project(ProjectError::new(
+        let locked_err = super::super::Error::from(ProjectError::new(lock_path.clone(), ProjectErrorKind::Locked));
+        let io_err = super::super::Error::from(ProjectError::new(
             lock_path.clone(),
             ProjectErrorKind::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
         ));

@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "Plumbing `OCX_TRACE_FILE` is removed; only Public names are contract.",
+  "findings": []
+}
