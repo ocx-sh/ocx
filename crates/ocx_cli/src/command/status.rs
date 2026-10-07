@@ -14,14 +14,21 @@ use crate::api::data::status::StatusReport;
 
 /// Show what `ocx.toml` and `ocx.lock` declare, without resolving anything.
 ///
-/// Reports every declared group with its bindings and `[env]` table, each
-/// binding's locked platform digests, the `[package."<id>"]` settings, and
-/// whether the lock is still current. Offline and read-only. A missing or
+/// Reports every declared group with its bindings and `[env]` table, the
+/// `[package."<id>"]` settings, and whether the lock is still current, marking
+/// a binding the lock does not cover on this platform. Offline and read-only. A missing or
 /// stale `ocx.lock` is reported and still exits 0 (`ocx lock --check` is the
 /// CI gate; `ocx inspect` the resolved surface). Exits 64 when no `ocx.toml`
 /// is in scope.
 #[derive(Parser)]
-pub struct Status {}
+pub struct Status {
+    /// Show each binding's host digest and locked platform count.
+    ///
+    /// Affects the plain rendering only. The structured report
+    /// (`ocx --format json status`) carries every platform either way.
+    #[arg(short, long)]
+    pub verbose: bool,
+}
 
 impl Status {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
@@ -40,7 +47,8 @@ impl Status {
             &config,
             lock.as_ref().map(Option::as_ref).map_err(String::clone),
             &ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any),
-        );
+        )
+        .verbose(self.verbose);
         context.api().report(&report)?;
 
         Ok(ExitCode::SUCCESS)
@@ -489,6 +497,82 @@ mod seam {
             .filter(|path| path.display().to_string().contains(REPO))
             .collect();
         assert!(leaked.is_empty(), "status must not create install symlinks: {leaked:?}");
+    }
+
+    /// Plain output is one row per binding: no digests, no platform counts,
+    /// and no group heading while `default` is the only group.
+    #[tokio::test]
+    async fn plain_status_is_compact_and_verbose_adds_pins() {
+        let fixture = Fixture::new();
+        let project = fixture.project(&declared_tool());
+        // `any` serves every host, so the row is covered wherever the test runs.
+        lock(&project, &[("any", '1')]).await;
+        let env = fixture.env(&project, &[]);
+
+        let plain = drive(&["status"], &env).await;
+        assert_eq!(plain.code, ExitCode::SUCCESS, "{}", plain.err);
+        assert!(plain.out.contains("lock: current"), "{}", plain.out);
+        assert!(
+            plain.out.contains(&format!("{REPO}  {REGISTRY}/{REPO}:1.0.0")),
+            "{}",
+            plain.out
+        );
+        for noise in ["sha256:", "platform", "group default", " · "] {
+            assert!(
+                !plain.out.contains(noise),
+                "{noise:?} in the compact view:\n{}",
+                plain.out
+            );
+        }
+
+        let verbose = drive(&["status", "--verbose"], &env).await;
+        assert_eq!(verbose.code, ExitCode::SUCCESS, "{}", verbose.err);
+        assert!(
+            verbose.out.contains(&format!("any: {}", digest('1'))) && verbose.out.contains("1 platform"),
+            "{}",
+            verbose.out
+        );
+
+        let json = drive(&["--format", "json", "status"], &env).await;
+        let json_verbose = drive(&["--format", "json", "status", "-v"], &env).await;
+        assert_eq!(json.out, json_verbose.out, "--verbose must not touch the JSON report");
+    }
+
+    /// A second group brings the group headings back, and a binding added since
+    /// the last lock is the one marked.
+    #[tokio::test]
+    async fn plain_status_marks_unlocked_and_heads_groups() {
+        let fixture = Fixture::new();
+        let project = fixture.project(&declared_tool());
+        lock(&project, &[("any", '1')]).await;
+        let config_path = project.join("ocx.toml");
+        let declared = std::fs::read_to_string(&config_path).expect("read ocx.toml");
+        std::fs::write(
+            &config_path,
+            format!("{declared}\n[group.ci.tools]\nlate = \"{REGISTRY}/{REPO}:2.0.0\"\n"),
+        )
+        .expect("declare a second group");
+
+        let plain = drive(&["status"], &fixture.env(&project, &[])).await;
+
+        assert_eq!(plain.code, ExitCode::SUCCESS, "{}", plain.err);
+        assert!(
+            plain.out.contains("group default") && plain.out.contains("group ci"),
+            "{}",
+            plain.out
+        );
+        let late = plain
+            .out
+            .lines()
+            .find(|line| line.contains("late"))
+            .expect("a row for `late`");
+        assert!(late.ends_with("· not locked"), "{late}");
+        let locked = plain
+            .out
+            .lines()
+            .find(|line| line.contains(":1.0.0"))
+            .expect("a row for the locked tool");
+        assert!(!locked.contains(" · "), "a covered row carries no mark: {locked}");
     }
 
     /// Every path under `dir`, recursively; empty when `dir` does not exist.
