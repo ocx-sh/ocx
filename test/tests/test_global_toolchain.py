@@ -914,7 +914,7 @@ def test_global_remove_emits_no_warning_for_ordinary_binding(
         f"--global remove must succeed; rc={remove.returncode}\n"
         f"stderr:\n{remove.stderr}"
     )
-    assert "WARN" not in remove.stderr, (
+    assert "warning:" not in remove.stderr, (
         "removing an ordinary global binding must be quiet — the absent "
         f"candidate/current symlinks are the normal state; stderr:\n{remove.stderr}"
     )

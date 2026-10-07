@@ -100,15 +100,13 @@ def _assert_no_diagnostics(stderr: str) -> None:
     and UUID repo names carry the test function's own name, so a substring
     check for "receipt" matches in every state.
 
-    Both routings of the same call must be caught. Under pytest stderr is
-    captured, so `UserInterface` is non-interactive and `status("note", msg)`
-    /`warn(msg)` route to `log::info!("note: {msg}")` / `log::warn!` — a
-    tracing line that starts with a timestamp, not with the prefix. Matching
-    only the interactive prefixes would let every advisory this suite exists
-    to forbid through."""
+    Under pytest `UserInterface` is non-interactive, so `status("note", msg)`
+    /`warn(msg)` route to `log::info!("note: {msg}")` / `log::warn!`, which the
+    subscriber renders as `note: msg` / `warning: msg` — the interactive
+    prefixes."""
     offenders = [
         line for line in stderr.splitlines()
-        if " WARN " in line or "note:" in line.lower() or "warning:" in line.lower()
+        if "note:" in line.lower() or "warning:" in line.lower()
     ]
     assert not offenders, "expected silence, got:\n" + "\n".join(offenders)
 

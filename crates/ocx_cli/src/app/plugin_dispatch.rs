@@ -24,7 +24,11 @@ use crate::app::context_options::ContextOptions;
 /// subcommand name, and propagates its exit status.
 pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Result<ExitCode> {
     // This path skips `Context::try_init`'s logging setup; without it `app::finish` logs returned errors nowhere.
-    LogSettings::default().with_console_level(opts.log_level).init().ok();
+    LogSettings::default()
+        .with_console_level(opts.log_level)
+        .with_stderr_color(opts.color.config().stderr)
+        .init()
+        .ok();
 
     let argv = rewrite_help_invocation(argv);
 

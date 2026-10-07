@@ -3210,7 +3210,7 @@ def test_claim_over_git_exits_80_when_the_push_credential_is_rejected(
     table serve both invocations.
 
     Observed before the fix, with the fixture set to accept one secret and ocx
-    resolving another: `ERROR git push failed: fatal: could not read Username
+    resolving another: `error: git push failed: fatal: could not read Username
     for '<url>': terminal prompts disabled`, exit **1**. The published claim
     table promises 80 for "the credential was rejected (401/403)" and does not
     qualify it by which git invocation met the refusal.

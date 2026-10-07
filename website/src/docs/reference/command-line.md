@@ -20,6 +20,8 @@ The log level for OCX, which can be set to one of the following values:
 - `debug`: Debug messages, informational messages, warning messages, and error messages will be emitted.
 - `trace`: All messages will be emitted, including trace messages.
 
+Up to `info`, stderr lines read `error: …` and `warning: …`. At `debug` or `trace`, each line carries a timestamp and its level instead.
+
 ### `--format` {#arg-format}
 
 When set, ocx will output information in the specified format instead of plain text.
@@ -5565,7 +5567,7 @@ The same gate applies to **every** command that fetches a package, not just `ins
 
 A package outside every policy's scope is not verified — trust is opt-in, and OCX logs an `INFO` line noting the skip. This opt-in is per scope: a covered package's transitive dependencies are verified only if a policy also covers *their* scope. When a policy does cover the package, a failed check exits with the same taxonomy [`package verify`][cmd-package-verify] uses: `65` for a tampered bundle, `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy configuration problem, `79` for no signature found.
 
-Pass `--no-verify` (below), or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out, to skip a policy-covered package's verification; the flag wins when both are set, and the bypass logs a single `WARN` per invocation. Under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), verification reuses whatever trust material is already local — a trust root from any rung of the ladder ([`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root], [`[trust.sigstore]`][config-trust-sigstore], `$OCX_HOME/sigstore/trusted-root.json`) or a warm `$OCX_HOME/state/trust_root/` cache entry — and fails closed with exit `78` when neither is available, rather than installing an artifact it could not check. See [Verify by default][guide-auto-verify] in the user guide for the full model.
+Pass `--no-verify` (below), or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out, to skip a policy-covered package's verification; the flag wins when both are set, and the bypass prints a single `warning:` line per invocation. Under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), verification reuses whatever trust material is already local — a trust root from any rung of the ladder ([`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root], [`[trust.sigstore]`][config-trust-sigstore], `$OCX_HOME/sigstore/trusted-root.json`) or a warm `$OCX_HOME/state/trust_root/` cache entry — and fails closed with exit `78` when neither is available, rather than installing an artifact it could not check. See [Verify by default][guide-auto-verify] in the user guide for the full model.
 
 **Usage**
 

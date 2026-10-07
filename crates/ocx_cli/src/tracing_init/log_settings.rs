@@ -4,7 +4,18 @@
 use ocx_console::ColorMode;
 use ocx_console::progress::ProgressManager;
 
-use super::{LogLevel, ProgressLogWriter};
+use super::{EventFormat, LogLevel, ProgressLogWriter};
+
+/// Cargo-style lines up to `info`; above it, the compact format with timestamp and level.
+fn event_format(
+    filter: &tracing_subscriber::EnvFilter,
+) -> EventFormat<tracing_subscriber::fmt::format::Format<tracing_subscriber::fmt::format::Compact>> {
+    let detailed = tracing_subscriber::fmt::format()
+        .compact()
+        .with_file(false)
+        .with_target(false);
+    EventFormat::new(filter.max_level_hint(), detailed)
+}
 
 /// Tracing subscriber configuration for this binary.
 ///
@@ -23,7 +34,6 @@ use super::{LogLevel, ProgressLogWriter};
 pub struct LogSettings {
     filter: Vec<String>,
     console_filter: Vec<String>,
-    console_events: bool,
     console_level: Option<LogLevel>,
     stderr_color: Option<bool>,
 }
@@ -31,11 +41,6 @@ pub struct LogSettings {
 impl LogSettings {
     pub fn with_console_level(mut self, level: Option<LogLevel>) -> Self {
         self.console_level = level;
-        self
-    }
-
-    pub fn with_console_events(mut self, enabled: bool) -> Self {
-        self.console_events = enabled;
         self
     }
 
@@ -54,11 +59,6 @@ impl LogSettings {
         self
     }
 
-    /// Whether console span events are enabled.
-    pub fn console_events(&self) -> bool {
-        self.console_events
-    }
-
     /// Installs a plain fmt subscriber on stderr.
     ///
     /// # Errors
@@ -67,13 +67,12 @@ impl LogSettings {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
         let ansi = self.stderr_color.unwrap_or_else(|| ColorMode::Auto.config().stderr);
+        let filter = self.build_env_filter("CONSOLE", std::iter::empty())?;
         let fmt_layer = tracing_subscriber::fmt::layer()
-            .compact()
             .with_ansi(ansi)
-            .with_file(false)
-            .with_target(false)
+            .event_format(event_format(&filter))
             .with_writer(std::io::stderr)
-            .with_filter(self.build_env_filter("CONSOLE", std::iter::empty())?);
+            .with_filter(filter);
 
         tracing_subscriber::registry()
             .with(fmt_layer)
@@ -92,21 +91,12 @@ impl LogSettings {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
         let ansi = self.stderr_color.unwrap_or_else(|| ColorMode::Auto.config().stderr);
-        let fmt_layer = {
-            let subscriber = tracing_subscriber::fmt::layer().compact().with_ansi(ansi);
-            let subscriber = if self.console_events {
-                subscriber.with_span_events(
-                    tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
-                )
-            } else {
-                subscriber
-            };
-            subscriber
-                .with_file(false)
-                .with_target(false)
-                .with_writer(ProgressLogWriter(progress.writer()))
-                .with_filter(self.build_env_filter("CONSOLE", std::iter::empty())?)
-        };
+        let filter = self.build_env_filter("CONSOLE", std::iter::empty())?;
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(ansi)
+            .event_format(event_format(&filter))
+            .with_writer(ProgressLogWriter(progress.writer()))
+            .with_filter(filter);
 
         tracing_subscriber::registry()
             .with(fmt_layer)

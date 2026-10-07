@@ -2284,14 +2284,14 @@ def test_a_read_only_home_skips_rather_than_fails(
     assert result.returncode == EXIT_SUCCESS, (
         f"row 13 — an unwritable home skips; rc={result.returncode}\n{result.stderr}"
     )
-    assert "WARN" in result.stderr, f"…and says so on stderr; stderr:\n{result.stderr}"
+    assert "warning:" in result.stderr, f"…and says so on stderr; stderr:\n{result.stderr}"
     assert str(project.home) in result.stderr, (
         f"…naming the home it could not write; stderr:\n{result.stderr}"
     )
     assert "panicked" not in result.stderr and "RUST_BACKTRACE" not in result.stderr, (
         f"…as a diagnostic, never a traceback; stderr:\n{result.stderr}"
     )
-    assert "WARN" not in result.stdout and str(project.home) not in result.stdout, (
+    assert "warning:" not in result.stdout and str(project.home) not in result.stdout, (
         f"…and stdout stays the command's own output; stdout:\n{result.stdout}"
     )
 
@@ -2551,7 +2551,7 @@ def test_an_absent_active_is_recreated_silently(ocx: OcxRunner, tmp_path: Path) 
         f"row 24 — …at its derived target; it names "
         f"{os.readlink(active_link(project.home))!r}"
     )
-    assert "WARN" not in result.stderr, (
+    assert "warning:" not in result.stderr, (
         f"row 24 — an ordinary heal is not a warning; stderr:\n{result.stderr}"
     )
     assert str(active_link(project.home)) not in result.stdout, (

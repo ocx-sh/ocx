@@ -88,7 +88,7 @@ async fn run_admitting(
     let code = Box::pin(App::drive(argv)).with_subscriber(subscriber(argv)).await;
     let (stdout, mut stderr, refused) = session.finish();
     let code = if refused {
-        stderr.extend_from_slice(b"ERROR network access refused: the in-process seam opens no network connection\n");
+        stderr.extend_from_slice(b"error: network access refused: the in-process seam opens no network connection\n");
         ocx_exit::ExitCode::UsageError.into()
     } else {
         code
@@ -163,12 +163,14 @@ fn subscriber(argv: &[OsString]) -> impl tracing::Subscriber + Send + Sync {
         .ok()
         .and_then(|cli| cli.context.log_level)
         .map_or(tracing_subscriber::filter::LevelFilter::INFO, Into::into);
-    tracing_subscriber::fmt()
+    let detailed = tracing_subscriber::fmt::format()
         .compact()
-        .with_ansi(false)
         .without_time()
-        .with_target(false)
+        .with_target(false);
+    tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_max_level(level)
+        .event_format(crate::tracing_init::EventFormat::new(Some(level), detailed))
         .with_writer(|| CapturedStderr)
         .finish()
 }
