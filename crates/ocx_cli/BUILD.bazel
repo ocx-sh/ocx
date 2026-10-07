@@ -71,6 +71,7 @@ rust_library(
         "//crates/ocx_announce",
         "//crates/ocx_config",
         "//crates/ocx_console",
+        "//crates/ocx_env",
         "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
@@ -155,12 +156,15 @@ rust_test(
         "--skip=app::seam::tests::seam_installs_no_global_subscriber_and_logs_to_err",
         "--skip=app::context::tests::extra_ca_try_init_installs_a_home_tier_root_for_sigstore",
         "--skip=app::context::tests::extra_ca_try_init_keeps_an_unpinned_managed_root_out_of_the_local_and_sigstore_views",
+        "--skip=app::context::tests::try_init_refuses_a_removed_env_spelling_with_exit_78",
+        "--skip=app::context::tests::try_init_warns_nothing_for_a_valid_boolean",
+        "--skip=app::context::tests::try_init_warns_once_for_an_in_window_env_spelling",
+        "--skip=app::context::tests::try_init_warns_once_naming_an_invalid_boolean_and_never_its_value",
         "--skip=command::self_group::activate::global_activate_tests::d3_bin_mode_gates_the_prompt_and_leaves_the_explicit_request_alone",
         "--skip=command::toolchain_env::tests::global_env_no_pinned_outranks_a_pinning_global_file",
         "--skip=command::toolchain_env::tests::global_env_pinned_selects_the_digest_lane",
         "--skip=command::toolchain_env::tests::global_env_with_a_pinning_file_and_no_flag_pins",
         "--skip=command::toolchain_env::tests::global_env_with_no_flag_follows_the_links",
-        "--skip=exit::tests::every_extracted_module_row_renames_onto_an_unoccupied_name",
     ],
     compile_data = [
         "//test:sigstore/keys/fulcio-ca.crt.pem",
@@ -181,7 +185,7 @@ rust_test(
 
 # The in-process CLI seam's tests (`app::seam::run`, ADR C-SEAM) and every port
 # that drives it, re-run under a POISONED environment. `run` installs the
-# caller's environment hermetically through `ocx_util::env`; a third-party
+# caller's environment hermetically through `ocx_env`; a third-party
 # crate reading the process environment past that layer (`dirs`, `reqwest`'s
 # proxy discovery, `docker_credential`, the TLS root loaders) sees these values
 # instead, and the read fails the case rather than picking up the host's:
@@ -290,6 +294,7 @@ rust_test(
         "//crates/ocx_announce",
         "//crates/ocx_config",
         "//crates/ocx_console",
+        "//crates/ocx_env",
         "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
@@ -353,6 +358,7 @@ rust_test(
         "//crates/ocx_announce",
         "//crates/ocx_config",
         "//crates/ocx_console",
+        "//crates/ocx_env",
         "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
@@ -407,6 +413,7 @@ rust_test(
         "//crates/ocx_announce",
         "//crates/ocx_config",
         "//crates/ocx_console",
+        "//crates/ocx_env",
         "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",

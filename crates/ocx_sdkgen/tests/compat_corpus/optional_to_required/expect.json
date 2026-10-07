@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushReport's `message` becomes required, a narrowing an output may make.",
+  "findings": []
+}

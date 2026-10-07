@@ -12,9 +12,10 @@ publish = false
 # `edit`'s lock-hold delay) and `managed_config::test_support`, whose package
 # fixtures `ocx_lib`'s own tests build on. Forwarding `ocx_oci/__testing` is
 # what makes that module compile: it is written against `StubTransport`, which
-# `ocx_oci` gates the same way. `ocx_util/__testing` carries the hermetic flag
-# `loader::hermetic_config_dir` answers the user tier from.
-__testing = ["ocx_oci/__testing", "ocx_util/__testing"]
+# `ocx_oci` gates the same way. `ocx_env/__testing` declares those seams and
+# carries the hermetic flag `loader::hermetic_config_dir` answers the user tier
+# from.
+__testing = ["ocx_env/__testing", "ocx_oci/__testing", "ocx_util/__testing"]
 # Test scaffolding `ocx_lib`'s unit tests inherited when `config` was a sibling
 # module rather than a crate: `ToolchainRoot::from_validated` and the
 # containment-anchor sandbox.
@@ -38,9 +39,13 @@ ocx_oci.workspace = true
 # `[trust]` is a config section, so parsing it means naming its types;
 # `resolve_extra_roots` hands `tls.rs` the sigstore trust material.
 ocx_trust.workspace = true
-# The bottom tier: `env::{var, flag, string}`, `FileReference`, the bounded
-# read every config file goes through, and the scoped lock `edit` takes.
+# The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
+ocx_exit.workspace = true
+# The bottom tier: `FileReference`, the bounded read every config file goes
+# through, and the scoped lock `edit` takes.
 ocx_util.workspace = true
+# The environment registry every variable this crate reads is declared in.
+ocx_env.workspace = true
 
 # `fetched_at` on the managed snapshot and the pause file's deadline are
 # timestamps, compared and rendered.
@@ -93,9 +98,9 @@ tempfile = { workspace = true, optional = true }
 ocx_oci = { workspace = true, features = ["__testing"] }
 # `sandbox_or_skip`'s containment-anchor helpers and the shared fixture data.
 ocx_test_support = { path = "../ocx_test_support" }
-# `ocx_util::env::overrides`, the process-environment table every loader test
+# `ocx_env::overrides`, the process-environment table every loader test
 # writes through.
-ocx_util = { workspace = true, features = ["__testing"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 # `tls`'s extra-CA tests build and re-encode real PEM documents rather than
 # asserting on a string, so the refusal under test is the one a real
 # certificate produces.

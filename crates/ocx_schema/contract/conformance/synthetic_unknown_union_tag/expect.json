@@ -1,0 +1,12 @@
+{
+  "root": "UpdateCheckData",
+  "exit_code": 0,
+  "decode": "ok",
+  "outcome": "success",
+  "unknown": [
+    "/skipped_reason"
+  ],
+  "fields": {
+    "/status": "skipped"
+  }
+}

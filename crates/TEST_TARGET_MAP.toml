@@ -62,7 +62,7 @@ cases = 0
 [[target]]
 label = "//crates/ocx_announce:ocx_announce_test"
 crate = "ocx_announce"
-cases = 395
+cases = 476
 
 [[target]]
 label = "//crates/ocx_cli:help_surface"
@@ -82,19 +82,19 @@ cases = 1
 [[target]]
 label = "//crates/ocx_cli:ocx_cli_doc_test"
 crate = "ocx_cli"
-cases = 0
+cases = 4
 ignored = 3
 
 [[target]]
 label = "//crates/ocx_cli:ocx_cli_seam_test"
 crate = "ocx_cli"
-cases = 44
+cases = 48
 
 [[target]]
 label = "//crates/ocx_cli:ocx_cli_test"
 crate = "ocx_cli"
-cases = 1435
-skipped = 9
+cases = 1600
+skipped = 8
 
 [[target]]
 label = "//crates/ocx_config:ocx_config_doc_test"
@@ -104,7 +104,7 @@ cases = 0
 [[target]]
 label = "//crates/ocx_config:ocx_config_test"
 crate = "ocx_config"
-cases = 615
+cases = 657
 
 [[target]]
 label = "//crates/ocx_console:ocx_console_doc_test"
@@ -115,17 +115,38 @@ ignored = 2
 [[target]]
 label = "//crates/ocx_console:ocx_console_test"
 crate = "ocx_console"
-cases = 47
+cases = 49
+
+[[target]]
+label = "//crates/ocx_env:ocx_env_doc_test"
+crate = "ocx_env"
+cases = 6
+ignored = 1
+
+[[target]]
+label = "//crates/ocx_env:ocx_env_test"
+crate = "ocx_env"
+cases = 36
+
+[[target]]
+label = "//crates/ocx_env:testing_gate"
+crate = "ocx_env"
+cases = 1
+
+[[target]]
+label = "//crates/ocx_exit:derive_test"
+crate = "ocx_exit"
+cases = 22
 
 [[target]]
 label = "//crates/ocx_exit:ocx_exit_doc_test"
 crate = "ocx_exit"
-cases = 0
+cases = 16
 
 [[target]]
 label = "//crates/ocx_exit:ocx_exit_test"
 crate = "ocx_exit"
-cases = 21
+cases = 27
 
 [[target]]
 label = "//crates/ocx_index:dispatch_conformance"
@@ -135,7 +156,7 @@ cases = 4
 [[target]]
 label = "//crates/ocx_index:index_wire_conformance"
 crate = "ocx_index"
-cases = 8
+cases = 9
 
 [[target]]
 label = "//crates/ocx_index:live_index_wire"
@@ -150,7 +171,7 @@ cases = 0
 [[target]]
 label = "//crates/ocx_index:ocx_index_test"
 crate = "ocx_index"
-cases = 432
+cases = 487
 skipped = 1
 
 [[target]]
@@ -162,7 +183,7 @@ ignored = 3
 [[target]]
 label = "//crates/ocx_oci:ocx_oci_test"
 crate = "ocx_oci"
-cases = 759
+cases = 813
 skipped = 2
 ignored = 5
 
@@ -180,7 +201,7 @@ ignored = 1
 [[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
-cases = 915
+cases = 1028
 
 [[target]]
 label = "//crates/ocx_package:tag_verdicts"
@@ -195,8 +216,8 @@ cases = 0
 [[target]]
 label = "//crates/ocx_package_manager:ocx_package_manager_test"
 crate = "ocx_package_manager"
-cases = 1097
-skipped = 5
+cases = 1194
+skipped = 3
 ignored = 1
 
 [[target]]
@@ -208,7 +229,7 @@ ignored = 1
 [[target]]
 label = "//crates/ocx_project:ocx_project_test"
 crate = "ocx_project"
-cases = 455
+cases = 485
 skipped = 1
 ignored = 2
 
@@ -230,12 +251,7 @@ cases = 3
 [[target]]
 label = "//crates/ocx_schema:golden_schemas"
 crate = "ocx_schema"
-cases = 7
-
-[[target]]
-label = "//crates/ocx_schema:json_keys_are_snake_case"
-crate = "ocx_schema"
-cases = 1
+cases = 10
 
 [[target]]
 label = "//crates/ocx_schema:ocx_schema_doc_test"
@@ -245,12 +261,12 @@ cases = 0
 [[target]]
 label = "//crates/ocx_schema:ocx_schema_test"
 crate = "ocx_schema"
-cases = 13
+cases = 63
 
 [[target]]
 label = "//crates/ocx_schema:schema_outputs"
 crate = "ocx_schema"
-cases = 13
+cases = 17
 
 [[target]]
 label = "//crates/ocx_script:ocx_script_doc_test"
@@ -260,8 +276,38 @@ cases = 0
 [[target]]
 label = "//crates/ocx_script:ocx_script_test"
 crate = "ocx_script"
-cases = 62
+cases = 63
 skipped = 1
+
+[[target]]
+label = "//crates/ocx_sdkgen:compat_gate"
+crate = "ocx_sdkgen"
+cases = 25
+
+[[target]]
+label = "//crates/ocx_sdkgen:conformance"
+crate = "ocx_sdkgen"
+cases = 1
+
+[[target]]
+label = "//crates/ocx_sdkgen:contract_lint"
+crate = "ocx_sdkgen"
+cases = 24
+
+[[target]]
+label = "//crates/ocx_sdkgen:ocx_sdkgen_doc_test"
+crate = "ocx_sdkgen"
+cases = 0
+
+[[target]]
+label = "//crates/ocx_sdkgen:ocx_sdkgen_test"
+crate = "ocx_sdkgen"
+cases = 48
+
+[[target]]
+label = "//crates/ocx_sdkgen:sdk_rust"
+crate = "ocx_sdkgen"
+cases = 35
 
 [[target]]
 label = "//crates/ocx_setup:ocx_setup_doc_test"
@@ -271,7 +317,7 @@ cases = 0
 [[target]]
 label = "//crates/ocx_setup:ocx_setup_test"
 crate = "ocx_setup"
-cases = 242
+cases = 247
 
 [[target]]
 label = "//crates/ocx_shell:ocx_shell_doc_test"
@@ -281,7 +327,7 @@ cases = 0
 [[target]]
 label = "//crates/ocx_shell:ocx_shell_test"
 crate = "ocx_shell"
-cases = 362
+cases = 366
 
 [[target]]
 label = "//crates/ocx_shim:ocx_shim_bin_test"
@@ -296,7 +342,7 @@ cases = 1
 [[target]]
 label = "//crates/ocx_sign:ocx_sign_test"
 crate = "ocx_sign"
-cases = 473
+cases = 477
 
 [[target]]
 label = "//crates/ocx_store:ocx_store_doc_test"
@@ -306,7 +352,7 @@ cases = 0
 [[target]]
 label = "//crates/ocx_store:ocx_store_test"
 crate = "ocx_store"
-cases = 350
+cases = 356
 
 [[target]]
 label = "//crates/ocx_test_support:boundary"
@@ -326,8 +372,8 @@ cases = 2
 [[target]]
 label = "//crates/ocx_test_support:workspace_structure"
 crate = "ocx_test_support"
-cases = 13
-skipped = 23
+cases = 20
+skipped = 29
 
 [[target]]
 label = "//crates/ocx_trust:ocx_trust_doc_test"
@@ -337,18 +383,18 @@ cases = 0
 [[target]]
 label = "//crates/ocx_trust:ocx_trust_test"
 crate = "ocx_trust"
-cases = 95
+cases = 96
 
 [[target]]
 label = "//crates/ocx_util:ocx_util_doc_test"
 crate = "ocx_util"
-cases = 1
+cases = 2
 ignored = 2
 
 [[target]]
 label = "//crates/ocx_util:ocx_util_test"
 crate = "ocx_util"
-cases = 259
+cases = 285
 
 # ---------------------------------------------------------------------------
 # C-008's suite-level exclusion set: what `cargo nextest list` reports and no

@@ -199,6 +199,10 @@ pub fn publish_plist(path: &Path, contents: &str) -> std::io::Result<()> {
 
 /// Run `launchctl` with `arguments`; callers judge a non-zero exit, which differs per subcommand.
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::disallowed_types,
+    reason = "runs `launchctl` for the session-PATH LaunchAgent"
+)]
 fn launchctl<I, S>(arguments: I) -> std::io::Result<std::process::Output>
 where
     I: IntoIterator<Item = S>,
@@ -755,11 +759,15 @@ mod tests {
     /// Returns the value the script passed to `launchctl setenv PATH`, or
     /// `None` when it called `setenv` not at all.
     ///
-    /// The launch firewall (`ocx_package_manager::launch`'s `no_process_spawn_outside_launch`)
-    /// refuses a spawn primitive outside the launch seam, and it is right to —
-    /// this module carries an entry in that test's `SPAWN_ALLOWED`, alongside
-    /// the live-shell harness for `self_group/activate.rs`.
+    /// The launch firewall (`clippy.toml`'s `disallowed_types`) refuses a spawn
+    /// primitive outside the launch seam, and it is right to — this harness
+    /// carries its own `#[expect]`, alongside the live-shell harness for
+    /// `self_group/activate.rs`.
     #[cfg(unix)]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only: runs the emitted LaunchAgent merge script under /bin/sh against a fake launchctl"
+    )]
     fn run_merge_script(script: &str, current: Option<&str>) -> Option<String> {
         use std::os::unix::fs::PermissionsExt as _;
 

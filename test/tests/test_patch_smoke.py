@@ -77,7 +77,7 @@ def test_patch_test_composes_a_companion_onto_a_base(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     assert entries, "the composed report must carry entries, not an empty env"
     smoke_var = next((e for e in entries if e["key"] == "SMOKE_PATCH_VAR"), None)
     assert smoke_var is not None, (

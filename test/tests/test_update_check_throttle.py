@@ -15,7 +15,7 @@ a pty (``run_on_a_terminal``) with a command that reaches the check:
 ``ocx clean --dry-run``. ``version`` is in the skip list and never did, which is
 why the earlier pipe-based versions of these tests always skipped themselves.
 The self check is redirected to a loopback repository with the
-``__OCX_SELF_IMAGE`` seam, so no case reaches the public registry; the probe
+``__OCX_TESTING_SELF_IMAGE`` seam, so no case reaches the public registry; the probe
 touches its state file whether or not that repository exists.
 
 The kill switch and a malformed interval are covered on a terminal in
@@ -66,7 +66,7 @@ def _probe_on_terminal(
     """One `ocx clean --dry-run` with stderr on a pty, asserted to exit 0."""
     script = tmp_path / f"run-{uuid4().hex[:8]}.sh"
     script.write_text(f"{shlex.quote(str(ocx.binary))} clean --dry-run >/dev/null\n")
-    env = {**ocx.env, "__OCX_SELF_IMAGE": f"{ocx.registry}/{self_repo}", **(extra_env or {})}
+    env = {**ocx.env, "__OCX_TESTING_SELF_IMAGE": f"{ocx.registry}/{self_repo}", **(extra_env or {})}
     status, terminal = run_on_a_terminal(script, cwd=tmp_path, env=env)
     assert status == 0, terminal
 

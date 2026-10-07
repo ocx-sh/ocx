@@ -262,7 +262,7 @@ def unreachable_rekor_url() -> str:
 
     The fake stack made Rekor fail by serving a 503 on demand; the real one has
     no such switch, so unavailability is produced by pointing ocx somewhere dead.
-    Connection-refused and 503 both classify as ``TransparencyLogUnavailable``, so the exit
+    Connection-refused and 503 both classify as ``TransparencyLogUnavailable`` (exit 75), so the exit
     code under test is unchanged.
 
     Binding then closing is what makes the port free *and* known — an arbitrary

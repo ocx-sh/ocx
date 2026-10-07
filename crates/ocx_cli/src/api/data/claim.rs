@@ -4,13 +4,13 @@
 //! The `ocx package claim` report; keys shared with the announce report render through
 //! [`forge_report`](super::forge_report).
 
-use ocx_announce::claim::{ClaimOutcome, ClaimStatus, OwnerIdentitySource, ResolvedOwner};
+use ocx_announce::claim::{ClaimOutcome, ResolvedOwner};
 use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
 use ocx_console::{Cell, Column};
 use serde::Serialize;
 
 use super::forge_report::{
-    CapabilityCheckEntry, CredentialKind, PushCredentialKind, serialize_display, serialize_optional_display,
+    CapabilityCheckEntry, CredentialKind, Forge, IdentitySource, PushCredentialKind, Transport, WriteStatus,
 };
 use crate::api::Printable;
 
@@ -43,10 +43,10 @@ impl OwnerEntry {
 /// `Pull Request`); a dash marks a field the run did not produce. `owners`,
 /// `author`, `author_identity_source` and `capability_checks` are JSON-only.
 ///
-/// JSON format: an object with one key per field below, in that order; every
-/// value vocabulary is closed as its field states. `status` compares against the
-/// open claim branch, not the committed root, so a claim `--out` run is always
-/// `"updated"`, where an announce `--out` run can report `"unchanged"`.
+/// JSON format: an object with one key per field below, in that order; a key
+/// whose value the run did not produce is omitted. `status` compares against the
+/// open claim branch, not the committed root, so a claim `--output` run is always
+/// `updated`, where an announce `--output` run can report `unchanged`.
 // JSON-only keys stay off the plain table: it is at its five-column budget.
 // Closed vocabularies stay enums: a `String` would publish an open string where the schema is a closed set.
 #[derive(Serialize, schemars::JsonSchema)]
@@ -55,29 +55,24 @@ pub struct ClaimReport {
     pub package: String,
     /// The logical name written into the root.
     pub name: String,
-    /// `"unchanged"` when the open claim branch already carries a
-    /// byte-identical root; `"updated"` otherwise, which `--out` always is.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub status: ClaimStatus,
-    /// The resolved forge kind, after `--forge`: `"github"` or `"gitlab"`.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub forge: ForgeKind,
-    /// The selected write transport: `"api"` or `"git"`.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub transport: WriteTransport,
-    /// The API credential's kind. `"job-token"` only when the credential is
+    /// `unchanged` when the open claim branch already carries a
+    /// byte-identical root; `updated` otherwise, which `--output` always is.
+    pub status: WriteStatus,
+    /// The resolved forge kind, after `--forge`.
+    pub forge: Forge,
+    /// The selected write transport.
+    pub transport: Transport,
+    /// The API credential's kind. `job_token` only when the credential is
     /// this environment's own `CI_JOB_TOKEN` — ocx cannot tell a personal from
     /// a project, group or OAuth token, so it reports no kind it cannot
     /// observe.
     pub credential_kind: CredentialKind,
-    /// The push credential's kind, or `null` under the `api` transport, which
-    /// pushes nothing. `"git-helper"` means nothing was injected and git's own
+    /// The push credential's kind; absent under the `api` transport, which
+    /// pushes nothing. `git_helper` means nothing was injected and git's own
     /// credential helpers authenticated the push.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub push_credential_kind: Option<PushCredentialKind>,
-    /// The identity that authored the request, or `null` when none is available.
+    /// The identity that authored the request; absent when none is available.
     ///
     /// The token identity, else the CI-environment identity; distinct from
     /// `owners`, as authorship is not ownership. **Not attested**: the second rung
@@ -86,44 +81,43 @@ pub struct ClaimReport {
     /// anything; only the first rung is the forge's own answer about the
     /// credential. A consumer must not treat this key as an attestation of who ran
     /// the command; `author_identity_source` says which rung answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<OwnerEntry>,
-    /// Which rule produced `author`: `"resolved"`, `"ci-environment"`, or `null` exactly when `author` is.
+    /// Which rule produced `author`: `resolved` or `ci_environment`; absent exactly when `author` is.
     ///
-    /// `"resolved"` means the forge's own answer about the credential, and
-    /// `"ci-environment"` the CI pair. The key makes `author` usable: the login
+    /// `resolved` means the forge's own answer about the credential, and
+    /// `ci_environment` the CI pair. The key makes `author` usable: the login
     /// alone cannot say whether the forge asserted it or a pipeline step wrote it
     /// into an environment variable, and a governance consumer needs that
-    /// difference. `"asserted"` is unreachable here: no operator word is ever
+    /// difference. `asserted` is unreachable here: no operator word is ever
     /// taken for the author.
-    #[serde(serialize_with = "serialize_optional_display")]
-    #[schemars(with = "Option<String>")]
-    pub author_identity_source: Option<OwnerIdentitySource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_identity_source: Option<IdentitySource>,
     /// The resolved owner list written into the root, in the order given.
     pub owners: Vec<OwnerEntry>,
-    /// Which rule produced `owners`: `"resolved"`, `"asserted"` or `"ci-environment"`.
-    ///
-    /// The same word appears on stderr and in the request body.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub owner_identity_source: OwnerIdentitySource,
+    /// Which rule produced `owners`: `resolved`, `asserted` or `ci_environment`.
+    pub owner_identity_source: IdentitySource,
     /// The claim branch, so a script need not re-derive the naming convention.
-    /// Always present, `--out` included: the name is derived from the package,
+    /// Always present, `--output` included: the name is derived from the package,
     /// not read from the forge, so a run that opens no request still reports
     /// the branch a later run would use.
     pub branch: String,
-    /// The opened or updated request's web URL.
+    /// The opened or updated request's web URL; absent when the run opened none.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
-    /// The opened or updated request's number.
+    /// The opened or updated request's number; absent when the run opened none.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_number: Option<u64>,
-    /// The verified fork, as `namespace/project`; `null` on the direct path and
+    /// The verified fork, as `namespace/project`; absent on the direct path and
     /// under the `git` transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fork: Option<String>,
-    /// The relative paths written under the `--out` directory; empty otherwise.
+    /// The relative paths written under the `--output` directory; empty otherwise.
     pub written_paths: Vec<String>,
     /// Every preflight row, including the ones that did not apply.
     ///
     /// Non-empty on every run, so a pipeline can assert the preflight ran rather
-    /// than trusting a bare success. Inapplicable rows carry `"skipped"`; rows
+    /// than trusting a bare success. Inapplicable rows carry `skipped`; rows
     /// follow a fixed capability order, so the array is stable across runs.
     pub capability_checks: Vec<CapabilityCheckEntry>,
 }
@@ -144,19 +138,19 @@ impl ClaimReport {
             package: outcome.package,
             name: outcome.name,
             // The outcome's own status, never a literal of this layer's.
-            status: outcome.status,
+            status: outcome.status.into(),
             // Resolved once at the CLI boundary; a second resolution here could disagree.
-            forge,
-            transport,
+            forge: forge.into(),
+            transport: transport.into(),
             credential_kind: super::forge_report::credential_kind(credentials),
             push_credential_kind: super::forge_report::push_credential_kind(credentials, transport),
             // Never re-derived here: the identity ladder runs in `claim::claim`, and the provenance
             // word is unrecoverable from the login.
             author: outcome.author.map(OwnerEntry::from_resolved),
-            author_identity_source: outcome.author_identity_source,
+            author_identity_source: outcome.author_identity_source.map(IdentitySource::from),
             owners: outcome.owners.into_iter().map(OwnerEntry::from_resolved).collect(),
-            owner_identity_source: outcome.owner_identity_source,
-            // Populated on every path, `--out` included; never `null`.
+            owner_identity_source: outcome.owner_identity_source.into(),
+            // Populated on every path, `--output` included; never `null`.
             branch: outcome.branch,
             pull_request_url: outcome.pull_request.as_ref().map(|request| request.html_url.clone()),
             pull_request_number: outcome.pull_request.as_ref().map(|request| request.number),
@@ -173,9 +167,9 @@ impl ClaimReport {
             vec!["Package", "Status", "Transport", "Branch", "Pull Request"],
             vec![
                 self.package.clone(),
-                // The `Display` JSON uses, so the two never spell a value differently.
-                self.status.to_string(),
-                self.transport.to_string(),
+                // The word JSON writes, so the two never spell a value differently.
+                self.status.as_str().to_string(),
+                self.transport.as_str().to_string(),
                 self.branch.clone(),
                 // A dash, never an empty cell.
                 self.pull_request_url.clone().unwrap_or_else(|| "-".to_string()),
@@ -185,6 +179,9 @@ impl ClaimReport {
 }
 
 impl Printable for ClaimReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "ClaimReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         // `print_table` is column-major, so a one-row table is one cell per column.
         let (headers, cells) = self.plain_table();
@@ -200,8 +197,9 @@ mod tests {
     use ocx_announce::forge::{ForgeCredentials, ForgeKind, ForgeToken, PullRequest, PushAccess, WriteTransport};
 
     use super::ClaimReport;
+    use crate::api::data::forge_report::{Forge, Transport, WriteStatus};
 
-    /// The `--out` shape: the tree was written, no request was opened, and the
+    /// The `--output` shape: the tree was written, no request was opened, and the
     /// forge was still read for the C-050 refusal and for owner resolution.
     fn out_outcome() -> ClaimOutcome {
         ClaimOutcome {
@@ -266,19 +264,15 @@ mod tests {
                 "forge",
                 "transport",
                 "credential_kind",
-                "push_credential_kind",
-                "author",
-                "author_identity_source",
                 "owners",
                 "owner_identity_source",
                 "branch",
                 "pull_request_url",
                 "pull_request_number",
-                "fork",
                 "written_paths",
                 "capability_checks",
             ],
-            "C-060's seventeen keys, in the contract's order"
+            "C-060's keys this run produced, in the contract's order; the rest are omitted"
         );
     }
 
@@ -294,21 +288,20 @@ mod tests {
     ///
     /// Between the two rows: `status` `updated`, `forge` `github`/`gitlab`,
     /// `transport` `api`/`git`, `credential_kind` `token`,
-    /// `push_credential_kind` `null`/`git-helper`, `owner_identity_source`
-    /// `resolved`/`ci-environment`, and every `capability_checks` row's
+    /// `push_credential_kind` absent/`git_helper`, `owner_identity_source`
+    /// `resolved`/`ci_environment`, and every `capability_checks` row's
     /// `name`/`status` pair.
     ///
-    /// Mutation: drop `#[serde(rename_all = "kebab-case")]` from
-    /// `PushCredentialKind` (`git-helper` becomes `GitHelper`); replace a
-    /// `serialize_with = "serialize_display"` with serde's default for a
-    /// unit-variant enum (`ci-environment` becomes `CiEnvironment`).
+    /// Mutation: drop `#[serde(rename_all = "snake_case")]` from
+    /// `PushCredentialKind` (`git_helper` becomes `GitHelper`) or from
+    /// `IdentitySource` (`ci_environment` becomes `CiEnvironment`).
     #[test]
     fn claim_report_wire_document_is_unchanged_by_the_typed_vocabularies() {
         let skipped_rows = serde_json::json!([
-            { "name": "git-version", "status": "skipped", "detail": null },
-            { "name": "push-access", "status": "skipped", "detail": null },
-            { "name": "job-token-push", "status": "skipped", "detail": null },
-            { "name": "job-token-allowlist", "status": "skipped", "detail": null },
+            { "name": "git_version", "status": "skipped" },
+            { "name": "push_access", "status": "skipped" },
+            { "name": "job_token_push", "status": "skipped" },
+            { "name": "job_token_allowlist", "status": "skipped" },
         ]);
 
         let api = serde_json::to_value(report(request_outcome(), ForgeKind::GitHub, WriteTransport::Api))
@@ -322,15 +315,11 @@ mod tests {
                 "forge": "github",
                 "transport": "api",
                 "credential_kind": "token",
-                "push_credential_kind": null,
-                "author": null,
-                "author_identity_source": null,
                 "owners": [],
                 "owner_identity_source": "resolved",
                 "branch": "indexbot-claim-acme-widget",
                 "pull_request_url": "https://github.com/ocx-sh/index/pull/42",
                 "pull_request_number": 42,
-                "fork": null,
                 "written_paths": [],
                 "capability_checks": skipped_rows,
             })
@@ -359,28 +348,25 @@ mod tests {
                 "forge": "gitlab",
                 "transport": "git",
                 "credential_kind": "token",
-                "push_credential_kind": "git-helper",
+                "push_credential_kind": "git_helper",
                 "author": { "login": "carol", "id": 5 },
-                "author_identity_source": "ci-environment",
+                "author_identity_source": "ci_environment",
                 "owners": [{ "login": "carol", "id": 5 }],
-                "owner_identity_source": "ci-environment",
+                "owner_identity_source": "ci_environment",
                 "branch": "indexbot-claim-acme-widget",
-                "pull_request_url": null,
-                "pull_request_number": null,
-                "fork": null,
                 "written_paths": ["p/acme/widget.json"],
                 "capability_checks": skipped_rows,
             })
         );
     }
 
-    /// C-060 / DX-40.3: a key the run did not produce is `null`, never `""` and
-    /// never absent.
+    /// C-060 / DX-40.3: a key the run did not produce is omitted, never `""` and
+    /// never `null`.
     ///
     /// `branch` is the deliberate exception and is asserted in the same
     /// function: `ClaimOutcome::branch` is derived from the package rather than
     /// read from the forge, so it is populated on **every** path including
-    /// `--out`. A builder porting announce's `""` → `null` rule across would
+    /// `--output`. A builder porting announce's `""` → absent rule across would
     /// blank a field that is always present. There is **no reachable red** for
     /// that half — claim never produces an empty branch, so the mutation is a
     /// no-op — and the control is this assertion plus the reviewer noting the
@@ -390,7 +376,7 @@ mod tests {
     /// Mutation once implemented: render `pull_request_url` with
     /// `unwrap_or_default()`.
     #[test]
-    fn absent_keys_render_null_and_branch_is_always_present() {
+    fn absent_keys_are_omitted_and_branch_is_always_present() {
         let value =
             serde_json::to_value(report(out_outcome(), ForgeKind::GitHub, WriteTransport::Api)).expect("serializes");
         for key in [
@@ -401,21 +387,21 @@ mod tests {
             "author_identity_source",
         ] {
             assert!(
-                value.get(key).expect("the key is present").is_null(),
-                "an absent {key} renders null, never an empty string"
+                value.get(key).is_none(),
+                "an unset {key} is omitted, never null or an empty string: {value}"
             );
         }
         assert_eq!(
             value.get("branch").and_then(serde_json::Value::as_str),
             Some("indexbot-claim-acme-widget"),
-            "branch is derived from the package, so --out reports it too"
+            "branch is derived from the package, so --output reports it too"
         );
     }
 
-    /// C-060 / S-010: a claim `--out` run always reports `updated`.
+    /// C-060 / S-010: a claim `--output` run always reports `updated`.
     ///
     /// **A characterization test at library scope** — `claim::claim` already
-    /// returns `ClaimStatus::Updated` on the `--out` path, so a WP-14 test over
+    /// returns `ClaimStatus::Updated` on the `--output` path, so a WP-14 test over
     /// a constructed outcome is green the moment `from_outcome` exists. Stated
     /// honestly rather than dressed up: what this pins is the **mapper**, which
     /// is where a builder copying announce goes wrong — announce compares
@@ -423,9 +409,9 @@ mod tests {
     /// against the open claim branch and a committed root has already exited 65.
     ///
     /// The word is asserted twice on purpose: against the literal the contract
-    /// spells, and against `ClaimStatus`'s own `Display`. The literal catches a
-    /// `Display` typo; the equality catches a mapper that ignores the outcome
-    /// and hardcodes the word.
+    /// spells, and against the typed value. The literal catches a spelling
+    /// typo; the equality catches a mapper that ignores the outcome and
+    /// hardcodes the word.
     ///
     /// Red at the stub: `from_outcome` is `unimplemented!()`.
     /// Mutation once implemented: render `status` from
@@ -434,13 +420,13 @@ mod tests {
     fn claim_out_status_is_always_updated() {
         let report = report(out_outcome(), ForgeKind::GitHub, WriteTransport::Api);
         assert_eq!(
-            report.status.to_string(),
+            serde_json::to_value(report.status).expect("serializes"),
             "updated",
             "C-060's word for a claim that moved the branch"
         );
         assert_eq!(
             report.status,
-            ClaimStatus::Updated,
+            WriteStatus::Updated,
             "the mapper renders the outcome's own status, not a literal of its own"
         );
     }
@@ -458,15 +444,15 @@ mod tests {
     #[test]
     fn forge_and_transport_render_the_boundary_resolved_values() {
         let report = report(out_outcome(), ForgeKind::GitLab, WriteTransport::Git);
-        assert_eq!(report.forge, ForgeKind::GitLab);
-        assert_eq!(report.transport, WriteTransport::Git);
+        assert_eq!(report.forge, Forge::Gitlab);
+        assert_eq!(report.transport, Transport::Git);
         let value = serde_json::to_value(&report).expect("serializes");
         assert_eq!(value.get("forge").and_then(serde_json::Value::as_str), Some("gitlab"));
         assert_eq!(value.get("transport").and_then(serde_json::Value::as_str), Some("git"));
     }
 
     /// C-060 / C-069 / S-011 / S-036: `capability_checks` is non-empty on every
-    /// run, `--out` included.
+    /// run, `--output` included.
     ///
     /// C-069 makes an empty vector unrepresentable *inside* `PushAccess`, but
     /// the CLI can still render an empty array by filtering the `skipped` rows

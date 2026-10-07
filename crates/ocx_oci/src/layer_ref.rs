@@ -49,7 +49,12 @@ impl std::fmt::Display for ArchiveMediaType {
 }
 
 /// Error produced when a string cannot be parsed as a [`LayerRef`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(
+    UsageError,
+    slug = "invalid_layer_ref",
+    summary = "A layer reference or its layout suffix does not parse"
+)]
 #[non_exhaustive]
 pub enum LayerRefParseError {
     #[error("{}", format_bare_digest(.0))]

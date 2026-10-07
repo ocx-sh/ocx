@@ -3,7 +3,11 @@
 
 //! Lexical path helpers, without filesystem access, for containment checks on paths that may not exist yet.
 
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bounds a [`RelativePath`] so an untrusted prefix cannot amplify into synthetic directories.
 const MAX_RELPATH_COMPONENTS: usize = 32;
@@ -48,7 +52,12 @@ pub fn escapes_root(path: &Path) -> bool {
 }
 
 /// Why an untrusted relative path was refused under a containment root.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(
+    DataError,
+    slug = "path_escape",
+    summary = "A relative path is absolute, escapes its root, or is otherwise unsafe to join"
+)]
 #[non_exhaustive]
 pub enum PathEscapeError {
     #[error("path must be relative")]
@@ -185,6 +194,82 @@ impl RelativePath {
     }
 }
 
+impl Serialize for RelativePath {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for RelativePath {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for RelativePath {
+    fn schema_name() -> Cow<'static, str> {
+        "RelativePath".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        "ocx::RelativePath".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "Relative path, `/`-separated, never leaving its root."
+        })
+    }
+}
+
+/// An absolute path on the host that produced it, in that host's native spelling.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AbsolutePath(PathBuf);
+
+impl AbsolutePath {
+    /// `None` unless `path` is absolute on this host.
+    pub fn new(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        path.is_absolute().then_some(Self(path))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Serialize for AbsolutePath {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsolutePath {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let path = PathBuf::deserialize(deserializer)?;
+        Self::new(path).ok_or_else(|| serde::de::Error::custom("path is not absolute"))
+    }
+}
+
+impl JsonSchema for AbsolutePath {
+    fn schema_name() -> Cow<'static, str> {
+        "AbsolutePath".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        "ocx::AbsolutePath".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "description": "Absolute path in the native spelling of the host that wrote it."
+        })
+    }
+}
+
 /// Per-layer placement before the overlap merge: drop `strip` leading components, then place under `prefix`.
 #[derive(Debug, Clone)]
 pub struct LayerPlacement {
@@ -296,6 +381,44 @@ pub fn validate_symlinks_in_dir(root: &Path, dir: &Path) -> Result<(), crate::ar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_path_serialises_its_wire_form_and_refuses_an_escape() {
+        let path = RelativePath::parse("a/./b/../c").expect("parses");
+        assert_eq!(serde_json::to_string(&path).expect("serialises"), r#""a/c""#);
+        assert_eq!(serde_json::from_str::<RelativePath>(r#""a/c""#).expect("parses"), path);
+        assert!(serde_json::from_str::<RelativePath>(r#""../x""#).is_err());
+    }
+
+    #[test]
+    fn absolute_path_refuses_a_relative_path() {
+        assert!(AbsolutePath::new("relative/x").is_none());
+        assert!(serde_json::from_str::<AbsolutePath>(r#""relative/x""#).is_err());
+    }
+
+    #[test]
+    fn absolute_path_round_trips() {
+        let host_absolute = PathBuf::from(if cfg!(windows) { r"C:\x" } else { "/x" });
+        let path = AbsolutePath::new(host_absolute.clone()).expect("absolute on this host");
+        let json = serde_json::to_string(&path).expect("serialises");
+        assert_eq!(serde_json::from_str::<AbsolutePath>(&json).expect("parses"), path);
+        assert_eq!(path.as_path(), host_absolute);
+    }
+
+    #[test]
+    fn path_schemas_are_strings_with_fixed_names() {
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct Holder {
+            install_path: AbsolutePath,
+            prefix_dir: RelativePath,
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(Holder)).expect("schema serialises");
+        assert_eq!(schema["$defs"]["AbsolutePath"]["type"], "string");
+        assert_eq!(schema["$defs"]["RelativePath"]["type"], "string");
+        assert_eq!(AbsolutePath::schema_id(), "ocx::AbsolutePath");
+        assert_eq!(RelativePath::schema_id(), "ocx::RelativePath");
+    }
 
     #[test]
     fn lexical_normalize_resolves_dot() {

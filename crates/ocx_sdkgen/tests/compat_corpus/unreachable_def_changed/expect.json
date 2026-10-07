@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "A property is removed from a `$def` no root reaches.",
+  "findings": []
+}

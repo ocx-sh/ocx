@@ -118,35 +118,16 @@ mod tests {
     const PINNED_INSTANT: &str = "2026-01-02T03:04:05Z";
     const PINNED_DATE: &str = "2026-01-02";
 
-    /// Pins `__OCX_TESTING_ANNOUNCE_CLOCK` for the test's lifetime.
-    ///
-    /// **`ocx_index::current_timestamp` reads `std::env::var` directly,
-    /// not `ocx_util::env::var`** — so `EnvLock::set` is a silent no-op here and the
-    /// pin must go through `std::env::set_var` under the same lock. The
-    /// equivalent guard in `oci/index.rs` is private to that module's test
-    /// module, and `oci/index.rs` is not in WP-9's file set, so it is duplicated
-    /// rather than shared.
+    /// Pins `__OCX_TESTING_ANNOUNCE_CLOCK` for the test's lifetime; the lock clears it on drop.
     struct ClockSeam {
-        _lock: ocx_util::env::overrides::EnvLock,
+        _lock: ocx_env::overrides::EnvLock,
     }
 
     impl ClockSeam {
         fn pinned(instant: &str) -> Self {
-            let lock = ocx_util::env::overrides::lock();
-            // SAFETY: `EnvLock` serialises every env-touching test in this
-            // process against this write, and `Drop` clears it unconditionally
-            // so a stub that panics mid-test cannot leak the pin into a sibling
-            // — which is exactly what the Specify phase does.
-            unsafe { std::env::set_var("__OCX_TESTING_ANNOUNCE_CLOCK", instant) };
+            let lock = ocx_env::overrides::lock();
+            lock.set(&ocx_env::__OCX_TESTING_ANNOUNCE_CLOCK, instant);
             Self { _lock: lock }
-        }
-    }
-
-    impl Drop for ClockSeam {
-        fn drop(&mut self) {
-            // SAFETY: see `ClockSeam::pinned`. A struct's own `Drop` runs before
-            // its fields', so the pin is gone before the lock releases.
-            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
         }
     }
 
@@ -476,11 +457,6 @@ mod tests {
     }
 
     /// C-047 — `created` is a **date**, not the tag `observed` timestamp.
-    ///
-    /// The instant is pinned through `std::env::set_var`, never `EnvLock::set`:
-    /// `current_timestamp` reads `std::env::var` directly, so the seam's own
-    /// override map never reaches it and the assertion would silently degrade to
-    /// "today equals today".
     ///
     /// Reds on: calling `current_timestamp()` instead of `current_date()` (the
     /// `T…Z` suffix appears), or reading an independent `Utc::now()` (the pinned

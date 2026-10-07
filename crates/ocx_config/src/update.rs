@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
 
-use crate::env::keys;
 use crate::refresh::{DEFAULT_INTERVAL, RefreshPolicy, parse_interval};
 
 /// A `[update]` value this ocx cannot use, kept as written so the resolver can warn about it.
@@ -161,13 +160,16 @@ impl ResolvedUpdatePolicy {
             warn_rejected("update", rejected, "a table");
         }
 
-        let self_policy = env_policy(keys::OCX_SELF_UPDATE)
+        let self_policy = env_policy(&ocx_env::OCX_SELF_UPDATE)
             .or_else(|| file_value("[update] self", file.self_policy, POLICY_VALUES))
             .unwrap_or(Self::DEFAULT_POLICY);
 
-        let toolchain = match env_policy(keys::OCX_TOOLCHAIN_UPDATE) {
+        let toolchain = match env_policy(&ocx_env::OCX_TOOLCHAIN_UPDATE) {
             Some(RefreshPolicy::Apply) => {
-                log::debug!("{}=apply is not supported; using notify", keys::OCX_TOOLCHAIN_UPDATE);
+                log::debug!(
+                    "{}=apply is not supported; using notify",
+                    ocx_env::OCX_TOOLCHAIN_UPDATE.name
+                );
                 RefreshPolicy::Notify
             }
             Some(policy) => policy,
@@ -211,25 +213,21 @@ fn default_interval() -> Duration {
     parse_interval(DEFAULT_INTERVAL).unwrap_or(Duration::from_secs(86_400))
 }
 
-fn env_value(key: &str) -> Option<String> {
-    ocx_util::env::var(key).filter(|value| !value.is_empty())
-}
-
-fn env_policy(key: &str) -> Option<RefreshPolicy> {
-    let value = env_value(key)?;
+fn env_policy(var: &'static ocx_env::EnvVar) -> Option<RefreshPolicy> {
+    let value = var.get()?;
     let parsed = RefreshPolicy::parse(&value);
     if parsed.is_none() {
-        log::debug!("ignoring {key}={value:?}: expected apply, notify or manual");
+        log::debug!("ignoring {}={value:?}: expected apply, notify or manual", var.name);
     }
     parsed
 }
 
 fn env_interval() -> Option<Duration> {
-    let value = env_value(keys::OCX_UPDATE_CHECK_INTERVAL)?;
+    let value = ocx_env::OCX_UPDATE_CHECK_INTERVAL.get()?;
     match parse_interval(value.trim()) {
         Ok(interval) => Some(interval),
         Err(error) => {
-            log::debug!("ignoring {}: {error}", keys::OCX_UPDATE_CHECK_INTERVAL);
+            log::debug!("ignoring {}: {error}", ocx_env::OCX_UPDATE_CHECK_INTERVAL.name);
             None
         }
     }
@@ -266,12 +264,12 @@ mod tests {
     const DAY: Duration = Duration::from_secs(86_400);
 
     /// Holds the env table with every update key removed, so the process env cannot leak in.
-    fn clean_env() -> ocx_util::env::overrides::EnvLock {
-        let guard = ocx_util::env::overrides::lock();
+    fn clean_env() -> ocx_env::overrides::EnvLock {
+        let guard = ocx_env::overrides::lock();
         for key in [
-            keys::OCX_SELF_UPDATE,
-            keys::OCX_TOOLCHAIN_UPDATE,
-            keys::OCX_UPDATE_CHECK_INTERVAL,
+            &ocx_env::OCX_SELF_UPDATE,
+            &ocx_env::OCX_TOOLCHAIN_UPDATE,
+            &ocx_env::OCX_UPDATE_CHECK_INTERVAL,
         ] {
             guard.remove(key);
         }
@@ -313,9 +311,9 @@ mod tests {
     #[test]
     fn env_beats_config() {
         let guard = clean_env();
-        guard.set(keys::OCX_SELF_UPDATE, "notify");
-        guard.set(keys::OCX_TOOLCHAIN_UPDATE, "notify");
-        guard.set(keys::OCX_UPDATE_CHECK_INTERVAL, "60");
+        guard.set(&ocx_env::OCX_SELF_UPDATE, "notify");
+        guard.set(&ocx_env::OCX_TOOLCHAIN_UPDATE, "notify");
+        guard.set(&ocx_env::OCX_UPDATE_CHECK_INTERVAL, "60");
         let config = file("[update]\nself = \"manual\"\ntoolchain = \"manual\"\ninterval = \"6h\"\n");
         assert_eq!(
             ResolvedUpdatePolicy::resolve(Some(&config)),
@@ -330,9 +328,9 @@ mod tests {
     #[test]
     fn invalid_env_values_fall_through_to_config() {
         let guard = clean_env();
-        guard.set(keys::OCX_SELF_UPDATE, "someday");
-        guard.set(keys::OCX_TOOLCHAIN_UPDATE, "someday");
-        guard.set(keys::OCX_UPDATE_CHECK_INTERVAL, "bogus");
+        guard.set(&ocx_env::OCX_SELF_UPDATE, "someday");
+        guard.set(&ocx_env::OCX_TOOLCHAIN_UPDATE, "someday");
+        guard.set(&ocx_env::OCX_UPDATE_CHECK_INTERVAL, "bogus");
         let config = file("[update]\nself = \"apply\"\ntoolchain = \"manual\"\ninterval = \"6h\"\n");
         assert_eq!(
             ResolvedUpdatePolicy::resolve(Some(&config)),
@@ -362,14 +360,14 @@ mod tests {
             ResolvedUpdatePolicy::resolve(Some(&config)).toolchain,
             RefreshPolicy::Notify
         );
-        guard.set(keys::OCX_TOOLCHAIN_UPDATE, "apply");
+        guard.set(&ocx_env::OCX_TOOLCHAIN_UPDATE, "apply");
         assert_eq!(ResolvedUpdatePolicy::resolve(None).toolchain, RefreshPolicy::Notify);
     }
 
     #[test]
     fn self_apply_is_kept() {
         let guard = clean_env();
-        guard.set(keys::OCX_SELF_UPDATE, "apply");
+        guard.set(&ocx_env::OCX_SELF_UPDATE, "apply");
         assert_eq!(ResolvedUpdatePolicy::resolve(None).self_policy, RefreshPolicy::Apply);
     }
 
@@ -382,7 +380,7 @@ mod tests {
             ("0", Duration::ZERO),
             ("bogus", DAY),
         ] {
-            guard.set(keys::OCX_UPDATE_CHECK_INTERVAL, value);
+            guard.set(&ocx_env::OCX_UPDATE_CHECK_INTERVAL, value);
             assert_eq!(ResolvedUpdatePolicy::resolve(None).interval, expected, "{value}");
         }
     }
@@ -390,8 +388,8 @@ mod tests {
     #[test]
     fn empty_env_values_are_unset() {
         let guard = clean_env();
-        guard.set(keys::OCX_SELF_UPDATE, "");
-        guard.set(keys::OCX_UPDATE_CHECK_INTERVAL, "");
+        guard.set(&ocx_env::OCX_SELF_UPDATE, "");
+        guard.set(&ocx_env::OCX_UPDATE_CHECK_INTERVAL, "");
         let config = file("[update]\nself = \"manual\"\ninterval = \"1h\"\n");
         let resolved = ResolvedUpdatePolicy::resolve(Some(&config));
         assert_eq!(resolved.self_policy, RefreshPolicy::Manual);

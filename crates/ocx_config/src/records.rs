@@ -40,14 +40,9 @@ impl RecordsOptions {
     ///
     /// An empty value is unset, or `OCX_RECORDS_DIR=""` scatters records across each tool's cwd.
     pub fn from_env() -> Self {
-        use crate::env::keys;
-        use ocx_util::env::var;
-
         Self {
-            dir: var(keys::OCX_RECORDS_DIR)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from),
-            name: var(keys::OCX_RECORDS_NAME).filter(|value| !value.is_empty()),
+            dir: ocx_env::OCX_RECORDS_DIR.get().map(PathBuf::from),
+            name: ocx_env::OCX_RECORDS_NAME.get(),
             required: None,
             system_locked: false,
         }
@@ -252,7 +247,7 @@ mod tests {
 #[cfg(test)]
 mod env_tier_tests {
     use super::*;
-    use crate::env::{Env, OcxConfigView, keys};
+    use crate::env::{Env, OcxConfigView};
 
     fn view(self_exe: &str) -> OcxConfigView {
         OcxConfigView::new(std::path::PathBuf::from(self_exe))
@@ -266,9 +261,9 @@ mod env_tier_tests {
     fn records_required_is_never_an_env_var() {
         const NOT_A_KEY: &str = "OCX_RECORDS_REQUIRED";
 
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(NOT_A_KEY, "1");
-        guard.set(keys::OCX_RECORDS_DIR, "/var/log/ocx-records");
+        let guard = ocx_env::overrides::lock();
+        guard.set_raw(NOT_A_KEY, "1");
+        guard.set(&ocx_env::OCX_RECORDS_DIR, "/var/log/ocx-records");
 
         // Read side: the env tier never populates `required`, whatever the
         // ambient environment claims.
@@ -297,9 +292,9 @@ mod env_tier_tests {
     /// The env tier reads both variables into the shape the fold merges.
     #[test]
     fn records_reads_dir_and_name_from_the_environment() {
-        let guard = ocx_util::env::overrides::lock();
-        guard.set(keys::OCX_RECORDS_DIR, "/var/log/ocx-records");
-        guard.set(keys::OCX_RECORDS_NAME, "{time}-{pid}-{rand}.json");
+        let guard = ocx_env::overrides::lock();
+        guard.set(&ocx_env::OCX_RECORDS_DIR, "/var/log/ocx-records");
+        guard.set(&ocx_env::OCX_RECORDS_NAME, "{time}-{pid}-{rand}.json");
 
         let options = RecordsOptions::from_env();
         assert_eq!(
@@ -318,16 +313,16 @@ mod env_tier_tests {
     /// into whatever directory each tool happened to run in.
     #[test]
     fn records_treats_absent_and_empty_as_unset() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
-        guard.remove(keys::OCX_RECORDS_DIR);
-        guard.remove(keys::OCX_RECORDS_NAME);
+        guard.remove(&ocx_env::OCX_RECORDS_DIR);
+        guard.remove(&ocx_env::OCX_RECORDS_NAME);
         let absent = RecordsOptions::from_env();
         assert!(absent.dir.is_none());
         assert!(absent.name.is_none());
 
-        guard.set(keys::OCX_RECORDS_DIR, "");
-        guard.set(keys::OCX_RECORDS_NAME, "");
+        guard.set(&ocx_env::OCX_RECORDS_DIR, "");
+        guard.set(&ocx_env::OCX_RECORDS_NAME, "");
         let empty = RecordsOptions::from_env();
         assert!(empty.dir.is_none(), "OCX_RECORDS_DIR=\"\" must read as unset");
         assert!(empty.name.is_none(), "OCX_RECORDS_NAME=\"\" must read as unset");
@@ -339,7 +334,7 @@ mod env_tier_tests {
     /// sink and template its parent did.
     #[test]
     fn records_round_trip_from_forwarded_child_env() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
         let mut cfg = view("/abs/ocx");
         cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
@@ -347,14 +342,15 @@ mod env_tier_tests {
 
         let mut child = Env::clean();
         child.apply_ocx_config(&cfg);
-        for key in [keys::OCX_RECORDS_DIR, keys::OCX_RECORDS_NAME] {
+        for var in [&ocx_env::OCX_RECORDS_DIR, &ocx_env::OCX_RECORDS_NAME] {
+            let key = var.name;
             let value = child
                 .get(key)
                 .unwrap_or_else(|| panic!("{key} must be set on the child env"))
                 .to_str()
                 .expect("a forwarded records value must be valid UTF-8")
                 .to_string();
-            guard.set(key, value);
+            guard.set(var, value);
         }
 
         let parsed = RecordsOptions::from_env();
@@ -376,7 +372,7 @@ mod env_tier_tests {
     /// against the table below.
     #[test]
     fn from_env_reads_each_field_as_the_contract_names_it() {
-        let guard = ocx_util::env::overrides::lock();
+        let guard = ocx_env::overrides::lock();
 
         for (dir, name, expected_dir, expected_name) in [
             (
@@ -391,12 +387,12 @@ mod env_tier_tests {
             (None, None, None, None),
         ] {
             match dir {
-                Some(value) => guard.set(keys::OCX_RECORDS_DIR, value),
-                None => guard.remove(keys::OCX_RECORDS_DIR),
+                Some(value) => guard.set(&ocx_env::OCX_RECORDS_DIR, value),
+                None => guard.remove(&ocx_env::OCX_RECORDS_DIR),
             }
             match name {
-                Some(value) => guard.set(keys::OCX_RECORDS_NAME, value),
-                None => guard.remove(keys::OCX_RECORDS_NAME),
+                Some(value) => guard.set(&ocx_env::OCX_RECORDS_NAME, value),
+                None => guard.remove(&ocx_env::OCX_RECORDS_NAME),
             }
 
             let moved = RecordsOptions::from_env();

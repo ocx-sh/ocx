@@ -68,7 +68,7 @@ def _install_content(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     `content/`), so `candidate.resolve()` yields the root. Helpers that need
     the actual content tree should append `/content`.
     """
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
     candidate = Path(result[pkg.short]["path"])
     return candidate.resolve()
 
@@ -347,7 +347,7 @@ def test_remote_flag_install_persists_and_links_chain(
     """
     pkg = published_package
 
-    result = ocx.json("--remote", "package", "install", pkg.short)
+    result = ocx.json("--remote", "package", "install", pkg.short)["packages"]
     assert pkg.short in result, f"AC8: --remote install must succeed for {pkg.short}"
 
     # Resolve the installed content path.
@@ -505,7 +505,7 @@ def test_parallel_install_races_preserve_full_chain(
             f"stdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
         )
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout)["packages"]
         candidate = Path(data[pkg.short]["path"])
         content = candidate.resolve()
         refs_blobs = _refs_blobs_dir(content)
@@ -694,7 +694,7 @@ def test_resolution_chain_direct_digest_to_image_index(
     )
 
     digest_ref = f"{ocx.registry}/{unique_repo}@{index_digest}"
-    result = ocx.json("package", "install", digest_ref)
+    result = ocx.json("package", "install", digest_ref)["packages"]
     candidate = Path(result[digest_ref]["path"])
     content = candidate.resolve()
 
@@ -725,7 +725,7 @@ def test_resolution_chain_direct_digest_to_platform_manifest(
     child_digest = manifest["manifests"][0]["digest"]
 
     digest_ref = f"{ocx.registry}/{unique_repo}@{child_digest}"
-    result = ocx.json("package", "install", digest_ref)
+    result = ocx.json("package", "install", digest_ref)["packages"]
     candidate = Path(result[digest_ref]["path"])
     content = candidate.resolve()
 

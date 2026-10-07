@@ -6527,8 +6527,8 @@ mod tests {
     /// every other ladder test.
     #[test]
     fn the_environment_tier_answers_when_every_config_tier_is_absent() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_LAZY_MODE", "always");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_LAZY_MODE, "always");
 
         assert_eq!(
             lazy_mode_ladder_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None).resolve(),
@@ -6540,8 +6540,8 @@ mod tests {
     /// above it is absent.
     #[test]
     fn the_ladder_floor_is_never() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_LAZY_MODE");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_LAZY_MODE);
 
         assert_eq!(
             lazy_mode_ladder_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None).resolve(),
@@ -6554,23 +6554,23 @@ mod tests {
     /// rather than silently ignored.
     #[test]
     fn the_oci_tier_ladder_is_the_cli_flag_then_the_environment() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
 
-        env.set("OCX_LAZY_MODE", "never");
+        env.set(&ocx_env::OCX_LAZY_MODE, "never");
         assert_eq!(
             lazy_mode_ladder_for_package(Some(LazyMode::Always)).resolve(),
             LazyMode::Always,
             "the CLI flag outranks the environment tier"
         );
 
-        env.set("OCX_LAZY_MODE", "always");
+        env.set(&ocx_env::OCX_LAZY_MODE, "always");
         assert_eq!(
             lazy_mode_ladder_for_package(None).resolve(),
             LazyMode::Always,
             "the environment tier answers when the flag is absent"
         );
 
-        env.remove("OCX_LAZY_MODE");
+        env.remove(&ocx_env::OCX_LAZY_MODE);
         assert_eq!(
             lazy_mode_ladder_for_package(None).resolve(),
             LazyMode::Never,
@@ -7084,8 +7084,8 @@ mod wp15_following_lane_spec_tests {
     /// RED: transposing the `cli` and `file` operands of the resolution chain.
     #[test]
     fn the_cli_pinned_flag_outranks_the_config_and_the_environment() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED, "false");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "false");
 
         assert!(
             pinned_for_project(Some(true), &config_with_pinned(Some(false))),
@@ -7099,8 +7099,8 @@ mod wp15_following_lane_spec_tests {
     /// RED: transposing the `file` and `environment` operands.
     #[test]
     fn the_config_tier_outranks_the_environment() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED, "false");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "false");
 
         assert!(
             pinned_for_project(None, &config_with_pinned(Some(true))),
@@ -7114,8 +7114,8 @@ mod wp15_following_lane_spec_tests {
     /// implementation passes every other ladder case.
     #[test]
     fn the_environment_tier_answers_when_the_cli_and_the_config_are_absent() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED, "true");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "true");
 
         assert!(
             pinned_for_project(None, &config_with_pinned(None)),
@@ -7130,8 +7130,8 @@ mod wp15_following_lane_spec_tests {
     /// pin every un-configured project and make the following lane unreachable in practice.
     #[test]
     fn an_all_absent_pinned_ladder_resolves_to_the_following_lane_floor() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         assert!(
             !pinned_for_project(None, &config_with_pinned(None)),
@@ -7148,8 +7148,8 @@ mod wp15_following_lane_spec_tests {
     /// it passes `Some(true)`.
     #[test]
     fn no_pinned_overrides_a_config_that_asked_to_pin() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED, "true");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "true");
 
         assert!(
             !pinned_for_project(Some(false), &config_with_pinned(Some(true))),
@@ -7165,8 +7165,8 @@ mod wp15_following_lane_spec_tests {
     /// the two sources happen to agree.
     #[test]
     fn the_unresolved_pinned_ladder_reports_one_tier_per_source() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED, "false");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "false");
 
         let ladder = pinned_ladder_for_project(Some(true), &config_with_pinned(Some(true)));
 
@@ -7322,8 +7322,8 @@ mod wp15_following_lane_spec_tests {
     /// resolves `pinned = true` to the following lane.
     #[tokio::test]
     async fn a_pinned_project_composes_on_digest_paths_and_never_creates_the_home_root() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7358,8 +7358,8 @@ mod wp15_following_lane_spec_tests {
     /// lane, or `install_path_for` ignoring the map.
     #[tokio::test]
     async fn an_entry_of_a_selected_group_composes_through_its_home_link() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7391,8 +7391,8 @@ mod wp15_following_lane_spec_tests {
     /// assertions red, and the on-disk one names the previous package.
     #[tokio::test]
     async fn a_stale_link_in_a_non_default_selected_group_is_healed_before_it_is_probed() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let default_tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7448,8 +7448,8 @@ mod wp15_following_lane_spec_tests {
     /// path would then name a regular file and every consumer would break.
     #[tokio::test]
     async fn an_entry_the_heal_cannot_repair_composes_on_the_digest_path() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let repairable = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7491,8 +7491,8 @@ mod wp15_following_lane_spec_tests {
     /// emit a link path that nothing ever writes.
     #[tokio::test]
     async fn an_entry_with_no_lock_leaf_for_the_target_platform_composes_on_the_digest_path() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let reachable = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7538,8 +7538,8 @@ mod wp15_following_lane_spec_tests {
     /// `links.groups`.
     #[tokio::test]
     async fn a_group_the_invocation_did_not_select_composes_on_the_digest_path() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let selected = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7578,8 +7578,8 @@ mod wp15_following_lane_spec_tests {
     /// is built (the heal's own `BTreeSet` ordering leaking into the map).
     #[tokio::test]
     async fn two_selected_groups_sharing_one_digest_keep_the_first_selected_groups_link() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let alpha = locked_tool("cmake", "alpha", "ns/cmake", 'a');
@@ -7621,8 +7621,8 @@ mod wp15_following_lane_spec_tests {
     /// inserting the key unconditionally.
     #[tokio::test]
     async fn a_refused_first_candidate_does_not_shadow_its_trustworthy_sibling() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let alpha = locked_tool("cmake", "alpha", "ns/cmake", 'a');
@@ -7677,8 +7677,8 @@ mod wp15_following_lane_spec_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_home_behind_a_symlinked_project_component_composes_on_the_digest_path() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7729,8 +7729,8 @@ mod wp15_following_lane_spec_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_entry_under_a_symlinked_group_directory_composes_on_the_digest_path() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7779,8 +7779,8 @@ mod wp15_following_lane_spec_tests {
     /// mutation returns `alpha`.
     #[tokio::test]
     async fn two_entries_of_one_group_sharing_one_digest_keep_the_first_in_lock_order() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let zeta = locked_tool("zeta", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7813,8 +7813,8 @@ mod wp15_following_lane_spec_tests {
     /// asks the following lane.
     #[tokio::test]
     async fn a_dependency_composes_on_the_digest_path_even_when_its_digest_root_carries_a_link() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7856,8 +7856,8 @@ mod wp15_following_lane_spec_tests {
     /// instead of `install_path_for(root.dir(), PathLane::Following)`.
     #[tokio::test]
     async fn a_following_root_emits_its_carrier_and_entrypoints_paths_under_the_home_link() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
@@ -7946,8 +7946,8 @@ mod wp15_following_lane_spec_tests {
     /// `root.dir()` instead of the `install_path_for` answer.
     #[tokio::test]
     async fn a_following_roots_integrations_payload_resolves_under_the_home_link() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(ocx_config::env::keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
 
         let tree = Tree::new();
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');

@@ -201,15 +201,21 @@ keep their names and roles. Dependencies flow strictly downward; the "may depend
 on" column is the contract, and a dependency not listed there is a defect even
 when Cargo would accept it.
 
+> **Amended 2026-10 by `adr_ocx_interface_contract.md`.** Two crates join the map: `ocx_env` (ecosystem, no `ocx_*` dependencies, row below) and `ocx_sdkgen` (internal; its `ocx-sdkgen` CLI is an interface; no `ocx_*` dependencies). Every crate that reads the environment gains the edge `ocx_env`, and `ocx_schema` gains `ocx_exit` and `ocx_env`; `scripts/crate_map.toml` is the authority for each edge. The workspace is 24 members.
+
+> **Amended 2026-10 by `adr_typed_contract_registries.md` (D2).** `ocx_exit_derive` (internal, a proc-macro, no `ocx_*` dependencies) joins the map and `ocx_exit` re-exports its `#[derive(Classify)]`; `ocx_util` and `ocx_env` gain the edge `ocx_exit`, and `ocx_config`, `ocx_store`, `ocx_package`, `ocx_shell`, `ocx_project` and `ocx_package_manager` name it in their manifests. E3 is inverted and E4 restated below.
+
 | Crate | Responsibility | Contents (today's modules) | May depend on | Tier | Justified by |
 |---|---|---|---|---|---|
-| `ocx_exit` | Process-outcome vocabulary shared by every OCX binary and by a future SDK: `ExitCode`, `ErrorCategory` | `cli/exit_code.rs`, `cli/error_category.rs` | — (`serde` is its only dependency; no `indicatif`, `console`, `tracing`, `clap`) | **interface** (exit codes are a CLI contract) | ocx-mirror: 201 `ExitCode` value uses; the foundation a future `ocx_api`/SDK crate lifts unchanged; ruled 2026-09-16 (§ Rulings OQ3) |
-| `ocx_util` | Domain-free primitives: fs, locking, extension traits, async singleflight, TLS roots, archive extraction, path-context error helpers | `utility` minus `fs/assemble.rs`; `compression`; `archive`; `error.rs`'s `file_error`, `render_chain`, `append_chain` | — | ecosystem | ocx-mirror imports `string_ext`, `tls::seed_embedded_roots`, `fs` helpers, `Archive::extract`; boundary: nothing generic may name an OCX type |
+| `ocx_exit` | Process-outcome vocabulary shared by every OCX binary and by a future SDK: `ExitCode`, `ErrorCategory`, the classification traits and `DetailEntry` (amended 2026-10) | `cli/exit_code.rs`, `cli/error_category.rs` | `ocx_exit_derive` (and `serde`; no `indicatif`, `console`, `tracing`, `clap`) | **interface** (exit codes are a CLI contract) | ocx-mirror: 201 `ExitCode` value uses; the foundation a future `ocx_api`/SDK crate lifts unchanged; ruled 2026-09-16 (§ Rulings OQ3) |
+| `ocx_exit_derive` | `#[derive(Classify)]`: a variant declares its exit code and `error.detail` slug in the crate that owns the type (amended 2026-10) | new | — | internal | the proc-macro half of the typed classification registry; tier crates name `ocx_exit::Classify` and never this crate |
+| `ocx_env` | The environment registry: every `OCX_*` / `__OCX_*` variable declared once with its doc, value kind, visibility, secrecy and child propagation, and the one seam that reads them (amended 2026-10) | `env` (variable vocabulary and accessor) | `ocx_exit` (std only otherwise) | ecosystem | every satellite reads variables through it; a variable that bypasses it is invisible to the docs and the contract |
+| `ocx_util` | Domain-free primitives: fs, locking, extension traits, async singleflight, TLS roots, archive extraction, path-context error helpers | `utility` minus `fs/assemble.rs`; `compression`; `archive`; `error.rs`'s `file_error`, `render_chain`, `append_chain` | `ocx_exit` | ecosystem | ocx-mirror imports `string_ext`, `tls::seed_embedded_roots`, `fs` helpers, `Archive::extract`; boundary: nothing generic may name an OCX type |
 | `ocx_console` | Presentation vocabulary shared by every OCX binary: rendering, printer, theme, styles, progress bars, data interface, options | `cli` minus classification, minus subscriber setup and minus `ocx_exit`'s two files; `log` | `ocx_exit`, `ocx_util` | ecosystem | ocx-mirror: `DataInterface`, `Printer`, `ProgressManager`; depends on `ocx_exit` so the rendering half never re-declares an exit value |
 | `ocx_oci` | OCI/distribution-spec-generic registry work: references, digests, manifests, transport, referrers, layer-placement annotations, SSRF guard, registry auth | 12 of the 13 generic `oci` sub-modules (all but `simplesigning`) + `identifier`, `platform`, `client`, `copy`, `host_capabilities`, `layer_layout`, `native`, `auth`, `media_type`, and the referrer/sidecar tag helpers moved out of `package::tag` | `ocx_util`, `ocx_console`, `ocx_exit` | ecosystem | ocx-mirror ~140 imports incl. `LayerLayoutSpec` at 4 sites; grimoire; boundary: the generic-vs-product line |
 | `ocx_trust` | Signer-identity policy: `[[trust.policy]]` model, **tiered resolution** (`resolve_tiered`), `CompiledPolicy`/`IdentityRule`, `SigstoreTrust` config type | `trust` | `ocx_oci`, `ocx_util` | ecosystem | grimoire needs the policy engine; boundary: 7 in-repo consumers reach policy without pulling Sigstore |
 | `ocx_sign` | Supply-chain signing: keyless Sigstore sign, DSSE attest, full verify, `TrustRoot` verification material, cosign simplesigning, SBOM referrers | `oci/{sign,attest,verify}`, `oci/simplesigning`, `sbom` | `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit` | ecosystem | grimoire needs the whole stack (dossier addendum) |
-| `ocx_config` | Resolved settings from files and environment: the four config tiers, the managed tier, env-var vocabulary and validation | `config`, `managed_config`, `env` (settings half) | `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit` | ecosystem | ocx-mirror imports `env::var`, `keys::CREDENTIAL_KEYS`, `insecure_registries` |
+| `ocx_config` | Resolved settings from files and environment: the four config tiers, the managed tier, settings validation (amended 2026-10: the env-var vocabulary and accessor live in `ocx_env`) | `config`, `managed_config`, `env` (settings half) | `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit` | ecosystem | ocx-mirror imports `env::var`, `keys::CREDENTIAL_KEYS`, `insecure_registries` |
 | `ocx_store` | The on-disk layout: three-tier CAS, symlink namespace, package materialisation, shim blobs, local code signing | `file_structure` minus `index_store`; `symlink`, `hardlink`, `reference_manager`, `shim`+`shims/`, `codesign`, `utility/fs/assemble.rs` | `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit` | internal | crate, not module: it is the one crate a satellite may compile transitively but never name, which a module cannot express |
 | `ocx_index` | The OCX resolution-index protocol and its local collection | `oci/index`, `file_structure/index_store` | `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit` | ecosystem | ocx-mirror imports `index::` and every `file_structure` item it uses (`IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult`, `SOURCE_LOCK_TIMEOUT`) |
 | `ocx_package` | Package identity, metadata, versioning, cascade, authoring and publication | `package` (minus the referrer/sidecar tag helpers), `publisher` | `ocx_index`, `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit` | ecosystem | ocx-mirror ~70 imports incl. `Publisher`, `Version`, `metadata::*`, `tag::*` |
@@ -284,7 +290,9 @@ graph TD
   descriptive, not binding. If grimoire ever needs `codesign`, it takes a direct
   dependency on `ocx_store` — a named, owner-granted exception to the satellite
   linking rule, opened on that day and not before.
-- **`env` splits.** The env-var vocabulary, accessor and key validator go to
+- **`env` splits.** *(Superseded 2026-10 by `adr_ocx_interface_contract.md`: the
+  vocabulary and accessor go to the new `ocx_env`, not `ocx_config`; the
+  package-aware composition half is unchanged.)* The env-var vocabulary, accessor and key validator go to
   `ocx_config` (with which `env` is already a 2-cycle: `env -> config` 35 refs,
   `config -> env` 28); the package-aware composition half, source of
   `env -> package` (48 refs), goes to `ocx_package_manager` beside `composer.rs`.
@@ -362,8 +370,8 @@ boundaries. No `snafu`. No shared leaf-error crate. The workspace-wide
 |---|---|---|
 | E1 | Each crate defines its own error type(s); no crate names another crate's error variant except through a `#[source]`/`#[from]` field it declares | `cargo build` after the crate-wide `Error` is deleted. **Review-only** beyond that: no gate proves a variant is well-factored |
 | E2 | The three-layer pattern (`Error` → context-bearing wrapper struct → discriminant `*Kind` enum) stays the way two call sites over one source type are told apart | `quality-rust-errors.md`; worked example in `crates/ocx_package_manager/src/error.rs` (`InternalFile` / `LayerLayout` / `SymlinkWalk` over one `io::Error`) — the example moved there at WP-34 and the crate that held it was deleted at WP-37 |
-| E3 | No library crate defines or implements `ClassifyExitCode` / `ClassifyErrorKind` | a boundary test scanning every `crates/ocx_*/src/**` except `ocx_cli` for those identifiers, rejecting `use` imports, fully-qualified paths and lib-root re-exports alike |
-| E4 | `ocx_exit::ExitCode` and `ErrorCategory` remain plain value types with no knowledge of any error type, and `ocx_exit` carries no rendering, logging or argument-parsing dependency | `ocx_exit`'s manifest lists `serde` and no `ocx_*` crate; `ocx_console`'s lists no `ocx_*` dependency but `ocx_util` and `ocx_exit` |
+| E3 | A tier crate declares the classification of its own error types with `#[derive(Classify)]` and writes no `ClassifyExitCode` / `ClassifyErrorKind` impl by hand, except `CommandError`'s hand `ClassifyExitCode` impl in `ocx_cli` (it holds its code at run time and has no slug); `ocx_cli` walks the cause chain and owns only the foreign and CLI-local types (amended 2026-10, inverted from "no library crate classifies") | a boundary test over every `crates/*/src/**` asserting no hand-written impl of either trait, with a red fixture and a floor on files read |
+| E4 | `ocx_exit` defines `ExitCode`, `ErrorCategory`, the classification traits and `DetailEntry` but names no concrete error type, and carries no rendering, logging or argument-parsing dependency (amended 2026-10) | `ocx_exit`'s manifest lists `serde` and `ocx_exit_derive`, a build-time dependency, and no other `ocx_*` crate; `ocx_console`'s lists no `ocx_*` dependency but `ocx_util` and `ocx_exit` |
 | E5 | `anyhow` appears only in `ocx_cli`, and as a dev-dependency of `ocx_script` | the existing `anyhow_is_dev_dependency_only` test, **rewritten to walk every `crates/ocx_*/Cargo.toml`** rather than only its own — re-homed unchanged it would lock one crate and leave sixteen untested |
 | E6 | The serialized shape of every `crates/ocx_cli/src/api/**` data type and of `crates/ocx_cli/src/error_envelope.rs` is `serde` derives over `ocx_exit` values and plain data; the human-format arm (`DataInterface`, `Cell`, `Theme`, `Printer`) is a separate `impl` that a future `ocx_api` extraction leaves behind. The wire shape never *requires* a rendering type | Review-only this round: one consumer, so the types stay in `ocx_cli` (YAGNI). The extraction target is named — `ocx_api`, § Deferred — not built |
 
@@ -411,14 +419,16 @@ Three tiers, as ratified:
 
 - **Internal** — free to change, no announcement. `ocx_store`, `ocx_shell`,
   `ocx_project`, `ocx_package_manager`, `ocx_announce`, `ocx_script`,
-  `ocx_setup`, `ocx_test_support`, `ocx_schema`.
+  `ocx_setup`, `ocx_test_support`, `ocx_schema`, `ocx_sdkgen` (its CLI is an
+  interface, below).
 - **Ecosystem** — a crate a lockstep submodule consumer links. Breaking changes
   are allowed when justified, but the consumer is upgraded in the same change
   series. A lockstep consumer does **not** promote a crate to interface.
-  `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`,
-  `ocx_index`, `ocx_package`, `ocx_python`.
+  `ocx_util`, `ocx_env`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`,
+  `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`.
 - **Interface** — the CLI surface, every wire and persisted format, the shim
-  wire ABI, and `ocx_exit`: an exit code is a CLI contract, so the crate that
+  wire ABI (amended 2026-10: the `--format json` reports and error document, the
+  `OCX_*` environment and the `ocx-sdkgen` CLI and output layout join the list), and `ocx_exit`: an exit code is a CLI contract, so the crate that
   defines the values carries the tier. The surface itself is unchanged by this
   ADR; `ocx_exit` is the one crate the split adds to the tier.
 
@@ -1144,3 +1154,5 @@ section is the record.
 | 2026-09-06 | Re-validation residuals: 63 module-local error enums, 21 `oci/index` → `file_structure` references, 241 `crate::test` sites, `auth/store.rs:165`, five dependency crates for `ocx_script`; research citations re-pointed from `.agents/research/` to `.claude/artifacts/`. |
 | 2026-09-23 | `ocx_python` joins the map as an ecosystem crate (moved from ocx-mirror, `ocx_python = ["ocx_oci", "ocx_package"]`): crate-map row, stability-tier list and container diagram; `ocx_cli` does not link it, so its errors stay with its consumers. |
 | 2026-09-16 | Owner ruling D8 (WP-40): the sanctioned `ocx_store` transitive path reads `{ocx_index, ocx_package}` — the crate map's ecosystem-tier edge (`scripts/crate_map.toml`, `ocx_package → ocx_store`) is kept and § "Stability tiers" / § Testing strategy are corrected to match it (plan DX-11); `task satellite:verify`'s `ocx_store` arm sanctions exactly that set. |
+| 2026-10-03 | Amended by `adr_ocx_interface_contract.md`: `ocx_env` (ecosystem) and `ocx_sdkgen` (internal) join the crate map, `ocx_env` edges added, the `ocx_config` charter row and the ecosystem and internal lists corrected, and § "`env` splits" marked superseded (vocabulary and accessor go to `ocx_env`). |
+| 2026-10-04 | Amended by `adr_typed_contract_registries.md` (D2): `ocx_exit_derive` (internal, proc-macro) joins the map and `ocx_exit` re-exports `#[derive(Classify)]`, E3 inverted (tier crates declare their classification, `ocx_cli` walks the chain and owns foreign types), E4 restated (`ocx_exit` owns the traits and `DetailEntry`, names no concrete error type), `ocx_util` and `ocx_env` gain the `ocx_exit` edge, the workspace is 24 members. |

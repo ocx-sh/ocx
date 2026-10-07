@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_exit::{Pick, Row};
+
 /// [`Error::InvalidIndexUrl`] `origin` for the configured base.
 pub const INDEX_URL_FROM_REGISTRIES: &str = "[registries.\"<ns>\"] index";
 
@@ -78,38 +80,55 @@ impl std::error::Error for ArcError {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors specific to OCI index operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "OciIndexError")]
 pub enum Error {
     /// JSON serialization or deserialization failed; unlike [`Self::MalformedIndexDocument`], names no document.
     #[error("JSON serialization error")]
+    #[exit(
+        DataError,
+        slug = "index_serialization",
+        summary = "An index document could not be serialized"
+    )]
     SerializationFailure(#[from] serde_json::Error),
 
     /// An OCI client operation failed.
     #[error(transparent)]
+    #[exit(delegate)]
     OciClient(#[from] ocx_oci::client::error::ClientError),
 
     /// A digest string could not be parsed.
     #[error(transparent)]
+    #[exit(delegate)]
     Digest(#[from] ocx_oci::digest::error::DigestError),
 
     /// A pinned identifier validation failed.
     #[error(transparent)]
+    #[exit(delegate)]
     PinnedIdentifier(#[from] ocx_oci::pinned_package_ref::PinnedIdentifierError),
 
     /// The store refused an index-tier operation.
     #[error(transparent)]
+    #[exit(delegate)]
     Store(#[from] ocx_store::file_structure::error::Error),
 
     /// A file operation under the index home failed.
     #[error(transparent)]
+    #[exit(delegate)]
     File(#[from] ocx_util::error::FileError),
 
     /// A path under the index home was not usable (e.g. it had no parent).
     #[error("invalid path: {0}")]
+    #[exit(Failure, slug = "index_path_invalid", summary = "A local index path is invalid")]
     PathInvalid(std::path::PathBuf),
 
     /// A remote manifest was expected but not found during index update.
     #[error("remote manifest not found for '{0}' during index update")]
+    #[exit(
+        NotFound,
+        slug = "index_manifest_not_found",
+        summary = "The registry has no manifest for a tag the index update walked"
+    )]
     RemoteManifestNotFound(String),
 
     /// A refresh had candidate tags but none could become a version pointer
@@ -117,31 +136,63 @@ pub enum Error {
     #[error(
         "no indexable tag for '{0}' — every candidate tag resolved to no manifest, a bare manifest, or a reserved name"
     )]
+    #[exit(
+        NotFound,
+        slug = "no_indexable_tag",
+        summary = "The repository carries no tag the index can record"
+    )]
     NoIndexableTag(String),
 
     /// A chained-index source walk failed; the leader and every singleflight waiter share one [`ArcError`].
     #[error("chained index source walk failed: {0}")]
+    #[exit(
+        with = source_failure,
+        rows((Failure, slug = "index_source_failed", summary = "An index source failed with an unclassified cause"))
+    )]
     SourceWalkFailed(#[source] ArcError),
 
     /// A singleflight coordination primitive failed (capacity exceeded, timeout
     /// or abandoned leader), as opposed to a source-side failure.
     // Names no component: every coalescing group in this crate raises it, so a name would misdirect.
     #[error("index singleflight failed")]
+    // `chain` defers the code: a `Some` would end the walk before the leader's typed source, so waiters would exit 1.
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "index_singleflight_failed",
+            summary = "A shared index operation failed with an unclassified cause"
+        )
+    )]
     SingleflightFailed(#[source] ocx_util::singleflight::Error),
 
     /// A coalesced fetch within one source (the `config.json` or root-document
     /// leader in [`OcxIndex`](super::OcxIndex)) failed.
     // Transparent, or a coalesced fetch reads differently from the same uncoalesced one.
     #[error(transparent)]
+    #[exit(
+        with = source_failure,
+        rows((Failure, slug = "index_source_failed", summary = "An index source failed with an unclassified cause"))
+    )]
     SourceFetchFailed(ArcError),
 
     /// A platform-selected child manifest was itself an image index, which the OCI spec does not describe.
     #[error("nested image index at {digest} is not a supported OCI shape")]
+    #[exit(
+        DataError,
+        slug = "nested_image_index",
+        summary = "An image index nests another image index, which OCI does not support"
+    )]
     NestedImageIndex { digest: ocx_oci::Digest },
 
     /// `--offline` or `--frozen` refused to ask a source what the local index
     /// cannot answer; `policy` is the flag label (`"offline"` / `"frozen"`).
     #[error("{}", .block.message(.identifier, .policy))]
+    #[exit(
+        PolicyBlocked,
+        slug = "index_resolution_blocked",
+        summary = "A local policy refused resolving through the index"
+    )]
     PolicyResolutionBlocked {
         identifier: String,
         policy: &'static str,
@@ -151,11 +202,21 @@ pub enum Error {
     /// An index document declared a `format_version` OCX does not understand.
     /// Fail-closed (`adr_index_indirection.md#f1`): a newer format may change shapes OCX would mis-parse.
     #[error("index format_version {version} is not supported")]
+    #[exit(
+        DataError,
+        slug = "unsupported_index_format",
+        summary = "The index format version is not supported"
+    )]
     UnsupportedIndexFormat { version: u64 },
 
     /// A fetched dispatch object's bytes did not hash to the digest the root
     /// pointed at (`adr_index_indirection.md#f1`, CWE-345).
     #[error("dispatch object digest mismatch: root claims {claimed}, bytes hash to {computed}")]
+    #[exit(
+        DataError,
+        slug = "index_dispatch_digest_mismatch",
+        summary = "A dispatch object does not hash to the digest its root claims"
+    )]
     DispatchObjectDigestMismatch {
         claimed: ocx_oci::Digest,
         computed: ocx_oci::Digest,
@@ -164,6 +225,11 @@ pub enum Error {
     /// A source answered a digest-addressed chain walk with a different digest
     /// than the requested pin; accepting it would move the pin.
     #[error("source answered a request for '{requested}' with '{answered}'")]
+    #[exit(
+        DataError,
+        slug = "walked_digest_mismatch",
+        summary = "A source answered a digest request with different content"
+    )]
     WalkedDigestMismatch {
         requested: ocx_oci::Digest,
         answered: ocx_oci::Digest,
@@ -172,6 +238,7 @@ pub enum Error {
     /// A tag resolved to a yanked entry and no opt-in was given; a digest-pinned
     /// resolve of the same content still succeeds (`adr_index_indirection.md#f3`).
     #[error("'{identifier}' is yanked; resolve it by digest or set OCX_ALLOW_YANKED=1 to override")]
+    #[exit(DataError, slug = "yanked_refused", summary = "The resolved version is yanked")]
     YankedRefused { identifier: String },
 
     /// The index configured for the identifier's registry holds no entry for it.
@@ -184,6 +251,7 @@ pub enum Error {
          registry '{namespace}'; announce it there with `ocx package announce`, or take the namespace \
          off the index with `[registries.\"{namespace}\"] index = \"\"`"
     )]
+    #[exit(NotFound, slug = "not_in_index", summary = "The package is not listed in the index")]
     NotInIndex {
         identifier: String,
         namespace: String,
@@ -193,11 +261,17 @@ pub enum Error {
     /// A root's `repository` pointer was not a well-formed `oci://` reference
     /// (`adr_index_indirection.md#c3`); a missing scheme is never a host guess.
     #[error("malformed physical repository reference '{value}' in index root")]
+    #[exit(
+        DataError,
+        slug = "malformed_physical_ref",
+        summary = "An index root carries a malformed physical repository reference"
+    )]
     MalformedPhysicalRef { value: String },
 
     /// The SSRF guard refused a root's `repository` host (a private, loopback,
     /// link-local or metadata address not in `[registries."<ns>"].trusted_hosts`).
     #[error(transparent)]
+    #[exit(delegate = source)]
     Ssrf {
         #[from]
         source: ocx_oci::ssrf::PhysicalDialRefused,
@@ -206,6 +280,11 @@ pub enum Error {
     /// An existing derived root names a different `repository` than the identifier
     /// implies; refused rather than overwritten (`adr_index_indirection.md#f1`).
     #[error("derived root for '{repository}' points at '{found}', expected '{expected}'")]
+    #[exit(
+        DataError,
+        slug = "root_repository_mismatch",
+        summary = "A derived index root points at another repository"
+    )]
     RootRepositoryMismatch {
         repository: String,
         expected: String,
@@ -215,11 +294,21 @@ pub enum Error {
     /// A dispatch object parsed as an OCI image index but violates the image
     /// spec (a wrong `schemaVersion`, or a descriptor that cannot address its child).
     #[error(transparent)]
+    #[exit(
+        DataError,
+        slug = "invalid_image_index",
+        summary = "An image index document is invalid"
+    )]
     InvalidImageIndex(#[from] ocx_oci::manifest::InvalidImageIndex),
 
     /// A static-file index document (root, dispatch object, or catalog) could
     /// not be parsed as the expected frozen wire shape.
     #[error("malformed index document at {url}")]
+    #[exit(
+        DataError,
+        slug = "malformed_index_document",
+        summary = "An index document is not valid JSON of the expected shape"
+    )]
     MalformedIndexDocument {
         url: String,
         #[source]
@@ -233,6 +322,13 @@ pub enum Error {
     /// classifier (`adr_index_sync_performance.md#d-010`). Exits 75 when
     /// [`Error::is_transient_transport`], else 69.
     #[error("index request to {url} failed")]
+    #[exit(
+        with = http_failure,
+        rows(
+            (TempFail, slug = "index_http_transient", summary = "An index request failed in a way a retry may clear"),
+            (Unavailable, slug = "index_http_failed", summary = "An index request failed"),
+        )
+    )]
     IndexHttpFailed {
         url: String,
         status: Option<u16>,
@@ -247,11 +343,21 @@ pub enum Error {
         "index traffic to '{host}' for registry '{namespace}' uses http:// but that host is not allowed plain HTTP; \
          set insecure = true under [registries.\"{host}\"] or add the host to OCX_INSECURE_REGISTRIES"
     )]
+    #[exit(
+        ConfigError,
+        slug = "plain_http_index_not_allowed",
+        summary = "An index URL uses plain HTTP for a host not allowed to"
+    )]
     PlainHttpIndexNotAllowed { namespace: String, host: String },
 
     /// An index-role target is unparseable or uses a scheme outside `https`, gated
     /// `http`, or a `file://` configured base (`adr_servable_index_snapshot.md`).
     #[error("invalid index url '{url}' for registry '{namespace}' (from {origin})")]
+    #[exit(
+        ConfigError,
+        slug = "invalid_index_url",
+        summary = "A configured index URL is invalid"
+    )]
     InvalidIndexUrl {
         namespace: String,
         url: String,
@@ -266,6 +372,11 @@ pub enum Error {
     /// path (CWE-22). The registry's enumeration is refused whole, never filtered,
     /// which would snapshot a tampered catalog (`adr_index_indirection.md#f2`).
     #[error("index source '{index_source}' served a malformed catalog key '{key}': {reason}")]
+    #[exit(
+        DataError,
+        slug = "malformed_catalog_key",
+        summary = "An index source served a malformed catalog key"
+    )]
     MalformedCatalogKey {
         index_source: String,
         key: String,
@@ -275,6 +386,11 @@ pub enum Error {
     /// A published index source serves no `c/index.json` at all — distinct from an
     /// empty catalog, so `index sync` fails instead of exiting 0 having refreshed nothing.
     #[error("index source '{index_source}' serves no catalog document at {url}")]
+    #[exit(
+        Unavailable,
+        slug = "catalog_document_absent",
+        summary = "The index source serves no catalog document"
+    )]
     CatalogDocumentAbsent { index_source: String, url: String },
 }
 
@@ -295,9 +411,46 @@ impl Error {
     }
 }
 
+/// Starts the cause walk at the shared inner error: [`ArcError::source`] skips it, so a chain over the field would lose its verdict.
+fn source_failure(error: &Error, [row]: [Row; 1]) -> Pick<'_> {
+    match error {
+        Error::SourceWalkFailed(arc) | Error::SourceFetchFailed(arc) => Pick::chain(arc.as_error(), row),
+        _ => Pick::row(row),
+    }
+}
+
+/// A retryable transport failure exits 75, any other failed index request 69.
+fn http_failure(error: &Error, [transient, failed]: [Row; 2]) -> Pick<'_> {
+    Pick::row(if error.is_transient_transport() {
+        transient
+    } else {
+        failed
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The picker is wired to two arms only; the fallback arm answers the declared row instead of
+    /// chaining back into the error it was handed, which would classify it again.
+    #[test]
+    fn source_failure_fallback_answers_the_declared_row() {
+        static ENTRY: ocx_exit::DetailEntry = ocx_exit::DetailEntry {
+            slug: "index_source_failed",
+            exit_code: ocx_exit::ExitCode::Failure,
+            family: "Error",
+            summary: "An index source failed with an unclassified cause",
+        };
+        let error = Error::NestedImageIndex {
+            digest: ocx_oci::Digest::Sha256("0".repeat(64)),
+        };
+
+        let pick = source_failure(&error, [Row::__declared(&ENTRY, false)]);
+
+        assert_eq!(pick.code(), Some(ocx_exit::ExitCode::Failure));
+        assert!(matches!(pick.detail(), ocx_exit::Detail::Fixed(entry) if entry.slug == "index_source_failed"));
+    }
 
     /// An SSRF refusal classifies to `ConfigError` (78): the fix path is adding
     /// the host to `[registries."<ns>"].trusted_hosts`.

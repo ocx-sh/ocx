@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "Public `OCX_OFFLINE` now refuses a value outside its grammar.",
+  "findings": [
+    {
+      "code": "G14",
+      "pointer": "/env/0",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

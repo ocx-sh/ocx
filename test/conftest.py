@@ -196,7 +196,7 @@ def legacy_registry() -> str:
     A real OCI Distribution v2 registry that does NOT implement the OCI 1.1
     Referrers API: ``GET /v2/<name>/referrers/<digest>`` returns 404. Consumed
     by ``test_referrers_capability.py`` (#106) to assert the clean
-    ``ReferrersUnsupported`` / exit-84 path against a genuine v2 registry, and
+    fallback-index path against a genuine v2 registry, and
     by ``test_referrers_smoke.py`` to prove the harness carries a real
     referrers-unsupported registry.
 

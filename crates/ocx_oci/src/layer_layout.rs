@@ -43,7 +43,12 @@ impl LayerLayoutSpec {
 
 /// Error resolving an untrusted layer-descriptor annotation into a
 /// [`LayerPlacement`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+#[exit(
+    DataError,
+    slug = "invalid_layer_layout",
+    summary = "A layer's strip-components or prefix annotation is invalid"
+)]
 #[non_exhaustive]
 pub enum LayerLayoutError {
     #[error("layer strip-components annotation is not a u8: {0}")]

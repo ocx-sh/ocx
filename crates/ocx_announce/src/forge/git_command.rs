@@ -89,7 +89,7 @@ pub async fn probe_git_binary() -> Result<GitBinary, ForgeError> {
     let cwd = std::env::current_dir().unwrap_or_default();
     // Resolved against ocx's `PATH` and spawned absolute: `Command::new("git")` would search
     // the parent's `PATH`, so `GitBinary::path` could name a binary that never ran.
-    let search_path = ocx_util::env::var("PATH");
+    let search_path = ocx_env::PATH.get_raw().and_then(|path| path.into_string().ok());
     let resolved = which::which_in("git", search_path.as_deref(), cwd).map_err(|error| ForgeError::GitUnavailable {
         reason: format!("git could not be resolved on PATH: {error}"),
     })?;
@@ -103,13 +103,17 @@ pub async fn probe_git_binary() -> Result<GitBinary, ForgeError> {
 /// Returns [`ForgeError::GitUnavailable`] when `program` cannot be run, exits
 /// non-zero, prints output no version can be parsed from, or reports a version
 /// below [`GitVersion::MINIMUM`].
+#[expect(
+    clippy::disallowed_types,
+    reason = "the git write transport runs the operator's own `git` resolved on `PATH`, not a package tool; every git spawn routes through this file"
+)]
 pub(super) async fn probe_git_binary_at(program: &Path) -> Result<GitBinary, ForgeError> {
     let unavailable = |reason: String| ForgeError::GitUnavailable { reason };
 
     let output = tokio::process::Command::new(program)
         .arg("--version")
         .env_clear()
-        .envs(git_child_env(|name| std::env::var_os(name), None, LazyFetch::Refuse).iter())
+        .envs(git_child_env(parent_value, None, LazyFetch::Refuse).iter())
         .kill_on_drop(true)
         .output()
         .await
@@ -147,79 +151,66 @@ pub(super) async fn probe_git_binary_at(program: &Path) -> Result<GitBinary, For
 
 /// The child-environment allowlist, as data.
 ///
-/// Only [`PASSTHROUGH`] is `#[cfg]`-selected: a `#[cfg(windows)]` platform table would
-/// leave its assertions unrun on Linux CI.
+/// The passthrough list is built for both platforms and only the choice between them is `#[cfg]`-selected: a
+/// `#[cfg(windows)]` platform table would leave its assertions unrun on Linux CI.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "`PASSTHROUGH` and `SET` are read by the child-environment builder; `NEVER`, `INJECTED` and whichever platform table is not live are assertion data by design — the disjointness check is what makes them load-bearing, so they have no production reader and must not acquire one"
+        reason = "`live_passthrough` and `SET` are read by the child-environment builder; `NEVER` and `INJECTED` are assertion data by design — the disjointness check is what makes them load-bearing, so they have no production reader and must not acquire one"
     )
 )]
 mod table {
-    /// Names copied from the parent environment when the parent has them.
+    use ocx_env::EnvVar;
+
+    /// Declarations copied from the parent environment when the parent has them, on every platform.
     ///
     /// Both proxy spellings stay: lowercase alone loses the proxy on Unix runners exporting `HTTPS_PROXY`.
     /// `PATH` stays although `git` is spawned absolute: `git` resolves
     /// `git-remote-https`, `ssh` and every hook off it.
-    pub const UNIX_PASSTHROUGH: &[&str] = &[
-        "PATH",
-        "HOME",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "all_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "ALL_PROXY",
-        "GIT_SSL_CAINFO",
-        "GIT_SSL_CAPATH",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
+    pub(super) const COMMON: &[&EnvVar] = &[
+        &ocx_env::PATH,
+        &ocx_env::HOME,
+        &ocx_env::HTTP_PROXY_LOWER,
+        &ocx_env::HTTPS_PROXY_LOWER,
+        &ocx_env::NO_PROXY_LOWER,
+        &ocx_env::ALL_PROXY_LOWER,
+        &ocx_env::HTTP_PROXY,
+        &ocx_env::HTTPS_PROXY,
+        &ocx_env::NO_PROXY,
+        &ocx_env::ALL_PROXY,
+        &ocx_env::GIT_SSL_CAINFO,
+        &ocx_env::GIT_SSL_CAPATH,
+        &ocx_env::SSL_CERT_FILE,
+        &ocx_env::SSL_CERT_DIR,
+        &ocx_env::TMPDIR,
+        &ocx_env::TEMP,
+        &ocx_env::TMP,
     ];
 
-    /// [`UNIX_PASSTHROUGH`] plus Windows' home-directory triple and `SYSTEMROOT`, which
+    /// What Windows adds to [`COMMON`]: the home-directory triple and `SYSTEMROOT`, which
     /// the Windows CRT and the TLS stack both need.
-    pub const WINDOWS_PASSTHROUGH: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "SYSTEMROOT",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "all_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "ALL_PROXY",
-        "GIT_SSL_CAINFO",
-        "GIT_SSL_CAPATH",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
+    pub(super) const WINDOWS_EXTRA: &[&EnvVar] = &[
+        &ocx_env::USERPROFILE,
+        &ocx_env::HOMEDRIVE,
+        &ocx_env::HOMEPATH,
+        &ocx_env::SYSTEMROOT,
     ];
 
-    /// The table this platform's child is actually built from.
-    #[cfg(not(windows))]
-    pub const PASSTHROUGH: &[&str] = UNIX_PASSTHROUGH;
+    /// The passthrough list of one platform.
+    pub(super) fn passthrough(windows: bool) -> impl Iterator<Item = &'static EnvVar> {
+        COMMON.iter().chain(if windows { WINDOWS_EXTRA } else { &[] }).copied()
+    }
 
-    /// The table this platform's child is actually built from.
-    #[cfg(windows)]
-    pub const PASSTHROUGH: &[&str] = WINDOWS_PASSTHROUGH;
+    /// The list this platform's child is actually built from.
+    pub(super) fn live_passthrough() -> impl Iterator<Item = &'static EnvVar> {
+        passthrough(cfg!(windows))
+    }
 
     /// Names ocx sets unconditionally, with the values it sets them to.
     ///
     /// All four identity names are set, or `$HOME/.gitconfig` supplies the missing one.
-    pub const SET: &[(&str, &str)] = &[
+    pub(super) const SET: &[(&str, &str)] = &[
         ("GIT_TERMINAL_PROMPT", "0"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_AUTHOR_NAME", "ocx"),
@@ -231,7 +222,7 @@ mod table {
     ];
 
     /// The credential triple, present **only** on an invocation that injects an ocx credential.
-    pub const INJECTED: &[&str] = &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
+    pub(super) const INJECTED: &[&str] = &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
 
     /// Set on a **local** invocation and on no other.
     ///
@@ -240,10 +231,10 @@ mod table {
     /// Not in [`SET`]: `fetch` and `push` depend on the lazy fetch this disables.
     //
     // Inert below git 2.45.0 (above `MINIMUM`), so `git_workspace`'s `write-tree --missing-ok` must stay.
-    pub const NO_LAZY_FETCH: &[(&str, &str)] = &[("GIT_NO_LAZY_FETCH", "1")];
+    pub(super) const NO_LAZY_FETCH: &[(&str, &str)] = &[("GIT_NO_LAZY_FETCH", "1")];
 
     /// Name **prefixes** that must never reach the child, whatever the parent holds.
-    pub const NEVER: &[&str] = &[
+    pub(super) const NEVER: &[&str] = &[
         "GIT_TRACE",
         "GIT_CURL_VERBOSE",
         "GIT_ASKPASS",
@@ -299,6 +290,13 @@ pub(super) struct CredentialInjection<'a> {
     pub credential: &'a GitPushCredential,
 }
 
+/// The parent's value of a declared variable, verbatim; a name the registry does not declare reads unset.
+fn parent_value(name: &str) -> Option<OsString> {
+    ocx_env::all()
+        .find(|var| var.name == name)
+        .and_then(|var| var.get_raw())
+}
+
 /// Build the child environment for a `git` invocation from [`Env::clean`] and the tables above.
 ///
 /// A passthrough name present but empty is carried verbatim: dropping `http_proxy=` lets
@@ -311,9 +309,9 @@ pub(super) fn git_child_env(
     // `Env::clean`, never `Env::new`/`default`: those start from the whole parent environment.
     let mut env = Env::clean();
 
-    for name in table::PASSTHROUGH {
-        if let Some(value) = lookup(name) {
-            env.set(*name, value);
+    for var in table::live_passthrough() {
+        if let Some(value) = lookup(var.name) {
+            env.set(var.name, value);
         }
     }
     for (name, value) in table::SET {
@@ -368,7 +366,7 @@ pub(super) async fn run_git(
     lazy_fetch: LazyFetch,
     args: &[&OsStr],
 ) -> Result<std::process::Output, ForgeError> {
-    let env = git_child_env(|name| std::env::var_os(name), injection, lazy_fetch);
+    let env = git_child_env(parent_value, injection, lazy_fetch);
     let mut command = git_child_command(git, workdir, &env);
     command.args(args);
     command.output().await.map_err(|error| ForgeError::GitUnavailable {
@@ -380,6 +378,10 @@ pub(super) async fn run_git(
 
 /// The child-process builder for one `git` invocation; private, so siblings spawn only
 /// through [`run_git`].
+#[expect(
+    clippy::disallowed_types,
+    reason = "the git write transport runs the operator's own `git` resolved on `PATH`, not a package tool; every git spawn routes through this file"
+)]
 fn git_child_command(git: &GitBinary, workdir: &Path, env: &Env) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&git.path);
     command
@@ -457,6 +459,29 @@ mod tests {
     use super::*;
     use crate::forge::ForgeToken;
 
+    /// A secret declaration listed here (through `declaration()`) would copy a credential into the git child.
+    #[test]
+    fn passthrough_lists_no_secret_declaration() {
+        assert!(!table::COMMON.is_empty() && !table::WINDOWS_EXTRA.is_empty());
+        for var in table::COMMON.iter().chain(table::WINDOWS_EXTRA) {
+            assert!(
+                !var.secret,
+                "`{}` is secret and must not be passed through to git",
+                var.name
+            );
+        }
+    }
+
+    /// The passthrough names of one platform's list.
+    fn passthrough_names(windows: bool) -> Vec<&'static str> {
+        table::passthrough(windows).map(|var| var.name).collect()
+    }
+
+    /// The passthrough names of the list this platform's child is built from.
+    fn live_passthrough_names() -> Vec<&'static str> {
+        table::live_passthrough().map(|var| var.name).collect()
+    }
+
     /// A parent environment as a closure, for [`git_child_env`]'s injectable
     /// reader. Owning, so the closure outlives the fixture literal.
     fn parent_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -494,6 +519,10 @@ mod tests {
     /// Writing through a shell keeps the handle out of this process's descriptor
     /// table, so no fork can inherit it and no later exec of the shim is refused.
     #[cfg(unix)]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "the git write transport runs the operator's own `git` resolved on `PATH`, not a package tool; every git spawn routes through this file"
+    )]
     fn shim(directory: &Path, script: &str) -> PathBuf {
         let path = directory.join("git");
         let status = std::process::Command::new("/bin/sh")
@@ -848,10 +877,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn probe_git_binary_resolves_git_on_the_child_path() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let directory = tempfile::TempDir::new().expect("temp dir");
         let path = version_shim(directory.path(), "3.14.15");
-        env.set("PATH", directory.path().to_str().expect("utf-8 temp path"));
+        env.set(&ocx_env::PATH, directory.path().to_str().expect("utf-8 temp path"));
 
         let binary = probe_git_binary().await.expect("the shim on PATH is a usable git");
         assert_eq!(
@@ -1070,9 +1099,8 @@ mod tests {
             LazyFetch::Allow,
         );
 
-        let allowed: Vec<&str> = table::PASSTHROUGH
-            .iter()
-            .copied()
+        let allowed: Vec<&str> = passthrough_names(cfg!(windows))
+            .into_iter()
             .chain(table::SET.iter().map(|(name, _)| *name))
             .chain(table::INJECTED.iter().copied())
             .collect();
@@ -1104,7 +1132,7 @@ mod tests {
     ///
     /// Reds on: dropping `PATH` from a passthrough table; dropping
     /// `GIT_TERMINAL_PROMPT` from `SET`; setting `GIT_CONFIG_NOSYSTEM` to `0`;
-    /// dropping `SYSTEMROOT` from `WINDOWS_PASSTHROUGH` (**on Linux**, which is
+    /// dropping `SYSTEMROOT` from `WINDOWS_EXTRA` (**on Linux**, which is
     /// what proves the Windows arm is pinned rather than merely written);
     /// listing only the lowercase proxy spellings.
     #[test]
@@ -1129,17 +1157,17 @@ mod tests {
             "TMP",
         ] {
             assert!(
-                table::UNIX_PASSTHROUGH.contains(&required),
+                passthrough_names(false).contains(&required),
                 "{required} must pass through on Unix"
             );
             assert!(
-                table::WINDOWS_PASSTHROUGH.contains(&required),
+                passthrough_names(true).contains(&required),
                 "{required} must pass through on Windows"
             );
         }
         for windows_only in ["USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT"] {
             assert!(
-                table::WINDOWS_PASSTHROUGH.contains(&windows_only),
+                passthrough_names(true).contains(&windows_only) && !passthrough_names(false).contains(&windows_only),
                 "{windows_only} must pass through on Windows — pinned here because Linux CI cannot exercise it"
             );
         }
@@ -1173,25 +1201,25 @@ mod tests {
 
         #[cfg(not(windows))]
         assert_eq!(
-            table::PASSTHROUGH,
-            table::UNIX_PASSTHROUGH,
-            "the live table on this platform is the Unix one"
+            live_passthrough_names(),
+            passthrough_names(false),
+            "the live list on this platform is the Unix one"
         );
         #[cfg(windows)]
         assert_eq!(
-            table::PASSTHROUGH,
-            table::WINDOWS_PASSTHROUGH,
-            "the live table on this platform is the Windows one"
+            live_passthrough_names(),
+            passthrough_names(true),
+            "the live list on this platform is the Windows one"
         );
 
         // And the tables are not merely written: the values a parent holds for
         // them reach the child, and the values ocx sets are the ones set.
-        let parent: Vec<(&str, &str)> = table::PASSTHROUGH
-            .iter()
-            .map(|name| (*name, "carried-verbatim"))
+        let parent: Vec<(&str, &str)> = live_passthrough_names()
+            .into_iter()
+            .map(|name| (name, "carried-verbatim"))
             .collect();
         let child = git_child_env(parent_env(&parent), None, LazyFetch::Allow);
-        for name in table::PASSTHROUGH {
+        for name in live_passthrough_names() {
             assert_eq!(
                 child_value(&child, name).as_deref(),
                 Some("carried-verbatim"),
@@ -1217,10 +1245,9 @@ mod tests {
     /// to stop.
     #[test]
     fn the_never_table_is_disjoint_from_every_name_the_child_gets() {
-        let admitted: Vec<&str> = table::UNIX_PASSTHROUGH
-            .iter()
-            .chain(table::WINDOWS_PASSTHROUGH.iter())
-            .copied()
+        let admitted: Vec<&str> = passthrough_names(true)
+            .into_iter()
+            .chain(passthrough_names(false))
             .chain(table::SET.iter().map(|(name, _)| *name))
             .chain(table::INJECTED.iter().copied())
             .chain(table::NO_LAZY_FETCH.iter().map(|(name, _)| *name))

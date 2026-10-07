@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "Only `$id` and PushReport's `schema_version` const move; the version step owns both and the differ skips them.",
+  "findings": []
+}

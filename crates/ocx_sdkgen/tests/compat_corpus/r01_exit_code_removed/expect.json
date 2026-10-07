@@ -1,0 +1,14 @@
+{
+  "kind": "errors",
+  "verdict": "break",
+  "change": "Exit code 80 is removed from the ExitCode registry.",
+  "findings": [
+    {
+      "code": "R01",
+      "pointer": "/$defs/ExitCode/x-ocx-enum/4",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

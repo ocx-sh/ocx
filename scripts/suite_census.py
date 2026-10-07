@@ -111,8 +111,9 @@ SUITE = REPO_ROOT / "test"
 #: `test_config_test.py` and `test_platform_pairs.py` into `ocx_cli` and
 #: `ocx_package` crate tests and deleted them (C-025).
 #: skipped 113 -> 121: the eight self-apply cases in `test_self_update.py`
-#: need a pty, so each skips on Windows.
-PINNED = {"tests": 2885, "skipped": 121, "xfailed": 4, "parametrized": 147}
+#: need a pty, so each skips on Windows; the env-contract tests also add a
+#: `win32` skip for POSIX-only bash output (re-measure).
+PINNED = {"tests": 2885, "skipped": 122, "xfailed": 4, "parametrized": 147}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

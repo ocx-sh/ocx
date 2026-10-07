@@ -1,0 +1,394 @@
+{
+  "schema_version": 1,
+  "root": {
+    "path": [],
+    "version": 0,
+    "summary": "A package manager for pre-built binaries.",
+    "hidden": false,
+    "external_subcommands": false,
+    "output": [],
+    "args": [
+      {
+        "id": "offline",
+        "long": "offline",
+        "value": {
+          "type": "switch"
+        },
+        "required": false,
+        "required_unless": [],
+        "num_args": {
+          "min": 0,
+          "max": 0
+        },
+        "global": false,
+        "hidden": false,
+        "default": [],
+        "requires": [],
+        "conflicts": [],
+        "overrides": [],
+        "require_equals": false,
+        "allow_hyphen_values": false,
+        "last": false,
+        "trailing_var_arg": false,
+        "stdin_secret": false,
+        "help": "Refuse network access",
+        "env": "OCX_OFFLINE"
+      }
+    ],
+    "groups": [],
+    "commands": [
+      {
+        "path": [
+          "package"
+        ],
+        "version": 0,
+        "summary": "Operations on packages",
+        "hidden": false,
+        "external_subcommands": false,
+        "output": [],
+        "args": [
+          {
+            "id": "remote",
+            "long": "remote",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": true,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Query the registry instead of the local index"
+          }
+        ],
+        "groups": [],
+        "commands": [
+          {
+            "path": [
+              "package",
+              "push"
+            ],
+            "version": 1,
+            "summary": "Push a package to its registry",
+            "hidden": false,
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "report",
+                "root": "PushReport"
+              }
+            ],
+            "args": [
+              {
+                "id": "identifier",
+                "position": 1,
+                "value": {
+                  "type": "identifier"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Package to push"
+              },
+              {
+                "id": "platform",
+                "long": "platform",
+                "short": "p",
+                "value": {
+                  "type": "platform"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Platform of the pushed content"
+              },
+              {
+                "id": "cascade",
+                "long": "cascade",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Also move the rolling tags"
+              },
+              {
+                "id": "jobs",
+                "long": "jobs",
+                "short": "j",
+                "value": {
+                  "type": "integer"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "4"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Parallel uploads"
+              },
+              {
+                "id": "compression",
+                "long": "compression",
+                "value": {
+                  "type": "choice",
+                  "choices": [
+                    {
+                      "value": "xz",
+                      "hidden": false
+                    },
+                    {
+                      "value": "zstd",
+                      "hidden": false
+                    },
+                    {
+                      "value": "gzip",
+                      "hidden": false
+                    }
+                  ]
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Layer compression"
+              },
+              {
+                "id": "annotations",
+                "long": "annotation",
+                "value": {
+                  "type": "string"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Manifest annotations as KEY=VALUE"
+              },
+              {
+                "id": "password_stdin",
+                "long": "password-stdin",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": true,
+                "help": "Read the registry password from stdin"
+              }
+            ],
+            "groups": [],
+            "commands": []
+          },
+          {
+            "path": [
+              "package",
+              "status"
+            ],
+            "version": 1,
+            "summary": "Show a package's registry state",
+            "hidden": false,
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "report",
+                "root": "StateReport"
+              }
+            ],
+            "args": [
+              {
+                "id": "identifier",
+                "position": 1,
+                "value": {
+                  "type": "identifier"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Package to check"
+              }
+            ],
+            "groups": [],
+            "commands": []
+          },
+          {
+            "path": [
+              "package",
+              "describe"
+            ],
+            "version": 1,
+            "summary": "Deprecated spelling of `ocx package status`; removed in 0.6",
+            "hidden": true,
+            "deprecated": {
+              "replacement": "package status",
+              "removal": "0.6"
+            },
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "empty"
+              }
+            ],
+            "args": [],
+            "groups": [],
+            "commands": []
+          }
+        ]
+      }
+    ]
+  },
+  "env": [
+    {
+      "name": "OCX_OFFLINE",
+      "value": "bool",
+      "visibility": "public",
+      "summary": "Disables network access when truthy.",
+      "flag": "--offline",
+      "secret": false,
+      "on_invalid": "default"
+    },
+    {
+      "name": "OCX_COMPRESSION",
+      "value": "choice",
+      "choices": [
+        "xz",
+        "zstd",
+        "gzip"
+      ],
+      "visibility": "public",
+      "summary": "Default layer compression.",
+      "secret": false,
+      "on_invalid": "default"
+    },
+    {
+      "name": "OCX_TRACE_FILE",
+      "value": "path",
+      "visibility": "plumbing",
+      "summary": "Where an internal trace goes.",
+      "secret": false,
+      "on_invalid": "default"
+    }
+  ],
+  "retired": []
+}

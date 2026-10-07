@@ -36,7 +36,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCESS_LEVEL_DEVELOPER: u64 = 30;
 const FORKS_PER_PAGE: u32 = 100;
 const FORKS_MAX_PAGES: u32 = 10;
-/// Walked to a short page: an unpaged read (default 20) misses page two and refuses the run at 86.
+/// Walked to a short page: an unpaged read (default 20) misses page two and refuses the run at 77.
 const ALLOWLIST_PER_PAGE: u32 = 100;
 /// Exhausting this without a hit is `Unreadable`, never a miss, or an incomplete walk refuses the run.
 const ALLOWLIST_MAX_PAGES: u32 = 10;
@@ -160,7 +160,7 @@ impl GitLabForge {
     }
 
     /// An authorized request: the credential travels only as a header, and an empty one sends none so
-    /// the tokenless `--out` path reads unauthenticated.
+    /// the tokenless `--output` path reads unauthenticated.
     fn request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
         let builder = self.client.request(method, url).header(ACCEPT, ACCEPT_JSON);
         let credential = self.credentials.api().0.as_str();
@@ -181,7 +181,7 @@ impl GitLabForge {
         (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN) && self.credentials.api_is_job_token()
     }
 
-    /// Whether this run pushes with a CI job token; ungated, the readable-`false` refusal would exit 86
+    /// Whether this run pushes with a CI job token; ungated, the readable-`false` refusal would exit 82
     /// on every `--transport api` announce against a project with the setting off.
     fn job_token_push_applies(&self) -> bool {
         // The push half, not `api_is_job_token`: `OCX_ANNOUNCE_GIT_TOKEN` replaces only the push half.
@@ -189,7 +189,7 @@ impl GitLabForge {
     }
 
     /// Whether the index project's job-token scope admits `publishing`, by name or by an ancestor group;
-    /// reading only the projects list refuses, at 86, announces GitLab accepts.
+    /// reading only the projects list refuses, at 77, announces GitLab accepts.
     async fn job_token_allowlist_admits(
         &self,
         repo: &RepoCoordinate,
@@ -591,7 +591,7 @@ impl GitLabForge {
     }
 
     /// The recorded preflight, or a fresh one: a push handed [`PushAccess::skipped_all`] instead
-    /// would classify every capability refusal as 77, not 86.
+    /// would classify every capability refusal as 77, not 82.
     ///
     /// # Errors
     ///
@@ -855,7 +855,7 @@ impl Forge for GitLabForge {
     /// `GET /user`; a job token or empty credential is [`ForgeError::UsersApiUnavailable`], never
     /// `Ok(None)`, so a bare `LOGIN` never becomes an id.
     async fn authenticated_identity(&self) -> Result<Option<ForgeIdentity>, ForgeError> {
-        // No request: without a header the 401 reads as a rejected credential (exit 80), breaking tokenless `--out`.
+        // No request: without a header the 401 reads as a rejected credential (exit 80), breaking tokenless `--output`.
         if self.credentials.api().0.is_empty() {
             return Err(ForgeError::UsersApiUnavailable);
         }
@@ -1101,12 +1101,12 @@ impl Forge for GitLabForge {
         );
     }
 
-    /// The whole capability array: a `false` job-token setting or an allowlist miss refuses at 86 before
-    /// any push, an unreadable one records `unknown` and proceeds.
+    /// The whole capability array: a `false` job-token setting refuses at 82 and an allowlist miss at 77,
+    /// before any push; an unreadable one records `unknown` and proceeds.
     async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
         // No `Failed` status exists: a refusal is the error, never a row in the returned array.
         let checks = self.push_access_checks(repo).await?;
-        // Kept for the push inside `open_or_update_pull_request`, whose exit-86 promotion reads this array.
+        // Kept for the push inside `open_or_update_pull_request`, whose exit-82 promotion reads this array.
         if self.transport == WriteTransport::Git {
             self.git_run.lock().await.preflight = Some(checks.clone());
         }
@@ -1263,7 +1263,7 @@ enum PendingCommit {
 /// State the git half carries between trait calls; parameters would expose the transport.
 #[derive(Default)]
 struct GitRun {
-    /// Threaded to the push so its promotion to exit 86 stays reachable.
+    /// Threaded to the push so its promotion to exit 82 stays reachable.
     preflight: Option<PushAccess>,
     /// Set by [`Forge::commit_files`], taken on every push attempt, successful or not.
     pending: PendingCommit,
@@ -1323,7 +1323,7 @@ fn group_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
 /// proxy with a different web host breaks. Ceiling: an instance rooted under a path ending in
 /// `/groups`; upgrade to `GET /groups/:id` (`full_path`), one request per entry.
 fn group_path_from_web_url(web_url: &str) -> Option<String> {
-    // The parsed path, never the raw string: a query would fold in and read as a miss, a false refusal at 86.
+    // The parsed path, never the raw string: a query would fold in and read as a miss, a false refusal at 77.
     let url = Url::parse(web_url).ok()?;
     let (_, path) = url.path().split_once(GROUP_URL_MARKER)?;
     let path = path.trim_end_matches('/');
@@ -1468,7 +1468,9 @@ fn mergeability_from_merge_request(value: &Value) -> Mergeability {
 
 #[cfg(any(test, feature = "__testing"))]
 fn testing_base_url_override() -> Option<String> {
-    std::env::var("__OCX_TESTING_FORGE_BASE_URL").ok()
+    ocx_env::__OCX_TESTING_FORGE_BASE_URL
+        .get_raw()
+        .and_then(|url| url.into_string().ok())
 }
 
 #[cfg(not(any(test, feature = "__testing")))]
@@ -1674,20 +1676,19 @@ mod tests {
     /// Every environment variable [`ForgeCredentials`]'s ladder reads.
     ///
     /// Copied from `credentials.rs`'s `var::ALL`, which is private to that
-    /// file. Its job here is DX-22's: [`ocx_util::env::var`]'s test seam falls
+    /// file. Its job here is DX-22's: the `ocx_env` override seam falls
     /// through to the real process environment for any key a test did not
     /// override, so a credentials test that overrides half of this list
     /// measures the machine it ran on rather than the code. `CI_PROJECT_PATH`
     /// is the one that bites hardest — it feeds `publishing_project`, which is
     /// the entire allowlist precondition table below.
-    const CI_VARIABLES: [&str; 7] = [
-        "OCX_ANNOUNCE_TOKEN",
-        "OCX_ANNOUNCE_GIT_TOKEN",
-        "OCX_ANNOUNCE_GIT_USERNAME",
-        "GITLAB_CI",
-        "CI_JOB_TOKEN",
-        "CI_PROJECT_PATH",
-        "CI_PROJECT_ID",
+    const CI_VARIABLES: [&ocx_env::EnvVar; 6] = [
+        ocx_env::OCX_ANNOUNCE_TOKEN.declaration(),
+        ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(),
+        &ocx_env::OCX_ANNOUNCE_GIT_USERNAME,
+        &ocx_env::GITLAB_CI,
+        ocx_env::CI_JOB_TOKEN.declaration(),
+        &ocx_env::CI_PROJECT_PATH,
     ];
 
     /// The environment lock, with every CI variable explicitly removed.
@@ -1696,17 +1697,18 @@ mod tests {
     /// mutex, so a second acquisition while the first is still alive deadlocks
     /// the whole test binary. A test with two phases resets between them with
     /// [`clear_ci`] instead.
-    fn isolated_env() -> ocx_util::env::overrides::EnvLock {
-        let env = ocx_util::env::overrides::lock();
+    fn isolated_env() -> ocx_env::overrides::EnvLock {
+        let env = ocx_env::overrides::lock();
         clear_ci(&env);
         env
     }
 
     /// Remove every CI variable again, resetting a held lock between phases.
-    fn clear_ci(env: &ocx_util::env::overrides::EnvLock) {
+    fn clear_ci(env: &ocx_env::overrides::EnvLock) {
         for key in CI_VARIABLES {
             env.remove(key);
         }
+        env.remove_raw("CI_PROJECT_ID");
     }
 
     /// A resolved `git`, for the git-transport constructor. Never executed —
@@ -1893,7 +1895,7 @@ mod tests {
     /// The preflight asks two endpoints (#430), and a projects-shaped body
     /// served for the groups list carries no `web_url` — which the walk reads as
     /// a *shape* it does not understand, not as an empty list. That turns a miss
-    /// into `unknown` and makes the 86 unreachable, so a handler that answers
+    /// into `unknown` and makes the 77 unreachable, so a handler that answers
     /// both endpoints with one body silently disarms its own assertion. Call
     /// this first in any handler whose projects body must be a miss.
     fn empty_groups_allowlist(target: &str) -> Option<(u16, String)> {
@@ -1936,30 +1938,33 @@ mod tests {
         PushHalfOnly,
     }
 
-    fn credentials_for(env: &ocx_util::env::overrides::EnvLock, shape: CredentialShape) -> ForgeCredentials {
-        env.set("GITLAB_CI", "true");
-        env.set("CI_JOB_TOKEN", JOB_TOKEN);
+    fn credentials_for(env: &ocx_env::overrides::EnvLock, shape: CredentialShape) -> ForgeCredentials {
+        env.set(&ocx_env::GITLAB_CI, "true");
+        env.set(ocx_env::CI_JOB_TOKEN.declaration(), JOB_TOKEN);
         match shape {
             CredentialShape::BothHalves => ForgeCredentials::resolve(WriteTransport::Git),
             CredentialShape::ApiHalfOnly => {
-                env.set("OCX_ANNOUNCE_GIT_TOKEN", "glpat-a-separate-push-token");
+                env.set(
+                    ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(),
+                    "glpat-a-separate-push-token",
+                );
                 ForgeCredentials::resolve(WriteTransport::Git)
             }
             CredentialShape::PushHalfUnderApi => {
-                env.set("OCX_ANNOUNCE_TOKEN", "glpat-notarealpat");
-                env.set("OCX_ANNOUNCE_GIT_TOKEN", JOB_TOKEN);
+                env.set(ocx_env::OCX_ANNOUNCE_TOKEN.declaration(), "glpat-notarealpat");
+                env.set(ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(), JOB_TOKEN);
                 ForgeCredentials::resolve(WriteTransport::Api)
             }
             CredentialShape::PushHalfOnly => {
-                env.set("OCX_ANNOUNCE_TOKEN", "glpat-notarealpat");
-                env.set("OCX_ANNOUNCE_GIT_TOKEN", JOB_TOKEN);
+                env.set(ocx_env::OCX_ANNOUNCE_TOKEN.declaration(), "glpat-notarealpat");
+                env.set(ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(), JOB_TOKEN);
                 ForgeCredentials::resolve(WriteTransport::Git)
             }
         }
     }
 
     /// The credentials a GitLab job resolves with no ocx variable set.
-    fn job_token_credentials(env: &ocx_util::env::overrides::EnvLock) -> ForgeCredentials {
+    fn job_token_credentials(env: &ocx_env::overrides::EnvLock) -> ForgeCredentials {
         credentials_for(env, CredentialShape::BothHalves)
     }
 
@@ -2016,7 +2021,7 @@ mod tests {
     /// and three of them are invisible to a single-cell test:
     ///
     /// - `CI_JOB_TOKEN` **unset**, and `CI_JOB_TOKEN` **set but empty** are
-    ///   different states. `ocx_util::env::overrides`'s seam distinguishes `remove`
+    ///   different states. `ocx_env::overrides`'s seam distinguishes `remove`
     ///   from `set(k, "")`, and a build that dropped the non-emptiness filter
     ///   passes the first and fails the second.
     /// - The comparison is **byte-exact**. Trimming is the plausible helpful
@@ -2037,8 +2042,8 @@ mod tests {
         for (label, job_token, api) in cases {
             let env = isolated_env();
             match job_token {
-                Some(value) => env.set("CI_JOB_TOKEN", value),
-                None => env.remove("CI_JOB_TOKEN"),
+                Some(value) => env.set(ocx_env::CI_JOB_TOKEN.declaration(), value),
+                None => env.remove(ocx_env::CI_JOB_TOKEN.declaration()),
             }
             let credentials = ForgeCredentials::new(ForgeToken::new(api.to_string()));
             assert!(
@@ -2072,7 +2077,7 @@ mod tests {
         // token, which GitLab rejects in a way that reads as a permission
         // problem.
         let env = isolated_env();
-        env.set("CI_JOB_TOKEN", "glpat-notarealpat");
+        env.set(ocx_env::CI_JOB_TOKEN.declaration(), "glpat-notarealpat");
         assert!(
             !ForgeCredentials::new(ForgeToken::new("glpat-notarealpat\n".to_string())).api_is_job_token(),
             "the comparison is byte-exact, not trimmed"
@@ -2081,11 +2086,11 @@ mod tests {
 
     /// An empty credential sends **no** authorization header at all, so the
     /// request reads as unauthenticated rather than as a rejected empty
-    /// credential. This is the `--out` path (S-011).
+    /// credential. This is the `--output` path (S-011).
     #[tokio::test]
     async fn empty_credential_sends_no_header() {
         let env = isolated_env();
-        env.set("CI_JOB_TOKEN", "");
+        env.set(ocx_env::CI_JOB_TOKEN.declaration(), "");
         let fake = FakeGitLab::start(|_, _| {
             (
                 200,
@@ -2165,7 +2170,7 @@ mod tests {
     async fn a_rejected_non_job_token_is_a_status_error_not_an_unavailable_users_api() {
         for status in [401_u16, 403] {
             let env = isolated_env();
-            env.set("CI_JOB_TOKEN", JOB_TOKEN);
+            env.set(ocx_env::CI_JOB_TOKEN.declaration(), JOB_TOKEN);
             let credentials = ForgeCredentials::new(ForgeToken::new("glpat-revoked".to_string()));
             let fake =
                 FakeGitLab::start(move |_, _| (status, json!({ "message": "401 Unauthorized" }).to_string())).await;
@@ -2247,7 +2252,7 @@ mod tests {
     ///
     /// C-027 gives no rule here and the gap is load-bearing: with no header the
     /// endpoint answers 401, and the ladder above would then classify that as
-    /// `Status { 401 }` → exit 80, contradicting S-011's "`--out` with no
+    /// `Status { 401 }` → exit 80, contradicting S-011's "`--output` with no
     /// credential proceeds unauthenticated". `UsersApiUnavailable` is exactly
     /// "the credential may not call the endpoint at all", and it costs no
     /// network.
@@ -2479,7 +2484,7 @@ mod tests {
             );
 
             clear_ci(&env);
-            env.set("CI_JOB_TOKEN", JOB_TOKEN);
+            env.set(ocx_env::CI_JOB_TOKEN.declaration(), JOB_TOKEN);
             let credentials = ForgeCredentials::new(ForgeToken::new("glpat-revoked".to_string()));
             let fake = FakeGitLab::start(move |_, _| (status, "{}".to_string())).await;
             let error = fake
@@ -2632,7 +2637,7 @@ mod tests {
         // Under the git transport the resolved binary answers `git-version`,
         // and a job-token push consults the project's own setting.
         clear_ci(&env);
-        env.set("CI_PROJECT_PATH", "acme/index");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/index");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, _| {
             let mut body = pushable_project();
@@ -2680,7 +2685,7 @@ mod tests {
     /// defensive: `true` passes, `false` refuses, and **absent, `null` and
     /// wrong-typed all mean the same thing** — nothing was read. The defect
     /// this forbids is a typed `#[serde(default)] bool`, which turns all three
-    /// into `false` and refuses every pre-18.4 instance at 86 before it pushes.
+    /// into `false` and refuses every pre-18.4 instance at 82 before it pushes.
     #[tokio::test]
     async fn preflight_unknown_field_does_not_fail() {
         let cases: [(&str, Option<Value>, CheckStatus, Option<&str>); 5] = [
@@ -2712,7 +2717,7 @@ mod tests {
         ];
         for (label, field, expected, detail) in cases {
             let env = isolated_env();
-            env.set("CI_PROJECT_PATH", "acme/index");
+            env.set(&ocx_env::CI_PROJECT_PATH, "acme/index");
             let credentials = job_token_credentials(&env);
             let fake = FakeGitLab::start(move |_, _| {
                 let mut body = pushable_project();
@@ -2741,7 +2746,7 @@ mod tests {
         }
     }
 
-    /// A field that reads **`false`** refuses the run at 86, before any push,
+    /// A field that reads **`false`** refuses the run at 82, before any push,
     /// naming the setting to change and the project to change it on.
     ///
     /// The rendered `Display` is asserted, not the struct fields: the variant
@@ -2751,7 +2756,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_readable_false_errs_86() {
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/index");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/index");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, _| {
             let mut body = pushable_project();
@@ -2794,7 +2799,7 @@ mod tests {
     /// announce path today, under `--transport api`, for every fork-free run,
     /// and `ci_push_repository_for_job_token_allowed: false` is a plausible
     /// project default with no bearing whatever on an API commit — so every
-    /// `ocx package announce` against such a project would exit 86.
+    /// `ocx package announce` against such a project would exit 82.
     ///
     /// Three cells, and each kills a different half of the conjunction. The
     /// `api` cell reds if the transport conjunct is dropped. The S-028 cell —
@@ -2826,7 +2831,7 @@ mod tests {
         ];
         for (label, shape, transport, refuses) in cases {
             let env = isolated_env();
-            env.set("CI_PROJECT_PATH", "acme/index");
+            env.set(&ocx_env::CI_PROJECT_PATH, "acme/index");
             let credentials = credentials_for(&env, shape);
             assert_eq!(
                 credentials.push_is_job_token() && transport == WriteTransport::Git,
@@ -2883,7 +2888,7 @@ mod tests {
     ///
     /// The comparison is case-insensitive: `CI_PROJECT_PATH` is operator-typed,
     /// and a case mismatch would produce a spurious cross-project read and,
-    /// behind it, a spurious 86. `ensure_fork` already compares namespaces this
+    /// behind it, a spurious 77. `ensure_fork` already compares namespaces this
     /// way.
     #[tokio::test]
     async fn allowlist_read_only_when_cross_project() {
@@ -2922,7 +2927,7 @@ mod tests {
             let env = isolated_env();
             // Before the ladder runs: `publishing_project` is derived in the
             // constructor, not read at use.
-            env.set("CI_PROJECT_PATH", publishing);
+            env.set(&ocx_env::CI_PROJECT_PATH, publishing);
             let credentials = credentials_for(&env, shape);
             assert_eq!(
                 credentials.publishing_project(),
@@ -2955,13 +2960,13 @@ mod tests {
     }
 
     /// A publishing project absent from the index project's allowlist refuses
-    /// at 86, naming **both** project paths.
+    /// at 77, naming **both** project paths.
     ///
     /// **Fixture-proved only.** `GET /projects/:id/job_token_scope/allowlist`
     /// requires Maintainer or Owner on the *index* project, while this
     /// preflight's own bar is Developer — so the publisher this check exists
     /// for, someone opening a claim merge request against a third-party index,
-    /// has no role there and reads `unknown` instead. The 86-miss path is
+    /// has no role there and reads `unknown` instead. The 77-miss path is
     /// therefore near-unreachable in production, and release gate 4 must
     /// observe the real status against gitlab.com. Annotated the way C-044
     /// annotates its fixture-written phrases rather than dropped: the code path
@@ -2969,7 +2974,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_allowlist_miss_errs_86() {
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if let Some(answer) = empty_groups_allowlist(target) {
@@ -3051,7 +3056,7 @@ mod tests {
     ///
     /// Reds on: splitting the raw string instead of the parsed path (the query
     /// and fragment rows return `acme/packages?x=1`, which `group_contains`
-    /// reads as a named miss and refuses the run at 86); dropping the
+    /// reads as a named miss and refuses the run at 77); dropping the
     /// empty-path guard (the bare-marker row returns `Some("")`, which is a
     /// named entry that admits nothing rather than an unreadable shape).
     #[test]
@@ -3120,7 +3125,7 @@ mod tests {
     ///
     /// An index that admits its publishers by group — one entry for a whole
     /// `packages/` group rather than one per publisher — carries nobody in the
-    /// projects list, so reading only that list refused at 86 an announce
+    /// projects list, so reading only that list refused at 77 an announce
     /// GitLab would have accepted, and told the operator to add an entry their
     /// group entry already covered.
     ///
@@ -3130,7 +3135,7 @@ mod tests {
     #[tokio::test]
     async fn a_group_entry_admits_the_publishing_project() {
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/packages/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/packages/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if target.contains(GROUPS_ALLOWLIST_ENDPOINT) {
@@ -3179,7 +3184,7 @@ mod tests {
             ("the projects list misses", "acme/other", true),
         ] {
             let env = isolated_env();
-            env.set("CI_PROJECT_PATH", "acme/widget");
+            env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
             let credentials = job_token_credentials(&env);
             let listed = listed.to_string();
             let fake = FakeGitLab::start(move |_, target| {
@@ -3213,7 +3218,7 @@ mod tests {
     /// the index project while this preflight's own bar is Developer. #430's
     /// rule is that *either* list being unreadable leaves the question
     /// unanswered, so a projects-list miss plus an unreadable groups list must
-    /// not refuse — refusing there is the false 86 the issue reports, one
+    /// not refuse — refusing there is the false 77 the issue reports, one
     /// endpoint further along.
     #[tokio::test]
     async fn an_unreadable_groups_list_is_unknown_never_a_miss() {
@@ -3232,7 +3237,7 @@ mod tests {
             ),
         ] {
             let env = isolated_env();
-            env.set("CI_PROJECT_PATH", "acme/widget");
+            env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
             let credentials = job_token_credentials(&env);
             let body = body.to_string();
             let fake = FakeGitLab::start(move |_, target| {
@@ -3275,13 +3280,13 @@ mod tests {
     ///
     /// The most dangerous cell in this package. GitLab's default page size is
     /// 20 and C-029 says nothing about paging, so a page-one miss becomes a
-    /// false 86 before any push — a perfectly valid run refused. The walk is
+    /// false 77 before any push — a perfectly valid run refused. The walk is
     /// bounded, and a walk that exhausts its ceiling without a hit is
     /// `unknown`, never a miss: an incomplete answer must not refuse.
     #[tokio::test]
     async fn allowlist_walks_past_the_first_page_and_never_misses_on_an_incomplete_walk() {
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if !target.contains("job_token_scope") {
@@ -3322,9 +3327,9 @@ mod tests {
 
         // A server that never runs out of full pages exhausts the ceiling. That
         // is an incomplete answer, so it is `unknown` — refusing here would
-        // turn a bounded walk into a false 86.
+        // turn a bounded walk into a false 77.
         clear_ci(&env);
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if !target.contains("job_token_scope") {
@@ -3389,7 +3394,7 @@ mod tests {
         ];
         for (label, status, body) in cases {
             let env = isolated_env();
-            env.set("CI_PROJECT_PATH", "acme/widget");
+            env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
             let credentials = job_token_credentials(&env);
             let rendered = body.to_string();
             let fake = FakeGitLab::start(move |_, target| {
@@ -3416,7 +3421,7 @@ mod tests {
 
         // A 5xx is a fault, not a capability answer.
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if target.contains("job_token_scope") {
@@ -3455,7 +3460,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_job_token_401_on_the_allowlist_stays_a_status_error() {
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = credentials_for(&env, CredentialShape::PushHalfOnly);
         assert!(
             credentials.push_is_job_token() && !credentials.api_is_job_token(),
@@ -3499,8 +3504,8 @@ mod tests {
         for publishing in [None, Some("acme?x=1/index")] {
             let env = isolated_env();
             match publishing {
-                Some(value) => env.set("CI_PROJECT_PATH", value),
-                None => env.remove("CI_PROJECT_PATH"),
+                Some(value) => env.set(&ocx_env::CI_PROJECT_PATH, value),
+                None => env.remove(&ocx_env::CI_PROJECT_PATH),
             }
             let credentials = job_token_credentials(&env);
             assert_eq!(
@@ -3538,10 +3543,10 @@ mod tests {
         }
     }
 
-    /// The preflight's 86 and the push classifier's 86 carry **different**
+    /// The preflight's 82 and the push classifier's 82 carry **different**
     /// remedies.
     ///
-    /// Both are `WriteCapabilityUnavailable` and both exit 86, so a test
+    /// Both are `WriteCapabilityUnavailable` and both exit 82, so a test
     /// asserting only the exit code cannot tell them apart — and a builder who
     /// reuses one string ships a wrong diagnosis for the other. The preflight
     /// read the field and saw `false`, so it names the setting; the classifier
@@ -3551,7 +3556,7 @@ mod tests {
     #[tokio::test]
     async fn the_preflight_remedy_is_not_the_push_classifier_remedy() {
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/index");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/index");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, _| {
             let mut body = pushable_project();
@@ -3574,7 +3579,7 @@ mod tests {
         );
         assert!(
             !remedy.contains("unreadable"),
-            "the preflight READ the field — the two-signal wording belongs to the classifier's 86: {remedy}"
+            "the preflight READ the field — the two-signal wording belongs to the classifier's 82: {remedy}"
         );
     }
 
@@ -3595,7 +3600,7 @@ mod tests {
         const SENTINEL: &str = "zzsentinelzz";
 
         let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if target.contains("job_token_scope") {
@@ -3640,7 +3645,7 @@ mod tests {
         // And the refusing shape, whose remedy is the other user-facing string
         // built on this path from this response.
         clear_ci(&env);
-        env.set("CI_PROJECT_PATH", "acme/widget");
+        env.set(&ocx_env::CI_PROJECT_PATH, "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
             if let Some(answer) = empty_groups_allowlist(target) {
@@ -3995,7 +4000,7 @@ mod tests {
     /// describes the API half, while the identity that pushes is the push half.
     /// `JobTokenPush` folds to `unknown` off the same absent body, which is what
     /// `git_stderr.rs` promotes on — so a push GitLab really does refuse still
-    /// lands as 86 naming the setting.
+    /// lands as 82 naming the setting.
     ///
     /// **Two cells, opposite verdicts, one predicate**, because the whole
     /// tolerance rests on a push following to render the deferred verdict. An
@@ -4006,7 +4011,7 @@ mod tests {
     /// out of `commit_files`, which classifies to nothing and exits 1.
     ///
     /// Reds on: refusing on an unreadable project under a git-transport job
-    /// token; recording that row as `passed` (86 would then never be promoted);
+    /// token; recording that row as `passed` (82 would then never be promoted);
     /// dropping the `transport == Git` conjunct (the `api` cell then reports
     /// `unknown` instead of refusing).
     ///
@@ -4022,7 +4027,7 @@ mod tests {
             ("the git transport, where the push decides", WriteTransport::Git, false),
         ] {
             let env = isolated_env();
-            env.set("CI_PROJECT_PATH", "acme/index");
+            env.set(&ocx_env::CI_PROJECT_PATH, "acme/index");
             let credentials = job_token_credentials(&env);
             assert!(
                 credentials.api_is_job_token(),
@@ -4071,7 +4076,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreadable_project_under_a_personal_token_is_still_denied() {
         let env = isolated_env();
-        env.remove("CI_JOB_TOKEN");
+        env.remove(ocx_env::CI_JOB_TOKEN.declaration());
         let credentials = ForgeCredentials::new(ForgeToken::new("glpat-notarealpat".to_string()));
         assert!(!credentials.api_is_job_token(), "the fixture must not be a job token");
         let fake = FakeGitLab::start(|_, _| (404, json!({ "message": "404 Project Not Found" }).to_string())).await;
@@ -4629,11 +4634,11 @@ mod tests {
     ///
     /// This is the DX-35 thread made observable without a workable `git`: the
     /// preflight sits between the "already open" return and the clone, so a
-    /// project whose job-token push setting reads `false` refuses at 86 with the
+    /// project whose job-token push setting reads `false` refuses at 82 with the
     /// clone never created.
     ///
     /// Reds on: deleting the transport arm (a `POST /merge_requests` appears);
-    /// on running the preflight after the clone (a git error replaces the 86);
+    /// on running the preflight after the clone (a git error replaces the 82);
     /// and on substituting `PushAccess::skipped_all()` for a real preflight (no
     /// refusal at all — the run reaches the clone).
     #[tokio::test]
@@ -4702,7 +4707,7 @@ mod tests {
     /// The fake answers `ci_push_repository_for_job_token_allowed` **true on the
     /// first project read and false afterwards** — a value ocx must never see,
     /// because the preflight it acts on already happened. Reusing the record
-    /// therefore ends at the clone; re-running it ends at 86.
+    /// therefore ends at the clone; re-running it ends at 82.
     ///
     /// The count is a second, independent witness now that
     /// `find_open_pull_request` addresses the project by path rather than
@@ -4773,7 +4778,7 @@ mod tests {
                 error,
                 ForgeError::GitUnavailable { .. } | ForgeError::GitCommandFailed { .. }
             ),
-            "the recorded preflight must carry the push; a re-read would refuse at 86, got {error:?}"
+            "the recorded preflight must carry the push; a re-read would refuse at 82, got {error:?}"
         );
         assert_eq!(
             project_reads.load(std::sync::atomic::Ordering::SeqCst),

@@ -3,7 +3,7 @@
 """`ocx package claim` acceptance tests — the REST half.
 
 Covers S-001…S-012 and S-036…S-038 of `plan_index_claim_command.md`: a claim
-opened over the forge API, the owner ladder and its refusals, `--out`, the
+opened over the forge API, the owner ladder and its refusals, `--output`, the
 sixteen-key report, the usage refusals, and the argv-boundary git gate. Every
 `--transport git` behaviour PAST the version probe is `test_transport_git.py`'s
 (WP-17); this module stops at "the run got past the probe".
@@ -19,7 +19,7 @@ them is green for the wrong reason or unreachable:
   `::test_unseeded_token_identity_exits_79` is the row that pins it rather than
   leaving it a copied incantation.
 * **Neither fake enforces authentication** — zero `401` responses in either
-  file. An unauthenticated `--out` run is answered normally on every route,
+  file. An unauthenticated `--output` run is answered normally on every route,
   which is what makes S-011 reachable at all, and it is why
   `::test_no_credential_exits_80` must assert zero forge calls: with the
   refusal deleted the run would *succeed*, not fail.
@@ -103,17 +103,18 @@ PULLS_ROUTE = f"/repos/{INDEX_OWNER}/{INDEX_REPO}/pulls"
 OWNER_LOGIN = "alice"
 OWNER_ID = 7
 
-#: C-060's seventeen keys, in declaration order. Asserted as a LIST: a membership
-#: check passes with a key missing and a `serde` reorder passes seventeen
-#: `.get()`s.
+#: C-060's keys a direct REST claim produces, in declaration order; the push
+#: credential and the fork it has none of are omitted. Asserted as a LIST: a
+#: membership check passes with a key missing and a `serde` reorder passes
+#: every `.get()`.
 REPORT_KEYS = [
+    "schema_version",
     "package",
     "name",
     "status",
     "forge",
     "transport",
     "credential_kind",
-    "push_credential_kind",
     "author",
     "author_identity_source",
     "owners",
@@ -121,14 +122,13 @@ REPORT_KEYS = [
     "branch",
     "pull_request_url",
     "pull_request_number",
-    "fork",
     "written_paths",
     "capability_checks",
 ]
 
 #: `CapabilityName::ALL`'s declaration order (S-036). The array is stable across
 #: runs, so a set or a length assertion is order-blind.
-CAPABILITY_NAMES = ["git-version", "push-access", "job-token-push", "job-token-allowlist"]
+CAPABILITY_NAMES = ["git_version", "push_access", "job_token_push", "job_token_allowlist"]
 
 
 def claim(
@@ -157,7 +157,7 @@ def claim(
     helper tidied into it would break the file-set rule for a shared module.
 
     `token=None` omits `OCX_ANNOUNCE_TOKEN` entirely, which is the exit-80 row
-    and the unauthenticated `--out` rows; passing a token that also appears
+    and the unauthenticated `--output` rows; passing a token that also appears
     under `CI_JOB_TOKEN` in `extra_env` is what makes `api_is_job_token` true
     without dragging the git transport in (hunt E-11).
 
@@ -297,7 +297,7 @@ def expected_root_bytes(
 def write_routes(fake_forge: FakeForge) -> list[tuple[str, str]]:
     """Every recorded request that was not a read.
 
-    `--out` must open nothing, and "no pull request was opened" alone does not
+    `--output` must open nothing, and "no pull request was opened" alone does not
     say that: a run that PATCHed a ref or POSTed a commit wrote to the forge
     just as much.
     """
@@ -412,7 +412,7 @@ def test_claim_json_report_key_set(
     `name` is asserted TWICE, once under `OCX_DEFAULT_REGISTRY=ocx.sh` and once
     under the harness's own registry: a single assertion cannot tell "reads the
     variable" from "hardcodes `ocx.sh`", and the harness default is not
-    `ocx.sh`. The second run is `--out` so it needs no second request.
+    `ocx.sh`. The second run is `--output` so it needs no second request.
 
     Mutations: move any field in `ClaimReport`; drop the
     `match transport { Api => None, .. }` gate in `forge_report`'s
@@ -424,15 +424,15 @@ def test_claim_json_report_key_set(
 
     report = claim_json(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}")
 
-    assert list(report) == REPORT_KEYS, "the sixteen keys, in declaration order"
+    assert list(report) == REPORT_KEYS, "the produced keys, in declaration order"
     assert report["package"] == PACKAGE
     assert report["name"] == f"{CANONICAL_REGISTRY}/{PACKAGE}"
     assert report["status"] == "updated"
     assert report["forge"] == "github"
     assert report["transport"] == "api"
     assert report["credential_kind"] == "token"
-    assert report["push_credential_kind"] is None, (
-        "`push_credential_kind` is null under the api transport (C-060); "
+    assert "push_credential_kind" not in report, (
+        "`push_credential_kind` is omitted under the api transport (C-060); "
         "`ForgeCredentials::resolve` populates the push half whenever an API "
         "credential exists, so a report rendered from it alone says 'token'"
     )
@@ -444,14 +444,14 @@ def test_claim_json_report_key_set(
         f"{fake_forge.base_url}/{INDEX_OWNER}/{INDEX_REPO}/pull/1"
     )
     assert report["pull_request_number"] == 1
-    assert report["fork"] is None
+    assert "fork" not in report
     assert report["written_paths"] == []
     assert [check["name"] for check in report["capability_checks"]] == CAPABILITY_NAMES
     assert report["capability_checks"] == [
-        {"name": "git-version", "status": "skipped", "detail": None},
-        {"name": "push-access", "status": "passed", "detail": None},
-        {"name": "job-token-push", "status": "skipped", "detail": None},
-        {"name": "job-token-allowlist", "status": "skipped", "detail": None},
+        {"name": "git_version", "status": "skipped"},
+        {"name": "push_access", "status": "passed"},
+        {"name": "job_token_push", "status": "skipped"},
+        {"name": "job_token_allowlist", "status": "skipped"},
     ]
 
     under_harness_registry = claim_json(
@@ -459,7 +459,7 @@ def test_claim_json_report_key_set(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         registry=ocx.registry,
     )
@@ -640,7 +640,7 @@ def test_a_second_claim_adds_the_callers_owner(
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
     target = {
         "direct": [],
-        "out": ["--out", str(tmp_path / "out")],
+        "out": ["--output", str(tmp_path / "out")],
         "fork": ["--fork", f"forkuser/{INDEX_REPO}"],
     }[mode]
 
@@ -704,7 +704,7 @@ def test_a_third_claim_naming_the_same_owner_is_unchanged(
     report = claim_json(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}")
 
     assert report["status"] == "unchanged"
-    assert report["pull_request_url"] is None, (
+    assert "pull_request_url" not in report, (
         f"nothing moved, so no request is opened: {report}"
     )
     assert write_routes(fake_forge) == [], (
@@ -967,13 +967,13 @@ def test_disclaimer_reaches_root_not_request_body(
     )
 
 
-# ── --out mode, and the refusals that must still hold under it ────────────
+# ── --output mode, and the refusals that must still hold under it ────────────
 
 
 def test_out_renders_and_opens_nothing(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """S-010: `--out` writes the root under the directory and opens no request.
+    """S-010: `--output` writes the root under the directory and opens no request.
 
     "Opens nothing" as an absence over an unconstrained request log is vacuous
     in BOTH directions — a run that never contacted the forge passes it, and so
@@ -982,20 +982,20 @@ def test_out_renders_and_opens_nothing(
     the owner lookup DID happen, and no write route was called.
 
     Plus `written_paths == ["p/acme/widget.json"]` (one relative path),
-    `pull_request_url is None`, `pull_request_number is None`, and
+    `pull_request_url` and `pull_request_number` absent, and
     `branch == CLAIM_BRANCH` by VALUE — the branch is always populated, so
     "not null" would pass in every state.
 
     The run carries a credential and still reports `credential_kind: "token"`
     (hunt E-18). This is the ONLY row in the module that occupies that cell:
     the other `credential_kind` assertions are the direct-transport run
-    (`::test_claim_json_report_key_set`) and the credential-LESS `--out` run
+    (`::test_claim_json_report_key_set`) and the credential-LESS `--output` run
     (`::test_out_without_credential_reports_push_access_skipped`, which owes
-    `"none"`). `--out` returns early inside `claim::claim`, which is exactly
-    where a "treat `--out` as unauthenticated" shortcut gets written — and it
+    `"none"`). `--output` returns early inside `claim::claim`, which is exactly
+    where a "treat `--output` as unauthenticated" shortcut gets written — and it
     would report `none` for a run that DID authenticate both of its reads.
 
-    Mutations: return before the C-050 read on the `--out` path — the positive
+    Mutations: return before the C-050 read on the `--output` path — the positive
     half reds; fall through to the pull-request open — the negative half reds;
     blank the credential kind whenever `written_paths` is non-empty — only the
     `credential_kind` line reds.
@@ -1005,7 +1005,7 @@ def test_out_renders_and_opens_nothing(
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
 
     report = claim_json(
-        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", "--out", str(out_dir)
+        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", "--output", str(out_dir)
     )
 
     assert report["written_paths"] == [ROOT_PATH]
@@ -1013,35 +1013,35 @@ def test_out_renders_and_opens_nothing(
         owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
         physical=f"oci://{ocx.registry}/{PACKAGE}",
     )
-    assert report["pull_request_url"] is None
-    assert report["pull_request_number"] is None
+    assert "pull_request_url" not in report
+    assert "pull_request_number" not in report
     assert report["branch"] == CLAIM_BRANCH
-    assert report["status"] == "updated", "a claim `--out` run always reports updated (C-060)"
+    assert report["status"] == "updated", "a claim `--output` run always reports updated (C-060)"
     assert report["credential_kind"] == "token", (
-        "`--out` with a credential present still reports the credential it "
+        "`--output` with a credential present still reports the credential it "
         "authenticated its reads with (hunt E-18); reporting `none` here would "
         "describe a run that did authenticate as unauthenticated"
     )
 
     assert fake_forge.request_count("GET", CONTENTS_ROUTE) >= 1, (
-        "the C-050 existing-root read still happens under `--out` (S-010)"
+        "the C-050 existing-root read still happens under `--output` (S-010)"
     )
     assert fake_forge.request_count("GET", f"/users/{OWNER_LOGIN}") >= 1, (
-        "the owner ladder still resolves against the forge under `--out`"
+        "the owner ladder still resolves against the forge under `--output`"
     )
     assert write_routes(fake_forge) == [], (
-        f"`--out` opened a write route: {write_routes(fake_forge)}"
+        f"`--output` opened a write route: {write_routes(fake_forge)}"
     )
 
 
 def test_out_without_credential_reports_push_access_skipped(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """S-011/S-036/C-069: `--out` with no credential proceeds unauthenticated
+    """S-011/S-036/C-069: `--output` with no credential proceeds unauthenticated
     and still reports a NON-EMPTY `capability_checks`.
 
     All four rows, as an ordered sequence, each `skipped` — not a lone
-    `push-access: skipped` lookup, which passes for a renderer that filters
+    `push_access: skipped` lookup, which passes for a renderer that filters
     `skipped` rows out and leaves the array empty. That "omit what does not
     apply" instinct is exactly what C-069 exists against.
 
@@ -1049,14 +1049,14 @@ def test_out_without_credential_reports_push_access_skipped(
     `--owner`, only `seed_token_identity()` (DX-74).
 
     Mutations: filter `status == "skipped"` in the capability-row renderer —
-    the array becomes `[]`; call `ensure_push_access` on the `--out` path —
+    the array becomes `[]`; call `ensure_push_access` on the `--output` path —
     GitHub answers `passed` and the row reds.
     """
     seed_index_base(fake_forge)
     fake_forge.seed_token_identity()
 
     report = claim_json(
-        ocx, fake_forge, "--out", str(tmp_path / "out"), token=None
+        ocx, fake_forge, "--output", str(tmp_path / "out"), token=None
     )
 
     assert report["credential_kind"] == "none"
@@ -1068,7 +1068,7 @@ def test_out_without_credential_reports_push_access_skipped(
 def test_out_writes_nothing_when_the_committed_root_disagrees(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """A refused `--out` claim leaves NOTHING under the output directory.
+    """A refused `--output` claim leaves NOTHING under the output directory.
 
     The property is the tree, not the code: a build that writes first and
     refuses second exits 65 too, and leaves a half-materialised directory the
@@ -1076,7 +1076,7 @@ def test_out_writes_nothing_when_the_committed_root_disagrees(
     (an already-committed root is a re-claim now), so it drives the surviving
     one — a `--repository` that disagrees with the committed pointer.
 
-    Mutation: move the repository comparison below the `--out` write — the exit
+    Mutation: move the repository comparison below the `--output` write — the exit
     code is unchanged and only the directory assertion reds.
     """
     out_dir = tmp_path / "out"
@@ -1092,7 +1092,7 @@ def test_out_writes_nothing_when_the_committed_root_disagrees(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(out_dir),
         repository=f"oci://{ocx.registry}/other",
     )
@@ -1105,7 +1105,7 @@ def test_out_writes_nothing_when_the_committed_root_disagrees(
 def test_out_writes_under_a_nested_directory(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """S-010 (hunt E-19): `--out` into a path whose parents do not exist.
+    """S-010 (hunt E-19): `--output` into a path whose parents do not exist.
 
     `write_out` creates parents; neither the creation nor its failure has any
     named test in the plan. The nested target is two levels below anything that
@@ -1118,7 +1118,7 @@ def test_out_writes_under_a_nested_directory(
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
 
     report = claim_json(
-        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", "--out", str(out_dir)
+        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", "--output", str(out_dir)
     )
 
     assert report["written_paths"] == [ROOT_PATH]
@@ -1130,7 +1130,7 @@ def test_out_writes_under_a_nested_directory(
 def test_out_write_failure_exits_74(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """S-010 (hunt E-19): a failed `--out` write is exit **74**.
+    """S-010 (hunt E-19): a failed `--output` write is exit **74**.
 
     74 is the only claim-owned exit code with no row anywhere in the plan, so
     the path ships unexercised without this one. The failure is produced by a
@@ -1155,7 +1155,7 @@ def test_out_write_failure_exits_74(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(blocker / "out"),
     )
 
@@ -1258,19 +1258,19 @@ def test_owner_canonical_login_overrides_supplied_case(
     )
 
 
-@pytest.mark.parametrize("half", ["resolved", "ci-environment"])
+@pytest.mark.parametrize("half", ["resolved", "ci_environment"])
 def test_owner_ci_environment(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path, half: str
 ) -> None:
     """C-048's CI clause, which has TWO outcomes and therefore two rows.
 
     (a) S-007: a CI pair with a REACHABLE users API — the API confirms and
-    overrides, so the source is **`resolved`**, not `ci-environment`. The
+    overrides, so the source is **`resolved`**, not `ci_environment`. The
     `GITHUB_ACTOR` spelling is deliberately mixed-case, so the row also shows
     the confirm step overriding what CI supplied.
     (b) S-008: a CI pair on GitLab with the users API out of reach under a job
     token — the list is carried unconfirmed and the source is
-    **`ci-environment`**, said identically by the report and the stderr line.
+    **`ci_environment`**, said identically by the report and the stderr line.
 
     They differ in which branch of `resolve_owners` answers and produce
     DIFFERENT wire words, which is the one thing S-008 exists to pin; a single
@@ -1278,10 +1278,10 @@ def test_owner_ci_environment(
     is reachable without the git transport by exporting the same value under
     `OCX_ANNOUNCE_TOKEN` and `CI_JOB_TOKEN` (hunt E-11).
 
-    Both halves run `--out`, which still performs the whole owner ladder
+    Both halves run `--output`, which still performs the whole owner ladder
     (S-010) while keeping the row REST-only. So two of S-008's three surfaces
     are asserted here and the third — the request body — is not, for the plain
-    reason that an `--out` run opens no request at all. The body's agreement
+    reason that an `--output` run opens no request at all. The body's agreement
     with the outcome is unit-covered by `claim.rs::
     owner_identity_source_is_rendered_once_for_body_and_outcome`, which holds
     the stronger property (ONE rendering of one value, so no second spelling
@@ -1294,7 +1294,7 @@ def test_owner_ci_environment(
     reds; return `Resolved` from the unconfirmed arm — (b) reds.
     """
     seed_index_base(fake_forge)
-    out = ["--out", str(tmp_path / "out")]
+    out = ["--output", str(tmp_path / "out")]
     if half == "resolved":
         fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
         report = claim_json(
@@ -1321,9 +1321,9 @@ def test_owner_ci_environment(
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["owner_identity_source"] == "ci-environment"
+    assert report["owner_identity_source"] == "ci_environment"
     assert report["owners"] == [{"login": OWNER_LOGIN, "id": OWNER_ID}]
-    assert "ci-environment" in result.stderr, (
+    assert "ci_environment" in result.stderr, (
         "C-072: the stderr line names the same source word as the report"
     )
 
@@ -1370,7 +1370,7 @@ def test_owner_asserted_needs_a_gitlab_job_token(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(tmp_path / "asserted"),
         forge="gitlab",
         extra_env=job_token_env,
@@ -1383,7 +1383,7 @@ def test_owner_asserted_needs_a_gitlab_job_token(
         fake_forge,
         "--owner",
         OWNER_LOGIN,
-        "--out",
+        "--output",
         str(tmp_path / "bare"),
         forge="gitlab",
         extra_env=job_token_env,
@@ -1400,7 +1400,7 @@ def test_owner_asserted_needs_a_gitlab_job_token(
         f"{OWNER_LOGIN}:{OWNER_ID}",
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(tmp_path / "duplicated"),
         forge="gitlab",
         extra_env=job_token_env,
@@ -1590,12 +1590,12 @@ def test_unseeded_token_identity_exits_79(
     """
     seed_index_base(fake_forge)
 
-    unseeded = claim(ocx, fake_forge, "--out", str(tmp_path / "unseeded"))
+    unseeded = claim(ocx, fake_forge, "--output", str(tmp_path / "unseeded"))
     assert unseeded.returncode == 79, unseeded.stderr
     assert "test-forge-bot" in unseeded.stderr
 
     fake_forge.seed_token_identity()
-    seeded = claim_json(ocx, fake_forge, "--out", str(tmp_path / "seeded"))
+    seeded = claim_json(ocx, fake_forge, "--output", str(tmp_path / "seeded"))
     assert seeded["owners"] == [{"login": "test-forge-bot", "id": 1001}]
     assert seeded["owner_identity_source"] == "resolved"
 
@@ -1621,7 +1621,7 @@ def test_no_acting_identity_64(
     seed_index_base(fake_forge)
     fake_forge.token_identity_absent = True
 
-    result = claim(ocx, fake_forge, "--out", str(tmp_path / "out"))
+    result = claim(ocx, fake_forge, "--output", str(tmp_path / "out"))
 
     assert result.returncode == 64, result.stderr
     assert "--owner" in result.stderr, (
@@ -1629,10 +1629,10 @@ def test_no_acting_identity_64(
     )
 
 
-def test_author_is_null_without_a_token_identity_or_a_ci_pair(
+def test_author_is_absent_without_a_token_identity_or_a_ci_pair(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """C-060: `author` is **null** when neither rung can answer, with an
+    """C-060: `author` is **absent** when neither rung can answer, with an
     explicit `--owner` still resolving normally.
 
     `resolve_author` is the token identity, else the CI pair, else `null` — the
@@ -1665,13 +1665,13 @@ def test_author_is_null_without_a_token_identity_or_a_ci_pair(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
     )
 
-    assert report["author"] is None, (
+    assert "author" not in report, (
         "with no identity behind the credential and no CI pair, `author` is "
-        "null rather than a stand-in the report's own doc warns is not an "
+        "omitted rather than a stand-in the report's own doc warns is not an "
         "attestation"
     )
     assert report["owners"] == [{"login": OWNER_LOGIN, "id": OWNER_ID}], (
@@ -1713,7 +1713,7 @@ def test_owner_line_is_logged_and_filterable(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(tmp_path / "default"),
     )
     quiet_run = claim(
@@ -1721,7 +1721,7 @@ def test_owner_line_is_logged_and_filterable(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        "--out",
+        "--output",
         str(tmp_path / "quiet"),
         log_level="error",
     )
@@ -1743,8 +1743,8 @@ def test_owner_line_is_logged_and_filterable(
 
 
 def test_no_credential_exits_80(ocx: OcxRunner, fake_forge: FakeForge) -> None:
-    """C-063: no `OCX_ANNOUNCE_TOKEN` and no `--out` is exit **80**, the message
-    naming both the variable and `--out`, with `fake_forge.requests == []`.
+    """C-063: no `OCX_ANNOUNCE_TOKEN` and no `--output` is exit **80**, the message
+    naming both the variable and `--output`, with `fake_forge.requests == []`.
 
     The zero-calls half is what names the contract. The refusal precedes forge
     construction — and with it deleted the run would reach the fake, which
@@ -1761,7 +1761,7 @@ def test_no_credential_exits_80(ocx: OcxRunner, fake_forge: FakeForge) -> None:
 
     assert result.returncode == 80, result.stderr
     assert "OCX_ANNOUNCE_TOKEN" in result.stderr
-    assert "--out" in result.stderr, "the message names the mode that works without one"
+    assert "--output" in result.stderr, "the message names the mode that works without one"
     assert fake_forge.requests == [], (
         f"the refusal precedes forge construction: {fake_forge.requests}"
     )
@@ -1982,10 +1982,10 @@ def test_transport_git_with_fork_64(
 def test_transport_git_with_out_64(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """S-020/C-058: `--transport git` with `--out` is **64**, message naming
+    """S-020/C-058: `--transport git` with `--output` is **64**, message naming
     BOTH flags. The sibling literal of the row above.
 
-    Mutation: drop `--out` from the message.
+    Mutation: drop `--output` from the message.
     """
     seed_index_base(fake_forge)
 
@@ -1994,12 +1994,12 @@ def test_transport_git_with_out_64(
         fake_forge,
         "--transport",
         "git",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         forge="gitlab",
     )
 
-    _assert_transport_git_conflict(result, "--out")
+    _assert_transport_git_conflict(result, "--output")
 
 
 # ── the argv-boundary git gate (C-065, C-075) ─────────────────────────────
@@ -2301,7 +2301,7 @@ def test_announce_unclaimed_package_exits_79(
         PACKAGE,
         "--tags",
         "1.0.0",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         check=False,
     )

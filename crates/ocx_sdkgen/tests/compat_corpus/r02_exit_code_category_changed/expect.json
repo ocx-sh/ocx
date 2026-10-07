@@ -1,0 +1,14 @@
+{
+  "kind": "errors",
+  "verdict": "break",
+  "change": "The `category` member of exit code 79 changes.",
+  "findings": [
+    {
+      "code": "R02",
+      "pointer": "/$defs/ExitCode/x-ocx-enum/3",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_config::env::keys;
 use ocx_config::refresh::RefreshPolicy;
 use ocx_exit::ExitCode as OcxExitCode;
 use ocx_oci::PackageRef;
@@ -25,7 +24,7 @@ pub(crate) enum SelfUpdate {
 ///
 /// Skipped under `--frozen`, like the toolchain drift check. Never fails the command: errors are logged at debug level.
 pub(crate) async fn check_for_update(ctx: &Context) -> Option<SelfUpdate> {
-    if let Some(reason) = background_check::skip_reason(keys::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
+    if let Some(reason) = background_check::skip_reason(&ocx_env::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
         log::debug!("Update check skipped: {reason}");
         return None;
     }
@@ -126,7 +125,7 @@ fn apply_line(
 pub(crate) enum HandoffAdvisory {
     /// The update landed and its setup completed.
     Reload,
-    /// The update landed, but a managed profile block with local edits was left alone (the child's exit 82).
+    /// The update landed, but a managed profile block with local edits was left alone (the child's exit 81).
     DirtyProfile,
     /// The update landed, but the new binary's setup did not finish.
     SetupIncomplete(String),
@@ -141,7 +140,7 @@ pub(crate) fn advisory_for(result: &SelfUpdateResult) -> Option<HandoffAdvisory>
         SelfUpdateResult::Installed {
             handoff: Some(failure), ..
         } => Some(match failure {
-            HandoffFailure::Exited(code) if *code == OcxExitCode::DirtyRcBlock as i32 => HandoffAdvisory::DirtyProfile,
+            HandoffFailure::Exited(code) if *code == OcxExitCode::PolicyBlocked as i32 => HandoffAdvisory::DirtyProfile,
             failure => HandoffAdvisory::SetupIncomplete(failure.to_string()),
         }),
         SelfUpdateResult::Pulled { handoff, .. } => Some(HandoffAdvisory::NotActivated(
@@ -267,7 +266,7 @@ mod tests {
         assert_eq!(advisory_for(&result), Some(HandoffAdvisory::Reload));
     }
 
-    /// Exit 82 is the child refusing to overwrite a user-edited profile — it
+    /// Exit 81 is the child refusing to overwrite a user-edited profile — it
     /// happens *after* the select, so the update stands and the advice names
     /// `--force` rather than a bare re-run.
     #[test]
@@ -275,9 +274,24 @@ mod tests {
         let result = SelfUpdateResult::Installed {
             from: None,
             to: "0.6.1".to_string(),
-            handoff: Some(HandoffFailure::Exited(OcxExitCode::DirtyRcBlock as i32)),
+            handoff: Some(HandoffFailure::Exited(OcxExitCode::PolicyBlocked as i32)),
         };
         assert_eq!(advisory_for(&result), Some(HandoffAdvisory::DirtyProfile));
+    }
+
+    /// 81 also means offline/frozen policy blocks, which fire before the select:
+    /// only the `Installed` verdict makes it a dirty profile.
+    #[test]
+    fn a_pre_select_policy_block_is_not_a_dirty_profile() {
+        let result = SelfUpdateResult::Pulled {
+            from: None,
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::Exited(OcxExitCode::PolicyBlocked as i32)),
+        };
+        match advisory_for(&result) {
+            Some(HandoffAdvisory::NotActivated(_)) => {}
+            other => panic!("expected NotActivated; got {other:?}"),
+        }
     }
 
     /// Any other non-zero child on a completed swap names how it ended and

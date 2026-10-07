@@ -432,7 +432,7 @@ def test_root_package_entrypoints_appear_in_self_env(
     ocx.plain("package", "install", "--select", pkg.short)
 
     env_result = ocx.json("package", "env", pkg.short)
-    path_entries = [e["value"] for e in env_result["entries"] if e["key"] == "PATH"]
+    path_entries = [e["value"] for e in env_result["items"] if e["key"] == "PATH"]
 
     # At least one PATH entry must contain the entrypoints/ subdirectory.
     assert any("entrypoints" in v for v in path_entries), (
@@ -481,7 +481,7 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     ocx.plain("package", "install", "--select", pkg.short)
 
     env_result = ocx.json("package", "env", pkg.short)
-    path_entries = [(i, e["value"]) for i, e in enumerate(env_result["entries"]) if e["key"] == "PATH"]
+    path_entries = [(i, e["value"]) for i, e in enumerate(env_result["items"]) if e["key"] == "PATH"]
     assert path_entries, f"expected PATH entries in env output: {env_result}"
 
     # On Windows the bin segment uses backslashes; match either separator.
@@ -1080,7 +1080,7 @@ def test_self_env_token_in_baked_args_is_refused_at_runtime(
     )
     ocx.plain("package", "install", "--select", pkg.short)
 
-    package_root = Path(ocx.json("package", "which", pkg.short)[pkg.short]["path"])
+    package_root = Path(ocx.json("package", "which", pkg.short)["paths"][pkg.short]["path"])
     metadata_path = package_root / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
     metadata["entrypoints"] = {"hello": {"args": ["${self.env.TOOL_HOME}"]}}

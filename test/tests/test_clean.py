@@ -14,7 +14,7 @@ def test_clean_removes_unreferenced_objects(
 ):
     """ocx install <pkg>; ocx uninstall <pkg>; ocx clean"""
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
     candidate = Path(result[pkg.short]["path"])
     content = candidate.resolve()
     assert_dir_exists(content)
@@ -67,7 +67,7 @@ def test_clean_preserves_referenced_objects(
 ):
     """ocx install <pkg>; ocx clean"""
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
     content = Path(result[pkg.short]["path"]).resolve().parent
 
     ocx.plain("clean")
@@ -100,7 +100,7 @@ def test_clean_preserves_config_blob_of_installed_package(
     # arbitrary one the moment the fixture gains a dependency — and since a
     # dependency's config blob is linked too, the wrong pick would still find a
     # blob on disk and pass, silently asserting about a different package.
-    installs = ocx.json("package", "install", "--select", pkg.short)
+    installs = ocx.json("package", "install", "--select", pkg.short)["packages"]
     assert len(installs) == 1, f"one identifier in, one entry out: {installs}"
 
     # `path` is the candidate symlink, and both `current` and `candidates/{tag}`

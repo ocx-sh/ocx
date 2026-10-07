@@ -1,132 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_project` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_project` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_project::ProjectErrorKind;
-use ocx_project::registry::ProjectRegistryErrorKind;
 
 use ocx_package_manager::activation::SessionError;
-use ocx_project::LockCurrency;
-use ocx_project::error::Error as ProjectError;
-use ocx_project::registry::error::Error as ProjectRegistryError;
-
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for SessionError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Lock(currency) => currency.classify(),
-            Self::Library(_) | Self::ListSeparator(_) => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for ProjectError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Project(e) => match &e.kind {
-                ProjectErrorKind::Io(_) => ExitCode::IoError,
-                ProjectErrorKind::TomlParse(_)
-                | ProjectErrorKind::TomlSerialize(_)
-                | ProjectErrorKind::ReservedGroupName { .. }
-                | ProjectErrorKind::InvalidToolchainNameCharset { .. }
-                | ProjectErrorKind::ShellSectionInProject
-                | ProjectErrorKind::UnsupportedDeclarationHashVersion { .. }
-                | ProjectErrorKind::FileTooLarge { .. }
-                | ProjectErrorKind::ToolValueMissingRegistry { .. }
-                | ProjectErrorKind::ToolValueInvalid { .. }
-                | ProjectErrorKind::PackageKeyMissingRegistry { .. }
-                | ProjectErrorKind::PackageKeyInvalid { .. }
-                | ProjectErrorKind::GroupHoldsDirectBinding { .. }
-                | ProjectErrorKind::UnknownGroupSection { .. }
-                | ProjectErrorKind::EnvReservedKey { .. }
-                | ProjectErrorKind::EnvInvalidKey { .. }
-                | ProjectErrorKind::EnvUnknownModifier { .. }
-                | ProjectErrorKind::EnvInvalidValue { .. }
-                | ProjectErrorKind::EnvUnknownValueField { .. }
-                | ProjectErrorKind::EnvSeparatorOnNonList { .. }
-                | ProjectErrorKind::EnvInvalidSeparator { .. }
-                | ProjectErrorKind::EnvSeparatorEdgedValue { .. }
-                | ProjectErrorKind::LockRepositoryNotBare { .. }
-                | ProjectErrorKind::ManifestEditParse(_) => ExitCode::ConfigError,
-                ProjectErrorKind::EnvPathSeparatorInValue { .. } => ExitCode::DataError,
-                ProjectErrorKind::ManifestEditDiverged => ExitCode::Failure,
-                ProjectErrorKind::EmptyGroupFilter
-                | ProjectErrorKind::UnknownGroup { .. }
-                | ProjectErrorKind::DuplicateToolAcrossSelectedGroups { .. }
-                | ProjectErrorKind::BindingAmbiguous { .. } => ExitCode::UsageError,
-                ProjectErrorKind::Locked => ExitCode::TempFail,
-                ProjectErrorKind::TagNotFound { .. } => ExitCode::NotFound,
-                ProjectErrorKind::AuthFailure { .. } => ExitCode::AuthError,
-                // Defer only to a transient `ClientError`; any other typed cause would re-code this 69 (e.g. to 65).
-                ProjectErrorKind::RegistryUnreachable { source, .. } => source
-                    .downcast_ref::<ocx_oci::client::error::ClientError>()
-                    .filter(|client| {
-                        // Braces stay: `classify_baseline_7adaea62.json` pins this closure's tokens.
-                        matches!(client, ocx_oci::client::error::ClientError::RegistryTransient(_))
-                    })
-                    .and_then(ClassifyExitCode::classify)
-                    .unwrap_or(ExitCode::Unavailable),
-                ProjectErrorKind::ResolveTimeout { .. } => ExitCode::TempFail,
-                ProjectErrorKind::LockMissing => ExitCode::ConfigError,
-                ProjectErrorKind::UnsupportedLockVersion { .. } => ExitCode::ConfigError,
-                ProjectErrorKind::NoHostLeaf { .. } => ExitCode::ConfigError,
-                ProjectErrorKind::AmbiguousHostLeaf { .. } => ExitCode::DataError,
-                ProjectErrorKind::ToolNotInConfig { .. } => ExitCode::NotFound,
-                ProjectErrorKind::BindingAlreadyExists { .. } => ExitCode::UsageError,
-                ProjectErrorKind::BindingNotFound { .. } => ExitCode::NotFound,
-                ProjectErrorKind::ConfigAlreadyExists { .. } => ExitCode::UsageError,
-                ProjectErrorKind::InvalidGroupName { .. } => ExitCode::UsageError,
-                ProjectErrorKind::InvalidBindingName { .. } => ExitCode::UsageError,
-                // Must match `LockCurrency::Stale` (65), or scripts see two codes for one condition.
-                ProjectErrorKind::LockOutOfSync { .. } => ExitCode::DataError,
-                ProjectErrorKind::DuplicatePlatformKey { .. } => ExitCode::DataError,
-                ProjectErrorKind::NoncanonicalPlatformKey { .. } => ExitCode::DataError,
-                ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked,
-            },
-            // Keep `return e.classify()`: `classify_baseline_7adaea62.json` pins these tokens exactly.
-            Self::OciClient(e) => return e.classify(),
-            Self::OciIndex(e) => return e.classify(),
-            Self::Config(e) => return e.classify(),
-            Self::InternalFile(_, _) => ExitCode::IoError,
-            Self::UpdateSectionInProject(_) => ExitCode::ConfigError,
-        })
-    }
-}
-
-impl ClassifyExitCode for LockCurrency {
-    fn classify(&self) -> Option<ExitCode> {
-        use ExitCode;
-        match self {
-            Self::Missing { .. } => Some(ExitCode::ConfigError),
-            Self::Stale { .. } => Some(ExitCode::DataError),
-        }
-    }
-}
-
-impl ClassifyExitCode for ProjectRegistryError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Registry(e) => match &e.kind {
-                ProjectRegistryErrorKind::Io(_) => ExitCode::IoError,
-            },
-        })
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, SessionError);
-    downcast_arm!(cause, ProjectError);
-    None
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    use ocx_exit::{ClassifyExitCode, ExitCode};
 
     use ocx_project::activate::ActivateMode;
 
@@ -147,7 +33,7 @@ bar = "ocx.sh/bar:1"
 "#;
         let err = ProjectConfig::from_toml_str(toml_str).expect_err("direct binding under [group.ci] must reject");
 
-        let code = <ocx_project::Error as ClassifyExitCode>::classify(&err);
+        let code = ClassifyExitCode::classify(&err);
         assert_eq!(
             code,
             Some(ExitCode::ConfigError),
@@ -173,7 +59,7 @@ bar = "ocx.sh/bar:1"
 
     /// A checked-in `ocx.toml` cannot declare the trust-sensitive `OCX_*`
     /// variables — not in `[env]`, not in a group's — because both sit in the
-    /// namespace `ocx_util::env::is_reserved_ocx_key` reserves.
+    /// namespace `ocx_env::is_reserved_ocx_key` reserves.
     ///
     /// `OCX_NO_VERIFY` turns off the policy-gated auto-verify on install/pull
     /// and is forwarded to every child ocx; `OCX_IDENTITY_TOKEN` is a bearer
@@ -181,7 +67,7 @@ bar = "ocx.sh/bar:1"
     /// repository silently disable signature verification for everyone who runs
     /// a tool out of it.
     ///
-    /// Built from the `keys::` constants rather than string literals: the gate
+    /// Built from the registry's declarations rather than string literals: the gate
     /// matches on the `OCX_` prefix, so respelling either variable outside that
     /// prefix moves it out of the gate's reach without touching the gate. That
     /// is the failure this test exists to catch, alongside the gate itself
@@ -189,8 +75,8 @@ bar = "ocx.sh/bar:1"
     #[test]
     fn project_env_cannot_declare_trust_sensitive_ocx_keys() {
         for key in [
-            ocx_config::env::keys::OCX_NO_VERIFY,
-            ocx_config::env::keys::OCX_IDENTITY_TOKEN,
+            ocx_env::OCX_NO_VERIFY.name,
+            ocx_env::OCX_IDENTITY_TOKEN.declaration().name,
         ] {
             for scope in ["env", "group.ci.env"] {
                 let toml_str = format!("[{scope}]\n{key} = \"1\"\n");
@@ -198,7 +84,7 @@ bar = "ocx.sh/bar:1"
                     panic!("[{scope}] must reject the reserved key {key}");
                 };
                 assert_eq!(
-                    <ocx_project::Error as ClassifyExitCode>::classify(&err),
+                    ClassifyExitCode::classify(&err),
                     Some(ExitCode::ConfigError),
                     "a reserved-key declaration is a config fault (exit 78)"
                 );
@@ -234,7 +120,7 @@ bar = "ocx.sh/bar:1"
         let ocx_project::Error::Project(pe) = err else {
             panic!("expected Error::Project");
         };
-        (pe, code)
+        (*pe, code)
     }
 
     /// C-012 (E49): the global `$OCX_HOME/ocx.toml` is read by the same
@@ -444,6 +330,55 @@ bar = "ocx.sh/bar:1"
 
     // ── moved from ocx_project::error with the impl ──
 
+    /// Reds on: a project slug, delegated or chosen by the cause's type, naming another cause than
+    /// the exit code does.
+    #[test]
+    fn project_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+
+        let project =
+            |kind| ocx_project::Error::from(ocx_project::ProjectError::new(PathBuf::from("/tmp/ocx.toml"), kind));
+        assert_detail(
+            &project(ProjectErrorKind::ManifestEditDiverged),
+            "project_manifest_edit_diverged",
+        );
+        let unreachable = |source: Box<dyn std::error::Error + Send + Sync>| {
+            project(ProjectErrorKind::RegistryUnreachable {
+                identifier: Box::new(
+                    ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("a valid reference"),
+                ),
+                source,
+            })
+        };
+        let transient =
+            ocx_oci::client::error::ClientError::RegistryTransient(Box::new(std::io::Error::other("reset")));
+        assert_detail(&unreachable(Box::new(transient)), "registry_transient");
+        assert_detail(
+            &unreachable(Box::new(std::io::Error::other("refused"))),
+            "registry_unreachable",
+        );
+
+        let stale = || ocx_project::LockCurrency::Stale {
+            lock_path: PathBuf::from("/tmp/ocx.lock"),
+        };
+        // No ladder rung downcasts `LockCurrency`, so it is checked directly; the wrappers below go through the ladder.
+        let missing = || ocx_project::LockCurrency::Missing {
+            path: PathBuf::from("/tmp/ocx.lock"),
+        };
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&stale())),
+            "lock_stale"
+        );
+        assert_eq!(ClassifyExitCode::classify(&stale()), Some(ExitCode::DataError));
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&missing())),
+            "lock_missing"
+        );
+        assert_eq!(ClassifyExitCode::classify(&missing()), Some(ExitCode::ConfigError));
+        assert_detail(&SessionError::Lock(stale()), "lock_stale");
+        assert_detail(&SessionError::Lock(missing()), "lock_missing");
+    }
+
     /// `ManifestEditDiverged` (the format-preserving writer produced a
     /// document that no longer describes the staged configuration) is a
     /// fail-closed writer-side guard, not something the user can fix by
@@ -451,7 +386,7 @@ bar = "ocx.sh/bar:1"
     /// `ConfigError` (78) class above.
     #[test]
     fn manifest_edit_diverged_classifies_as_failure() {
-        let err = ocx_project::Error::Project(ocx_project::ProjectError::new(
+        let err = ocx_project::Error::from(ocx_project::ProjectError::new(
             PathBuf::from("/tmp/ocx.toml"),
             ProjectErrorKind::ManifestEditDiverged,
         ));
@@ -464,7 +399,7 @@ bar = "ocx.sh/bar:1"
     /// (78), same class as a `TomlParse` failure.
     #[test]
     fn manifest_edit_parse_classifies_as_config_error() {
-        let err = ocx_project::Error::Project(ocx_project::ProjectError::new(
+        let err = ocx_project::Error::from(ocx_project::ProjectError::new(
             PathBuf::from("/tmp/ocx.toml"),
             ProjectErrorKind::ManifestEditParse("[tools\n".parse::<toml_edit::DocumentMut>().unwrap_err()),
         ));

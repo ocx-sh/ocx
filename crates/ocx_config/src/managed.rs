@@ -115,8 +115,13 @@ fn sources_canonically_eq(left: &str, right: &str) -> bool {
 }
 
 /// Errors raised while resolving [`ManagedConfig`] or parsing its fields.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    ConfigError,
+    slug = "managed_config_invalid",
+    summary = "The managed-config settings are invalid, or a system lock refuses the change"
+)]
 pub enum ManagedConfigError {
     /// The `source` field is present but empty — a no-op managed tier that
     /// would silently skip the whole feature.

@@ -22,6 +22,7 @@ use crate::sign::state::SigningStatePaths;
 use crate::simplesigning::SimpleSigningClaim;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{Client, OciTransport};
+use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
 use ocx_oci::referrer::ReferrerManifest;
 use ocx_oci::referrer::manifest::{bundle_annotations, bundle_created, bundle_now};
 use ocx_oci::referrer::media_types::{
@@ -30,12 +31,6 @@ use ocx_oci::referrer::media_types::{
 use ocx_oci::resolve_target::{ResolveTargetError, ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
 use ocx_oci::{Descriptor, Digest, OCI_IMAGE_MEDIA_TYPE, PackageRef, Platform, native};
-
-/// Manifest media types accepted when fetching the per-platform target.
-const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
-    OCI_IMAGE_MEDIA_TYPE,
-    "application/vnd.docker.distribution.manifest.v2+json",
-];
 
 /// A caller-supplied subject resolution, shared by the sign and attest pipelines.
 ///
@@ -257,7 +252,7 @@ impl SignPipeline {
         // Digest-only: a `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, served_digest) = transport
-            .pull_manifest_raw(&subject_ref, ACCEPTED_MANIFEST_TYPES)
+            .pull_manifest_raw(&subject_ref, SIGNABLE_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
         // Bind the mirror-served bytes to the resolved digest, or a wrong `size` yields a signature strict verifiers reject.
@@ -1337,7 +1332,7 @@ mod tests {
     }
 
     /// **C-009, in the positive.** A registry with no Referrers API used to
-    /// refuse the whole sign with exit 84; it now gets the OCI tag-schema
+    /// refuse the whole sign with exit 82; it now gets the OCI tag-schema
     /// fallback index written alongside the referrer manifest.
     ///
     /// Loop A shipped `append_referrer_fallback_index` with no production

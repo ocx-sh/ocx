@@ -13,16 +13,16 @@ Spec sources:
   write contract).
 
 These tests are SPECIFICATION mode. The implementation must add
-fault-injection env-var hooks (``OCX_TEST_FAULT``) so the kill / fail
+fault-injection env-var hooks (``__OCX_TESTING_FAULT``) so the kill / fail
 points can be exercised deterministically; until those exist, the
 relevant tests are ``@pytest.mark.xfail``.
 
 Implementation hooks needed (flagged for the Implement phase):
-- ``OCX_TEST_FAULT=after_lock_write`` — abort after ``ocx.lock`` is
+- ``__OCX_TESTING_FAULT=after_lock_write`` — abort after ``ocx.lock`` is
   renamed but before ``ocx.toml`` is rewritten.
-- ``OCX_TEST_FAULT=before_lock_rename`` — abort after the lock tempfile
+- ``__OCX_TESTING_FAULT=before_lock_rename`` — abort after the lock tempfile
   is staged but before the rename.
-- ``OCX_TEST_FAULT=registry_unavailable`` — short-circuit the resolver
+- ``__OCX_TESTING_FAULT=registry_unavailable`` — short-circuit the resolver
   to return ``Unavailable`` without contacting the registry.
 """
 from __future__ import annotations
@@ -137,7 +137,7 @@ def test_kill_mid_add_leaves_recoverable_state(
         project,
         "add",
         fq_a,
-        extra_env={"OCX_TEST_FAULT": "pause_before_manifest_write"},
+        extra_env={"__OCX_TESTING_FAULT": "pause_before_manifest_write"},
     )
     # Give the process time to write ocx.lock and reach the pause.
     time.sleep(2.0)
@@ -215,7 +215,7 @@ def test_kill_mid_add_leaves_ocx_toml_intact(
         project,
         "add",
         f"{ocx.registry}/{repo}:1.0.0",
-        extra_env={"OCX_TEST_FAULT": "pause_before_manifest_write"},
+        extra_env={"__OCX_TESTING_FAULT": "pause_before_manifest_write"},
     )
     time.sleep(2.0)
     proc.send_signal(signal.SIGKILL)
@@ -266,7 +266,7 @@ def test_partial_lock_write_rolled_back(
         project,
         "add",
         fq,
-        extra_env={"OCX_TEST_FAULT": "after_lock_write"},
+        extra_env={"__OCX_TESTING_FAULT": "after_lock_write"},
     )
     assert failed.returncode != EXIT_SUCCESS, (
         f"fault-injected add must fail; got rc={failed.returncode}, "

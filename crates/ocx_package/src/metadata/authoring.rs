@@ -139,8 +139,13 @@ impl AuthoringMetadata {
 }
 
 /// Errors projecting authoring metadata to the published form.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    DataError,
+    slug = "package_authoring_invalid",
+    summary = "Package metadata cannot be authored as given"
+)]
 pub enum AuthoringError {
     #[error(
         "dependency '{identifier}' is not pinned to a manifest digest; run `ocx package create --platform <PLATFORM>` to resolve it"

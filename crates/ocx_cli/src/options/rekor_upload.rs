@@ -54,7 +54,6 @@ impl RekorUploadOpt {
 
 #[cfg(test)]
 mod tests {
-    use crate::exit::ClassifyErrorKind as _;
     use clap::Parser as _;
 
     use super::*;
@@ -149,7 +148,10 @@ mod tests {
         let error = parse(&["--no-rekor-upload"])
             .enabled(false, None)
             .expect_err("keyless must refuse to skip the log");
-        assert_eq!(error.kind_detail(), "rekor_upload_required_for_keyless");
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&error)),
+            "rekor_upload_required_for_keyless"
+        );
 
         let message = error.to_string();
         for fragment in ["--no-rekor-upload", "--key", "ten minutes"] {

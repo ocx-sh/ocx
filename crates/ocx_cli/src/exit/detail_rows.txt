@@ -1,0 +1,532 @@
+activation_failed	Failure	Shell activation failed with an unclassified cause
+agnostic_platform_libc_claim	DataError	A libc-agnostic platform ships a binary that needs a libc
+ambiguous_extra_ca_certs	ConfigError	Both extra_ca_certs and extra_ca_certs_pem are declared
+ambiguous_extra_ca_certs	ConfigError	Both extra_ca_certs and extra_ca_certs_pem are declared
+ambiguous_host_leaf	DataError	ocx.lock pins several platforms this host could run, none preferred
+ambiguous_trust_root	ConfigError	The payload declares both trusted_root and trusted_root_json
+announce_failed	Failure	Announcing failed with an unclassified cause
+any_pin_not_advertised_as_any	DataError	A dependency pinned as `any` is not published for any platform
+any_pin_provenance_unavailable	Failure	Verifying an `any` pin's provenance failed with an unclassified cause
+archive_entry_escape	DataError	An archive entry path escapes the extraction root
+archive_extraction_cap_exceeded	DataError	Extraction exceeded the decompressed-size cap
+archive_gnu_sparse_unsupported	DataError	An archive entry uses the unsupported GNU sparse format
+archive_hard_link_escape	DataError	An archive hard link does not resolve inside the extraction root
+archive_internal	Failure	An internal archive operation failed
+archive_io	IoError	Reading or writing an archive entry failed
+archive_symlink_escape	DataError	An archive symlink points outside the extraction root
+archive_tar_invalid	DataError	The tar stream is malformed
+archive_unsupported_format	DataError	The archive format is not supported
+archive_zip_invalid	DataError	The zip archive is malformed
+attestation_budget_exhausted	DataError	The attestations together exceed the total size limit
+attestation_not_found	NotFound	No verified attestation matches the requested predicate type
+attestation_payload_too_large	DataError	The attestation statement exceeds its size limit
+attestation_too_large	DataError	The attestation envelope exceeds its size limit
+auth_env_missing	ConfigError	An environment variable the authentication type needs is not set
+bin_scan_failed	Failure	Scanning for interface binaries failed with an unclassified cause
+bin_scan_unsupported_host	DataError	This host cannot scan for the target platform's executables
+binding_already_exists	UsageError	A binding with this name already exists
+binding_ambiguous	UsageError	A binding exists in several groups and no group was named
+binding_not_declared	NotFound	The named binding is not declared in ocx.toml
+binding_not_found	NotFound	The named binding does not exist in ocx.toml
+binding_value_invalid	ConfigError	A binding's value is not a valid identifier
+binding_value_missing_registry	ConfigError	A binding's identifier names no registry
+blob_not_found	NotFound	The registry has no such blob
+blob_not_found	NotFound	The registry has no such blob
+bot_identity	UsageError	The acting identity is a bot account
+builder_mismatch	DataError	The provenance builder does not match the pinned builder
+bundle_parse_failed	DataError	The signature bundle could not be parsed
+candidate_limit_exhausted	DataError	The examination cap was reached with candidates unexamined and none passing
+catalog_document_absent	Unavailable	The index source serves no catalog document
+cert_chain_invalid	DataError	The certificate chain does not verify against the trust root
+certificate_validity_window	DataError	The log entry time falls outside the certificate validity window
+ci_export_write	IoError	Writing the CI export stream failed
+ci_file_write	IoError	Writing a CI export file failed
+ci_missing_env	ConfigError	A CI environment variable the export needs is not set
+client_internal	Failure	A registry operation failed with an unclassified cause
+client_io	IoError	Reading or writing a local file during a registry operation failed
+client_serialization	DataError	A registry document could not be serialized or parsed
+command_not_executable	DataError	The command resolves to a file that is not executable
+command_not_found	DataError	The command does not resolve in the composed environment
+command_trampoline_refused	DataError	The command resolves to a toolchain launcher that would re-enter itself
+committed_tags_dropped	DataError	The announce would drop tags the index already committed
+compression_create	IoError	Creating compressed output failed
+compression_decode_only	DataError	The format can be extracted but not written
+compression_engine_init	Failure	The compression engine failed to initialize
+compression_io	IoError	A compression stream failed to read or write
+compression_open	IoError	Opening a file for decompression failed
+compression_unknown_format	DataError	The compression algorithm could not be determined
+config_edit_io	IoError	Reading or writing the config file being edited failed
+config_edit_locked	TempFail	Another process holds the lock on the config file being edited
+config_edit_malformed	IoError	The config file being edited has a shape the edit cannot apply to
+config_edit_parse	IoError	The config file being edited does not parse as TOML
+config_edit_too_large	ConfigError	The config file being edited exceeds the allowed size
+config_file_not_found	NotFound	An explicitly named config or project file does not exist
+config_file_too_large	ConfigError	A config file exceeds the allowed size
+config_io	IoError	Reading a config file failed
+config_parse	ConfigError	A config file does not parse
+credential_helper_failed	AuthError	The credential helper failed to supply credentials
+credential_helper_invalid_json	DataError	The credential helper answered with invalid JSON
+credential_helper_not_on_path	ConfigError	The configured credential helper is not on PATH
+credential_helper_timeout	TempFail	The credential helper did not answer in time
+credential_helper_unsafe_path	ConfigError	The credential helper resolves to an unsafe path
+credential_store_write	IoError	Writing the credential store failed
+declared_binary_not_executable	DataError	A declared binary is not executable
+decompression_cap_exceeded	DataError	A layer decompressed past the size cap
+delete_needs_tag	UsageError	A tag delete names no single tag, or also names a digest
+dependency_ambiguous_platform	DataError	Several of a dependency's platforms match the target equally
+dependency_conflict	DataError	Dependencies pin conflicting versions of one repository
+dependency_declaration_invalid	DataError	A package declares its dependencies invalidly
+dependency_manifest_not_found	NotFound	A pinned dependency manifest is not in the registry
+dependency_no_compatible_platform	DataError	A dependency is published for no platform compatible with the target
+dependency_not_found	NotFound	A dependency is not in the selected index
+dependency_pin_resolution_failed	Failure	Resolving a dependency pin failed with an unclassified cause
+dependency_pin_verification_failed	Failure	Verifying a dependency pin failed with an unclassified cause
+dependency_pinned_to_index	DataError	A dependency is pinned to an image index rather than a platform manifest
+dependency_routing_failed	Failure	Routing a dependency through the index failed with an unclassified cause
+dependency_setup_failed	Failure	Setting up a dependency failed with an unclassified cause
+desc_disappeared	DataError	The package description vanished between two reads
+destination_check_io	IoError	Inspecting the destination directory failed
+destination_not_a_directory	UsageError	The destination exists and is not a directory
+destination_not_empty	UsageError	The destination directory is not empty
+destination_through_symlink	UsageError	A destination path resolves through a symlink
+digest_mismatch	DataError	Downloaded content does not hash to its expected digest
+digest_missing	DataError	The identifier carries no digest after resolution
+direct_digest_pin_in_any_target	DataError	An `any` package pins a dependency by a platform-specific digest
+dispatch_object_digest_mismatch	DataError	A stored dispatch object does not hash to its claimed digest
+docker_credential_retrieval	AuthError	Reading Docker credentials failed
+duplicate_binding_across_groups	UsageError	A binding is defined in more than one selected group
+duplicate_owner	UsageError	The same owner was supplied twice
+duplicate_platform_key	DataError	ocx.lock lists the same platform twice for one binding
+empty_group_filter	UsageError	A group filter names an empty group
+empty_push_set	DataError	A push names no target platform
+endpoint_unresolvable	Unavailable	An endpoint host does not resolve
+entrypoint_collision	DataError	Two packages declare the same entrypoint name
+extra_ca_certs_invalid	DataError	The extra CA bundle the payload names is not usable
+extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
+extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
+extra_ca_certs_pem_invalid	ConfigError	The extra CA bundle inlined in the payload is not usable
+extra_ca_certs_read_failed	IoError	Reading the extra CA bundle the payload names failed
+extra_ca_file_invalid	DataError	The extra CA bundle file holds no usable certificate
+extra_ca_file_too_large	IoError	The extra CA bundle file exceeds the allowed size
+extra_ca_unreadable	IoError	The extra CA bundle cannot be read
+extra_ca_value_invalid	ConfigError	The configured extra CA bundle value holds no usable certificate
+extra_ca_value_too_large	ConfigError	The configured extra CA bundle value exceeds the allowed size
+feature_mismatch	DataError	The package needs a platform feature this host lacks
+file_io	IoError	Reading or writing an internal file failed
+forbidden_registry_target	ConfigError	The rewritten registry resolves into a forbidden address range
+forbidden_registry_target	ConfigError	The rewritten registry resolves into a forbidden address range
+forge_auth_failed	AuthError	The forge rejected the request's credentials
+forge_capability_unavailable	Unsupported	The forge or project lacks a capability the transport needs
+forge_client_build	Failure	The forge HTTP client could not be built
+forge_decode	Failure	A forge response could not be decoded
+forge_failed	Failure	A forge operation failed with an unclassified cause
+forge_kind_unknown	UsageError	The forge kind of a self-hosted host is unknown; name it explicitly
+forge_missing_field	Failure	A forge response lacks a required field
+forge_non_fast_forward	TempFail	The push was not a fast-forward; another writer moved the branch
+forge_publisher_not_allowlisted	PermissionDenied	The publishing project is not on the index project's job-token allowlist
+forge_push_access_denied	AuthError	The credential may not push to the repository
+forge_push_refused	PermissionDenied	The forge refused the push
+forge_request_encode	Failure	A forge request body could not be encoded
+forge_required	Failure	No forge was supplied to read the committed index root through
+forge_required	Failure	No forge was supplied to read the committed index root through
+forge_stale_lease	TempFail	The branch moved since it was read
+forge_status	Failure	The forge answered with an unexpected HTTP status
+forge_transient	TempFail	The forge answered with a status a retry may clear
+forge_transport_failed	Unavailable	The forge could not be reached
+forge_transport_operation_unsupported	UsageError	The selected transport does not support this operation
+forge_transport_transient	TempFail	Reaching the forge failed in a way a retry may clear
+forge_transport_unsupported	UsageError	The forge does not support the selected transport
+forge_unavailable	Unavailable	The forge answered with a server error
+fork_base_unreachable	Failure	The fork's branch cannot reach the upstream base
+fork_field_missing	Failure	A fork response lacks a required field
+fork_host_mismatch	UsageError	The fork lives on another host than the index
+fork_not_ready	Failure	The fork did not become ready in time
+fork_owner_mismatch	Failure	The fork is owned by another account than expected
+fork_parent_absent	Failure	The fork reports no parent
+fork_parent_mismatch	Failure	The fork's parent is not the expected upstream
+forwarded_env_invalid	DataError	The OCX_ENV value a parent ocx forwarded is malformed
+fulcio_bad_request	ConfigError	The certificate authority rejected the signing request
+fulcio_unavailable	TempFail	The certificate authority is unreachable or overloaded
+git_command_failed	Failure	A git command failed
+git_push_failed	Failure	A git push failed for an unrecognised reason
+git_unavailable	Unavailable	The git executable the transport needs is unavailable
+group_holds_direct_binding	ConfigError	A group table holds a binding outside its tools table
+host_resolution_failed	TempFail	A registry host could not be resolved
+identity_mismatch	PermissionDenied	The certificate identity does not match the required signer
+identity_token_file_permissive	PermissionDenied	The identity token file is readable by group or other
+index_dispatch_digest_mismatch	DataError	A dispatch object does not hash to the digest its root claims
+index_http_failed	Unavailable	An index request failed
+index_http_transient	TempFail	An index request failed in a way a retry may clear
+index_manifest_not_found	NotFound	The registry has no manifest for a tag the index update walked
+index_named_by_digest	UsageError	The source names an image index by digest, which cannot merge into the target
+index_path_invalid	Failure	A local index path is invalid
+index_resolution_blocked	PolicyBlocked	A local policy refused resolving through the index
+index_root_missing_field	Failure	The committed index root lacks a required field
+index_root_not_object	Failure	The committed index root is not a JSON object
+index_root_parse	Failure	The committed index root is not valid JSON
+index_serialization	DataError	An index document could not be serialized
+index_singleflight_failed	Failure	A shared index operation failed with an unclassified cause
+index_source_failed	Failure	An index source failed with an unclassified cause
+integration_namespace_invalid	DataError	An integrations namespace is invalid
+integration_too_large	DataError	An integrations payload exceeds its size limit
+integrations_too_large	DataError	A package's integrations exceed the per-package size limit
+internal	Failure	A failure no classifier recognises
+internal	Failure	A failure no classifier recognises
+internal_path_invalid	Failure	An internal store path has an unexpected structure
+invalid_auth_type	ConfigError	The configured authentication type is not recognized
+invalid_binary_name	DataError	A binary name is not valid
+invalid_binding_name	UsageError	A binding name carries a character outside the allowed set
+invalid_boolean_string	DataError	A value is not one of the accepted boolean spellings
+invalid_build_metadata	DataError	A version's build metadata is invalid
+invalid_digest	DataError	A digest is not a valid algorithm-prefixed hash
+invalid_encoding	DataError	Registry content is not valid UTF-8
+invalid_endpoint_url	UsageError	A Sigstore endpoint URL failed validation
+invalid_env	ConfigError	An OCX environment variable holds a value its declaration refuses
+invalid_group_name	UsageError	A group name carries a character outside the allowed set
+invalid_identifier	DataError	A package identifier does not parse
+invalid_image_index	DataError	An image index document is invalid
+invalid_image_index	DataError	An image index document is invalid
+invalid_index_url	ConfigError	A configured index URL is invalid
+invalid_layer_layout	DataError	A layer's strip-components or prefix annotation is invalid
+invalid_layer_ref	UsageError	A layer reference or its layout suffix does not parse
+invalid_list_separator	DataError	A package env entry declares an unusable list separator
+invalid_logo_content	DataError	The logo file's content does not match its format
+invalid_managed_config_source	ConfigError	The managed-config source is not a valid OCI identifier
+invalid_manifest	DataError	A manifest is invalid
+invalid_owner_login	UsageError	An owner login carries a character outside letters, digits, dot, underscore and hyphen
+invalid_platform	DataError	A platform string does not follow the platform grammar
+invalid_repo_coordinate	UsageError	A repository coordinate is not a valid owner/name
+invalid_tag	UsageError	A tag is malformed, or not one the operation may act on
+invalid_tag	UsageError	A tag is malformed, or not one the operation may act on
+invalid_toolchain_name_charset	ConfigError	A group or binding name carries a character toolchain paths refuse
+invalid_trust_policy	ConfigError	The payload declares an unusable trust-policy entry
+invalid_version_spec	UsageError	The version argument is not a tag, a digest, or a tag pinned to a digest
+issuer_mismatch	PermissionDenied	The certificate OIDC issuer does not match the required issuer
+json_serialization	DataError	JSON could not be serialized or deserialized
+key_backend_unavailable	TempFail	The signing key backend is temporarily unavailable
+key_malformed	DataError	A signing or verification key holds no usable key
+key_malformed	DataError	A signing or verification key holds no usable key
+key_reference_invalid	UsageError	A key reference could not be parsed
+key_reference_invalid	UsageError	A key reference could not be parsed
+key_unreadable	IoError	A signing or verification key could not be read from its location
+key_unreadable	IoError	A signing or verification key could not be read from its location
+launch_identities_invalid	ConfigError	The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
+launch_spawn_failed	Failure	The resolved command could not be started
+launcher_path_not_utf8	DataError	A path baked into a generated launcher is not valid UTF-8
+launcher_unsafe_character	DataError	A value baked into a generated launcher contains an unsafe character
+layer_layout_failed	Failure	Resolving a layer layout failed with an unclassified cause
+layer_not_staged	Failure	A layer the package needs was not staged
+layer_size_exceeded	DataError	A layer declares a size above the allowed maximum
+libc_lint_read	IoError	Reading a file while checking its libc requirement failed
+libc_lint_scan_failed	Failure	Walking the content tree for the libc check failed with an unclassified cause
+libc_scan_scope_modifier	DataError	The libc scan scope carries a modifier it cannot honour
+libc_scan_scope_unresolvable	DataError	The libc scan scope cannot be resolved
+link_path_occupied	DataError	The install link path holds something other than an ocx package link
+list_separator_invalid	DataError	A list-valued environment entry conflicts with or edges on its separator
+lock_missing	ConfigError	ocx.lock does not exist
+lock_missing	ConfigError	ocx.lock does not exist
+lock_repository_not_bare	ConfigError	ocx.lock records a repository carrying a tag or digest
+lock_stale	DataError	ocx.lock does not match ocx.toml
+lock_stale	DataError	ocx.lock does not match ocx.toml
+login_rejected	AuthError	The registry rejected the supplied credentials
+malformed_catalog_key	DataError	An index source served a malformed catalog key
+malformed_fork_full_name	Failure	A fork's full name is malformed
+malformed_index_document	DataError	An index document is not valid JSON of the expected shape
+malformed_physical_ref	DataError	An index root carries a malformed physical repository reference
+malformed_physical_repository	Failure	The index root names a malformed registry repository
+malformed_repository	UsageError	The repository is not a well-formed oci:// pointer
+malformed_root_document	DataError	A local index root document is not valid JSON of the expected shape
+managed_config_contains_managed_section	ConfigError	The managed-config payload contains a [managed] section
+managed_config_entry_too_large	DataError	The managed-config config.toml entry exceeds the allowed size
+managed_config_input_not_found	NotFound	A file the managed-config payload names does not exist
+managed_config_invalid	ConfigError	The managed-config settings are invalid, or a system lock refuses the change
+managed_config_invalid_archive	DataError	The managed-config layer is not a readable archive
+managed_config_invalid_toml	DataError	The fetched managed-config payload is not valid TOML
+managed_config_key_by_path	ConfigError	The payload declares a trust-policy key signer by path instead of inline
+managed_config_layer_digest_mismatch	DataError	The managed-config layer does not hash to its declared digest
+managed_config_layer_size_exceeded	DataError	The managed-config layer declares a size above the allowed maximum
+managed_config_missing_config_toml	DataError	The managed-config layer contains no config.toml
+managed_config_no_any_platform	DataError	The managed-config package has no any/any platform entry
+managed_config_no_gzip_layer	DataError	The managed-config package has no tar+gzip layer
+managed_config_payload_invalid_toml	ConfigError	The managed-config payload is not a valid config file
+managed_config_payload_read_failed	IoError	Reading the managed-config payload failed
+managed_config_payload_too_large	ConfigError	The managed-config payload exceeds the allowed size
+managed_config_snapshot_write	IoError	Writing the managed-config snapshot failed
+managed_config_source_not_found	NotFound	The registry has no managed-config package at the configured source
+managed_config_stage_failed	IoError	Staging the managed-config payload for publishing failed
+managed_config_unexpected_manifest	DataError	The managed-config package has an unexpected manifest shape
+managed_config_update_failed	Failure	Syncing the managed-config snapshot failed with an unclassified cause
+manifest_not_found	NotFound	The registry has no such manifest
+merge_request_unconfirmed	TempFail	The forge did not confirm the merge request in time
+metadata_ambiguous	UsageError	More than one candidate package metadata file was found
+metadata_blob_too_large	DataError	A package metadata blob exceeds the size cap
+metadata_invalid_layer_path	UsageError	A layer path cannot anchor a metadata file search
+metadata_required	UsageError	No package metadata file was given or found
+mirror_config_invalid	ConfigError	A registry mirror setting is invalid
+missing_base_ref	Failure	The index base branch does not exist
+missing_base_ref	Failure	The index base branch does not exist
+missing_digest	DataError	An identifier the store needs pinned carries no digest
+missing_head_root	Failure	A concurrent claim's or announce's head carries no index root
+missing_head_root	Failure	A concurrent claim's or announce's head carries no index root
+missing_list_separator	DataError	A list-valued package env entry omits its separator
+multiple_attestations	DataError	More than one verified attestation matched
+multiple_signatures	DataError	The envelope carries other than exactly one signature
+nested_image_index	DataError	An image index nests another image index, which OCI does not support
+nested_namespace_unsupported	UsageError	The forge does not support nested namespaces
+no_acting_identity	UsageError	No owner could be determined to write into the claim
+no_credential_store	ConfigError	No credential helper or store is available to save credentials in
+no_curated_tags	UsageError	No tag is left to announce once reserved tags are dropped
+no_host_leaf	ConfigError	ocx.lock pins no platform this host can run
+no_identity_provided	UsageError	No signer identity was given by flags or a matching trust policy
+no_indexable_tag	NotFound	The repository carries no tag the index can record
+no_matching_platform	UsageError	The source index offers no requested platform
+no_project	UsageError	No ocx.toml exists in the working directory or any parent
+no_project_in	UsageError	The explicitly selected project directory holds no ocx.toml
+no_signatures_found	NotFound	The target has no signature referrers
+no_usable_bundle	NotFound	Referrers exist but none is a recognised Sigstore bundle
+non_utf8_wire_name	DataError	A local index path is not valid UTF-8
+noncanonical_platform_key	DataError	ocx.lock records a platform key not in canonical form
+not_a_manifest	DataError	The registry did not answer with a manifest
+not_in_index	NotFound	The package is not listed in the index
+not_in_index	NotFound	The package is not listed in the index
+observe_raced	TempFail	A tag appeared between the two reads of one announce
+offline_attest_refused	PolicyBlocked	Attaching was refused because offline mode is on
+offline_manifest_missing	PolicyBlocked	Offline mode and the manifest is not stored locally
+offline_mode	PolicyBlocked	A network operation was attempted in offline mode
+offline_mode	PolicyBlocked	A network operation was attempted in offline mode
+offline_sign_refused	PolicyBlocked	Signing was refused because offline mode is on
+oidc_pre_check_failed	PermissionDenied	The OIDC token failed a client-side check before reaching the certificate authority
+oidc_token_rejected	AuthError	The certificate authority rejected the OIDC token
+output_write	IoError	Writing the output tree failed
+output_write	IoError	Writing the output tree failed
+owner_id_mismatch	UsageError	A supplied owner id disagrees with the forge account
+owner_unknown	NotFound	The forge has no account with this login
+package_authoring_invalid	DataError	Package metadata cannot be authored as given
+package_file_io	IoError	Reading or writing a package file failed
+package_internal	Failure	A package operation failed with an unclassified cause
+package_key_invalid	ConfigError	A package key is not a valid identifier
+package_key_missing_registry	ConfigError	A package key names no registry
+package_manager_internal_file	IoError	Reading or writing an internal package file failed
+package_manager_serialization	DataError	A package document could not be serialized
+package_not_found	NotFound	The package does not exist
+package_serialization	DataError	A package document could not be serialized
+package_task_failed	Failure	A per-package operation failed with an unclassified cause
+patch_blob_write_failed	IoError	Persisting a patch descriptor blob failed
+patch_config_invalid	ConfigError	A patch-tier setting is invalid
+patch_descriptor_invalid_json	DataError	A patch descriptor is not valid JSON of the expected shape
+patch_descriptor_too_large	DataError	A patch descriptor exceeds its structural limits
+patch_descriptor_unsupported_version	DataError	A patch descriptor has a version this build does not understand
+patch_descriptor_vanished	NotFound	A pinned patch descriptor is no longer in the registry
+patch_discovery_failed	Failure	Discovering patches failed with an unclassified cause
+patch_layer_digest_mismatch	DataError	A patch descriptor layer does not hash to its declared digest
+patch_layer_size_exceeded	DataError	A patch descriptor layer declares a size above the allowed maximum
+patch_manifest_digest_mismatch	DataError	A patch descriptor manifest does not hash to its declared digest
+patch_policy_blocked	PolicyBlocked	A local policy refused fetching a patch descriptor
+patch_project_config_unreadable	ConfigError	The project config patches would freeze into is unreadable
+patch_snapshot_active	ConfigError	Patch pins cannot advance while OCX_PATCH_SNAPSHOT is set
+patch_snapshot_descriptor_missing	NotFound	The patch snapshot names a descriptor that is not stored locally
+patch_snapshot_unsupported_version	DataError	The patch snapshot has a format version this build does not understand
+patch_unexpected_artifact_type	DataError	A patch descriptor manifest carries an unexpected artifact type
+patch_unexpected_layer_media_type	DataError	A patch descriptor layer carries an unexpected media type
+patch_unexpected_manifest	DataError	A patch descriptor manifest has an unexpected shape
+patch_wrong_layer_count	DataError	A patch descriptor manifest carries other than exactly one layer
+path_escape	DataError	A relative path is absolute, escapes its root, or is otherwise unsafe to join
+payload_type_unsupported	DataError	The envelope payload type is not in-toto JSON
+permission_denied	PermissionDenied	The operating system refused access to a file or directory
+pin_digest_mismatch	DataError	The registry resolved the pinned tag to a different digest
+pin_digest_mismatch	DataError	The registry resolved the pinned tag to a different digest
+pinned_identifier_missing_digest	DataError	An identifier that must be pinned carries no digest
+plain_http_index_not_allowed	ConfigError	An index URL uses plain HTTP for a host not allowed to
+platform_ambiguous	UsageError	The source is a single-platform manifest and more than one platform was named
+platform_required	UsageError	The source is a single-platform manifest and no platform was named
+predicate_not_json	DataError	The predicate file is not JSON
+predicate_too_large	DataError	The predicate or statement exceeds its size limit
+predicate_type_mismatch	DataError	The signed predicate type is not the requested one
+project_already_exists	UsageError	ocx.toml already exists at the target path
+project_env_invalid_key	ConfigError	ocx.toml sets an invalid environment variable name
+project_env_invalid_separator	ConfigError	An ocx.toml environment entry has an unusable list separator
+project_env_invalid_value	ConfigError	An ocx.toml environment entry has a value of the wrong shape
+project_env_path_separator_in_value	DataError	An ocx.toml path value contains the platform path separator
+project_env_reserved_key	ConfigError	ocx.toml sets a reserved OCX environment key
+project_env_separator_edged_value	ConfigError	An ocx.toml list value starts or ends with its separator
+project_env_separator_on_non_list	ConfigError	An ocx.toml environment entry sets a separator on a non-list value
+project_env_unknown_modifier	ConfigError	An ocx.toml environment entry names an unknown modifier type
+project_env_unknown_value_field	ConfigError	An ocx.toml environment entry table holds an unknown field
+project_file_too_large	ConfigError	A project file exceeds the allowed size
+project_internal_file	IoError	Reading or writing an internal project file failed
+project_io	IoError	Reading or writing a project file failed
+project_load_failed	Failure	Loading the project failed with an unclassified cause
+project_locked	TempFail	Another process holds the lock on ocx.toml
+project_manifest_edit_diverged	Failure	The edited ocx.toml no longer matches the staged configuration
+project_manifest_not_editable	ConfigError	ocx.toml is not an editable TOML document
+project_registry_io	IoError	Reading or writing the project registry failed
+project_resolution_blocked	PolicyBlocked	A local policy refused resolving a binding
+project_toml_invalid	ConfigError	ocx.toml or ocx.lock is not valid TOML of the expected shape
+project_toml_serialize	ConfigError	A project file could not be serialized
+provenance_version_unsupported	UsageError	The provenance predicate type is older than SLSA v1.0
+prune_digest_tag	UsageError	A digest was given where prune takes a tag
+prune_no_index	PolicyBlocked	No index is configured to check the tags against
+prune_not_a_prerelease	UsageError	The --prerelease value is not a pre-release without a build
+prune_package_not_bare	UsageError	The package argument carries a tag or digest
+prune_refused_durable	PolicyBlocked	The index still lists a tag prune would delete, and the tag is durable
+prune_refused_pending	TempFail	The index still lists a tag prune would delete, pending an announce
+prune_tag_still_present	TempFail	A deleted tag is still present in the registry
+pull_request_unmergeable	DataError	The open announce pull request conflicts with the index
+push_option_refused	Failure	The forge refused a git push option
+record_exemption_refused	IoError	The execution-record exemption was refused
+record_inputs_incomplete	Failure	An execution record frame carries no argv
+record_name_not_a_filename	ConfigError	The record name is not a plain filename
+record_serialize_failed	IoError	Serializing an execution record failed
+record_sink_symlink	ConfigError	The execution-record sink is a symlink
+record_template_not_unique	ConfigError	The record name template has no varying component
+record_template_unknown_placeholder	ConfigError	The record name template names an unknown placeholder
+record_write_failed	IoError	Writing an execution record failed
+records_required_without_sink	ConfigError	Execution records are required but no sink is configured
+referrers_unsupported	Unsupported	The registry supports neither the OCI Referrers API nor a referrers fallback tag
+referrers_unsupported	Unsupported	The registry supports neither the OCI Referrers API nor a referrers fallback tag
+registry_auth_failed	AuthError	The registry rejected the request's authentication
+registry_auth_failed	AuthError	The registry rejected the request's authentication
+registry_delete_unsupported	Unsupported	The registry does not delete tags
+registry_transient	TempFail	A registry operation failed in a way a retry may clear
+registry_unavailable	Unavailable	A registry operation failed in a way a retry does not clear
+registry_unreachable	Unavailable	The registry could not be reached
+rekor_inclusion_proof_absent	DataError	The bundle carries no transparency log inclusion proof
+rekor_set_absent_tsa_present	DataError	The bundle has a timestamp authority stamp but no transparency log timestamp, which this build cannot verify
+rekor_set_invalid	DataError	The transparency log timestamp does not verify against the log key
+rekor_set_malformed	DataError	The transparency log answered with an unusable timestamp or body
+rekor_upload_required_for_keyless	UsageError	Skipping the transparency log upload requires a signing key
+rendered_config_too_large	ConfigError	Persisting the extra CA bundle would exceed the config size limit
+repository_escapes_index_home	DataError	An index repository path escapes its source directory
+repository_mismatch	DataError	A re-claim supplied a repository other than the committed one
+repository_not_found	NotFound	The registry has no such repository
+required_path_missing	NotFound	A required path does not exist
+reserved_env_key	DataError	A package env entry sets a reserved OCX key
+reserved_group_name	ConfigError	ocx.toml declares a reserved group name
+resolve_timeout	TempFail	Resolving a binding timed out
+retired_env	ConfigError	A retired OCX environment variable is set
+root_name_mismatch	DataError	The committed index root names a different package
+root_name_mismatch	DataError	The committed index root names a different package
+root_repository_mismatch	DataError	A derived index root points at another repository
+same_filesystem_check_failed	IoError	Probing whether two paths share a filesystem failed
+sbom_media_type_unsupported	DataError	An unsigned SBOM referrer declares a media type outside the SBOM set
+selection_ambiguous	DataError	The selection matches more than one package
+self_fork_refused	UsageError	The fork namespace is the upstream's own
+separator_edged_list_value	DataError	A package list value starts or ends with its separator
+session_path_not_absolute	ConfigError	A session PATH entry is not an absolute path
+session_path_not_utf8	ConfigError	A session PATH entry is not valid UTF-8
+session_path_unencodable	ConfigError	A session PATH entry contains a character the host format cannot store
+setup_bootstrap_failed	Failure	Installing ocx into the content store failed with an unclassified cause
+setup_io	IoError	Reading or writing a setup file failed
+setup_profile_subprocess	Unavailable	A shell subprocess setup needs could not run
+shell_section_in_project	ConfigError	ocx.toml declares a [shell] section, which only config.toml may hold
+shim_claim_unfulfilled	DataError	A declared interface name does not exist in the package
+shim_name_invalid	DataError	A shim name is not a valid binary name
+shim_name_not_claimed	DataError	A shim name is not an interface name the package declares
+shim_names_not_enumerable	DataError	The package's interface names cannot be enumerated
+short_blob_read	TempFail	The registry ended a blob download early
+sidecar_requires_signature	UsageError	A sidecar signature format was requested without a signing identity
+signature_invalid	DataError	The signature does not verify over the subject digest
+simple_signing_claim_unsupported	DataError	The simple signing payload declares an unsupported claim type
+singleflight_abandoned	Failure	The leader of shared in-flight work stopped without a result
+singleflight_capacity_exceeded	TempFail	Too many distinct operations were in flight at once
+singleflight_failed	Failure	Shared in-flight work failed with an unclassified cause
+singleflight_timeout	TempFail	Waiting for shared in-flight work timed out
+ssrf_forbidden_target	ConfigError	A registry host resolves to an address outside the trusted set
+statement_subject_absent	DataError	The signed statement carries no subjects
+statement_subject_mismatch	DataError	No subject in the signed statement binds the target digest
+statement_subject_weak_algorithm	DataError	A statement subject carries no sha256 digest
+statement_type_unsupported	DataError	The statement type is not an accepted in-toto statement type
+subject_digest_mismatch	DataError	The registry served subject bytes that do not hash to the resolved digest
+subject_digest_unsupported	DataError	The subject digest is not sha256
+symlink_not_found	NotFound	The package has no candidate or current symlink to resolve
+symlink_requires_tag	DataError	Symlink resolution needs a tag, not a digest
+symlink_walk_io	IoError	Inspecting a destination path component failed
+system_config_invalid	ConfigError	The system-wide config file is unusable
+tag_not_an_image_index	DataError	A tag to announce does not point at an image index
+tag_not_found	NotFound	The registry has no such tag
+target_not_an_index	NotFound	A platform was requested but the reference names a single manifest
+target_not_an_index	NotFound	A platform was requested but the reference names a single manifest
+target_not_found	NotFound	The reference resolves to no manifest for the requested platform
+target_not_found	NotFound	The reference resolves to no manifest for the requested platform
+task_panicked	Failure	A package task panicked
+template_ambiguous_dependency_ref	DataError	An interpolation token names an ambiguous dependency
+template_ambiguous_self_env_ref	DataError	An interpolation token names an env var declared more than once
+template_dependency_not_installed	NotFound	An interpolation token names a dependency that is not installed
+template_disallowed_token	DataError	An interpolation token is not permitted in this field
+template_modifier_not_applicable	DataError	An interpolation modifier does not apply to its token
+template_undefined_self_env_ref	DataError	An interpolation token names an env var not declared before it
+template_unknown_dependency_ref	DataError	An interpolation token names an unknown dependency
+template_unknown_field	DataError	An interpolation token names an unknown field
+template_unknown_modifier	DataError	An interpolation token carries an unknown modifier
+template_unknown_token	DataError	An interpolation token is not recognised
+template_value_too_large	DataError	An interpolated value exceeds its size budget
+tlog_binding_mismatch	DataError	The transparency log entry does not match the received envelope
+too_many_attestations	DataError	The target has more attestation referrers than the candidate limit
+toolchain_dir_group_or_world_writable	ConfigError	The toolchain_dir directory is writable by other users
+toolchain_dir_inaccessible	ConfigError	The toolchain_dir setting names a path that cannot be inspected
+toolchain_dir_inside_global_home	ConfigError	The toolchain_dir setting resolves inside the global toolchain home
+toolchain_dir_is_containment_anchor	ConfigError	The toolchain_dir setting names the home directory or OCX_HOME itself
+toolchain_dir_no_containment_anchor	ConfigError	No home directory or OCX_HOME exists to contain toolchain_dir
+toolchain_dir_not_a_directory	ConfigError	The toolchain_dir setting names something other than a directory
+toolchain_dir_not_owner_owned	ConfigError	The toolchain_dir directory is not owned by the current user
+toolchain_dir_outside_home	ConfigError	The toolchain_dir setting resolves outside the home directory and OCX_HOME
+toolchain_dir_parent_component	ConfigError	The toolchain_dir setting contains a '..' component
+toolchain_dir_relative	ConfigError	The toolchain_dir setting is a relative path
+toolchain_dir_system_prefix	ConfigError	The toolchain_dir setting resolves to a system location
+toolchain_dir_unexpandable	ConfigError	The toolchain_dir setting starts with a '~' that cannot be expanded
+toolchain_home_not_absolute	DataError	The toolchain home is not an absolute path
+toolchain_name_control_character	ConfigError	A toolchain group or entry name contains a control character
+toolchain_name_empty	ConfigError	A toolchain group or entry name is empty
+toolchain_name_path_prefix	ConfigError	A toolchain group or entry name carries a path prefix
+toolchain_name_relative	ConfigError	A toolchain group or entry name is a relative path component
+toolchain_name_separator	ConfigError	A toolchain group or entry name contains a path separator
+toolchain_name_trailing_dot_or_space	ConfigError	A toolchain group or entry name ends with a dot or a space
+transparency_body_mismatch	DataError	The transparency log entry belongs to another subject
+transparency_log_key_unavailable	Unavailable	The transparency log answered its public-key request with a client error
+transparency_log_response_invalid	DataError	The transparency log answered with a public-key body that is oversize or not text
+transparency_log_unavailable	TempFail	The transparency log is unavailable
+transparency_log_unavailable	TempFail	The transparency log is unavailable
+transparency_log_unreachable	Unavailable	The transparency log cannot be reached and a rerun will not change that
+traversal_limit_exceeded	DataError	Copying a manifest graph exceeded a traversal limit
+trust_policy_invalid	ConfigError	A trust policy entry is malformed
+trust_root_load	ConfigError	Trust material failed to load
+trust_root_unavailable	ConfigError	The trust root could not be loaded
+trust_root_unreadable	IoError	A trust root file named by the operator could not be read
+trusted_root_invalid	ConfigError	The named file is not a usable Sigstore trusted root
+trusted_root_read_failed	IoError	Reading the trusted root the payload names failed
+unclaimed_package	NotFound	The package has no index entry to announce into
+undeclared_binary	DataError	A scanned executable is not declared in binaries
+undeclared_libc	DataError	A binary needs a libc the package's platform does not declare
+unexpected_artifact_type	DataError	An artifact carries an unexpected artifact type
+unexpected_layer_media_type	DataError	A layer carries an unexpected media type
+unexpected_manifest_type	DataError	An image index arrived where an image manifest was expected
+unfollowed_redirect	DataError	The registry answered with a redirect the transport did not follow
+unknown_compare_status	Failure	A forge compare returned a status the client does not model
+unknown_env_modifier	DataError	A package env entry declares a type this build does not know
+unknown_group	UsageError	A group filter names a group ocx.toml does not declare
+unknown_group_section	ConfigError	A group table holds an unknown key
+unparseable_elf	DataError	A file carries an ELF header but cannot be parsed
+unrecognized_interpreter	DataError	A binary names an ELF interpreter no libc family claims
+unresolved_tag	NotFound	A tag to announce does not exist in the registry
+unsafe_destination	DataError	The registry named a destination the transport refuses
+unsigned_rejected_by_policy	PermissionDenied	An unsigned document was refused because a signature is required
+unsigned_type_unsupported	UsageError	An unsigned attach names a predicate type with no SBOM media type
+unsupported_declaration_hash_version	ConfigError	ocx.lock records a declaration hash version this build does not understand
+unsupported_index_format	DataError	The index format version is not supported
+unsupported_key_backend	Unsupported	A key reference names a recognised key backend this build does not implement
+unsupported_key_backend	Unsupported	A key reference names a recognised key backend this build does not implement
+unsupported_key_backend	Unsupported	A key reference names a recognised key backend this build does not implement
+unsupported_lock_version	ConfigError	ocx.lock has a version this build does not understand
+unsupported_logo_format	DataError	The logo file has an unsupported format
+unsupported_media_type	DataError	A manifest carries an unsupported media type
+unsupported_tlog_entry_kind	DataError	The transparency log entry kind is not accepted
+unyank_tag_not_curated	Failure	A tag to unyank is not a curated tag
+update_section_in_project	ConfigError	ocx.toml declares an [update] section, which only config.toml may hold
+usage	UsageError	The command was invoked with arguments it cannot act on
+users_api_unavailable	UsageError	The forge offers no users API to resolve owners through
+version_invalid	DataError	A package version does not parse
+walked_digest_mismatch	DataError	A source answered a digest request with different content
+wrong_layer_count	DataError	An artifact carries other than exactly one layer
+yank_tag_not_curated	Failure	A tag to yank is not a curated tag
+yank_unyank_overlap	Failure	The same tag is both yanked and unyanked
+yanked_refused	DataError	The resolved version is yanked

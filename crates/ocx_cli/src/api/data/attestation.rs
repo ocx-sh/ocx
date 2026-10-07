@@ -20,11 +20,12 @@ use crate::api::data::sanitize_for_terminal;
 /// annotated and hashed, and echoing it keeps that resolution visible.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AttestationReport {
-    /// User-facing identifier that was attested (echoes the CLI arg).
-    pub identifier: String,
-    /// Platform narrowed into (e.g. `linux/amd64`), or `any` when
-    /// `--platform` was absent and the run attested whatever resolved.
-    pub platform: String,
+    /// The package that was attested, resolved against the default registry.
+    pub identifier: ocx_oci::PackageRef,
+    /// The `--platform` the run narrowed into; absent when none was given and
+    /// the run attested whatever the identifier resolved to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<ocx_oci::Platform>,
     /// Digest of the subject manifest the Statement names.
     pub subject_digest: ocx_oci::Digest,
     /// The resolved `predicateType` URI written into the Statement.
@@ -33,16 +34,13 @@ pub struct AttestationReport {
     /// signed attach, the SBOM document itself on an unsigned one. The JSON key
     /// keeps its shipped name.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub bundle_digest: Option<ocx_oci::Digest>,
     /// Digest of the published OCI referrer manifest wrapping the payload.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub referrer_digest: Option<ocx_oci::Digest>,
     /// Digest of the `sha256-<hex>.att` sidecar manifest, when
     /// `--signature-format` asked for one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub sidecar_digest: Option<ocx_oci::Digest>,
     /// Whether the referrer carries a signature. `false` means the document was
     /// attached as-is, with no identity behind it — the two certificate fields
@@ -50,48 +48,37 @@ pub struct AttestationReport {
     pub signed: bool,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer URL embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
     /// Which key model produced this attestation (`keyless`, `file`, and —
     /// once they exist — `aws_kms` and friends). Absent on an unsigned attach,
     /// where no key model was involved at all. Same vocabulary as the
     /// `ocx package sign` report.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub key_backend: Option<ocx_trust::key_ref::KeyBackendKind>,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub public_key_hint: Option<String>,
-    /// Whether a transparency record was created, and its log index when so.
+    /// The Rekor log index of the transparency record this run created.
     ///
-    /// **Emitted unconditionally**, `null` included, exactly as the sign report
-    /// emits it: under a key `--rekor-upload` is opt-in, so a missing Rekor
-    /// entry is a legal outcome the operator has to be able to *see* rather
-    /// than infer from a key that is not there.
+    /// Absent when no record was created: legal under a key, where
+    /// `--rekor-upload` is opt-in, and on an unsigned attach.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transparency_log_index: Option<u64>,
-}
-
-/// The `--platform` request as reported, `any` when none was made; never null, since consumers
-/// read the field unconditionally.
-fn platform_label(platform: Option<&ocx_oci::Platform>) -> String {
-    platform.map_or_else(|| "any".to_string(), ocx_oci::Platform::to_string)
 }
 
 impl AttestationReport {
     /// Builds a report from the whole pipeline result, since same-typed positionals would swap silently.
     pub fn new(
-        identifier: String,
+        identifier: ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         result: ocx_sign::attest::pipeline::AttestResult,
     ) -> Self {
         Self {
             identifier,
-            platform: platform_label(platform),
+            platform: platform.cloned(),
             subject_digest: result.subject_digest,
             predicate_type: result.predicate_type,
             bundle_digest: result.referrer.as_ref().map(|leg| leg.payload_digest.clone()),
@@ -110,8 +97,16 @@ impl AttestationReport {
     /// `predicate_type` is still attacker-controlled, and a field added later is covered.
     fn plain_fields(&self) -> Vec<(&'static str, String)> {
         let mut fields = vec![
-            ("Identifier", sanitize_for_terminal(&self.identifier)),
-            ("Platform", sanitize_for_terminal(&self.platform)),
+            ("Identifier", sanitize_for_terminal(&self.identifier.to_string())),
+            (
+                "Platform",
+                sanitize_for_terminal(
+                    &self
+                        .platform
+                        .as_ref()
+                        .map_or_else(|| "any".to_string(), ToString::to_string),
+                ),
+            ),
             (
                 "Subject digest",
                 sanitize_for_terminal(&self.subject_digest.to_string()),
@@ -156,7 +151,14 @@ impl AttestationReport {
     }
 }
 
+impl crate::api::data::sweep::SweptReport for AttestationReport {
+    const SWEEP_ROOT: &'static str = "SweepReport<AttestationReport>";
+}
+
 impl Printable for AttestationReport {
+    const SCHEMA_VERSION: u32 = 2;
+    const ROOT: &'static str = "AttestationReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
         for (label, value) in self.plain_fields() {
@@ -164,16 +166,6 @@ impl Printable for AttestationReport {
             rows[1].push(Cell::from(value));
         }
         data.print_table(&["Field".into(), "Value".into()], &rows);
-    }
-
-    /// Emits the success envelope `{"schema_version":1,"command":"package attest","exit_code":0,"data":{...}}`.
-    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        let json = crate::error_envelope::render_success_envelope("package attest", self)?;
-        let parsed: serde_json::Value = serde_json::from_str(&json)?;
-        Ok(data.print_json(&parsed)?)
     }
 }
 
@@ -183,13 +175,17 @@ mod tests {
     use ocx_sign::attest::pipeline::AttestResult;
     use ocx_sign::sign::pipeline::LegDigests;
 
+    fn id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry("registry.example/pkg:1.0", "ocx.sh").expect("identifier")
+    }
+
     fn digest(fill: char) -> ocx_oci::Digest {
         ocx_oci::Digest::Sha256(fill.to_string().repeat(64))
     }
 
     fn sample() -> AttestationReport {
         AttestationReport::new(
-            "registry.example/pkg:1.0".into(),
+            id(),
             Some(&"linux/amd64".parse().expect("platform")),
             AttestResult {
                 key_backend: None,
@@ -212,7 +208,7 @@ mod tests {
     /// The unsigned twin: same attach, no identity behind it.
     fn unsigned_sample() -> AttestationReport {
         AttestationReport::new(
-            "registry.example/pkg:1.0".into(),
+            id(),
             Some(&"linux/amd64".parse().expect("platform")),
             AttestResult {
                 key_backend: None,
@@ -237,31 +233,25 @@ mod tests {
     /// that failed to render, which is the opposite of what happened.
     #[test]
     fn an_unsigned_attach_omits_the_certificate_keys_and_says_so() {
-        let json =
-            crate::error_envelope::render_success_envelope("package attest", &unsigned_sample()).expect("render");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        let data = &parsed["data"];
+        let data = &serde_json::to_value(unsigned_sample()).expect("serialize");
 
         assert_eq!(data["signed"], false);
         assert!(data.get("certificate_identity").is_none(), "empty SAN would mislead");
         assert!(data.get("certificate_oidc_issuer").is_none());
         // The positive control: the signed shape still carries both, so this
         // pair cannot pass by the keys having been dropped everywhere.
-        let signed = crate::error_envelope::render_success_envelope("package attest", &sample()).expect("render");
-        let signed: serde_json::Value = serde_json::from_str(&signed).expect("valid json");
-        assert_eq!(signed["data"]["signed"], true);
-        assert_eq!(signed["data"]["certificate_identity"], "signer@example.com");
+        let signed = serde_json::to_value(sample()).expect("serialize");
+        assert_eq!(signed["signed"], true);
+        assert_eq!(signed["certificate_identity"], "signer@example.com");
     }
 
     /// A key-mode attest with `--rekor-upload` off: the report says which key
     /// model signed **and** that no transparency record exists.
     ///
-    /// The spec is explicit — "a missing Rekor entry must be a fact the
-    /// operator can see, not an omission they infer" — so
-    /// `transparency_log_index` is emitted as `null` rather than skipped, and
-    /// the plain table keeps a "Transparency log: none" row. Before this the
-    /// report carried none of the three fields, so `attest --key` gave an
-    /// operator no way to tell a logged signature from an unlogged one.
+    /// The schema states that an absent `transparency_log_index` means no
+    /// record, and the plain table keeps a "Transparency log: none" row, so
+    /// `attest --key` lets an operator tell a logged signature from an
+    /// unlogged one.
     ///
     /// The `Some(index)` half runs beside it so neither can pass by the key
     /// having been dropped for both.
@@ -269,7 +259,7 @@ mod tests {
     fn a_key_mode_attest_reports_the_key_model_and_whether_a_record_exists() {
         let report = |transparency_log_index| {
             AttestationReport::new(
-                "registry.example/pkg:1.0".into(),
+                id(),
                 None,
                 AttestResult {
                     key_backend: Some(ocx_trust::key_ref::KeyBackendKind::File),
@@ -288,26 +278,22 @@ mod tests {
                 },
             )
         };
-        let render = |report: &AttestationReport| {
-            let json = crate::error_envelope::render_success_envelope("package attest", report).expect("render");
-            serde_json::from_str::<serde_json::Value>(&json).expect("valid json")
-        };
+        let render = |report: &AttestationReport| serde_json::to_value(report).expect("serialize");
 
         let unlogged = report(None);
-        let data = &render(&unlogged)["data"];
+        let data = &render(&unlogged);
         assert_eq!(data["key_backend"], "file");
         assert_eq!(data["public_key_hint"], "cosign-hint");
         assert!(
-            data.get("transparency_log_index")
-                .is_some_and(serde_json::Value::is_null),
-            "a missing Rekor entry must be stated as null, never omitted: {data}"
+            data.get("transparency_log_index").is_none(),
+            "a missing Rekor entry is stated by the key's absence, never `null`: {data}"
         );
         let plain: std::collections::BTreeMap<_, _> = unlogged.plain_fields().into_iter().collect();
         assert_eq!(plain["Key backend"], "file");
         assert_eq!(plain["Transparency log"], "none");
 
         let logged = report(Some(1234));
-        assert_eq!(render(&logged)["data"]["transparency_log_index"], 1234);
+        assert_eq!(render(&logged)["transparency_log_index"], 1234);
         let plain: std::collections::BTreeMap<_, _> = logged.plain_fields().into_iter().collect();
         assert_eq!(plain["Transparency log"], "Rekor index 1234");
     }
@@ -316,17 +302,11 @@ mod tests {
     /// omitted rather than defaulted to `keyless` — which would name a
     /// signing model for a document nothing signed.
     #[test]
-    fn an_unsigned_attach_omits_the_key_backend_but_still_states_the_record() {
-        let json =
-            crate::error_envelope::render_success_envelope("package attest", &unsigned_sample()).expect("render");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        let data = &parsed["data"];
+    fn an_unsigned_attach_omits_the_key_backend_and_the_record() {
+        let data = &serde_json::to_value(unsigned_sample()).expect("serialize");
         assert!(data.get("key_backend").is_none(), "nothing signed it: {data}");
         assert!(data.get("public_key_hint").is_none());
-        assert!(
-            data.get("transparency_log_index")
-                .is_some_and(serde_json::Value::is_null)
-        );
+        assert!(data.get("transparency_log_index").is_none(), "no record: {data}");
     }
 
     /// Plain output names the trust class outright. Inferring it from two
@@ -350,18 +330,16 @@ mod tests {
     }
 
     #[test]
-    fn json_output_carries_the_c_s1_1_envelope() {
-        let json = crate::error_envelope::render_success_envelope("package attest", &sample()).expect("render");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(parsed["schema_version"], 1);
-        assert_eq!(parsed["command"], "package attest");
-        assert_eq!(parsed["exit_code"], 0);
-
-        let data = &parsed["data"];
+    fn json_output_is_the_unwrapped_report() {
+        let data = &serde_json::to_value(sample()).expect("serialize");
+        for envelope_key in ["schema_version", "command", "exit_code", "data"] {
+            assert!(data.get(envelope_key).is_none(), "{envelope_key} leaked: {data}");
+        }
         assert_eq!(data["identifier"], "registry.example/pkg:1.0");
         assert_eq!(
-            data["platform"], "linux/amd64",
-            "platform must serialize as a plain string"
+            data["platform"],
+            serde_json::json!({"architecture": "amd64", "os": "linux"}),
+            "platform is the OCI platform object"
         );
         assert_eq!(
             data["predicate_type"], "https://cyclonedx.org/bom",
@@ -407,11 +385,7 @@ mod tests {
         };
         result.predicate_type.push('\r');
 
-        let report = AttestationReport::new(
-            "registry.example/pkg:1.0".into(),
-            Some(&"linux/amd64".parse().unwrap()),
-            result,
-        );
+        let report = AttestationReport::new(id(), Some(&"linux/amd64".parse().unwrap()), result);
         for (label, value) in report.plain_fields() {
             assert!(!value.contains('\u{1b}'), "{label} leaked an escape: {value:?}");
             assert!(!value.contains('\r'), "{label} leaked a carriage return: {value:?}");

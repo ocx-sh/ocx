@@ -3,11 +3,8 @@
 
 //! Reads the vendored upstream specifications under `tests/specs/`.
 //!
-//! Shared by `borrowed_vocabulary_matches_spec.rs` (which asserts our published
-//! schemas against these) and `json_keys_are_snake_case.rs` (which derives its
-//! snake_case exemptions from them instead of hand-typing them). Both need the
-//! same parse, and a second copy of it would be a second thing to keep in step
-//! with the vendored files.
+//! `borrowed_vocabulary_matches_spec.rs` asserts our published schemas against
+//! these.
 //!
 //! Every file is pulled in with `include_str!`, so a missing or moved spec is a
 //! compile error rather than a test that quietly reads nothing and passes.

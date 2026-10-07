@@ -34,9 +34,9 @@ every `?` under `ci/` converts a `ci::error::Error` (`MissingEnv`, `File`,
 
 **This was checked against the exit-code table, not assumed.** `ocx_lib`'s
 `Error::Ci` arm read `Self::Ci(e) => e.classify()` — it delegated to the very
-impl the DEC-24 bridge `ocx_cli/src/exit/ocx_shell.rs` provides for `CiError` —
+impl the classification `CiError` declares with `#[derive(ocx_exit::Classify)]` —
 so narrowing moved no exit code. That enum is gone since WP-37 and the
-delegation is now the ladder's rung on `CiError`, which is the same answer. Do the same check before narrowing anything
+delegation is now the registry's rung on `CiError`, which is the same answer. Do the same check before narrowing anything
 else here: DEC-23 is the hazard that an extraction silently relocates a code
 while every test still passes.
 

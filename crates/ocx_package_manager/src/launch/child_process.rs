@@ -41,6 +41,13 @@ fn propagate_exit_status(status: ExitStatus) -> ! {
 
 /// Run `program` with `args` and exactly `env`, replacing the running process (`execvp(2)` on
 /// Unix; spawn, wait and exit elsewhere). Returns only on failure.
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::disallowed_methods,
+        reason = "the one place ocx replaces itself with a tool; the record is emitted first"
+    )
+)]
 pub async fn exec<F, Fut>(program: &Path, args: &[String], env: Env, on_started: F) -> LaunchError
 where
     F: FnOnce(u32) -> Fut,
@@ -252,7 +259,7 @@ mod tests {
     #[cfg(not(unix))]
     #[tokio::test]
     async fn a_refused_launch_stops_the_child_it_already_spawned() {
-        let program = std::env::var_os("COMSPEC").map_or_else(
+        let program = ocx_env::dynamic("COMSPEC").map_or_else(
             || std::path::PathBuf::from(r"C:\Windows\System32\cmd.exe"),
             std::path::PathBuf::from,
         );

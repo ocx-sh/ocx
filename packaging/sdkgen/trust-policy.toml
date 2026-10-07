@@ -1,0 +1,14 @@
+# The `[[trust.policy]]` an SDK repository pins for `ocx.sh/ocx/sdkgen`: the
+# keyless identity `.github/workflows/sdkgen-publish.yml` signs under, called
+# from the tag-driven release. `task release:sdkgen:check` matches the pattern
+# against that workflow's path, so a renamed workflow or a loosened pattern
+# reds before a release, not after one.
+#
+# Both scopes: the logical name users type and the GHCR home the signature is
+# attached to.
+
+[[trust.policy]]
+scope = { include = ["ocx.sh/ocx/sdkgen", "ghcr.io/ocx-sh/ocx/sdkgen"] }
+signers = [
+  { kind = "keyless", identity_regexp = '^https://github\.com/ocx-sh/ocx/\.github/workflows/sdkgen-publish\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$', oidc_issuer = "https://token.actions.githubusercontent.com" },
+]

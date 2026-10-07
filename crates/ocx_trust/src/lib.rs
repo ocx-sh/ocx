@@ -2837,8 +2837,8 @@ signers = [
     /// flag naming one variable resolve to one key.
     #[test]
     fn an_env_key_reference_compiles_from_the_variable() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_TEST_POLICY_KEY", GOLDEN_PUBLIC_KEY_PEM);
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_TEST_POLICY_KEY", GOLDEN_PUBLIC_KEY_PEM);
 
         let reference = key_ref::KeyRef::parse("env://OCX_TEST_POLICY_KEY").expect("env:// parses");
         compile_key_reference(&reference, "ghcr.io/acme/*").expect("the variable holds an SPKI PEM");
@@ -2854,10 +2854,10 @@ signers = [
     /// to go on when there is no path in the refusal.
     #[test]
     fn an_env_key_reference_refuses_unset_and_oversized_values_by_name() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let reference = key_ref::KeyRef::parse("env://OCX_TEST_POLICY_KEY").expect("env:// parses");
 
-        env.remove("OCX_TEST_POLICY_KEY");
+        env.remove_raw("OCX_TEST_POLICY_KEY");
         let unset = compile_key_reference(&reference, "ghcr.io/acme/*").expect_err("an unset variable holds no key");
         let TrustPolicyError::KeyMalformed { reason, fault, .. } = &unset else {
             panic!("got {unset:?}");
@@ -2869,7 +2869,7 @@ signers = [
         );
 
         let cap = usize::try_from(MAX_KEY_PEM_BYTES).expect("the cap fits a usize");
-        env.set("OCX_TEST_POLICY_KEY", "k".repeat(cap + 1));
+        env.set_raw("OCX_TEST_POLICY_KEY", "k".repeat(cap + 1));
         let oversized = compile_key_reference(&reference, "ghcr.io/acme/*").expect_err("over the cap");
         let TrustPolicyError::KeyMalformed { reason, fault, .. } = &oversized else {
             panic!("got {oversized:?}");

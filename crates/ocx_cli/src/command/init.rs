@@ -40,7 +40,7 @@ impl Init {
                 ocx_project::init_project(&selected)?
             }
         } else {
-            let cwd = ocx_util::env::current_dir()?;
+            let cwd = ocx_env::current_dir()?;
             ocx_project::init_project_at_default(&cwd)?
         };
 

@@ -1,0 +1,18 @@
+# Read by `cargo clippy` natively and by Bazel's clippy aspect through `.bazelrc`.
+# A crate-local clippy.toml would shadow this one; there must be none.
+
+disallowed-types = [
+    { path = "std::process::Command", reason = "launch through ocx_package_manager::launch; a program ocx runs for its own purposes needs an item-level #[expect] stating why" },
+    { path = "tokio::process::Command", reason = "launch through ocx_package_manager::launch; a program ocx runs for its own purposes needs an item-level #[expect] stating why" },
+]
+
+disallowed-methods = [
+    { path = "std::env::var", reason = "read through ocx_env" },
+    { path = "std::env::var_os", reason = "read through ocx_env" },
+    { path = "std::env::vars", reason = "read through ocx_env" },
+    { path = "std::env::vars_os", reason = "read through ocx_env" },
+    { path = "std::env::set_var", reason = "set through ocx_env::overrides" },
+    { path = "std::env::remove_var", reason = "set through ocx_env::overrides" },
+    { path = "ocx_package_manager::launch::Launch::exempt", reason = "a non-recording launch is sanctioned only for package test and patch test; claim it with an item-level #[expect]" },
+    { path = "std::os::unix::process::CommandExt::exec", allow-invalid = true, reason = "replace the process only inside ocx_package_manager::launch" },
+]

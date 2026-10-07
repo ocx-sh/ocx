@@ -155,8 +155,8 @@ NEXTEST_EXCLUDED_SUITES = len(BAZEL_UNMAPPED_SUITES)  # 2
 """The suite-level half of C-008's exclusion set. Derived from the named table
 above rather than restated, so the two cannot disagree."""
 
-NEXTEST_SUITE_FLOOR = CRATES_TEST_TARGETS + NEXTEST_EXCLUDED_SUITES  # 37
-"""35 Bazel `rust_test` targets + 2 suites that have none = 20 lib + 14
+NEXTEST_SUITE_FLOOR = CRATES_TEST_TARGETS + NEXTEST_EXCLUDED_SUITES  # 44
+"""42 Bazel `rust_test` targets + 2 suites that have none = 22 lib + 19
 integration + 3 bin. The reader floor for any listing that claims to be
 `--workspace`: fewer suites than this and the listing is partial, which is
 indistinguishable from a shrunken test set in the sum alone."""
@@ -562,7 +562,7 @@ def _suite(kind: str, package: str, cases: dict[str, tuple[bool, str]]) -> dict:
 
 
 def sample_listing(*, cases_per_suite: int = 4, ignored: int = 8) -> dict[str, dict]:
-    """37 suites in the live tree's shape: 20 lib, 14 test, 3 bin.
+    """44 suites in the live tree's shape: 22 lib, 19 test, 3 bin.
 
     Names are borrowed from the real listing for the three `bin` suites and for
     `ocx::linux_self_contained` — those four are what the exclusion set turns
@@ -573,19 +573,19 @@ def sample_listing(*, cases_per_suite: int = 4, ignored: int = 8) -> dict[str, d
     the fact the old `kind`-based rule got wrong in both directions.
     """
     suites: dict[str, dict] = {}
-    for index in range(1, 21):
+    for index in range(1, 23):
         suites[f"pkg{index:02d}"] = _suite(
             "lib",
             f"pkg{index:02d}",
             {f"t{n}": (False, "matches") for n in range(cases_per_suite)},
         )
-    for index in range(1, 14):
+    for index in range(1, 19):
         suites[f"pkg{index:02d}::it{index:02d}"] = _suite(
             "test",
             f"pkg{index:02d}",
             {f"t{n}": (False, "matches") for n in range(cases_per_suite)},
         )
-    # The 14th integration suite, real name and real shape: `kind = "test"`,
+    # The 19th integration suite, real name and real shape: `kind = "test"`,
     # one testcase, and no Bazel target.
     suites["ocx::linux_self_contained"] = _suite("test", "ocx", {"t0": (False, "matches")})
     for binary_id, package in (
@@ -692,11 +692,11 @@ def prove_floor_count() -> int:
     """C-012's other half — the sum, and S-011 on a listing built by hand."""
     checks = 0
     suites = sample_listing()
-    expect(len(suites) == 37, f"the sample listing has {len(suites)} suites, expected 37")
+    expect(len(suites) == 44, f"the sample listing has {len(suites)} suites, expected 44")
     total = floor_count(suites)
-    # 36 suites of `cases_per_suite`, plus `ocx::linux_self_contained`'s single
+    # 43 suites of `cases_per_suite`, plus `ocx::linux_self_contained`'s single
     # real testcase — the one the exclusion set is worth 1 rather than 4 for.
-    expect(total == 36 * 4 + 1, f"sample sum is {total}, expected {36 * 4 + 1}")
+    expect(total == 43 * 4 + 1, f"sample sum is {total}, expected {43 * 4 + 1}")
 
     expect(report(floor_findings(suites, total)) == 0, "a sum equal to its floor must be green")
     print(f"S-011 GREEN: {total} tests listed across {len(suites)} suites (floor {total})")
@@ -895,7 +895,7 @@ def prove_parity() -> int:
         f"{len(labels)} labels vs {len(suite_ids)} - {len(exclusions)}",
     )
 
-    expect(report(target_parity(labels, suite_ids, exclusions)) == 0, "35 == 37 - 2 must be green")
+    expect(report(target_parity(labels, suite_ids, exclusions)) == 0, "42 == 44 - 2 must be green")
     print(
         f"C-013a GREEN: {len(labels)} bazel rust_test == {len(suite_ids)} rust-suites - "
         f"{len(exclusions)} excluded"
@@ -936,15 +936,15 @@ def prove_parity() -> int:
 
 def prove_counts() -> int:
     """Sums, and the two constants this file floors against on disk."""
-    expect(NEXTEST_SUITE_FLOOR == 37, f"suite floor is {NEXTEST_SUITE_FLOOR}, expected 35+2")
-    expect(CRATES_TEST_TARGETS == 35, f"{CRATES_TEST_TARGETS} rust_test targets, the tree has 35")
-    # The 20 `rust_doc_test` targets (C-030) are Bazel test targets with no nextest
+    expect(NEXTEST_SUITE_FLOOR == 44, f"suite floor is {NEXTEST_SUITE_FLOOR}, expected 42+2")
+    expect(CRATES_TEST_TARGETS == 42, f"{CRATES_TEST_TARGETS} rust_test targets, the tree has 42")
+    # The 22 `rust_doc_test` targets (C-030) are Bazel test targets with no nextest
     # suite — nextest runs no doctest — so they sit outside this reconciliation, like
-    # the seam twin. A floor that folded them in would demand 20 suites the listing
+    # the seam twin. A floor that folded them in would demand 22 suites the listing
     # can never report.
     expect(
         NEXTEST_SUITE_FLOOR == CRATES_TEST_TARGETS + NEXTEST_EXCLUDED_SUITES
-        and CRATES_DOC_TEST_TARGETS == 20,
+        and CRATES_DOC_TEST_TARGETS == 22,
         f"the suite floor {NEXTEST_SUITE_FLOOR} must count rust_test targets only; "
         f"{CRATES_DOC_TEST_TARGETS} rust_doc_test targets have no nextest suite",
     )
@@ -956,7 +956,7 @@ def prove_counts() -> int:
     ceiling = int(CEILING_FILE.read_text(encoding="utf-8").strip())
     expect(floor > 0 and ceiling >= 0, f"crates/ floor={floor} ceiling={ceiling}")
     print(
-        f"counts  OK : 37 = 20 + 14 + 3 = {CRATES_TEST_TARGETS} + {NEXTEST_EXCLUDED_SUITES} "
+        f"counts  OK : 44 = 22 + 19 + 3 = {CRATES_TEST_TARGETS} + {NEXTEST_EXCLUDED_SUITES} "
         f"(the {CRATES_DOC_TEST_TARGETS} rust_doc_test targets have no suite); "
         f"crates/NEXTEST_FLOOR={floor}, crates/NEXTEST_SKIP_CEILING={ceiling} — internal "
         "consistency only; WP-12's generated table is the reality check"

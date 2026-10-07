@@ -1410,7 +1410,7 @@ def test_a_truncated_but_well_formed_carrier_is_treated_as_absent(arena: Arena) 
     assert f"export {matrix.CARRIER}=" in result.stdout
     state = matrix.shell_state(arena.ocx, project, arena.env() | {matrix.CARRIER: truncated})
     assert state["carrier_present"] is True
-    assert state["inert_reason"] == {"reason": "ledger_unreadable", "first_prompt": False}, (
+    assert state["inert_reason"] == {"type": "ledger_unreadable", "first_prompt": False}, (
         "a corrupt carrier and an absent one are DIFFERENT reasons (C-006); got "
         f"{state['inert_reason']}"
     )
@@ -1489,11 +1489,11 @@ def test_shell_state_distinguishes_an_absent_carrier_from_a_corrupt_one(arena: A
 
     absent = matrix.shell_state(arena.ocx, project, arena.env())
     assert absent["carrier_present"] is False
-    assert absent["inert_reason"] == {"reason": "ledger_unreadable", "first_prompt": True}
+    assert absent["inert_reason"] == {"type": "ledger_unreadable", "first_prompt": True}
 
     corrupt = matrix.shell_state(arena.ocx, project, arena.env() | {matrix.CARRIER: "1.@@@not-a-payload"})
     assert corrupt["carrier_present"] is True
-    assert corrupt["inert_reason"] == {"reason": "ledger_unreadable", "first_prompt": False}
+    assert corrupt["inert_reason"] == {"type": "ledger_unreadable", "first_prompt": False}
 
 
 def test_an_over_cap_ledger_still_carries_a_decodable_marker(arena: Arena) -> None:
@@ -1519,7 +1519,7 @@ def test_an_over_cap_ledger_still_carries_a_decodable_marker(arena: Arena) -> No
     assert len(carrier) <= 16384, f"the marker must fit the cap; got {len(carrier)} bytes"
 
     state = matrix.shell_state(arena.ocx, project, arena.env() | {matrix.CARRIER: carrier})
-    assert state["inert_reason"]["reason"] == "ledger_over_cap", (
+    assert state["inert_reason"]["type"] == "ledger_over_cap", (
         f"the over-cap state must be read FROM THE MARKER, never inferred from an absent carrier; got "
         f"{state['inert_reason']}"
     )
@@ -1653,7 +1653,7 @@ def test_a_fresh_clone_is_inert(arena: Arena) -> None:
 
     state = matrix.shell_state(arena.ocx, clone, arena.env())
     assert state["project_stamped"] is False, "the clone must carry no stamp, or the row proves nothing"
-    assert state["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"a fresh clone must be inert; got {state['inert_reason']}"
     )
 
@@ -1797,10 +1797,10 @@ def test_shell_allow_consents_a_clone_and_revoke_takes_it_back(arena: Arena) -> 
 
     before = matrix.shell_state(arena.ocx, clone, arena.env())
     key = before["project_key"]
-    assert before["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert before["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"the clone must start inert, or the grant below proves nothing; got {before['inert_reason']}"
     )
-    assert before["grant"] is None, "an inert project names no granting clause"
+    assert before.get("grant") is None, "an inert project names no granting clause"
 
     allowed = _consent(arena, "allow", clone)
     assert allowed.returncode == 0, f"`ocx shell allow` must succeed:\n{allowed.stderr}"
@@ -1812,7 +1812,7 @@ def test_shell_allow_consents_a_clone_and_revoke_takes_it_back(arena: Arena) -> 
     # `ledger_unreadable` to report — what must be gone is the *consent*
     # refusal, and the grant is what says so.
     after = matrix.shell_state(arena.ocx, clone, arena.env())
-    assert after["inert_reason"]["reason"] == "ledger_unreadable", (
+    assert after["inert_reason"]["type"] == "ledger_unreadable", (
         f"consent must no longer be the refusal; got {after['inert_reason']}"
     )
     assert after["project_stamped"] is True, "the stamp must be readable back through the predicate"
@@ -1829,10 +1829,10 @@ def test_shell_allow_consents_a_clone_and_revoke_takes_it_back(arena: Arena) -> 
         "revoking must remove the stamp, not merely report that it did"
     )
     back = matrix.shell_state(arena.ocx, clone, arena.env())
-    assert back["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert back["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"a revoke is effective at the very next prompt; got {back['inert_reason']}"
     )
-    assert back["grant"] is None
+    assert back.get("grant") is None
 
     # Idempotent: revoking what is already gone is the state the caller asked
     # for, not a failure (owner rule: no block on a common benign state).
@@ -1868,9 +1868,9 @@ def test_the_documented_json_field_list_is_the_one_the_binary_emits(arena: Arena
     real payload finds keys the contract says should not be there. So compare
     the two sets rather than trusting either.
 
-    Red state: drop any name from the documented sentence, or add a field to
-    ``ShellStateReport`` without documenting it, and the symmetric difference
-    below is non-empty.
+    Red state: drop any name from the documented sentence, or add an undocumented
+    field to ``ShellStateReport``. An unset optional is omitted, so only an
+    optional documented name may be missing from the payload.
     """
     doc = _locate_command_reference()
     if doc is None:
@@ -1893,7 +1893,17 @@ def test_the_documented_json_field_list_is_the_one_the_binary_emits(arena: Arena
     # the page can never be picked up instead.
     documented = set(re.findall(r"`([a-z_]+)`", claim.split("\u2014")[1]))
 
-    assert emitted == documented, (
+    optional = {
+        "fingerprint_current",
+        "grant",
+        "inert_reason",
+        "ledger",
+        "lock_refusal",
+        "project_dir",
+        "project_key",
+        "stamp_written_at",
+    }
+    assert emitted <= documented and documented - emitted <= optional, (
         f"the documented field list and the emitted document disagree.\n"
         f"emitted ({len(emitted)}): {sorted(emitted)}\n"
         f"documented ({len(documented)}): {sorted(documented)}\n"
@@ -1919,7 +1929,7 @@ def test_shell_allow_refuses_the_ocx_home(arena: Arena) -> None:
     # Since #485 the walk never adopts `$OCX_HOME/ocx.toml` as a project, so
     # `shell state` there carries no project key at all — and with no key
     # there is nothing a stamp could be filed under.
-    home_key = matrix.shell_state(arena.ocx, arena.ocx_home, arena.env())["project_key"]
+    home_key = matrix.shell_state(arena.ocx, arena.ocx_home, arena.env()).get("project_key")
     assert home_key is None, (
         f"A-44/#485: $OCX_HOME must not resolve to a project key; got {home_key!r}"
     )
@@ -1976,7 +1986,7 @@ def test_the_global_toolchain_composes_regardless_of_project_consent(arena: Aren
     # Arm 1 — the project-specific config (the clone's own ocx.toml + ocx.lock)
     # is present and refused. The global tier still applies.
     state = matrix.shell_state(arena.ocx, clone, arena.env())
-    assert state["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"the clone must be inert, or neither arm proves anything; got {state['inert_reason']}"
     )
     inert = matrix.reconcile(arena.ocx, "bash", clone, arena.env())
@@ -2013,7 +2023,7 @@ def test_a_project_with_no_lock_at_all_is_inert(arena: Arena) -> None:
     (project / "bin").mkdir()
 
     state = matrix.shell_state(arena.ocx, project, arena.env())
-    assert state["inert_reason"] == {"reason": "lock_unavailable"}
+    assert state["inert_reason"] == {"type": "lock_unavailable"}
     emitted = matrix.reconcile(arena.ocx, "bash", project, arena.env())
     assert str(project / "bin") not in emitted.stdout, (
         f"a lockless clone must not put its own bin dir PATH-front:\n{emitted.stdout}"
@@ -2033,7 +2043,7 @@ def test_an_unreadable_lock_is_inert_exactly_like_an_absent_one(arena: Arena) ->
         state = matrix.shell_state(arena.ocx, project, arena.env())
     finally:
         lock.chmod(0o644)
-    assert state["inert_reason"] == {"reason": "lock_unavailable"}
+    assert state["inert_reason"] == {"type": "lock_unavailable"}
 
 
 def test_an_unparseable_lock_is_inert_exactly_like_an_absent_one(arena: Arena) -> None:
@@ -2041,7 +2051,7 @@ def test_an_unparseable_lock_is_inert_exactly_like_an_absent_one(arena: Arena) -
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "ocx.lock").write_text("this is not TOML {[", encoding="utf-8")
     state = matrix.shell_state(arena.ocx, project, arena.env())
-    assert state["inert_reason"] == {"reason": "lock_unavailable"}
+    assert state["inert_reason"] == {"type": "lock_unavailable"}
 
 
 def test_a_paths_granted_project_activates_and_writes_no_stamp(arena: Arena) -> None:
@@ -2056,7 +2066,7 @@ def test_a_paths_granted_project_activates_and_writes_no_stamp(arena: Arena) -> 
 
     granted = arena.env(OCX_CONSENT_PATHS=str(clone))
     state = matrix.shell_state(arena.ocx, clone, granted)
-    assert state["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] != "no_stamp_no_grant", (
         f"a paths grant must activate; got {state['inert_reason']}"
     )
     emitted = matrix.reconcile(arena.ocx, "bash", clone, granted)
@@ -2067,7 +2077,7 @@ def test_a_paths_granted_project_activates_and_writes_no_stamp(arena: Arena) -> 
 
     # Revoking is immediately effective precisely because no stamp was derived.
     revoked = matrix.shell_state(arena.ocx, clone, arena.env())
-    assert revoked["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert revoked["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"revoking a paths grant must be effective at the very next prompt; got {revoked['inert_reason']}"
     )
 
@@ -2079,8 +2089,8 @@ def test_a_paths_grant_does_not_match_a_sibling_with_a_longer_name(arena: Arena)
     evil = _clone_of(source, arena.projects / "project-evil")
 
     granted = arena.env(OCX_CONSENT_PATHS=str(victim))
-    assert matrix.shell_state(arena.ocx, victim, granted)["inert_reason"]["reason"] != "no_stamp_no_grant"
-    assert matrix.shell_state(arena.ocx, evil, granted)["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert matrix.shell_state(arena.ocx, victim, granted)["inert_reason"]["type"] != "no_stamp_no_grant"
+    assert matrix.shell_state(arena.ocx, evil, granted)["inert_reason"]["type"] == "no_stamp_no_grant", (
         "a `paths` entry must not match a sibling whose name merely starts with it"
     )
 
@@ -2111,7 +2121,7 @@ def test_a_paths_subtree_grant_activates_the_named_directory_and_not_a_sibling(a
     granted = arena.env(OCX_CONSENT_PATHS=str(project / "*"))
 
     state = matrix.shell_state(arena.ocx, project, granted)
-    assert state["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] != "no_stamp_no_grant", (
         f"the subtree grant must cover the directory it names; got {state['inert_reason']}"
     )
     emitted = matrix.reconcile(arena.ocx, "bash", project, granted)
@@ -2120,7 +2130,7 @@ def test_a_paths_subtree_grant_activates_the_named_directory_and_not_a_sibling(a
     )
 
     evil_state = matrix.shell_state(arena.ocx, evil, granted)
-    assert evil_state["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert evil_state["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"a `<dir>/*` entry must not match a sibling whose name merely starts with `<dir>`'s name; "
         f"got {evil_state['inert_reason']}"
     )
@@ -2138,7 +2148,7 @@ def test_a_namespaces_grant_goes_inert_when_a_source_leaves_it(arena: Arena) -> 
 
     granted = arena.env(OCX_CONSENT_NAMESPACES="ghcr.io/acme")
     inside = matrix.shell_state(arena.ocx, project, granted)
-    assert inside["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert inside["inert_reason"]["type"] != "no_stamp_no_grant", (
         f"the grant must cover the whole source set; got {inside['inert_reason']}"
     )
     key = inside["project_key"]
@@ -2150,7 +2160,7 @@ def test_a_namespaces_grant_goes_inert_when_a_source_leaves_it(arena: Arena) -> 
         matrix.lock_tool("hello", "ghcr.io/acme/hello") + "\n" + matrix.lock_tool("evil", "ghcr.io/evil/tool"),
     )
     after = matrix.shell_state(arena.ocx, project, granted)
-    assert after["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert after["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"one source leaving the grant must make the project inert at the next prompt; got {after['inert_reason']}"
     )
     assert "ghcr.io/evil" in after["inert_reason"]["derived_sources"]
@@ -2178,11 +2188,11 @@ def test_a_same_cardinality_source_swap_re_prompts_a_stamped_project(arena: Aren
     )
     before = matrix.shell_state(arena.ocx, project, arena.env())
     assert before["project_stamped"] is True, "the hand-written stamp must be accepted, or the drift row is vacuous"
-    assert before["inert_reason"]["reason"] != "source_set_drift"
+    assert before["inert_reason"]["type"] != "source_set_drift"
 
     matrix.write_lock(project, matrix.lock_tool("hello", "ghcr.io/evil/tool"))
     after = matrix.shell_state(arena.ocx, project, arena.env())
-    assert after["inert_reason"] == {"reason": "source_set_drift", "new_sources": ["ghcr.io/evil"]}, (
+    assert after["inert_reason"] == {"type": "source_set_drift", "new_sources": ["ghcr.io/evil"]}, (
         f"the reason must NAME the source that is new; got {after['inert_reason']}"
     )
 
@@ -2212,7 +2222,7 @@ def test_growth_inside_an_already_stamped_source_does_not_re_prompt(arena: Arena
         matrix.lock_tool("hello", "ghcr.io/acme/hello") + "\n" + matrix.lock_tool("other", "ghcr.io/acme/other"),
     )
     state = matrix.shell_state(arena.ocx, project, arena.env())
-    assert state["inert_reason"]["reason"] != "source_set_drift", (
+    assert state["inert_reason"]["type"] != "source_set_drift", (
         f"a new repository inside a stamped source is a subset, not drift; got {state['inert_reason']}"
     )
 
@@ -2227,11 +2237,11 @@ def test_a_port_bearing_registry_is_a_distinct_consent_source(arena: Arena) -> N
     assert derived == ["localhost:5000/acme"], f"the port must be preserved in the source; got {derived}"
 
     portless = matrix.shell_state(arena.ocx, project, arena.env(OCX_CONSENT_NAMESPACES="localhost/acme"))
-    assert portless["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert portless["inert_reason"]["type"] == "no_stamp_no_grant", (
         "a portless grant must not cover a ported registry"
     )
     ported = matrix.shell_state(arena.ocx, project, arena.env(OCX_CONSENT_NAMESPACES="localhost:5000/acme"))
-    assert ported["inert_reason"]["reason"] != "no_stamp_no_grant"
+    assert ported["inert_reason"]["type"] != "no_stamp_no_grant"
 
 
 @pytest.mark.parametrize(
@@ -2250,7 +2260,7 @@ def test_empty_tokens_in_the_namespace_env_channel_grant_nothing(value: str, are
     matrix.write_lock(project, matrix.lock_tool("evil", "ghcr.io/evil/tool"))
 
     state = matrix.shell_state(arena.ocx, project, arena.env(OCX_CONSENT_NAMESPACES=value))
-    assert state["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"OCX_CONSENT_NAMESPACES={value!r} must grant nothing to ghcr.io/evil; got {state['inert_reason']}"
     )
     tested = state["inert_reason"]["namespaces_tested"]
@@ -2264,7 +2274,7 @@ def test_an_empty_token_in_the_path_env_channel_grants_nothing(arena: Arena) -> 
     clone = _clone_of(project, arena.projects / "clone")
 
     state = matrix.shell_state(arena.ocx, clone, arena.env(OCX_CONSENT_PATHS=os.pathsep))
-    assert state["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert state["inert_reason"]["type"] == "no_stamp_no_grant", (
         f"an OS-separator-only OCX_CONSENT_PATHS must grant nothing; got {state['inert_reason']}"
     )
     assert all(str(path) for path in state["inert_reason"]["paths_tested"]), (
@@ -2352,7 +2362,7 @@ def test_shell_hook_false_in_a_config_tier_disables_the_hook(arena: Arena) -> No
     """S-016 rung 4 — `[shell] hook = false`, with the deciding tier named."""
     _write_config(arena, "[shell]\nhook = false\n")
     state = matrix.shell_state(arena.ocx, arena.projects, arena.env())
-    assert state["inert_reason"]["reason"] == "hook_disabled"
+    assert state["inert_reason"]["type"] == "hook_disabled"
     assert state["inert_reason"]["rung"] == "[shell] hook", f"got {state['inert_reason']}"
     assert state["inert_reason"]["tier"], "the deciding tier must be named, never hard-coded"
 
@@ -2361,13 +2371,13 @@ def test_ocx_no_hook_disables_the_hook_and_names_its_own_rung(arena: Arena) -> N
     """S-015 rung 3 — `OCX_NO_HOOK` beats the config tier and says so."""
     _write_config(arena, "[shell]\nhook = true\n")
     state = matrix.shell_state(arena.ocx, arena.projects, arena.env(OCX_NO_HOOK="1"))
-    assert state["inert_reason"] == {"reason": "hook_disabled", "rung": "OCX_NO_HOOK", "tier": None}
+    assert state["inert_reason"] == {"type": "hook_disabled", "rung": "OCX_NO_HOOK"}
 
 
 def test_a_non_boolean_ocx_no_hook_warns_and_falls_back(arena: Arena) -> None:
     """S-015 edge — `OCX_NO_HOOK=maybe` is not truthy and not an error (BooleanString)."""
     state = matrix.shell_state(arena.ocx, arena.projects, arena.env(OCX_NO_HOOK="maybe"))
-    assert state["hook"] == {"rung": "auto", "tier": None, "enabled": None}, (
+    assert state["hook"] == {"rung": "auto"}, (
         f"an unrecognised value must fall back to rung 5, not disable the hook; got {state['hook']}"
     )
 
@@ -2455,7 +2465,7 @@ def _assert_grant_voided_and_file_survived(arena: Arena, project: Path) -> None:
     """
     state = matrix.shell_state(arena.ocx, project, arena.env())
     inert = state["inert_reason"]
-    assert inert["reason"] == "no_stamp_no_grant", (
+    assert inert["type"] == "no_stamp_no_grant", (
         f"a refused consent table must grant NOTHING; got {inert}"
     )
     assert inert["namespaces_tested"] == [], (
@@ -2486,7 +2496,7 @@ def test_a_grammatically_invalid_namespaces_pattern_voids_the_grant_not_the_file
     _assert_grant_voided_and_file_survived(arena, project)
 
     _write_config(arena, '[shell]\nhook = true\n[shell.consent]\nnamespaces = "ocx.sh/acme"\n')
-    assert matrix.shell_state(arena.ocx, project, arena.env())["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert matrix.shell_state(arena.ocx, project, arena.env())["inert_reason"]["type"] != "no_stamp_no_grant", (
         "control: at source granularity the same pattern must grant — otherwise the arm above proves nothing"
     )
 
@@ -2514,7 +2524,7 @@ def test_an_unknown_key_inside_the_consent_table_voids_the_grant_it_appears_in(a
     _assert_grant_voided_and_file_survived(arena, project)
 
     _write_config(arena, '[shell]\nhook = true\n[shell.consent]\nnamespaces = { include = ["ocx.sh/acme"] }\n')
-    assert matrix.shell_state(arena.ocx, project, arena.env())["inert_reason"]["reason"] != "no_stamp_no_grant", (
+    assert matrix.shell_state(arena.ocx, project, arena.env())["inert_reason"]["type"] != "no_stamp_no_grant", (
         "control: the include alone must grant — otherwise the refusal arm above proves nothing"
     )
 
@@ -2538,8 +2548,8 @@ def test_a_carve_out_beats_coverage_at_source_granularity(arena: Arena) -> None:
     matrix.write_project(bad, _ENV_BLOCK_A, tools_block='[tools]\nt = "ocx.sh/acme-compromised/tool:1"\n')
     matrix.write_lock(bad, matrix.lock_tool("t", "ocx.sh/acme-compromised/tool"))
 
-    assert matrix.shell_state(arena.ocx, good, arena.env())["inert_reason"]["reason"] != "no_stamp_no_grant"
-    assert matrix.shell_state(arena.ocx, bad, arena.env())["inert_reason"]["reason"] == "no_stamp_no_grant", (
+    assert matrix.shell_state(arena.ocx, good, arena.env())["inert_reason"]["type"] != "no_stamp_no_grant"
+    assert matrix.shell_state(arena.ocx, bad, arena.env())["inert_reason"]["type"] == "no_stamp_no_grant", (
         "an exclude must subtract an org the same spec included"
     )
 
@@ -2565,7 +2575,7 @@ def test_direnv_live_for_this_directory_yields_the_project_scope(arena: Arena) -
         f"one info line must name direnv and the live signal:\n{emitted.stdout}"
     )
     state = matrix.shell_state(arena.ocx, project, env)
-    assert state["inert_reason"]["reason"] == "yielded_to"
+    assert state["inert_reason"]["type"] == "yielded_to"
     assert state["yielded_to"], "the yield must be reported with its evidence"
 
 
@@ -2680,7 +2690,7 @@ def test_clean_retains_an_env_only_projects_stamp_and_collects_a_dead_one(arena:
     # leaving `--dry-run` silent about the one change a user would want to stop.
     # Compared by key rather than by path bytes: the stamp directory's name IS
     # the key, so this cannot fail on a non-canonical `$OCX_HOME`.
-    previewed = [row for row in json.loads(dry.stdout) if row["kind"] == "consent"]
+    previewed = [row for row in json.loads(dry.stdout)["items"] if row["kind"] == "consent"]
     assert [Path(row["path"]).name for row in previewed] == [dead_key], (
         f"`--dry-run` must name the stamp it would sweep; got {dry.stdout!r}"
     )
@@ -2795,7 +2805,8 @@ def test_shell_state_verbose_is_a_rendering_tier_not_a_payload(arena: Arena) -> 
     bare_json = json.loads(run("--format", "json", "shell", "state").stdout)
     verbose_json = json.loads(run("--format", "json", "shell", "state", "--verbose").stdout)
     assert bare_json == verbose_json, "`--verbose` must not change the structured payload"
-    for key in ("ledger", "watch_set", "carrier_bytes", "priors", "hook", "project_key"):
+    # No carrier in this shell, so `ledger` is absent here by contract: an unset optional is omitted.
+    for key in ("watch_set", "carrier_bytes", "priors", "hook", "project_key"):
         assert key in bare_json, f"the structured report must carry {key!r}: {sorted(bare_json)}"
 
     default_text = run("shell", "state").stdout

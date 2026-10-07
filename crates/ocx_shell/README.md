@@ -4,6 +4,6 @@ Shell and CI export surface: export generation, per-prompt reconciliation planne
 
 **Tier:** internal
 
-**May depend on:** `ocx_package`, `ocx_config`, `ocx_store`, `ocx_oci`, `ocx_util`, `ocx_console`, `ocx_exit`
+**May depend on:** `ocx_package`, `ocx_config`, `ocx_store`, `ocx_oci`, `ocx_util`, `ocx_console`, `ocx_exit`, `ocx_env`
 
 **Named dependency exceptions:** none

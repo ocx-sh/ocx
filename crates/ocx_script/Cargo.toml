@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 # The composed package environment a script runs against (`host::HostState`).
 ocx_config.workspace = true
+# The registry the `ocx.run`/`ocx.env` reserved-key list names its variables from.
+ocx_env.workspace = true
 # `Platform` and its `OperatingSystem`/`Architecture` enums — the typed values
 # `ocx.os.*` / `ocx.arch.*` mirror, and what `variant_parity` pins them against.
 ocx_oci.workspace = true

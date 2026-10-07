@@ -13,8 +13,11 @@ use crate::api::Printable;
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum RemovedStatus {
+    /// The symlink was removed.
     Removed,
+    /// The package's object directory was deleted.
     Purged,
+    /// Nothing was there to remove.
     Absent,
 }
 
@@ -30,13 +33,17 @@ impl fmt::Display for RemovedStatus {
 
 /// A single uninstall or deselect result entry.
 ///
-/// The `path` field holds the symlink that was removed (for `Removed`),
-/// the object directory that was purged (for `Purged`), or is `None`
-/// when the resource was already absent.
+/// The `path` field holds the symlink that was removed (for `removed`) or the
+/// object directory that was purged (for `purged`), and is absent when the
+/// resource was already absent.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RemovedEntry {
+    /// The package as requested.
     pub package: String,
+    /// What happened to it.
     pub status: RemovedStatus,
+    /// What was removed; absent when nothing was.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
 
@@ -47,26 +54,25 @@ impl RemovedEntry {
 }
 
 /// Results of an uninstall or deselect; `path` gets no plain column since it names something now gone.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Removed {
-    pub entries: Vec<RemovedEntry>,
+    /// One entry per package, in request order.
+    pub items: Vec<RemovedEntry>,
 }
 
 impl Removed {
-    pub fn new(entries: Vec<RemovedEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for Removed {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+    pub fn new(items: Vec<RemovedEntry>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for Removed {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Removed";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        for entry in &self.entries {
+        for entry in &self.items {
             rows[0].push(entry.package.clone());
             rows[1].push(entry.status.to_string());
         }
@@ -74,16 +80,5 @@ impl Printable for Removed {
             &["Package".into(), "Status".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
-    }
-}
-
-// Transparent `Serialize`: the schema is the bare entry array.
-impl schemars::JsonSchema for Removed {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Removed".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<RemovedEntry>>::json_schema(generator)
     }
 }

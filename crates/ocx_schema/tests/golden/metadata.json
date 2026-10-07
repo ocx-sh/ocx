@@ -20,12 +20,16 @@
   "$defs": {
     "BundleMetadataVersion": {
       "description": "Bundle metadata format version.",
-      "type": "integer",
-      "enum": [
-        1
+      "oneOf": [
+        {
+          "description": "The first bundle metadata format.",
+          "type": "integer",
+          "const": 1
+        }
       ]
     },
     "Env": {
+      "description": "A package's declared environment variables, in declaration order.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Var"
@@ -41,11 +45,22 @@
         },
         "visibility": {
           "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry. Defaults to `private` — publishers explicitly mark\ncontract entries as `public` or `interface` to expose them to consumers.\n`\"sealed\"` is rejected at parse time.",
-          "type": "string",
-          "enum": [
-            "private",
-            "public",
-            "interface"
+          "oneOf": [
+            {
+              "description": "Visible to the package's own runtime only.",
+              "type": "string",
+              "const": "private"
+            },
+            {
+              "description": "Visible to the package's own runtime and to consumers.",
+              "type": "string",
+              "const": "public"
+            },
+            {
+              "description": "Visible to consumers only.",
+              "type": "string",
+              "const": "interface"
+            }
           ],
           "default": "private"
         }
@@ -187,12 +202,28 @@
       "type": "string"
     },
     "Visibility": {
-      "type": "string",
-      "enum": [
-        "sealed",
-        "private",
-        "public",
-        "interface"
+      "description": "Two-axis visibility of a dependency edge or env entry: whether it reaches the package's own runtime, its consumers, both or neither.",
+      "oneOf": [
+        {
+          "description": "Visible to neither the package's own runtime nor its consumers.",
+          "type": "string",
+          "const": "sealed"
+        },
+        {
+          "description": "Visible to the package's own runtime only.",
+          "type": "string",
+          "const": "private"
+        },
+        {
+          "description": "Visible to the package's own runtime and to consumers.",
+          "type": "string",
+          "const": "public"
+        },
+        {
+          "description": "Visible to consumers only.",
+          "type": "string",
+          "const": "interface"
+        }
       ]
     },
     "DependencyName": {

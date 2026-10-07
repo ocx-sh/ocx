@@ -6,31 +6,29 @@
 
 use std::time::Duration;
 
+use ocx_util::wire_words;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Default throttle interval between two background checks.
 pub const DEFAULT_INTERVAL: &str = "1d";
 
-/// What a background check does when it finds drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RefreshPolicy {
-    /// Drift is applied without asking, by the background check only, which runs only on an
-    /// interactive terminal, outside CI, and online.
-    Apply,
-    /// Drift prints a stderr advisory naming the command that applies it; nothing is fetched.
-    Notify,
-    /// The background check is skipped entirely; only an explicit command refreshes.
-    Manual,
+wire_words! {
+    /// What a background check does when it finds drift.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub enum RefreshPolicy {
+        /// Drift is applied without asking, by the background check only, which runs only on an
+        /// interactive terminal, outside CI, and online.
+        Apply = "apply",
+        /// Drift prints a stderr advisory naming the command that applies it; nothing is fetched.
+        Notify = "notify",
+        /// The background check is skipped entirely; only an explicit command refreshes.
+        Manual = "manual",
+    }
 }
 
 impl std::fmt::Display for RefreshPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Apply => "apply",
-            Self::Notify => "notify",
-            Self::Manual => "manual",
-        })
+        f.write_str(self.as_str())
     }
 }
 
@@ -38,12 +36,7 @@ impl RefreshPolicy {
     /// The posture spelled `value` (`apply`, `notify` or `manual`), or `None` for anything else.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "apply" => Some(Self::Apply),
-            "notify" => Some(Self::Notify),
-            "manual" => Some(Self::Manual),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|policy| policy.as_str() == value)
     }
 }
 
@@ -126,6 +119,18 @@ pub fn parse_interval(value: &str) -> Result<Duration, IntervalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ocx_env` cannot name `RefreshPolicy` (the dependency runs the other way), so its `Choice` literals are pinned here.
+    #[test]
+    fn the_refresh_env_vars_accept_exactly_the_policy_words() {
+        let words: Vec<&str> = RefreshPolicy::ALL.iter().map(|policy| policy.as_str()).collect();
+        for var in [&ocx_env::OCX_SELF_UPDATE, &ocx_env::OCX_TOOLCHAIN_UPDATE] {
+            let ocx_env::EnvValue::Choice(choices) = var.value else {
+                panic!("{} is not a choice variable", var.name);
+            };
+            assert_eq!(choices, words.as_slice(), "{}", var.name);
+        }
+    }
 
     #[test]
     fn parse_interval_bare_digits_is_seconds() {

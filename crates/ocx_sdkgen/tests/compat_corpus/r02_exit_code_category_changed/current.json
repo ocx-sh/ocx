@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocx.sh/schemas/errors/v2.json",
+  "title": "ErrorDocument",
+  "description": "The error document.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Version of this document's shape.",
+      "const": 2
+    },
+    "command": {
+      "description": "Canonical command string.",
+      "type": "string"
+    },
+    "exit_code": {
+      "$ref": "#/$defs/ExitCode",
+      "description": "Process exit code."
+    },
+    "error": {
+      "$ref": "#/$defs/EnvelopeError",
+      "description": "Structured error payload."
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "exit_code",
+    "error"
+  ],
+  "$defs": {
+    "EnvelopeError": {
+      "description": "The `error` object of an error document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ErrorCategory",
+          "description": "Coarse error category."
+        },
+        "detail": {
+          "$ref": "#/$defs/ErrorDetail",
+          "description": "Fine-grained error slug."
+        },
+        "message": {
+          "description": "Full user-facing message.",
+          "type": "string"
+        },
+        "context": {
+          "description": "Structured context.",
+          "type": "object",
+          "properties": {
+            "identifier": {
+              "$ref": "#/$defs/PackageRef",
+              "description": "The package the error concerns."
+            }
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "context"
+      ]
+    },
+    "PackageRef": {
+      "description": "A package reference.",
+      "type": "string"
+    },
+    "ExitCode": {
+      "description": "The process exit code.",
+      "type": "integer",
+      "x-ocx-enum": [
+        {
+          "value": 0,
+          "name": "Success",
+          "description": "The command succeeded.",
+          "category": "internal"
+        },
+        {
+          "value": 1,
+          "name": "Failure",
+          "description": "The command failed.",
+          "category": "internal"
+        },
+        {
+          "value": 64,
+          "name": "UsageError",
+          "description": "The command line is invalid.",
+          "category": "usage_error"
+        },
+        {
+          "value": 79,
+          "name": "NotFound",
+          "description": "A named resource does not exist.",
+          "category": "usage_error"
+        },
+        {
+          "value": 80,
+          "name": "AuthError",
+          "description": "Authentication failed.",
+          "category": "auth_error"
+        }
+      ]
+    },
+    "ErrorCategory": {
+      "description": "The coarse class of an error.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "internal",
+          "name": "Internal",
+          "description": "An internal failure."
+        },
+        {
+          "value": "usage_error",
+          "name": "UsageError",
+          "description": "The command line is invalid."
+        },
+        {
+          "value": "not_found",
+          "name": "NotFound",
+          "description": "A named resource does not exist."
+        },
+        {
+          "value": "auth_error",
+          "name": "AuthError",
+          "description": "Authentication failed."
+        }
+      ]
+    },
+    "ErrorDetail": {
+      "description": "The specific error within its class.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "bad_flag",
+          "description": "A flag value is invalid.",
+          "exit_code": 64
+        },
+        {
+          "value": "package_not_found",
+          "description": "The package does not exist.",
+          "exit_code": 79
+        }
+      ]
+    }
+  }
+}

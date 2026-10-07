@@ -99,6 +99,7 @@ def _push_json(
 #: The exact key set of a push report with no `--sbom` (`attestation` and an
 #: empty `platform_digests` are both `skip_serializing_if`-omitted).
 _REPORT_KEYS = {
+    "schema_version",
     "identifier",
     "status",
     "manifest_digest",

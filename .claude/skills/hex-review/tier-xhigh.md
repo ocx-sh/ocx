@@ -4,8 +4,7 @@ The full adversarial treatment for **one-way-door-high** diffs: >15 files,
 a new package/module, a breaking API, cross-area changes, a security-
 sensitive path, or a `breaking-change`/`epic` label. Adds `architect` and
 `researcher` to the Stage 2 panel, applies Five Whys to every finding above
-Suggest, and runs the cross-model pass as a mandatory final gate before
-verdict.
+Suggest, and runs the cross-model pass before verdict.
 
 `Read` this file from [`SKILL.md`](SKILL.md) after the config is announced.
 Shared vocabulary is linked, not restated: roles in
@@ -13,10 +12,10 @@ Shared vocabulary is linked, not restated: roles in
 [`models.md`](../hex-core/references/models.md), and the outer contracts in
 [`protocol.md`](../hex-core/references/protocol.md).
 
-**Meta-plan preview is mandatory.** At `xhigh`, the gate in
-[`SKILL.md`](SKILL.md) step 5 always blocks for explicit approval — this
+**Meta-plan preview is mandatory** outside loop mode. At `xhigh`, the gate in
+[`SKILL.md`](SKILL.md) step 5 blocks for explicit approval — this
 tier is expensive, and the preview catches a misclassification before
-workers launch.
+workers launch. In loop mode it is announced, not asked.
 
 ## Phase 1: Discover (inline, no worker)
 
@@ -35,8 +34,9 @@ enumerated.
 
 ## Phase 2: Stage 1 — Correctness (parallel, 2 workers)
 
-Same shape as `high`, launched **in a single batch** so they run
-concurrently
+Same shape as `high` — per pipeline slice, plus the seams seat
+([`SKILL.md` § Seats](SKILL.md#worker-assignment-shared-across-tiers)) —
+launched **in a single batch** so they run concurrently
 ([`protocol.md`](../hex-core/references/protocol.md#worker-coordination)):
 
 - **1** `reviewer` (focus `spec`, phase `post-implementation`) — reviews
@@ -50,9 +50,7 @@ concurrently
   **Specify**-phase tests cover edge cases, boundary conditions, concurrent
   access, and failure modes.
 
-Model class per [`models.md`](../hex-core/references/models.md) rows
-`reviewer:spec` / `reviewer:quality`, tier `xhigh` — both escalate to the
-`deep-reasoning` class at this tier. Stub → Specify → Implement traceability
+All seats are `standard` class. Stub → Specify → Implement traceability
 matters extra here: flag any implementation behavior with no corresponding
 test or design-record anchor.
 
@@ -80,8 +78,8 @@ matching `perspectives.always` rule adds):
   `hex.md › Pointers`) — SOTA gap check: how do the field's leading
   tools solve the same problem? Is the algorithm choice current? Any
   known pitfall unaddressed?
-- the configured **cross-model adversary**, last in the batch — mandatory
-  at this tier; it occupies no worker slot and is triaged in Phase 5
+- the configured **cross-model adversary**, last in the batch — it occupies
+  no worker slot and is triaged in Phase 5
   ([adversary contract](../hex-core/references/adversary.md#adversary-contract),
   `adr_0016` C-987).
 
@@ -98,9 +96,7 @@ displaces first
 ([`config.md` § Merge rules](../hex-core/references/config.md#merge-rules)).
 If the diff clearly doesn't need
 `researcher` (e.g. a pure refactor with no algorithmic change), skip it —
-a diff-content judgement, not a cap accommodation. Model class per
-[`models.md`](../hex-core/references/models.md), tier `xhigh` — most rows
-escalate to `deep-reasoning` here. Each reviewer classifies findings
+a diff-content judgement, not a cap accommodation. Each reviewer classifies findings
 actionable or deferred and tags each with a
 [severity](../hex-core/references/severity.md#finding-severity); a
 Suggest-severity finding is reported but never gates the verdict.
@@ -126,7 +122,7 @@ in the worker pool").
 **Gate** — RCA is complete for every finding above Suggest; clusters are
 noted.
 
-## Phase 5: Cross-model pass (mandatory)
+## Phase 5: Cross-model pass
 
 The configured adversary skill was **launched last in Phase 3's batch**
 against the diff (`code-diff` scope) or the artifact (`plan-artifact` scope
@@ -139,9 +135,9 @@ stays read-only), deferred (added to Deferred Findings with a reason),
 stated-convention (dropped, count mentioned), trivia (dropped, count
 mentioned).
 
-No-review path: at this tier the pass is a **gate, not a blocker** —
-surface the skip prominently in the verdict summary so the reader knows one
-review layer was missed. Log
+No-review path: the pass is a **gate, not a blocker**, and is never waited
+for — surface the skip prominently in the verdict summary so the reader knows
+one review layer was missed. Log
 `Cross-model review skipped: <reason>` and include it in the Summary line.
 
 **Gate** — triage is complete (or the skip is surfaced).

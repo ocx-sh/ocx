@@ -591,7 +591,7 @@ def test_cascade_libc_variants_preserved(
     through the cascade merge step.
     """
     # Push glibc variant for linux/amd64 at version 1.0.0 with explicit libc tag.
-    # The __OCX_TEST_LIBC env var is NOT set in this test — we are pushing to the
+    # The __OCX_TESTING_LIBC env var is NOT set in this test — we are pushing to the
     # registry with explicit platform metadata via the ``--platform`` flag; we are
     # NOT testing host detection here.  The libc variants appear in the image
     # index as explicit ``os.features`` values set during publish.

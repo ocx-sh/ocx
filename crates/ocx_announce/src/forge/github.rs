@@ -105,7 +105,7 @@ impl GitHubForge {
             .request(method, url)
             .header(ACCEPT, ACCEPT_JSON)
             .header("X-GitHub-Api-Version", API_VERSION);
-        // No header for an empty token (tokenless `--out`): GitHub rejects an empty bearer.
+        // No header for an empty token (tokenless `--output`): GitHub rejects an empty bearer.
         if self.credentials.api().0.is_empty() {
             builder
         } else {
@@ -852,7 +852,9 @@ fn mergeability_from_body(value: &Value) -> Mergeability {
 
 #[cfg(any(test, feature = "__testing"))]
 fn testing_base_url_override() -> Option<String> {
-    std::env::var("__OCX_TESTING_FORGE_BASE_URL").ok()
+    ocx_env::__OCX_TESTING_FORGE_BASE_URL
+        .get_raw()
+        .and_then(|url| url.into_string().ok())
 }
 
 #[cfg(not(any(test, feature = "__testing")))]
@@ -2127,7 +2129,7 @@ mod tests {
         //
         // The consequence is a cross-package constraint: GitHub's `push-access`
         // row has two outcomes only, `passed` or a raised error, so S-011's
-        // `push-access: skipped` under `--out` is satisfied by **not calling
+        // `push-access: skipped` under `--output` is satisfied by **not calling
         // this at all** on that path and seeding `PushAccess::skipped_all()`
         // above it, never by this returning `skipped`.
         for (status, case) in [
@@ -2159,10 +2161,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn github_ensure_push_access_without_a_credential_is_denied() {
-        // S-011's `--out` run: an empty token sends no `Authorization` header,
+        // S-011's `--output` run: an empty token sends no `Authorization` header,
         // and GitHub answers an unauthenticated repository read 200 **without**
         // `permissions`. Pinned so that a later package which starts routing
-        // `--out` through the preflight reds here rather than shipping exit 80
+        // `--output` through the preflight reds here rather than shipping exit 80
         // on a run that never intended to write.
         let fake = FakeForge::start(|method, path| match (method, path) {
             ("GET", "/repos/forkuser/index") => (200, r#"{"full_name":"forkuser/index"}"#.to_string()),

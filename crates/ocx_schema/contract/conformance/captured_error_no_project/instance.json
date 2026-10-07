@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "command": "env",
+  "exit_code": 64,
+  "error": {
+    "kind": "usage_error",
+    "detail": "no_project",
+    "message": "no ocx.toml found in /home/conformance or any parent; run `ocx init` to create one",
+    "context": {}
+  }
+}

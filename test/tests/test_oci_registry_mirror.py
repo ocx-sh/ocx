@@ -795,7 +795,7 @@ def test_mirror_install_clean_reachability_is_mirror_agnostic(
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
 
     fq = f"{registry}/{unique_repo}:1.0.0"
-    result = ocx.json("package", "install", fq)
+    result = ocx.json("package", "install", fq)["packages"]
     content = Path(result[fq]["path"]).resolve()
     assert_dir_exists(content)
 

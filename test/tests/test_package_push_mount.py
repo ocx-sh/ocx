@@ -89,7 +89,7 @@ def test_package_push_mount_cross_repository_reuse(
 
     # (4) Install app-b and verify the mounted layer's content is intact.
     ocx.plain("index", "update", f"{app_b_repo}:1.0.0")
-    result = ocx.json("package", "install", f"{app_b_repo}:1.0.0")
+    result = ocx.json("package", "install", f"{app_b_repo}:1.0.0")["packages"]
     content = Path(result[f"{app_b_repo}:1.0.0"]["path"]) / "content"
 
     assert_dir_exists(content)

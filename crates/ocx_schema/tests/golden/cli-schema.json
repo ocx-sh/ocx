@@ -1,0 +1,649 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cli",
+  "description": "The whole command-line surface: the command tree, the environment it reads, and retired spellings.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "root": {
+      "$ref": "#/$defs/CommandSpec"
+    },
+    "env": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EnvSpec"
+      }
+    },
+    "retired": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RetiredSpec"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "root",
+    "env",
+    "retired"
+  ],
+  "$defs": {
+    "CommandSpec": {
+      "description": "One command or command group.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Words below `ocx`; empty for the root.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "version": {
+          "description": "Version of this command's output contract; 0 for a group.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "summary": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "deprecated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deprecation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_subcommands": {
+          "type": "boolean"
+        },
+        "output": {
+          "description": "What the command can write to stdout; empty only for a group.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutputMode"
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArgSpec"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GroupSpec"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommandSpec"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "version",
+        "summary",
+        "hidden",
+        "external_subcommands",
+        "output",
+        "args",
+        "groups",
+        "commands"
+      ]
+    },
+    "Deprecation": {
+      "description": "A spelling that still works and is removed in a named release.",
+      "type": "object",
+      "properties": {
+        "replacement": {
+          "type": "string"
+        },
+        "removal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "replacement",
+        "removal"
+      ]
+    },
+    "OutputMode": {
+      "description": "One kind of stdout a command can produce.",
+      "oneOf": [
+        {
+          "description": "One JSON report of the named root, exit 0.",
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "report"
+            }
+          },
+          "required": [
+            "type",
+            "root"
+          ]
+        },
+        {
+          "description": "One JSON report of the named root, then a non-zero exit: the command reports what it did before failing.",
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "report_then_fail"
+            }
+          },
+          "required": [
+            "type",
+            "root"
+          ]
+        },
+        {
+          "description": "Nothing on stdout.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "empty"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "The child process owns stdout.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "passthrough"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Shell or CI source text, never JSON.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_stream"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A fetched document's raw bytes, verbatim, never JSON.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "raw_document"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ArgSpec": {
+      "description": "One flag, option or positional argument, listed on the command that declares it.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "long": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "short": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 1
+        },
+        "position": {
+          "description": "1-based index of a positional argument.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "value": {
+          "$ref": "#/$defs/ValueSpec"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "required_unless": {
+          "description": "Arguments or groups that waive this argument's requirement; without one of them it is required.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "num_args": {
+          "$ref": "#/$defs/Arity"
+        },
+        "global": {
+          "description": "Accepted on every command below the declaring one.",
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "deprecated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deprecation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requires": {
+          "description": "Arguments or groups that must accompany this one.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "conflicts": {
+          "description": "Arguments that may not accompany this one.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "overrides": {
+          "description": "Arguments this one replaces when both are given; the later one wins.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "require_equals": {
+          "type": "boolean"
+        },
+        "allow_hyphen_values": {
+          "type": "boolean"
+        },
+        "last": {
+          "description": "Taken only after `--`.",
+          "type": "boolean"
+        },
+        "trailing_var_arg": {
+          "type": "boolean"
+        },
+        "value_terminator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stdin_secret": {
+          "description": "The secret value is read from stdin, never from the argument list.",
+          "type": "boolean"
+        },
+        "help": {
+          "type": "string"
+        },
+        "env": {
+          "description": "The environment variable that stands in for this flag.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "value",
+        "required",
+        "required_unless",
+        "num_args",
+        "global",
+        "hidden",
+        "default",
+        "requires",
+        "conflicts",
+        "overrides",
+        "require_equals",
+        "allow_hyphen_values",
+        "last",
+        "trailing_var_arg",
+        "stdin_secret",
+        "help"
+      ]
+    },
+    "ValueSpec": {
+      "description": "The grammar of an argument's value.",
+      "oneOf": [
+        {
+          "description": "A flag that takes no value.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "switch"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A flag that counts its occurrences.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "count"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "path"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "choices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Choice"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "choice"
+            }
+          },
+          "required": [
+            "type",
+            "choices"
+          ]
+        },
+        {
+          "description": "A package identifier.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "identifier"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "platform"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "digest"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "Choice": {
+      "description": "One accepted value of a choice argument.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "help": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "deprecated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deprecation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "value",
+        "hidden"
+      ]
+    },
+    "Arity": {
+      "description": "How many values an argument takes per occurrence; `max` absent means unbounded.",
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "min"
+      ]
+    },
+    "GroupSpec": {
+      "description": "A named set of arguments with a shared rule.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required": {
+          "description": "One member must be given.",
+          "type": "boolean"
+        },
+        "multiple": {
+          "description": "More than one member may be given.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "args",
+        "required",
+        "multiple"
+      ]
+    },
+    "EnvSpec": {
+      "description": "One environment variable OCX reads.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The value grammar: `bool`, `tri_bool`, `string`, `integer`, `path`, `path_list`, `path_or_pem`,\n`host_list`, `choice` or `json`.",
+          "type": "string"
+        },
+        "choices": {
+          "description": "The accepted values of a `choice` variable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "visibility": {
+          "description": "`public`, `foreign` or `plumbing`.",
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "flag": {
+          "description": "The flag this variable stands in for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secret": {
+          "type": "boolean"
+        },
+        "on_invalid": {
+          "description": "What a value outside the grammar does: `default` falls back, `error` refuses.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "visibility",
+        "summary",
+        "secret",
+        "on_invalid"
+      ]
+    },
+    "RetiredSpec": {
+      "description": "An environment spelling OCX no longer reads under its own name.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "replacement": {
+          "type": "string"
+        },
+        "change": {
+          "description": "`rename`, `value_rename` or `polarity`.",
+          "type": "string"
+        },
+        "status": {
+          "description": "`window` while the old spelling still works, `removed` once it is refused.",
+          "type": "string"
+        },
+        "removal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "replacement",
+        "change",
+        "status"
+      ]
+    }
+  },
+  "$id": "https://ocx.sh/schemas/cli/v1.json"
+}

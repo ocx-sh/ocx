@@ -11,15 +11,9 @@ use crate::api::data::self_setup::ManagedConfigEntry;
 /// Report of `ocx config setup`: the outcome of adopting the managed config.
 ///
 /// Plain format: a key/value table with a `Managed config` summary row.
-///
-/// JSON format: `{"managed_config":{"status":"…"}}`, plus `"digest"` on the
-/// adopt/refresh paths (`adopted` / `already_adopted` / `refreshed` /
-/// `refresh_unavailable` / `would_refresh`); `refreshed` additionally carries
-/// `"previous_digest"`, `refresh_unavailable` carries `"reason"`, both omitted
-/// everywhere else — the same `managed_config` entry shape `ocx self setup`
-/// reports, so fleet tooling can parse both with one schema.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigSetupData {
+    /// The adoption outcome, in the entry shape `ocx self setup` reports.
     managed_config: ManagedConfigEntry,
 }
 
@@ -32,6 +26,9 @@ impl ConfigSetupData {
 }
 
 impl Printable for ConfigSetupData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "ConfigSetupData";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         printer.print_table(
             &["Field".into(), "Value".into()],

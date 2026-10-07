@@ -21,23 +21,19 @@ use crate::auth::registry_url::canonicalize_registry;
 
 use ocx_util::fs::LockedFile;
 
-/// Test seam replacing the credential helper's subprocess budget, in milliseconds.
-/// Seam convention: `subsystem-tests.md` § Test-Only Seams.
-#[cfg(any(test, feature = "__testing"))]
-const TESTING_HELPER_TIMEOUT_ENV: &str = "__OCX_TESTING_HELPER_TIMEOUT_MS";
-
-/// The helper budget: [`docker_credential::HELPER_TIMEOUT`], or the [`TESTING_HELPER_TIMEOUT_ENV`] override.
+/// The helper budget: [`docker_credential::HELPER_TIMEOUT`], or the `__OCX_TESTING_HELPER_TIMEOUT_MS` override.
 ///
 /// Panics on a malformed value, or a typo silently out-waits the real deadline and the test still passes.
 #[cfg(any(test, feature = "__testing"))]
 fn helper_timeout() -> Duration {
-    let Ok(raw) = std::env::var(TESTING_HELPER_TIMEOUT_ENV) else {
+    let seam = &ocx_env::__OCX_TESTING_HELPER_TIMEOUT_MS;
+    let Some(raw) = seam.get_raw().and_then(|value| value.into_string().ok()) else {
         return docker_credential::HELPER_TIMEOUT;
     };
     Duration::from_millis(
-        raw.trim().parse().unwrap_or_else(|_| {
-            panic!("{TESTING_HELPER_TIMEOUT_ENV} must be a whole number of milliseconds, got {raw:?}")
-        }),
+        raw.trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{} must be a whole number of milliseconds, got {raw:?}", seam.name)),
     )
 }
 
@@ -157,13 +153,16 @@ impl DockerCredentialStore {
 
 /// Resolves `$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`.
 ///
-/// Home via [`ocx_util::env::home_dir`], not `dirs::home_dir`, which ignores `%USERPROFILE%` and could name a
+/// Home via [`ocx_env::home_dir`], not `dirs::home_dir`, which ignores `%USERPROFILE%` and could name a
 /// different file than docker reads.
 fn resolve_config_path() -> Result<PathBuf, AuthError> {
-    if let Some(dir) = ocx_util::env::var("DOCKER_CONFIG") {
+    if let Some(dir) = ocx_env::DOCKER_CONFIG
+        .get_raw()
+        .and_then(|value| value.into_string().ok())
+    {
         return Ok(PathBuf::from(dir).join("config.json"));
     }
-    let home = ocx_util::env::home_dir().ok_or_else(|| AuthError::WriteConfigFailed {
+    let home = ocx_env::home_dir().ok_or_else(|| AuthError::WriteConfigFailed {
         path: PathBuf::new(),
         source: std::io::Error::new(ErrorKind::NotFound, "home directory not found"),
     })?;
@@ -820,9 +819,9 @@ mod tests {
 
     #[test]
     fn dockerconfigstore_honors_docker_config_env() {
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
         let dir = tempfile::tempdir().expect("tempdir");
-        env_guard.set("DOCKER_CONFIG", dir.path().display().to_string());
+        env_guard.set(&ocx_env::DOCKER_CONFIG, dir.path().display().to_string());
         let store = DockerCredentialStore::new(StoreOptions {
             allow_plaintext_put: true,
             detect_default_native_store: false,

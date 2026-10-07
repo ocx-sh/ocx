@@ -1408,7 +1408,10 @@ async fn the_report_document_has_the_documented_shape() {
         document["repository"],
         serde_json::to_value(repository()).expect("serialises")
     );
-    assert_eq!(document["selection"], serde_json::json!({"tags": ["old"]}));
+    assert_eq!(
+        document["selection"],
+        serde_json::json!({"type": "tags", "tags": ["old"]})
+    );
     assert_eq!(document["force"], false);
     assert_eq!(document["dry_run"], false);
     assert_eq!(
@@ -1421,7 +1424,6 @@ async fn the_report_document_has_the_documented_shape() {
             "tag": "old",
             "digest": root_content("old").to_string(),
             "action": "deleted",
-            "reason": null,
         }])
     );
 }
@@ -1477,12 +1479,12 @@ async fn the_family_selection_serialises_with_its_keep_builds() {
 
     assert_eq!(
         document["selection"],
-        serde_json::json!({"prerelease": "0.5.0-canary", "keep_builds": 3})
+        serde_json::json!({"type": "prerelease", "prerelease": "0.5.0-canary", "keep_builds": 3})
     );
 }
 
 #[tokio::test]
-async fn a_run_without_an_index_reports_a_null_index() {
+async fn a_run_without_an_index_omits_the_index() {
     let registry = Registry::new();
 
     let run = registry
@@ -1491,7 +1493,7 @@ async fn a_run_without_an_index_reports_a_null_index() {
     let document = serde_json::to_value(&run.outcome).expect("the outcome serialises");
 
     assert!(run.error.is_none(), "got {:?}", run.error);
-    assert!(document["index"].is_null());
+    assert!(document.get("index").is_none(), "{document}");
     assert_eq!(
         document["repository"],
         serde_json::to_value(package()).expect("serialises")

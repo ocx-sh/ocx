@@ -13,9 +13,11 @@ use crate::api::Printable;
 /// Whether a locked tool is already in the object store or would be
 /// fetched on a real `ocx pull`.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum PullStatus {
+    /// Already in the object store.
     Cached,
+    /// A real `ocx pull` would download it.
     WouldFetch,
 }
 
@@ -23,7 +25,7 @@ impl fmt::Display for PullStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PullStatus::Cached => write!(f, "cached"),
-            PullStatus::WouldFetch => write!(f, "would-fetch"),
+            PullStatus::WouldFetch => write!(f, "would_fetch"),
         }
     }
 }
@@ -31,15 +33,17 @@ impl fmt::Display for PullStatus {
 // `package` stays typed: JSON keeps the full pin while the plain table shortens it.
 /// A single dry-run preview row.
 ///
-/// `package` is the pinned `…@sha256:<64hex>` identifier. `path` is the
-/// package root directory (parent of `content/` and `entrypoints/`) for
-/// `cached` rows, and `null` for `would-fetch` rows where nothing has been
-/// materialised yet; traverse into `<path>/content/` for installed files or
-/// `<path>/entrypoints/` for generated launchers.
+/// `path` is the package root directory (parent of `content/` and
+/// `entrypoints/`) for `cached` rows and absent for `would_fetch` rows, where
+/// nothing has been materialised yet.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DryRunEntry {
+    /// The locked tool's pinned identifier.
     pub package: PinnedPackageRef,
+    /// Whether the tool is cached or would be fetched.
     pub status: PullStatus,
+    /// The package root; absent when nothing is materialised yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
 
@@ -49,27 +53,26 @@ impl DryRunEntry {
     }
 }
 
-/// Preview of what `ocx pull` would do without writing to the store, in lock-file order.
+/// Preview of what `ocx pull` would do without writing to the store.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PullDryRun {
-    pub entries: Vec<DryRunEntry>,
+    /// One entry per locked tool, in lock-file order.
+    pub items: Vec<DryRunEntry>,
 }
 
 impl PullDryRun {
-    pub fn new(entries: Vec<DryRunEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl Serialize for PullDryRun {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+    pub fn new(items: Vec<DryRunEntry>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for PullDryRun {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PullDryRun";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        for entry in &self.entries {
+        for entry in &self.items {
             // Shortened, not dropped: a locked leaf has no tag, so the digest is its only version.
             rows[0].push(format!(
                 "{}@{}",
@@ -82,16 +85,5 @@ impl Printable for PullDryRun {
             &["Package".into(), "Status".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
-    }
-}
-
-// Transparent `Serialize`: the schema is the bare entry array.
-impl schemars::JsonSchema for PullDryRun {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "PullDryRun".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<DryRunEntry>>::json_schema(generator)
     }
 }

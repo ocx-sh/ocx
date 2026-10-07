@@ -83,6 +83,12 @@ build --@rules_rust//rust/settings:clippy_output_diagnostics=true
 build --@rules_rust//rust/settings:clippy_error_format=json
 build --@rules_rust//rust/settings:clippy_flag=-Wunreachable_pub
 
+# The root `clippy.toml` (`disallowed-methods`: raw `std::env` reads). rules_rust
+# 0.74.0 reads no `clippy.toml` without this label, so the aspect would lint
+# without the ban while `cargo clippy` enforced it. Proven like the three above,
+# at rules_rust 0.74.0: `bazel query @rules_rust//rust/settings:clippy.toml` resolves.
+build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
+
 # rustdoc — one cached pass, read by `task rust:doc:ratchet`.
 #
 # `rustdoc_diagnostics.bzl`'s aspect, beside clippy's for the same reason:

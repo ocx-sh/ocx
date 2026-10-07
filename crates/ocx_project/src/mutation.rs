@@ -236,7 +236,7 @@ impl MutationGuard {
     }
 }
 
-/// Fault-injection points, keyed by `OCX_TEST_FAULT` value.
+/// Fault-injection points, keyed by `__OCX_TESTING_FAULT` value.
 enum CommitStage {
     BeforeLockRename,
     AfterLockWrite,
@@ -253,15 +253,33 @@ impl CommitStage {
     }
 }
 
-/// `OCX_TEST_FAULT`, with an empty value treated as unset.
+/// `__OCX_TESTING_FAULT`, with an empty value treated as unset.
+#[cfg(any(test, feature = "__testing"))]
 fn read_fault_hook() -> Option<String> {
-    let raw = std::env::var_os("OCX_TEST_FAULT")?;
-    let s = raw.to_string_lossy().into_owned();
-    if s.is_empty() { None } else { Some(s) }
+    ocx_env::__OCX_TESTING_FAULT
+        .get_os()
+        .map(|raw| raw.to_string_lossy().into_owned())
+}
+
+/// A release build has no fault seam: the variable is not even declared there.
+#[cfg(not(any(test, feature = "__testing")))]
+fn read_fault_hook() -> Option<String> {
+    None
+}
+
+/// `__OCX_TESTING_FAULT_RELEASE_FILE`, the file whose appearance ends the pause stage.
+#[cfg(any(test, feature = "__testing"))]
+fn fault_release_file() -> Option<std::ffi::OsString> {
+    ocx_env::__OCX_TESTING_FAULT_RELEASE_FILE.get_raw()
+}
+
+#[cfg(not(any(test, feature = "__testing")))]
+fn fault_release_file() -> Option<std::ffi::OsString> {
+    None
 }
 
 /// Inject `stage`'s fault if `fault` names it: an I/O error, or for the pause
-/// stage a wait until `OCX_TEST_FAULT_RELEASE_FILE` exists.
+/// stage a wait until `__OCX_TESTING_FAULT_RELEASE_FILE` exists.
 async fn maybe_inject_fault(fault: Option<&str>, stage: CommitStage) -> Result<(), Error> {
     let Some(fault) = fault else {
         return Ok(());
@@ -274,13 +292,13 @@ async fn maybe_inject_fault(fault: Option<&str>, stage: CommitStage) -> Result<(
         CommitStage::BeforeLockRename | CommitStage::AfterLockWrite => Err(ProjectError::new(
             PathBuf::new(),
             ProjectErrorKind::Io(std::io::Error::other(format!(
-                "OCX_TEST_FAULT={fault} (test-only hook)"
+                "__OCX_TESTING_FAULT={fault} (test-only hook)"
             ))),
         )
         .into()),
         CommitStage::PauseBeforeManifestWrite => {
             // Without a release path this waits forever; the test must arrange one.
-            let release = std::env::var_os("OCX_TEST_FAULT_RELEASE_FILE");
+            let release = fault_release_file();
             loop {
                 if let Some(ref path) = release
                     && tokio::fs::metadata(path).await.is_ok()

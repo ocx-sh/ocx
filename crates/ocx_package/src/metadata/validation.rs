@@ -199,7 +199,7 @@ pub(super) fn validate_env_reserved_keys(metadata: &Metadata) -> Result<(), Pack
 
     for var in env {
         // The shared predicate, or the write and read paths disagree about which keys exist.
-        if ocx_util::env::is_reserved_ocx_key(&var.key) {
+        if ocx_env::is_reserved_ocx_key(&var.key) {
             return Err(Error::ReservedEnvKey { key: var.key.clone() });
         }
     }

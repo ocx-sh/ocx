@@ -3833,6 +3833,7 @@ dependencies = [
  "ocx_announce",
  "ocx_config",
  "ocx_console",
+ "ocx_env",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -3847,17 +3848,13 @@ dependencies = [
  "ocx_test_support",
  "ocx_trust",
  "ocx_util",
- "proc-macro2",
  "quick-junit",
- "quote",
  "reqwest",
  "schemars 1.2.2",
  "secrecy",
  "serde",
  "serde_json",
  "serde_repr",
- "sha2 0.11.0",
- "syn 2.0.119",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -3885,6 +3882,7 @@ dependencies = [
  "hyper-util",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -3916,6 +3914,8 @@ dependencies = [
  "futures",
  "libc",
  "log",
+ "ocx_env",
+ "ocx_exit",
  "ocx_oci",
  "ocx_test_support",
  "ocx_trust",
@@ -3946,6 +3946,7 @@ dependencies = [
  "console",
  "indicatif",
  "log",
+ "ocx_env",
  "ocx_util",
  "rpassword",
  "serde",
@@ -3955,11 +3956,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocx_env"
+version = "0.6.5"
+dependencies = [
+ "ocx_exit",
+ "tempfile",
+]
+
+[[package]]
 name = "ocx_exit"
 version = "0.6.5"
 dependencies = [
+ "ocx_exit_derive",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ocx_exit_derive"
+version = "0.6.5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3973,6 +3992,7 @@ dependencies = [
  "libc",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_exit",
  "ocx_oci",
  "ocx_store",
@@ -4010,6 +4030,7 @@ dependencies = [
  "lzma-rust2",
  "oci-client",
  "ocx_console",
+ "ocx_env",
  "ocx_exit",
  "ocx_test_support",
  "ocx_util",
@@ -4043,6 +4064,8 @@ dependencies = [
  "futures",
  "log",
  "ocx_config",
+ "ocx_env",
+ "ocx_exit",
  "ocx_index",
  "ocx_oci",
  "ocx_store",
@@ -4075,6 +4098,8 @@ dependencies = [
  "log",
  "ocx_config",
  "ocx_console",
+ "ocx_env",
+ "ocx_exit",
  "ocx_index",
  "ocx_oci",
  "ocx_package",
@@ -4118,6 +4143,8 @@ dependencies = [
  "hex",
  "log",
  "ocx_config",
+ "ocx_env",
+ "ocx_exit",
  "ocx_index",
  "ocx_oci",
  "ocx_package",
@@ -4163,13 +4190,17 @@ dependencies = [
 name = "ocx_schema"
 version = "0.6.5"
 dependencies = [
+ "clap",
  "ocx",
  "ocx_config",
+ "ocx_env",
+ "ocx_exit",
  "ocx_oci",
  "ocx_package",
  "ocx_package_manager",
  "ocx_project",
  "schemars 1.2.2",
+ "serde",
  "serde_json",
 ]
 
@@ -4180,6 +4211,7 @@ dependencies = [
  "allocative",
  "anyhow",
  "ocx_config",
+ "ocx_env",
  "ocx_oci",
  "ocx_util",
  "regex",
@@ -4193,6 +4225,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocx_sdkgen"
+version = "0.6.5"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "ocx_setup"
 version = "0.6.5"
 dependencies = [
@@ -4200,6 +4244,7 @@ dependencies = [
  "libc",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_exit",
  "ocx_index",
  "ocx_oci",
@@ -4236,6 +4281,8 @@ dependencies = [
  "log",
  "ocx_config",
  "ocx_console",
+ "ocx_env",
+ "ocx_exit",
  "ocx_oci",
  "ocx_package",
  "ocx_store",
@@ -4268,6 +4315,7 @@ dependencies = [
  "clap_builder",
  "hex",
  "log",
+ "ocx_env",
  "ocx_exit",
  "ocx_oci",
  "ocx_trust",
@@ -4300,6 +4348,8 @@ dependencies = [
  "hex",
  "log",
  "ocx_config",
+ "ocx_env",
+ "ocx_exit",
  "ocx_oci",
  "ocx_util",
  "serde",
@@ -4317,6 +4367,7 @@ version = "0.6.5"
 dependencies = [
  "dunce",
  "libc",
+ "ocx_env",
  "p256",
  "pem",
  "proc-macro2",
@@ -4337,6 +4388,7 @@ name = "ocx_trust"
 version = "0.6.5"
 dependencies = [
  "log",
+ "ocx_env",
  "ocx_util",
  "regex",
  "schemars 1.2.2",
@@ -4354,6 +4406,7 @@ version = "0.6.5"
 dependencies = [
  "async-trait",
  "bzip2",
+ "chrono",
  "dunce",
  "flate2",
  "fs4",
@@ -4363,6 +4416,7 @@ dependencies = [
  "libc",
  "log",
  "lzma-rust2",
+ "ocx_exit",
  "ocx_test_support",
  "pem",
  "regex",

@@ -11,22 +11,22 @@ use ocx_console::{Annotation, DataInterface, Theme, TreeItem};
 use ocx_oci::{Platform, Selection};
 use ocx_package::metadata::env::modifier::ModifierKind;
 use ocx_project::{PackageSettings, ProjectConfig, ProjectEnv, ProjectLock};
+use ocx_util::time::Timestamp;
 use serde::Serialize;
 
 use crate::api::Printable;
 
 // Not `ProjectEnv`'s own `Serialize`: its TOML grammar mixes strings and tables per key.
-/// One declared environment value, normalized: `type` and `value` are always emitted.
+/// One declared environment value, normalized: `kind` and `value` are always emitted.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvValueOut {
-    #[serde(rename = "type")]
+    /// How the value combines with the variable's existing value.
     kind: ModifierKind,
     /// The declared separator for a `list`-typed value. `None` for every
     /// other kind, and for a `list` that declared none — the project surface
     /// may omit it, and what the omission inherits is decided at compose
     /// time, which status does not do. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     separator: Option<String>,
     /// Verbatim as written: a relative `path` value stays relative. `ocx inspect`
     /// and `ocx env` resolve it against the project root.
@@ -39,20 +39,18 @@ pub struct EnvValueOut {
 /// closure ("key absent on the wire means undeclared"):
 ///
 /// - both keys — declared in `ocx.toml` and locked.
-/// - no `platforms` — declared but not yet locked (added since the last
+/// - no `platform_digests` — declared but not yet locked (added since the last
 ///   `ocx lock`).
 /// - no `declared` — locked but no longer declared (orphaned in a stale lock).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ToolStatus {
     /// The `ocx.toml` value for this binding, verbatim (`ocx.sh/go-task:3`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     declared: Option<String>,
-    /// EVERY platform leaf the lock records, not the host's; `ocx inspect`
-    /// picks the host leaf.
+    /// EVERY platform leaf the lock records, not the host's, keyed by the
+    /// canonical platform string; `ocx inspect` picks the host leaf.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    platforms: Option<BTreeMap<String, String>>,
+    platform_digests: Option<BTreeMap<String, ocx_oci::Digest>>,
     /// The `(platform key, digest)` leaf this host runs, picked by the matcher
     /// `ocx pull` and `ocx exec` use. `None` when unlocked. Plain view only.
     #[serde(skip)]
@@ -63,6 +61,7 @@ pub struct ToolStatus {
 /// top-level `[tools]` and `[env]` tables in `ocx.toml` ARE its tools and env.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct GroupStatus {
+    /// The group's bindings, keyed by binding name.
     tools: BTreeMap<String, ToolStatus>,
     /// This scope's `[env]` table alone — never merged with another scope's.
     // Never merge: a merged view cannot show which scope declared a key.
@@ -79,26 +78,24 @@ pub struct GroupStatus {
 // Never an error: status is the command reached for when the project is broken.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct LockStatus {
+    /// Whether an `ocx.lock` exists beside `ocx.toml`.
     present: bool,
     /// Why the lock could not be parsed. Its presence IS the unreadable state
     /// — no separate boolean, which could only ever repeat what this key
-    /// already says. The header fields and every binding's `platforms` are
+    /// already says. The header fields and every binding's `platform_digests` are
     /// absent alongside it: nothing was read.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     error: Option<String>,
     /// `true` when the lock binds to `ocx.toml`: its stored `declaration_hash`
     /// matches and every entry names its declared repository. `false` is the
     /// lock `ocx pull` and `ocx exec` refuse.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     current: Option<bool>,
+    /// The lock file format version.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     lock_version: Option<u8>,
     /// The hash stored in `ocx.lock`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     declaration_hash: Option<String>,
     /// The hash recomputed from `ocx.toml` — what the lock's stored hash would
     /// have to be for `current` to hold, so a consumer sees *why* `current` is
@@ -108,12 +105,12 @@ pub struct LockStatus {
     /// `[package.*]` are excluded by design, so an edit to either leaves
     /// `current` true.
     declaration_hash_expected: String,
+    /// The ocx version that wrote the lock.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     generated_by: Option<String>,
+    /// When the lock was written; absent when its recorded time is not an RFC 3339 instant.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    generated_at: Option<String>,
+    generated_at: Option<Timestamp>,
 }
 
 // Plain is a tree under `inspect`'s single-table exemption: groups × tools × env share no row shape.
@@ -125,7 +122,9 @@ pub struct LockStatus {
 pub struct StatusReport {
     /// Absolute path of the `ocx.toml` this report describes.
     project: String,
+    /// The `ocx.lock` header and whether it agrees with `ocx.toml`.
     lock: LockStatus,
+    /// Every group's declarations, keyed by group name.
     groups: BTreeMap<String, GroupStatus>,
     /// `[package."<id>"]` resolve-time policy, keyed by the canonical author
     /// string. Reported here because it is excluded from `declaration_hash`,
@@ -139,7 +138,16 @@ pub struct StatusReport {
 /// Per-package resolve-time policy from `[package."<id>"]`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageSettingsOut {
+    /// Whether `no_patches` excludes the package from patch overlays.
     no_patches: bool,
+}
+
+/// The lock's advisory write time; status never fails on it, so an unparseable one is logged and omitted.
+fn generated_at(recorded: &str) -> Option<Timestamp> {
+    recorded
+        .parse()
+        .inspect_err(|error| log::warn!("ocx.lock generated_at {recorded:?} is not an RFC 3339 instant: {error}"))
+        .ok()
 }
 
 fn env_out(env: &ProjectEnv) -> BTreeMap<String, EnvValueOut> {
@@ -200,17 +208,11 @@ impl StatusReport {
             });
             let tool = entry.tools.entry(locked.name.clone()).or_insert_with(|| ToolStatus {
                 declared: None,
-                platforms: None,
+                platform_digests: None,
                 host_leaf: None,
             });
             tool.host_leaf = Some(owned(ocx_project::lookup_host_leaf(&locked.platforms, host)));
-            tool.platforms = Some(
-                locked
-                    .platforms
-                    .iter()
-                    .map(|(key, digest)| (key.clone(), digest.to_string()))
-                    .collect(),
-            );
+            tool.platform_digests = Some(locked.platforms.clone());
         }
 
         let lock_status = match lock {
@@ -222,7 +224,7 @@ impl StatusReport {
                 declaration_hash: Some(lock.metadata.declaration_hash.clone()),
                 declaration_hash_expected: config_hash,
                 generated_by: Some(lock.metadata.generated_by.clone()),
-                generated_at: Some(lock.metadata.generated_at.clone()),
+                generated_at: generated_at(&lock.metadata.generated_at),
             },
             None => LockStatus {
                 present: false,
@@ -325,7 +327,7 @@ fn declared_tools(tools: &BTreeMap<String, ocx_oci::PackageRef>) -> BTreeMap<Str
                 binding.clone(),
                 ToolStatus {
                     declared: Some(identifier.to_string()),
-                    platforms: None,
+                    platform_digests: None,
                     host_leaf: None,
                 },
             )
@@ -397,7 +399,7 @@ impl ToolStatus {
             Some(Selection::Found((key, digest))) if verbose => notes.push(format!("{key}: {digest}")),
             Some(Selection::Found(_)) => {}
         }
-        if verbose && let Some(platforms) = &self.platforms {
+        if verbose && let Some(platforms) = &self.platform_digests {
             let count = platforms.len();
             notes.push(format!("{count} platform{}", if count == 1 { "" } else { "s" }));
         }
@@ -432,6 +434,9 @@ impl GroupStatus {
 }
 
 impl Printable for StatusReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "StatusReport";
+
     fn print_plain(&self, data: &DataInterface) {
         let lock_label = match (self.lock.present, self.lock.error.as_deref(), self.lock.current) {
             (false, _, _) => "lock: absent (run `ocx lock`)".to_owned(),
@@ -469,6 +474,12 @@ impl Printable for StatusReport {
 mod tests {
     use super::*;
 
+    /// An unparseable advisory write time is omitted, never an error.
+    #[test]
+    fn generated_at_omits_an_unparseable_instant() {
+        assert!(generated_at("garbage").is_none());
+    }
+
     // ── separator field (W-10) ─────────────────────────────────────────────
     //
     // Driven through a real `ProjectEnv`, not a hand-built `EnvValueOut`: the
@@ -488,7 +499,7 @@ mod tests {
             "GODEBUG": { "type": "list", "separator": ",", "value": "gctrace=1" }
         }));
         let json = serde_json::to_string(&reported).expect("serializes");
-        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(json.contains(r#""kind":"list""#), "kind must serialize as list: {json}");
         assert!(
             json.contains(r#""separator":",""#),
             "the declared separator must reach the report: {json}"
@@ -516,7 +527,7 @@ mod tests {
             "GODEBUG": { "type": "list", "value": "gctrace=1" }
         }));
         let json = serde_json::to_string(&reported).expect("serializes");
-        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(json.contains(r#""kind":"list""#), "kind must serialize as list: {json}");
         assert!(
             !json.contains("\"separator\""),
             "an undeclared separator must not be invented: {json}"

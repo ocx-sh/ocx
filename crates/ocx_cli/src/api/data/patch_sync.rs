@@ -34,6 +34,9 @@ impl PatchSyncReport {
 }
 
 impl Printable for PatchSyncReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PatchSyncReport";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Column-major: `rows[c]` holds column c.
         let rows: [Vec<String>; 3] = [

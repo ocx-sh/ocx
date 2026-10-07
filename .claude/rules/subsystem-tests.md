@@ -22,7 +22,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 | `test/src/helpers.py` | `make_package()`: build + push test packages |
 | `test/src/registry.py` | OCI registry helpers (fetch manifest, extract platforms) |
 | `test/taskfile.yml` | Task runner (default, quick, parallel, smoke, scoped; suite floor/ceiling checks) |
-| `test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/XFAIL_CEILING` | Plain-integer floor files the run is bracketed by (below) |
+| `test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/XFAIL_CEILING`, `test/CONFORMANCE_FLOOR` | Plain-integer floor files the run is bracketed by (below) |
 
 ## Key Fixtures
 
@@ -121,7 +121,7 @@ Four tiers (ADR `adr_test_speed_tiers.md` § C-TIER; plan `plan_test_speed_tiers
 |---|---|---|---|
 | **T0 lint** | `task test:lint:structure` (pytest over `test/lint/`, uncached) + `scripts/scoped_gate.py --check-coverage` (`task test:rows:check`) | verify phase 1; every `verify:scoped`, regardless of decision (an escalate reaches it through `verify`) | ≤ 30 s wall (`OCX_LINT_BUDGET_SECONDS`), floored on `test/LINT_FLOOR`, ceilinged on `test/LINT_SKIP_CEILING` / `test/LINT_XFAIL_CEILING` |
 | **T1 inner** | T0 + `task bazel:test:unit` (cached, reverse-dependents — its `rust_doc_test` targets are the doctests) + `cargo clippy -p <crate>` per changed crate + the workspace `rust:doc:ratchet` + `test:smoke` + `test:scoped` over the plan's `acceptance_globs` | `task verify:scoped --force`, per task / review-fix iteration | ≤ 120 s on the first verification after a code-changing edit |
-| **T2 full** | `task verify` (both phases, ending in `bazel:test:accept`) | WP merge commit (mechanically enforced — `workflow-git.md` "Work-Package Merges"), `/hex-finalize`, any `verify:scoped` escalation, commits on `main` | unbounded, measured |
+| **T2 full** | `task verify` (both phases, ending in `bazel:test:accept`) | `/hex-finalize`, any `verify:scoped` escalation, commits on `main` | unbounded, measured |
 | **T3 deep** | `verify-deep.yml` | push to `main`, merge queue, `workflow_dispatch` | CI, cold disk |
 
 ### Lint tier admission (`test/lint/`)
@@ -164,7 +164,10 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
 - **Floor files.** `test/SUITE_FLOOR` (collected count, only ever rises — in the commit that
   adds the tests), `test/SKIP_CEILING`, `test/XFAIL_CEILING`. `task test` (and `test:quick` /
   `test:parallel`, which route through it) refuses below the floor before the run and above a
-  ceiling after it, both as `cmds:` (`--force` skips `preconditions:`).
+  ceiling after it, both as `cmds:` (`--force` skips `preconditions:`). `test/CONFORMANCE_FLOOR`
+  is the minimum count of distinct `--format json` schema roots a full run validated; the
+  conformance hook records them per case and `scripts/conformance_floor.py` reads the JUnit
+  report (the `test` taskfile's conformance-floor step and `bazel:test:accept`; a subset run is reported as not floored).
 - **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` (run at every merge over both the
   per-WP range and `merge-base(origin/main)..HEAD`, with `--tiered-shapes` on ranges that
   legitimately move or add a `test/lint/` module, add a `command` marker, edit
@@ -429,10 +432,10 @@ When an acceptance test must force internal state that production code derives a
 
 1. **Cargo feature `__testing`** — declared `__testing = []` in each seam crate's `Cargo.toml` and forwarded from `crates/ocx_cli/Cargo.toml` (the list `testing_feature_forward_list_matches_grep` checks). Follows the Rust-ecosystem `__name` convention (axum `__private`, reqwest `__tls`): internal, no stability guarantee, never enabled by downstream code.
 2. **Gate every seam** `#[cfg(any(test, feature = "__testing"))]` — `test` covers unit tests, `feature = "__testing"` covers the acceptance binary. **Release artifacts physically lack the code path.**
-3. **Env-var name is double-underscore-prefixed `__OCX_*`** (e.g. `__OCX_SELF_IMAGE`, `__OCX_TEST_LIBC`) — the prefix signals "private test seam, not user-facing config." These are NOT documented in `website/src/docs/reference/environment.md` and are NOT forwarded via `Env::apply_ocx_config`.
-4. **Defense-in-depth assert inside the gate** where misuse is dangerous — e.g. `__OCX_SELF_IMAGE` asserts the override targets a loopback registry, so even a build with the feature on cannot be coerced against a real registry.
+3. **Env-var name is double-underscore-prefixed `__OCX_*`** (e.g. `__OCX_TESTING_SELF_IMAGE`, `__OCX_TESTING_LIBC`) — the prefix signals "private test seam, not user-facing config." These are NOT documented in `website/src/docs/reference/environment.md` and are NOT forwarded via `Env::apply_ocx_config`.
+4. **Defense-in-depth assert inside the gate** where misuse is dangerous — e.g. `__OCX_TESTING_SELF_IMAGE` asserts the override targets a loopback registry, so even a build with the feature on cannot be coerced against a real registry.
 
-The acceptance harness already builds with the feature: the binary under test is Bazel's `//crates/ocx_cli:ocx`, and every tier crate's `rust_library` in `crates/*/BUILD.bazel` sets `crate_features = ["__testing"]`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
+The acceptance harness already builds with the feature: the binary under test is Bazel's `//crates/ocx_cli:ocx`, and every tier crate's `rust_library` in `crates/*/BUILD.bazel` sets `crate_features = ["__testing"]`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_TESTING_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
 
 ## Unfalsifiable Greens
 
@@ -453,7 +456,7 @@ failed assert on a missing prerequisite over `pytest.skip`.
 
 ## Quality Gate
 
-Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which `bazel build` `//crates/ocx_cli:ocx` and copy it there; `task bazel:test:accept` runs that Bazel output directly and reads nothing from `test/bin/`).
+Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which `bazel build` `//crates/ocx_cli:ocx` and copy it there; `task bazel:test:accept` runs that Bazel output directly and reads nothing from `test/bin/`).
 
 **Never run `task website:build` while an acceptance suite is running.** Its
 `website:recordings:ensure-binary` step rebuilds `-p ocx` in *release* — without

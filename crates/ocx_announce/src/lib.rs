@@ -3,8 +3,8 @@
 
 //! Index publication workflow: announce pipeline, forge drivers, index claim.
 //!
-//! No root `Error`: each subtree's error has its own `downcast_arm!` rung in
-//! `ocx_cli/src/exit/ocx_announce.rs`, which a wrapper would hide.
+//! No root `Error`: each subtree's error has its own rung in the
+//! `families!` list in `ocx_cli/src/exit.rs`, which a wrapper would hide.
 
 pub mod announce;
 pub mod claim;

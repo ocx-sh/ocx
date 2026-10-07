@@ -59,7 +59,7 @@ A signature is an OCI referrer of the manifest it signs, and the distribution sp
 
 OCX writes through whichever the registry offers. Where the API is present, the referrer manifest is pushed and the registry indexes it. Where it is absent — the endpoint answers HTTP 404, or a `NOT_FOUND` / `NAME_UNKNOWN` envelope — OCX pushes the same referrer manifest and names it in the fallback index itself. Signing succeeds either way, and `ocx package verify` reads both shapes with no flag.
 
-Exit 84 (`ReferrersUnsupported`) is reserved for a registry that offers neither: no Referrers API, **and** a fallback-index write it refused. Only a registry that understood the document and declined it earns that code — an auth failure, a 429 or a 5xx keeps its own exit code, because for those a rerun is the right move and for 84 it never is.
+Exit 82 (`referrers_unsupported`) is reserved for a registry that offers neither: no Referrers API, **and** a fallback-index write it refused. Only a registry that understood the document and declined it earns that code — an auth failure, a 429 or a 5xx keeps its own exit code, because for those a rerun is the right move and for 82 it never is.
 
 :::info Which registries implement OCI 1.1 Referrers?
 
@@ -79,7 +79,7 @@ A signature is a [Sigstore bundle v0.3][sigstore-bundle] — a JSON envelope car
 
 - The [Fulcio][fulcio]-issued short-lived signing certificate — the **leaf alone**, in the bundle's `verificationMaterial.certificate` field. Bundle v0.3 replaced v0.2's `x509CertificateChain` with a single leaf; the intermediates come from the trust root, so a chain would carry nothing the verifier does not already have.
 - The ECDSA P-256 signature over the subject manifest's SHA-256 digest
-- The [Rekor][rekor] transparency-log entry: the Signed Entry Timestamp (inclusion promise) and the Merkle inclusion proof. Both are mandatory in either direction — `ocx package sign` refuses to publish a bundle whose log entry carries no inclusion proof (exit 83), and `ocx package verify` refuses one it receives (`rekor_inclusion_proof_absent`, exit 65). The promise is only a signed statement that the entry *will* be included; the proof is the evidence that it is, in a tree whose root the log signed. Bundle profile v0.1 and v0.2 leave the proof optional at the schema level, so accepting a promise-only bundle would verify on weaker evidence than the format allows for.
+- The [Rekor][rekor] transparency-log entry: the Signed Entry Timestamp (inclusion promise) and the Merkle inclusion proof. Both are mandatory in either direction — `ocx package sign` refuses to publish a bundle whose log entry carries no inclusion proof (exit 65, `rekor_set_malformed`), and `ocx package verify` refuses one it receives (`rekor_inclusion_proof_absent`, exit 65). The promise is only a signed statement that the entry *will* be included; the proof is the evidence that it is, in a tree whose root the log signed. Bundle profile v0.1 and v0.2 leave the proof optional at the schema level, so accepting a promise-only bundle would verify on weaker evidence than the format allows for.
 
 OCX pushes the bundle as an OCI referrer of the subject manifest. The referrer artifact's media type is `application/vnd.dev.sigstore.bundle.v0.3+json`. The raw blob lands in `$OCX_HOME/blobs/` alongside other OCI blobs, identified by its own SHA-256 digest and referenced in the subject manifest's referrers index.
 
@@ -117,7 +117,7 @@ For a self-hosted Fulcio and Rekor, note that cosign 3 removed `--fulcio-url` / 
 
 A CI pipeline with an OIDC step has nothing to gain from a key: keyless is less to manage and leaves an identity-bound audit trail for free. A key pair earns its place when there is no OIDC step to detect, or when an operator wants signatures independent of any identity provider or public transparency log — a private key under their own custody, verified by the matching public key rather than by a certificate chain.
 
-`--key` takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://` one, names a file — the private key (encrypted, password from `OCX_KEY_PASSWORD`) for `sign` and `attest`, the public key (a plain SPKI PEM) for `verify`. `env://VAR` reads the same PEM out of the environment variable `VAR` itself, for a runner with no writable disk — see [`OCX_SIGNING_KEY`][env-ocx-signing-key], the one variable name OCX strips from the environment of every subprocess it spawns. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and refused **by name** (exit 85, `unsupported_key_backend`) — not implemented yet, but reserved so a script can already branch on the vocabulary rather than guess at a future one. A reference OCX cannot parse at all — an unrecognised scheme, or nothing after it — is a usage error (exit 64, `key_reference_invalid`), a distinct code because the remedy is to fix the reference, not to wait for a backend.
+`--key` takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://` one, names a file — the private key (encrypted, password from `OCX_KEY_PASSWORD`) for `sign` and `attest`, the public key (a plain SPKI PEM) for `verify`. `env://VAR` reads the same PEM out of the environment variable `VAR` itself, for a runner with no writable disk — see [`OCX_SIGNING_KEY`][env-ocx-signing-key], the one variable name OCX strips from the environment of every subprocess it spawns. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and refused **by name** (exit 82, `unsupported_key_backend`) — not implemented yet, but reserved so a script can already branch on the vocabulary rather than guess at a future one. A reference OCX cannot parse at all — an unrecognised scheme, or nothing after it — is a usage error (exit 64, `key_reference_invalid`), a distinct code because the remedy is to fix the reference, not to wait for a backend.
 
 ### The Rekor rule {#key-mode-rekor}
 
@@ -269,9 +269,9 @@ Reading an attestation back is two commands, not one, because "does this verify"
 
 ## Current Limitations {#current-limitations}
 
-- **Rekor v1 only.** [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client, so OCX targets Rekor v1 transparency-log entries — `hashedrekord` for signatures, `dsse` for attestations. A bundle from a Rekor v2 instance carries an RFC 3161 TSA timestamp instead of a SET; OCX rejects it with exit 83 (`TransparencyLogUnavailable`) rather than treating it as unsigned. Tracked as [#107][gh-107].
+- **Rekor v1 only.** [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client, so OCX targets Rekor v1 transparency-log entries — `hashedrekord` for signatures, `dsse` for attestations. A bundle from a Rekor v2 instance carries an RFC 3161 TSA timestamp instead of a SET; OCX rejects it with exit 65 (`rekor_set_absent_tsa_present`) rather than treating it as unsigned. Tracked as [#107][gh-107].
 
-  This is a dated dependency, not a static gap: it holds only while the log you sign against speaks v1. The moment an instance — the public-good deployment or your own — serves v2, every **new** signature or attestation it issues verifies as exit 83 here, and entries already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107], and pin the Rekor URL you verify against rather than following an instance through a migration.
+  This is a dated dependency, not a static gap: it holds only while the log you sign against speaks v1. The moment an instance — the public-good deployment or your own — serves v2, every **new** signature or attestation it issues verifies as exit 65 here, and entries already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107], and pin the Rekor URL you verify against rather than following an instance through a migration.
 - **An attached `.sbom` sidecar can be listed but never verified.** OCX reads all three cosign sidecar tags — `sha256-<digest>.sig`, `.att` and `.sbom` — but the third is unsigned by construction: `cosign attach sbom` writes the document and signs nothing, and no cosign command signs that tag afterwards. So [`ocx package sbom --no-verify`][cmd-package-sbom] lists it `verified: false` and `--verify` refuses it (`unsigned_rejected_by_policy`, exit 77). This is a property of the shape rather than a limitation of the reader: a signed SBOM is an attestation. See [Attached SBOMs][in-depth-cosign-parity].
 
 :::tip Automatic verification at install time
@@ -301,7 +301,7 @@ ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-`ocx package sign` stays online-only — it needs live Fulcio and Rekor round-trips — and rejects `--offline` with exit 77 (`PermissionDenied`), a policy on the action distinct from verify's read-side behavior.
+`ocx package sign` stays online-only — it needs live Fulcio and Rekor round-trips — and rejects `--offline` with exit 81 (`PolicyBlocked`), a policy on the action distinct from verify's read-side behavior.
 
 :::tip Custom Sigstore endpoints
 `--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio/Rekor. `validate_sigstore_url` accepts `http://` only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`); any non-loopback target must be `https://`.
@@ -319,7 +319,7 @@ Under a configured [HTTP proxy][env-external-proxies], a hostname-configured `--
 2. An ephemeral ECDSA P-256 keypair is generated in memory.
 3. The ephemeral public key is sent to [Fulcio][fulcio] with the OIDC token; Fulcio issues a short-lived certificate binding the key to the OIDC identity.
 4. The subject manifest's SHA-256 digest is signed with the ephemeral private key. The key is zeroized immediately after signing.
-5. The log entry is posted to [Rekor][rekor]; the response contains the SET and the Merkle inclusion proof. A log that returns no usable proof fails the sign with exit 83 rather than publishing a bundle OCX itself would refuse to verify.
+5. The log entry is posted to [Rekor][rekor]; the response contains the SET and the Merkle inclusion proof. A log that returns no usable proof fails the sign with exit 65 (`rekor_set_malformed`) rather than publishing a bundle OCX itself would refuse to verify.
 6. The leaf certificate, the signature, and the log entry (SET plus inclusion proof) are assembled into a [Sigstore bundle v0.3][sigstore-bundle] and pushed to the registry as a referrer of the subject manifest.
 
 ## See Also {#see-also}

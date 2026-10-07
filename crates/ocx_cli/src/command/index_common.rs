@@ -27,9 +27,9 @@ pub(super) fn log_failure(action: &str, subject: &str, error: &anyhow::Error) {
 }
 
 /// The `--frozen` refusal `ocx index sync` and `ocx index update` share (exit 81).
-pub(crate) fn policy_blocked(operation: &str, policy: &str) -> crate::app::CommandError {
+pub(crate) fn policy_blocked(operation: &str) -> crate::app::CommandError {
     crate::app::CommandError::new(
-        format!("{operation} discovers new digests and cannot run in {policy} mode; re-run it without --{policy}"),
+        format!("{operation} discovers new digests and cannot run in frozen mode; re-run it without --frozen"),
         ocx_exit::ExitCode::PolicyBlocked,
     )
 }
@@ -321,7 +321,7 @@ mod tests {
 
     /// A distinguishable error that needs no I/O to build.
     fn failure(operation: &'static str) -> anyhow::Error {
-        super::policy_blocked(operation, "aggregation-test").into()
+        super::policy_blocked(operation).into()
     }
 
     #[test]

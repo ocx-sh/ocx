@@ -172,7 +172,7 @@ pub async fn announce(
 
     match &request.target {
         AnnounceTarget::Out(directory) => {
-            // Writes even when unchanged, or `announce --out dir && publish dir` publishes an empty directory.
+            // Writes even when unchanged, or `announce --output dir && publish dir` publishes an empty directory.
             // An empty `--tags-file` never reaches here: that run exits 0 without writing.
             let written_paths = pipeline::write_out(directory, &files).await?;
             Ok(AnnounceOutcome {
@@ -666,7 +666,7 @@ async fn resolve_branch_state(
 /// Read the committed root from the announce branch head while [`BranchState::Live`], else the index `main`.
 ///
 /// `branch_repo` is the verified coordinate the branch lives in (`None` for
-/// `--out` and a fork target with no fork yet). Liveness comes from the caller's
+/// `--output` and a fork target with no fork yet). Liveness comes from the caller's
 /// `branch_state`, never re-asked, so it agrees with the commit's base.
 ///
 /// # Errors
@@ -1721,15 +1721,15 @@ mod tests {
     /// Every outcome carries the announce branch and the whole capability array,
     /// on all five construction sites rather than only the committing one.
     ///
-    /// Four of the five return before `ensure_push_access` is reached — `--out`,
+    /// Four of the five return before `ensure_push_access` is reached — `--output`,
     /// both unchanged arms, and the whole fork path — so a test driving the
     /// committing path alone stays green while the other four ship an empty
-    /// array and an empty branch. `--out` is the one path that reports **no**
+    /// array and an empty branch. `--output` is the one path that reports **no**
     /// branch: it reads none and pushes nothing, and the name is derivable on
     /// every run, so reporting it there would claim a branch was written.
     #[tokio::test(flavor = "multi_thread")]
     async fn announce_outcome_carries_branch_and_capability_checks() {
-        // `--out`: writes locally, touches no branch.
+        // `--output`: writes locally, touches no branch.
         let directory = tempfile::TempDir::new().expect("a scratch directory");
         let (registry, digest) = seed_tags(&["1.0.0"]);
         let forge = FakeForge::new()
@@ -1742,15 +1742,15 @@ mod tests {
             registry,
         )
         .await
-        .expect("--out writes on every run");
+        .expect("--output writes on every run");
         assert!(
             outcome.branch.is_empty(),
-            "--out reads no branch and pushes nothing, so it reports none: {:?}",
+            "--output reads no branch and pushes nothing, so it reports none: {:?}",
             outcome.branch
         );
-        assert!(!outcome.written_paths.is_empty(), "--out writes the root");
-        assert_capability_rows(&outcome, CheckStatus::Skipped, "--out");
-        assert_eq!(forge.push_access_probes(), 0, "--out demands no push permission");
+        assert!(!outcome.written_paths.is_empty(), "--output writes the root");
+        assert_capability_rows(&outcome, CheckStatus::Skipped, "--output");
+        assert_eq!(forge.push_access_probes(), 0, "--output demands no push permission");
 
         // Unchanged with a stale branch: returns the request the branch already
         // has, without committing.
@@ -3101,10 +3101,10 @@ mod tests {
             StubTransportData::new(),
         )
         .await
-        .expect("an empty selection is a no-op for --out too");
+        .expect("an empty selection is a no-op for --output too");
 
         assert_eq!(outcome.status, AnnounceStatus::Unchanged);
-        assert!(outcome.branch.is_empty(), "--out has no branch");
+        assert!(outcome.branch.is_empty(), "--output has no branch");
         assert!(outcome.written_paths.is_empty());
         assert!(directory_entries(directory.path()).is_empty());
     }

@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+rust_library(
+    name = "ocx_env",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [
+        "__testing",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_env"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_exit",
+    ],
+)
+
+rust_test(
+    name = "ocx_env_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    # `--test-threads=1`: the override table is process-global, and libtest runs
+    # testcases as threads of one process.
+    args = [
+        "--test-threads=1",
+    ],
+    crate = ":ocx_env",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_env"},
+    deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "testing_gate",
+    srcs = [
+        "tests/testing_gate.rs",
+    ],
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    # Must match the library's features, or the test asserts the wrong build.
+    crate_features = [
+        "__testing",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_env"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":ocx_env",
+    ],
+)
+
+rust_doc_test(
+    name = "ocx_env_doc_test",
+    crate = ":ocx_env",
+    # rust_doc_test does not inherit the library's features: without these the
+    # `__testing`-gated items' doctests silently drop out.
+    crate_features = [
+        "__testing",
+    ],
+)

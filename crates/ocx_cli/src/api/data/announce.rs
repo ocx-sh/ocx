@@ -4,13 +4,14 @@
 //! The `ocx package announce` report; keys shared with the claim report render through
 //! [`forge_report`](super::forge_report). It carries no `owners` or `author`: announce records no governance.
 
-use ocx_announce::announce::{AnnounceOutcome, AnnounceStatus};
+use ocx_announce::announce::AnnounceOutcome;
 use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
 use ocx_console::{Cell, Column};
 use serde::Serialize;
 
 use super::forge_report::{
-    CapabilityCheckEntry, CredentialKind, PushCredentialKind, credential_kind, push_credential_kind, serialize_display,
+    CapabilityCheckEntry, CredentialKind, Forge, PushCredentialKind, Transport, WriteStatus, credential_kind,
+    push_credential_kind,
 };
 use crate::api::Printable;
 
@@ -21,67 +22,66 @@ use crate::api::Printable;
 /// `Written Paths` is a count, not the list. Every other key is JSON-only; the
 /// command warns about dropped reserved tags on stderr when there are any.
 ///
-/// JSON format: an object with one key per field below, in that order; every
-/// value vocabulary is closed as its field states.
+/// JSON format: an object with one key per field below, in that order; a key
+/// whose value the run did not produce is omitted.
 // The forge keys are JSON-only: the plain table is at its five-column budget, and scripts read its shape.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AnnounceReport {
     /// The announced `<namespace>/<package>` identifier.
     pub package: String,
-    /// `"unchanged"` when the rebuilt root was byte-identical to the committed
-    /// one, so nothing was committed; `"updated"` otherwise. An unchanged
+    /// `unchanged` when the rebuilt root was byte-identical to the committed
+    /// one, so nothing was committed; `updated` otherwise. An unchanged
     /// `--fork` run still ensures a pull request when its announce branch is
     /// ahead of the index base, and still reports one when the branch has
     /// diverged from the index base but its open pull request can still
     /// merge.
-    // `status`/`desc_status` stay `String` (`AnnounceStatus` via `status_label`); every other closed
-    // vocabulary here is typed, since a `String` would publish an open set.
-    pub status: String,
-    /// `"updated"` when the package's `__ocx.desc` artifact moved, so the
+    pub status: WriteStatus,
+    /// `updated` when the package's `__ocx.desc` artifact moved, so the
     /// root's `desc` object was rebuilt and its readme (and logo) written as
-    /// new content-addressed objects; `"unchanged"` when the description sits
+    /// new content-addressed objects; `unchanged` when the description sits
     /// where the committed root already recorded it, or there is none.
-    pub desc_status: String,
-    /// The resolved forge kind, after `--forge`: `"github"` or `"gitlab"`.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub forge: ForgeKind,
-    /// The selected write transport: `"api"` or `"git"`.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub transport: WriteTransport,
-    /// The API credential's kind. `"job-token"` only when the credential is
+    pub desc_status: WriteStatus,
+    /// The resolved forge kind, after `--forge`.
+    pub forge: Forge,
+    /// The selected write transport.
+    pub transport: Transport,
+    /// The API credential's kind. `job_token` only when the credential is
     /// this environment's own `CI_JOB_TOKEN` — ocx cannot tell a personal from
     /// a project, group or OAuth token, so it reports no kind it cannot
     /// observe.
     pub credential_kind: CredentialKind,
-    /// The push credential's kind, or `null` under the `api` transport, which
-    /// pushes nothing. `"git-helper"` means nothing was injected and git's own
+    /// The push credential's kind; absent under the `api` transport, which
+    /// pushes nothing. `git_helper` means nothing was injected and git's own
     /// credential helpers authenticated the push.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub push_credential_kind: Option<PushCredentialKind>,
-    /// The announce branch, or `null` under `--out`, which opens no request and
+    /// The announce branch; absent under `--output`, which opens no request and
     /// so has no branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The opened or updated pull request's web URL.
     ///
-    /// Always `null` for `--out`. In `--fork` mode `null` only when the run made
+    /// Always absent for `--output`. In `--fork` mode absent only when the run made
     /// no pull request: an unchanged run whose announce branch is ahead of the
     /// index base still ensures, and therefore reports, one. So does an unchanged
     /// run whose branch has diverged from the index base but still holds an open,
     /// mergeable pull request.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
-    /// The opened or updated pull request's number; `null` under the same
+    /// The opened or updated pull request's number; absent under the same
     /// conditions as `pull_request_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_number: Option<u64>,
-    /// The verified fork, as `owner/repo`; `null` for `--out`, and in `--fork`
+    /// The verified fork, as `owner/repo`; absent for `--output`, and in `--fork`
     /// mode only when the run made no pull request.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fork: Option<String>,
-    /// The relative paths written under the `--out` directory; empty outside `--out`.
+    /// The relative paths written under the `--output` directory; empty outside `--output`.
     pub written_paths: Vec<String>,
     /// Every preflight row, including the ones that did not apply.
     ///
     /// Non-empty on every run, so a pipeline can assert the preflight ran rather
-    /// than trusting a bare success. Inapplicable rows carry `"skipped"`; rows
+    /// than trusting a bare success. Inapplicable rows carry `skipped`; rows
     /// follow a fixed capability order, so the array is stable across runs.
     pub capability_checks: Vec<CapabilityCheckEntry>,
     /// Tags dropped from the curated set because they are reserved.
@@ -113,14 +113,14 @@ impl AnnounceReport {
     ) -> Self {
         Self {
             package: outcome.package,
-            status: status_label(outcome.status).to_string(),
-            desc_status: status_label(outcome.desc_status).to_string(),
-            forge,
-            transport,
+            status: outcome.status.into(),
+            desc_status: outcome.desc_status.into(),
+            forge: forge.into(),
+            transport: transport.into(),
             credential_kind: credential_kind(credentials),
             // Takes the transport: the credential alone reports a push kind for a REST run that pushed nothing.
             push_credential_kind: push_credential_kind(credentials, transport),
-            // `--out` leaves `branch` empty, and `""` would read as a branch name that failed to render.
+            // `--output` leaves `branch` empty, and `""` would read as a branch name that failed to render.
             branch: (!outcome.branch.is_empty()).then_some(outcome.branch),
             pull_request_url: outcome
                 .pull_request
@@ -144,7 +144,7 @@ impl AnnounceReport {
             vec!["Package", "Status", "Pull Request", "Fork", "Written Paths"],
             vec![
                 self.package.clone(),
-                self.status.clone(),
+                self.status.as_str().to_string(),
                 // A dash, never an empty cell.
                 self.pull_request_url.clone().unwrap_or_else(|| "-".to_string()),
                 self.fork.clone().unwrap_or_else(|| "-".to_string()),
@@ -159,15 +159,10 @@ impl AnnounceReport {
     }
 }
 
-/// The wire spelling of a status, shared by the root and the description.
-fn status_label(status: AnnounceStatus) -> &'static str {
-    match status {
-        AnnounceStatus::Unchanged => "unchanged",
-        AnnounceStatus::Updated => "updated",
-    }
-}
-
 impl Printable for AnnounceReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "AnnounceReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         // `print_table` is column-major, so a one-row table is one cell per column.
         let (headers, cells) = self.plain_table();
@@ -211,15 +206,15 @@ mod tests {
 
     /// The same credential over a **chosen** forge and transport.
     ///
-    /// Needed because `push_credential_kind` is `null` for every run on the
+    /// Needed because `push_credential_kind` is absent for every run on the
     /// default `api` transport (C-061), so a six-keys test built only from
-    /// [`report`] asserts `null` against a field that is `null` in every state —
+    /// [`report`] asserts absence against a field that is absent in every state —
     /// green in a world where the mapping does not exist (DX-68).
     fn report_over(outcome: AnnounceOutcome, forge: ForgeKind, transport: WriteTransport) -> AnnounceReport {
         AnnounceReport::from_outcome(outcome, forge, transport, &boundary().2)
     }
 
-    /// An `--out` run: paths written, no request, and an **empty** branch —
+    /// An `--output` run: paths written, no request, and an **empty** branch —
     /// the shape `AnnounceOutcome`'s `Out` arm produces (`announce.rs:194`).
     fn outcome_out() -> AnnounceOutcome {
         AnnounceOutcome {
@@ -234,10 +229,10 @@ mod tests {
     /// The four preflight rows a run that checked nothing reports, as JSON.
     fn skipped_capability_rows() -> serde_json::Value {
         serde_json::json!([
-            { "name": "git-version", "status": "skipped", "detail": null },
-            { "name": "push-access", "status": "skipped", "detail": null },
-            { "name": "job-token-push", "status": "skipped", "detail": null },
-            { "name": "job-token-allowlist", "status": "skipped", "detail": null },
+            { "name": "git_version", "status": "skipped" },
+            { "name": "push_access", "status": "skipped" },
+            { "name": "job_token_push", "status": "skipped" },
+            { "name": "job_token_allowlist", "status": "skipped" },
         ])
     }
 
@@ -331,13 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_no_op_has_null_pull_request_fields() {
+    fn unchanged_no_op_omits_pull_request_fields() {
         let report = report(outcome_unchanged());
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("unchanged"));
-        assert!(value.get("pull_request_url").unwrap().is_null());
-        assert!(value.get("pull_request_number").unwrap().is_null());
-        assert!(value.get("fork").unwrap().is_null());
+        for key in ["pull_request_url", "pull_request_number", "fork"] {
+            assert!(value.get(key).is_none(), "{key} is omitted, never null: {value}");
+        }
     }
 
     /// `unchanged` does NOT imply "no pull request": a run whose announce branch
@@ -361,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn out_mode_has_null_pull_request_url_and_lists_written_paths() {
+    fn out_mode_omits_pull_request_url_and_lists_written_paths() {
         let outcome = AnnounceOutcome {
             package: "acme/widget".to_string(),
             status: AnnounceStatus::Updated,
@@ -377,7 +372,7 @@ mod tests {
         };
         let report = report(outcome);
         let value = serde_json::to_value(&report).unwrap();
-        assert!(value.get("pull_request_url").unwrap().is_null());
+        assert!(value.get("pull_request_url").is_none(), "omitted, never null: {value}");
         assert_eq!(
             value.get("written_paths").and_then(|v| v.as_array()),
             Some(&vec![serde_json::Value::String("p/acme/widget.json".to_string())])
@@ -472,7 +467,6 @@ mod tests {
                 "forge",
                 "transport",
                 "credential_kind",
-                "push_credential_kind",
                 "branch",
                 "pull_request_url",
                 "pull_request_number",
@@ -496,8 +490,8 @@ mod tests {
             "a credential the ladder resolved that is not this job's own"
         );
         assert!(
-            value["push_credential_kind"].is_null(),
-            "the api transport pushes nothing: {value}"
+            value.get("push_credential_kind").is_none(),
+            "the api transport pushes nothing, so the key is omitted: {value}"
         );
         assert_eq!(value["branch"], "indexbot-announce-acme-widget");
         assert_eq!(
@@ -510,14 +504,14 @@ mod tests {
     /// DX-68 / E-12: the `git` transport is what makes `push_credential_kind`
     /// discriminate.
     ///
-    /// `push_credential_kind` is `null` on **every** default-transport run, so
-    /// the row in `announce_report_gains_six_keys` asserts `null` against a
-    /// field that is `null` in every state — including one where the mapping was
+    /// `push_credential_kind` is absent on **every** default-transport run, so
+    /// the row in `announce_report_gains_six_keys` asserts absence against a
+    /// field that is absent in every state — including one where the mapping was
     /// never wired at all. This is the case that can tell those apart.
     ///
-    /// `git-helper` rather than `token`: nothing was injected here, and
-    /// `git-helper` is the statement that a push happened and git's own
-    /// credential helpers authenticated it. The `job-token` rung needs the
+    /// `git_helper` rather than `token`: nothing was injected here, and
+    /// `git_helper` is the statement that a push happened and git's own
+    /// credential helpers authenticated it. The `job_token` rung needs the
     /// process environment and is covered at library scope and end to end.
     ///
     /// Red at the stub: `from_outcome` is `unimplemented!()`.
@@ -531,12 +525,12 @@ mod tests {
         assert_eq!(value["forge"], "gitlab");
         assert_eq!(value["transport"], "git");
         assert_eq!(
-            value["push_credential_kind"], "git-helper",
-            "nothing injected under the git transport is `git-helper`, never null: {value}"
+            value["push_credential_kind"], "git_helper",
+            "nothing injected under the git transport is `git_helper`, never absent: {value}"
         );
     }
 
-    /// DX-40.3 / E-08: `branch` is `null` under `--out`, never `""`.
+    /// DX-40.3 / E-08: `branch` is absent under `--output`, never `""`.
     ///
     /// [`AnnounceOutcome::branch`] is a `String` that the `Out` arm leaves
     /// empty, so the naive projection ships `"branch": ""` — a value C-060's
@@ -548,11 +542,11 @@ mod tests {
     /// Mutation once implemented: project `branch: Some(outcome.branch)` — it
     /// compiles, the request-mode rows stay green, and this reds on `""`.
     #[test]
-    fn announce_report_branch_is_null_under_out() {
+    fn announce_report_branch_is_absent_under_out() {
         let value = serde_json::to_value(report(outcome_out())).expect("the report serializes");
         assert!(
-            value["branch"].is_null(),
-            "an --out run opens no request and so has no branch: {value}"
+            value.get("branch").is_none(),
+            "an --output run opens no request and so has no branch: {value}"
         );
         assert_eq!(
             value["written_paths"],
@@ -563,7 +557,7 @@ mod tests {
         let request_mode = serde_json::to_value(report(outcome_updated())).expect("serializes");
         assert_eq!(
             request_mode["branch"], "indexbot-announce-acme-widget",
-            "a run that opens a request still reports its branch — `null` is the --out statement, not the default"
+            "a run that opens a request still reports its branch — absence is the --output statement, not the default"
         );
     }
 
@@ -615,7 +609,7 @@ mod tests {
                 "-".to_string(),
                 "1".to_string(),
             ],
-            "--out reports how many paths it wrote, never the list: one path per tag is unbounded"
+            "--output reports how many paths it wrote, never the list: one path per tag is unbounded"
         );
     }
 }

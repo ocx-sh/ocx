@@ -365,7 +365,7 @@ pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectRepo
 pub fn cascade_check_exit_code(
     report: &crate::api::data::package_cascade_check::PackageCascadeCheck,
 ) -> ocx_exit::ExitCode {
-    if report.reports.iter().any(|report| report.has_findings()) {
+    if report.items.iter().any(|report| report.has_findings()) {
         ocx_exit::ExitCode::DataError
     } else {
         ocx_exit::ExitCode::Success
@@ -379,7 +379,7 @@ pub fn cascade_check_exit_code(
 pub fn cascade_repair_exit_code(
     report: &crate::api::data::package_cascade_repair::PackageCascadeRepair,
 ) -> ocx_exit::ExitCode {
-    let remains = report.entries.iter().any(|entry| {
+    let remains = report.items.iter().any(|entry| {
         !entry.report.unrepairable.is_empty()
             || entry
                 .outcomes
@@ -859,7 +859,7 @@ mod tests {
 
         fn repair(entry: RepairEntry, dry_run: bool) -> PackageCascadeRepair {
             PackageCascadeRepair {
-                entries: vec![entry],
+                items: vec![entry],
                 dry_run,
                 tags_file: None,
                 index_layer_skipped: Vec::new(),
@@ -972,10 +972,12 @@ mod tests {
             refused.planned = vec![planned_write()];
             refused.outcomes = vec![RepairOutcome {
                 tag: tag("3.28"),
-                outcome: WriteOutcome::Refused(Unrepairable::ChildManifestMissing {
-                    tag: tag("3.28"),
-                    digest: digest().to_string(),
-                }),
+                outcome: WriteOutcome::Refused {
+                    reason: Unrepairable::ChildManifestMissing {
+                        tag: tag("3.28"),
+                        digest: digest(),
+                    },
+                },
             }];
 
             assert_eq!(cascade_repair_exit_code(&repair(refused, false)), ExitCode::DataError);
@@ -1038,7 +1040,7 @@ mod tests {
         // Executed on ksh, dash and pwsh: their split-based folds see `/n/a:b`
         // as two segments, match neither against the whole operand, and prepend
         // another copy on every re-source — PATH grows without bound.
-        let separator = ocx_util::env::PATH_SEPARATOR;
+        let separator = ocx_util::path::PATH_SEPARATOR;
         let entry = path_entry("OCXP", &format!("/n/a{separator}b"));
         let note = emit_line(Shell::Bash, &entry).expect_err("must be refused, not emitted");
         assert!(note.contains("path separator"), "{note}");

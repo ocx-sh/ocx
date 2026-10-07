@@ -1,2 +1,5 @@
 # Default owner for everything in the repository
 * @michael-herwig
+
+# The compat gate's baseline and break ledger: an edit here can weaken the gate.
+/crates/ocx_schema/contract/ @michael-herwig

@@ -1,137 +1,78 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_announce` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_announce` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_announce::announce::AnnounceError;
 use ocx_announce::claim::ClaimError;
-use ocx_announce::forge::{ForgeError, is_server_fault};
-use ocx_oci::transport_policy::{is_transient_status, is_transient_transport_error};
-
-use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for AnnounceError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            // Delegated explicitly: `Observe`/`ObserveDesc`/`ListTags` box their source (never downcasts) and
-            // `Forge` is transparent; `Ssrf` delegates for uniformity.
-            Self::Ssrf { source, .. } => source.classify(),
-            Self::Forge(inner) => inner.classify(),
-            Self::Observe { source, .. } => source.classify(),
-            Self::ObserveDesc { source, .. } => source.classify(),
-            Self::ListTags { source, .. } => source.classify(),
-            Self::DescDisappeared { .. } => Some(ExitCode::DataError),
-            Self::RootNameMismatch { .. } => Some(ExitCode::DataError),
-            // Never `TempFail`: a rerun reproduces it exactly, so a retrying publisher would loop.
-            Self::CommittedTagsDropped { .. } => Some(ExitCode::DataError),
-            Self::UnresolvedTag { .. } => Some(ExitCode::NotFound),
-            // A push landed between the two reads; a rerun observes the tag as present.
-            Self::ObserveRaced { .. } => Some(ExitCode::TempFail),
-            Self::UnclaimedPackage { .. } => Some(ExitCode::NotFound),
-            // Not `NotFound`: the artifact exists, only its shape is wrong.
-            Self::TagIsNotAnImageIndex { .. } => Some(ExitCode::DataError),
-            Self::NoCuratedTags { .. } => Some(ExitCode::UsageError),
-            // Not `TempFail`: a retry can never succeed; only a human clears the conflict.
-            Self::PullRequestUnmergeable { .. } => Some(ExitCode::DataError),
-            // The generic `io::Error` walker maps only `PermissionDenied`; any other kind would exit 1.
-            Self::OutputWrite { .. } => Some(ExitCode::IoError),
-            _ => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for ForgeError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::Status { status, .. } if *status == 401 || *status == 403 => Some(ExitCode::AuthError),
-            Self::PushAccessDenied { .. } => Some(ExitCode::AuthError),
-            // 75 means a rerun may succeed, 69 that it will not; the registry's own split.
-            Self::Status { status, .. } if is_transient_status(*status) => Some(ExitCode::TempFail),
-            Self::Status { status, .. } if is_server_fault(*status) => Some(ExitCode::Unavailable),
-            Self::Transport { source, .. } if is_transient_transport_error(source) => Some(ExitCode::TempFail),
-            Self::Transport { .. } => Some(ExitCode::Unavailable),
-            // All three are races a rerun clears.
-            Self::NonFastForward { .. } | Self::StaleLease { .. } | Self::MergeRequestUnconfirmed { .. } => {
-                Some(ExitCode::TempFail)
-            }
-            Self::GitUnavailable { .. } => Some(ExitCode::Unavailable),
-            Self::PushRefused { .. } => Some(ExitCode::PermissionDenied),
-            Self::WriteCapabilityUnavailable { .. } => Some(ExitCode::ForgeCapabilityUnavailable),
-            Self::ForgeKindUnknown { .. }
-            | Self::NestedNamespaceUnsupported { .. }
-            | Self::SelfForkRefused { .. }
-            | Self::ForkHostMismatch { .. }
-            | Self::InvalidRepoCoordinate { .. }
-            | Self::TransportUnsupported { .. }
-            | Self::TransportOperationUnsupported { .. }
-            | Self::UsersApiUnavailable => Some(ExitCode::UsageError),
-            // `GitCommandFailed`/`GitPushFailed` stay exit 1: no remedy a caller could branch on.
-            _ => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for ClaimError {
-    /// Wildcard-free, so a new variant is an `E0004` rather than a silent exit 1.
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::ForgeRequired | Self::MissingBaseRef { .. } | Self::MissingHeadRoot { .. } => None,
-            Self::MalformedRepository { .. }
-            | Self::NoActingIdentity
-            | Self::InvalidOwnerLogin { .. }
-            | Self::DuplicateOwner { .. }
-            | Self::OwnerIdMismatch { .. }
-            | Self::BotIdentity { .. } => Some(ExitCode::UsageError),
-            Self::RootNameMismatch { .. } | Self::RepositoryMismatch { .. } => Some(ExitCode::DataError),
-            Self::OwnerUnknown { .. } => Some(ExitCode::NotFound),
-            Self::OutputWrite { .. } => Some(ExitCode::IoError),
-            // `#[error(transparent)]` hides both nodes from the chain walker, so delegate explicitly.
-            Self::Description(inner) => inner.classify(),
-            Self::Forge(inner) => inner.classify(),
-        }
-    }
-}
-
-impl ClassifyErrorKind for ClaimError {
-    fn exit_code(&self) -> ExitCode {
-        self.classify().unwrap_or(ExitCode::Failure)
-    }
-
-    /// `Forge` is one slug: `#[error(transparent)]` hides the `ForgeError` node from the envelope's chain walk.
-    fn kind_detail(&self) -> &'static str {
-        match self {
-            Self::ForgeRequired => "forge_required",
-            Self::MalformedRepository { .. } => "malformed_repository",
-            Self::RootNameMismatch { .. } => "root_name_mismatch",
-            Self::RepositoryMismatch { .. } => "repository_mismatch",
-            Self::Description(_) => "description",
-            Self::NoActingIdentity => "no_acting_identity",
-            Self::InvalidOwnerLogin { .. } => "invalid_owner_login",
-            Self::DuplicateOwner { .. } => "duplicate_owner",
-            Self::OwnerUnknown { .. } => "owner_unknown",
-            Self::OwnerIdMismatch { .. } => "owner_id_mismatch",
-            Self::BotIdentity { .. } => "bot_identity",
-            Self::MissingBaseRef { .. } => "missing_base_ref",
-            Self::MissingHeadRoot { .. } => "missing_head_root",
-            Self::OutputWrite { .. } => "output_write",
-            Self::Forge(_) => "forge",
-        }
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, ForgeError);
-    downcast_arm!(cause, AnnounceError);
-    downcast_arm!(cause, ClaimError);
-    None
-}
+use ocx_announce::forge::ForgeError;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use ocx_announce::forge::{CapabilityName, ForgeKind, WriteTransport, redact};
+    use ocx_exit::{ClassifyExitCode, ExitCode};
+
+    /// Every literal-slug variant here whose `classify` answers `None`, one instance each.
+    pub(in crate::exit) fn deferring_literal_variants() -> Vec<(String, &'static str, bool)> {
+        use crate::exit::tests::deferring_row as row;
+        let s = String::new;
+        vec![
+            row(AnnounceError::ForgeRequired),
+            row(AnnounceError::RootNotObject { path: s() }),
+            row(AnnounceError::RootMissingField { field: "name" }),
+            row(AnnounceError::MalformedPhysicalRepository { value: s() }),
+            row(AnnounceError::YankUnyankOverlap { tags: Vec::new() }),
+            row(AnnounceError::YankTagNotCurated { tag: s() }),
+            row(AnnounceError::UnyankTagNotCurated { tag: s() }),
+            row(AnnounceError::MissingBaseRef { repo: s() }),
+            row(AnnounceError::MissingHeadRoot {
+                repo: s(),
+                path: s(),
+                sha: s(),
+            }),
+            row(ClaimError::ForgeRequired),
+            row(ClaimError::MissingBaseRef {
+                repo: s(),
+                base_ref: s(),
+            }),
+            row(ClaimError::MissingHeadRoot { branch: s(), path: s() }),
+            row(ForgeError::MissingField { url: s(), field: s() }),
+            row(ForgeError::Status {
+                url: s(),
+                status: 404,
+                detail: s(),
+            }),
+            row(ForgeError::ForkBaseUnreachable {
+                fork: s(),
+                branch: s(),
+                sync: s(),
+            }),
+            row(ForgeError::ForkFieldMissing { field: s() }),
+            row(ForgeError::ForkNotReady { deadline_secs: 0 }),
+            row(ForgeError::ForkOwnerMismatch {
+                expected: s(),
+                actual: s(),
+            }),
+            row(ForgeError::ForkParentAbsent { expected: s() }),
+            row(ForgeError::ForkParentMismatch {
+                expected: s(),
+                actual: s(),
+            }),
+            row(ForgeError::GitCommandFailed {
+                command: s(),
+                status: s(),
+                stderr: redact("", &[]),
+            }),
+            row(ForgeError::GitPushFailed {
+                status: s(),
+                stderr: redact("", &[]),
+            }),
+            row(ForgeError::MalformedForkFullName { full_path: s() }),
+            row(ForgeError::PushOptionRefused { key: "k", reason: s() }),
+            row(ForgeError::UnknownCompareStatus { url: s(), status: s() }),
+        ]
+    }
 
     use ocx_announce::claim::INDEX_BASE_REF;
 
@@ -187,14 +128,13 @@ mod tests {
     ///
     /// The fixture is the value the producer can actually raise: a transport fault inside
     /// an index error inside the package tier's own error, never the `OfflineMode` variant
-    /// `Publisher::list_tags` cannot return. The assertion follows that two-hop chain and
-    /// reads the expected code off the `ClientError` itself, never a literal copied down
-    /// from the arm.
+    /// `Publisher::list_tags` cannot return. The assertion reads the expected code off the
+    /// `ClientError` itself, never a literal copied down from the arm.
     #[test]
     fn list_tags_variant_classifies_via_the_inner_error() {
         let transport =
             ocx_oci::client::error::ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
-        let expected = transport.classify();
+        let expected = ocx_exit::ClassifyExitCode::classify(&transport);
         let error = AnnounceError::ListTags {
             repository: "oci://ghcr.io/acme/widget".to_string(),
             source: Box::new(ocx_package::error::Error::Index(ocx_index::error::Error::OciClient(
@@ -276,7 +216,7 @@ mod tests {
     #[test]
     fn observe_desc_variant_classifies_via_the_inner_error() {
         let inner = ocx_oci::client::error::ClientError::ManifestNotFound("x".to_string());
-        let expected = inner.classify();
+        let expected = ocx_exit::ClassifyExitCode::classify(&inner);
         let error = AnnounceError::ObserveDesc {
             repository: "oci://ghcr.io/acme/widget".to_string(),
             source: Box::new(inner),
@@ -414,7 +354,7 @@ mod tests {
         assert_eq!(AnnounceError::ForgeRequired.classify(), None);
     }
 
-    /// An `--out` write failure is an operator/environment
+    /// An `--output` write failure is an operator/environment
     /// I/O problem, exit 74. `StorageFull` is the case the generic walker
     /// cannot reach — it special-cases only `PermissionDenied`, so before this
     /// arm existed every other kind exited 1, the crash code.
@@ -432,7 +372,7 @@ mod tests {
             assert_eq!(
                 error.classify(),
                 Some(ExitCode::IoError),
-                "an --out write failure of kind {kind:?} must exit 74"
+                "an --output write failure of kind {kind:?} must exit 74"
             );
         }
     }
@@ -462,8 +402,8 @@ mod tests {
             "output_write",
             "root_name_mismatch",
             "repository_mismatch",
-            "description",
-            "forge",
+            "desc_disappeared",
+            "users_api_unavailable",
         ];
         let variants = every_variant();
         assert_eq!(
@@ -472,12 +412,7 @@ mod tests {
             "one slug per variant, in `every_variant` order"
         );
         for (error, slug) in variants.iter().zip(expected) {
-            assert_eq!(error.kind_detail(), slug, "{error}");
-            assert_eq!(
-                error.exit_code(),
-                error.classify().unwrap_or(ExitCode::Failure),
-                "{error}"
-            );
+            crate::exit::tests::assert_detail(error, slug);
         }
     }
 
@@ -534,11 +469,8 @@ mod tests {
         );
         let error = ClaimError::Description(inner);
         assert_eq!(error.classify(), expected);
-        assert_eq!(
-            error.kind_detail(),
-            "description",
-            "the envelope slug is the claim-side variant's, never the wrapped error's"
-        );
+        // The slug names the wrapped error, the one that decides the exit code.
+        crate::exit::tests::assert_detail(&error, "ssrf_forbidden_target");
     }
 
     /// The three deliberately **unclassified** variants answer `None`,
@@ -934,13 +866,81 @@ mod tests {
                     repo: "acme/index".to_string(),
                     remedy: "enable Settings > CI/CD > Job token permissions on acme/index".to_string(),
                 },
-                Some(ExitCode::ForgeCapabilityUnavailable),
+                Some(ExitCode::Unsupported),
             ),
             (
                 ForgeError::MergeRequestUnconfirmed { deadline_secs: 30 },
                 Some(ExitCode::TempFail),
             ),
         ]
+    }
+
+    /// Reds on: an announce or forge slug, delegated, walked or split by a status guard, naming
+    /// another cause than the exit code does.
+    #[test]
+    fn announce_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+
+        let ssrf = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: ocx_oci::ssrf::SsrfError::ForbiddenTarget {
+                host: "127.0.0.1".to_string(),
+                ip: "127.0.0.1".parse().expect("valid ip literal"),
+            },
+        };
+        assert_detail(&ssrf, "ssrf_forbidden_target");
+        let status = |status| ForgeError::Status {
+            url: "https://api.github.com/user".to_string(),
+            status,
+            detail: String::new(),
+        };
+        assert_detail(&status(401), "forge_auth_failed");
+        assert_detail(&status(503), "forge_transient");
+        assert_detail(&status(404), "forge_status");
+        assert_detail(&AnnounceError::Forge(status(401)), "forge_auth_failed");
+        let transport =
+            ocx_oci::client::error::ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        let list_tags = AnnounceError::ListTags {
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+            source: Box::new(ocx_package::error::Error::Index(ocx_index::error::Error::OciClient(
+                transport,
+            ))),
+        };
+        assert_detail(&list_tags, "registry_auth_failed");
+        assert_detail(&AnnounceError::ForgeRequired, "forge_required");
+        for (error, _) in new_variants_with_exit_codes() {
+            assert_detail(
+                &error,
+                crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&error)),
+            );
+        }
+    }
+
+    /// The job-token allowlist miss is an authorisation gap a grant closes (77), where the other
+    /// capability refusals are the forge's to enable (82); the two share one variant, so the
+    /// capability that decides the code is pinned here with its `error.detail` slug.
+    ///
+    /// Reds on: keying the row on anything but [`CapabilityName::JobTokenAllowlist`], or dropping
+    /// the `forge_publisher_not_allowlisted` slug.
+    #[test]
+    fn a_job_token_allowlist_miss_is_a_permission_refusal() {
+        use crate::exit::tests::assert_detail;
+
+        let refusal = |capability| ForgeError::WriteCapabilityUnavailable {
+            capability,
+            repo: "acme/index".to_string(),
+            remedy: "grant it".to_string(),
+        };
+        let miss = refusal(CapabilityName::JobTokenAllowlist);
+        assert_eq!(miss.classify(), Some(ExitCode::PermissionDenied));
+        assert_detail(&miss, "forge_publisher_not_allowlisted");
+        assert_eq!(
+            crate::exit::classify_library_error(&AnnounceError::Forge(refusal(CapabilityName::JobTokenAllowlist))),
+            ExitCode::PermissionDenied
+        );
+        let disabled = refusal(CapabilityName::JobTokenPush);
+        assert_eq!(disabled.classify(), Some(ExitCode::Unsupported));
+        assert_detail(&disabled, "forge_capability_unavailable");
     }
 
     // recovered from ocx_announce::forge::error
@@ -954,9 +954,11 @@ mod tests {
     /// a caller could branch on, so a later accidental classification must red
     /// here rather than ship silently.
     ///
-    /// The two worth reading twice are 86 and 77.
-    /// [`ForgeError::WriteCapabilityUnavailable`] is exit 86, a *capability
-    /// gate* whose remedy is an administrator's; [`ForgeError::PushRefused`] is
+    /// The two worth reading twice are 82 and 77.
+    /// [`ForgeError::WriteCapabilityUnavailable`] is exit 82, a *capability
+    /// gate* whose remedy is an administrator's (a job-token allowlist miss is the
+    /// one cause that exits 77, see `a_job_token_allowlist_miss_is_a_permission_refusal`);
+    /// [`ForgeError::PushRefused`] is
     /// exit 77, a *permission refusal* against a credential that authenticated
     /// fine. Collapsing them would hide the one state a pipeline cannot act on
     /// from the one it can.
@@ -966,7 +968,7 @@ mod tests {
     /// and would not notice a dropped row.
     ///
     /// Reds on: dropping any row (proved), and on moving a variant to a
-    /// different arm of `classify` (proved with `PushRefused` 77 -> 86).
+    /// different arm of `classify` (proved with `PushRefused` 77 -> 82).
     #[test]
     fn forge_error_exit_code_table() {
         let table = new_variants_with_exit_codes();

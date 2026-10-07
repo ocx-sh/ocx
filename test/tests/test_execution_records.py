@@ -328,12 +328,12 @@ def _toml_path(path: Path) -> str:
 def _package_root(ocx: OcxRunner, short: str) -> Path:
     """The on-disk package root of an installed package.
 
-    ``ocx package which`` reports ``{"<id>": {"path": ..., "kind": ...}}`` —
+    ``ocx package which`` reports ``{"paths": {"<id>": {"path": ..., "kind": ...}}}`` —
     the value grew from a bare path string into an object when lazy shims
     became locatable, so ``kind`` distinguishes a materialized package root
     from a generated shim tree. This helper wants the former.
     """
-    result = ocx.json("package", "which", short)
+    result = ocx.json("package", "which", short)["paths"]
     located = result.get(short) if isinstance(result, dict) else None
     assert isinstance(located, dict), (
         f"ocx package which must report a located-path object for {short!r}; got {located!r}"

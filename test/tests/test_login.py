@@ -559,10 +559,11 @@ def test_login_allows_plaintext_with_flag_writes_base64_with_warning(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("registry_arg", ["ghcr.io", "https://ghcr.io/v1/"])
 def test_login_json_format_emits_minimal_payload(
-    ocx: OcxRunner, tmp_path: Path
+    ocx: OcxRunner, tmp_path: Path, registry_arg: str
 ) -> None:
-    """Scenario 6 — ``--format json`` emits ``{"registry":"…","username":"…"}``."""
+    """Scenario 6 — ``--format json`` emits ``{"registry":"…","username":"…"}``, the registry as its bare host."""
     docker_config_dir = tmp_path / "docker"
     docker_config_dir.mkdir()
     helper_dir = tmp_path / "helper_bin"
@@ -583,14 +584,14 @@ def test_login_json_format_emits_minimal_payload(
         "-u",
         "u",
         "--password-stdin",
-        "ghcr.io",
+        registry_arg,
     ]
     result = subprocess.run(
         cmd, capture_output=True, text=True, env=env, input="tok\n", check=False
     )
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload == {"registry": "ghcr.io", "username": "u"}
+    assert payload == {"schema_version": 1, "registry": "ghcr.io", "username": "u"}
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +931,7 @@ def test_logout_json_format(ocx: OcxRunner, tmp_path: Path) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload == {"registry": "ghcr.io"}
+    assert payload == {"schema_version": 1, "registry": "ghcr.io"}
 
 
 def test_logout_falls_back_to_default_registry(
@@ -984,3 +985,88 @@ def test_logout_removes_from_both_layers(ocx: OcxRunner, tmp_path: Path) -> None
     assert "ghcr.io" not in cfg.get("auths", {}), (
         f"auths[ghcr.io] still present after logout; cfg: {cfg!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stored key = reported host
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("registry_arg", "stored_key", "reported"),
+    [
+        ("internal.example.com/team", "internal.example.com", "internal.example.com"),
+        ("https://internal.example.com/team/", "internal.example.com", "internal.example.com"),
+        ("https://ghcr.io/v1/", "ghcr.io", "ghcr.io"),
+        ("http://registry.corp:5000/v2", "registry.corp:5000", "registry.corp:5000"),
+        ("docker.io", "https://index.docker.io/v1/", "docker.io"),
+        ("https://index.docker.io/v1/", "https://index.docker.io/v1/", "index.docker.io"),
+    ],
+)
+def test_login_stores_under_the_reported_host(
+    ocx: OcxRunner, tmp_path: Path, registry_arg: str, stored_key: str, reported: str
+) -> None:
+    """The credential key is the host the report names, so a pull from that host finds it."""
+    docker_config_dir = tmp_path / "docker"
+    docker_config_dir.mkdir()
+    env = dict(ocx.env)
+    env["DOCKER_CONFIG"] = str(docker_config_dir)
+    cmd = [
+        str(ocx.binary),
+        "--format",
+        "json",
+        "login",
+        "--no-verify",
+        "-u",
+        "u",
+        "--password-stdin",
+        "--allow-insecure-store",
+        registry_arg,
+    ]
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, env=env, input="tok\n", check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["registry"] == reported
+    cfg = _read_docker_config(docker_config_dir)
+    assert cfg is not None
+    assert list(cfg.get("auths", {})) == [stored_key], cfg
+
+
+def test_logout_removes_the_reported_host(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A path after the host still logs out of that host's credential."""
+    docker_config_dir = tmp_path / "docker"
+    docker_config_dir.mkdir()
+    (docker_config_dir / "config.json").write_text(
+        '{"auths":{"internal.example.com":{"auth":"dTpw"}}}'
+    )
+    result = _run_logout(
+        ocx, "internal.example.com/team", docker_config_dir=docker_config_dir
+    )
+    assert result.returncode == 0, result.stderr
+    cfg = _read_docker_config(docker_config_dir)
+    assert cfg is not None
+    assert "internal.example.com" not in cfg.get("auths", {}), cfg
+
+
+@pytest.mark.parametrize("command", ["login", "logout"])
+def test_registry_with_userinfo_is_refused_without_echo(
+    ocx: OcxRunner, tmp_path: Path, command: str
+) -> None:
+    """A registry that is not ``host[:port]`` is exit 64, and the password it carries is never printed."""
+    docker_config_dir = tmp_path / "docker"
+    docker_config_dir.mkdir()
+    run = _run_login if command == "login" else _run_logout
+    extra = ["-u", "u", "--password-stdin"] if command == "login" else []
+    kwargs: dict[str, Any] = {"stdin": "tok\n"} if command == "login" else {}
+    result = run(
+        ocx,
+        *extra,
+        "https://user:hunter2@ghcr.io",
+        docker_config_dir=docker_config_dir,
+        **kwargs,
+    )
+    assert result.returncode == 64, f"exit {result.returncode}, stderr: {result.stderr}"
+    assert "hunter2" not in result.stdout
+    assert "hunter2" not in result.stderr
+    assert _read_docker_config(docker_config_dir) is None

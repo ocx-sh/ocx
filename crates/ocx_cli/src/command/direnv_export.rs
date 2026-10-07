@@ -52,7 +52,7 @@ impl DirenvExport {
         // Argv faults fail loudly (64) before any filesystem work: an `.envrc` typo must be seen.
         crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
 
-        let cwd = ocx_util::env::current_dir()?;
+        let cwd = ocx_env::current_dir()?;
         // Relative `:path` values anchor here (the `.envrc` directory) and resolve absolute, so the
         // export is stable wherever direnv replays it.
         let env_overrides = self.env.entries(&cwd)?;
@@ -195,7 +195,9 @@ impl DirenvExport {
         let (mut entries, _, _) = offline
             .resolve_env_with_patch_boundary(&composed.roots, false, scope, &platform)
             .await?;
-        let inherited = ocx_util::env::var(ocx_config::env::keys::OCX_LAUNCH_IDENTITIES);
+        let inherited = ocx_env::OCX_LAUNCH_IDENTITIES
+            .get_raw()
+            .and_then(|v| v.into_string().ok());
         entries.extend(offline.launch_identity_entry(&composed.roots, &no_patches, inherited.as_deref()));
 
         // A package's explicit separator must be what `None`-separator contributors (`[env]`, `--env`)

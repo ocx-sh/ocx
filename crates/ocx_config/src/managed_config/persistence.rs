@@ -26,10 +26,11 @@ pub struct FetchedManagedConfig {
 // ── Fetch errors ──────────────────────────────────────────────────────────────
 
 /// Errors raised while fetching the managed-config package from the registry.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ManagedConfigFetchError {
     /// A network or auth error from the OCI client.
     #[error("failed to fetch managed config from registry")]
+    #[exit(delegate = source)]
     FetchFailed {
         /// The underlying OCI client error.
         #[source]
@@ -39,6 +40,11 @@ pub enum ManagedConfigFetchError {
     /// The manifest chain had an unexpected shape (e.g. an index entry that
     /// resolves to another index, or a child manifest that vanished).
     #[error("unexpected manifest shape for managed config: {detail}")]
+    #[exit(
+        DataError,
+        slug = "managed_config_unexpected_manifest",
+        summary = "The managed-config package has an unexpected manifest shape"
+    )]
     UnexpectedManifest {
         /// Human-readable detail about the shape mismatch.
         detail: String,
@@ -46,19 +52,39 @@ pub enum ManagedConfigFetchError {
 
     /// The image index has no `any/any` entry (publish with the default `--platform any/any`).
     #[error("managed config package has no any/any platform entry")]
+    #[exit(
+        DataError,
+        slug = "managed_config_no_any_platform",
+        summary = "The managed-config package has no any/any platform entry"
+    )]
     NoAnyPlatformEntry,
 
     /// The selected image manifest has no tar+gzip layer.
     #[error("managed config package has no tar+gzip layer")]
+    #[exit(
+        DataError,
+        slug = "managed_config_no_gzip_layer",
+        summary = "The managed-config package has no tar+gzip layer"
+    )]
     NoGzipLayer,
 
     /// The package's layer archive contains no `config.toml` entry.
     #[error("managed config package layer contains no config.toml")]
+    #[exit(
+        DataError,
+        slug = "managed_config_missing_config_toml",
+        summary = "The managed-config layer contains no config.toml"
+    )]
     MissingConfigToml,
 
     /// The declared layer size exceeded
     /// [`crate::managed_config::MAX_MANAGED_CONFIG_BYTES`].
     #[error("managed config layer size {declared} exceeds the maximum allowed {maximum} bytes")]
+    #[exit(
+        DataError,
+        slug = "managed_config_layer_size_exceeded",
+        summary = "The managed-config layer declares a size above the allowed maximum"
+    )]
     LayerSizeExceeded {
         /// The size declared in the manifest layer descriptor.
         declared: i64,
@@ -69,6 +95,11 @@ pub enum ManagedConfigFetchError {
     /// The SHA-256 digest of the fetched layer bytes does not match the digest
     /// declared in the manifest.
     #[error("managed config layer digest mismatch: declared '{declared}', computed '{computed}'")]
+    #[exit(
+        DataError,
+        slug = "managed_config_layer_digest_mismatch",
+        summary = "The managed-config layer does not hash to its declared digest"
+    )]
     LayerDigestMismatch {
         /// The digest declared in the manifest descriptor.
         declared: String,
@@ -79,6 +110,11 @@ pub enum ManagedConfigFetchError {
     /// The `config.toml` entry (or the decompressed archive stream) exceeds
     /// [`crate::managed_config::MAX_MANAGED_CONFIG_BYTES`] — gzip-bomb guard.
     #[error("managed config config.toml entry exceeds the maximum allowed {maximum} bytes")]
+    #[exit(
+        DataError,
+        slug = "managed_config_entry_too_large",
+        summary = "The managed-config config.toml entry exceeds the allowed size"
+    )]
     ConfigEntryTooLarge {
         /// The enforced ceiling in bytes.
         maximum: u64,
@@ -87,6 +123,11 @@ pub enum ManagedConfigFetchError {
     /// The layer bytes are not a readable gzip'd tar archive (or the
     /// `config.toml` entry is not valid UTF-8).
     #[error("managed config layer is not a readable archive: {detail}")]
+    #[exit(
+        DataError,
+        slug = "managed_config_invalid_archive",
+        summary = "The managed-config layer is not a readable archive"
+    )]
     InvalidArchive {
         /// Human-readable detail about the archive failure.
         detail: String,
@@ -96,10 +137,15 @@ pub enum ManagedConfigFetchError {
 // ── Persist errors ────────────────────────────────────────────────────────────
 
 /// Errors raised while persisting a fetched managed-config payload.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ManagedConfigPersistError {
     /// The payload text is not valid TOML.
     #[error("managed config payload is not valid TOML")]
+    #[exit(
+        DataError,
+        slug = "managed_config_invalid_toml",
+        summary = "The fetched managed-config payload is not valid TOML"
+    )]
     InvalidToml {
         /// The underlying TOML parse failure.
         #[source]
@@ -108,6 +154,11 @@ pub enum ManagedConfigPersistError {
 
     /// Writing the atomic snapshot file failed.
     #[error("failed to write managed config snapshot")]
+    #[exit(
+        IoError,
+        slug = "managed_config_snapshot_write",
+        summary = "Writing the managed-config snapshot failed"
+    )]
     SnapshotWriteFailed {
         /// The underlying I/O failure.
         #[source]
@@ -120,6 +171,7 @@ pub enum ManagedConfigPersistError {
     /// `ocx config push` proves it on the publisher's platform only; persisted, it would fail
     /// `Context::try_init` on every command here, `ocx config update` included.
     #[error("managed config payload carries an extra CA bundle this host cannot load; the previous snapshot is kept")]
+    #[exit(delegate = source)]
     ExtraCaCertsInvalid {
         /// What the parser or verifier rejected, naming the block, never the bytes.
         #[source]
@@ -131,25 +183,37 @@ pub enum ManagedConfigPersistError {
 
 /// Combined error for a full fetch-then-persist update cycle
 /// (`PackageManager::update_managed_config`, `ocx config update`).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ManagedConfigUpdateError {
     /// The fetch step failed.
     #[error("failed to fetch managed config")]
+    #[exit(delegate)]
     Fetch(#[from] ManagedConfigFetchError),
     /// The persist step failed.
     #[error("failed to persist managed config")]
+    #[exit(delegate)]
     Persist(#[from] ManagedConfigPersistError),
     /// The resolved source has no manifest in the registry.
     ///
     /// An error, not a `NotConfigured` success, or `ocx self setup --managed-config` reaches its
     /// `unreachable!()` arm.
     #[error("managed config source '{effective_source}' not found in registry")]
+    #[exit(
+        NotFound,
+        slug = "managed_config_source_not_found",
+        summary = "The registry has no managed-config package at the configured source"
+    )]
     SourceNotFound {
         /// The resolved source that produced no manifest.
         effective_source: ocx_oci::OciIdentifier,
     },
     /// A `tag@digest` pin's tag resolved to a different digest; nothing was persisted.
     #[error("managed config pin digest mismatch: expected '{expected}' but the tag resolved to '{fetched}'")]
+    #[exit(
+        DataError,
+        slug = "pin_digest_mismatch",
+        summary = "The registry resolved the pinned tag to a different digest"
+    )]
     PinDigestMismatch {
         /// The digest pinned in the VERSION argument.
         expected: ocx_oci::Digest,

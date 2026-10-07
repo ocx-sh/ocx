@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "Public `OCX_COMPRESSION` is removed with no RETIRED window.",
+  "findings": [
+    {
+      "code": "G13",
+      "pointer": "/env/1",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

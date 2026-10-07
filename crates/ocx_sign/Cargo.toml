@@ -14,8 +14,10 @@ ocx_oci.workspace = true
 # The verification-material tier: `TrustPolicy`, the identity matchers and the
 # certificate/authority vocabulary `verify` decides against.
 ocx_trust.workspace = true
-# The bottom tier: `FileError`, the env-override table, TLS helpers.
+# The bottom tier: `FileError`, TLS helpers.
 ocx_util.workspace = true
+# The environment registry: the ambient OIDC sources and `OCX_KEY_PASSWORD`.
+ocx_env.workspace = true
 # `ExitCode`/`ErrorCategory` — the signing and verification error families
 # classify themselves.
 ocx_exit.workspace = true
@@ -81,9 +83,9 @@ tracing.workspace = true
 # (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps the
 # feature out of the normal build, so the runtime row above stays seamless.
 ocx_oci = { workspace = true, features = ["__testing"] }
-# `ocx_util::env::overrides`, the process-environment table the key-backend
+# `ocx_env::overrides`, the process-environment table the key-backend
 # tests write through. Same dev-edge allowance as the row above.
-ocx_util = { workspace = true, features = ["__testing"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 
 # Test-only. The error-render tests here construct an `anyhow::Error` to stand
 # in for the binary's top-level formatter. Kept out of `[dependencies]` on

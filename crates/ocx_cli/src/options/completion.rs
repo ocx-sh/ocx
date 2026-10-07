@@ -16,7 +16,7 @@ pub struct Completion {
 }
 
 impl Completion {
-    /// Whether completions load: the `[shell] hook` ladder over the flags, `OCX_NO_COMPLETIONS`,
+    /// Whether completions load: the `[shell] hook` ladder over the flags, `OCX_NO_COMPLETION`,
     /// `[shell] completions` (`configured`), then `interactive`.
     // Take `interactive` from the caller, never probe stderr here: the shim may have redirected it.
     pub fn enabled(&self, interactive: bool, configured: Option<bool>) -> bool {
@@ -39,7 +39,7 @@ impl Completion {
         };
         resolve_ladder(
             flag,
-            ocx_util::env::flag("OCX_NO_COMPLETIONS", false),
+            ocx_env::OCX_NO_COMPLETION.bool_or(false).unwrap_or(false),
             configured,
             interactive,
         )
@@ -62,7 +62,7 @@ mod tests {
     /// condition where the shim sets the flag and stderr is redirected.
     ///
     /// Independent of the ambient environment: rungs 1 and 2 are decided before
-    /// `OCX_NO_COMPLETIONS` is consulted.
+    /// `OCX_NO_COMPLETION` is consulted.
     #[test]
     fn explicit_completion_outranks_config_and_non_interactive() {
         assert_eq!(

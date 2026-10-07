@@ -13,26 +13,26 @@ use crate::api::Printable;
 /// A single install or select result entry for CLI output.
 ///
 /// The `path` field holds the symlink that was created or updated (candidate
-/// for install, current for select), or `None` when no host symlink was written
-/// — a foreign-platform install populates the object store but writes neither
-/// host pointer.
+/// for install, current for select). It is absent when no host symlink was
+/// written: a foreign-platform install populates the object store but writes
+/// neither host pointer.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct InstallEntry {
+    /// The pinned identifier the package resolved to.
     pub identifier: ocx_oci::PackageRef,
+    /// The installed package's metadata.
     pub metadata: Metadata,
+    /// The symlink written; absent when no host symlink was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
 
-/// Installed or selected packages keyed by the user-supplied identifier string.
+/// Installed or selected packages.
 ///
-/// Plain format: three-column table (Package | Version | Path). `Version`
-/// renders the identifier without its digest; the pinned form stays in JSON.
-///
-/// JSON format: object keyed by package identifier, each value an
-/// `{ identifier, metadata, path }` object.
+/// The plain `Version` column drops the digest; the pinned form stays in JSON.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Installs {
-    #[serde(flatten)]
+    /// One entry per package, keyed by the identifier as given, sorted by key.
     pub packages: BTreeMap<String, InstallEntry>,
 }
 
@@ -46,6 +46,9 @@ impl Installs {
 }
 
 impl Printable for Installs {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Installs";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let theme = printer.theme();
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];

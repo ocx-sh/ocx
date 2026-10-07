@@ -921,7 +921,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
     /// Criterion 5 shape: a dirty fence (user-edited body) is left untouched
     /// without `--force`; `--force` overwrites to the canonical body. The CLI
-    /// layer maps `SkippedDirty` to exit 82 — this test proves the underlying
+    /// layer maps `SkippedDirty` to exit 81 — this test proves the underlying
     /// mechanism only.
     #[test]
     fn managed_config_fence_dirty_edit_is_skipped_unless_forced() {

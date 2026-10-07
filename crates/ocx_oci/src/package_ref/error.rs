@@ -2,8 +2,13 @@
 // Copyright 2026 The OCX Authors
 
 /// An error that occurred while parsing an OCI identifier string.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, ocx_exit::Classify)]
 #[error("invalid identifier '{}': {}", .input, .kind)]
+#[exit(
+    DataError,
+    slug = "invalid_identifier",
+    summary = "A package identifier does not parse"
+)]
 #[non_exhaustive]
 pub struct IdentifierError {
     pub input: String,

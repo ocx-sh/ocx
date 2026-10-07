@@ -4,10 +4,14 @@
 use serde::{Serialize, ser::SerializeStruct};
 
 use ocx_console::{Annotation, DataInterface, Theme, TreeItem, human_bytes};
+use ocx_oci::digest::error::DigestError;
+use ocx_oci::platform::error::PlatformError;
+use ocx_oci::{Digest, PinnedPackageRef, Platform};
 use ocx_package::metadata::{Binaries, Metadata, env::modifier::ModifierKind, visibility::Visibility};
 use ocx_package_manager::{
     ClosureConflicts, ClosureEdge, ClosureEnvVar, ClosureNode, InspectClosure, InspectResult, ResolvedChain, Surface,
 };
+use ocx_util::size::ByteSize;
 
 use crate::api::{
     Printable,
@@ -85,7 +89,9 @@ struct ClosureOut {
     /// dependents). The inspected root is NOT listed here — it is named by the
     /// top-level `identifier` and appears in each surface's attributions.
     deps: Vec<ClosureDepOut>,
+    /// What would land on each axis if the root were installed.
     surface: SurfacesOut,
+    /// Conditions on the interface projection that install would refuse.
     conflicts: ConflictsOut,
 }
 
@@ -98,15 +104,16 @@ struct ClosureDepOut {
     /// Always digest-pinned — a closure node is a resolved artifact, never a
     /// tag. There is no separate `digest` key because this one already ends in
     /// it.
-    identifier: String,
-    /// Composed-from-root visibility — always present (the root, whose axis is
-    /// undefined, is excluded from `deps`).
-    effective_visibility: String,
+    identifier: PinnedPackageRef,
+    /// The visibility composed from the root down to this dependency.
+    // Set on every dep: the root, whose axis is undefined, is excluded from `deps`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_visibility: Option<Visibility>,
     /// Tri-state, mirrors `Bundle.binaries`: key absent = undeclared,
     /// `Some(empty)` = publisher asserts zero interface executables.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     binaries: Option<Vec<String>>,
+    /// The dep's declared entrypoint names.
     entrypoints: Vec<String>,
     /// The dep's own declared integration namespace keys, lexicographically
     /// ordered. Keys only — a closure node is not installed, so
@@ -122,8 +129,11 @@ struct ClosureDepOut {
 /// A declared dependency edge (as authored) of one closure dependency.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ClosureEdgeOut {
-    identifier: String,
-    visibility: String,
+    /// The dependency, digest-pinned.
+    identifier: PinnedPackageRef,
+    /// The visibility the edge declares.
+    visibility: Visibility,
+    /// The dependency's name as the edge declares it.
     name: String,
 }
 
@@ -143,7 +153,9 @@ struct SurfacesOut {
 /// a single axis.
 #[derive(Serialize, schemars::JsonSchema)]
 struct SurfaceOut {
+    /// Admitted `binaries` claims on this axis, attributed to their packages.
     binaries: Vec<BinaryAttribution>,
+    /// Admitted `entrypoints` claims on this axis, attributed to their packages.
     entrypoints: Vec<BinaryAttribution>,
     /// Env keys each admitted node exposes on this axis, attributed to the
     /// declaring package. Values are omitted — they are `${installPath}`-
@@ -161,20 +173,19 @@ struct SurfaceOut {
 }
 
 /// One env key exposed on the interface surface, attributed to the package that
-/// declares it. `type` is the modifier kind (`path` | `constant` | `list`).
-/// No value: values are `${installPath}`-templated and only concrete after install.
+/// declares it. No value: values are `${installPath}`-templated and only concrete after install.
 #[derive(Serialize, schemars::JsonSchema)]
 struct EnvVarAttribution {
+    /// The environment variable name.
     key: String,
-    #[serde(rename = "type")]
-    kind: String,
+    /// How the value combines with the variable's existing value.
+    kind: ModifierKind,
     /// The declared separator for a `list`-kind entry; `None` for every other
     /// kind. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     separator: Option<String>,
+    /// The declaring package.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     package: Option<String>,
 }
 
@@ -185,7 +196,7 @@ impl EnvVarAttribution {
             .iter()
             .map(|(identifier, var)| Self {
                 key: var.key.clone(),
-                kind: var.kind.to_string(),
+                kind: var.kind.clone(),
                 separator: var.separator.clone(),
                 package: Some(identifier.to_string()),
             })
@@ -201,9 +212,10 @@ impl EnvVarAttribution {
 /// installed, so `${installPath}` has no value.
 #[derive(Serialize, schemars::JsonSchema)]
 struct NamespaceAttribution {
+    /// The integration namespace key.
     namespace: String,
+    /// The declaring package.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     package: Option<String>,
 }
 
@@ -225,7 +237,9 @@ impl NamespaceAttribution {
 /// realizable. Inspect stays a view, not a gate — exit 0 either way.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ConflictsOut {
+    /// Entrypoint names claimed by more than one package.
     entrypoints: Vec<EntrypointConflictOut>,
+    /// Repositories resolved to more than one digest.
     repositories: Vec<RepositoryConflictOut>,
 }
 
@@ -233,7 +247,9 @@ struct ConflictsOut {
 /// name.
 #[derive(Serialize, schemars::JsonSchema)]
 struct EntrypointConflictOut {
+    /// The contested entrypoint name.
     name: String,
+    /// Every package claiming it.
     packages: Vec<String>,
 }
 
@@ -241,8 +257,10 @@ struct EntrypointConflictOut {
 /// projection.
 #[derive(Serialize, schemars::JsonSchema)]
 struct RepositoryConflictOut {
+    /// The contested repository.
     repository: String,
-    digests: Vec<String>,
+    /// Every digest it resolved to.
+    digests: Vec<Digest>,
 }
 
 /// Projects a lib-level metadata closure into the wire shape: `deps`, both `surface` views and `conflicts`.
@@ -282,12 +300,8 @@ fn surface_out(surface: Surface) -> SurfaceOut {
 fn closure_dep_out(node: ClosureNode) -> ClosureDepOut {
     ClosureDepOut {
         name: node.identifier.as_identifier().name().to_string(),
-        identifier: node.identifier.to_string(),
-        // Unreachable fallback: every non-root node carries a composed visibility.
-        effective_visibility: node
-            .effective_visibility
-            .map(|visibility| visibility.to_string())
-            .unwrap_or_default(),
+        identifier: node.identifier,
+        effective_visibility: node.effective_visibility,
         binaries: node
             .binaries
             .map(|binaries| binaries.iter().map(ToString::to_string).collect()),
@@ -299,8 +313,8 @@ fn closure_dep_out(node: ClosureNode) -> ClosureDepOut {
 
 fn closure_edge_out(edge: ClosureEdge) -> ClosureEdgeOut {
     ClosureEdgeOut {
-        identifier: edge.identifier.to_string(),
-        visibility: edge.visibility.to_string(),
+        identifier: edge.identifier,
+        visibility: edge.visibility,
         name: edge.name.to_string(),
     }
 }
@@ -320,7 +334,7 @@ fn conflicts_out(conflicts: ClosureConflicts) -> ConflictsOut {
             .into_iter()
             .map(|conflict| RepositoryConflictOut {
                 repository: conflict.repository.to_string(),
-                digests: conflict.digests.iter().map(ToString::to_string).collect(),
+                digests: conflict.digests,
             })
             .collect(),
     }
@@ -329,22 +343,23 @@ fn conflicts_out(conflicts: ClosureConflicts) -> ConflictsOut {
 /// One platform child of an image index, or one locked platform leaf.
 #[derive(Serialize, schemars::JsonSchema)]
 struct CandidateOut {
-    digest: String,
+    /// The candidate manifest's digest.
+    digest: Digest,
     /// This candidate as a pullable reference — the entry's identifier with
     /// this child's digest attached. Emitted for the same reason the entry
     /// carries `pinned_identifier`: splicing one by hand means knowing where
     /// the tag goes relative to the digest.
     // `pinned`, not `pinned_identifier`: a candidate has one digest, nothing to disambiguate.
-    pinned: String,
-    platform: String,
+    pinned: PinnedPackageRef,
+    /// The platform the candidate serves.
+    platform: Platform,
     /// Absent for a lock-projected candidate: `ocx.lock` records the leaf
     /// digest per platform, not the descriptor that pointed at it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     media_type: Option<String>,
+    /// The candidate manifest's size; absent for a lock-projected candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    size: Option<i64>,
+    size: Option<ByteSize>,
 }
 
 /// The OCI resolution chain for the selected platform. Carries only the walk
@@ -352,7 +367,9 @@ struct CandidateOut {
 /// are rendered alongside the metadata, not inside the chain.
 #[derive(Serialize, schemars::JsonSchema)]
 struct Resolution {
-    pinned: String,
+    /// The resolved artifact, digest-pinned.
+    pinned: PinnedPackageRef,
+    /// The blobs walked, in order: index when there is one, manifest, config.
     chain: Vec<ChainOut>,
 }
 
@@ -361,45 +378,70 @@ struct Resolution {
 /// the index from the manifest from the config without decoding digests.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ChainOut {
-    digest: String,
+    /// The blob's digest.
+    digest: Digest,
+    /// What the blob is in the walk: `index`, `manifest` or `config`.
     role: String,
+    /// The blob's media type.
     media_type: String,
-    size: i64,
+    /// The blob's size; absent when it is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<ByteSize>,
 }
 
 /// A single layer descriptor from the inspected manifest (default mode) or the
 /// platform-selected manifest (`--resolve`).
 #[derive(Serialize, schemars::JsonSchema)]
 struct Layer {
-    digest: String,
+    /// The layer's digest.
+    digest: Digest,
+    /// The layer's media type.
     media_type: String,
-    size: i64,
+    /// The layer's size; absent when the descriptor records a negative one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<ByteSize>,
 }
 
 impl Layer {
     /// Projects raw OCI layer descriptors onto the report surface.
-    fn from_descriptors(descriptors: &[ocx_oci::Descriptor]) -> Vec<Self> {
+    fn from_descriptors(descriptors: &[ocx_oci::Descriptor]) -> Result<Vec<Self>, DigestError> {
         descriptors
             .iter()
-            .map(|descriptor| Layer {
-                digest: descriptor.digest.clone(),
-                media_type: descriptor.media_type.clone(),
-                size: descriptor.size,
+            .map(|descriptor| {
+                Ok(Layer {
+                    digest: Digest::try_from(descriptor.digest.as_str())?,
+                    media_type: descriptor.media_type.clone(),
+                    size: byte_size(descriptor.size),
+                })
             })
             .collect()
     }
 }
 
+/// A wire size from the manager, which reports an unknown one as negative.
+fn byte_size(size: i64) -> Option<ByteSize> {
+    u64::try_from(size).ok().map(ByteSize::from)
+}
+
+/// The plain rendering of a size.
+fn human_size(size: ByteSize) -> String {
+    human_bytes(i64::try_from(size.get()).unwrap_or(i64::MAX))
+}
+
 impl PackageInspect {
     /// Builds one report entry; `name` is how the caller addressed the package, `identifier` the
     /// expanded request, and `platform` matters only under `--resolve`.
+    ///
+    /// # Errors
+    ///
+    /// A layer descriptor whose digest is not an OCI digest.
     pub fn new(
         name: String,
         identifier: ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
         result: InspectResult,
-    ) -> Self {
-        match result {
+    ) -> Result<Self, DigestError> {
+        Ok(match result {
             InspectResult::Candidates { pinned, candidates } => Self {
                 name,
                 identifier,
@@ -407,11 +449,11 @@ impl PackageInspect {
                     candidates: candidates
                         .into_iter()
                         .map(|c| CandidateOut {
-                            digest: c.identifier.digest().to_string(),
-                            pinned: c.identifier.to_string(),
-                            platform: c.platform.to_string(),
+                            digest: c.identifier.digest(),
+                            pinned: c.identifier,
+                            platform: c.platform,
                             media_type: Some(c.media_type),
-                            size: Some(c.size),
+                            size: byte_size(c.size),
                         })
                         .collect(),
                     pinned,
@@ -428,7 +470,7 @@ impl PackageInspect {
                 body: Body::Manifest {
                     pinned,
                     metadata: metadata.into(),
-                    layers: Layer::from_descriptors(&layers),
+                    layers: Layer::from_descriptors(&layers)?,
                     closure: closure.map(project_closure),
                 },
             },
@@ -444,51 +486,57 @@ impl PackageInspect {
                     pinned,
                     platform,
                     metadata: metadata.into(),
-                    layers: Layer::from_descriptors(&chain.final_manifest.layers),
+                    layers: Layer::from_descriptors(&chain.final_manifest.layers)?,
                     resolution: Resolution::from_chain(&chain),
                     closure: closure.map(project_closure),
                 },
             },
-        }
+        })
     }
 
     /// Builds one entry straight from a locked toolchain binding (`ocx inspect` default mode): a pure
     /// projection with no registry read and no pinned artifact.
+    ///
+    /// # Errors
+    ///
+    /// A platform key that is not a canonical platform string.
     pub fn locked(
         name: String,
         identifier: ocx_oci::PackageRef,
-        platforms: &std::collections::BTreeMap<String, ocx_oci::Digest>,
-    ) -> Self {
+        platforms: &std::collections::BTreeMap<String, Digest>,
+    ) -> Result<Self, PlatformError> {
         let candidates = platforms
             .iter()
-            .map(|(platform, digest)| CandidateOut {
-                digest: digest.to_string(),
-                pinned: identifier.clone_with_digest(digest.clone()).to_string(),
-                platform: platform.clone(),
-                media_type: None,
-                size: None,
+            .map(|(platform, digest)| {
+                Ok(CandidateOut {
+                    digest: digest.clone(),
+                    pinned: PinnedPackageRef::pin(&identifier, digest.clone()),
+                    platform: platform.parse()?,
+                    media_type: None,
+                    size: None,
+                })
             })
-            .collect();
-        Self {
+            .collect::<Result<_, PlatformError>>()?;
+        Ok(Self {
             name,
             identifier,
             body: Body::Locked { candidates },
-        }
+        })
     }
 }
 
 impl Resolution {
     fn from_chain(chain: &ResolvedChain) -> Self {
         Self {
-            pinned: chain.pinned.to_string(),
+            pinned: chain.pinned.clone(),
             chain: chain
                 .chain
                 .iter()
                 .map(|blob| ChainOut {
-                    digest: blob.identifier.digest().to_string(),
+                    digest: blob.identifier.digest(),
                     role: blob.role.to_string(),
                     media_type: blob.media_type.clone(),
-                    size: blob.size,
+                    size: byte_size(blob.size),
                 })
                 .collect(),
         }
@@ -568,8 +616,8 @@ impl Serialize for PackageInspect {
         s.serialize_field("name", &self.name)?;
         s.serialize_field("identifier", &self.identifier)?;
         if let Some(pinned) = pinned {
-            s.serialize_field("pinned_identifier", &pinned.to_string())?;
-            s.serialize_field("pinned_digest", &pinned.digest().to_string())?;
+            s.serialize_field("pinned_identifier", pinned)?;
+            s.serialize_field("pinned_digest", &pinned.digest())?;
         }
         match &self.body {
             Body::Candidates { candidates, .. } | Body::Locked { candidates } => {
@@ -762,9 +810,9 @@ fn candidates_node(candidates: &[CandidateOut]) -> Node {
     let entries = candidates
         .iter()
         .map(|c| {
-            let node = Node::leaf(c.platform.clone()).with_digest(c.digest.clone());
+            let node = Node::leaf(c.platform.to_string()).with_digest(c.digest.to_string());
             match c.size {
-                Some(size) => node.with_note(human_bytes(size)),
+                Some(size) => node.with_note(human_size(size)),
                 None => node,
             }
         })
@@ -783,10 +831,13 @@ fn layers_node(layers: &[Layer]) -> Node {
         .iter()
         .enumerate()
         .map(|(i, layer)| {
-            Node::leaf(format!("[{i}]"))
-                .with_digest(layer.digest.clone())
-                .with_note(media_type_suffix(&layer.media_type).to_string())
-                .with_note(human_bytes(layer.size))
+            let node = Node::leaf(format!("[{i}]"))
+                .with_digest(layer.digest.to_string())
+                .with_note(media_type_suffix(&layer.media_type).to_string());
+            match layer.size {
+                Some(size) => node.with_note(human_size(size)),
+                None => node,
+            }
         })
         .collect();
     Node::branch("layers", entries)
@@ -800,9 +851,11 @@ fn resolution_node(resolution: &Resolution, platform: &ocx_oci::Platform) -> Nod
         .chain
         .iter()
         .map(|c| {
-            Node::leaf(c.role.clone())
-                .with_digest(c.digest.clone())
-                .with_note(human_bytes(c.size))
+            let node = Node::leaf(c.role.clone()).with_digest(c.digest.to_string());
+            match c.size {
+                Some(size) => node.with_note(human_size(size)),
+                None => node,
+            }
         })
         .collect();
     Node::branch(
@@ -836,7 +889,11 @@ fn closure_node(closure: &ClosureOut) -> Node {
         ));
     }
     for conflict in &closure.conflicts.repositories {
-        let digests = conflict.digests.iter().map(|d| Node::leaf(short_digest(d))).collect();
+        let digests = conflict
+            .digests
+            .iter()
+            .map(|digest| Node::leaf(digest.to_short_string()))
+            .collect();
         children.push(Node::branch(
             format!("repository '{}' resolves to multiple digests", conflict.repository),
             digests,
@@ -848,8 +905,8 @@ fn closure_node(closure: &ClosureOut) -> Node {
 
 /// One dependency as a flat leaf: short name, digest-inked identifier and composed visibility.
 fn closure_dep_leaf(dep: &ClosureDepOut) -> Node {
-    let mut leaf = Node::leaf(dep.name.clone()).with_digest(dep.identifier.clone());
-    if let Some(visibility) = parse_visibility(&dep.effective_visibility) {
+    let mut leaf = Node::leaf(dep.name.clone()).with_digest(dep.identifier.to_string());
+    if let Some(visibility) = dep.effective_visibility {
         leaf = leaf.with_visibility(visibility);
     }
     leaf
@@ -861,26 +918,10 @@ fn without_digest(identifier: &str) -> String {
         .map_or_else(|_| identifier.to_string(), |parsed| parsed.without_digest().to_string())
 }
 
-/// A wire digest in short form (`sha256:` + 12 hex), or verbatim when it does not parse.
-fn short_digest(digest: &str) -> String {
-    ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
-}
-
 /// The repository's final path segment, as [`ClosureDepOut::name`] carries it, so `deps` reads as
 /// the legend for every attribution; verbatim when it does not parse.
 fn attribution_name(identifier: &str) -> String {
     ocx_oci::PackageRef::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
-}
-
-/// Parses a wire `effective_visibility` back into a [`Visibility`] for the palette.
-fn parse_visibility(text: &str) -> Option<Visibility> {
-    match text {
-        "sealed" => Some(Visibility::SEALED),
-        "private" => Some(Visibility::PRIVATE),
-        "interface" => Some(Visibility::INTERFACE),
-        "public" => Some(Visibility::PUBLIC),
-        _ => None,
-    }
 }
 
 /// Renders the `interface` and `private` surfaces under one `surface` branch.
@@ -944,23 +985,17 @@ fn attribution_leaf(name: &str, package: Option<&str>) -> Node {
 
 /// One [`EnvVarAttribution`] leaf: env key, modifier kind and owning package.
 fn env_var_attribution_leaf(attribution: &EnvVarAttribution) -> Node {
-    let leaf = Node::leaf(attribution.key.clone()).with_note(attribution.kind.clone());
+    let leaf = Node::leaf(attribution.key.clone()).with_note(attribution.kind.to_string());
     match &attribution.package {
         Some(package) => leaf.with_note(attribution_name(package)),
         None => leaf,
     }
 }
 
-impl Printable for PackageInspect {
-    fn print_plain(&self, data: &DataInterface) {
-        data.print_tree(&self.tree());
-    }
-}
-
 /// The report both inspect commands emit: `ocx package inspect` over identifiers, `ocx inspect` over `ocx.toml`.
 pub struct InspectReport {
     /// Present only when the run selected a platform, so `-p` stays inert in default mode.
-    platform: Option<String>,
+    platform: Option<Platform>,
     /// An array, not keyed by request: entry order is meaningful and JSON key order is not.
     packages: Vec<PackageInspect>,
     /// The composed project-tier environment in application order, empty when nothing applies.
@@ -973,7 +1008,7 @@ impl InspectReport {
     /// `platform` is `Some` only when the run selected one, or the report names a platform nothing resolved against.
     pub fn new(platform: Option<&ocx_oci::Platform>, packages: Vec<PackageInspect>, env: Vec<EnvEntry>) -> Self {
         Self {
-            platform: platform.map(ToString::to_string),
+            platform: platform.cloned(),
             packages,
             env,
         }
@@ -1007,11 +1042,20 @@ impl Serialize for InspectReport {
 }
 
 impl Printable for InspectReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "InspectReport";
+
     fn print_plain(&self, data: &DataInterface) {
         for inspect in &self.packages {
-            inspect.print_plain(data);
+            data.print_tree(&inspect.tree());
         }
     }
+}
+
+/// A `$ref` or inline schema with a description beside it.
+fn described(mut schema: schemars::Schema, description: &str) -> schemars::Schema {
+    schema.insert("description".to_owned(), description.into());
+    schema
 }
 
 // Hand-written: both `Serialize` impls build their field list at run time.
@@ -1023,11 +1067,20 @@ impl schemars::JsonSchema for InspectReport {
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "object",
+            "description": "The report `ocx inspect` and `ocx package inspect` emit.",
             "properties": {
-                // Omitted, never null, when no platform was resolved.
-                "platform": {"type": "string"},
-                "packages": generator.subschema_for::<Vec<PackageInspect>>(),
-                "env": generator.subschema_for::<Vec<EnvEntry>>(),
+                "platform": described(
+                    generator.subschema_for::<Platform>(),
+                    "The platform the run selected; absent when it selected none.",
+                ),
+                "packages": described(
+                    generator.subschema_for::<Vec<PackageInspect>>(),
+                    "One entry per inspected package, in request order.",
+                ),
+                "env": described(
+                    generator.subschema_for::<Vec<EnvEntry>>(),
+                    "The composed project-tier environment in application order; empty when nothing applies.",
+                ),
             },
             "required": ["packages", "env"],
         })
@@ -1042,22 +1095,45 @@ impl schemars::JsonSchema for PackageInspect {
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "object",
-            "$comment": "`name` and `identifier` are always written. `pinned_identifier` and \
-        `pinned_digest` appear together, and only when the body pinned an artifact. The remaining keys \
-        come from exactly one body shape: `candidates` (a candidate listing or an `ocx.lock` binding), \
-        `metadata` + `layers` (a manifest), or `platform` + `metadata` + `layers` + `resolution` (a \
-        resolved package). `closure` rides along with the last two under `--closure`.",
+            "description": "One inspected package. `pinned_identifier` and `pinned_digest` appear together, \
+        only when the entry pinned one artifact. The other keys come from one shape: `candidates` (an image \
+        index or an `ocx.lock` binding), `metadata` + `layers` (a manifest), or `platform` + `metadata` + \
+        `layers` + `resolution` (a resolved package); `closure` joins the last two under `--closure`.",
             "properties": {
-                "name": {"type": "string"},
-                "identifier": generator.subschema_for::<ocx_oci::PackageRef>(),
-                "pinned_identifier": {"type": "string"},
-                "pinned_digest": {"type": "string"},
-                "candidates": generator.subschema_for::<Vec<CandidateOut>>(),
-                "platform": generator.subschema_for::<ocx_oci::Platform>(),
-                "metadata": generator.subschema_for::<Metadata>(),
-                "layers": generator.subschema_for::<Vec<Layer>>(),
-                "resolution": generator.subschema_for::<Resolution>(),
-                "closure": generator.subschema_for::<ClosureOut>(),
+                "name": {"type": "string", "description": "The package as the caller addressed it."},
+                "identifier": described(
+                    generator.subschema_for::<ocx_oci::PackageRef>(),
+                    "The expanded request.",
+                ),
+                "pinned_identifier": described(
+                    generator.subschema_for::<PinnedPackageRef>(),
+                    "The one artifact this entry pinned.",
+                ),
+                "pinned_digest": described(
+                    generator.subschema_for::<Digest>(),
+                    "The digest of `pinned_identifier`.",
+                ),
+                "candidates": described(
+                    generator.subschema_for::<Vec<CandidateOut>>(),
+                    "The platform children of an image index, or the platforms an `ocx.lock` binding pins.",
+                ),
+                "platform": described(
+                    generator.subschema_for::<Platform>(),
+                    "The platform `--resolve` selected.",
+                ),
+                "metadata": described(generator.subschema_for::<Metadata>(), "The package metadata."),
+                "layers": described(
+                    generator.subschema_for::<Vec<Layer>>(),
+                    "The selected manifest's layers, in order.",
+                ),
+                "resolution": described(
+                    generator.subschema_for::<Resolution>(),
+                    "The resolution walk `--resolve` took.",
+                ),
+                "closure": described(
+                    generator.subschema_for::<ClosureOut>(),
+                    "The dependency closure `--closure` computed.",
+                ),
             },
             "required": ["name", "identifier"],
         })
@@ -1277,15 +1353,19 @@ mod tests {
             ("linux/amd64".to_string(), ocx_oci::Digest::Sha256("a".repeat(64))),
             ("darwin/arm64".to_string(), ocx_oci::Digest::Sha256("b".repeat(64))),
         ]);
-        let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
+        let report =
+            PackageInspect::locked("toolchain".into(), test_identifier(), &platforms).expect("canonical platform keys");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
 
         assert_eq!(value["name"], "toolchain", "the entry names itself by binding");
         assert_eq!(value["identifier"], "example.com/toolchain:1.0");
         let candidates = value["candidates"].as_array().expect("candidates is an array");
         assert_eq!(
-            candidates.iter().map(|c| c["platform"].as_str()).collect::<Vec<_>>(),
-            [Some("darwin/arm64"), Some("linux/amd64")],
+            candidates.iter().map(|c| c["platform"].clone()).collect::<Vec<_>>(),
+            [
+                serde_json::json!({"os": "darwin", "architecture": "arm64"}),
+                serde_json::json!({"os": "linux", "architecture": "amd64"}),
+            ],
             "candidates follow the lock's canonical platform-key order: {candidates:?}"
         );
         assert_eq!(
@@ -1306,7 +1386,8 @@ mod tests {
     fn json_locked_omits_what_the_lock_does_not_record() {
         let platforms =
             std::collections::BTreeMap::from([("linux/amd64".to_string(), ocx_oci::Digest::Sha256("a".repeat(64)))]);
-        let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
+        let report =
+            PackageInspect::locked("toolchain".into(), test_identifier(), &platforms).expect("canonical platform keys");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let object = value.as_object().expect("top-level JSON is an object");
 
@@ -1331,7 +1412,8 @@ mod tests {
     fn locked_plain_tree_roots_at_the_declared_identifier() {
         let platforms =
             std::collections::BTreeMap::from([("linux/amd64".to_string(), ocx_oci::Digest::Sha256("a".repeat(64)))]);
-        let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
+        let report =
+            PackageInspect::locked("toolchain".into(), test_identifier(), &platforms).expect("canonical platform keys");
 
         let root = report.tree();
         assert_eq!(
@@ -1362,7 +1444,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, None),
-        );
+        )
+        .expect("well-formed layer digests");
         assert_eq!(
             report.tree().identifier.as_ref().map(ToString::to_string),
             Some(format!("example.com/toolchain@sha256:{}", "a".repeat(64))),
@@ -1382,7 +1465,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, None),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         assert!(
             !value
@@ -1410,7 +1494,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
 
         let deps = value["closure"]["deps"].as_array().expect("closure.deps is an array");
@@ -1460,7 +1545,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let deps = value["closure"]["deps"].as_array().expect("closure.deps is an array");
         let find = |marker: &str| {
@@ -1500,7 +1586,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let dep_entry = &value["closure"]["deps"][0];
         assert_eq!(
@@ -1523,7 +1610,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let closure_val = value["closure"].as_object().expect("closure is an object");
 
@@ -1550,10 +1638,20 @@ mod tests {
         assert!(conflicts.get("repositories").is_some_and(serde_json::Value::is_array));
     }
 
-    /// A surface `env` array projects each exposed env key with its modifier
-    /// kind under `type` and the declaring package under `package`.
+    /// A layer descriptor whose digest does not parse fails the projection rather than reporting a bogus layer.
     #[test]
-    fn json_closure_surface_env_carries_key_type_and_package() {
+    fn layer_from_descriptors_rejects_unparseable_digest() {
+        let descriptor = ocx_oci::Descriptor {
+            digest: "nope".to_string(),
+            ..Default::default()
+        };
+        assert!(Layer::from_descriptors(&[descriptor]).is_err());
+    }
+
+    /// A surface `env` array projects each exposed env key with its modifier
+    /// kind under `kind` and the declaring package under `package`.
+    #[test]
+    fn json_closure_surface_env_carries_key_kind_and_package() {
         let root = pinned("root", 'a');
         let dep = pinned("dep", 'b');
         let interface = surface_with_env(
@@ -1576,14 +1674,15 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let env = value["closure"]["surface"]["interface"]["env"]
             .as_array()
             .expect("closure.surface.interface.env is an array");
 
         let path = env.iter().find(|e| e["key"] == "PATH").expect("PATH env entry present");
-        assert_eq!(path["type"], "path", "modifier kind serializes under `type`");
+        assert_eq!(path["kind"], "path", "modifier kind serializes under `kind`");
         assert!(
             path["package"].as_str().unwrap_or_default().contains("root"),
             "env entry carries its declaring package: {path}"
@@ -1592,7 +1691,7 @@ mod tests {
             .iter()
             .find(|e| e["key"] == "DEP_HOME")
             .expect("DEP_HOME env entry present");
-        assert_eq!(dep_home["type"], "constant");
+        assert_eq!(dep_home["kind"], "constant");
         assert!(dep_home["package"].as_str().unwrap_or_default().contains("dep"));
     }
 
@@ -1614,7 +1713,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let env = value["closure"]["surface"]["interface"]["env"]
             .as_array()
@@ -1624,7 +1724,7 @@ mod tests {
             .iter()
             .find(|e| e["key"] == "GODEBUG")
             .expect("GODEBUG env entry present");
-        assert_eq!(godebug["type"], "list");
+        assert_eq!(godebug["kind"], "list");
         assert_eq!(godebug["separator"], ",");
 
         let path = env.iter().find(|e| e["key"] == "PATH").expect("PATH env entry present");
@@ -1655,7 +1755,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let integrations = value["closure"]["surface"]["interface"]["integrations"]
             .as_array()
@@ -1699,7 +1800,8 @@ mod tests {
             test_identifier(),
             test_platform(),
             manifest_result(root, Some(closure)),
-        );
+        )
+        .expect("well-formed layer digests");
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         for axis in ["interface", "private"] {
             assert_eq!(
@@ -1741,11 +1843,13 @@ mod tests {
     }
 
     /// One wire `deps` entry with the given short name / digest hex / visibility.
-    fn dep_out(name: &str, hex: char, visibility: &str) -> ClosureDepOut {
+    fn dep_out(name: &str, hex: char, visibility: Visibility) -> ClosureDepOut {
+        let identifier = ocx_oci::PackageRef::parse(&format!("example.com/{name}:1.0")).expect("valid identifier");
+        let digest = ocx_oci::Digest::try_from(fake_digest(hex).as_str()).expect("valid digest");
         ClosureDepOut {
             name: name.to_string(),
-            identifier: format!("example.com/{name}:1.0@{}", fake_digest(hex)),
-            effective_visibility: visibility.to_string(),
+            identifier: PinnedPackageRef::pin(&identifier, digest),
+            effective_visibility: Some(visibility),
             binaries: None,
             entrypoints: vec![],
             integrations: vec![],
@@ -1761,8 +1865,8 @@ mod tests {
     fn closure_node_renders_flat_deps_with_visibility_and_surface_branch() {
         let closure = ClosureOut {
             deps: vec![
-                dep_out("deps-mid", 'm', "interface"),
-                dep_out("deps-leaf", 'l', "public"),
+                dep_out("deps-mid", 'c', Visibility::INTERFACE),
+                dep_out("deps-leaf", 'd', Visibility::PUBLIC),
             ],
             surface: SurfacesOut {
                 interface: empty_surface_out(true),
@@ -1792,7 +1896,7 @@ mod tests {
             "the flat deps list carries no (*) markers: {joined}"
         );
         assert_eq!(
-            text.iter().filter(|t| t.contains(&fake_digest('m'))).count(),
+            text.iter().filter(|t| t.contains(&fake_digest('c'))).count(),
             1,
             "each dep identifier renders exactly once (no re-expansion): {joined}"
         );
@@ -1839,7 +1943,10 @@ mod tests {
                 }],
                 repositories: vec![RepositoryConflictOut {
                     repository: "example.com/shared-lib".to_string(),
-                    digests: vec![fake_digest('e'), fake_digest('f')],
+                    digests: vec![
+                        ocx_oci::Digest::try_from(fake_digest('e').as_str()).expect("valid digest"),
+                        ocx_oci::Digest::try_from(fake_digest('f').as_str()).expect("valid digest"),
+                    ],
                 }],
             },
         };

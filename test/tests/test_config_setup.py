@@ -18,7 +18,7 @@ config-setup-specific contract:
   digest-pinned seed skip the refresh outright, without a warning
 - bare ``ocx config setup`` with nothing configured → exit 64 (UsageError)
 - ``--managed-config ""`` → clears fence + snapshot dir
-- dirty fence → exit 82; ``--force`` overwrites; ``--dry-run`` writes nothing
+- dirty fence → exit 81; ``--force`` overwrites; ``--dry-run`` writes nothing
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from src.runner import OcxRunner
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE)
-EXIT_DIRTY = 82  # DirtyRcBlock
+EXIT_DIRTY = 81  # PolicyBlocked
 
 # The managed-config fence closer (distinct from the shell-activation fence).
 _MANAGED_FENCE_CLOSER = "# <<< ocx managed <<<"
@@ -336,7 +336,7 @@ def test_clear_removes_fence_and_snapshot(ocx: OcxRunner, unique_repo: str, regi
 
 
 # ---------------------------------------------------------------------------
-# Dirty fence contract (exit 82 / --force / --dry-run)
+# Dirty fence contract (exit 81 / --force / --dry-run)
 # ---------------------------------------------------------------------------
 
 
@@ -346,8 +346,8 @@ def _tamper_fence(ocx: OcxRunner) -> None:
     config_path.write_text(text.replace(_MANAGED_FENCE_CLOSER, f"# tampered\n{_MANAGED_FENCE_CLOSER}"))
 
 
-def test_dirty_fence_exits_82_force_overwrites(ocx: OcxRunner, unique_repo: str, registry: str) -> None:
-    """User edits inside the fence → exit 82 (dirty, untouched); `--force`
+def test_dirty_fence_exits_81_force_overwrites(ocx: OcxRunner, unique_repo: str, registry: str) -> None:
+    """User edits inside the fence → exit 81 (dirty, untouched); `--force`
     rewrites the fence."""
     ref = _publish(registry, unique_repo, "config-setup-dirty.example")
     assert _run(ocx, "config", "setup", "--managed-config", ref).returncode == EXIT_SUCCESS
@@ -355,7 +355,7 @@ def test_dirty_fence_exits_82_force_overwrites(ocx: OcxRunner, unique_repo: str,
 
     dirty = _run(ocx, "config", "setup", "--managed-config", ref)
     assert dirty.returncode == EXIT_DIRTY, (
-        f"a tampered fence must exit 82; got {dirty.returncode}\nstderr:\n{dirty.stderr}"
+        f"a tampered fence must exit 81; got {dirty.returncode}\nstderr:\n{dirty.stderr}"
     )
     assert _status(dirty) == "dirty"
     assert "# tampered" in (_home(ocx) / "config.toml").read_text(), "dirty fence left untouched"

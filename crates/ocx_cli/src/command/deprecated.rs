@@ -1,31 +1,198 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Deprecated command spellings for the 0.6-to-0.7 pair, deleted whole in 0.7 with the hidden
-//! variants that call it, so nothing else may depend on it.
+//! Deprecated command and flag spellings for the 0.6-to-0.7 pair, deleted whole in 0.7 with the
+//! hidden variants that call it, so nothing else may depend on it.
 //!
-//! Each spelling is a hidden command, never a clap alias: `ArgMatches` reports only the canonical
-//! name, so an alias could never warn. The `--package` flag rename's sites carry `// 0.7 removal:`.
+//! Each command spelling is a hidden command, never a clap alias: `ArgMatches` reports only the
+//! canonical name, so an alias could never warn. Each flag spelling is a hidden argument whose id
+//! [`RenamedFlag::arg_id`] derives, read back by [`renamed_flags_used`]. The removal release is the
+//! `REMOVAL_RELEASE` constant every row's notice reads.
 
+use clap::ArgMatches;
+use clap::parser::ValueSource;
+use ocx_env::REMOVAL_RELEASE;
+
+use super::leaf::Leaf;
 use crate::app::Context;
 
-/// The release that deletes this module and every spelling in it.
-const REMOVAL_RELEASE: &str = "0.7";
+/// A flag spelled as typed on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spelling {
+    Long(&'static str),
+    Short(char),
+}
 
-/// Every command spelling this window renames, as `(old, new)`; the authority
-/// `test/lint/test_deprecated_spellings.py` parses to sweep the repo. The renamed `--package` flag
-/// has no `(old, new)` pair, so the sweep carries it separately.
-pub const RENAMED: &[(&str, &str)] = &[
-    ("run", "exec"),
-    ("package describe", "package description push"),
-    ("package info", "package description pull"),
+impl Spelling {
+    /// Whether an argument named `long` and `short` is spelled this way.
+    #[must_use]
+    pub fn is_spelled(&self, long: Option<&str>, short: Option<char>) -> bool {
+        match *self {
+            Self::Long(name) => long == Some(name),
+            Self::Short(letter) => short == Some(letter),
+        }
+    }
+}
+
+impl std::fmt::Display for Spelling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Long(name) => write!(f, "--{name}"),
+            Self::Short(letter) => write!(f, "-{letter}"),
+        }
+    }
+}
+
+/// A hidden command spelling that still runs the command it was renamed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenamedCommand {
+    pub old: Leaf,
+    pub new: Leaf,
+}
+
+/// A hidden flag spelling that still works on the command `path` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenamedFlag {
+    pub path: Leaf,
+    pub old: Spelling,
+    pub new: Spelling,
+    id: &'static str,
+}
+
+impl RenamedFlag {
+    /// The clap id of the hidden argument that keeps the old spelling working: `--out` is `deprecated_out`,
+    /// `-c` is `deprecated_c`.
+    #[must_use]
+    pub const fn arg_id(&self) -> &'static str {
+        self.id
+    }
+}
+
+/// One flag row; the hidden argument's id is built from the old spelling here and nowhere else.
+macro_rules! renamed_flag {
+    ($path:ident, $old_kind:ident($old:literal) => $new_kind:ident($new:literal)) => {
+        RenamedFlag {
+            path: Leaf::$path,
+            old: Spelling::$old_kind($old),
+            new: Spelling::$new_kind($new),
+            id: concat!("deprecated_", $old),
+        }
+    };
+}
+
+pub const RUN: RenamedCommand = RenamedCommand {
+    old: Leaf::Run,
+    new: Leaf::Exec,
+};
+pub const PACKAGE_DESCRIBE: RenamedCommand = RenamedCommand {
+    old: Leaf::PackageDescribe,
+    new: Leaf::PackageDescriptionPush,
+};
+pub const PACKAGE_INFO: RenamedCommand = RenamedCommand {
+    old: Leaf::PackageInfo,
+    new: Leaf::PackageDescriptionPull,
+};
+
+pub const CONFIG_PUSH_C: RenamedFlag = renamed_flag!(ConfigPush, Short('c') => Long("cascade"));
+pub const INDEX_CATALOG_TAGS: RenamedFlag = renamed_flag!(IndexCatalog, Long("tags") => Long("with-tags"));
+/// `package claim --out` shares the options struct, and so the hidden argument, with this row.
+pub const ANNOUNCE_OUT: RenamedFlag = renamed_flag!(PackageAnnounce, Long("out") => Long("output"));
+pub const CLAIM_OUT: RenamedFlag = RenamedFlag {
+    path: Leaf::PackageClaim,
+    ..ANNOUNCE_OUT
+};
+pub const COPY_C: RenamedFlag = renamed_flag!(PackageCopy, Short('c') => Long("cascade"));
+pub const COPY_DESCRIPTION: RenamedFlag = renamed_flag!(PackageCopy, Long("description") => Long("with-description"));
+pub const CREATE_L: RenamedFlag = renamed_flag!(PackageCreate, Short('l') => Long("compression-level"));
+pub const PUSH_C: RenamedFlag = renamed_flag!(PackagePush, Short('c') => Long("cascade"));
+
+/// Every command spelling this window renames.
+pub const COMMANDS: &[RenamedCommand] = &[RUN, PACKAGE_DESCRIBE, PACKAGE_INFO];
+
+/// Every flag spelling this window renames. The renamed announce `--package` flag became a positional,
+/// not a spelling, so it is not a row.
+pub const FLAGS: &[RenamedFlag] = &[
+    CONFIG_PUSH_C,
+    INDEX_CATALOG_TAGS,
+    ANNOUNCE_OUT,
+    CLAIM_OUT,
+    COPY_C,
+    COPY_DESCRIPTION,
+    CREATE_L,
+    PUSH_C,
 ];
 
-/// Warn on stderr that `old` has been renamed to `new`; once, as one process dispatches one command.
-pub fn warn_renamed(context: &Context, old: &str, new: &str) {
-    context.ui().warn(format!(
-        "`ocx {old}` is renamed to `ocx {new}` and is removed in {REMOVAL_RELEASE}"
-    ));
+fn words(leaf: Leaf) -> String {
+    leaf.path().join(" ")
+}
+
+impl RenamedCommand {
+    /// The warning for this spelling.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        notice(&words(self.old), &words(self.new))
+    }
+}
+
+impl RenamedFlag {
+    /// The command path and old spelling, as typed (`package push -c`).
+    #[must_use]
+    pub fn old_text(&self) -> String {
+        format!("{} {}", words(self.path), self.old)
+    }
+
+    /// The command path and replacement spelling (`package push --cascade`).
+    #[must_use]
+    pub fn new_text(&self) -> String {
+        format!("{} {}", words(self.path), self.new)
+    }
+
+    /// The warning for this spelling.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        notice(&self.old_text(), &self.new_text())
+    }
+}
+
+/// The flag rows of [`FLAGS`] the command line spelled the old way, in table order.
+#[must_use]
+pub fn renamed_flags_used(matches: &ArgMatches) -> Vec<RenamedFlag> {
+    let mut path = Vec::new();
+    let mut leaf = matches;
+    while let Some((name, sub)) = leaf.subcommand() {
+        path.push(name);
+        leaf = sub;
+    }
+    FLAGS
+        .iter()
+        .copied()
+        .filter(|row| {
+            let id = row.arg_id();
+            // `try_contains_id` first: `value_source` panics on an id the command lacks.
+            row.path.path() == path.as_slice()
+                && leaf.try_contains_id(id).is_ok()
+                && leaf.value_source(id) == Some(ValueSource::CommandLine)
+        })
+        .collect()
+}
+
+fn notice(old: &str, new: &str) -> String {
+    format!(
+        "`ocx {old}` is renamed to `ocx {new}` and is removed in {}",
+        REMOVAL_RELEASE.minor_form()
+    )
+}
+
+/// Warn on stderr that a command spelling has been renamed; once, as one process dispatches one command.
+pub fn warn_renamed(context: &Context, row: &RenamedCommand) {
+    context.ui().warn(row.notice());
+}
+
+/// Warn on stderr once for each renamed flag the command line spelled the old way.
+pub fn warn_renamed_flags(context: &Context, matches: &ArgMatches) {
+    for row in renamed_flags_used(matches) {
+        context.ui().warn(row.notice());
+    }
 }
 
 /// The notice `ocx package announce --package` prints. Returned rather than warned so a test can
@@ -34,13 +201,19 @@ pub fn warn_renamed(context: &Context, old: &str, new: &str) {
 pub fn package_flag_notice() -> String {
     format!(
         "`ocx package announce --package <PACKAGE>` takes the package as a positional argument now; \
-         the flag is removed in {REMOVAL_RELEASE}"
+         the flag is removed in {}",
+        REMOVAL_RELEASE.minor_form()
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RENAMED, package_flag_notice};
+    use clap::CommandFactory as _;
+
+    use super::{
+        ANNOUNCE_OUT, CLAIM_OUT, CONFIG_PUSH_C, COPY_C, COPY_DESCRIPTION, CREATE_L, FLAGS, INDEX_CATALOG_TAGS, PUSH_C,
+        RenamedFlag, package_flag_notice, renamed_flags_used,
+    };
 
     /// The notice names the deprecated spelling, the form that replaces it, and the
     /// release that removes it.
@@ -55,17 +228,12 @@ mod tests {
     /// `test/tests/test_tag_reserved.py:131,137` (a `ui().warn` on stderr while
     /// stdout stays parseable JSON in the same run).
     ///
-    /// `"0.7"` is quoted as a **literal**, never read off [`REMOVAL_RELEASE`]:
+    /// `"0.7"` is quoted as a **literal**, never read off `ocx_env::REMOVAL_RELEASE`:
     /// reading the constant would make the named mutation invisible, because the
     /// expectation would move with it.
     ///
-    /// Red at the stub: `package_flag_notice` is `unimplemented!()`, so this
-    /// panics.
-    /// Mutation once implemented: set [`REMOVAL_RELEASE`] to `"0.8"`; or drop
-    /// the word `positional` from the sentence, which is the needle the
-    /// acceptance half counts.
-    ///
-    /// [`REMOVAL_RELEASE`]: super::REMOVAL_RELEASE
+    /// Mutation: set `REMOVAL_RELEASE` to 0.8; or drop the word `positional` from
+    /// the sentence, which is the needle the acceptance half counts.
     #[test]
     fn announce_package_flag_notice_names_the_removal_release() {
         let notice = package_flag_notice();
@@ -83,85 +251,83 @@ mod tests {
         );
     }
 
-    /// Every site the 0.7 removal must delete is findable from one `0.7 removal:`
-    /// grep.
-    ///
-    /// Scanned over **`command/package_announce.rs`**, a different file, and
-    /// that is the whole design: a scan run over this module's own source would
-    /// match the `# External sites…` doc block above in every state — a detector
-    /// measuring its own invocation (`quality-core.md` § Unchecked Green).
-    ///
-    /// Asserted as a **count**, never as presence: the doc block names two
-    /// sites (the hidden `--package` `Arg`, and the `package_selector` `ArgGroup`
-    /// with the `override_usage` beside it), so a marker deleted from one of them
-    /// must red rather than being covered by its survivor. A bare
-    /// `contains(...)` would also stay green if the file were renamed and the
-    /// `include_str!` retargeted at something that happened to quote the phrase.
-    ///
-    /// **Green on arrival** — the stub carries both markers.
-    /// Mutation: delete the `// 0.7 removal:` comment above the
-    /// `package_selector` `ArgGroup`; the count drops to one and this reds.
-    #[test]
-    fn the_announce_deprecation_sites_are_marked_for_the_removal_release() {
-        let announce_source = include_str!("package_announce.rs");
-        assert!(
-            announce_source.matches("0.7 removal:").count() >= 2,
-            "both announce-side deprecation sites must carry the `0.7 removal:` marker this module's \
-             doc block enumerates; found {}",
-            announce_source.matches("0.7 removal:").count()
-        );
+    /// One command line per flag row of [`FLAGS`], spelled the old way; the
+    /// new spelling is the row's `new` substituted in.
+    const FLAG_ROW_ARGV: &[(RenamedFlag, &[&str])] = &[
+        (
+            CONFIG_PUSH_C,
+            &["config", "push", "-c", "-i", "r.example/c:1", "config.toml"],
+        ),
+        (INDEX_CATALOG_TAGS, &["index", "catalog", "--tags"]),
+        (
+            ANNOUNCE_OUT,
+            &["package", "announce", "--tags", "1", "--out", "d", "acme/widget"],
+        ),
+        (
+            CLAIM_OUT,
+            &[
+                "package",
+                "claim",
+                "--repository",
+                "https://example.com/r",
+                "--out",
+                "d",
+                "acme/widget",
+            ],
+        ),
+        (COPY_C, &["package", "copy", "-c", "--to", "r.example", "r.example/a:1"]),
+        (
+            COPY_DESCRIPTION,
+            &["package", "copy", "--description", "--to", "r.example", "r.example/a:1"],
+        ),
+        (CREATE_L, &["package", "create", "-l", "fast", "dir"]),
+        (PUSH_C, &["package", "push", "-c", "-i", "r.example/a:1", "a.tar.xz"]),
+    ];
+
+    fn parse(argv: &[&str]) -> clap::ArgMatches {
+        let mut full = vec!["ocx"];
+        full.extend_from_slice(argv);
+        crate::app::Cli::command()
+            .try_get_matches_from(&full)
+            .unwrap_or_else(|error| panic!("`{}` must parse: {error}", full.join(" ")))
     }
 
-    /// The two quoted arguments of the first `warn_renamed(&context, …)` call in
-    /// `tail`.
-    fn first_pair(tail: &str) -> Option<(&str, &str)> {
-        let (_, after_open) = tail.split_once('"')?;
-        let (old, rest) = after_open.split_once('"')?;
-        let (_, after_second_open) = rest.split_once('"')?;
-        let (new, _) = after_second_open.split_once('"')?;
-        Some((old, new))
-    }
-
-    /// [`RENAMED`] is the whole set: every dispatch site that warns about a
-    /// renamed command names a pair this list carries, and carries no other.
+    /// Every flag row still parses under its old spelling, is reported as used
+    /// by exactly that row, and the new spelling parses and reports nothing.
     ///
-    /// Scanned over `command.rs` and `command/package.rs`, never over this
-    /// module's own source — the needle `warn_renamed(&context, ` is a literal
-    /// in the scanner directly above, so a scan that included this file would
-    /// match its own invocation in every state (`quality-core.md` § Unchecked
-    /// Green), exactly as the `0.7 removal:` count below is scanned over a
-    /// different file for the same reason.
+    /// The table is checked against [`FLAGS`] first, so a row added without a
+    /// command line here reds rather than going unexercised.
     ///
-    /// Asserted as a **count first**, then membership. Membership alone stays
-    /// green when an entry is deleted from [`RENAMED`] *and* from its dispatch
-    /// site together, which is the shape a half-finished 0.7 removal has; the
-    /// count is what makes the sweep's input provably complete.
-    ///
-    /// Mutation: delete any one entry from [`RENAMED`] — the count reds.
+    /// Mutation: delete any row's hidden argument (its parse reds), or misspell
+    /// its id (detection reds).
     #[test]
-    fn every_warn_renamed_dispatch_site_is_listed_in_renamed() {
-        const NEEDLE: &str = "warn_renamed(&context, ";
-        let sources = [include_str!("../command.rs"), include_str!("package.rs")];
+    fn every_renamed_flag_still_parses_and_is_detected() {
+        let exercised: Vec<RenamedFlag> = FLAG_ROW_ARGV.iter().map(|(row, _)| *row).collect();
+        assert_eq!(FLAGS, exercised, "every flag row needs a command line here");
 
-        let sites: Vec<(&str, &str)> = sources
-            .iter()
-            .flat_map(|source| source.split(NEEDLE).skip(1))
-            .map(|tail| first_pair(tail).expect("a warn_renamed call site quotes two literals"))
-            .collect();
+        for (row, argv) in FLAG_ROW_ARGV {
+            assert_eq!(renamed_flags_used(&parse(argv)), [*row], "`ocx {}`", row.old_text());
 
-        assert_eq!(
-            sites.len(),
-            RENAMED.len(),
-            "RENAMED must list exactly the dispatch sites that warn; found {sites:?} against {RENAMED:?}"
-        );
-        for site in &sites {
+            let (old, new) = (row.old.to_string(), row.new.to_string());
+            let renamed: Vec<&str> = argv
+                .iter()
+                .map(|word| if *word == old { new.as_str() } else { word })
+                .collect();
             assert!(
-                RENAMED.contains(site),
-                "`{}` -> `{}` warns at a dispatch site but is missing from RENAMED, so the \
-                 repo-wide sweep in test/lint/test_deprecated_spellings.py never looks for it",
-                site.0,
-                site.1
+                renamed_flags_used(&parse(&renamed)).is_empty(),
+                "`ocx {}` is the current spelling and must not warn",
+                row.new_text()
             );
         }
+    }
+
+    /// The old spelling of a value flag conflicts with the new one, so a script
+    /// passing both is refused rather than silently getting one of them.
+    #[test]
+    fn a_renamed_value_flag_conflicts_with_its_replacement() {
+        let both = ["package", "create", "-l", "fast", "--compression-level", "best", "dir"];
+        let mut full = vec!["ocx"];
+        full.extend_from_slice(&both);
+        assert!(crate::app::Cli::command().try_get_matches_from(full).is_err());
     }
 }

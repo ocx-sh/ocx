@@ -434,7 +434,7 @@ impl Transfer<'_> {
         let target_image = self.client.transport_write_reference(self.target);
 
         // `_with_fallback`: the source's referrers may live on the fallback tag, and a verdict here would
-        // misattribute exit 84 to the source.
+        // misattribute exit 82 to the source.
         let descriptors = transport
             .list_referrers_with_fallback(&source_image, subject, None)
             .await?
@@ -1693,7 +1693,7 @@ mod tests {
     /// A source registry with no OCI 1.1 Referrers API keeps its referrers on
     /// the `<algorithm>-<encoded>` fallback tag — which is exactly where OCX's
     /// own `sign` and `attest` write them. Reading the source through the
-    /// verdict-shaped `list_referrers` turned that into exit 84 naming the
+    /// verdict-shaped `list_referrers` turned that into exit 82 naming the
     /// SOURCE, dropping every fallback-tag signature on the floor. The verdict
     /// belongs to `ensure_target_serves_referrers`, on the target.
     ///
@@ -1851,7 +1851,7 @@ mod source_guard_tests {
 
         assert!(
             code.contains("ClientError::ReferrersUnsupported"),
-            "positive control: the exit-84 refusal must still be constructed in copy.rs, \
+            "positive control: the exit-82 refusal must still be constructed in copy.rs, \
              or this scan is reading a file that no longer holds the contract"
         );
         assert!(

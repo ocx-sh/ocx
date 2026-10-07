@@ -109,7 +109,7 @@ def test_layer_ref_strip_and_prefix_round_trip(ocx: OcxRunner, unique_repo: str,
     )
     ocx.plain("index", "update", short)
 
-    result = ocx.json("package", "install", short)
+    result = ocx.json("package", "install", short)["packages"]
     content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)

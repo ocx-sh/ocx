@@ -265,12 +265,12 @@ def _announce_tags_file(
     ocx: OcxRunner, repo: str, tmp_path: Path
 ) -> tuple[list[str], str]:
     path = _missing(tmp_path)
-    # `--out` keeps the run off the forge: no credential, no pull request.
+    # `--output` keeps the run off the forge: no credential, no pull request.
     return (
         [
             "package", "announce",
             "--tags-file", str(path),
-            "--out", str(tmp_path),
+            "--output", str(tmp_path),
             "acme/widget",
         ],
         str(path),
@@ -553,7 +553,7 @@ def _announce_tags_file_oversized(
         [
             "package", "announce",
             "--tags-file", str(path),
-            "--out", str(tmp_path),
+            "--output", str(tmp_path),
             "acme/widget",
         ],
         str(path),

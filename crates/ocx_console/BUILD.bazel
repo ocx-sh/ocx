@@ -23,6 +23,7 @@ rust_library(
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_console"},
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_env",
         "//crates/ocx_util",
     ],
 )

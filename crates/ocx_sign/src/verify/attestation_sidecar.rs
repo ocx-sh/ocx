@@ -20,8 +20,8 @@ use super::dsse::{self, VerifiedAttestation, VerifiedEnvelope};
 use super::error::VerifyErrorKind;
 use super::identity::{self, matching_policies, oidc_issuer, parse_certificate, subject_identity};
 use super::pipeline::{
-    ACCEPTED_MANIFEST_TYPES, MAX_REFERRER_MANIFEST_BYTES, PolicyDeferredToOcx, RefusedCandidate, ScanStop,
-    VerifiedSignature, VerifyResult, map_client_error, map_verification_error, pull_blob_capped,
+    MAX_REFERRER_MANIFEST_BYTES, PolicyDeferredToOcx, RefusedCandidate, ScanStop, VerifiedSignature, VerifyResult,
+    map_client_error, map_verification_error, pull_blob_capped,
 };
 use super::signing_instant::SigningInstant;
 use super::simplesigning_read::{
@@ -35,6 +35,7 @@ use crate::attest::{DSSE_PAYLOAD_TYPE, MAX_ATTESTATION_CANDIDATES, MAX_ATTESTATI
 use crate::sign::SignatureFormat;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{OciTransport, sibling_tag_reference};
+use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
 use ocx_oci::referrer::media_types::DSSE_ENVELOPE_MEDIA_TYPE;
 use ocx_oci::{Algorithm, Descriptor, Digest, ImageManifest, native};
 use ocx_trust::key_ref::KeyBackendKind;
@@ -91,7 +92,7 @@ pub(super) async fn read_attestation_sidecar_tag(
         image,
         super::simplesigning_read::sidecar_tag(subject_digest, SidecarKind::Attestation),
     );
-    let bytes = match transport.pull_manifest_raw(&target, ACCEPTED_MANIFEST_TYPES).await {
+    let bytes = match transport.pull_manifest_raw(&target, SIGNABLE_MANIFEST_TYPES).await {
         Ok((bytes, _digest)) => bytes,
         Err(ClientError::ManifestNotFound(_)) => return Ok(None),
         Err(other) => return Err(map_client_error(other)),

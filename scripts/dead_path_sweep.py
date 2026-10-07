@@ -21,10 +21,8 @@ answers the same question.
 
 Exemptions are earned by what a file *is*, never by naming a path
 ------------------------------------------------------------------
-- The frozen pre-split classification baseline. Its rows are a *pre-move*
-  reading by construction; a live path in it would mean it had been regenerated.
-- The DEC-24 relocation bridge under `crates/ocx_cli/src/exit/`, whose entire
-  job is to carry yesterday's spellings alongside today's.
+- The relocated classification tests under `crates/ocx_cli/src/exit/`, whose
+  provenance comments carry yesterday's spellings alongside today's.
 - Files whose subject is constructed test data: the gate tooling's own fixtures
   mint paths like `crates/ocx_lib/src/thing.rs` that were never meant to exist.
 
@@ -92,9 +90,8 @@ LITERAL = re.compile(r"crates/ocx_[a-z_]+(?:/[A-Za-z0-9_./*-]*)?")
 SEGMENTED = re.compile(r"""["']crates["']((?:\s*/\s*["'][A-Za-z0-9_.*+-]+["'])+)""")
 _SEGMENT = re.compile(r"""["']([A-Za-z0-9_.*+-]+)["']""")
 
-EXEMPT_EXACT = {"crates/ocx_cli/src/exit/classify_baseline_7adaea62.json"}
 EXEMPT_PATTERNS = (
-    re.compile(r"crates/ocx_cli/src/exit(\.rs|/ocx_[a-z_]+\.rs)$"),  # DEC-24 bridge
+    re.compile(r"crates/ocx_cli/src/exit(\.rs|/ocx_[a-z_]+\.rs)$"),  # relocated classification tests
     # `bazel_build_drift.py` was here too and is not any more. Its synthetic
     # tree named its filler packages `ocx_pNN`, which this reader truncates to
     # the dead literal `crates/ocx_p` — and a file-wide exemption bought that
@@ -141,7 +138,7 @@ BASELINE_DEAD = frozenset({
 
 
 def _exempt(rel: str) -> bool:
-    return rel in EXEMPT_EXACT or any(p.search(rel) for p in EXEMPT_PATTERNS)
+    return any(p.search(rel) for p in EXEMPT_PATTERNS)
 
 
 def _live(rel: str) -> bool:

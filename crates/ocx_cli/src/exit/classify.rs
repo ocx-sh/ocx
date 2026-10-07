@@ -1,35 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The two classification traits, and the `std::io::Error` case the orphan rule keeps from being an impl.
+//! The one rung `families!` cannot hold: `std::io::Error` is foreign, so it can carry no classification impl.
+
+use std::io::Error as IoError;
 
 use ocx_exit::ExitCode;
 
-/// Classify an error into an [`ExitCode`].
-pub(crate) trait ClassifyExitCode {
-    /// Return an exit code for this error, or `None` to defer to the next link in the source chain.
-    fn classify(&self) -> Option<ExitCode> {
-        None
-    }
-}
+use super::Verdict;
 
-/// Infallible variant of [`ClassifyExitCode`] for leaf "kind" enums; the non-`Option` return forces an exhaustive impl.
-pub(crate) trait ClassifyErrorKind {
-    /// Return the exit code this kind maps to.
-    fn exit_code(&self) -> ExitCode;
-
-    /// Stable snake_case discriminant for `envelope.error.detail`, frozen across releases: consumers dispatch on it.
-    ///
-    /// Implementations take no wildcard `_` arm, so a new variant forces an explicit mapping.
-    fn kind_detail(&self) -> &'static str;
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    // `std::io::Error` is foreign, so it gets no `ClassifyExitCode` impl (orphan rule).
-    if let Some(io) = cause.downcast_ref::<std::io::Error>()
+pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<Verdict> {
+    if let Some(io) = cause.downcast_ref::<IoError>()
         && io.kind() == std::io::ErrorKind::PermissionDenied
     {
-        return Some(ExitCode::PermissionDenied);
+        return Some(Verdict {
+            code: ExitCode::PermissionDenied,
+            detail: "permission_denied",
+        });
     }
 
     None
@@ -114,7 +101,7 @@ mod tests {
         let toml_err = toml::from_str::<toml::Value>("invalid =[[[").unwrap_err();
         let err = ConfigError::Parse {
             path: PathBuf::from("/bad.toml"),
-            source: toml_err,
+            source: Box::new(toml_err),
         };
         assert_eq!(classify(err), ExitCode::ConfigError);
     }
@@ -140,6 +127,20 @@ mod tests {
     }
 
     // ── std::io::Error with PermissionDenied kind ────────────────────────────
+
+    /// Reds on: the `io::Error` slug drifting from the registry row of the code it exits with.
+    #[test]
+    fn io_permission_denied_reports_the_registered_slug() {
+        let denied = IoError::new(std::io::ErrorKind::PermissionDenied, "EACCES");
+        let decision = try_downcast(&denied).expect("a permission refusal classifies");
+        let registry = crate::exit::detail_registry();
+        let row = registry
+            .iter()
+            .find(|row| row.slug == decision.detail)
+            .expect("the slug is registered");
+        assert_eq!((decision.detail, row.exit_code), ("permission_denied", decision.code));
+        assert!(try_downcast(&IoError::new(std::io::ErrorKind::NotFound, "ENOENT")).is_none());
+    }
 
     #[test]
     fn io_permission_denied_maps_to_permission_denied() {
@@ -336,7 +337,7 @@ mod tests {
             policy: "offline",
             block: ocx_index::error::PolicyBlock::UnpinnedTag,
         };
-        let err = ocx_project::error::Error::Project(ProjectError::new(PathBuf::new(), kind));
+        let err = ocx_project::error::Error::from(ProjectError::new(PathBuf::new(), kind));
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
@@ -362,7 +363,7 @@ mod tests {
         // `ocx_lib::Error::PolicyBlocked`, so it classifies on the CLI-local
         // pass. Built by the real helper, so a drift in the code it carries
         // reds here rather than in a local re-statement of it.
-        let err = crate::command::index_common::policy_blocked("`ocx index update`", "frozen");
+        let err = crate::command::index_common::policy_blocked("`ocx index update`");
         assert_eq!(crate::exit::classify_error(&err), ExitCode::PolicyBlocked);
     }
 
@@ -382,10 +383,9 @@ mod tests {
 
     // ── record::RecordsError exit-code classification ────────────────────────
 
-    /// `try_classify` is a hand-written downcast ladder with no compile-time
-    /// guard: a type with no arm silently falls through to `Failure` (1). For
-    /// records that would turn an unwritable operator sink from exit 74 into
-    /// exit 1, so this test locks in both the arm's presence and every variant's
+    /// A type missing from the `families!` list silently falls through to
+    /// `Failure` (1). For records that would turn an unwritable operator sink from exit 74 into
+    /// exit 1, so this test locks in both the family's presence and every variant's
     /// code. The variants split across two codes deliberately — an unwritable
     /// sink is an I/O fault, while everything the operator fixes by editing
     /// `[records]` (the template, the rendered name, the sink itself) is a
@@ -652,27 +652,27 @@ mod tests {
     }
 
     #[test]
-    fn sign_error_transparency_log_unavailable_maps_to_transparency_log_unavailable() {
-        // Slice 1: distinct exit code 83 so operators can distinguish Rekor
-        // outage from registry outage.
+    fn sign_error_transparency_log_unavailable_maps_to_temp_fail() {
+        // A Rekor outage is a retryable fault (75); its `error.detail` slug, not its code,
+        // tells it from a registry outage.
         let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::TransparencyLogUnavailable);
-        assert_eq!(classify(err), ExitCode::TransparencyLogUnavailable);
+        assert_eq!(classify(err), ExitCode::TempFail);
     }
 
     #[test]
-    fn sign_error_referrers_unsupported_maps_to_referrers_unsupported() {
+    fn sign_error_referrers_unsupported_maps_to_unsupported() {
         let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::ReferrersUnsupported);
-        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
+        assert_eq!(classify(err), ExitCode::Unsupported);
     }
 
     #[test]
-    fn sign_error_offline_sign_refused_maps_to_permission_denied() {
+    fn sign_error_offline_sign_refused_maps_to_policy_blocked() {
         // Slice 1 policy: `ocx package sign --offline` is rejected at the CLI.
         let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OfflineSignRefused);
-        assert_eq!(classify(err), ExitCode::PermissionDenied);
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
     // ── VerifyError (Slice 1 — referrers verify) ────────────────────────────
@@ -970,7 +970,7 @@ mod tests {
     // ── BinScanError registration (regression) ───────────────────────────────
 
     /// Regression: `BinScanError` (the `--bin-scan` Verify-mode diff error)
-    /// was never registered in the `try_classify` ladder, so `ocx package
+    /// was never registered in the `families!` list, so `ocx package
     /// create --bin-scan` printed the right message but exited 1 (Failure)
     /// instead of 65 (DataError). The type itself always implemented
     /// `ClassifyExitCode` correctly — the ladder just never downcast to it.
@@ -1156,8 +1156,8 @@ mod tests {
     ///
     /// This test and `every_toolchain_path_error_variant_classifies_as_config_error`
     /// in `file_structure/toolchain_store.rs` cover two different failures, which
-    /// is why both exist: removing the `try_downcast!(ToolchainPathError)` entry
-    /// from the ladder leaves that one green — the impl still returns
+    /// is why both exist: removing the `ToolchainPathError` entry
+    /// from the `families!` list leaves that one green — the impl still returns
     /// `Some(ConfigError)` — while this one reds, because an unregistered type
     /// falls through the chain walk to `ExitCode::Failure`.
     #[test]
@@ -1181,7 +1181,7 @@ mod tests {
 
     // ── claim error classification (C-052 / C-071) ──────────────────────────
 
-    /// C-071 — every claim-owned exit code survives the `try_downcast!` ladder.
+    /// C-071 — every claim-owned exit code survives the `families!` ladder.
     ///
     /// Driven over a **boxed** `ClaimError` through `classify_error`, never over
     /// `ClaimError::classify` directly: the impl tested in isolation is green in
@@ -1189,7 +1189,7 @@ mod tests {
     /// registration from its absence. `AnnounceError`'s own module-local tests are
     /// that shape today, which is why this one is written here instead.
     ///
-    /// **Two mutations, two halves.** Deleting `try_downcast!(ClaimError)` reds
+    /// **Two mutations, two halves.** Deleting the `ClaimError` entry from `families!` reds
     /// the claim-owned rows — and, because `ClaimError::Forge` is
     /// `#[error(transparent)]` and thiserror forwards `source()` past the wrapped
     /// error, it reds the forge-derived row too. The plan's stated rationale ("the

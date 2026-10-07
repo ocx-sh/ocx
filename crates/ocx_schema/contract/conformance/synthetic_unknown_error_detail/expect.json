@@ -1,0 +1,10 @@
+{
+  "root": "ErrorDocument",
+  "exit_code": 65,
+  "decode": "ok",
+  "outcome": "error_document",
+  "unknown": [
+    "/error/detail",
+    "/error/kind"
+  ]
+}

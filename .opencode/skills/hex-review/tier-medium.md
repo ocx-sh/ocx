@@ -3,8 +3,8 @@
 Minimal review for **two-way-door** diffs — a flag or option change, a doc
 edit, a fixture, a single-area tweak of ≤3 files. The adversarial stance
 still applies (question every assumption, name failure conditions) but the
-panel shrinks to one reviewer — no RCA, no cross-model pass. Matches what a
-quick check against `--base=HEAD~1` or a close sibling branch should feel
+panel shrinks to one reviewer and the cross-model pass — no RCA. Matches what
+a quick check against `--base=HEAD~1` or a close sibling branch should feel
 like.
 
 `Read` this file from [`SKILL.md`](SKILL.md) after the config is announced.
@@ -28,8 +28,8 @@ worker is needed for this.
 ## Phase 2: Stage 1 — Correctness (single reviewer)
 
 Launch **1** `reviewer` (focus `spec`, phase `post-implementation`) on the
-diff. Model class per [`models.md`](../hex-core/references/models.md) row
-`reviewer:spec`, tier `medium`. Its brief carries the composed `spec` +
+diff, `standard` class ([`SKILL.md` § Seats](SKILL.md#worker-assignment-shared-across-tiers)).
+Its brief carries the composed `spec` +
 `quality` sections of
 [`checklist.md`](../hex-core/references/checklist.md#composition) — the
 single-reviewer case the checklist exists for. It applies both jobs a
@@ -67,14 +67,14 @@ hiding inside a diff that looked doc-only), **stop and re-run** as
 remediation only. A systemic-smelling finding is still flagged **deferred**
 with a reason — a human can escalate to `/hex-review high` for Five Whys.
 
-## Phase 5: Cross-model — skipped
+## Phase 5: Cross-model
 
-`adversary: off` by default. If the user explicitly passes `--adversary`,
-run the pass anyway (user override) in the scope the target implies
-(`code-diff` for a diff, `plan-artifact` for a markdown target) — launched
-in the same batch as the Phase 2 reviewer, last, and triaged here
+`adversary: on`. Run the pass in the scope the target implies (`code-diff`
+for a diff, `plan-artifact` for a markdown target) — launched in the same
+batch as the Phase 2 reviewer, last, and triaged here 4-way
 ([adversary contract](../hex-core/references/adversary.md#adversary-contract)).
-Otherwise log `Cross-model review skipped: tier=medium default` and continue.
+Unavailable (or `--no-adversary`): log `Cross-model review skipped: <reason>`
+and continue — never wait for it.
 
 ## Phase 6: Verdict & Output
 
@@ -92,11 +92,12 @@ Produce the review report using the skeleton from
 [findings with file:line, description, remediation]
 ### Convergence   <!-- when the target traces to a plan -->
 ### Fold-Back     <!-- mandatory when the target traces to a plan; full block per SKILL.md § The review report -->
+### Cross-Model Adversarial
 ### Deferred Findings
 [each with: what it is, why human judgment is needed]
 ```
 
-Omit Stage 2, Cross-Model, and Root-Cause sections — absence is the tier
+Omit Stage 2 and Root-Cause sections — absence is the tier
 contract, not a bug. Omit Convergence too unless the target traces to a
 plan.
 
@@ -116,7 +117,7 @@ from [`SKILL.md`](SKILL.md) with:
 - Scope: small (two-way door)
 - Tier: medium
 - Baseline: <base>
-- Overlays: breadth=minimal, rca=off, adversary=off
+- Overlays: breadth=minimal, rca=off, adversary=on
 ```
 
 If actionable findings exist and the caller wants them applied:

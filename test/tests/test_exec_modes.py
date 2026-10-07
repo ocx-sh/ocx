@@ -70,7 +70,7 @@ def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageIn
 
 def _env_keys(env_result: dict) -> list[str]:
     """Extract the list of env-entry keys from a `ocx env` JSON result."""
-    return [e["key"] for e in env_result.get("entries", [])]
+    return [e["key"] for e in env_result.get("items", [])]
 
 
 def _project_root() -> Path:
@@ -327,7 +327,7 @@ def test_bare_binary_consumer_default_hides_path_without_stamp(
 
     env_default = ocx.json("package", "env", pkg_default.short)
     path_entries_default = [
-        e for e in env_default.get("entries", [])
+        e for e in env_default.get("items", [])
         if e["key"] == "PATH"
     ]
     assert path_entries_default == [], (
@@ -347,7 +347,7 @@ def test_bare_binary_consumer_default_hides_path_without_stamp(
 
     env_public = ocx.json("package", "env", pkg_public.short)
     path_entries_public = [
-        e for e in env_public.get("entries", [])
+        e for e in env_public.get("items", [])
         if e["key"] == "PATH"
     ]
     assert path_entries_public, (
@@ -375,7 +375,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     # Consumer: raw bin/ not in PATH (default-private hides declared PATH).
     env_consumer = ocx.json("package", "env", pkg.short)
     consumer_path_values = [
-        e["value"] for e in env_consumer.get("entries", []) if e["key"] == "PATH"
+        e["value"] for e in env_consumer.get("items", []) if e["key"] == "PATH"
     ]
     has_synth_consumer = any("entrypoints" in v for v in consumer_path_values)
     has_raw_bin_consumer = any(
@@ -392,7 +392,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     # Self: raw bin/ present (recursion-safe).
     env_self = ocx.json("package", "env", "--self", pkg.short)
     self_path_values = [
-        e["value"] for e in env_self.get("entries", []) if e["key"] == "PATH"
+        e["value"] for e in env_self.get("items", []) if e["key"] == "PATH"
     ]
     has_raw_bin_self = any(
         v.endswith(("/bin", "\\bin")) for v in self_path_values

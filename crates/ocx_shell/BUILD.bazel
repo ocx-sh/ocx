@@ -26,6 +26,8 @@ rust_library(
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_config",
         "//crates/ocx_console",
+        "//crates/ocx_env",
+        "//crates/ocx_exit",
         "//crates/ocx_oci",
         "//crates/ocx_package",
         "//crates/ocx_store",

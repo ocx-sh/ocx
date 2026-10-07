@@ -1218,7 +1218,7 @@ def test_script_host_cannot_run_unrecorded_under_a_required_policy(
 
     `ocx package test` is a sanctioned non-recording frame, but the Starlark
     host's `ocx.run` spawns its children directly (`script/ocx_module.rs`,
-    allowlisted in `no_process_spawn_outside_launch`) and so never reaches a
+    an `#[expect(clippy::disallowed_types)]` site) and so never reaches a
     `Launch`. The bound `Launch::exempt` applies to the trailing-command branch
     therefore could not reach the script branch at all: under an operator's
     `required = true` a script was free to run an arbitrary number of unrecorded

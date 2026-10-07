@@ -82,7 +82,7 @@ def test_status_reports_drift_instead_of_refusing(
     assert data["lock"]["declaration_hash"] != data["lock"]["declaration_hash_expected"]
 
     tools = data["groups"]["default"]["tools"]
-    assert "platforms" not in tools["undeclared-in-lock"], (
+    assert "platform_digests" not in tools["undeclared-in-lock"], (
         "the binding added since the last lock is the one without platforms"
     )
-    assert "platforms" in tools[unique_repo], "the already-locked sibling keeps its pins"
+    assert "platform_digests" in tools[unique_repo], "the already-locked sibling keeps its pins"

@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "The PushStatus `$def` is renamed and every `$ref` follows; `$def` names are not wire.",
+  "findings": []
+}

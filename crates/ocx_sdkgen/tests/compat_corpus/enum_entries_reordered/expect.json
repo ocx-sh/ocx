@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushStatus lists its `x-ocx-enum` entries in a different order.",
+  "findings": []
+}

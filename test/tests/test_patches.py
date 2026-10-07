@@ -197,7 +197,7 @@ def _publish_descriptor_global(ocx: OcxRunner, descriptor_path: Path) -> None:
 def _env_entries(ocx: OcxRunner, pkg_short: str) -> list[dict]:
     """Return `entries` from `ocx --format json package env <pkg>`."""
     result = ocx.json("package", "env", pkg_short)
-    return result["entries"]
+    return result["items"]
 
 
 def _entry_by_key(entries: list[dict], key: str) -> dict | None:
@@ -255,7 +255,7 @@ def test_corp_ca_wildcard_descriptor_composes_on_base(
         f"got keys: {[e['key'] for e in entries]}"
     )
     assert ssl_entry["value"] == "/etc/ssl/certs/corp-ca.pem"
-    assert ssl_entry["type"] == "constant"
+    assert ssl_entry["kind"] == "constant"
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ def test_global_companion_appears_once_when_it_matches_several_bases(
     ocx.plain("package", "install", base1.short)
     ocx.plain("package", "install", base2.short)
 
-    entries = ocx.json("package", "env", base1.short, base2.short)["entries"]
+    entries = ocx.json("package", "env", base1.short, base2.short)["items"]
     dedup_count = sum(1 for e in entries if e["key"] == "DEDUP_CA")
     assert dedup_count == 1, (
         f"a companion matching both bases must contribute exactly one DEDUP_CA entry; "
@@ -504,7 +504,7 @@ def test_env_candidate_resolves_and_pins_an_unpinned_required_companion(
     assert result.returncode == 0, (
         f"env must resolve the unpinned required companion live; rc={result.returncode}\nstderr: {result.stderr}"
     )
-    entry = _entry_by_key(json.loads(result.stdout)["entries"], "UNPINNED_REQUIRED")
+    entry = _entry_by_key(json.loads(result.stdout)["items"], "UNPINNED_REQUIRED")
     assert entry is not None and entry["value"] == "live-resolved", (
         f"the live-resolved companion's env var must be composed; got {entry}"
     )
@@ -717,7 +717,7 @@ def test_exec_skips_a_pinned_optional_companion_that_is_not_installed(
     _write_config(ocx, registry, required=False)
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
     ocx.plain("package", "install", base_pkg.short)
-    companion_path = Path(ocx.json("package", "which", companion.short)[companion.short]["path"])
+    companion_path = Path(ocx.json("package", "which", companion.short)["paths"][companion.short]["path"])
     # The pin keeps the companion rooted, so drop it for the clean and put it back after.
     pin_path = ocx.ocx_home / "state" / "patch-companions" / registry_dir(registry) / f"{companion.repo}.json"
     pin = pin_path.read_bytes()
@@ -884,7 +884,7 @@ def _cold_snapshot_runner(
     _write_config(ocx, registry, required=True)
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
     ocx.plain("package", "install", base_pkg.short)
-    companion_path = Path(ocx.json("package", "which", companion.short)[companion.short]["path"])
+    companion_path = Path(ocx.json("package", "which", companion.short)["paths"][companion.short]["path"])
     snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
 
     _companion_pin(ocx, registry, companion_repo)
@@ -1361,7 +1361,7 @@ def test_compose_does_not_advance_a_companion_between_syncs(
         "compose must not fail closed when the local index moved past the pinned companion; "
         f"got {result.returncode}\nstderr: {result.stderr}"
     )
-    entry = _entry_by_key(json.loads(result.stdout)["entries"], "DETERMINISM_CA")
+    entry = _entry_by_key(json.loads(result.stdout)["items"], "DETERMINISM_CA")
     assert entry is not None, "DETERMINISM_CA must still be composed"
     assert entry["value"] == "/certs/v1/ca.pem", (
         f"compose must stay on the pinned companion until the next sync; got: {entry['value']}"
@@ -1429,7 +1429,7 @@ def test_patch_freeze_pins_companion_digest(
         f"package env with OCX_PATCH_SNAPSHOT must succeed; got {result_frozen.returncode}\n"
         f"stderr: {result_frozen.stderr}"
     )
-    entries_frozen = json.loads(result_frozen.stdout)["entries"]
+    entries_frozen = json.loads(result_frozen.stdout)["items"]
     ca_frozen = _entry_by_key(entries_frozen, "FROZEN_CA")
     assert ca_frozen is not None, "FROZEN_CA must appear with snapshot"
     assert ca_frozen["value"] == "/certs/frozen-v1/ca.pem", (
@@ -1584,7 +1584,7 @@ def test_show_patches_attributes_the_overlay_and_not_the_project_env(
         f"ocx env --show-patches must succeed; rc={result.returncode}\n"
         f"stderr: {result.stderr}"
     )
-    entries = json.loads(result.stdout)["entries"]
+    entries = json.loads(result.stdout)["items"]
 
     companion_entry = _entry_by_key(entries, "SHOW_PATCHES_CA")
     assert companion_entry is not None, (
@@ -1596,7 +1596,7 @@ def test_show_patches_attributes_the_overlay_and_not_the_project_env(
         f"a companion overlay entry must carry provenance under --show-patches; "
         f"got: {companion_entry}"
     )
-    assert source["kind"] == "patch", f"unexpected source kind; got: {source}"
+    assert source["type"] == "patch", f"unexpected source type; got: {source}"
     assert source["rule"] == "*", (
         f"provenance must name the descriptor rule that admitted the companion; got: {source}"
     )
@@ -1680,7 +1680,7 @@ def test_patch_companion_contributes_integrations(
     ocx.plain("package", "install", base_pkg.short)
 
     result = ocx.json("package", "env", base_pkg.short)
-    entries = result["entries"]
+    entries = result["items"]
     assert any(e["key"] == "INTEGRATIONS_COMPANION_CA" for e in entries), (
         f"sanity: the companion's public env var must reach the composed "
         f"env, proving the companion mechanism actually engaged; got keys: "
@@ -1718,7 +1718,7 @@ def test_patch_companion_contributes_integrations(
     # a future change that gated the whole companion overlay by `self_view`
     # would leave `integrations == []` green while deleting the premise
     # the design record rests on.
-    self_entries = self_view["entries"]
+    self_entries = self_view["items"]
     assert any(e["key"] == "INTEGRATIONS_COMPANION_CA" for e in self_entries), (
         f"the companion's env var must still reach `--self` even though its "
         f"integrations do not; got keys: {[e['key'] for e in self_entries]}"
@@ -1853,7 +1853,7 @@ def test_launcher_identity_opt_out_respects_system_required(
     _publish_global_rules(ocx, tmp_path, registry, [{"match": "*", "packages": [companion_fq]}])
     ocx.plain("package", "install", base_pkg.short)
 
-    pkg_root = Path(ocx.json("package", "which", base_pkg.short)[base_pkg.short]["path"])
+    pkg_root = Path(ocx.json("package", "which", base_pkg.short)["paths"][base_pkg.short]["path"])
     base_digest = (pkg_root / "digest").read_text().strip()
     assert base_digest.startswith("sha256:"), f"unexpected digest sidecar content: {base_digest!r}"
     base_name = base_pkg.fq.rpartition(":")[0]
@@ -1951,7 +1951,7 @@ def test_no_patches_opt_out_suppresses_overlay_in_toolchain_env(
     assert opted_out_result.returncode == 0, (
         f"ocx env must succeed; rc={opted_out_result.returncode}\nstderr: {opted_out_result.stderr}"
     )
-    opted_out_entries = json.loads(opted_out_result.stdout)["entries"]
+    opted_out_entries = json.loads(opted_out_result.stdout)["items"]
     assert _entry_by_key(opted_out_entries, "TOOLCHAIN_ENV_OPT_CA") is None, (
         "no-patches=true for this base must suppress the companion overlay in "
         f"`ocx env`; got keys: {[e['key'] for e in opted_out_entries]}"
@@ -1961,7 +1961,7 @@ def test_no_patches_opt_out_suppresses_overlay_in_toolchain_env(
     assert baseline_result.returncode == 0, (
         f"ocx env must succeed; rc={baseline_result.returncode}\nstderr: {baseline_result.stderr}"
     )
-    baseline_entries = json.loads(baseline_result.stdout)["entries"]
+    baseline_entries = json.loads(baseline_result.stdout)["items"]
     assert _entry_by_key(baseline_entries, "TOOLCHAIN_ENV_OPT_CA") is not None, (
         "sibling project without no-patches must still receive the companion overlay "
         f"(proves the opt-out, not a blanket regression, suppressed it); "
@@ -2016,7 +2016,7 @@ def test_global_no_patches_opt_out_suppresses_overlay_in_global_env(
         f"ocx --global env must succeed; rc={baseline_result.returncode}\n"
         f"stderr: {baseline_result.stderr}"
     )
-    baseline_entries = json.loads(baseline_result.stdout)["entries"]
+    baseline_entries = json.loads(baseline_result.stdout)["items"]
     assert _entry_by_key(baseline_entries, "GLOBAL_TOOLCHAIN_ENV_OPT_CA") is not None, (
         "sanity baseline: without an opt-out, `ocx --global env` must carry the "
         f"companion overlay; got keys: {[e['key'] for e in baseline_entries]}"
@@ -2033,7 +2033,7 @@ def test_global_no_patches_opt_out_suppresses_overlay_in_global_env(
         f"ocx --global env must succeed; rc={opted_out_result.returncode}\n"
         f"stderr: {opted_out_result.stderr}"
     )
-    opted_out_entries = json.loads(opted_out_result.stdout)["entries"]
+    opted_out_entries = json.loads(opted_out_result.stdout)["items"]
     assert _entry_by_key(opted_out_entries, "GLOBAL_TOOLCHAIN_ENV_OPT_CA") is None, (
         "no-patches=true in $OCX_HOME/ocx.toml must suppress the companion overlay in "
         f"`ocx --global env`; got keys: {[e['key'] for e in opted_out_entries]}"
@@ -2193,8 +2193,8 @@ def test_patch_test_composes_env_locally_without_publishing(
     )
 
     report = json.loads(result.stdout)
-    assert "entries" in report, f"patch test JSON must have 'entries'; got: {list(report.keys())}"
-    entries = report["entries"]
+    assert "items" in report, f"patch test JSON must have 'items'; got: {list(report.keys())}"
+    entries = report["items"]
     patch_var = _entry_by_key(entries, "PATCH_TEST_VAR")
     assert patch_var is not None, (
         f"PATCH_TEST_VAR must appear in patch test entries; "
@@ -2394,7 +2394,7 @@ def test_patch_test_companion_archive_still_resolves(
         "patch test must resolve an unpublished companion handed to it as an archive; "
         f"got {result.returncode}\nstderr: {result.stderr}"
     )
-    entry = _entry_by_key(json.loads(result.stdout)["entries"], "ARCHIVE_CA")
+    entry = _entry_by_key(json.loads(result.stdout)["items"], "ARCHIVE_CA")
     assert entry is not None, "the archive companion's INTERFACE var must be composed"
     assert entry["value"] == "/certs/archive/ca.pem", (
         f"ARCHIVE_CA must carry the archive companion's value; got: {entry['value']}"
@@ -2447,7 +2447,7 @@ def test_frozen_patch_test_resolves_an_unindexed_companion_live(
         "ocx --frozen patch test must resolve an unpinned, unindexed companion live; "
         f"got {result.returncode}\nstderr: {result.stderr}"
     )
-    entry = _entry_by_key(json.loads(result.stdout)["entries"], "FROZEN_PATCH_VAR")
+    entry = _entry_by_key(json.loads(result.stdout)["items"], "FROZEN_PATCH_VAR")
     assert entry is not None and entry["value"] == "v", (
         f"the live-resolved companion's INTERFACE var must compose; got: {entry}"
     )
@@ -2897,7 +2897,7 @@ def test_patch_on_sealed_dep_not_inherited(
     consumer_entries = _env_entries(ocx, root.short)
     self_result = ocx.run("package", "env", "--self", root.short, format="json", check=False)
     assert self_result.returncode == 0, f"--self must succeed; stderr: {self_result.stderr}"
-    self_entries: list[dict] = json.loads(self_result.stdout)["entries"]
+    self_entries: list[dict] = json.loads(self_result.stdout)["items"]
 
     dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
     dep_patch_self = _entry_by_key(self_entries, "DEP_PATCH")
@@ -2981,7 +2981,7 @@ def test_patch_on_private_dep_only_under_self(
     consumer_entries = _env_entries(ocx, root.short)
     self_result = ocx.run("package", "env", "--self", root.short, format="json", check=False)
     assert self_result.returncode == 0, f"--self must succeed; stderr: {self_result.stderr}"
-    self_entries: list[dict] = json.loads(self_result.stdout)["entries"]
+    self_entries: list[dict] = json.loads(self_result.stdout)["items"]
 
     dep_patch_consumer = _entry_by_key(consumer_entries, "DEP_PATCH")
     dep_patch_self = _entry_by_key(self_entries, "DEP_PATCH")
@@ -3061,7 +3061,7 @@ def test_private_companion_var_reaches_its_targets_launcher_and_self_only(
     ocx.plain("package", "install", base_pkg.short)
     ocx.plain("package", "install", sibling.short)
 
-    self_entries = ocx.json("package", "env", "--self", base_pkg.short)["entries"]
+    self_entries = ocx.json("package", "env", "--self", base_pkg.short)["items"]
     assert _entry_by_key(self_entries, "JDK_JAVA_OPTIONS") is not None, (
         "a private companion var must reach its target's `--self` surface; got keys: "
         f"{[e['key'] for e in self_entries]}"
@@ -3256,7 +3256,7 @@ def test_a_launcher_run_by_absolute_path_matches_only_catch_all_rules(
     )
     ocx.plain("package", "install", base_pkg.short)
 
-    pkg_root = Path(ocx.json("package", "which", base_pkg.short)[base_pkg.short]["path"])
+    pkg_root = Path(ocx.json("package", "which", base_pkg.short)["paths"][base_pkg.short]["path"])
     launcher = pkg_root / "entrypoints" / ("showenv.exe" if sys.platform == "win32" else "showenv")
     result = subprocess.run(
         [str(launcher)],
@@ -3480,8 +3480,7 @@ def test_patch_why_names_rule_and_companion_for_applicable_base(
     install_result = ocx.plain("package", "install", base_pkg.short)
     assert install_result.returncode == 0, f"install must succeed; stderr: {install_result.stderr}"
 
-    entries = ocx.json("patch", "why", base_pkg.short)
-    assert isinstance(entries, list), f"`ocx patch why` JSON must be a bare array; got: {entries}"
+    entries = ocx.json("patch", "why", base_pkg.short)["items"]
     why_var = next((e for e in entries if e["variable"] == "WHY_VAR"), None)
     assert why_var is not None, (
         f"WHY_VAR must be named by `ocx patch why`; got variables: {[e['variable'] for e in entries]}"
@@ -3507,8 +3506,8 @@ def test_patch_why_reports_no_patches_for_unaffected_base(
     base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
-    entries = ocx.json("patch", "why", base_pkg.short)
-    assert entries == [], f"no `[patches]` tier configured must yield an empty result; got: {entries}"
+    report = ocx.json("patch", "why", base_pkg.short)
+    assert report == {"schema_version": 1, "items": []}, f"no `[patches]` tier configured must yield an empty result; got: {report}"
 
     plain_result = ocx.plain("patch", "why", base_pkg.short)
     assert plain_result.returncode == 0, (
@@ -3601,7 +3600,7 @@ def test_relocated_ocx_home_offline_companion_env_identical(
         f"`ocx --offline package env` against a relocated OCX_HOME must succeed; "
         f"rc={result.returncode}\nstderr: {result.stderr}"
     )
-    relocated_entries = json.loads(result.stdout)["entries"]
+    relocated_entries = json.loads(result.stdout)["items"]
     relocated_ca = _entry_by_key(relocated_entries, "RELOCATE_CA")
     assert relocated_ca is not None, (
         "RELOCATE_CA must survive OCX_HOME relocation and resolve offline; "
@@ -3642,7 +3641,7 @@ def test_gc_collects_companion_after_base_uninstall(
     # Capture the companion package directory while the base is installed
     # (companion present). `package which` does not auto-install and maps each
     # identifier to its package-root path string.
-    which = ocx.json("package", "which", companion.short)
+    which = ocx.json("package", "which", companion.short)["paths"]
     companion_path = Path(which[companion.short]["path"])
     assert companion_path.exists(), (
         f"setup: companion package dir must exist while its base is installed: {companion_path}"
@@ -4153,9 +4152,9 @@ def test_patch_test_report_lists_env_override_without_companion(
     )
 
     report = json.loads(result.stdout)
-    override = _entry_by_key(report["entries"], "REPORT_PROBE")
+    override = _entry_by_key(report["items"], "REPORT_PROBE")
     assert override is not None, (
-        f"the override must appear in the report; got: {[e['key'] for e in report['entries']]}"
+        f"the override must appear in the report; got: {[e['key'] for e in report['items']]}"
     )
     assert override["value"] == "from-flag", override
     assert override.get("source") is None, (
@@ -4199,18 +4198,18 @@ def test_patch_test_report_lists_env_override_alongside_companion(
     )
 
     report = json.loads(result.stdout)
-    companion_entry = _entry_by_key(report["entries"], "COMPANION_PROBE")
+    companion_entry = _entry_by_key(report["items"], "COMPANION_PROBE")
     assert companion_entry is not None, (
         f"the companion var must appear in the report; "
-        f"got: {[e['key'] for e in report['entries']]}"
+        f"got: {[e['key'] for e in report['items']]}"
     )
     assert companion_entry.get("source") is not None, (
         f"a companion overlay entry must keep its provenance; got: {companion_entry}"
     )
 
-    override = _entry_by_key(report["entries"], "REPORT_PROBE")
+    override = _entry_by_key(report["items"], "REPORT_PROBE")
     assert override is not None, (
-        f"the override must appear in the report; got: {[e['key'] for e in report['entries']]}"
+        f"the override must appear in the report; got: {[e['key'] for e in report['items']]}"
     )
     assert override["value"] == "from-flag", override
     assert override.get("source") is None, (
@@ -4279,7 +4278,7 @@ def test_patch_test_with_path_prefixed_registry_composes(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     prefixed_var = _entry_by_key(entries, "PREFIXED_REGISTRY_VAR")
     assert prefixed_var is not None, (
         f"PREFIXED_REGISTRY_VAR must appear in patch test entries under a "
@@ -4369,7 +4368,7 @@ def test_patch_test_companion_archive_composes_unpublished_companion(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     archive_var = _entry_by_key(entries, "ARCHIVE_COMPANION_VAR")
     assert archive_var is not None, (
         f"ARCHIVE_COMPANION_VAR must appear in patch test entries after "
@@ -4516,7 +4515,7 @@ def test_patch_test_resolves_registry_from_managed_config(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     managed_var = _entry_by_key(entries, "MANAGED_CONFIG_VAR")
     assert managed_var is not None, (
         f"MANAGED_CONFIG_VAR must appear in patch test entries when the [patches] "
@@ -4562,7 +4561,7 @@ def test_patch_test_optional_tier_with_path_prefixed_registry_composes(
         f"got {result.returncode}\nstderr: {result.stderr}"
     )
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     optional_var = _entry_by_key(entries, "OPTIONAL_PREFIXED_VAR")
     assert optional_var is not None, (
         "the seeded descriptor names a companion, so its var must be composed — "
@@ -4625,7 +4624,7 @@ def test_patch_test_registry_flag_composes_without_config(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     assert entries, "the composed report must carry entries, not an empty env"
     bootstrap_var = _entry_by_key(entries, "BOOTSTRAP_VAR")
     assert bootstrap_var is not None, (
@@ -4683,7 +4682,7 @@ def test_patch_test_registry_flag_wins_over_configured_tier(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     assert entries, "the composed report must carry entries, not an empty env"
     override_var = _entry_by_key(entries, "OVERRIDE_REGISTRY_VAR")
     assert override_var is not None, (
@@ -4756,7 +4755,7 @@ def test_patch_test_platform_flag_composes_for_named_platform(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     assert entries, "the composed report must carry entries, not an empty env"
     companion_var = _entry_by_key(entries, "PLATFORM_COMPANION_VAR")
     assert companion_var is not None, (
@@ -4915,7 +4914,7 @@ def test_patch_test_optional_missing_companion_warns_and_skips(
     )
 
     report = json.loads(result.stdout)
-    entries = report["entries"]
+    entries = report["items"]
     assert entries, (
         "the base's own env must still be composed after the optional companion is skipped; "
         "an empty report is the silent-failure shape this pins"
@@ -5096,7 +5095,7 @@ def test_tag_scoped_rule_matches_project_tool_from_lock(
     assert env_result.returncode == 0, (
         f"ocx env must succeed; rc={env_result.returncode}\nstderr: {env_result.stderr}"
     )
-    env_entries = json.loads(env_result.stdout)["entries"]
+    env_entries = json.loads(env_result.stdout)["items"]
     assert _entry_by_key(env_entries, "LOCK_TAG_CA") is not None, (
         "the tag-scoped companion must also appear in `ocx env`'s composed "
         f"entries; got keys: {[e['key'] for e in env_entries]}"
@@ -5445,7 +5444,7 @@ def test_package_pull_pins_a_matching_companion(
     assert pull.returncode == 0, f"package pull must succeed:\n{pull.stderr}"
     env = _run_ocx(ocx, "--offline", "--format", "json", "package", "env", base_pkg.short)
     assert env.returncode == 0, f"offline package env must succeed after the pull; rc={env.returncode}\n{env.stderr}"
-    entry = _entry_by_key(json.loads(env.stdout)["entries"], "PULL_COMPANION")
+    entry = _entry_by_key(json.loads(env.stdout)["items"], "PULL_COMPANION")
     assert entry is not None and entry["value"] == "pulled", (
         f"package pull must have installed the companion for an offline compose; got {entry}"
     )
@@ -5802,7 +5801,7 @@ def test_digest_only_declaration_tag_anchor_skips_repo_wildcard_matches(
     assert env_result.returncode == 0, (
         f"ocx env must succeed; rc={env_result.returncode}\nstderr: {env_result.stderr}"
     )
-    env_entries = json.loads(env_result.stdout)["entries"]
+    env_entries = json.loads(env_result.stdout)["items"]
     assert _entry_by_key(env_entries, "DIGEST_TAG_CA") is None, (
         "the tag-anchored rule's companion must also be absent from `ocx env`'s "
         f"composed entries; got keys: {[e['key'] for e in env_entries]}"
@@ -5949,7 +5948,7 @@ def test_tag_scoped_rule_matches_global_toolchain_tool_from_lock(
     assert result.returncode == 0, (
         f"ocx --global env must succeed; rc={result.returncode}\nstderr: {result.stderr}"
     )
-    entries = json.loads(result.stdout)["entries"]
+    entries = json.loads(result.stdout)["items"]
     assert _entry_by_key(entries, "GLOBAL_LOCK_TAG_CA") is not None, (
         "a tag-scoped rule must match a global-toolchain tool resolved from "
         f"the global lock; got keys: {[e['key'] for e in entries]}"
@@ -6096,7 +6095,7 @@ def test_stale_global_lock_tag_edit_env_tolerant_no_tag_scoped_companion(
     assert baseline.returncode == 0, (
         f"ocx --global env must succeed while the lock is current:\n{baseline.stderr}"
     )
-    baseline_entries = json.loads(baseline.stdout)["entries"]
+    baseline_entries = json.loads(baseline.stdout)["items"]
     assert _entry_by_key(baseline_entries, "S006C_CA") is not None, (
         "the tag-scoped companion must be present via `ocx --global env` while "
         f"the declared tag matches the lock; got keys: {[e['key'] for e in baseline_entries]}"
@@ -6114,7 +6113,7 @@ def test_stale_global_lock_tag_edit_env_tolerant_no_tag_scoped_companion(
         "the global toolchain env exporter has no staleness gate on reads; "
         f"rc={result.returncode}\nstderr: {result.stderr}"
     )
-    entries = json.loads(result.stdout)["entries"]
+    entries = json.loads(result.stdout)["items"]
     assert _entry_by_key(entries, "S006C_CA") is None, (
         "a drifted global lock must never surface a tag-scoped companion; "
         f"got keys: {[e['key'] for e in entries]}"
@@ -6168,7 +6167,7 @@ def test_stale_global_lock_unparseable_ocx_toml_env_tolerant_no_tag_scoped_compa
     assert baseline.returncode == 0, (
         f"ocx --global env must succeed while ocx.toml is parseable:\n{baseline.stderr}"
     )
-    baseline_entries = json.loads(baseline.stdout)["entries"]
+    baseline_entries = json.loads(baseline.stdout)["items"]
     assert _entry_by_key(baseline_entries, "S006C2_CA") is not None, (
         "the tag-scoped companion must be present via `ocx --global env` before "
         f"ocx.toml is corrupted; got keys: {[e['key'] for e in baseline_entries]}"
@@ -6184,7 +6183,7 @@ def test_stale_global_lock_unparseable_ocx_toml_env_tolerant_no_tag_scoped_compa
         "the global toolchain env exporter has no staleness gate on an "
         f"unparseable ocx.toml; rc={result.returncode}\nstderr: {result.stderr}"
     )
-    entries = json.loads(result.stdout)["entries"]
+    entries = json.loads(result.stdout)["items"]
     assert _entry_by_key(entries, "S006C2_CA") is None, (
         "an unparseable global ocx.toml must never surface a tag-scoped "
         f"companion; got keys: {[e['key'] for e in entries]}"
@@ -6320,7 +6319,7 @@ def test_companion_reaching_another_version_of_a_base_dependency_is_refused(
         f"an optional conflicting companion is skipped, not fatal; rc={optional.returncode}\n"
         f"stderr: {optional.stderr}"
     )
-    entries = json.loads(optional.stdout)["entries"]
+    entries = json.loads(optional.stdout)["items"]
     assert _entry_by_key(entries, "CONFLICTING_VAR") is None, (
         f"the conflicting companion is skipped whole; got keys: {[e['key'] for e in entries]}"
     )
@@ -6422,7 +6421,7 @@ def test_companion_launchers_stay_off_path_and_its_dependency_launchers_are_clai
     ocx.plain("package", "install", base_pkg.short)
 
     report = ocx.json("package", "env", base_pkg.short)
-    entries = report["entries"]
+    entries = report["items"]
     assert _entry_by_key(entries, "LAUNCHING_COMPANION_VAR") is not None, (
         f"positive control: the companion projects; got keys: {[e['key'] for e in entries]}"
     )
@@ -6430,7 +6429,7 @@ def test_companion_launchers_stay_off_path_and_its_dependency_launchers_are_clai
         e["value"] for e in entries
         if e["key"] == "PATH" and Path(e["value"]).name == "entrypoints"
     ]
-    dep_root = Path(ocx.json("package", "which", dep.short)[dep.short]["path"])
+    dep_root = Path(ocx.json("package", "which", dep.short)["paths"][dep.short]["path"])
     assert [Path(d).resolve() for d in launcher_dirs] == [(dep_root / "entrypoints").resolve()], (
         f"only the dependency's launchers reach PATH, never the companion's; got: {launcher_dirs}"
     )
@@ -6463,7 +6462,7 @@ def test_patch_test_and_why_preview_the_private_surface_under_self(
             format="json", check=False,
         )
         assert result.returncode == 0, f"patch test {flags} must succeed; stderr: {result.stderr}"
-        previews[bool(flags)] = _entry_by_key(json.loads(result.stdout)["entries"], "PRIVATE_PREVIEW_VAR")
+        previews[bool(flags)] = _entry_by_key(json.loads(result.stdout)["items"], "PRIVATE_PREVIEW_VAR")
     assert previews[False] is None, f"the consumer view leaves the private var out; got: {previews[False]}"
     assert previews[True] is not None and previews[True]["value"] == "-Xmx2g", (
         f"--self previews the private var; got: {previews[True]}"
@@ -6472,7 +6471,7 @@ def test_patch_test_and_why_preview_the_private_surface_under_self(
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
     ocx.plain("package", "install", base_pkg.short)
     traced = {
-        bool(flags): [entry["variable"] for entry in ocx.json("patch", "why", *flags, base_pkg.short)]
+        bool(flags): [entry["variable"] for entry in ocx.json("patch", "why", *flags, base_pkg.short)["items"]]
         for flags in ([], ["--self"])
     }
     assert "PRIVATE_PREVIEW_VAR" not in traced[False], f"the consumer view traces no private var; got: {traced[False]}"

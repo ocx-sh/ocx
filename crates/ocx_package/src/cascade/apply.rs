@@ -6,7 +6,7 @@
 //! Every read addresses the canonical registry the writes go to; a mirror-answered
 //! preflight would gate a write on a repository it never touches.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 use serde::Serialize;
@@ -22,40 +22,53 @@ const CASCADE_APPLY_CONCURRENCY: usize = 8;
 /// What happened to one alias tag in a repair run.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct RepairOutcome {
+    /// The alias tag.
     pub tag: AliasTag,
+    /// What the write did.
     pub outcome: WriteOutcome,
 }
 
 /// The result of attempting one alias index write.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case", tag = "outcome")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum WriteOutcome {
     /// The index was written. `verified` is false when the post-write read-back
     /// returned a different digest — a concurrent writer, which is a warning
     /// rather than a failure: this run's write did land.
-    ///
-    /// `dropped` names the child digests that were removed from the planned
-    /// index before it went on the wire: dead pointers backing nothing but
-    /// orphan slots. Absent when empty, as on every ordinary write.
     Written {
+        /// The digest of the index written.
         digest: ocx_oci::Digest,
+        /// Whether the post-write read-back returned the same digest.
         verified: bool,
+        /// The dead child digests dropped from the planned index before it went on the
+        /// wire, each backing nothing but orphan slots; absent when empty, as on every
+        /// ordinary write.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         dropped: Vec<String>,
     },
     /// Refused before any write, because applying it would publish something
     /// broken.
-    Refused(Unrepairable),
+    Refused {
+        /// Why the alias was refused.
+        reason: Unrepairable,
+    },
     /// The alias moved between the gather this plan was computed from and the
     /// write, so nothing was written. Not a fault and not unrepairable: a
     /// publish landed in the middle of the run, and re-running the repair
     /// against the new state is the whole fix.
     Raced {
+        /// The digest the plan expected; absent when the plan expected no alias.
+        #[serde(skip_serializing_if = "Option::is_none")]
         expected: Option<ocx_oci::Digest>,
+        /// The digest the alias holds now; absent when the alias is gone.
+        #[serde(skip_serializing_if = "Option::is_none")]
         live: Option<ocx_oci::Digest>,
     },
     /// The registry rejected the write, with the rendered cause.
-    Failed { message: String },
+    Failed {
+        /// The rendered cause.
+        message: String,
+    },
 }
 
 /// Applies a repair plan to `identifier`, one whole index PUT per alias, and
@@ -106,7 +119,8 @@ enum Preflight {
 /// What one probe learned about one referenced digest.
 enum ChildState {
     Present,
-    Missing,
+    /// Carries the parsed digest: the report publishes it normalised, the raw string only matches entries.
+    Missing(ocx_oci::Digest),
     /// It names a digest algorithm this build cannot address.
     Unaddressable,
 }
@@ -138,13 +152,13 @@ async fn preflight(
                 return Ok((position, digest, ChildState::Unaddressable));
             };
             // `clone_with_digest` keeps the tag; the child must be addressed by digest alone.
-            let child = identifier.without_tag().clone_with_digest(parsed);
+            let child = identifier.without_tag().clone_with_digest(parsed.clone());
             match client
                 .probe_manifest_digest_addressed(&child, ReadAddressing::Canonical)
                 .await
             {
                 Ok(Some(_)) => Ok((position, digest, ChildState::Present)),
-                Ok(None) => Ok((position, digest, ChildState::Missing)),
+                Ok(None) => Ok((position, digest, ChildState::Missing(parsed))),
                 // Both guesses are destructive: a dangling pointer, or a live platform dropped.
                 Err(source) => Err(PackageError::from(source)),
             }
@@ -154,13 +168,13 @@ async fn preflight(
         .await?;
 
     // `BTreeSet` keeps verdicts independent of probe completion order.
-    let mut missing: Vec<BTreeSet<&String>> = vec![BTreeSet::new(); writes.len()];
+    let mut missing: Vec<BTreeMap<&String, ocx_oci::Digest>> = vec![BTreeMap::new(); writes.len()];
     let mut unaddressable: Vec<BTreeSet<&String>> = vec![BTreeSet::new(); writes.len()];
     for (position, digest, state) in probed {
         match state {
             ChildState::Present => {}
-            ChildState::Missing => {
-                missing[position].insert(digest);
+            ChildState::Missing(parsed) => {
+                missing[position].insert(digest, parsed);
             }
             ChildState::Unaddressable => {
                 unaddressable[position].insert(digest);
@@ -176,7 +190,11 @@ async fn preflight(
 }
 
 /// Turns one alias's dead children into a write-or-refuse decision.
-fn verdict(write: &PlannedWrite, missing: &BTreeSet<&String>, unaddressable: &BTreeSet<&String>) -> Preflight {
+fn verdict(
+    write: &PlannedWrite,
+    missing: &BTreeMap<&String, ocx_oci::Digest>,
+    unaddressable: &BTreeSet<&String>,
+) -> Preflight {
     if let Some(digest) = unaddressable.first() {
         return Preflight::Refuse(Unrepairable::ChildDigestUnaddressable {
             tag: write.tag.clone(),
@@ -185,11 +203,11 @@ fn verdict(write: &PlannedWrite, missing: &BTreeSet<&String>, unaddressable: &BT
     }
 
     let mut dropped = BTreeSet::new();
-    for digest in missing {
+    for (digest, parsed) in missing {
         if !backs_orphans_only(write, digest) {
             return Preflight::Refuse(Unrepairable::ChildManifestMissing {
                 tag: write.tag.clone(),
-                digest: (*digest).clone(),
+                digest: parsed.clone(),
             });
         }
         dropped.insert((*digest).clone());
@@ -238,7 +256,7 @@ async fn write_alias(
     let dropped = match verdict {
         Preflight::Refuse(refusal) => {
             log::warn!("Refusing to write alias '{}' of {identifier}: {refusal:?}", write.tag);
-            return WriteOutcome::Refused(refusal);
+            return WriteOutcome::Refused { reason: refusal };
         }
         Preflight::Write { dropped } => dropped,
     };
@@ -477,6 +495,33 @@ mod tests {
         }
     }
 
+    /// An index may spell a child digest in uppercase hex; the refusal still
+    /// publishes it in the `Digest` schema's lowercase form.
+    #[tokio::test]
+    async fn missing_child_refusal_publishes_the_normalised_digest() {
+        let data = StubTransportData::new();
+        let dead = [format!("sha256:{:064X}", 0xABu8)];
+        let writes = vec![planned_write(latest(), &dead)];
+        let client = test_client(&data);
+
+        let outcomes = apply(&client, &test_identifier(), &writes).await.unwrap();
+
+        let WriteOutcome::Refused { reason } = &outcomes[0].outcome else {
+            panic!(
+                "expected the dead-pointer alias to be refused, got {:?}",
+                outcomes[0].outcome
+            );
+        };
+        let wire = serde_json::to_value(reason).unwrap();
+        let digest = wire["digest"].as_str().expect("the refusal carries a digest");
+        let hex = digest.strip_prefix("sha256:").expect("sha256 prefix");
+        assert!(
+            hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "'{digest}' must match the published `Digest` pattern"
+        );
+        assert_eq!(digest, dead[0].to_ascii_lowercase());
+    }
+
     /// G2: a child manifest the registry no longer serves refuses that one
     /// alias; every other alias in the plan is still written.
     #[tokio::test]
@@ -497,9 +542,11 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes[0].tag, latest(), "outcomes are sorted by tag");
         match &outcomes[0].outcome {
-            WriteOutcome::Refused(Unrepairable::ChildManifestMissing { tag, digest }) => {
+            WriteOutcome::Refused {
+                reason: Unrepairable::ChildManifestMissing { tag, digest },
+            } => {
                 assert_eq!(*tag, latest());
-                assert_eq!(*digest, dead[0]);
+                assert_eq!(digest.to_string(), dead[0]);
             }
             other => panic!("expected the dead-pointer alias to be refused, got {other:?}"),
         }
@@ -865,8 +912,11 @@ mod tests {
         let outcomes = apply(&client, &test_identifier(), &[write]).await.unwrap();
 
         match &outcomes[0].outcome {
-            WriteOutcome::Refused(Unrepairable::ChildManifestMissing { digest, .. }) => assert_eq!(
-                *digest, dead_folded,
+            WriteOutcome::Refused {
+                reason: Unrepairable::ChildManifestMissing { digest, .. },
+            } => assert_eq!(
+                digest.to_string(),
+                dead_folded,
                 "the refusal must name the child the fold depends on"
             ),
             other => panic!("a dead folded child must refuse the alias, got {other:?}"),
@@ -996,7 +1046,9 @@ mod tests {
         let outcomes = apply(&client, &test_identifier(), &[write]).await.unwrap();
 
         match &outcomes[0].outcome {
-            WriteOutcome::Refused(Unrepairable::ChildDigestUnaddressable { tag, digest }) => {
+            WriteOutcome::Refused {
+                reason: Unrepairable::ChildDigestUnaddressable { tag, digest },
+            } => {
                 assert_eq!(*tag, latest());
                 assert_eq!(*digest, unaddressable);
             }

@@ -107,13 +107,13 @@ impl ProjectEnv {
         let mut entries = BTreeMap::new();
         for (key, value) in raw {
             // Reserved before grammar, so an `OCX_*` key is not fixed only to fail again.
-            if ocx_util::env::is_reserved_ocx_key(key) {
+            if ocx_env::is_reserved_ocx_key(key) {
                 return Err(ProjectErrorKind::EnvReservedKey {
                     scope: scope.to_string(),
                     key: key.clone(),
                 });
             }
-            if !ocx_util::env::is_valid_env_key(key) {
+            if !ocx_env::is_valid_env_key(key) {
                 return Err(ProjectErrorKind::EnvInvalidKey {
                     scope: scope.to_string(),
                     key: key.clone(),
@@ -211,7 +211,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
 
     // A path entry names one directory: an embedded separator splits into
     // segments the dedup and `remove_segment` never match.
-    if kind == ModifierKind::Path && literal.contains(ocx_util::env::PATH_SEPARATOR) {
+    if kind == ModifierKind::Path && literal.contains(ocx_util::path::PATH_SEPARATOR) {
         // Refused here: `ocx exec` and the shell emitters never reach the reconciler's drop.
         return Err(ProjectErrorKind::EnvPathSeparatorInValue {
             scope: scope.to_string(),
@@ -524,7 +524,7 @@ mod tests {
     /// gets a scope/key message instead of a warn line the prompt hook discards.
     #[test]
     fn path_value_embedding_the_platform_separator_rejected() {
-        let separator = ocx_util::env::PATH_SEPARATOR;
+        let separator = ocx_util::path::PATH_SEPARATOR;
         for value in [
             format!("a{separator}b"),
             format!("{separator}bin"),
@@ -672,7 +672,7 @@ mod tests {
         // key content matches what reaches the validator.
         for key in ["1FOO", "FOO-BAR", "FOO BAR", "FOO.BAR"] {
             assert!(
-                !ocx_util::env::is_valid_env_key(key),
+                !ocx_env::is_valid_env_key(key),
                 "test bug: fixture key {key:?} must itself be invalid per the shared validator"
             );
             let source = format!("{key:?} = \"1\"");
@@ -697,7 +697,7 @@ mod tests {
         // accepts must not be rejected by a stricter grammar of its own.
         for key in ["FOO", "_x", "A1", "_OCX_INTERNAL"] {
             assert!(
-                ocx_util::env::is_valid_env_key(key),
+                ocx_env::is_valid_env_key(key),
                 "test bug: fixture key {key:?} must itself be valid per the shared validator"
             );
             let source = format!("{key:?} = \"1\"");

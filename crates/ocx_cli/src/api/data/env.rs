@@ -7,6 +7,7 @@ use std::fmt;
 use ocx_console::Cell;
 use ocx_package::metadata::IntegrationEntry;
 use ocx_package::metadata::env::var::ModifierKind;
+use ocx_util::opaque::OpaqueJson;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -14,18 +15,20 @@ use crate::api::Printable;
 /// Origin of a resolved environment variable entry, shown under `--show-patches`.
 ///
 /// A package-native entry has no `source` object at all. A companion patch
-/// overlay entry carries `{"kind": "patch", "rule": "<glob>", "companion":
-/// "<companion-id>"}`, exactly these three keys: `rule` is the descriptor rule
-/// glob that admitted the companion for the base, and `companion` is the
-/// identifier of the companion that produced the entry.
+/// overlay entry carries `{"type": "patch", "rule": "<glob>", "companion":
+/// "<companion-id>"}`, exactly these three keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum EntrySource {
+    /// Declared by the package itself.
     // Never constructed (a native entry's `source` stays `None`); kept so the taxonomy is total.
     #[allow(dead_code)]
     Package,
+    /// Contributed by a companion patch overlay.
     Patch {
+        /// The descriptor rule glob that admitted the companion for the base.
         rule: String,
+        /// The identifier of the companion that produced the entry.
         companion: String,
     },
 }
@@ -47,18 +50,18 @@ impl fmt::Display for EntrySource {
 /// every other kind omits it.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvEntry {
+    /// The environment variable name.
     pub key: String,
+    /// The resolved value this entry contributes.
     pub value: String,
-    #[serde(rename = "type")]
+    /// How the value combines with the variable's existing value.
     pub kind: ModifierKind,
     /// The separator a `list` entry folds with; absent on every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub separator: Option<String>,
     /// Origin annotation under `--show-patches`: absent for a package-native
     /// entry, the patch provenance object for a companion overlay entry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub source: Option<EntrySource>,
 }
 
@@ -69,9 +72,10 @@ pub struct EnvEntry {
 /// zero binaries".
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct BinaryAttribution {
+    /// The claimed executable or entrypoint name.
     pub name: String,
+    /// The declaring package; absent when attribution is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub package: Option<String>,
 }
 
@@ -100,11 +104,13 @@ impl BinaryAttribution {
 // (`adr_package_integrations.md`).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct IntegrationAttribution {
+    /// The integration namespace the payload is keyed under.
     pub namespace: String,
+    /// The declaring package; absent when attribution is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub package: Option<String>,
-    pub payload: serde_json::Value,
+    /// The interpolated payload, emitted exactly as composed.
+    pub payload: OpaqueJson,
 }
 
 impl IntegrationAttribution {
@@ -116,10 +122,23 @@ impl IntegrationAttribution {
             .map(|(identifier, entry)| Self {
                 namespace: entry.namespace.clone(),
                 package: Some(identifier.to_string()),
-                payload: entry.payload.clone(),
+                payload: OpaqueJson(entry.payload.clone()),
             })
             .collect()
     }
+}
+
+/// What a lazy advisory flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LazyAdvisoryKind {
+    /// A `constant` or `list` variable interpolating `${installPath}`, which a tool may read before the package
+    /// is materialized.
+    InstallPathRootedNonPathVar,
+    /// No `binaries` claim, so the deferred tool's launcher names cannot be enumerated.
+    UndeclaredBinaries,
+    /// A `path` value combining `${installPath}` with anything else, which the launcher cannot substitute.
+    CombinedPathValue,
 }
 
 /// One advisory raised while composing a **deferred** tool, in wire shape.
@@ -134,11 +153,14 @@ impl IntegrationAttribution {
 // Reported, not only logged, or the tooling reading the report never sees them.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct LazyAdvisoryReport {
-    pub kind: &'static str,
+    /// What the advisory flags.
+    pub kind: LazyAdvisoryKind,
+    /// The deferred package the advisory concerns.
     pub package: String,
+    /// The environment variable the advisory names; present for the two variable kinds.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub key: Option<String>,
+    /// The human rendering of the advisory.
     pub message: String,
 }
 
@@ -150,12 +172,16 @@ impl LazyAdvisoryReport {
             .iter()
             .map(|advisory| {
                 let (kind, package, key) = match advisory {
-                    LazyAdvisory::InstallPathRootedNonPathVar { package, key } => {
-                        ("install-path-rooted-non-path-var", package, Some(key.clone()))
+                    LazyAdvisory::InstallPathRootedNonPathVar { package, key } => (
+                        LazyAdvisoryKind::InstallPathRootedNonPathVar,
+                        package,
+                        Some(key.clone()),
+                    ),
+                    LazyAdvisory::UndeclaredBinaries { package } => {
+                        (LazyAdvisoryKind::UndeclaredBinaries, package, None)
                     }
-                    LazyAdvisory::UndeclaredBinaries { package } => ("undeclared-binaries", package, None),
                     LazyAdvisory::CombinedPathValue { package, key } => {
-                        ("combined-path-value", package, Some(key.clone()))
+                        (LazyAdvisoryKind::CombinedPathValue, package, Some(key.clone()))
                     }
                 };
                 Self {
@@ -171,20 +197,24 @@ impl LazyAdvisoryReport {
 
 /// Resolved environment variables for one or more packages, in declaration order.
 ///
-/// Each `entries` item carries its modifier `type`: `constant` replaces any
+/// Each `items` entry carries its modifier `kind`: `constant` replaces any
 /// existing value for the key, `path` prepends using the platform path separator.
-/// A key may appear more than once, with different types.
+/// A key may appear more than once, with different kinds.
 ///
-/// JSON format: `{"entries", "binaries", "entrypoints", "integrations",
+/// JSON format: `{"items", "binaries", "entrypoints", "integrations",
 /// "advisories"}`, each always present as an array, possibly empty. The last four
-/// are top-level siblings, never nested inside `entries`, and `integrations` is
+/// are top-level siblings, never nested inside `items`, and `integrations` is
 /// never collapsed for a single root.
 // An ordered list, not type-keyed maps: it keeps declaration order and allows several entries per key.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvVars {
-    pub entries: Vec<EnvEntry>,
+    /// The resolved entries, in application order.
+    pub items: Vec<EnvEntry>,
+    /// Admitted `binaries` claims, attributed to their packages.
     pub binaries: Vec<BinaryAttribution>,
+    /// Admitted `entrypoints` claims, attributed to their packages.
     pub entrypoints: Vec<BinaryAttribution>,
+    /// Admitted integration payloads, one per (package, namespace) pair.
     pub integrations: Vec<IntegrationAttribution>,
     /// Advisories raised for the **deferred** tools in this composition —
     /// always present, empty whenever nothing was deferred. Warning-only.
@@ -193,13 +223,13 @@ pub struct EnvVars {
 
 impl EnvVars {
     pub fn new(
-        entries: Vec<EnvEntry>,
+        items: Vec<EnvEntry>,
         binaries: Vec<BinaryAttribution>,
         entrypoints: Vec<BinaryAttribution>,
         integrations: Vec<IntegrationAttribution>,
     ) -> Self {
         Self {
-            entries,
+            items,
             binaries,
             entrypoints,
             integrations,
@@ -280,10 +310,13 @@ fn has_availability_hint(
 }
 
 impl Printable for EnvVars {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "EnvVars";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        if has_patch_entry(&self.entries) {
+        if has_patch_entry(&self.items) {
             let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-            for entry in &self.entries {
+            for entry in &self.items {
                 rows[0].push(entry.key.clone());
                 rows[1].push(entry.kind.to_string());
                 rows[2].push(entry.value.clone());
@@ -295,7 +328,7 @@ impl Printable for EnvVars {
             );
         } else {
             let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-            for entry in &self.entries {
+            for entry in &self.items {
                 rows[0].push(entry.key.clone());
                 rows[1].push(entry.kind.to_string());
                 rows[2].push(entry.value.clone());
@@ -352,7 +385,7 @@ mod tests {
         let json = serde_json::to_string(&vars).expect("serializes");
         // The provenance object names BOTH the rule glob and the companion.
         assert!(
-            json.contains(r#""kind":"patch""#),
+            json.contains(r#""type":"patch""#),
             "source must be tagged patch: {json}"
         );
         assert!(json.contains(r#""rule":"*""#), "source must name the rule glob: {json}");
@@ -389,7 +422,7 @@ mod tests {
             Vec::new(),
         );
         let json = serde_json::to_string(&vars).expect("serializes");
-        assert!(json.contains(r#""type":"list""#), "kind must serialize as list: {json}");
+        assert!(json.contains(r#""kind":"list""#), "kind must serialize as list: {json}");
         assert!(json.contains(r#""separator":",""#), "separator must be present: {json}");
     }
 
@@ -458,11 +491,11 @@ mod tests {
         let json = serde_json::to_string(&vars).expect("serializes");
         assert!(
             json.contains(r#""binaries":[{"#),
-            "binaries must be a top-level sibling array, not nested inside entries: {json}"
+            "binaries must be a top-level sibling array, not nested inside items: {json}"
         );
         assert!(
             json.contains(r#""entrypoints":[{"#),
-            "entrypoints must be a top-level sibling array, not nested inside entries: {json}"
+            "entrypoints must be a top-level sibling array, not nested inside items: {json}"
         );
         assert!(json.contains(r#""name":"cmake""#));
         assert!(json.contains(r#""package":"ocx.sh/cmake:3.28@sha256:aaaa""#));
@@ -512,7 +545,7 @@ mod tests {
         IntegrationAttribution {
             namespace: namespace.to_owned(),
             package: package.map(str::to_owned),
-            payload,
+            payload: OpaqueJson(payload),
         }
     }
 
@@ -535,6 +568,17 @@ mod tests {
         let json =
             serde_json::to_string(&integration("com.example", None, serde_json::json!("v"))).expect("serializes");
         assert_eq!(json, r#"{"namespace":"com.example","payload":"v"}"#);
+    }
+
+    /// Nested `null`s and non-snake keys survive in place: the payload is never renamed or stripped.
+    #[test]
+    fn integration_payload_is_emitted_verbatim() {
+        let payload = r#"{"zFirst":null,"Kebab-Key":[null,{"camelCase":null,"a":1}],"aLast":"x"}"#;
+        let row = integration("ns", None, serde_json::from_str(payload).expect("fixture parses"));
+        assert_eq!(
+            serde_json::to_string(&row).expect("serializes"),
+            format!(r#"{{"namespace":"ns","payload":{payload}}}"#)
+        );
     }
 
     /// A pinned identifier for the `from_pairs` fixtures below — the `env.rs`
@@ -576,10 +620,10 @@ mod tests {
             Some(pinned("cmake", 'a').to_string()),
             "package sourced from the identifier half"
         );
-        assert_eq!(rows[0].payload, serde_json::json!({"ide": "clion"}));
+        assert_eq!(rows[0].payload, OpaqueJson(serde_json::json!({"ide": "clion"})));
         assert_eq!(rows[1].namespace, "com.microsoft.vscode");
         assert_eq!(rows[1].package, Some(pinned("ninja", 'b').to_string()));
-        assert_eq!(rows[1].payload, serde_json::json!("enabled"));
+        assert_eq!(rows[1].payload, OpaqueJson(serde_json::json!("enabled")));
     }
 
     // ── plain-mode: table stays byte-stable when empty, hint gated on non-empty ──

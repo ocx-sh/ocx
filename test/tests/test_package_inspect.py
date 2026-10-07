@@ -49,7 +49,7 @@ def test_inspect_default_lists_index_candidates(
     assert len(candidates) >= 1
     c = candidates[0]
     assert c["digest"].startswith("sha256:")
-    assert c["platform"]
+    assert c["platform"]["os"] and c["platform"]["architecture"]
     assert c["media_type"]
     assert isinstance(c["size"], int)
     assert c["pinned"].endswith(f"@{c['digest']}"), (
@@ -114,15 +114,17 @@ def test_inspect_resolve_adds_metadata_and_chain(
     chain = resolution["chain"]
     assert len(chain) >= 2, chain
     # Every chain entry is a descriptor object, not a bare digest string:
-    # digest + role + media_type + raw integer size (machine surface keeps
-    # the integer; the plain tree humanises it).
+    # digest + role + media_type + a non-negative integer size, omitted when
+    # the walk never saw a descriptor for the blob (the plain tree humanises it).
     for entry in chain:
         assert entry["digest"].startswith("sha256:"), entry
         assert entry["role"] in {"index", "manifest", "config"}, entry
         assert entry["media_type"], entry
-        assert isinstance(entry["size"], int), entry
+        if "size" in entry:
+            assert isinstance(entry["size"], int) and entry["size"] >= 0, entry
     roles = [e["role"] for e in chain]
     assert roles[-1] == "config", roles
+    assert isinstance(chain[-1]["size"], int), chain[-1]
     assert "manifest" in roles, roles
     # Layers render alongside metadata (same surface as default mode), not
     # inside the resolution chain.
@@ -148,7 +150,7 @@ def test_inspect_resolve_platform_selects_child(
     short = f"{unique_repo}:1.0.0"
 
     listed = {
-        c["platform"]
+        f"{c['platform']['os']}/{c['platform']['architecture']}"
         for c in inspect_entry(ocx.json("package", "inspect", short), short)["candidates"]
     }
     assert {"linux/amd64", "linux/arm64"} <= listed, listed
@@ -255,7 +257,8 @@ def test_inspect_default_platform_flag_ignored_without_resolve(
         f"without -p: {without_flag!r}\nwith -p: {with_flag!r}"
     )
     listed = {
-        c["platform"] for c in inspect_entry(json.loads(with_flag), short)["candidates"]
+        f"{c['platform']['os']}/{c['platform']['architecture']}"
+        for c in inspect_entry(json.loads(with_flag), short)["candidates"]
     }
     assert {"linux/amd64", "linux/arm64"} <= listed, (
         f"default mode must list ALL platforms even with -p, got {listed}"

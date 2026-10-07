@@ -10,9 +10,6 @@ use crate::api::Printable;
 use crate::api::data::env::LazyAdvisoryReport;
 use crate::api::data::path_kind::PathKind;
 
-/// Reserved JSON key of [`WarmedPaths`]; safe because no pinned identifier beside it is a bare word.
-const ADVISORIES_KEY: &str = "advisories";
-
 /// One pre-warmed tool: what `ocx pull` put on disk for it, and which kind of
 /// directory that is.
 ///
@@ -22,19 +19,29 @@ const ADVISORIES_KEY: &str = "advisories";
 // Never name the package directory for a lazy tool: a machine-read field would point at nothing.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct WarmedPath {
+    /// The pulled identifier: serialized only as the map key, kept for the plain `Package` column.
     #[serde(skip)]
     pub package: String,
+    /// The directory that now exists for the tool.
     pub path: PathBuf,
+    /// Whether `path` is a package root or a shim tree.
     pub kind: PathKind,
 }
 
-/// Pre-warmed tools, one per locked tool in scope, keyed by pulled identifier in lock order.
-///
-/// JSON adds one reserved top-level `advisories` key, always present, in the shape `ocx env` emits.
+/// Pre-warmed tools, one per locked tool in scope.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct WarmedPaths {
+    /// Each pre-warmed tool, keyed by pulled identifier, in lock order.
+    #[serde(rename = "paths", serialize_with = "warmed_by_package")]
+    #[schemars(with = "std::collections::BTreeMap<String, WarmedPath>")]
     pub entries: Vec<WarmedPath>,
-    /// Advisories for the deferred tools this run pre-warmed; also written to stderr.
+    /// Advisories for the deferred tools this run pre-warmed, in the shape `ocx env` emits; also written to stderr.
     pub advisories: Vec<LazyAdvisoryReport>,
+}
+
+/// Lock order is the contract, so the entries serialize as a map without passing through a sorted one.
+fn warmed_by_package<S: serde::Serializer>(entries: &[WarmedPath], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(entries.iter().map(|entry| (&entry.package, entry)))
 }
 
 impl WarmedPaths {
@@ -52,19 +59,10 @@ impl WarmedPaths {
     }
 }
 
-impl Serialize for WarmedPaths {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.entries.len() + 1))?;
-        for entry in &self.entries {
-            map.serialize_entry(&entry.package, entry)?;
-        }
-        map.serialize_entry(ADVISORIES_KEY, &self.advisories)?;
-        map.end()
-    }
-}
-
 impl Printable for WarmedPaths {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "WarmedPaths";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
@@ -76,25 +74,6 @@ impl Printable for WarmedPaths {
             &["Package".into(), "Kind".into(), "Path".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
-    }
-}
-
-// Hand-written: `Serialize` emits a map keyed by package, not the struct's fields.
-impl schemars::JsonSchema for WarmedPaths {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "WarmedPaths".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            // A package named `advisories` would collide with this key; the wire format has no escape.
-            "properties": {
-                ADVISORIES_KEY: generator.subschema_for::<Vec<LazyAdvisoryReport>>(),
-            },
-            "required": [ADVISORIES_KEY],
-            "additionalProperties": generator.subschema_for::<WarmedPath>(),
-        })
     }
 }
 
@@ -110,7 +89,7 @@ mod tests {
         }
     }
 
-    /// The wire shape F-11 fixes: keyed by identifier, each value an object
+    /// The wire shape: keyed by identifier, each value an object
     /// naming the directory that exists AND which kind it is. A consumer must
     /// be able to tell a shim tree from a package root without probing disk.
     #[test]
@@ -121,17 +100,18 @@ mod tests {
         ]);
 
         let json = serde_json::to_value(&report).expect("serializes");
-        assert_eq!(json["example.com/eager@sha256:a"]["kind"], "package");
-        assert_eq!(json["example.com/eager@sha256:a"]["path"], "/store/packages/eager");
+        let paths = &json["paths"];
+        assert_eq!(paths["example.com/eager@sha256:a"]["kind"], "package");
+        assert_eq!(paths["example.com/eager@sha256:a"]["path"], "/store/packages/eager");
         assert_eq!(
-            json["example.com/lazy@sha256:b"]["kind"], "shim",
+            paths["example.com/lazy@sha256:b"]["kind"], "shim",
             "a deferred tool's row must announce that its path is a shim tree: {json}"
         );
-        assert_eq!(json["example.com/lazy@sha256:b"]["path"], "/store/shims/lazy");
+        assert_eq!(paths["example.com/lazy@sha256:b"]["path"], "/store/shims/lazy");
         // The key carries the identifier, so it must not be repeated inside the
         // value — a duplicated field is a second place for it to go stale.
         assert!(
-            json["example.com/lazy@sha256:b"].get("package").is_none(),
+            paths["example.com/lazy@sha256:b"].get("package").is_none(),
             "the identifier is the key, not a field: {json}"
         );
         assert_eq!(
@@ -141,7 +121,7 @@ mod tests {
         );
     }
 
-    /// C-015: `ocx pull --lazy-mode always --format json` serializes the
+    /// `ocx pull --lazy-mode always --format json` serializes the
     /// advisories it raises, in the same projection and under the same key as
     /// `ocx env`. Without the field `jq '.advisories'` answers `null` while the
     /// identical advisory for the identical package is readable off `ocx env`.
@@ -153,7 +133,7 @@ mod tests {
             PathKind::Shim,
         )])
         .with_advisories(vec![LazyAdvisoryReport {
-            kind: "undeclared-binaries",
+            kind: crate::api::data::env::LazyAdvisoryKind::UndeclaredBinaries,
             package: "example.com/lazy@sha256:b".to_owned(),
             key: None,
             message: "declares no binaries".to_owned(),
@@ -161,11 +141,10 @@ mod tests {
 
         let json = serde_json::to_value(&report).expect("serializes");
         assert_eq!(
-            json["advisories"][0]["kind"], "undeclared-binaries",
+            json["advisories"][0]["kind"], "undeclared_binaries",
             "an advisory raised by a deferred pull must reach the wire: {json}"
         );
         assert_eq!(json["advisories"][0]["package"], "example.com/lazy@sha256:b");
-        // The reserved key must not shadow a pulled row, and vice versa.
-        assert_eq!(json["example.com/lazy@sha256:b"]["kind"], "shim", "{json}");
+        assert_eq!(json["paths"]["example.com/lazy@sha256:b"]["kind"], "shim", "{json}");
     }
 }

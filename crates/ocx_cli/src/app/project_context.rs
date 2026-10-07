@@ -26,46 +26,61 @@ pub struct ProjectContext {
     pub lock: ProjectLock,
 }
 
-/// Failure modes of the project-tier loaders; exit codes come from the `ClassifyExitCode` impl below.
-#[derive(Debug, thiserror::Error)]
+/// Failure modes of the project-tier loaders.
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
 pub enum ProjectContextError {
     /// No `ocx.toml` in `cwd` or any parent, and no explicit selection in effect.
     #[error("no ocx.toml found in {cwd} or any parent; run `ocx init` to create one")]
+    #[exit(
+        UsageError,
+        slug = "no_project",
+        summary = "No ocx.toml exists in the working directory or any parent"
+    )]
     NoProject { cwd: PathBuf },
 
     /// `--project` / `OCX_PROJECT` named `dir`, and it holds no `ocx.toml`.
     /// Not `NoProject`, whose wording names the CWD and claims a parent walk that never happened.
     #[error("no ocx.toml in {dir} (check --project or OCX_PROJECT); run `ocx init` in that directory to create one")]
+    #[exit(
+        UsageError,
+        slug = "no_project_in",
+        summary = "The explicitly selected project directory holds no ocx.toml"
+    )]
     NoProjectIn { dir: PathBuf },
 
     /// `ocx.lock` is absent or no longer describes `ocx.toml`.
     /// Wraps [`ocx_project::LockCurrency`] rather than restating it, so the wording matches
     /// `ocx_package_manager::activation::SessionError`'s for the same two states.
     #[error("{0}")]
+    #[exit(delegate)]
     Lock(#[from] ocx_project::LockCurrency),
 
     /// A project-tier library error from `ocx_project`.
     // `{0}`, not `transparent`: transparent's `source()` skips the inner error, which then goes unclassified.
     #[error("{0}")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "project_load_failed",
+            summary = "Loading the project failed with an unclassified cause"
+        )
+    )]
     Project(#[from] ocx_project::Error),
 
     /// A config-tier error from the loader, e.g. an explicit `--project` path that is absent or unreadable.
     // `{0}`, not `transparent`, for the same reason as `Project`.
     #[error("{0}")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "project_load_failed",
+            summary = "Loading the project failed with an unclassified cause"
+        )
+    )]
     Config(#[from] ocx_config::error::Error),
-}
-
-impl crate::exit::ClassifyExitCode for ProjectContextError {
-    fn classify(&self) -> Option<ocx_exit::ExitCode> {
-        use ocx_exit::ExitCode;
-        match self {
-            Self::NoProject { .. } | Self::NoProjectIn { .. } => Some(ExitCode::UsageError),
-            Self::Lock(currency) => currency.classify(),
-            // Classified by the wrapped error, reached through the `source()` chain.
-            Self::Project(_) | Self::Config(_) => None,
-        }
-    }
 }
 
 /// Creates `$OCX_HOME/ocx.toml` under `--global` when it is absent; a no-op otherwise.
@@ -94,7 +109,7 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
     let result = tokio::task::spawn_blocking(move || ocx_project::init_project(&init_path))
         .await
         .map_err(|e| {
-            ProjectContextError::Project(ocx_project::Error::Project(ocx_project::error::ProjectError::new(
+            ProjectContextError::Project(ocx_project::Error::from(ocx_project::error::ProjectError::new(
                 config_path.clone(),
                 ProjectErrorKind::Io(std::io::Error::other(e)),
             )))
@@ -137,8 +152,8 @@ pub async fn resolve_project_paths(
 
     let start = match walk_from {
         Some(path) => path.to_path_buf(),
-        None => ocx_util::env::current_dir().map_err(|e| {
-            ProjectContextError::Project(ocx_project::Error::Project(ProjectError::new(
+        None => ocx_env::current_dir().map_err(|e| {
+            ProjectContextError::Project(ocx_project::Error::from(ProjectError::new(
                 std::path::PathBuf::new(),
                 ProjectErrorKind::Io(e),
             )))
@@ -159,8 +174,8 @@ pub async fn resolve_project_paths(
 pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<ProjectContext, ProjectContextError> {
     use ocx_project::error::{ProjectError, ProjectErrorKind};
 
-    let cwd = ocx_util::env::current_dir().map_err(|e| {
-        ProjectContextError::Project(ocx_project::Error::Project(ProjectError::new(
+    let cwd = ocx_env::current_dir().map_err(|e| {
+        ProjectContextError::Project(ocx_project::Error::from(ProjectError::new(
             std::path::PathBuf::new(),
             ProjectErrorKind::Io(e),
         )))
@@ -260,7 +275,8 @@ pub async fn record_activation_consent_over(
     sources: std::collections::BTreeSet<String>,
     consent: Option<bool>,
 ) {
-    if !consent.unwrap_or_else(|| !ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONSENT, false)) {
+    // An invalid value suppresses: context init already refused it, and a typo must never stamp consent.
+    if !consent.unwrap_or_else(|| !ocx_env::OCX_NO_CONSENT.bool_or(false).unwrap_or(true)) {
         log::debug!(
             "Shell-activation consent was not recorded for '{}': suppressed by --no-consent or OCX_NO_CONSENT",
             config_path.display()
@@ -419,8 +435,8 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
 pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<MutationGuard, ProjectContextError> {
     use ocx_project::error::{ProjectError, ProjectErrorKind};
 
-    let cwd = ocx_util::env::current_dir().map_err(|e| {
-        ProjectContextError::Project(ocx_project::Error::Project(ProjectError::new(
+    let cwd = ocx_env::current_dir().map_err(|e| {
+        ProjectContextError::Project(ocx_project::Error::from(ProjectError::new(
             std::path::PathBuf::new(),
             ProjectErrorKind::Io(e),
         )))
@@ -451,7 +467,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 return Err(
-                    ocx_project::Error::Project(ProjectError::new(lock_path.clone(), ProjectErrorKind::Io(e))).into(),
+                    ocx_project::Error::from(ProjectError::new(lock_path.clone(), ProjectErrorKind::Io(e))).into(),
                 );
             }
         },
@@ -476,6 +492,27 @@ mod tests {
 
     use super::*;
 
+    /// Reds on: a project-context slug, delegated or walked, naming another cause than the exit
+    /// code does.
+    #[test]
+    fn project_context_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+
+        let no_project = ProjectContextError::NoProject {
+            cwd: PathBuf::from("/work"),
+        };
+        assert_detail(&no_project, "no_project");
+        let stale = ProjectContextError::from(ocx_project::LockCurrency::Stale {
+            lock_path: PathBuf::from("/work/proj/ocx.lock"),
+        });
+        assert_detail(&stale, "lock_stale");
+        let diverged = ProjectContextError::Project(ocx_project::Error::from(ocx_project::ProjectError::new(
+            PathBuf::from("/work/proj/ocx.toml"),
+            ocx_project::error::ProjectErrorKind::ManifestEditDiverged,
+        )));
+        assert_detail(&diverged, "project_manifest_edit_diverged");
+    }
+
     /// Finding 11 — the two lock states are one contract, and this enum must
     /// *delegate* to it rather than carry a second copy of the mapping.
     ///
@@ -490,7 +527,7 @@ mod tests {
     /// Red state: swap the two arms in `LockCurrency::classify`.
     #[test]
     fn f011_the_lock_states_classify_through_the_shared_currency_type() {
-        use crate::exit::ClassifyExitCode as _;
+        use ocx_exit::ClassifyExitCode as _;
         use ocx_exit::ExitCode;
         use ocx_project::LockCurrency;
 
@@ -657,18 +694,18 @@ mod tests {
     /// is invisible in a diff of either function alone, which is why the
     /// property is asserted over all three at once.
     ///
-    /// Red state: move the `ocx_util::env::flag` call from
+    /// Red state: move the `ocx_env::OCX_NO_CONSENT.bool_or` call from
     /// `record_activation_consent_over` up into `record_activation_consent`.
     #[test]
     fn c400_the_consent_env_var_is_read_only_at_the_seam() {
         let source = include_str!("project_context.rs");
 
         let seam = code_only(&function_body(source, "record_activation_consent_over"));
-        // The `flag(` half matters: the debug line below the gate names the
+        // The `bool_or(` half matters: the debug line below the gate names the
         // variable too, so a guard that only looked for the spelling would stay
         // green with the read itself deleted.
         assert!(
-            seam.contains("ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONSENT"),
+            seam.contains("ocx_env::OCX_NO_CONSENT.bool_or("),
             "the seam must be the function that reads the env var, or the guard below is vacuous"
         );
 

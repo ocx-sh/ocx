@@ -15,7 +15,9 @@ use crate::api::Printable;
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum CleanKind {
+    /// An unreferenced package in the object store.
     Object,
+    /// A leftover temporary directory.
     Temp,
     /// A `state/projects/<key>/` directory whose consent stamp was swept.
     // Reported like the other two: revoking a project's activation consent is the
@@ -45,8 +47,11 @@ impl fmt::Display for CleanKind {
 // Column layout and JSON shape: adr_clean_project_backlinks.md § `ocx clean` UX.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CleanEntry {
+    /// What kind of resource this is.
     pub kind: CleanKind,
+    /// Whether the run was a dry run, so nothing was removed.
     pub dry_run: bool,
+    /// Where the resource is, or was.
     pub path: PathBuf,
     /// Project `ocx.lock` paths holding this entry. Empty when the entry is not
     /// protected by any registered project, or when `--force` was specified.
@@ -54,8 +59,10 @@ pub struct CleanEntry {
 }
 
 /// Objects, temp directories and consent stamps a clean removed, or would remove in a dry run.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Clean {
-    pub entries: Vec<CleanEntry>,
+    /// One entry per resource: objects, then temp directories, then consent stamps.
+    pub items: Vec<CleanEntry>,
 }
 
 impl Clean {
@@ -87,25 +94,22 @@ impl Clean {
                 held_by: Vec::new(),
             });
         }
-        Self { entries }
-    }
-}
-
-impl Serialize for Clean {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
+        Self { items: entries }
     }
 }
 
 impl Printable for Clean {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Clean";
+
     /// `Type | Held By | Path` when any entry carries `held_by`, else `Type | Path`
     /// (`adr_clean_project_backlinks.md` "Dry-run preview shape (plain)").
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        let has_attribution = self.entries.iter().any(|e| !e.held_by.is_empty());
+        let has_attribution = self.items.iter().any(|e| !e.held_by.is_empty());
 
         if has_attribution {
             let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-            for entry in &self.entries {
+            for entry in &self.items {
                 rows[0].push(entry.kind.to_string());
                 rows[1].push(
                     entry
@@ -123,7 +127,7 @@ impl Printable for Clean {
             );
         } else {
             let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-            for entry in &self.entries {
+            for entry in &self.items {
                 rows[0].push(entry.kind.to_string());
                 rows[1].push(entry.path.display().to_string());
             }
@@ -132,16 +136,5 @@ impl Printable for Clean {
                 &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
             );
         }
-    }
-}
-
-// Transparent `Serialize`: the schema is the bare entry array.
-impl schemars::JsonSchema for Clean {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Clean".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<CleanEntry>>::json_schema(generator)
     }
 }

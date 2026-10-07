@@ -27,14 +27,16 @@ Matches the [`SKILL.md`](SKILL.md) parser:
 --adversary / --no-adversary
 ```
 
-hex-review never exposes a literal model flag — model choice resolves
-through [`models.md`](../hex-core/references/models.md) only, per
-[spawn-selection precedence](../hex-core/references/protocol.md#spawn-selection-precedence).
+hex-review never exposes a literal model flag — every seat is the `standard`
+class at every tier ([`SKILL.md` § Worker assignment](SKILL.md#worker-assignment-shared-across-tiers),
+[`models.md`](../hex-core/references/models.md)). Axes scale seat count, not
+seat class.
 
 ## breadth axis
 
 Controls the Stage 2 panel. Stage 1 (`reviewer` focus `spec` +
-test-coverage emphasis) runs at every tier regardless of breadth.
+test-coverage emphasis, split per pipeline) runs at every tier regardless of
+breadth.
 
 | Value | Effect |
 |---|---|
@@ -84,20 +86,22 @@ This is `code-diff` scope for a branch/PR/working-tree target,
 | `off` | No cross-model pass. |
 | `on` | Invoke the adversary skill once against the diff or artifact, launched last in the Stage 2 batch. One-shot, no loop. Triage its findings 4-way (actionable / deferred / stated-convention / trivia). Review is read-only: an actionable finding is reported, never auto-fixed — hand off to `/hex-execute` if the caller wants it applied. |
 
+The adversary runs in every call at `medium` and up.
+
 Per-tier defaults:
 
 | Tier | adversary default |
 |---|---|
 | low | `off` (inline tier); explicit `--adversary` runs it alone, read-only |
-| medium | `off` (two-way door — cost outweighs value) |
-| high | `off`, auto-on when [`classify.md`](classify.md) fires `adversary=on` for a one-way-door or security signal; explicit via `--adversary` |
-| xhigh | `on` (a default part of the flow; a skip is surfaced prominently) |
+| medium | `on` |
+| high | `on` |
+| xhigh | `on` (a skip is surfaced prominently) |
 | max | `on` — **every** entry of a list-valued `adversary` key, in the Stage 2 batch; below `max` the first entry only (`adr_0017` C-995) |
 
-When the adversary produces no review — the named skill is unavailable, or it
-ran and did not complete one — log
-`Cross-model review skipped: <reason>` and continue — a gate, not a
-blocker ([`adversary.md`](../hex-core/references/adversary.md#adversary-contract)).
+When the adversary produces no review — the named skill is unavailable
+(not installed, quota or limit hit), or it ran and did not complete one — log
+`Cross-model review skipped: <reason>` and continue. Never wait for its quota
+— a gate, not a blocker ([`adversary.md`](../hex-core/references/adversary.md#adversary-contract)).
 
 ## Precedence
 
@@ -118,4 +122,4 @@ axis's source.
 |---|---|---|---|---|---|
 | breadth | minimal (inline) | minimal | full | adversarial | adversarial |
 | rca | off | off | on (Block/High) | on (above Suggest) | on (above Suggest) |
-| adversary | off | off | off (auto-on on signal) | on (mandatory) | on (every configured) |
+| adversary | off | on | on | on | on (every configured) |

@@ -13,8 +13,11 @@ use crate::api::Printable;
 /// of the companion that produced the var.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchWhyEntry {
+    /// The env var name.
     pub variable: String,
+    /// The descriptor rule `match` glob that admitted the companion.
     pub rule: String,
+    /// The companion that produced the var.
     pub companion: String,
 }
 
@@ -31,32 +34,33 @@ impl PatchWhyEntry {
 /// `ocx patch why <base>`: each env var a companion contributes to `base`, with the matching rule
 /// and companion. Empty is never an error: either no companion applies, or those that apply add
 /// nothing to this surface.
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchWhyReport {
+    #[serde(skip)]
     base: String,
     /// Every companion composed for `base`, including one that adds no var to this surface.
+    #[serde(skip)]
     companions: Vec<String>,
-    entries: Vec<PatchWhyEntry>,
+    /// One entry per contributed variable; empty when no companion applies or none adds a var here.
+    items: Vec<PatchWhyEntry>,
 }
 
 impl PatchWhyReport {
-    pub fn new(base: String, companions: Vec<String>, entries: Vec<PatchWhyEntry>) -> Self {
+    pub fn new(base: String, companions: Vec<String>, items: Vec<PatchWhyEntry>) -> Self {
         Self {
             base,
             companions,
-            entries,
+            items,
         }
     }
 }
 
-impl Serialize for PatchWhyReport {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.entries.serialize(serializer)
-    }
-}
-
 impl Printable for PatchWhyReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PatchWhyReport";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        if self.entries.is_empty() {
+        if self.items.is_empty() {
             if self.companions.is_empty() {
                 printer.print_hint(&format!("no patches apply to '{}'", self.base));
             } else {
@@ -69,7 +73,7 @@ impl Printable for PatchWhyReport {
             return;
         }
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for entry in &self.entries {
+        for entry in &self.items {
             rows[0].push(entry.variable.clone());
             rows[1].push(entry.rule.clone());
             rows[2].push(entry.companion.clone());
@@ -81,23 +85,12 @@ impl Printable for PatchWhyReport {
     }
 }
 
-// Transparent `Serialize`: the schema is the bare entry array; `base` never reaches JSON.
-impl schemars::JsonSchema for PatchWhyReport {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "PatchWhyReport".into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<PatchWhyEntry>>::json_schema(generator)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn json_shape_is_bare_array() {
+    fn json_shape_is_an_items_list() {
         let report = PatchWhyReport::new(
             "ocx.sh/java:21".to_owned(),
             vec!["corp/jdk-trust:1.0".to_owned()],
@@ -108,7 +101,10 @@ mod tests {
             )],
         );
         let json = serde_json::to_string(&report).expect("serializes");
-        assert!(json.starts_with('['), "JSON must be a bare array, got {json}");
+        assert!(
+            json.starts_with(r#"{"items":["#),
+            "JSON must be an items list, got {json}"
+        );
         assert!(
             json.contains(r#""variable":"JAVA_TRUST""#),
             "names the variable: {json}"
@@ -127,6 +123,9 @@ mod tests {
     fn empty_report_serializes_to_empty_array() {
         let report = PatchWhyReport::new("ocx.sh/cmake:3".to_owned(), Vec::new(), Vec::new());
         let json = serde_json::to_string(&report).expect("serializes");
-        assert_eq!(json, "[]", "empty provenance must serialize to an empty array");
+        assert_eq!(
+            json, r#"{"items":[]}"#,
+            "empty provenance must serialize to an empty items list"
+        );
     }
 }

@@ -81,7 +81,7 @@ impl SelfActivate {
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
         if self.reconcile {
             // Always exit 0 so the prompt renders; failures log at debug, and the emitted body discards stderr anyway.
-            let carrier = ocx_util::env::var(CARRIER_KEY);
+            let carrier = ocx_env::__OCX_ENV_STATE.get_raw().and_then(|v| v.into_string().ok());
             if let Err(error) = self
                 .run_reconcile(options, color_config, &FileStructure::new(), carrier.as_deref())
                 .await
@@ -486,7 +486,7 @@ enum Walk {
 
 /// Resolve the project's identity without deserializing `ocx.toml`, classified per [`Walk`]; failures degrade at debug.
 async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
-    let cwd = match ocx_util::env::current_dir() {
+    let cwd = match ocx_env::current_dir() {
         Ok(cwd) => Some(cwd),
         // Never fall back to a cached CWD: with none, the ancestor test cannot run.
         Err(error) => {
@@ -541,7 +541,7 @@ async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
 /// Shared with `ocx shell completion --if-enabled`. Only this run sees `--config`, so the tier list is recorded
 /// here or `--reconcile` loses that consent channel; a malformed config degrades to the auto rung.
 pub(crate) async fn load_shell_config(options: &ContextOptions) -> (Option<ShellConfig>, Vec<PathBuf>) {
-    let cwd = ocx_util::env::current_dir().ok();
+    let cwd = ocx_env::current_dir().ok();
     let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
         explicit_path: options.config.as_deref(),
         explicit_project_path: options.project.as_deref(),
@@ -949,13 +949,87 @@ mod tests {
             "nushell eval line must embed the shared apply loop verbatim (drift guard); got: {line:?}"
         );
         assert!(
-            line.contains(r#"$_ocx_e.type == "path""#),
+            line.contains(r#"$_ocx_e.kind == "path""#),
             "nushell must dispatch on the entry modifier type, not the key name; got: {line:?}"
         );
         assert!(
             !line.contains("nu -c"),
             "nushell must NOT shell out to a child `nu -c` (no parent env effect); got: {line:?}"
         );
+    }
+
+    /// Every nushell apply copy reads only keys `ocx --format json env` emits: the root list key
+    /// and each entry field it dereferences. A rename leaves `default []` applying nothing, and
+    /// the behavioural rows skip on any host without `nu`, so nothing else goes red.
+    #[test]
+    fn nushell_apply_reads_the_keys_env_vars_emits() {
+        use ocx_package::metadata::env::modifier::ModifierKind;
+
+        use crate::api::data::env::{EnvEntry, EnvVars};
+
+        let report = EnvVars::new(
+            vec![EnvEntry {
+                key: "OCX_CROSS_CHECK".to_owned(),
+                value: "value".to_owned(),
+                kind: ModifierKind::List,
+                separator: Some(":".to_owned()),
+                source: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let json = serde_json::to_value(&report).expect("EnvVars serializes");
+        let (list_key, items) = json
+            .as_object()
+            .expect("object root")
+            .iter()
+            .find(|(_, value)| {
+                value
+                    .as_array()
+                    .is_some_and(|array| array.iter().any(|entry| entry["key"] == "OCX_CROSS_CHECK"))
+            })
+            .expect("one root array holds the entry");
+        let entry = items[0].as_object().expect("entry is an object");
+        let (kind_field, _) = entry
+            .iter()
+            .find(|(_, value)| *value == "list")
+            .expect("one entry field carries the modifier kind");
+
+        let references = |text: &str, prefix: &str| -> Vec<String> {
+            text.split(prefix)
+                .skip(1)
+                .map(|rest| {
+                    rest.chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect()
+                })
+                .collect()
+        };
+        for (name, text) in [
+            ("NU_ENV_APPLY_LOOP", ocx_setup::shims::NU_ENV_APPLY_LOOP),
+            ("ENV_NU", ocx_setup::shims::ENV_NU),
+        ] {
+            let roots = references(text, "$_ocx_json.");
+            assert!(!roots.is_empty(), "{name} reads no `$_ocx_json` key");
+            for root in &roots {
+                assert_eq!(
+                    root, list_key,
+                    "{name} reads `$_ocx_json.{root}`, the report emits `{list_key}`"
+                );
+            }
+            let fields = references(text, "$_ocx_e.");
+            assert!(
+                text.contains(&format!("$_ocx_e.{kind_field} == ")),
+                "{name} must dispatch on the emitted `{kind_field}` field"
+            );
+            for field in &fields {
+                assert!(
+                    entry.contains_key(field),
+                    "{name} reads `$_ocx_e.{field}`, which no emitted entry carries: {entry:?}"
+                );
+            }
+        }
     }
 
     /// The eval stays gated on an `ocx`-existence probe (not a state guard) for
@@ -1093,7 +1167,7 @@ mod tests {
 
     // ── Completion interactivity gate ──────────────────────────────────────
     //
-    // The gate decision (flags + `OCX_NO_COMPLETIONS` + interactivity) now lives
+    // The gate decision (flags + `OCX_NO_COMPLETION` + interactivity) now lives
     // in `options::Completion::enabled` and is unit-tested there. `execute` just
     // honours the resolved boolean before calling `generate_completion_inline`.
 
@@ -1566,7 +1640,7 @@ mod reconcile_tests {
             constant("2FOO", "x"),
             Entry {
                 key: "TOOLS".to_owned(),
-                value: format!("/a{}/b", ocx_util::env::PATH_SEPARATOR),
+                value: format!("/a{}/b", ocx_util::path::PATH_SEPARATOR),
                 kind: ModifierKind::Path,
                 separator: None,
             },
@@ -2795,6 +2869,10 @@ mod bare_ocx_tests {
     /// stream runs it, so the marker appears. With the absolute path it cannot.
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness running bash, zsh or fish over the emitted activation stream"
+    )]
     fn c045_a_user_function_named_ocx_is_never_executed_by_the_stream() {
         use std::process::Command;
 
@@ -3332,6 +3410,10 @@ mod emitted_path_tests {
     /// dedupe loop whose *effect* is the contract, and a substring assertion on
     /// it would pass for a line that removed the segment it was supposed to
     /// prepend.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "test-only live-shell harness running bash, zsh or fish over the emitted activation stream"
+    )]
     fn path_after(seed: &[&Path], lines: &[String]) -> Vec<String> {
         let seeded = std::env::join_paths(seed.iter().map(|path| path.as_os_str())).expect("the seed joins");
         let script = format!(
@@ -3539,25 +3621,15 @@ mod global_activate_tests {
     /// The ladder's other three tiers on this tier: leniency, the floor, and
     /// `OCX_TOOLCHAIN_ACTIVATE` as the **weakest** rung.
     ///
-    /// The only test in this module that touches `OCX_TOOLCHAIN_ACTIVATE`.
-    /// A sibling below writes and removes `OCX_HOME`, so "the only test that
-    /// mutates the environment" would be false; what holds — and what the
-    /// ordering guarantee actually needs — is that no other test in this crate
-    /// writes *this key* (precedent: `crate::options::hook`'s
-    /// `each_ladder_reads_its_own_environment_key`).
-    ///
     /// Red state: replace `.unwrap_or_default()` in `global_activate_mode` with
     /// `.map(|c| ...).unwrap_or(ActivateMode::None)` and the corrupt-file
     /// assertions flip — a malformed global file would silently stop composing.
     #[tokio::test]
     async fn d3_the_ladder_is_lenient_and_the_environment_tier_is_the_weakest() {
         let home = tempfile::TempDir::new().expect("tempdir");
-        let key = ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE;
-        // SAFETY: `OCX_TOOLCHAIN_ACTIVATE` has no other writer in this crate —
-        // the sibling below writes `OCX_HOME`, a different key — and nextest
-        // runs one test per process, so no concurrent reader of this key exists
-        // to race.
-        unsafe { std::env::remove_var(key) };
+        let key = &ocx_env::OCX_TOOLCHAIN_ACTIVATE;
+        let env = ocx_env::overrides::lock();
+        env.remove(key);
 
         assert_eq!(
             mode_for(home.path(), None).await,
@@ -3576,8 +3648,7 @@ mod global_activate_tests {
              composes - a prompt must never fail, warn, or silently fall to `none` over it"
         );
 
-        // SAFETY: see above.
-        unsafe { std::env::set_var(key, "bin") };
+        env.set(key, "bin");
         assert_eq!(
             mode_for(home.path(), Some("[tools]\n")).await,
             ActivateMode::Bin,
@@ -3594,9 +3665,6 @@ mod global_activate_tests {
             "and it loses to a global file that states a value - the weakest-tier rule holds on \
              this tier too"
         );
-
-        // SAFETY: see above.
-        unsafe { std::env::remove_var(key) };
     }
 
     /// The gate itself, against a real [`Context`]: `bin` composes nothing while
@@ -3617,11 +3685,8 @@ mod global_activate_tests {
     #[tokio::test]
     async fn d3_bin_mode_gates_the_prompt_and_leaves_the_explicit_request_alone() {
         let home = tempfile::TempDir::new().expect("tempdir");
-        // SAFETY: `OCX_HOME` is read through `ocx_util::env::var`, whose
-        // `#[cfg(test)]` override seam is internal to `ocx_lib` and therefore
-        // unavailable from this crate; the process variable is the only seam.
-        // nextest runs one test per process, so this cannot race a sibling.
-        unsafe { std::env::set_var("OCX_HOME", home.path()) };
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().expect("temp path is utf-8"));
 
         let global_config = home.path().join("ocx.toml");
         std::fs::write(&global_config, "activate = \"bin\"\n[env]\nWP16 = \"composed\"\n").expect("write ocx.toml");
@@ -3690,9 +3755,6 @@ mod global_activate_tests {
             vec!["WP16".to_owned()],
             "`env` mode composes the global tier, exactly as it always has"
         );
-
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("OCX_HOME") };
     }
 
     // ── the other half: the LOGIN stream ─────────────────────────────────

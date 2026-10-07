@@ -56,9 +56,8 @@ const PROTO_TYPE_STRING: i64 = 9;
 
 /// Properties ocx's platform schema publishes that OCI image-spec `v1.1.1`
 /// does not define — NOT sanctioned, pinned so the set cannot grow silently.
-/// Same semantics as `KNOWN_NON_SNAKE` in `json_keys_are_snake_case.rs`: every
-/// entry must match a real deviation on every run, so an entry that stops
-/// deviating is stale and fails the test exactly like an unpinned new one.
+/// Every entry must match a real deviation on every run, so an entry that
+/// stops deviating is stale and fails the test exactly like an unpinned new one.
 ///
 /// `(kind, json_pointer_path, property)`.
 ///

@@ -4,6 +4,6 @@ Resolved settings from files and environment: the four config tiers, the managed
 
 **Tier:** ecosystem
 
-**May depend on:** `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit`
+**May depend on:** `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env`
 
 **Named dependency exceptions:** none

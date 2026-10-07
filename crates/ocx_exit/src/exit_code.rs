@@ -3,64 +3,85 @@
 
 //! Process exit codes shared by all OCX binaries.
 
-/// Process exit codes used by all OCX binaries.
-///
-/// Values follow BSD `sysexits.h` (64+), clear of shell-reserved (1–2) and signal-derived (128+) codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-#[non_exhaustive]
-pub enum ExitCode {
+use crate::error_category::ErrorCategory;
+
+/// Declares [`ExitCode`] with its `ALL`, `summary` and `category` from one row per variant.
+macro_rules! exit_codes {
+    ($($(#[$meta:meta])* $name:ident = $value:literal => $category:ident, $summary:literal;)*) => {
+        /// Process exit codes used by all OCX binaries.
+        ///
+        /// Values follow BSD `sysexits.h` (64+), clear of shell-reserved (1–2) and signal-derived (128+) codes.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[repr(u8)]
+        #[non_exhaustive]
+        pub enum ExitCode {
+            $($(#[$meta])* $name = $value,)*
+        }
+
+        impl ExitCode {
+            /// Every variant, in declaration order: the source of the published exit-code table.
+            pub const ALL: &'static [ExitCode] = &[$(ExitCode::$name),*];
+
+            /// One-line user-facing meaning of this code, as the published contract states it.
+            pub const fn summary(self) -> &'static str {
+                match self {
+                    $(ExitCode::$name => $summary,)*
+                }
+            }
+
+            /// The `error.kind` this code is reported under; `Success` and `Failure` map to `Internal`.
+            pub const fn category(self) -> ErrorCategory {
+                match self {
+                    $(ExitCode::$name => ErrorCategory::$category,)*
+                }
+            }
+        }
+    };
+}
+
+exit_codes! {
     /// Successful completion.
-    Success = 0,
+    Success = 0 => Internal, "The command succeeded";
     /// Generic failure, only when no specific code applies.
-    Failure = 1,
+    Failure = 1 => Internal, "The command failed and no more specific code applies";
     /// Bad CLI invocation: unknown flag, wrong argument count, invalid syntax (`EX_USAGE`).
-    UsageError = 64,
+    UsageError = 64 => UsageError, "The command line is invalid: unknown flag, wrong argument count or bad syntax";
     /// Malformed input data: bad identifier format, invalid digest (`EX_DATAERR`).
-    DataError = 65,
+    DataError = 65 => DataError, "Input data is malformed or fails verification";
     /// Required resource unavailable, e.g. registry unreachable; unlike [`ExitCode::TempFail`],
     /// rerunning will not change the outcome (`EX_UNAVAILABLE`).
-    Unavailable = 69,
+    Unavailable = 69 => Unavailable, "A required service is unavailable and rerunning will not help";
     /// I/O failure: filesystem permission denied, disk full, read/write error (`EX_IOERR`).
-    IoError = 74,
+    IoError = 74 => IoError, "A filesystem read or write failed";
     /// Transient failure (rate limit, registry connect failure or timeout); the same command
     /// may succeed on retry, which makes automated retry safe here only (`EX_TEMPFAIL`).
-    TempFail = 75,
-    /// Filesystem `EPERM`, or a forge refusing a push (protected branch, pre-receive hook) where
-    /// the refusal is not a capability gate ([`ExitCode::ForgeCapabilityUnavailable`]) (`EX_NOPERM`).
-    PermissionDenied = 77,
+    TempFail = 75 => TempFail, "A transient failure; the same command may succeed on retry";
+    /// Filesystem `EPERM`, or a forge refusing a push (protected branch, pre-receive hook,
+    /// publisher not on the job-token allowlist) where the refusal is not a missing capability
+    /// ([`ExitCode::Unsupported`]) (`EX_NOPERM`).
+    PermissionDenied = 77 => PermissionDenied, "The operation was refused for lack of permission";
     /// Bad `config.toml`: parse failure or missing required field (`EX_CONFIG`).
-    ConfigError = 78,
+    ConfigError = 78 => ConfigError, "Configuration is invalid or incomplete";
     /// Resource not found: package 404, explicit config path absent.
-    NotFound = 79,
+    NotFound = 79 => NotFound, "A named package, tag, file or resource does not exist";
     /// Authentication failure: registry 401 or 403, missing credentials.
-    AuthError = 80,
-    /// A deliberate local policy (offline, frozen, the prune safeguard against deleting a
-    /// durable tag) refused an operation; loosen the flag, pre-populate the local index, or pass
-    /// `--force` to prune. A refusal, not a fault like `Unavailable`.
-    PolicyBlocked = 81,
-    /// A managed shell-integration block carries user edits and was left untouched
-    /// (`ocx self setup` without `--force`).
-    DirtyRcBlock = 82,
-    /// Rekor unavailable on sign (upload failed) or on verify (SET and TSA absent, SET invalid
-    /// against the Rekor key, or lookup 5xx/timeout); distinct from a registry `Unavailable`.
-    TransparencyLogUnavailable = 83,
-    /// Registry has neither the OCI Referrers API nor a fallback-tag referrers index; discovery
-    /// fails rather than returning empty results.
-    ReferrersUnsupported = 84,
-    /// A key reference (`--key`, a `[[trust.policy]]` signer, managed config) names a recognised
-    /// but unimplemented backend (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
-    /// `k8s://`); "not built yet", never a `config_error`.
-    UnsupportedKeyBackend = 85,
-    /// A reachable forge refuses a write because the instance or target project lacks the
-    /// capability the transport needs (job-token push disabled, publisher not allowlisted);
-    /// the credential is valid and an administrator, not the caller, must act.
-    ForgeCapabilityUnavailable = 86,
-    /// The registry does not delete tags (405, 400 `UNSUPPORTED`, or 400 `DIGEST_INVALID` from a
-    /// registry that deletes by digest only); an operator must enable deletion or use another
-    /// registry, so a retry never helps.
-    RegistryDeleteUnsupported = 87,
+    AuthError = 80 => AuthError, "Authentication failed or credentials are missing";
+    /// A deliberate local policy or safeguard refused an operation: offline, frozen, the prune
+    /// safeguard against deleting a durable tag, a managed shell-profile block carrying user edits.
+    /// The caller's next action is to loosen the flag, pre-populate the local index, or pass
+    /// `--force`; a refusal, not a fault like `Unavailable`.
+    PolicyBlocked = 81 => PermissionDenied, "A local policy or safeguard refused the operation; loosen the flag or pass --force";
+    /// A valid invocation the registry, forge or build cannot honour: the capability is absent or
+    /// not enabled, and retrying never helps. The caller uses another registry, forge or build, or
+    /// has its operator enable it. Which capability is the `error.detail` slug's job
+    /// (`adr_exit_code_taxonomy.md`).
+    Unsupported = 82 => Unsupported, "The operation as requested is not supported or not enabled by this registry, forge or build; retrying will not help";
 }
+
+/// Exit numbers no [`ExitCode`] may ever take again: once a consumer keyed on a value, reusing it
+/// changes the meaning under a script. Each was a per-feature code collapsed into the next-action
+/// codes by `adr_exit_code_taxonomy.md`.
+pub const RETIRED: &[u8] = &[83, 84, 85, 86, 87];
 
 impl From<ExitCode> for std::process::ExitCode {
     fn from(value: ExitCode) -> Self {
@@ -150,45 +171,78 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_dirty_rc_block_is_82() {
-        // OCX-specific; script-discoverable dirty-RC-skip outcome (plan D3).
-        // Distinct from ConfigError (78) so a refused managed block is not
-        // conflated with a bad-config failure.
-        assert_eq!(ExitCode::DirtyRcBlock as u8, 82);
+    fn exit_code_unsupported_is_82() {
+        // OCX-specific; a capability the registry, forge or build lacks (adr_exit_code_taxonomy.md).
+        assert_eq!(ExitCode::Unsupported as u8, 82);
     }
 
+    /// A retired number keeps no meaning a consumer could still key on, so no variant may take it back.
+    ///
+    /// Reds on: any `ExitCode` declared with a value listed in [`RETIRED`].
     #[test]
-    fn exit_code_transparency_log_unavailable_is_83() {
-        // Tool-specific; distinct from Unavailable — Rekor is a separate,
-        // non-retryable supply-chain dependency (vs registry transient faults).
-        assert_eq!(ExitCode::TransparencyLogUnavailable as u8, 83);
+    fn retired_numbers_are_never_reused() {
+        assert!(!ExitCode::ALL.is_empty(), "nothing to check: ExitCode::ALL is empty");
+        for code in ExitCode::ALL {
+            assert!(
+                !RETIRED.contains(&(*code as u8)),
+                "{code:?} reuses retired exit number {}",
+                *code as u8
+            );
+        }
     }
 
-    #[test]
-    fn exit_code_referrers_unsupported_is_84() {
-        // Tool-specific; registry lacks OCI 1.1 referrers — no fallback.
-        assert_eq!(ExitCode::ReferrersUnsupported as u8, 84);
+    /// Wildcard-free: a new variant is an `E0004` here until its value is pinned.
+    fn pinned_value(code: ExitCode) -> u8 {
+        match code {
+            ExitCode::Success => 0,
+            ExitCode::Failure => 1,
+            ExitCode::UsageError => 64,
+            ExitCode::DataError => 65,
+            ExitCode::Unavailable => 69,
+            ExitCode::IoError => 74,
+            ExitCode::TempFail => 75,
+            ExitCode::PermissionDenied => 77,
+            ExitCode::ConfigError => 78,
+            ExitCode::NotFound => 79,
+            ExitCode::AuthError => 80,
+            ExitCode::PolicyBlocked => 81,
+            ExitCode::Unsupported => 82,
+        }
     }
 
+    /// `ALL` is the published exit-code table, so a code missing from it is a code consumers never learn.
+    ///
+    /// Reds on: a variant dropped from `ALL`, listed twice, or out of declaration order.
     #[test]
-    fn exit_code_unsupported_key_backend_is_85() {
-        // Tool-specific; canonical source is design_spec_cosign_parity.md
-        // section "Exit codes". 85 is the first free slot above 84.
-        assert_eq!(ExitCode::UnsupportedKeyBackend as u8, 85);
+    fn all_lists_every_code_once_in_declaration_order() {
+        let listed: Vec<u8> = ExitCode::ALL.iter().map(|code| pinned_value(*code)).collect();
+        assert_eq!(
+            listed,
+            [0, 1, 64, 65, 69, 74, 75, 77, 78, 79, 80, 81, 82],
+            "ExitCode::ALL must list every variant exactly once, in declaration order"
+        );
+        for code in ExitCode::ALL {
+            assert_eq!(*code as u8, pinned_value(*code), "{code:?}");
+        }
     }
 
+    /// Each summary is copied verbatim into the published schema, so it is one plain line.
     #[test]
-    fn exit_code_forge_capability_unavailable_is_86() {
-        // C-001; canonical source is adr_index_claim_command.md, section
-        // "Exit codes — full mapping". 85 was taken by UnsupportedKeyBackend,
-        // so 86 is the first free slot.
-        assert_eq!(ExitCode::ForgeCapabilityUnavailable as u8, 86);
-    }
-
-    #[test]
-    fn exit_code_registry_delete_unsupported_is_87() {
-        // Tool-specific; 86 was taken by ForgeCapabilityUnavailable, so 87 is the next free slot.
-        assert_eq!(ExitCode::RegistryDeleteUnsupported as u8, 87);
+    fn every_code_has_a_one_line_summary() {
+        assert!(!ExitCode::ALL.is_empty(), "nothing to check: ExitCode::ALL is empty");
+        for code in ExitCode::ALL {
+            let summary = code.summary();
+            assert!(!summary.trim().is_empty(), "{code:?} has no summary");
+            assert!(!summary.contains('\n'), "{code:?} summary spans lines: {summary}");
+            assert!(
+                !summary.ends_with('.'),
+                "{code:?} summary ends with a period: {summary}"
+            );
+            assert!(
+                !summary.contains('[') && !summary.contains("::"),
+                "{code:?} summary carries a doc link or code path: {summary}"
+            );
+        }
     }
 
     #[test]

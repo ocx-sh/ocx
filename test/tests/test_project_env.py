@@ -917,7 +917,7 @@ B_MARKER = "b-value"
         f"ocx env -g a -g b -g a must succeed; rc={reported.returncode}\n"
         f"stderr:\n{reported.stderr}"
     )
-    entries = json.loads(reported.stdout)["entries"]
+    entries = json.loads(reported.stdout)["items"]
     occurrences = [e for e in entries if e["key"] == "PATH" and e["value"] == a_bin]
     assert len(occurrences) == 1, (
         f"a group named twice must contribute its [env] once, at its last "
@@ -1011,7 +1011,7 @@ def test_global_env_applies_to_global_tier_resolution(ocx: OcxRunner, tmp_path: 
         f"global ocx.toml; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     data = json.loads(result.stdout)
-    entries = {e["key"]: e["value"] for e in data["entries"]}
+    entries = {e["key"]: e["value"] for e in data["items"]}
     assert entries.get("GLOBAL_ENV_MARKER") == "global-value", (
         f"the global tier's own [env] must apply to `ocx --global env` (Q2); "
         f"entries={entries}"
@@ -1039,7 +1039,7 @@ def test_global_env_applies_without_any_global_lock(ocx: OcxRunner, tmp_path: Pa
         f"ocx --global env must succeed with a lock-less global ocx.toml; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["entries"]}
+    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["items"]}
     assert entries.get("GLOBAL_ONLY_MARKER") == "global-value", (
         f"a global [env] declaration must apply even when no global tool is "
         f"locked or installed (Q2); entries={entries}"
@@ -1085,7 +1085,7 @@ def test_global_env_applies_when_locked_tool_not_materialised(
         f"ocx --global env must stay lenient about unmaterialised tools; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["entries"]}
+    entries = {e["key"]: e["value"] for e in json.loads(result.stdout)["items"]}
     assert entries.get("UNMATERIALISED_MARKER") == "global-value", (
         f"a global [env] declaration must apply even when every locked tool "
         f"fails the offline lookup (Q2); entries={entries}"
@@ -1557,14 +1557,14 @@ def test_launcher_forged_ocx_env_fails_closed_on_whole_payload(
 
     Envelope per R1a: an object whose ``entries`` array is the mandatory
     sentinel (a bare array has nowhere to carry one). The modifier field is
-    spelled ``type``, matching ``ocx --format json env``, the ``[env]``
-    table grammar, and ``Modifier``'s serde tag.
+    spelled ``type``, matching the ``[env]`` table grammar and
+    ``Modifier``'s serde tag.
     """
     base_pkg = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path, entrypoints={"showenv": {"command": "env"}}
     )
     ocx.plain("package", "install", base_pkg.short)
-    which = ocx.json("package", "which", base_pkg.short)
+    which = ocx.json("package", "which", base_pkg.short)["paths"]
     pkg_root = Path(which[base_pkg.short]["path"])
 
     forged = json.dumps(

@@ -654,8 +654,8 @@ def test_clean_keeps_global_lock_pinned_package(
         f"package install --select must succeed to locate content dir; "
         f"rc={install_info.returncode}\nstderr:\n{install_info.stderr}"
     )
-    install_data = _json.loads(install_info.stdout)
-    # The JSON is keyed by the package short name; value has a "path" field.
+    install_data = _json.loads(install_info.stdout)["packages"]
+    # `packages` is keyed by the package short name; each value has a "path" field.
     assert len(install_data) == 1, f"one identifier in, one entry out: {install_data}"
     short_key = next(iter(install_data))
     content_path = Path(install_data[short_key]["path"]).resolve()
@@ -687,7 +687,7 @@ def test_clean_keeps_global_lock_pinned_package(
     )
 
     # The global lock-pinned package must appear in held_by (not unreferenced).
-    entries = _json.loads(dry_run_result.stdout)
+    entries = _json.loads(dry_run_result.stdout)["items"]
     object_entries = [e for e in entries if e.get("kind") == "object"]
     # Unreferenced entries (would-be-collected) have an empty held_by.
     unreferenced_paths = {e["path"] for e in object_entries if not e.get("held_by")}

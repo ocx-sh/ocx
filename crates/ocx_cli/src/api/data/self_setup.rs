@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_console::Cell;
+use ocx_oci::Digest;
 use ocx_setup::{
     BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome,
     SessionPathOutcome, SetupOutcome,
@@ -10,13 +11,10 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// Top-level status discriminant for a `ocx self setup` run.
-///
-/// Serde serializes each variant to its `snake_case` name, matching the JSON
-/// wire format the snapshot tests pin. `Skipped` is the dirty-RC outcome (the
-/// CLI maps it to exit 82); every other status is exit 0.
+/// The overall outcome of an `ocx self setup` run; `skipped` exits 81, every other status 0.
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "SelfSetupStatus")]
 enum StatusKind {
     /// Shims and/or profiles were written or upgraded.
     Completed,
@@ -39,20 +37,26 @@ impl std::fmt::Display for StatusKind {
     }
 }
 
-/// JSON-serialized per-profile outcome (`{"path":"…","outcome":"completed"}`).
+/// One shell profile and what this run did to its managed block.
 #[derive(Serialize, schemars::JsonSchema)]
 struct ProfileEntry {
+    /// The profile file.
     path: String,
+    /// What this run did to the profile's managed block.
     outcome: ProfileOutcomeKind,
 }
 
-/// A profile's outcome, as its `snake_case` name.
+/// What a run did to one profile's managed block.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ProfileOutcomeKind {
+    /// The managed block was written or upgraded.
     Completed,
+    /// The managed block was already current.
     NoOp,
+    /// A legacy footprint was migrated to the current fence.
     Migrated,
+    /// The managed block carried user edits and was left untouched.
     SkippedDirty,
 }
 
@@ -78,27 +82,31 @@ impl std::fmt::Display for ProfileOutcomeKind {
     }
 }
 
-/// JSON-serialized per-store session-PATH outcome
-/// (`{"location":"…","outcome":"written"}`).
-///
-/// `location` rather than `path`: on Windows the store is
-/// `HKCU\Environment\Path`, a registry location, and on a host with no
-/// facility it is a deliberately unspellable placeholder.
+/// One session-PATH store and what this run did to it.
+// `location`, not `path`: on Windows the store is `HKCU\Environment\Path`, a registry location.
 #[derive(Serialize, schemars::JsonSchema)]
 struct SessionPathEntry {
+    /// Where the store lives: a file, or a registry location on Windows.
     location: String,
+    /// What this run did to the store.
     outcome: SessionPathOutcomeKind,
 }
 
-/// A session-PATH store's outcome, as its `snake_case` name.
+/// What a run did to one session-PATH store.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum SessionPathOutcomeKind {
+    /// The ocx directories were written to the store.
     Written,
+    /// The store already held the ocx directories.
     Unchanged,
+    /// The ocx directories were removed from the store.
     Removed,
+    /// Skipped: PATH modification is opted out.
     SkippedOptOut,
+    /// Skipped: this host has no such store.
     SkippedUnsupported,
+    /// Writing the store failed; the run warned and carried on.
     Failed,
 }
 
@@ -128,31 +136,29 @@ impl std::fmt::Display for SessionPathOutcomeKind {
     }
 }
 
-/// JSON-serialized bootstrap outcome.
-///
-/// Unpinned path (no VERSION): `{"status":"already_present"}` or
-/// `{"status":"pulled","version":"1.2.3"}`.
-/// Pinned path (VERSION given): same shapes plus `"digest":"sha256:<hex>"` when
-/// resolution produced one. `digest` is omitted on unpinned fast-path runs.
-// `digest` stays omitted when absent, keeping existing JSON consumers byte-identical.
+/// Whether this run installed ocx into its own content store.
 #[derive(Serialize, schemars::JsonSchema)]
 struct BootstrapEntry {
+    /// What the bootstrap did.
     status: ApiBootstrapStatus,
+    /// The version pulled, or that a dry run would pull.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     version: Option<String>,
-    /// Resolved content digest; present when pinning produced one.
+    /// Resolved content digest; present when a pinned version produced one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    digest: Option<String>,
+    digest: Option<Digest>,
 }
 
-/// Bootstrap status, as its `snake_case` name.
+/// What a bootstrap did.
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "BootstrapStatus")]
 enum ApiBootstrapStatus {
+    /// The requested ocx was already installed.
     AlreadyPresent,
+    /// The requested ocx was pulled.
     Pulled,
+    /// Dry run: the requested ocx would be pulled.
     WouldPull,
 }
 
@@ -166,7 +172,7 @@ impl BootstrapEntry {
         Self {
             status,
             version: outcome.version.clone(),
-            digest: outcome.digest.as_ref().map(|d| d.to_string()),
+            digest: outcome.digest.clone(),
         }
     }
 
@@ -183,50 +189,49 @@ impl BootstrapEntry {
     }
 }
 
-/// JSON-serialized managed-config adoption outcome:
-/// `{"status":"…"}` or, for the adopt/refresh paths,
-/// `{"status":"…","digest":"sha256:<hex>"}` (the digest is the operator's
-/// TOFU signal — always visible on adopt paths). `refreshed` additionally
-/// carries `previous_digest`; `refresh_unavailable` carries `reason`. Both are
-/// omitted everywhere else.
-///
-/// `ocx config setup` reports the same entry shape, so fleet tooling parses both
-/// commands with one schema.
-// Refresh-only keys are omitted elsewhere, keeping existing consumers byte-identical.
+/// The managed-config adoption outcome, shared by `ocx self setup` and `ocx config setup`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ManagedConfigEntry {
+    /// What the run did to the managed-config tier.
     status: ManagedConfigStatusKind,
+    /// The adopted snapshot's digest, on every status that has one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    digest: Option<String>,
+    digest: Option<Digest>,
     /// The digest the snapshot carried before a `refreshed` run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
-    previous_digest: Option<String>,
+    previous_digest: Option<Digest>,
     /// Why a `refresh_unavailable` run could not reach the registry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     reason: Option<String>,
 }
 
-/// Managed-config adoption status, as its `snake_case` name.
+/// What a run did to the managed-config tier.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ManagedConfigStatusKind {
+    /// No managed config is configured.
     NotConfigured,
+    /// The snapshot was already adopted and current.
     AlreadyAdopted,
+    /// A snapshot was fetched and adopted.
     Adopted,
+    /// The adopted snapshot was replaced by a newer one.
     Refreshed,
+    /// The registry could not be reached; the adopted snapshot is kept.
     RefreshUnavailable,
+    /// The managed-config tier was removed.
     Cleared,
+    /// The managed block in `config.toml` carried user edits and was left untouched.
     Dirty,
+    /// Dry run: a snapshot would be adopted.
     WouldAdopt,
+    /// Dry run: the adopted snapshot would be refreshed.
     WouldRefresh,
 }
 
 impl ManagedConfigEntry {
     /// A status with an optional digest and no refresh-only fields.
-    fn with_digest(status: ManagedConfigStatusKind, digest: Option<String>) -> Self {
+    fn with_digest(status: ManagedConfigStatusKind, digest: Option<Digest>) -> Self {
         Self {
             status,
             digest,
@@ -239,20 +244,20 @@ impl ManagedConfigEntry {
         match outcome {
             ManagedConfigSetupOutcome::NotConfigured => Self::with_digest(ManagedConfigStatusKind::NotConfigured, None),
             ManagedConfigSetupOutcome::AlreadyAdopted { digest } => {
-                Self::with_digest(ManagedConfigStatusKind::AlreadyAdopted, Some(digest.to_string()))
+                Self::with_digest(ManagedConfigStatusKind::AlreadyAdopted, Some(digest.clone()))
             }
             ManagedConfigSetupOutcome::Adopted { digest } => {
-                Self::with_digest(ManagedConfigStatusKind::Adopted, Some(digest.to_string()))
+                Self::with_digest(ManagedConfigStatusKind::Adopted, Some(digest.clone()))
             }
             ManagedConfigSetupOutcome::Refreshed { from, to } => Self {
                 status: ManagedConfigStatusKind::Refreshed,
-                digest: Some(to.to_string()),
-                previous_digest: Some(from.to_string()),
+                digest: Some(to.clone()),
+                previous_digest: Some(from.clone()),
                 reason: None,
             },
             ManagedConfigSetupOutcome::RefreshUnavailable { digest, reason } => Self {
                 status: ManagedConfigStatusKind::RefreshUnavailable,
-                digest: Some(digest.to_string()),
+                digest: Some(digest.clone()),
                 previous_digest: None,
                 reason: Some(reason.clone()),
             },
@@ -260,7 +265,7 @@ impl ManagedConfigEntry {
             ManagedConfigSetupOutcome::Dirty => Self::with_digest(ManagedConfigStatusKind::Dirty, None),
             ManagedConfigSetupOutcome::WouldAdopt => Self::with_digest(ManagedConfigStatusKind::WouldAdopt, None),
             ManagedConfigSetupOutcome::WouldRefresh { digest } => {
-                Self::with_digest(ManagedConfigStatusKind::WouldRefresh, Some(digest.to_string()))
+                Self::with_digest(ManagedConfigStatusKind::WouldRefresh, Some(digest.clone()))
             }
         }
     }
@@ -268,7 +273,7 @@ impl ManagedConfigEntry {
     /// The adoption outcome's plain row; the `refresh_unavailable` cause stays on stderr, too wide for
     /// the column budget.
     pub fn summary(&self) -> String {
-        let digest = || self.digest.clone().unwrap_or_default();
+        let digest = || self.digest.as_ref().map(Digest::to_string).unwrap_or_default();
         match self.status {
             ManagedConfigStatusKind::NotConfigured => "not configured".to_string(),
             ManagedConfigStatusKind::AlreadyAdopted => match &self.digest {
@@ -294,31 +299,29 @@ impl ManagedConfigEntry {
     }
 }
 
-/// JSON-serialized `OCX_EXTRA_CA_CERTS` persistence outcome.
-///
-/// `{"status":"…"}` or, once a value has been resolved,
-/// `{"status":"…","certificates":N}`. `status` is `persisted` / `unchanged` /
-/// `not_configured` normally, and `would_persist` / `unchanged` /
-/// `not_configured` under `--dry-run`, the same dry-run convention
-/// `managed_config` uses (`would_adopt` / `would_refresh`). `system_locked` (no
-/// count, in either mode) says the value was set but the system tier locks the
-/// pair, so nothing was validated or written.
+/// The `OCX_EXTRA_CA_CERTS` persistence outcome.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ExtraCaCertsEntry {
+    /// What the run did with the extra CA roots.
     status: ExtraCaCertsStatusKind,
+    /// How many certificates the resolved value holds; absent on `not_configured` and `system_locked`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     certificates: Option<usize>,
 }
 
-/// Extra CA roots persistence status, as its `snake_case` name.
+/// What a run did with the extra CA roots.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ExtraCaCertsStatusKind {
+    /// `OCX_EXTRA_CA_CERTS` is not set.
     NotConfigured,
+    /// `config.toml` already holds the same roots.
     Unchanged,
+    /// The roots were written to `config.toml`.
     Persisted,
+    /// Dry run: the roots would be written to `config.toml`.
     WouldPersist,
+    /// The system tier locks the setting, so nothing was validated or written.
     SystemLocked,
 }
 
@@ -367,42 +370,35 @@ impl ExtraCaCertsEntry {
 ///
 /// Plain format: a key/value table (`Status`, `Bootstrap`, written shims,
 /// per-profile outcomes, and any advisory), with empty rows suppressed.
-///
-/// JSON format: an object discriminated by `status` (`skipped` on a dirty
-/// profile). `managed_config`, `extra_ca_certs` and `session_path` are always
-/// present; `session_path` has one entry per store this host owns, empty only
-/// where the platform has no session-PATH facility at all. `dirty_profiles`,
-/// `exec_policy_warning`, `conflicting_ocx` and `reload_hint` appear only when set.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfSetupData {
+    /// The run's overall outcome; `skipped` when a managed block was left dirty.
     status: StatusKind,
+    /// Whether this run installed ocx into its own content store.
     bootstrap: BootstrapEntry,
+    /// The env shim files this run wrote.
     shims: Vec<String>,
+    /// One entry per shell profile this run considered.
     profiles: Vec<ProfileEntry>,
-    /// Per-store session-PATH outcomes, serialized in every state.
-    ///
-    /// Present including for `skipped_opt_out` and `skipped_unsupported`.
+    /// One entry per session-PATH store this host owns, the skipped ones included; empty only
+    /// where the platform has no session-PATH facility.
     // Always serialized, or a `failed` store with no payload is an outcome computed and discarded.
-    session_path: Vec<SessionPathEntry>,
+    session_path_stores: Vec<SessionPathEntry>,
     /// Profiles skipped because the user edited the managed block; present iff
     /// status = `skipped`. Carried separately for a script to `case` on without
     /// scanning the `profiles` list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     dirty_profiles: Vec<String>,
     /// Windows execution-policy `Restricted` advisory, if applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     exec_policy_warning: Option<String>,
     /// An `ocx` on `PATH` ahead of the directory the shim prepends, if found.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     conflicting_ocx: Option<String>,
     /// Whether this run changed a PATH surface that the user must act on: a shim or
     /// managed profile block (re-source the shell), or a session-PATH store (log out
     /// and back in, so programs started outside a shell see it too).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     reload_hint: bool,
     /// Result of adopting/clearing the `--managed-config` tier.
     managed_config: ManagedConfigEntry,
@@ -441,7 +437,7 @@ impl SelfSetupData {
                 .map(|path| path.display().to_string())
                 .collect(),
             profiles,
-            session_path: outcome
+            session_path_stores: outcome
                 .session_path
                 .iter()
                 .map(|(location, session_outcome)| SessionPathEntry {
@@ -480,6 +476,9 @@ fn derive_status(outcome: &SetupOutcome) -> StatusKind {
 }
 
 impl Printable for SelfSetupData {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "SelfSetupData";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Only rows with a payload appear.
         let mut fields: Vec<Cell> = vec!["Status".into(), "Bootstrap".into()];
@@ -490,7 +489,7 @@ impl Printable for SelfSetupData {
 
         if let Some(digest) = &self.bootstrap.digest {
             fields.push("Digest".into());
-            values.push(Cell::from(digest.clone()));
+            values.push(Cell::from(digest.to_string()));
         }
 
         for (index, shim) in self.shims.iter().enumerate() {
@@ -509,7 +508,7 @@ impl Printable for SelfSetupData {
             values.push(Cell::from(format!("{} ({})", profile.path, profile.outcome)));
         }
 
-        for (index, entry) in self.session_path.iter().enumerate() {
+        for (index, entry) in self.session_path_stores.iter().enumerate() {
             let label = if index == 0 {
                 "Session PATH".to_string()
             } else {
@@ -563,7 +562,7 @@ mod tests {
         }
     }
 
-    /// C-036 / E-X14: `session_path` is present in **every** state, including
+    /// `session_path_stores` is present in **every** state, including
     /// the two skip outcomes — a `failed` store that reached no payload would
     /// be an outcome computed and discarded, and absence-as-signal is not this
     /// report's convention.
@@ -585,7 +584,7 @@ mod tests {
 
             let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
             assert_eq!(
-                value["session_path"],
+                value["session_path_stores"],
                 json!([{"location": "/home/dev/.config/environment.d/ocx.conf", "outcome": expected}]),
                 "for {session_outcome:?}"
             );
@@ -608,7 +607,7 @@ mod tests {
 
         let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
         assert_eq!(
-            value["session_path"],
+            value["session_path_stores"],
             json!([
                 {"location": "/home/dev/.config/environment.d/ocx.conf", "outcome": "failed"},
                 {"location": "HKCU\\Environment\\Path", "outcome": "written"}
@@ -661,7 +660,7 @@ mod tests {
         assert_eq!(value["shims"], json!([]));
         assert_eq!(value["profiles"], json!([]));
         assert_eq!(
-            value["session_path"],
+            value["session_path_stores"],
             json!([]),
             "the key is always present; only a host with no facility makes it empty"
         );

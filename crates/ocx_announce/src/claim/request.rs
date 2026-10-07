@@ -22,12 +22,12 @@ pub enum ClaimTarget {
     Direct,
 }
 
-/// Whether the claim moved the claim branch; a `--out` run is always [`Self::Updated`].
+/// Whether the claim moved the claim branch; a `--output` run is always [`Self::Updated`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimStatus {
     /// The claim branch already carries a byte-identical root.
     Unchanged,
-    /// The branch was created or moved, or `--out` wrote the tree.
+    /// The branch was created or moved, or `--output` wrote the tree.
     Updated,
 }
 
@@ -66,7 +66,7 @@ impl std::fmt::Display for OwnerIdentitySource {
         formatter.write_str(match self {
             Self::Resolved => "resolved",
             Self::Asserted => "asserted",
-            Self::CiEnvironment => "ci-environment",
+            Self::CiEnvironment => "ci_environment",
         })
     }
 }
@@ -146,16 +146,16 @@ pub struct ClaimOutcome {
     /// The token identity, else the CI-environment identity; `None` when neither is available.
     /// Authorship never substitutes for ownership, nor the reverse.
     pub author: Option<ResolvedOwner>,
-    /// Which rung produced [`Self::author`]: `resolved` is forge-attested, `ci-environment` is
+    /// Which rung produced [`Self::author`]: `resolved` is forge-attested, `ci_environment` is
     /// settable by any earlier pipeline step. `None` exactly when [`Self::author`] is; never `asserted`.
     pub author_identity_source: Option<OwnerIdentitySource>,
     /// The claim branch, so a script need not re-derive the naming convention.
     pub branch: String,
-    /// The opened/updated pull request — `None` under `--out`.
+    /// The opened/updated pull request — `None` under `--output`.
     pub pull_request: Option<PullRequest>,
-    /// The verified fork identity — `None` under `--out` and on the direct path.
+    /// The verified fork identity — `None` under `--output` and on the direct path.
     pub fork: Option<ForkIdentity>,
-    /// Relative paths written under the `--out` directory; empty otherwise.
+    /// Relative paths written under the `--output` directory; empty otherwise.
     pub written_paths: Vec<String>,
     /// The preflight rows.
     pub push_access: PushAccess,
@@ -222,9 +222,8 @@ mod tests {
     /// shipped**; `CapabilityName` got the same guard in WP-5 for exactly that
     /// reason. The pairing is what makes the arity a guard rather than a number
     /// the test wrote for itself: a variant added to `ALL` without a spelling reds
-    /// on the length, and one renamed in `Display` reds on its own row. Note the
-    /// **hyphen** in `ci-environment` — an underscore is the natural Rust-side
-    /// spelling and the wrong wire one.
+    /// on the length, and one renamed in `Display` reds on its own row. The words
+    /// are snake_case, as every machine-facing value is.
     ///
     /// Reds on: renaming any spelling, reordering `ALL`, or changing its length.
     #[test]
@@ -232,7 +231,7 @@ mod tests {
         let expected = [
             (OwnerIdentitySource::Resolved, "resolved"),
             (OwnerIdentitySource::Asserted, "asserted"),
-            (OwnerIdentitySource::CiEnvironment, "ci-environment"),
+            (OwnerIdentitySource::CiEnvironment, "ci_environment"),
         ];
         assert_eq!(
             OwnerIdentitySource::ALL.len(),
@@ -254,7 +253,7 @@ mod tests {
     ///
     /// Deliberately the same two words announce uses, over a different subject:
     /// announce compares against the *committed* root, claim against the *open
-    /// claim branch*. The `--out`-is-always-`updated` consequence is asserted in
+    /// claim branch*. The `--output`-is-always-`updated` consequence is asserted in
     /// the orchestration's own tests; this pins the vocabulary.
     ///
     /// Reds on: renaming a spelling, reordering `ALL`, or changing its length.
@@ -287,7 +286,7 @@ mod tests {
     fn request_body_carries_every_structured_value() {
         let body = request_body(NAME, REPOSITORY, BRANCH, &owners(), OwnerIdentitySource::CiEnvironment);
 
-        for value in [NAME, REPOSITORY, BRANCH, "alice:7", "bob:8", "ci-environment"] {
+        for value in [NAME, REPOSITORY, BRANCH, "alice:7", "bob:8", "ci_environment"] {
             assert!(body.contains(value), "the body must carry {value}: {body}");
         }
 

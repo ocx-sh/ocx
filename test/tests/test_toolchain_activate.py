@@ -290,7 +290,7 @@ def _composed_path_dirs(ocx: OcxRunner, cwd: Path, *args: str) -> list[str]:
     result = run_in(ocx, cwd, "--format", "json", "env", *args)
     assert result.returncode == EXIT_SUCCESS, f"`ocx env` failed:\n{result.stderr}"
     payload = json.loads(result.stdout)
-    return [entry["value"] for entry in payload["entries"] if entry["key"] == "PATH"]
+    return [entry["value"] for entry in payload["items"] if entry["key"] == "PATH"]
 
 
 def _write_home_config(arena: Arena, body: str) -> Path:
@@ -954,7 +954,7 @@ def test_pinned_cli_beats_the_file_which_beats_the_environment(ocx: OcxRunner, t
     def lane(*args: str, env: dict[str, str] | None = None) -> str:
         result = run_in(ocx, project.directory, "--format", "json", "env", *args, env_extra=env)
         assert result.returncode == EXIT_SUCCESS, f"`ocx env` failed:\n{result.stderr}"
-        values = [entry["value"] for entry in json.loads(result.stdout)["entries"] if entry["key"] == "PATH"]
+        values = [entry["value"] for entry in json.loads(result.stdout)["items"] if entry["key"] == "PATH"]
         assert values, "the project must compose at least one PATH directory"
         if all(value.startswith(store + os.sep) for value in values):
             return "pinned"
@@ -1123,7 +1123,7 @@ def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena,
     project = locked_project(ocx, tmp_path, label="d9")
     clone = _clone(project.directory, tmp_path / "unconsented-clone")
     state = json.loads(run_in(ocx, clone, "--format", "json", "shell", "state").stdout)
-    assert state["grant"] is None, f"this row needs a genuinely unconsented project: {state}"
+    assert state.get("grant") is None, f"this row needs a genuinely unconsented project: {state}"
     home = Path(state["toolchain_home"])
     planted = _real(shell_bin(home))
 

@@ -9,7 +9,7 @@ publish = false
 [features]
 # The seam feature, forwarded the way every other crate forwards it: test-only
 # surface that must never reach the release binary.
-__testing = ["ocx_index/__testing", "ocx_package/__testing", "ocx_shell/__testing", "ocx_store/__testing"]
+__testing = ["ocx_env/__testing", "ocx_index/__testing", "ocx_package/__testing", "ocx_shell/__testing", "ocx_store/__testing"]
 
 [dependencies]
 # Every workspace edge below is a row of `scripts/crate_map.toml`'s
@@ -17,6 +17,8 @@ __testing = ["ocx_index/__testing", "ocx_package/__testing", "ocx_shell/__testin
 # even when Cargo would accept it.
 ocx_config.workspace = true
 ocx_console.workspace = true
+ocx_env.workspace = true
+ocx_exit.workspace = true
 ocx_index.workspace = true
 ocx_oci.workspace = true
 ocx_package.workspace = true
@@ -77,6 +79,7 @@ libc.workspace = true
 # `__testing`, so a dev edge is the only way to reach it and the acceptance
 # binary still lacks the code path.
 ocx_config = { workspace = true, features = ["__testing", "__test_scaffolding"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 ocx_index = { workspace = true, features = ["__testing"] }
 ocx_oci = { workspace = true, features = ["__testing"] }
 # `__testing` ONLY — the runtime edge is in `[dependencies]` above. The seam

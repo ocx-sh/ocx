@@ -106,11 +106,11 @@ impl Package {
             Package::Create(create) => create.execute(context).await,
             Package::Description(description) => description.execute(context).await,
             Package::DeprecatedDescribe(push) => {
-                super::deprecated::warn_renamed(&context, "package describe", "package description push");
+                super::deprecated::warn_renamed(&context, &super::deprecated::PACKAGE_DESCRIBE);
                 push.execute(context).await
             }
             Package::DeprecatedInfo(pull) => {
-                super::deprecated::warn_renamed(&context, "package info", "package description pull");
+                super::deprecated::warn_renamed(&context, &super::deprecated::PACKAGE_INFO);
                 pull.execute(context).await
             }
             Package::Deps(deps) => deps.execute(context).await,

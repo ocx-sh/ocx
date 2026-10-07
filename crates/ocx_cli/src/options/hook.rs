@@ -24,7 +24,7 @@ pub enum Rung {
     FlagOff,
     /// Rung 2 — `--hook` / `--completion`.
     FlagOn,
-    /// Rung 3 — `OCX_NO_HOOK` / `OCX_NO_COMPLETIONS` truthy.
+    /// Rung 3 — `OCX_NO_HOOK` / `OCX_NO_COMPLETION` truthy.
     EnvOptOut,
     /// Rung 4 — `[shell] hook` / `[shell] completions`.
     Configured,
@@ -72,7 +72,12 @@ impl Hook {
         } else {
             None
         };
-        resolve_ladder(flag, ocx_util::env::flag("OCX_NO_HOOK", false), configured, interactive)
+        resolve_ladder(
+            flag,
+            ocx_env::OCX_NO_HOOK.bool_or(false).unwrap_or(false),
+            configured,
+            interactive,
+        )
     }
 }
 
@@ -199,18 +204,13 @@ mod tests {
 
     /// C-038/C-039 rung 3 wiring: each struct reads **its own** environment key
     /// and threads `configured` through, proven by owning both keys for the
-    /// duration. Consolidated into one test so exactly one test function
-    /// mutates the process environment; precedent:
-    /// `ocx_oci::host_capabilities`.
+    /// duration.
     /// EC-CFG-011 — the hook and completions ladders read their own keys and never each other's.
     #[test]
     fn each_ladder_reads_its_own_environment_key() {
-        // SAFETY: this is the only test that touches OCX_NO_HOOK or
-        // OCX_NO_COMPLETIONS; a single #[test] gives the ordering guarantee.
-        unsafe {
-            std::env::remove_var("OCX_NO_HOOK");
-            std::env::remove_var("OCX_NO_COMPLETIONS");
-        }
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_HOOK);
+        env.remove(&ocx_env::OCX_NO_COMPLETION);
         assert!(
             Hook::default().enabled(false, Some(true)),
             "rung 4 must reach the hook ladder: `[shell] hook = true` beats a non-interactive session"
@@ -225,8 +225,7 @@ mod tests {
             "with no flag, no env key and no config, rung 5 decides"
         );
 
-        // SAFETY: see above.
-        unsafe { std::env::set_var("OCX_NO_HOOK", "1") };
+        env.set(&ocx_env::OCX_NO_HOOK, "1");
         assert_eq!(
             (
                 Hook::default().enabled(true, Some(true)),
@@ -240,25 +239,19 @@ mod tests {
             "OCX_NO_HOOK must not reach the completions ladder"
         );
 
-        // SAFETY: see above.
-        unsafe {
-            std::env::remove_var("OCX_NO_HOOK");
-            std::env::set_var("OCX_NO_COMPLETIONS", "1");
-        }
+        env.remove(&ocx_env::OCX_NO_HOOK);
+        env.set(&ocx_env::OCX_NO_COMPLETION, "1");
         assert_eq!(
             (
                 Completion::default().enabled(true, Some(true)),
                 Completion::default().rung(true, Some(true))
             ),
             (false, Rung::EnvOptOut),
-            "OCX_NO_COMPLETIONS=1 must disable completions at rung 3"
+            "OCX_NO_COMPLETION=1 must disable completions at rung 3"
         );
         assert!(
             Hook::default().enabled(true, Some(true)),
-            "OCX_NO_COMPLETIONS must not reach the hook ladder"
+            "OCX_NO_COMPLETION must not reach the hook ladder"
         );
-
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("OCX_NO_COMPLETIONS") };
     }
 }

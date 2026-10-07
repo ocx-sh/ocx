@@ -1,0 +1,58 @@
+# Permanent, decided exceptions to the contract lint. Each cites the decision
+# record that made it; a stale entry reds.
+
+[[exemption]]
+rule = "C02"
+document = "cli"
+pointer = "-g {global,group}"
+reason = "`-g` is `--global` before the subcommand and `--group` after it: position disambiguates (the ruling at `crates/ocx_cli/src/app/context_options.rs`)."
+adr = ".claude/artifacts/adr_ocx_interface_contract.md#open-questions"
+
+[[exemption]]
+rule = "L06"
+document = "reports"
+pointer = "/$defs/Platform/properties/os.features"
+reason = "Borrowed OCI image-spec platform field, spelled as the specification spells it."
+adr = ".claude/artifacts/adr_ocx_interface_contract.md#waivers-and-exemptions"
+
+[[exemption]]
+rule = "L06"
+document = "reports"
+pointer = "/$defs/Platform/properties/os.version"
+reason = "Borrowed OCI image-spec platform field, spelled as the specification spells it."
+adr = ".claude/artifacts/adr_ocx_interface_contract.md#waivers-and-exemptions"
+
+[[exemption]]
+rule = "C08"
+document = "cli"
+pointer = "ocx package attest --key"
+reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
+adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"
+
+[[exemption]]
+rule = "C08"
+document = "cli"
+pointer = "ocx package push --key"
+reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
+adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"
+
+[[exemption]]
+rule = "C08"
+document = "cli"
+pointer = "ocx package sbom --key"
+reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
+adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"
+
+[[exemption]]
+rule = "C08"
+document = "cli"
+pointer = "ocx package sign --key"
+reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
+adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"
+
+[[exemption]]
+rule = "C08"
+document = "cli"
+pointer = "ocx package verify --key"
+reason = "`--key` names a key reference (`env://`, a path, a KMS URI), never the key itself (D-35)."
+adr = ".claude/artifacts/plan_ocx_interface_contract.md#decisions-question--research--decision"

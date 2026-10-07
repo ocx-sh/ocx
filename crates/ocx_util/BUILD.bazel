@@ -22,7 +22,9 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_util"},
     version = "0.6.2",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_exit",
+    ],
 )
 
 rust_test(

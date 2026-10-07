@@ -12,25 +12,29 @@ use crate::api::Printable;
 use crate::api::data::signature::SignatureReport;
 use crate::api::data::sweep::SweptStatus;
 
+/// Outcome of a push.
+#[derive(Serialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PushStatus {
+    /// The push landed; the registry merge is idempotent, so a repeat push lands too.
+    Pushed,
+}
+
 /// Result of a successful `ocx package push`.
 ///
-/// The first five keys (`identifier`, `status`, `manifest_digest`,
-/// `cascade_tags_written`, `keep_tags_written`) are the stable contract:
 /// `ocx-mirror pipeline push` keys its go/no-go off `status` and records
-/// `cascade_tags_written`. Everything after them is additive, and
-/// `platform_digests`, `annotations_written`, `aliases_written`, `signatures`
-/// and `attestation` are omitted when empty, so an unsigned push that
-/// annotates nothing emits the first six keys alone.
+/// `cascade_tags_written`. `platform_digests`, `annotations_written`,
+/// `aliases_written`, `signatures` and `attestation` are omitted when empty,
+/// so an unsigned push that annotates nothing emits the first six keys alone.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PushReport {
-    /// The pushed package identifier (`registry/repository:tag`), carrying the tag actually written —
-    /// the `--build-timestamp` suffix included — not the tag the caller passed.
-    pub identifier: String,
-    /// Outcome of the push. Always `"pushed"`: the command performs the push
-    /// unconditionally (the registry merge is idempotent).
-    pub status: String,
-    /// Digest of the pushed multi-platform image index (`sha256:...`).
-    pub manifest_digest: String,
+    /// The pushed package, carrying the tag actually written — the
+    /// `--build-timestamp` suffix included — not the tag the caller passed.
+    pub identifier: ocx_oci::PackageRef,
+    /// Outcome of the push.
+    pub status: PushStatus,
+    /// Digest of the pushed multi-platform image index.
+    pub manifest_digest: ocx_oci::Digest,
     /// Rolling cascade tags written in addition to the primary version tag
     /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push.
     pub cascade_tags_written: Vec<String>,
@@ -55,7 +59,6 @@ pub struct PushReport {
     /// JSON only.
     // The plain table is at its five-column budget.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub platform_digests: BTreeMap<String, String>,
     /// Every OCI annotation this push wrote onto the index of each tag it
     /// touched — the `--ci-annotations` set with the explicit `--annotation`
@@ -66,7 +69,6 @@ pub struct PushReport {
     /// variable was unset is absent here, which is how a pipeline finds out
     /// that its runner did not export what it assumed. JSON only.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub annotations_written: BTreeMap<String, String>,
     /// The un-prefixed track tags `--default` aliased onto this push, bare
     /// version first (`1.2.3`, then `1.2`, `1`, `latest` under `--cascade`).
@@ -75,7 +77,6 @@ pub struct PushReport {
     /// push already uploaded, never a second upload.
     // `cascade_tags_written`/`keep_tags_written` stay unconditional: `ocx-mirror pipeline push` parses them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub aliases_written: Vec<String>,
     /// One row per platform manifest `--sign` signed inline, in push order.
     ///
@@ -86,7 +87,6 @@ pub struct PushReport {
     /// signs it later.
     // Omitted when empty, keeping the key set an unsigned-push consumer parses unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signatures: Vec<SignedPlatformReport>,
     /// Absent unless `--sbom` was passed.
     ///
@@ -95,7 +95,6 @@ pub struct PushReport {
     /// manifest is immutable and OCI offers no un-push.
     // Never fold this into `status`: `ocx-mirror pipeline push` keys its go/no-go off it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub attestation: Option<AttestationOutcome>,
 }
 
@@ -109,10 +108,9 @@ pub struct PushReport {
 /// did not carry is omitted from `platform_digests` and never becomes a row.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SignedPlatformReport {
-    /// The platform whose manifest was signed, canonically spelled
-    /// (`os/arch[/variant][+feature,…]`) — the same key `platform_digests`
-    /// uses, so the two zip.
-    pub platform: String,
+    /// The platform whose manifest was signed; its canonical spelling keys
+    /// `platform_digests`.
+    pub platform: ocx_oci::Platform,
     /// What the inline signing did to this platform.
     pub status: SweptStatus,
     /// That platform's own sign report, verbatim. Present for every platform
@@ -120,24 +118,21 @@ pub struct SignedPlatformReport {
     /// `--signature-format both` platform where one leg landed and one did not
     /// is a failure that still carries the leg that landed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub report: Option<SignatureReport>,
-    /// The JSON error envelope's per-variant slug for this platform's failure,
-    /// falling back to its frozen category. Present exactly when `status` is
-    /// `failed`.
+    /// The error's slug, else its category: the `error.detail`, else the
+    /// `error.kind`, its error document would carry. Present exactly when
+    /// `status` is `failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub kind: Option<String>,
     /// Human-readable cause, sanitized for the terminal (CWE-150). Present
     /// exactly when `status` is `failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 
 impl SignedPlatformReport {
     /// A platform whose manifest was signed.
-    pub fn completed(platform: String, report: SignatureReport) -> Self {
+    pub fn completed(platform: ocx_oci::Platform, report: SignatureReport) -> Self {
         Self {
             platform,
             status: SweptStatus::Completed,
@@ -148,7 +143,7 @@ impl SignedPlatformReport {
     }
 
     /// A platform whose signing failed, described as the error envelope would.
-    pub fn failed(platform: String, report: Option<SignatureReport>, kind: String, message: String) -> Self {
+    pub fn failed(platform: ocx_oci::Platform, report: Option<SignatureReport>, kind: String, message: String) -> Self {
         Self {
             platform,
             status: SweptStatus::Failed,
@@ -159,54 +154,96 @@ impl SignedPlatformReport {
     }
 }
 
+/// Whether the `--sbom` attestation was published.
+#[derive(Serialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationStatus {
+    /// The attestation was published on the pushed manifest.
+    Succeeded,
+    /// The push landed and was NOT rolled back; the attestation did not.
+    Failed,
+}
+
 /// What `--sbom` did after the push landed.
 ///
-/// A failure carries the error slug the JSON error envelope would have used,
+/// A failure carries the error slug the JSON error document would have used,
 /// not a bespoke string, so a script branches on the same vocabulary
 /// either way.
 #[derive(Serialize, schemars::JsonSchema)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum AttestationOutcome {
-    /// The attestation was published on the pushed manifest.
-    Succeeded {
-        /// Digest of the published OCI referrer manifest. Absent under
-        /// `--signature-format simplesigning`, which publishes the
-        /// `sha256-<hex>.att` sidecar alone and no referrer.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[schemars(extend("x-ocx-absent-when-none" = true))]
-        referrer_digest: Option<String>,
-        /// Digest of the `sha256-<hex>.att` sidecar manifest, when
-        /// `--signature-format` asked for one. Spelled as in the
-        /// `ocx package attest` report, so one vocabulary names both addresses.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[schemars(extend("x-ocx-absent-when-none" = true))]
-        sidecar_digest: Option<String>,
-        /// The resolved `predicateType` URI written into the Statement.
+pub struct AttestationOutcome {
+    /// Whether the attestation was published.
+    pub status: AttestationStatus,
+    /// Digest of the published OCI referrer manifest. Absent on failure, and
+    /// under `--signature-format simplesigning`, which publishes the
+    /// `sha256-<hex>.att` sidecar alone and no referrer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referrer_digest: Option<ocx_oci::Digest>,
+    /// Digest of the `sha256-<hex>.att` sidecar manifest, when
+    /// `--signature-format` asked for one. Spelled as in the
+    /// `ocx package attest` report, so one vocabulary names both addresses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidecar_digest: Option<ocx_oci::Digest>,
+    /// The resolved `predicateType` URI written into the Statement. Present
+    /// exactly when `status` is `succeeded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicate_type: Option<String>,
+    /// Whether the referrer carries a signature. `false` means the SBOM was
+    /// attached raw because the run had no signing identity available — the
+    /// push still succeeded, and nothing vouches for the document. Present
+    /// exactly when `status` is `succeeded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed: Option<bool>,
+    /// The error document's `error.detail` slug, falling back to its
+    /// `error.kind` category. Present exactly when `status` is `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Human-readable cause, sanitized for the terminal (CWE-150). Present
+    /// exactly when `status` is `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl AttestationOutcome {
+    /// A published attestation; `simplesigning` writes only the `.att` sidecar, so neither digest is required.
+    pub fn succeeded(
+        referrer_digest: Option<ocx_oci::Digest>,
+        sidecar_digest: Option<ocx_oci::Digest>,
         predicate_type: String,
-        /// Whether the referrer carries a signature. `false` means the SBOM
-        /// was attached raw because the run had no signing identity available
-        /// — the push still succeeded, and nothing vouches for the document.
         signed: bool,
-    },
-    /// The push landed and was NOT rolled back; the attestation did not.
-    Failed {
-        /// The error envelope's per-variant slug (`error.detail`), falling
-        /// back to its frozen category (`error.kind`) for errors outside the
-        /// sign and verify taxonomies, which carry no `detail`.
-        kind: String,
-        /// Human-readable cause, sanitized for the terminal.
-        message: String,
-    },
+    ) -> Self {
+        Self {
+            status: AttestationStatus::Succeeded,
+            referrer_digest,
+            sidecar_digest,
+            predicate_type: Some(predicate_type),
+            signed: Some(signed),
+            kind: None,
+            message: None,
+        }
+    }
+
+    /// An attestation that failed after the push landed.
+    pub fn failed(kind: String, message: String) -> Self {
+        Self {
+            status: AttestationStatus::Failed,
+            referrer_digest: None,
+            sidecar_digest: None,
+            predicate_type: None,
+            signed: None,
+            kind: Some(kind),
+            message: Some(crate::api::data::sanitize_for_terminal(&message)),
+        }
+    }
 }
 
 impl PushReport {
     /// Builds a `pushed` report from the publisher's outcome, taken whole: cascade and keep tags are
     /// both `Vec<String>`, so swapped positionals would type-check and publish keep tags as cascade tags.
-    pub fn from_outcome(identifier: String, outcome: PushOutcome) -> Self {
+    pub fn from_outcome(identifier: ocx_oci::PackageRef, outcome: PushOutcome) -> Self {
         Self {
             identifier,
-            status: "pushed".to_string(),
-            manifest_digest: outcome.manifest_digest.to_string(),
+            status: PushStatus::Pushed,
+            manifest_digest: outcome.manifest_digest,
             cascade_tags_written: outcome.cascade_tags,
             keep_tags_written: outcome.keep_tags,
             layers: outcome.layer_counts,
@@ -245,6 +282,9 @@ impl PushReport {
 }
 
 impl Printable for PushReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PushReport";
+
     /// One-row table; keep tags are a count, since each is 82 columns, and `status` is always `pushed`.
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         data.print_table(
@@ -256,8 +296,8 @@ impl Printable for PushReport {
                 "Layers".into(),
             ],
             &[
-                vec![Cell::from(self.identifier.clone())],
-                vec![Cell::from(self.manifest_digest.clone())],
+                vec![Cell::from(self.identifier.to_string())],
+                vec![Cell::from(self.manifest_digest.to_string())],
                 vec![Cell::from(self.cascade_tags_written.join(","))],
                 vec![Cell::from(self.keep_tags_written.len().to_string())],
                 vec![Cell::from(format!(
@@ -282,6 +322,10 @@ mod tests {
     /// name distinct digests by a single letter and still read them back.
     fn digest(hex_char: &str) -> ocx_oci::Digest {
         ocx_oci::Digest::try_from(format!("sha256:{}", hex_char.repeat(64)).as_str()).expect("digest parses")
+    }
+
+    pub(super) fn pkg(identifier: &str) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry(identifier, "ocx.sh").expect("identifier parses")
     }
 
     fn outcome(digest_hex: &str, cascade_tags: Vec<String>, keep_tags: Vec<String>) -> PushOutcome {
@@ -333,7 +377,7 @@ mod tests {
     #[test]
     fn cascade_report_json_shape() {
         let report = PushReport::from_outcome(
-            "registry.example/tool:3.28.1".to_string(),
+            pkg("registry.example/tool:3.28.1"),
             outcome(
                 "c",
                 vec!["3.28".to_string(), "3".to_string(), "latest".to_string()],
@@ -365,7 +409,7 @@ mod tests {
     /// both arrays must serialize as empty, never absent or null.
     #[test]
     fn non_cascade_report_has_empty_tags() {
-        let report = PushReport::from_outcome("tool:1.0.0".to_string(), outcome("d", Vec::new(), Vec::new()));
+        let report = PushReport::from_outcome(pkg("tool:1.0.0"), outcome("d", Vec::new(), Vec::new()));
         let value = serde_json::to_value(&report).unwrap();
 
         assert_eq!(
@@ -383,7 +427,7 @@ mod tests {
     #[test]
     fn layers_json_shape() {
         let report = PushReport::from_outcome(
-            "tool:1.0.0".to_string(),
+            pkg("tool:1.0.0"),
             outcome_with_layers(
                 "d",
                 Vec::new(),
@@ -413,7 +457,7 @@ mod tests {
     /// "the index", so this assertion would pass on the wrong value.
     #[test]
     fn push_report_json_shape_carries_per_platform_manifest_digests() {
-        let report = PushReport::from_outcome("tool:1.0.0".to_string(), multi_platform_outcome(Vec::new()));
+        let report = PushReport::from_outcome(pkg("tool:1.0.0"), multi_platform_outcome(Vec::new()));
         let value = serde_json::to_value(&report).expect("serialize");
 
         let digests = value
@@ -447,7 +491,7 @@ mod tests {
     /// nothing, which is a different statement.
     #[test]
     fn push_report_omits_platform_digests_when_none_were_produced() {
-        let report = PushReport::from_outcome("tool:1.0.0".to_string(), outcome("d", Vec::new(), Vec::new()));
+        let report = PushReport::from_outcome(pkg("tool:1.0.0"), outcome("d", Vec::new(), Vec::new()));
         let value = serde_json::to_value(&report).expect("serialize");
 
         assert!(
@@ -461,7 +505,7 @@ mod tests {
     /// deriving the field from `keep_tags_written` would empty it here.
     #[test]
     fn platform_digests_survive_no_keep_tag() {
-        let report = PushReport::from_outcome("tool:1.0.0".to_string(), multi_platform_outcome(Vec::new()));
+        let report = PushReport::from_outcome(pkg("tool:1.0.0"), multi_platform_outcome(Vec::new()));
         let value = serde_json::to_value(&report).expect("serialize");
 
         assert_eq!(
@@ -484,7 +528,7 @@ mod tests {
     #[test]
     fn print_plain_smoke() {
         let report = PushReport::from_outcome(
-            "tool:1.0.0".to_string(),
+            pkg("tool:1.0.0"),
             outcome_with_layers(
                 "d",
                 vec!["1".to_string(), "latest".to_string()],
@@ -509,9 +553,9 @@ mod attestation_tests {
 
     fn report() -> PushReport {
         PushReport {
-            identifier: "registry.example/pkg:1.0".into(),
-            status: "pushed".into(),
-            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            identifier: crate::api::data::push::tests::pkg("registry.example/pkg:1.0"),
+            status: super::PushStatus::Pushed,
+            manifest_digest: ocx_oci::Digest::Sha256("a".repeat(64)),
             cascade_tags_written: Vec::new(),
             keep_tags_written: Vec::new(),
             layers: ocx_oci::LayerCounts::default(),
@@ -573,7 +617,7 @@ mod attestation_tests {
         );
 
         let json = serde_json::to_value(PushReport::from_outcome(
-            "registry.example/pkg:full-1.2.3".into(),
+            crate::api::data::push::tests::pkg("registry.example/pkg:full-1.2.3"),
             outcome,
         ))
         .expect("serialize");
@@ -605,10 +649,10 @@ mod attestation_tests {
     /// tell a mirror pipeline the push did not happen.
     #[test]
     fn a_failed_attestation_does_not_change_the_push_status() {
-        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Failed {
-            kind: "offline_attest_refused".into(),
-            message: "offline attestation is not supported".into(),
-        }))
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::failed(
+            "offline_attest_refused".into(),
+            "offline attestation is not supported".into(),
+        )))
         .expect("serialize");
 
         assert_eq!(json["status"], "pushed", "the push landed and is not undoable");
@@ -618,12 +662,12 @@ mod attestation_tests {
 
     #[test]
     fn a_successful_attestation_reports_the_referrer_and_resolved_type() {
-        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Succeeded {
-            referrer_digest: Some(format!("sha256:{}", "c".repeat(64))),
-            sidecar_digest: None,
-            predicate_type: "https://cyclonedx.org/bom".into(),
-            signed: true,
-        }))
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::succeeded(
+            Some(ocx_oci::Digest::Sha256("c".repeat(64))),
+            None,
+            "https://cyclonedx.org/bom".into(),
+            true,
+        )))
         .expect("serialize");
 
         assert_eq!(json["attestation"]["status"], "succeeded");
@@ -649,12 +693,12 @@ mod attestation_tests {
     /// by the other key having been dropped for everyone.
     #[test]
     fn a_sidecar_only_attestation_reports_the_sidecar_and_omits_the_referrer() {
-        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Succeeded {
-            referrer_digest: None,
-            sidecar_digest: Some(format!("sha256:{}", "d".repeat(64))),
-            predicate_type: "https://cyclonedx.org/bom".into(),
-            signed: true,
-        }))
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::succeeded(
+            None,
+            Some(ocx_oci::Digest::Sha256("d".repeat(64))),
+            "https://cyclonedx.org/bom".into(),
+            true,
+        )))
         .expect("serialize");
 
         assert_eq!(json["attestation"]["status"], "succeeded");
@@ -674,12 +718,12 @@ mod attestation_tests {
     /// as having published a signed SBOM.
     #[test]
     fn an_unsigned_attachment_succeeds_and_says_it_is_unsigned() {
-        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Succeeded {
-            referrer_digest: Some(format!("sha256:{}", "c".repeat(64))),
-            sidecar_digest: None,
-            predicate_type: "https://cyclonedx.org/bom".into(),
-            signed: false,
-        }))
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::succeeded(
+            Some(ocx_oci::Digest::Sha256("c".repeat(64))),
+            None,
+            "https://cyclonedx.org/bom".into(),
+            false,
+        )))
         .expect("serialize");
 
         assert_eq!(json["attestation"]["status"], "succeeded");
@@ -700,11 +744,15 @@ mod signature_row_tests {
         ocx_oci::Digest::try_from(format!("sha256:{}", hex_char.repeat(64)).as_str()).expect("digest parses")
     }
 
+    fn linux(arch: &str) -> ocx_oci::Platform {
+        format!("linux/{arch}").parse().expect("platform parses")
+    }
+
     fn report() -> PushReport {
         PushReport {
-            identifier: "registry.example/pkg:1.0".into(),
-            status: "pushed".into(),
-            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            identifier: crate::api::data::push::tests::pkg("registry.example/pkg:1.0"),
+            status: super::PushStatus::Pushed,
+            manifest_digest: ocx_oci::Digest::Sha256("a".repeat(64)),
             cascade_tags_written: Vec::new(),
             keep_tags_written: Vec::new(),
             layers: ocx_oci::LayerCounts::default(),
@@ -718,7 +766,7 @@ mod signature_row_tests {
 
     fn signature(subject: ocx_oci::Digest) -> SignatureReport {
         SignatureReport::new(
-            "registry.example/pkg:1.0".into(),
+            crate::api::data::push::tests::pkg("registry.example/pkg:1.0"),
             subject,
             vec![SignatureLegReport {
                 format: ocx_sign::sign::SignatureFormat::Bundle,
@@ -749,12 +797,15 @@ mod signature_row_tests {
     #[test]
     fn a_signed_row_names_the_platform_and_carries_that_platforms_subject_digest() {
         let push = report().with_signatures(vec![SignedPlatformReport::completed(
-            "linux/amd64".into(),
+            linux("amd64"),
             signature(digest("1")),
         )]);
         let json = serde_json::to_value(push).expect("serialize");
 
-        assert_eq!(json["signatures"][0]["platform"], "linux/amd64");
+        assert_eq!(
+            json["signatures"][0]["platform"],
+            serde_json::json!({"architecture": "amd64", "os": "linux"})
+        );
         assert_eq!(json["signatures"][0]["status"], "completed");
         assert_eq!(
             json["signatures"][0]["report"]["subject_digest"],
@@ -777,7 +828,7 @@ mod signature_row_tests {
     #[test]
     fn a_failed_signature_does_not_change_the_push_status() {
         let push = report().with_signatures(vec![SignedPlatformReport::failed(
-            "linux/arm64".into(),
+            linux("arm64"),
             None,
             "referrers_unsupported".into(),
             "the registry serves no referrers API".into(),
@@ -800,7 +851,7 @@ mod signature_row_tests {
     #[test]
     fn a_partially_failed_platform_keeps_the_leg_that_landed() {
         let push = report().with_signatures(vec![SignedPlatformReport::failed(
-            "linux/amd64".into(),
+            linux("amd64"),
             Some(signature(digest("1"))),
             "internal".into(),
             "the simplesigning sidecar was refused".into(),
@@ -816,7 +867,7 @@ mod signature_row_tests {
     #[test]
     fn a_failure_message_is_sanitized_for_the_terminal() {
         let push = report().with_signatures(vec![SignedPlatformReport::failed(
-            "linux/amd64".into(),
+            linux("amd64"),
             None,
             "internal".into(),
             "boom\u{1b}[31m".into(),

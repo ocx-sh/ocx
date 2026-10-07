@@ -7,6 +7,11 @@
 //! Under `__testing` the binary depends on source and toolchain only, so its bytes
 //! never churn per commit or CI run (`adr_test_speed_tiers.md` § C-PROV).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a build script's inputs are cargo's environment"
+)]
+
 use std::env;
 
 use vergen_gix::{BuildBuilder, CargoBuilder, Emitter, GixBuilder, RustcBuilder};

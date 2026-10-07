@@ -1,217 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_package` error family.
+//! Test-only: the classification tests of the `ocx_package` family. Its types declare their own codes with `#[derive(Classify)]`.
 
-use ocx_exit::ExitCode;
-
-use ocx_oci::layer_ref::LayerRefParseError;
-use ocx_package::bin_scan::BinScanError;
 use ocx_package::dependency_pinning::DependencyPinningError;
 use ocx_package::error::Error as PackageError;
 use ocx_package::libc_lint::LibcLintError;
-use ocx_package::metadata::authoring::AuthoringError;
 use ocx_package::metadata::dependency::DependencyError as MetadataDependencyError;
 use ocx_package::metadata::template::TemplateError;
 use ocx_package::prune::PruneError;
-use ocx_package::publisher::CopyError;
 use ocx_package::publisher::CopyErrorKind;
 use ocx_package::publisher::PublishGateError;
-
-use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for CopyError {
-    /// `Registry` is `#[error(transparent)]`, so only this explicit arm reaches its cause; the walker would exit 1.
-    fn classify(&self) -> Option<ExitCode> {
-        use ClassifyErrorKind;
-        match &self.kind {
-            CopyErrorKind::Registry(cause) => cause.classify(),
-            kind => Some(kind.exit_code()),
-        }
-    }
-}
-
-impl ClassifyErrorKind for CopyErrorKind {
-    fn exit_code(&self) -> ExitCode {
-        use ExitCode;
-        match self {
-            Self::IndexNamedByDigest
-            | Self::PlatformRequired
-            | Self::PlatformAmbiguous
-            | Self::NoMatchingPlatform { .. } => ExitCode::UsageError,
-            // Only a bare kind with its cause discarded lands here; `CopyError::classify` asks the cause.
-            Self::Registry(_) => ExitCode::Failure,
-        }
-    }
-
-    fn kind_detail(&self) -> &'static str {
-        // Frozen contract: never rename a slug.
-        match self {
-            Self::IndexNamedByDigest => "index_named_by_digest",
-            Self::PlatformRequired => "platform_required",
-            Self::PlatformAmbiguous => "platform_ambiguous",
-            Self::NoMatchingPlatform { .. } => "no_matching_platform",
-            Self::Registry(_) => "registry",
-        }
-    }
-}
-
-impl ClassifyExitCode for LayerRefParseError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::UsageError)
-    }
-}
-
-impl ClassifyExitCode for PublishGateError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            PublishGateError::DependencyPinnedToIndex { .. } | PublishGateError::AnyPinNotAdvertisedAsAny { .. } => {
-                Some(ExitCode::DataError)
-            }
-            PublishGateError::DependencyManifestNotFound { .. } => Some(ExitCode::NotFound),
-            PublishGateError::Verification { .. } | PublishGateError::AnyPinProvenanceUnavailable { .. } => None,
-            PublishGateError::Routing { .. } => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for BinScanError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::UndeclaredBinary { .. }
-            | Self::DeclaredNotExecutable { .. }
-            | Self::Binary(_)
-            | Self::UnsupportedHostScan { .. } => Some(ExitCode::DataError),
-            Self::Scan(_) => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for DependencyPinningError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            DependencyPinningError::DependencyNotFound { .. } => Some(ExitCode::NotFound),
-            DependencyPinningError::NoCompatiblePlatform { .. }
-            | DependencyPinningError::AmbiguousPlatform { .. }
-            | DependencyPinningError::DirectDigestPinInAnyTarget { .. } => Some(ExitCode::DataError),
-            DependencyPinningError::Index(_) => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for PackageError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::VersionInvalid(_)
-            | Self::UnsupportedLogoFormat(_)
-            | Self::InvalidLogoContent { .. }
-            | Self::BuildMeta(_)
-            | Self::EmptyPushSet
-            | Self::UnknownEnvModifier { .. }
-            | Self::MissingListSeparator { .. }
-            | Self::ReservedEnvKey { .. }
-            | Self::InvalidListSeparator { .. }
-            | Self::SeparatorEdgedListValue { .. }
-            | Self::IntegrationNamespaceInvalid { .. }
-            | Self::IntegrationTooLarge { .. }
-            | Self::IntegrationsTooLarge { .. } => Some(ExitCode::DataError),
-            Self::RequiredPathMissing(_) => Some(ExitCode::NotFound),
-            Self::EnvVarInterpolation { source, .. } => source.classify(),
-            Self::EntrypointArgInterpolation { source, .. } => source.classify(),
-            Self::IntegrationInterpolation { source, .. } => source.classify(),
-            Self::File(_) => Some(ExitCode::IoError),
-            Self::Archive(e) => e.classify(),
-            Self::Digest(e) => e.classify(),
-            Self::Platform(e) => e.classify(),
-            Self::SerializationFailure(_) => Some(ExitCode::DataError),
-            Self::OciClient(e) => e.classify(),
-            Self::Index(e) => e.classify(),
-        }
-    }
-}
-
-impl ClassifyExitCode for PruneError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::NotAPrereleaseFamily { .. }
-            | Self::DigestTag { .. }
-            | Self::InvalidTag { .. }
-            | Self::PackageNotBare { .. } => Some(ExitCode::UsageError),
-            Self::RootUnreadable { source, .. } | Self::RepositoryPointer { source, .. } => source.classify(),
-            Self::NotInIndex { .. } => Some(ExitCode::NotFound),
-            Self::NoIndex { .. } => Some(ExitCode::PolicyBlocked),
-            // A retry cannot fix a durable tag; a pending announce can merge.
-            Self::Refused { durable, .. } if !durable.is_empty() => Some(ExitCode::PolicyBlocked),
-            Self::Refused { .. } | Self::StillPresent { .. } => Some(ExitCode::TempFail),
-            Self::DeleteDenied { source, .. } => source.classify(),
-            Self::Registry(source) => source.classify(),
-        }
-    }
-}
-
-impl ClassifyExitCode for LibcLintError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            // Must match `PackageErrorKind::FeatureMismatch` (65), the install-time side of the same contract.
-            Self::UndeclaredLibc { .. }
-            | Self::AgnosticPlatformClaim { .. }
-            | Self::UnparseableElf { .. }
-            | Self::UnrecognizedInterpreter { .. }
-            | Self::UnresolvableScanScope { .. }
-            | Self::ModifierBearingScanScope { .. } => Some(ExitCode::DataError),
-            Self::Read { .. } => Some(ExitCode::IoError),
-            Self::Scan(_) => None,
-        }
-    }
-}
-
-impl ClassifyExitCode for AuthoringError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for MetadataDependencyError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for TemplateError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::UnknownDependencyRef { .. }
-            | Self::AmbiguousDependencyRef { .. }
-            | Self::UnknownToken { .. }
-            | Self::UnknownField { .. }
-            | Self::UnknownModifier { .. }
-            | Self::ModifierNotApplicable { .. }
-            | Self::UndefinedSelfEnvRef { .. }
-            | Self::AmbiguousSelfEnvRef { .. }
-            | Self::DisallowedToken { .. }
-            | Self::ResolvedValueTooLarge { .. } => ExitCode::DataError,
-            Self::DependencyNotInstalled { .. } => ExitCode::NotFound,
-        })
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, CopyError);
-    downcast_arm!(cause, PackageError);
-    downcast_arm!(cause, AuthoringError);
-    downcast_arm!(cause, DependencyPinningError);
-    downcast_arm!(cause, BinScanError);
-    downcast_arm!(cause, LibcLintError);
-    downcast_arm!(cause, TemplateError);
-    downcast_arm!(cause, LayerRefParseError);
-    downcast_arm!(cause, PublishGateError);
-    downcast_arm!(cause, PruneError);
-    None
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exit::tests::assert_detail;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
     use ocx_package::metadata::dependency::DependencyName;
 
     use ocx_package::metadata::Metadata;
@@ -219,6 +24,27 @@ mod tests {
     use ocx_package::metadata::validation::ValidMetadata;
 
     use std::path::PathBuf;
+
+    /// `error` answers `code` and `slug`, and the registry files `slug` under `code`; for a type no ladder rung
+    /// downcasts, whose code the whole-ladder helper cannot read.
+    fn assert_slug_code_and_row<K: ocx_exit::ClassifyErrorKind + ClassifyExitCode + std::fmt::Debug>(
+        error: &K,
+        slug: &str,
+        code: ExitCode,
+    ) {
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(error)),
+            slug,
+            "slug for {error:?}"
+        );
+        assert_eq!(error.classify(), Some(code), "exit code for {error:?}");
+        let registry = crate::exit::detail_registry();
+        let row = registry
+            .iter()
+            .find(|row| row.slug == slug)
+            .unwrap_or_else(|| panic!("{error:?} produces `{slug}`, which no DETAILS table lists"));
+        assert_eq!(row.exit_code, code, "`{slug}` is registered under another exit code");
+    }
 
     // ── moved from ocx_package::dependency_pinning with the impl ──
 
@@ -302,11 +128,11 @@ mod tests {
         use ExitCode;
 
         let undeclared = LibcLintError::UndeclaredLibc {
-            path: PathBuf::from("bin/bazel"),
-            interpreter: "/lib64/ld-linux-x86-64.so.2".to_string(),
-            required: "libc.glibc".to_string(),
-            platform: "linux/amd64".to_string(),
-            suggestion: "linux/amd64+libc.glibc".to_string(),
+            path: PathBuf::from("bin/bazel").into_boxed_path(),
+            interpreter: "/lib64/ld-linux-x86-64.so.2".into(),
+            required: "libc.glibc".into(),
+            platform: "linux/amd64".into(),
+            suggestion: "linux/amd64+libc.glibc".into(),
         };
         assert_eq!(
             undeclared.classify(),
@@ -328,7 +154,7 @@ mod tests {
         assert_eq!(unreadable.classify(), Some(ExitCode::IoError));
 
         assert_eq!(
-            LibcLintError::Scan(ocx_package::error::Error::Index(
+            LibcLintError::from(ocx_package::error::Error::Index(
                 ocx_index::error::Error::PolicyResolutionBlocked {
                     identifier: "pkg:1.0.0".to_string(),
                     policy: "offline",
@@ -339,6 +165,13 @@ mod tests {
             None,
             "Scan must delegate classification to its inner package-tier cause"
         );
+
+        // The chain walk must reach the inner error as its own type; a boxed source hides it and exits 1.
+        let scan = LibcLintError::from(ocx_package::error::Error::File(ocx_util::error::FileError::new(
+            PathBuf::from("content/bin"),
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        )));
+        assert_eq!(crate::exit::classify_error(&scan), ExitCode::IoError);
     }
 
     // ── moved from ocx_package::metadata::authoring::dependency with the impl ──
@@ -376,7 +209,7 @@ mod tests {
     ///
     /// Recovered from `7adaea62:crates/ocx_lib/src/publisher/publish_gate.rs`,
     /// not read off the arm it guards — the two `DataError` variants were the
-    /// pair `classify_baseline_7adaea62.json` dropped (block-form right-hand
+    /// pair the pre-split baseline pin dropped (block-form right-hand
     /// side), so between the pin's blind spot and WP-10's strip of
     /// `index_pinned_dependency_rejected` /
     /// `any_target_rejects_pin_not_advertised_as_any`, this impl survived every
@@ -608,9 +441,24 @@ mod tests {
                 CopyErrorKind::NoMatchingPlatform { .. } => ("no_matching_platform", ExitCode::UsageError),
                 CopyErrorKind::Registry(_) => unreachable!("the pass-through arm is not in this fixture"),
             };
-            assert_eq!(kind.kind_detail(), slug, "slug for {kind:?}");
-            assert_eq!(kind.exit_code(), code, "exit code for {kind:?}");
+            assert_slug_code_and_row(kind, slug, code);
         }
+    }
+
+    /// The pass-through arm reports its cause's slug, the error whose code `CopyError` exits with.
+    #[test]
+    fn a_copy_registry_failure_reports_its_causes_slug() {
+        let kind = CopyErrorKind::from(ocx_oci::client::error::ClientError::Registry(Box::new(
+            std::io::Error::other("503"),
+        )));
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&kind)),
+            "registry_unavailable"
+        );
+        let CopyErrorKind::Registry(cause) = &kind else {
+            panic!("a client error converts into the pass-through arm, got {kind:?}");
+        };
+        assert_detail(cause, "registry_unavailable");
     }
 
     /// The exit-code half of
@@ -646,6 +494,76 @@ mod tests {
                 },
             },
         }
+    }
+
+    /// Reds on: a package or prune slug, delegated, walked or split by a guard, naming another cause
+    /// than the exit code does.
+    #[test]
+    fn package_details_name_the_cause_that_decides_the_code() {
+        use ocx_oci::client::error::ClientError;
+
+        let identifier = || {
+            Box::new(
+                "example.com/dep:1.0"
+                    .parse::<ocx_oci::PackageRef>()
+                    .expect("the fixture identifier parses"),
+            )
+        };
+        let not_found = DependencyPinningError::DependencyNotFound {
+            identifier: identifier(),
+        };
+        assert_detail(&not_found, "dependency_not_found");
+        let blocked = DependencyPinningError::Index(ocx_index::error::Error::PolicyResolutionBlocked {
+            identifier: "pkg:1.0.0".to_string(),
+            policy: "offline",
+            block: ocx_index::error::PolicyBlock::UnpinnedTag,
+        });
+        assert_detail(&blocked, "index_resolution_blocked");
+        let verification = PublishGateError::Verification {
+            identifier: Box::new(pinned(&"a".repeat(64))),
+            source: ClientError::Authentication("bad creds".into()),
+        };
+        assert_detail(&verification, "registry_auth_failed");
+        let invalid_name = MetadataDependencyError::InvalidName {
+            name: "Bad Name".to_string(),
+        };
+        // No ladder rung downcasts this type: only a wrapper's delegation reaches it.
+        assert_slug_code_and_row(&invalid_name, "dependency_declaration_invalid", ExitCode::DataError);
+
+        let refused = |durable: &[&str], not_in_index: &[&str]| PruneError::Refused {
+            package: "ocx.sh/acme/tool".to_string(),
+            url: "https://index.example".to_string(),
+            durable: durable.iter().map(|tag| (*tag).to_string()).collect(),
+            not_in_index: not_in_index.iter().map(|tag| (*tag).to_string()).collect(),
+        };
+        assert_detail(&refused(&["release"], &["fresh"]), "prune_refused_durable");
+        assert_detail(&refused(&[], &["fresh"]), "prune_refused_pending");
+        let unsupported = PruneError::Registry(ClientError::DeleteUnsupported {
+            registry: "registry.example".to_string(),
+            status: 405,
+        });
+        assert_detail(&unsupported, "registry_delete_unsupported");
+        let denied = PruneError::DeleteDenied {
+            repository: "registry.example/acme/tool".to_string(),
+            tag: "snap".to_string(),
+            source: ClientError::Authentication("token lacks delete".into()),
+        };
+        assert_detail(&denied, "registry_auth_failed");
+        let pointer = PruneError::RepositoryPointer {
+            package: "ocx.sh/acme/tool".to_string(),
+            source: prune_ssrf_error(),
+        };
+        assert_detail(&pointer, "ssrf_forbidden_target");
+        let unreadable = PruneError::RootUnreadable {
+            package: "ocx.sh/acme/tool".to_string(),
+            url: "https://index.example".to_string(),
+            source: ocx_index::error::Error::IndexHttpFailed {
+                url: "https://index.example/p/acme/tool.json".to_string(),
+                status: Some(500),
+                source: "unexpected status 500".into(),
+            },
+        };
+        assert_detail(&unreadable, "index_http_failed");
     }
 
     /// A refusal the caller can only fix by naming something else exits 64, never 65 or 1.
@@ -738,11 +656,8 @@ mod tests {
             registry: "registry.example".to_string(),
             status: 405,
         });
-        assert_eq!(unsupported.classify(), Some(ExitCode::RegistryDeleteUnsupported));
-        assert_eq!(
-            crate::exit::classify_library_error(&unsupported),
-            ExitCode::RegistryDeleteUnsupported
-        );
+        assert_eq!(unsupported.classify(), Some(ExitCode::Unsupported));
+        assert_eq!(crate::exit::classify_library_error(&unsupported), ExitCode::Unsupported);
 
         let transient = PruneError::Registry(ocx_oci::client::error::ClientError::RegistryTransient(
             "simulated 503".into(),

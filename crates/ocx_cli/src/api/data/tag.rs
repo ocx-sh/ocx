@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use ocx_console::Cell;
 use serde::Serialize;
@@ -13,80 +13,111 @@ use crate::api::data::sanitize_for_terminal;
 ///
 /// Plain format: two-column table (Package | Tag) by default, or
 /// (Package | Platform) with `--platforms`, or (Package | Variant) with `--variants`.
-///
-/// JSON format: object keyed by package name; values are arrays of tags, platforms, or variants.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Tags {
-    #[serde(flatten)]
-    pub packages: TagsData,
+    /// One entry per package, sorted by package.
+    pub items: Vec<TagsEntry>,
+    #[serde(skip)]
+    header: &'static str,
+}
+
+/// One package's listing; exactly one of `tags`, `platforms` and `variants` is present, chosen by the flag.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct TagsEntry {
+    /// The package as given.
+    pub package: String,
+    /// Its tags, sorted; present without `--platforms` and `--variants`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// The platforms of the listed tag, sorted; present under `--platforms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<ocx_oci::Platform>>,
+    /// Its variant names, sorted, `""` naming the default variant; present under `--variants`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variants: Option<Vec<String>>,
+}
+
+impl TagsEntry {
+    fn new(package: String) -> Self {
+        Self {
+            package,
+            tags: None,
+            platforms: None,
+            variants: None,
+        }
+    }
+
+    /// The listed values as the plain table spells them.
+    fn values(&self) -> Vec<String> {
+        match (&self.tags, &self.platforms, &self.variants) {
+            (Some(values), _, _) | (_, _, Some(values)) => values.clone(),
+            (_, Some(platforms), _) => platforms.iter().map(ToString::to_string).collect(),
+            (None, None, None) => Vec::new(),
+        }
+    }
 }
 
 impl Tags {
     pub fn from_tags(packages: HashMap<String, impl IntoIterator<Item = String>>) -> Self {
-        Self {
-            packages: TagsData::Tags(into_sorted(packages)),
-        }
+        Self::sorted(packages, "Tag", |entry, values| entry.tags = Some(sorted(values)))
     }
 
-    pub fn from_platforms(packages: HashMap<String, Vec<String>>) -> Self {
-        Self {
-            packages: TagsData::Platforms(into_sorted(packages)),
-        }
+    pub fn from_platforms(packages: HashMap<String, Vec<ocx_oci::Platform>>) -> Self {
+        Self::sorted(packages, "Platform", |entry, mut values| {
+            values.sort_by_cached_key(ToString::to_string);
+            entry.platforms = Some(values);
+        })
     }
 
     pub fn from_variants(packages: HashMap<String, Vec<String>>) -> Self {
-        Self {
-            packages: TagsData::Variants(into_sorted(packages)),
-        }
-    }
-}
-
-/// Sorts keys and value lists so table and JSON output do not follow hash order.
-fn into_sorted(packages: HashMap<String, impl IntoIterator<Item = String>>) -> BTreeMap<String, Vec<String>> {
-    packages
-        .into_iter()
-        .map(|(package, values)| {
-            let mut list: Vec<String> = values.into_iter().collect();
-            list.sort();
-            (package, list)
+        Self::sorted(packages, "Variant", |entry, values| {
+            entry.variants = Some(sorted(values))
         })
-        .collect()
-}
+    }
 
-/// Polymorphic tag payload.
-#[derive(Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum TagsData {
-    Tags(BTreeMap<String, Vec<String>>),
-    Platforms(BTreeMap<String, Vec<String>>),
-    Variants(BTreeMap<String, Vec<String>>),
-}
+    /// Sorts packages so table and JSON output do not follow hash order.
+    fn sorted<V>(packages: HashMap<String, V>, header: &'static str, fill: impl Fn(&mut TagsEntry, V)) -> Self {
+        let mut items: Vec<TagsEntry> = packages
+            .into_iter()
+            .map(|(package, values)| {
+                let mut entry = TagsEntry::new(package);
+                fill(&mut entry, values);
+                entry
+            })
+            .collect();
+        items.sort_by(|a, b| a.package.cmp(&b.package));
+        Self { items, header }
+    }
 
-impl Tags {
     fn plain_header(&self) -> &'static str {
-        match &self.packages {
-            TagsData::Tags(_) => "Tag",
-            TagsData::Platforms(_) => "Platform",
-            TagsData::Variants(_) => "Variant",
-        }
+        self.header
     }
 
     /// Column-major rows, neutralized (CWE-150): names and values are index-authored.
     fn plain_rows(&self, theme: &ocx_console::Theme) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        let (TagsData::Tags(packages) | TagsData::Platforms(packages) | TagsData::Variants(packages)) = &self.packages;
-        for (package, values) in packages {
-            for value in values {
-                rows[0].push(sanitize_for_terminal(package));
+        for entry in &self.items {
+            for value in entry.values() {
+                rows[0].push(sanitize_for_terminal(&entry.package));
                 // Sanitize before `theme.tag`, never after, or its own ANSI is stripped instead of the attack.
-                rows[1].push(theme.tag(sanitize_for_terminal(value)));
+                rows[1].push(theme.tag(sanitize_for_terminal(&value)));
             }
         }
         rows
     }
 }
 
+/// Sorts one value list; lexical, so the empty default variant comes first.
+fn sorted(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut list: Vec<String> = values.into_iter().collect();
+    list.sort();
+    list
+}
+
 impl Printable for Tags {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Tags";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         printer.print_table(
             &["Package".into(), self.plain_header().into()],
@@ -110,6 +141,29 @@ mod tests {
                     (*key).to_string(),
                     values.iter().map(|value| (*value).to_string()).collect(),
                 )
+            })
+            .collect()
+    }
+
+    /// The plain-spelled values one package lists.
+    fn values_of(tags: &Tags, package: &str) -> Vec<String> {
+        tags.items
+            .iter()
+            .find(|entry| entry.package == package)
+            .map(TagsEntry::values)
+            .expect("the package is listed")
+    }
+
+    /// [`package_map`] with every value parsed as a platform.
+    fn platform_map(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<ocx_oci::Platform>> {
+        package_map(pairs)
+            .into_iter()
+            .map(|(key, values)| {
+                let platforms = values
+                    .iter()
+                    .map(|value| value.parse().expect("a valid platform"))
+                    .collect();
+                (key, platforms)
             })
             .collect()
     }
@@ -165,13 +219,23 @@ mod tests {
             ],
         );
 
-        let TagsData::Tags(map) = &tags.packages else {
-            panic!("expected Tags variant");
-        };
         // Lexical (byte) sort, not semver: "0.10" < "0.2" because '1' < '2' at the
         // third byte. Intentional — the contract is determinism, not version order.
-        assert_eq!(map["zeta"], ["0.1", "0.10", "0.2"], "inner list must be sorted");
-        assert_eq!(map["mike"], ["1.0", "2.1", "3.2"], "inner list must be sorted");
+        assert_eq!(
+            values_of(&tags, "zeta"),
+            ["0.1", "0.10", "0.2"],
+            "inner list must be sorted"
+        );
+        assert_eq!(
+            values_of(&tags, "mike"),
+            ["1.0", "2.1", "3.2"],
+            "inner list must be sorted"
+        );
+        assert_eq!(
+            serde_json::to_value(&tags).expect("serializes")["items"][0],
+            serde_json::json!({"package": "alpha", "tags": ["1.1", "9.0"]}),
+            "a tag listing carries `tags` only"
+        );
     }
 
     #[test]
@@ -204,19 +268,14 @@ mod tests {
             ],
         );
 
-        let TagsData::Variants(map) = &tags.packages else {
-            panic!("expected Variants variant");
-        };
         // Lexical sort keeps the empty default variant first.
-        assert_eq!(map["mike"], ["", "gnu", "musl"]);
+        assert_eq!(values_of(&tags, "mike"), ["", "gnu", "musl"]);
     }
 
     #[test]
     fn from_platforms_emits_sorted_keys_and_sorted_inner_lists() {
-        // `from_platforms` shares `into_sorted` with the other constructors, but the
-        // `Platforms` variant is type-distinct: this guards against a future revert of
-        // its field to `HashMap`, which the from_tags/from_variants tests would miss.
-        let packages = package_map(&[
+        // Platforms are typed, so their ordering is checked apart from the string lists.
+        let packages = platform_map(&[
             ("mike", &["windows/amd64", "linux/amd64", "darwin/arm64"]),
             ("alpha", &["linux/arm64"]),
             ("zeta", &["linux/amd64"]),
@@ -244,13 +303,15 @@ mod tests {
             ],
         );
 
-        let TagsData::Platforms(map) = &tags.packages else {
-            panic!("expected Platforms variant");
-        };
         assert_eq!(
-            map["mike"],
+            values_of(&tags, "mike"),
             ["darwin/arm64", "linux/amd64", "windows/amd64"],
             "inner list must be sorted"
+        );
+        assert_eq!(
+            serde_json::to_value(&tags).expect("serializes")["items"][0],
+            serde_json::json!({"package": "alpha", "platforms": [{"architecture": "arm64", "os": "linux"}]}),
+            "a platform is the OCI platform object, not its flag spelling"
         );
     }
 
@@ -274,7 +335,8 @@ mod tests {
         let hostile = || package_map(&[(HOSTILE, &[HOSTILE])]);
         let all_variants = [
             Tags::from_tags(hostile()),
-            Tags::from_platforms(hostile()),
+            // A platform is parsed, so only its package name can carry the attack.
+            Tags::from_platforms(platform_map(&[(HOSTILE, &["linux/amd64"])])),
             Tags::from_variants(hostile()),
         ];
         for tags in all_variants {

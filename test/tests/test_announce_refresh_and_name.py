@@ -19,7 +19,7 @@ Scope:
 * **ocx#477** — announce refuses a committed root whose `name` disagrees with
   the identifier on the command line, at exit 65, naming both values. An absent
   `name` is a disagreement too. The check needs no `[registries."<domain>"]`
-  entry, which the `--out` rows here are what say.
+  entry, which the `--output` rows here are what say.
 
 * **Snapshot removal** — vanished rows, empty tags files and canonical observation.
 
@@ -108,7 +108,7 @@ def test_refresh_on_a_claimed_unreleased_package_completes_instead_of_exiting_64
 
     assert report["status"] == "unchanged"
     assert report["desc_status"] == "unchanged"
-    assert report["pull_request_url"] is None, "nothing moved, so nothing is proposed"
+    assert "pull_request_url" not in report, "nothing moved, so nothing is proposed"
 
 
 def test_refresh_publishes_a_description_for_a_package_with_no_versions(
@@ -166,7 +166,7 @@ def test_an_empty_tags_file_changes_nothing_and_exits_0(
         fake_forge,
         "--tags-file",
         str(empty_tags_file),
-        "--out",
+        "--output",
         str(out_dir),
         package,
         check=False,
@@ -175,7 +175,7 @@ def test_an_empty_tags_file_changes_nothing_and_exits_0(
     assert result.returncode == 0, (
         f"an empty --tags-file names no version and is a no-op; got {result.returncode}: {result.stderr}"
     )
-    assert not out_dir.exists(), f"a no-op must not write --out; found {sorted(out_dir.rglob('*'))}"
+    assert not out_dir.exists(), f"a no-op must not write --output; found {sorted(out_dir.rglob('*'))}"
 
 
 # ── ocx#477: the root's name is checked against the identifier ──────────────
@@ -195,7 +195,7 @@ def test_announce_refuses_a_root_that_names_another_package(
     operator cannot tell which side is wrong from either one alone.
 
     No `[registries]` entry is configured, and the refusal still fires: the check
-    reads the identifier, never the config, so it cannot refuse an `--out` render
+    reads the identifier, never the config, so it cannot refuse an `--output` render
     on a machine that has no entry for the domain.
     """
     package = f"acme/{unique_repo}"
@@ -204,7 +204,7 @@ def test_announce_refuses_a_root_that_names_another_package(
     seed_canonical_root(fake_forge, package, physical, name=foreign)
 
     result = announce(
-        ocx, fake_forge, "--refresh", "--out", str(tmp_path / "out"), package, check=False
+        ocx, fake_forge, "--refresh", "--output", str(tmp_path / "out"), package, check=False
     )
 
     assert result.returncode == 65, f"expected DataError (65), got {result.returncode}: {result.stderr}"
@@ -226,7 +226,7 @@ def test_announce_refuses_a_root_carrying_no_name_at_all(
     seed_canonical_root(fake_forge, package, physical, name="")
 
     result = announce(
-        ocx, fake_forge, "--refresh", "--out", str(tmp_path / "out"), package, check=False
+        ocx, fake_forge, "--refresh", "--output", str(tmp_path / "out"), package, check=False
     )
 
     assert result.returncode == 65, f"expected DataError (65), got {result.returncode}: {result.stderr}"
@@ -253,7 +253,7 @@ def test_a_matching_name_needs_no_registries_entry_to_get_past_the_check(
     # Deliberately no `configure_trusted_hosts` call.
 
     result = announce(
-        ocx, fake_forge, "--refresh", "--out", str(tmp_path / "out"), package, check=False
+        ocx, fake_forge, "--refresh", "--output", str(tmp_path / "out"), package, check=False
     )
 
     assert result.returncode == 78, (
@@ -279,7 +279,7 @@ def test_an_empty_tags_value_names_one_malformed_tag(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
     out_dir = tmp_path / "out"
 
-    result = announce(ocx, fake_forge, "--tags", "", "--out", str(out_dir), package, check=False)
+    result = announce(ocx, fake_forge, "--tags", "", "--output", str(out_dir), package, check=False)
 
     assert result.returncode == 64, (
         "an empty --tags value names one malformed tag, which is a usage error — not the "
@@ -342,7 +342,7 @@ def test_refresh_removes_a_vanished_ephemeral_row_and_reports_a_vanished_durable
     package, rows = seed_two_vanished_tags(ocx, fake_forge, unique_repo, tmp_path)
     out_dir = tmp_path / "out"
 
-    report = announce_json(ocx, fake_forge, "--refresh", "--out", str(out_dir), package)
+    report = announce_json(ocx, fake_forge, "--refresh", "--output", str(out_dir), package)
 
     assert report["status"] == "updated"
     assert report["removed"] == ["1.0.0"], "only the ephemeral row is removed by a refresh"
@@ -363,7 +363,7 @@ def test_naming_a_vanished_durable_tag_removes_it_and_touches_no_other_row(
     tags_file.write_text("2.0.0\n")
     out_dir = tmp_path / "out"
 
-    report = announce_json(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package)
+    report = announce_json(ocx, fake_forge, "--tags-file", str(tags_file), "--output", str(out_dir), package)
 
     assert report["removed"] == ["2.0.0"]
     assert report["durable_missing"] == []
@@ -381,7 +381,7 @@ def test_ephemeral_beside_refresh_is_a_usage_error(
         fake_forge,
         "--ephemeral",
         "--refresh",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         f"acme/{unique_repo}",
         check=False,
@@ -404,7 +404,7 @@ def test_a_tags_file_naming_a_tag_neither_registry_nor_index_holds_writes_nothin
     tags_file.write_text("9.9.9\n")
     out_dir = tmp_path / "out"
 
-    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package, check=False)
+    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--output", str(out_dir), package, check=False)
 
     assert result.returncode == 79, f"expected NotFound (79), got {result.returncode}: {result.stderr}"
     assert "9.9.9" in result.stderr, f"the refusal must name the tag it could not resolve: {result.stderr}"
@@ -423,7 +423,7 @@ def test_a_tag_outside_the_oci_grammar_exits_64_and_writes_nothing(
     tags_file.write_text("9.9.9#x\n")
     out_dir = tmp_path / "out"
 
-    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package, check=False)
+    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--output", str(out_dir), package, check=False)
 
     assert result.returncode == 64, f"expected a usage error (64), got {result.returncode}: {result.stderr}"
     assert "is not a valid OCI tag" in result.stderr, f"the 64 must be the tag refusal: {result.stderr}"
@@ -443,7 +443,7 @@ def test_a_fragment_on_a_published_tag_exits_64_instead_of_recording_that_tag(
     tags_file.write_text("1.0#x\n")
     out_dir = tmp_path / "out"
 
-    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--out", str(out_dir), package, check=False)
+    result = announce(ocx, fake_forge, "--tags-file", str(tags_file), "--output", str(out_dir), package, check=False)
 
     assert result.returncode == 64, f"expected a usage error (64), got {result.returncode}: {result.stderr}"
     assert "is not a valid OCI tag" in result.stderr, f"the 64 must be the tag refusal: {result.stderr}"
@@ -477,7 +477,7 @@ def test_tags_are_observed_at_the_canonical_registry_when_a_mirror_is_configured
         fake_forge,
         "--tags",
         "1.0.0",
-        "--out",
+        "--output",
         str(out_dir),
         package,
         check=False,

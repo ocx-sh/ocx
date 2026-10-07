@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "skipped",
+  "skipped_reason": {
+    "type": "gravity_failure",
+    "detail": "not a registered reason"
+  }
+}

@@ -79,14 +79,24 @@ impl std::fmt::Display for ToolchainPathComponent {
 ///
 /// Validated here, not at a producer: names also arrive from `-g` and a hostile clone's `ocx.lock`.
 /// Interpolated with `{:?}`, never raw, or a newline in an untrusted name forges log lines (CWE-117).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, ocx_exit::Classify)]
 pub enum ToolchainPathError {
     /// An empty component would make `<group>/<entry>` name the group directory itself.
     #[error("toolchain {component} name is empty")]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_name_empty",
+        summary = "A toolchain group or entry name is empty"
+    )]
     Empty { component: ToolchainPathComponent },
 
     /// Any Unicode control character, `U+0080`–`U+009F` included: the name reaches emitted `PATH` values (CWE-77) and logs (CWE-117).
     #[error("toolchain {component} name {value:?} contains a control character")]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_name_control_character",
+        summary = "A toolchain group or entry name contains a control character"
+    )]
     ControlCharacter {
         component: ToolchainPathComponent,
         value: String,
@@ -94,6 +104,11 @@ pub enum ToolchainPathError {
 
     /// `/` or `\`, on every platform, or one component widens into several.
     #[error("toolchain {component} name {value:?} contains a path separator")]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_name_separator",
+        summary = "A toolchain group or entry name contains a path separator"
+    )]
     Separator {
         component: ToolchainPathComponent,
         value: String,
@@ -101,6 +116,11 @@ pub enum ToolchainPathError {
 
     /// Any `:`, on every platform: on Windows `PathBuf::push("C:")` discards the home root.
     #[error("toolchain {component} name {value:?} carries a path prefix")]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_name_path_prefix",
+        summary = "A toolchain group or entry name carries a path prefix"
+    )]
     PathPrefix {
         component: ToolchainPathComponent,
         value: String,
@@ -108,6 +128,11 @@ pub enum ToolchainPathError {
 
     /// A trailing `.` or space, on every platform: Windows strips it, so `foo.` and `foo` name one directory.
     #[error("toolchain {component} name {value:?} ends with a dot or a space")]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_name_trailing_dot_or_space",
+        summary = "A toolchain group or entry name ends with a dot or a space"
+    )]
     TrailingDotOrSpace {
         component: ToolchainPathComponent,
         value: String,
@@ -115,6 +140,11 @@ pub enum ToolchainPathError {
 
     /// `.` or `..`.
     #[error("toolchain {component} name {value:?} is a relative path component")]
+    #[exit(
+        ConfigError,
+        slug = "toolchain_name_relative",
+        summary = "A toolchain group or entry name is a relative path component"
+    )]
     Relative {
         component: ToolchainPathComponent,
         value: String,
@@ -366,10 +396,13 @@ mod tests {
         let Some(sandbox) = ocx_config::sandbox_or_skip() else {
             return;
         };
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_HOME", sandbox.path().to_str().expect("anchor path is utf-8"));
+        let env = ocx_env::overrides::lock();
         env.set(
-            ocx_config::env::keys::OCX_TOOLCHAIN_DIR,
+            &ocx_env::OCX_HOME,
+            sandbox.path().to_str().expect("anchor path is utf-8"),
+        );
+        env.set(
+            &ocx_env::OCX_TOOLCHAIN_DIR,
             sandbox.path().join("elsewhere").to_str().expect("path is utf-8"),
         );
 

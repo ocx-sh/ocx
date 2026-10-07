@@ -14,7 +14,7 @@ enum Refusal {
     /// A leased force-push lost its lease (exit 75).
     StaleLease,
     /// The server refused a write the credential may not make:
-    /// [`ForgeError::WriteCapabilityUnavailable`] (86) under an `unknown`
+    /// [`ForgeError::WriteCapabilityUnavailable`] (82) under an `unknown`
     /// `job-token-push` preflight, [`ForgeError::PushRefused`] (77) otherwise.
     PermissionOrCapability,
     /// Any other `pre-receive` refusal: always [`ForgeError::PushRefused`] (77).
@@ -37,7 +37,7 @@ enum MatchScope {
 /// Mirrors `OBSERVED_REFUSAL_STDERR` in `test/tests/git_http_fixture.py`; both sides assert
 /// the arity, so a new row needs a fixture shape too.
 // A job-token refusal also carries `(pre-receive hook declined)`, so moving that row up makes
-// the 86 promotion unreachable.
+// the 82 promotion unreachable.
 // `not allowed to push` stays a substring so it also matches GitLab's protected-branch wording.
 const REFUSAL_NEEDLES: [(&str, MatchScope, Refusal); 6] = [
     ("(stale info)", MatchScope::Body, Refusal::StaleLease),
@@ -400,7 +400,7 @@ mod tests {
     /// too old.
     ///
     /// Reds on: rewriting the predicate as `!= CheckStatus::Passed` (the three
-    /// `Skipped` cells flip to 86), as `== CheckStatus::Passed`, or dropping the
+    /// `Skipped` cells flip to 82), as `== CheckStatus::Passed`, or dropping the
     /// status read entirely.
     #[test]
     fn promotion_fires_only_on_unknown_preflight() {
@@ -487,7 +487,7 @@ mod tests {
     ///
     /// The cell that matters is `(fetch first)` under `unknown`: a classifier
     /// that read the status before matching the phrase would turn every
-    /// retryable race on an older GitLab into a terminal 86 and kill the retry
+    /// retryable race on an older GitLab into a terminal 82 and kill the retry
     /// convergence. `(pre-receive hook declined)` alone stays 77 under
     /// `unknown` for the same reason — the promotion is gated on the promotable
     /// set, not on "any refusal".
@@ -537,7 +537,7 @@ mod tests {
     /// promotable line **and** `(pre-receive hook declined)` at once.
     ///
     /// This is the pair the fixture records, not a body invented here, and it is
-    /// the case that decides whether the 86 promotion is reachable in production
+    /// the case that decides whether the 82 promotion is reachable in production
     /// at all. An earlier draft of this design shipped the opposite order and
     /// the promotion could never fire.
     ///
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(
             outcome_of(&classify(&body, CheckStatus::Unknown)),
             Outcome::Capability,
-            "the combined body must promote, or the 86 arm is dead code in production"
+            "the combined body must promote, or the 82 arm is dead code in production"
         );
         assert_eq!(
             outcome_of(&classify(&body, CheckStatus::Passed)),
@@ -620,7 +620,7 @@ mod tests {
     /// Bodies that look like a promotable refusal and are not.
     ///
     /// Every row is run under `unknown`, the status where promotion is armed, so
-    /// a widened matcher shows up as an 86 an operator cannot act on. Each row
+    /// a widened matcher shows up as an 82 an operator cannot act on. Each row
     /// names the widening it forbids:
     ///
     /// * a branch called `not-allowed-to-push` echoed in git's reject line —
@@ -930,10 +930,10 @@ mod tests {
         }
     }
 
-    /// The promoted 86 names the row that was unreadable, the repository, and
+    /// The promoted 82 names the row that was unreadable, the repository, and
     /// S-017's two-signal remedy.
     ///
-    /// There are two different 86s and they carry two different remedies. The
+    /// There are two different 82s and they carry two different remedies. The
     /// preflight's fires when the job-token field reads `false` and names
     /// Settings → CI/CD → Job token permissions, because ocx read the setting.
     /// This one fires when the field could not be read *and* the push was then
@@ -965,7 +965,7 @@ mod tests {
                 );
                 assert!(
                     !remedy.contains("Job token permissions"),
-                    "this is not the preflight's 86 — its Settings remedy belongs to the readable-false path"
+                    "this is not the preflight's 82 — its Settings remedy belongs to the readable-false path"
                 );
             }
             other => panic!("an unknown preflight must promote; got {other:?}"),
@@ -1103,7 +1103,7 @@ mod tests {
         }
     }
 
-    /// A 403 on a push still reaches the documented 77/86 verdict rather than
+    /// A 403 on a push still reaches the documented 77/82 verdict rather than
     /// the 80 the same text earns on a fetch.
     ///
     /// The two tables share the `403` needle **and a push now does consult the

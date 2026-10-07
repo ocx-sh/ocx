@@ -159,6 +159,7 @@ class TestShareableQualityRules:
         "quality-typescript.md",
         "quality-bash.md",
         "quality-vite.md",
+        "quality-rust-exit_codes.md",
     ]
 
     def test_shareable_rules_no_ocx_leak(self) -> None:
@@ -2153,6 +2154,11 @@ class TestSubsystemCliCommandsTableCoverage:
         # `package_sign_common.rs` = shared OIDC/signing helpers for
         # `package sign` and `package attest` (not a command).
         "package_sign_common",
+        # `contract.rs` = every command's output modes and contract version,
+        # read by the `cli.json` export (not a command).
+        "contract",
+        # `leaf.rs` = the `Leaf` enum every command name derives from (not a command).
+        "leaf",
         # `app.rs` / `command.rs` rooted dispatchers (not commands themselves).
     }
 
@@ -3053,9 +3059,9 @@ class TestAgentGateWording:
     sentence (ADR `adr_test_speed_tiers.md` § C-AGENT):
 
         Per task / review-fix iteration: `task verify:scoped --force`. Full
-        `task verify` runs at WP merge (enforced by the commit gate), at
-        finalize, and whenever `verify:scoped` escalates (it then runs
-        `task verify` itself).
+        `task verify` runs once, at finalize; until then `task verify:mark`
+        is always allowed — pick the level the change needs
+        (`workflow-git.md` § Verification Levels).
 
     The line-scoped regex below is the ADR's own enforcement design: a line
     naming bare `` `task verify` `` (never `` `task verify:<subcommand>` ``)
@@ -3121,9 +3127,9 @@ class TestAgentGateWording:
         original = target.read_text(encoding="utf-8")
         canonical = (
             "Per task / review-fix iteration: `task verify:scoped --force`. "
-            "Full `task verify` runs at WP merge (enforced by the commit "
-            "gate), at finalize, and whenever `verify:scoped` escalates (it "
-            "then runs `task verify` itself)."
+            "Full `task verify` runs once, at finalize; until then `task "
+            "verify:mark` is always allowed — pick the level the change needs "
+            "(`workflow-git.md` § Verification Levels)."
         )
         assert canonical in original, (
             "fixture text not found in subsystem-cli.md — update this test's "
@@ -3185,10 +3191,10 @@ class TestAgentGateWording:
         reverted = original.replace(
             "Use `task` commands for standard workflows: `task verify:scoped "
             "--force` per task/review-fix iteration; full `task verify` runs "
-            "at WP merge (enforced by the commit gate), at finalize, and "
-            "whenever `verify:scoped` escalates (it then runs `task verify` "
-            "itself). `task test:quick` (acceptance). Run `task --list` to "
-            "discover commands.",
+            "once, at finalize; until then `task verify:mark` is always "
+            "allowed — pick the level the change needs (`workflow-git.md` § "
+            "Verification Levels). `task test:quick` (acceptance). Run `task "
+            "--list` to discover commands.",
             "Use `task` commands for standard workflows: `task verify` "
             "(full gate), `task test:quick` (acceptance). Run `task --list` "
             "to discover commands.",

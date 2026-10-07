@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "command": "package sbom",
+  "exit_code": 81,
+  "error": {
+    "kind": "permission_denied",
+    "detail": "index_resolution_blocked",
+    "message": "ocx.sh/x: internal verification error: offline mode refused to resolve unpinned reference 'ocx.sh/x'; run `ocx index update` or pin a digest",
+    "context": {
+      "identifier": "ocx.sh/x"
+    }
+  }
+}

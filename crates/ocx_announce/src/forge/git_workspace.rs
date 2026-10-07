@@ -49,7 +49,7 @@ pub const CONFIRMATION_SCHEDULE: PollSchedule = PollSchedule {
 /// The `__testing` seam replacing [`CONFIRMATION_SCHEDULE`]'s intervals, as
 /// `initial,max,deadline` **milliseconds**, so acceptance rows can exhaust the poll fast.
 #[cfg(any(test, feature = "__testing"))]
-const TESTING_CONFIRMATION_ENV: &str = "__OCX_TESTING_FORGE_CONFIRM_MS";
+const TESTING_CONFIRMATION_ENV: &str = ocx_env::__OCX_TESTING_FORGE_CONFIRM_MS.name;
 
 /// [`CONFIRMATION_SCHEDULE`], or the [`TESTING_CONFIRMATION_ENV`] override.
 ///
@@ -57,7 +57,10 @@ const TESTING_CONFIRMATION_ENV: &str = "__OCX_TESTING_FORGE_CONFIRM_MS";
 /// the real deadline and still pass.
 #[cfg(any(test, feature = "__testing"))]
 fn confirmation_schedule() -> PollSchedule {
-    let Ok(raw) = std::env::var(TESTING_CONFIRMATION_ENV) else {
+    let Some(raw) = ocx_env::__OCX_TESTING_FORGE_CONFIRM_MS
+        .get_raw()
+        .and_then(|raw| raw.into_string().ok())
+    else {
         return CONFIRMATION_SCHEDULE;
     };
     let millis: Vec<u64> = raw
@@ -155,7 +158,7 @@ where
 /// What a rejected `git push` needs before it can be named.
 ///
 /// The workspace cannot derive either; without the preflight a refusal classifies as
-/// [`ForgeError::PushRefused`] (77) where [`ForgeError::WriteCapabilityUnavailable`] (86) is required.
+/// [`ForgeError::PushRefused`] (77) where [`ForgeError::WriteCapabilityUnavailable`] (82) is required.
 pub struct RefusalContext<'a> {
     /// The write preflight this run already performed.
     pub preflight: &'a PushAccess,
@@ -713,7 +716,7 @@ impl GitWorkspace {
     fn command_failed(&self, command: &str, output: &std::process::Output) -> ForgeError {
         // Uncapped: `remote:` banners push the phrase to the tail, where a cap would cut it.
         let stderr = redact(String::from_utf8_lossy(&output.stderr).trim(), &self.secrets());
-        // `Fetch`: here a 403 is a refused credential, while a push's 403 keeps its 77/86.
+        // `Fetch`: here a 403 is a refused credential, while a push's 403 keeps its 77/82.
         if let Some(rejected) = classify_remote_failure(&stderr, &self.remote, GitInvocation::Fetch) {
             return rejected;
         }
@@ -1059,7 +1062,7 @@ mod tests {
         /// This host's own `git`, resolved against the **process** `PATH`.
         ///
         /// Deliberately not `probe_git_binary`, which resolves against
-        /// `ocx_util::env::var("PATH")` — a value `ocx_util::env::overrides` lets any test
+        /// `ocx_env::PATH.get_raw()` — a value `ocx_env::overrides` lets any test
         /// in this binary override *globally*. `git_command`'s
         /// `probe_git_binary_resolves_git_on_the_child_path` points that
         /// override at a temporary directory holding a `--version`-only shim,

@@ -528,7 +528,7 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         self.gitlab_merge_request_fail_once: bool = False
         # Project path -> the `ci_push_repository_for_job_token_allowed` value
         # the project body reports. THREE states, not two (C-029): `True`
-        # passes, `False` refuses at 86 before any push, and a project ABSENT
+        # passes, `False` refuses at 77 before any push, and a project ABSENT
         # from this dict emits **no field at all** — the GitLab < 18.4 / hidden
         # case that is the only one yielding `unknown`-and-proceed. Absence is
         # the default, so every existing consumer sees the body it sees today.
@@ -648,7 +648,7 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
     def read_file(self, owner: str, repo: str, path: str, *, branch: str = "main") -> bytes | None:
         """Test-assertion helper: reads a committed file directly from the
         in-memory git graph, bypassing HTTP — the only way to inspect what a
-        `--fork` run committed onto its own branch, since `--out` mode never
+        `--fork` run committed onto its own branch, since `--output` mode never
         surfaces it (it reads/writes independently of the forge commit
         history) and the real forge has no "diff" endpoint to poll."""
         full = f"{owner}/{repo}"
@@ -911,7 +911,7 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         `seed_logins`' strong guard (`claim/owners.rs`) rather than the
         login-shape guard; `token_identity_absent` is
         `::test_no_acting_identity_64` and
-        `::test_author_is_null_without_a_token_identity_or_a_ci_pair`, which is
+        `::test_author_is_absent_without_a_token_identity_or_a_ci_pair`, which is
         `author`'s null rung AND the observation that this knob really is
         narrower than `users_api_status` — it passes `--owner`, so the owner
         lookup must still answer for that row to succeed at all.
@@ -922,7 +922,7 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         may not call the users API at all, and its scope is every user route the
         client can express it on. A test needing the second without the first
         exists (`asserted`); a test needing the first without the second exists
-        (`::test_author_is_null_without_a_token_identity_or_a_ci_pair`, whose
+        (`::test_author_is_absent_without_a_token_identity_or_a_ci_pair`, whose
         owner lookup must still answer — which is what makes the narrowness
         observable rather than only asserted here).
         """

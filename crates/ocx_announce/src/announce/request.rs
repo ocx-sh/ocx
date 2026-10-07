@@ -78,7 +78,7 @@ pub struct AnnounceRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnounceStatus {
     /// Byte-identical root and no new CAS object: no commit, no pull request.
-    /// `--out` still writes its files.
+    /// `--output` still writes its files.
     Unchanged,
     /// The rebuilt root differed.
     Updated,
@@ -102,7 +102,7 @@ pub struct AnnounceOutcome {
     pub pull_request: Option<PullRequest>,
     /// The verified fork identity, when the run used a fork.
     pub fork: Option<ForkIdentity>,
-    /// The paths written under `--out` (sorted, the whole entry even when
+    /// The paths written under `--output` (sorted, the whole entry even when
     /// unchanged); empty otherwise.
     pub written_paths: Vec<String>,
     /// Whether the `__ocx.desc` observation moved the root's `desc` object.

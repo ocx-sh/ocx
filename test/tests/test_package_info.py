@@ -71,22 +71,23 @@ def test_info_with_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path)
 
 
 def test_info_json(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """package info --format json returns an object keyed by the raw identifier."""
+    """package info --format json keys each description by the raw identifier."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_description(ocx, unique_repo, tmp_path, title="CMake", description="Build system", keywords="cmake,build")
 
-    data = ocx.json("package", "description", "pull", pkg.fq)[pkg.fq]
+    data = ocx.json("package", "description", "pull", pkg.fq)["descriptions"][pkg.fq]
+    assert data["published"] is True
     assert data["title"] == "CMake"
     assert data["description"] == "Build system"
     assert data["keywords"] == "cmake,build"
 
 
 def test_info_json_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
-    """package info --format json keys the package with a null value when absent."""
+    """package info --format json reports an unpublished description as `published: false`."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     data = ocx.json("package", "description", "pull", pkg.fq)
-    assert list(data.keys()) == [pkg.fq]
-    assert data[pkg.fq] is None
+    assert list(data.keys()) == ["schema_version", "descriptions"]
+    assert data["descriptions"] == {pkg.fq: {"published": False}}
 
 
 def test_info_save_readme(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -140,11 +141,11 @@ def test_info_multiple_packages_json_keyed_object(
     b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_b", "1.0.0", tmp_path)
     _push_description(ocx, a.repo, tmp_path, title="Alpha")
 
-    data = ocx.json("package", "description", "pull", a.fq, b.fq)
+    data = ocx.json("package", "description", "pull", a.fq, b.fq)["descriptions"]
 
     assert set(data.keys()) == {a.fq, b.fq}
     assert data[a.fq]["title"] == "Alpha"
-    assert data[b.fq] is None
+    assert data[b.fq] == {"published": False}
 
 
 def test_info_rejects_duplicate_references(ocx: OcxRunner) -> None:

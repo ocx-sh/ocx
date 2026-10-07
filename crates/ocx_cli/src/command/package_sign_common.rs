@@ -167,10 +167,8 @@ pub(super) async fn resolve_override_token(
         return Ok(Some(Zeroizing::new(buf.trim().to_string())));
     }
     // Credential exemption: not forwarded via OcxConfigView. See subsystem-cli.md.
-    if let Ok(token) = std::env::var(ocx_config::env::keys::OCX_IDENTITY_TOKEN)
-        && !token.is_empty()
-    {
-        return Ok(Some(Zeroizing::new(token)));
+    if let Some(token) = ocx_env::OCX_IDENTITY_TOKEN.get() {
+        return Ok(Some(Zeroizing::new(token.into_inner())));
     }
     Ok(None)
 }
@@ -255,11 +253,17 @@ pub(super) fn resolve_rekor_endpoint(
     })
 }
 
-/// Format a UTC epoch-seconds timestamp as ISO-8601 (`YYYY-MM-DDThh:mm:ssZ`).
-pub(super) fn iso8601(epoch_secs: u64) -> String {
-    chrono::DateTime::from_timestamp(epoch_secs as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_default()
+/// A Rekor `integratedTime` (UTC epoch seconds) as a wire timestamp; `None` when out of range.
+pub(super) fn signed_at(epoch_secs: u64) -> Option<ocx_util::time::Timestamp> {
+    let timestamp = i64::try_from(epoch_secs)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .map(ocx_util::time::Timestamp::from);
+    // `None` reads as "no transparency record", so an unrepresentable time must not pass silently.
+    if timestamp.is_none() {
+        log::warn!("Rekor integratedTime {epoch_secs} is out of range; reporting no signed_at");
+    }
+    timestamp
 }
 
 /// The ANY-of identity constraints the signing certificate must satisfy: the flag pair, else the
@@ -362,7 +366,11 @@ pub(super) async fn resolve_trust_root(
 ) -> anyhow::Result<TrustRoot> {
     let explicit = trusted_root
         .map(std::path::Path::to_path_buf)
-        .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(std::path::PathBuf::from))
+        .or_else(|| {
+            ocx_env::OCX_SIGSTORE_TRUSTED_ROOT
+                .get_raw()
+                .map(std::path::PathBuf::from)
+        })
         .map(explicit_trust_root_path);
     let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path();
     ocx_sign::verify::resolve_trust_root(
@@ -477,11 +485,7 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
 
 /// A failed `push --sbom` attestation, slugged as the JSON error envelope would slug it.
 pub(super) fn failed_outcome(err: &anyhow::Error) -> crate::api::data::push::AttestationOutcome {
-    crate::api::data::push::AttestationOutcome::Failed {
-        kind: error_slug("package attest", err),
-        // Registry-sourced text reaches the chain verbatim (CWE-150), and this renders to a terminal.
-        message: crate::api::data::sanitize_for_terminal(&format!("{err:#}")),
-    }
+    crate::api::data::push::AttestationOutcome::failed(error_slug("package attest", err), format!("{err:#}"))
 }
 
 /// The slug the JSON error envelope would give `err`: `error.detail`, else `error.kind`.
@@ -489,7 +493,7 @@ pub(super) fn failed_outcome(err: &anyhow::Error) -> crate::api::data::push::Att
 /// Lifted from the rendered envelope, never re-derived, or a report and the envelope spell one
 /// failure two ways.
 pub(super) fn error_slug(command: &str, err: &anyhow::Error) -> String {
-    crate::error_envelope::render_error_envelope(command, err)
+    crate::error_document::render_error_document(command, err)
         .ok()
         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .as_ref()
@@ -502,13 +506,13 @@ pub(super) fn error_slug(command: &str, err: &anyhow::Error) -> String {
         .to_owned()
 }
 
-/// The frozen `error.kind` a failed leg rolls up to: its run returned `Ok`, so no envelope
-/// `error.detail` exists to lift.
-pub(super) fn category_slug(code: ocx_exit::ExitCode) -> String {
-    serde_json::to_value(ocx_exit::ErrorCategory::from_exit_code(code))
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "failure".to_string())
+/// The `error.detail` slug of a failed leg: its run returned `Ok`, so no envelope exists to lift it from.
+///
+/// The detail, not the category, because the category flattens `referrers_unsupported` (and every other
+/// capability gap) to `unsupported`; an `Internal` leg answers with its wrapped cause's slug, as a
+/// whole-run failure does.
+pub(super) fn leg_slug(kind: &ocx_sign::sign::SignErrorKind) -> String {
+    crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(kind)).to_owned()
 }
 
 /// A `--tags` sweep's exit code: `Success` with no failure, the shared code when every failure
@@ -559,7 +563,7 @@ pub(super) fn signature_report(
         .collect();
 
     SignatureReport::new(
-        identifier.to_string(),
+        identifier.clone(),
         result.subject_digest,
         legs,
         platform,
@@ -575,7 +579,8 @@ pub(super) fn signature_report(
 pub(super) fn leg_exit_code(kind: &ocx_sign::sign::SignErrorKind) -> ocx_exit::ExitCode {
     match kind {
         ocx_sign::sign::SignErrorKind::Internal(cause) => crate::exit::classify_library_error(cause.as_ref()),
-        other => crate::exit::ClassifyErrorKind::exit_code(other),
+        // Every other kind decides its own code; `Failure` is only reachable for a kind that defers.
+        other => ocx_exit::ClassifyExitCode::classify(other).unwrap_or(ocx_exit::ExitCode::Failure),
     }
 }
 
@@ -605,7 +610,7 @@ mod leg_exit_code_tests {
     fn a_leg_failing_on_a_sign_side_kind_keeps_that_kinds_code() {
         assert_eq!(
             leg_exit_code(&SignErrorKind::ReferrersUnsupported),
-            ExitCode::ReferrersUnsupported
+            ExitCode::Unsupported
         );
     }
 }
@@ -619,7 +624,7 @@ mod tests {
     //! their helpers.
 
     use super::*;
-    use crate::error_envelope::render_error_envelope;
+    use crate::error_document::render_error_document;
 
     /// C-083 — both explicit doors (`--sigstore-trusted-root`,
     /// `OCX_SIGSTORE_TRUSTED_ROOT`) take the two spellings
@@ -948,7 +953,7 @@ mod tests {
             )))),
         );
         let err = verify_error_into_anyhow(package_error);
-        let json = render_error_envelope("package verify", &err).expect("render envelope");
+        let json = render_error_document("package verify", &err).expect("render envelope");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
 
         assert_eq!(parsed["exit_code"], 77);
@@ -971,7 +976,7 @@ mod tests {
     }
 
     fn envelope(err: &anyhow::Error) -> serde_json::Value {
-        let json = render_error_envelope("package attest", err).expect("render envelope");
+        let json = render_error_document("package attest", err).expect("render envelope");
         serde_json::from_str(&json).expect("valid json")
     }
 
@@ -1019,7 +1024,7 @@ mod tests {
             (SignErrorKind::PredicateNotJson, 65, "data_error", "predicate_not_json"),
             (
                 SignErrorKind::OfflineAttestRefused,
-                77,
+                81,
                 "permission_denied",
                 "offline_attest_refused",
             ),
@@ -1236,17 +1241,21 @@ mod sweep_exit_code_tests {
         );
     }
 
-    /// The slug a leg failure carries is the wire spelling of its category, so
-    /// a sweep's rows read in the same vocabulary as an error envelope.
+    /// A failed leg's slug is its `error.detail`, so the capability gap a category
+    /// folds away (`referrers_unsupported` under `unsupported`) survives on the row,
+    /// and an `Internal` leg reports its wrapped cause's slug.
+    ///
+    /// Reds on: emitting the category (`unsupported`) or the kind (`internal`).
     #[test]
-    fn a_leg_failures_slug_is_the_wire_spelling_of_its_category() {
-        assert_eq!(super::category_slug(ExitCode::AuthError), "auth_error");
+    fn a_leg_failures_slug_is_its_detail_slug() {
+        use ocx_sign::sign::SignErrorKind;
         assert_eq!(
-            super::category_slug(ExitCode::ReferrersUnsupported),
+            super::leg_slug(&SignErrorKind::ReferrersUnsupported),
             "referrers_unsupported"
         );
-        // `Failure` has no category of its own; it rolls up to `internal`,
-        // which is what the envelope would print for it too.
-        assert_eq!(super::category_slug(ExitCode::Failure), "internal");
+        let transient = SignErrorKind::Internal(Box::new(ocx_oci::client::error::ClientError::RegistryTransient(
+            "503".into(),
+        )));
+        assert_eq!(super::leg_slug(&transient), "registry_transient");
     }
 }

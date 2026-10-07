@@ -452,8 +452,11 @@ impl schemars::JsonSchema for Version {
         "PackageVersion".into()
     }
 
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        String::json_schema(generator)
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "An OCX package version, e.g. `3.28.1`, a rolling `3.28`, `0.5.0-canary` or a variant `debug-3.12.5`."
+        })
     }
 }
 

@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "root": {
+    "path": [],
+    "version": 0,
+    "summary": "Root.",
+    "hidden": false,
+    "external_subcommands": false,
+    "output": [],
+    "args": [
+      {
+        "id": "offline", "long": "offline", "short": "x", "value": { "type": "switch" },
+        "required": false, "required_unless": [], "num_args": { "min": 0, "max": 0 }, "global": true,
+        "hidden": false, "default": ["false"], "requires": [], "conflicts": [], "overrides": [],
+        "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+        "stdin_secret": false, "help": "C05: linked to an env name that is not `OCX_OFFLINE`.", "env": "OCX_NETWORK_OFF"
+      }
+    ],
+    "groups": [],
+    "commands": [
+      {
+        "path": ["first"],
+        "version": 1,
+        "summary": "C09: names a root `reports` does not hold.",
+        "hidden": false,
+        "external_subcommands": false,
+        "output": [{ "type": "report", "root": "Missing" }],
+        "args": [
+          {
+            "id": "group", "long": "group", "short": "x", "value": { "type": "string" },
+            "required": false, "required_unless": [], "num_args": { "min": 1, "max": 1 }, "global": false,
+            "hidden": false, "default": [], "requires": [], "conflicts": [], "overrides": [],
+            "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+            "stdin_secret": false, "help": "C02: `-x` means `--offline` at the root."
+          },
+          {
+            "id": "token", "long": "token", "value": { "type": "string" },
+            "required": false, "required_unless": [], "num_args": { "min": 1, "max": 1 }, "global": false,
+            "hidden": false, "default": [], "requires": [], "conflicts": [], "overrides": [],
+            "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+            "stdin_secret": false, "help": "C08: a secret on argv."
+          },
+          {
+            "id": "out_file", "long": "out-file", "value": { "type": "path" },
+            "required": false, "required_unless": [], "num_args": { "min": 1, "max": 1 }, "global": false,
+            "hidden": false, "default": [], "requires": [], "conflicts": [], "overrides": [],
+            "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+            "stdin_secret": false, "help": "C06: an output destination not spelled `--output`."
+          }
+        ],
+        "groups": [],
+        "commands": []
+      },
+      {
+        "path": ["second"],
+        "version": 1,
+        "summary": "C09: a leaf with no output mode.",
+        "hidden": false,
+        "external_subcommands": false,
+        "output": [],
+        "args": [
+          {
+            "id": "group", "long": "group", "value": { "type": "path" },
+            "required": false, "required_unless": [], "num_args": { "min": 1, "max": 1 }, "global": false,
+            "hidden": false, "default": [], "requires": [], "conflicts": [], "overrides": [],
+            "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+            "stdin_secret": false, "help": "C04: `--group` is a string on `first`."
+          },
+          {
+            "id": "badFlag", "long": "badFlag", "value": { "type": "choice", "choices": [{ "value": "Bad-Choice", "hidden": false }] },
+            "required": false, "required_unless": [], "num_args": { "min": 1, "max": 1 }, "global": false,
+            "hidden": false, "default": [], "requires": [], "conflicts": [], "overrides": [],
+            "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+            "stdin_secret": false, "help": "C03: neither the flag nor its choice is spelled to convention."
+          },
+          {
+            "id": "quiet", "long": "quiet", "value": { "type": "switch" },
+            "required": false, "required_unless": [], "num_args": { "min": 0, "max": 0 }, "global": false,
+            "hidden": false, "default": ["false"], "requires": [], "conflicts": [], "overrides": [],
+            "require_equals": false, "allow_hyphen_values": false, "last": false, "trailing_var_arg": false,
+            "stdin_secret": false, "help": ""
+          }
+        ],
+        "groups": [],
+        "commands": []
+      }
+    ]
+  },
+  "env": [
+    {
+      "name": "OCX_NETWORK_OFF", "value": "bool", "visibility": "public", "summary": "Disables network access.",
+      "flag": "--offline", "secret": false, "on_invalid": "error"
+    }
+  ],
+  "retired": []
+}

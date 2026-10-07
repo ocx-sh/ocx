@@ -215,8 +215,14 @@ impl<'de> Deserialize<'de> for Dependencies {
 }
 
 /// Errors that can occur when constructing or validating [`Dependencies`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    family = "MetadataDependencyError",
+    DataError,
+    slug = "dependency_declaration_invalid",
+    summary = "A package declares its dependencies invalidly"
+)]
 pub enum DependencyError {
     /// A dependency identifier appears more than once.
     #[error("duplicate dependency identifier: '{identifier}'")]
@@ -241,7 +247,12 @@ impl schemars::JsonSchema for Dependencies {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<Dependency>>::json_schema(generator)
+        let mut schema = <Vec<Dependency>>::json_schema(generator);
+        schema.insert(
+            "description".to_owned(),
+            "Ordered list of package dependencies; array position is the environment import order.".into(),
+        );
+        schema
     }
 }
 

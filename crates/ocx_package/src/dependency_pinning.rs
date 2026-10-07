@@ -129,15 +129,25 @@ fn require_leaf_digest(
 }
 
 /// Errors resolving dependency pins at `ocx package create` time.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum DependencyPinningError {
     /// The dependency tag does not resolve in the selected index.
     #[error("dependency '{identifier}' not found in the selected index")]
+    #[exit(
+        NotFound,
+        slug = "dependency_not_found",
+        summary = "A dependency is not in the selected index"
+    )]
     DependencyNotFound { identifier: Box<ocx_oci::PackageRef> },
     /// No advertised leaf is compatible with the declared platform.
     #[error(
         "dependency '{identifier}' has no leaf compatible with platform '{platform}' (available: {}); pass --platform matching an available platform, or ask the dependency publisher to add a build for '{platform}'",
         available.join(", ")
+    )]
+    #[exit(
+        DataError,
+        slug = "dependency_no_compatible_platform",
+        summary = "A dependency is published for no platform compatible with the target"
     )]
     NoCompatiblePlatform {
         identifier: Box<ocx_oci::PackageRef>,
@@ -149,6 +159,11 @@ pub enum DependencyPinningError {
         "dependency '{identifier}' is ambiguous for platform '{platform}' (candidates: {}); pin the dependency digest explicitly",
         candidates.join(", ")
     )]
+    #[exit(
+        DataError,
+        slug = "dependency_ambiguous_platform",
+        summary = "Several of a dependency's platforms match the target equally"
+    )]
     AmbiguousPlatform {
         identifier: Box<ocx_oci::PackageRef>,
         platform: String,
@@ -158,10 +173,23 @@ pub enum DependencyPinningError {
     #[error(
         "dependency '{identifier}' carries a direct digest pin in an `any`-targeted bundle; `any` deps must resolve through `ocx package create --platform any` (unverifiable pin provenance)"
     )]
+    #[exit(
+        DataError,
+        slug = "direct_digest_pin_in_any_target",
+        summary = "An `any` package pins a dependency by a platform-specific digest"
+    )]
     DirectDigestPinInAnyTarget { identifier: Box<ocx_oci::PackageRef> },
     /// Index-layer failure (network, policy block, malformed manifest).
     // Not `transparent`, which would hide the index error from the exit-code chain walk.
     #[error("dependency pin resolution failed")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "dependency_pin_resolution_failed",
+            summary = "Resolving a dependency pin failed with an unclassified cause"
+        )
+    )]
     Index(#[from] ocx_index::error::Error),
 }
 

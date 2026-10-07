@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "version": "0.6.4",
+  "registry": "ocx.sh",
+  "platforms": [
+    {
+      "architecture": "amd64",
+      "os": "linux",
+      "os.features": [
+        "libc.glibc"
+      ]
+    }
+  ],
+  "features": [
+    "libc.glibc"
+  ],
+  "libc": [
+    "libc.glibc"
+  ],
+  "shell": "Zsh",
+  "home": "/home/conformance/.ocx",
+  "commit": {
+    "sha": "72405b0fbd300843d076d0175ddbf7aad788611d",
+    "short": "72405b0f",
+    "describe": "v0.6.4-184-g72405b0fb",
+    "dirty": false,
+    "timestamp": "2026-10-04T15:37:02.000000000Z",
+    "future_commit_field": "x"
+  },
+  "future_field": {
+    "nested": [
+      1,
+      2,
+      3
+    ]
+  }
+}

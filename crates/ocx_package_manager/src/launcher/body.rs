@@ -1326,6 +1326,10 @@ mod tests {
         use super::super::{TrampolineTarget, unix_launcher_body, unix_shim_body, unix_trampoline_body};
         use super::{PINNED, project, safe};
         use std::path::{Path, PathBuf};
+        #[expect(
+            clippy::disallowed_types,
+            reason = "test-only /bin/sh harness running the emitted launcher body against a stub `ocx`"
+        )]
         use std::process::Command;
 
         /// A stand-in for `ocx` that records what reached it and then
@@ -1385,6 +1389,10 @@ exit 0
         ///
         /// `PATH` is `<scratch>` first, so a bare-name re-entry resolves a stub
         /// placed there and nothing else on the host.
+        #[expect(
+            clippy::disallowed_types,
+            reason = "test-only /bin/sh harness running the emitted launcher body against a stub `ocx`"
+        )]
         fn run_body(scratch: &Path, name: &str, body: &str, caller_environment: &[(&str, &str)]) -> Observed {
             let script = scratch.join(name);
             write_executable(&script, body);
@@ -1669,6 +1677,10 @@ exit 0
         /// `$0 = "/"`, which no `execve` can produce.
         #[test]
         fn the_argv0_expansion_matches_basename_except_for_a_bare_root() {
+            #[expect(
+                clippy::disallowed_types,
+                reason = "test-only /bin/sh harness running the emitted launcher body against a stub `ocx`"
+            )]
             fn under_sh(script: &str, argv0: &str) -> String {
                 let output = Command::new("/bin/sh")
                     .args(["-c", script, argv0])

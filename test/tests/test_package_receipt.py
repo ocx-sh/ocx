@@ -21,6 +21,12 @@ EXIT_DATA_ERR = 65
 EXIT_NOT_FOUND = 79
 
 
+def _platform_object() -> dict[str, str]:
+    """The report's OCI platform object for the host platform."""
+    os_, architecture = current_platform().split("/")
+    return {"os": os_, "architecture": architecture}
+
+
 def _create(ocx: OcxRunner, tmp_path: Path, name: str, *create_args: str) -> Path:
     """`ocx package create` of a one-file directory; returns the bundle path."""
     pkg_dir = tmp_path / f"content-{name}"
@@ -32,14 +38,15 @@ def _create(ocx: OcxRunner, tmp_path: Path, name: str, *create_args: str) -> Pat
 
 
 def test_receipt_prints_what_create_recorded(ocx: OcxRunner, tmp_path: Path) -> None:
-    """Both fields recorded → both printed, as the canonical strings."""
+    """Both fields recorded → both printed: the platform as an OCI object."""
     bundle = _create(
         ocx, tmp_path, "both", "-p", current_platform(), "-i", "example.com/acme/widget:1.0.0"
     )
     assert resolved_receipt_path(bundle).is_file(), "precondition: create wrote the sidecar"
 
     assert ocx.json("package", "receipt", str(bundle)) == {
-        "platform": current_platform(),
+        "schema_version": 1,
+        "platform": _platform_object(),
         "identifier": "example.com/acme/widget:1.0.0",
     }
 
@@ -48,7 +55,7 @@ def test_receipt_omits_a_field_create_was_not_given(ocx: OcxRunner, tmp_path: Pa
     """Absent means "not recorded" — the key is missing, never `null`."""
     bundle = _create(ocx, tmp_path, "platform-only", "-p", current_platform())
 
-    assert ocx.json("package", "receipt", str(bundle)) == {"platform": current_platform()}
+    assert ocx.json("package", "receipt", str(bundle)) == {"schema_version": 1, "platform": _platform_object()}
 
 
 def test_receipt_missing_exits_not_found(ocx: OcxRunner, tmp_path: Path) -> None:

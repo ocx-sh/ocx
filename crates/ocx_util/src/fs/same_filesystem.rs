@@ -6,9 +6,14 @@
 use std::path::{Path, PathBuf};
 
 /// Failure modes of [`same_filesystem`].
-#[derive(Debug)]
+#[derive(Debug, ocx_exit::Classify)]
 pub enum SameFilesystemError {
     /// I/O failure resolving an existing ancestor of one of the inputs.
+    #[exit(
+        IoError,
+        slug = "same_filesystem_check_failed",
+        summary = "Probing whether two paths share a filesystem failed"
+    )]
     Io { path: PathBuf, source: std::io::Error },
 }
 

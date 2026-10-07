@@ -54,6 +54,16 @@ def _inspect(ocx: OcxRunner, cwd: Path, *args: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _platform_key(platform: dict) -> str:
+    """The canonical platform string a lock keys by, rebuilt from the report's platform object."""
+    key = f"{platform['os']}/{platform['architecture']}"
+    if "variant" in platform:
+        key += f"/{platform['variant']}"
+    if platform.get("os.features"):
+        key += "+" + ",".join(platform["os.features"])
+    return key
+
+
 def _project(ocx: OcxRunner, tmp_path: Path) -> Path:
     project = tmp_path / "project"
     project.mkdir()
@@ -110,7 +120,7 @@ def test_inspect_default_lists_locked_candidates_without_resolving(
         platform: digest
         for platform, digest in json.loads(
             _run(ocx, project, "--format", "json", "status").stdout
-        )["groups"]["default"]["tools"][unique_repo]["platforms"].items()
+        )["groups"]["default"]["tools"][unique_repo]["platform_digests"].items()
     }
 
     entry = inspect_entry(_inspect(ocx, project), unique_repo)
@@ -122,7 +132,7 @@ def test_inspect_default_lists_locked_candidates_without_resolving(
         f"a lock projection pins no single artifact: {entry}"
     )
     assert "metadata" not in entry and "resolution" not in entry
-    candidates = {c["platform"]: c["digest"] for c in entry["candidates"]}
+    candidates = {_platform_key(c["platform"]): c["digest"] for c in entry["candidates"]}
     assert candidates == locked, (
         f"candidates are the lock's platform leaves verbatim: {candidates} != {locked}"
     )
@@ -173,7 +183,7 @@ def test_inspect_env_follows_application_order(
         f"env must keep every contributing layer in application order, got {stages}"
     )
     for entry in data["env"]:
-        assert entry["type"] in ("constant", "path"), entry
+        assert entry["kind"] in ("constant", "path"), entry
 
 
 def test_inspect_resolves_relative_path_env_unlike_status(

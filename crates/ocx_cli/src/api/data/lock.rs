@@ -8,68 +8,62 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// A single locked tool entry in the `ocx lock` report.
-///
-/// `binding` is the TOML key in `ocx.toml` (the local binding name);
-/// `group` is `"default"` for entries from the top-level `[tools]`
-/// table or the named `[group.*]` key. `digest` is the host-platform
-/// leaf digest (the primary digest column). `platforms` maps each
-/// shipped platform's lossless key string to its leaf digest — the full
-/// available-only map surfaced in verbose / JSON output.
+/// One locked binding in the `ocx lock` report.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct LockEntry {
+    /// The binding's key in `ocx.toml`.
     pub binding: String,
+    /// The owning group: `default` for the top-level `[tools]` table, else the `[group.*]` key.
     pub group: String,
-    pub digest: String,
-    pub platforms: BTreeMap<String, String>,
+    /// The host platform's leaf digest; absent when no leaf, or more than one, fits the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<ocx_oci::Digest>,
+    /// Every leaf the lock records, keyed by the canonical platform string
+    /// (`os/arch[/variant][+feature,…]` or `any`).
+    pub platform_digests: BTreeMap<String, ocx_oci::Digest>,
 }
 
-/// Report emitted by `ocx lock` after a successful resolve.
+/// Report emitted by `ocx lock`, `ocx add` and `ocx remove`: every locked binding.
 ///
-/// Plain format: three-column table (Binding | Group | Digest) where the
-/// digest column is the host-platform leaf digest.
-///
-/// JSON format: array of `{ binding, group, digest, platforms }` objects,
-/// where `platforms` is the full available-only platform-key → digest map.
+/// Plain format: three-column table (Binding | Group | Digest) of the host-platform leaf.
 #[derive(Serialize, schemars::JsonSchema)]
-#[serde(transparent)]
 pub struct LockReport {
-    entries: Vec<LockEntry>,
+    /// The locked bindings, in lock order.
+    items: Vec<LockEntry>,
 }
 
 impl LockEntry {
-    /// Builds a report entry from a [`LockedTool`]: `digest` is the host leaf, empty when that leaf
-    /// is absent or ambiguous rather than fabricated or an error.
+    /// Builds a report entry from a [`LockedTool`](ocx_project::LockedTool); `digest` is the host leaf.
     pub fn from_tool(tool: &ocx_project::LockedTool, host: &ocx_oci::Platform) -> Self {
         let digest = match ocx_project::lookup_host_leaf(&tool.platforms, host) {
-            ocx_oci::Selection::Found((digest, _key)) => digest.to_string(),
-            ocx_oci::Selection::None | ocx_oci::Selection::Ambiguous(_) => String::new(),
+            ocx_oci::Selection::Found((digest, _key)) => Some(digest.clone()),
+            ocx_oci::Selection::None | ocx_oci::Selection::Ambiguous(_) => None,
         };
-        let platforms: BTreeMap<String, String> =
-            tool.platforms.iter().map(|(k, v)| (k.clone(), v.to_string())).collect();
-
         Self {
             binding: tool.name.clone(),
             group: tool.group.clone(),
             digest,
-            platforms,
+            platform_digests: tool.platforms.clone(),
         }
     }
 }
 
 impl LockReport {
-    pub fn new(entries: Vec<LockEntry>) -> Self {
-        Self { entries }
+    pub fn new(items: Vec<LockEntry>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for LockReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "LockReport";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for entry in &self.entries {
+        for entry in &self.items {
             rows[0].push(entry.binding.clone());
             rows[1].push(entry.group.clone());
-            rows[2].push(entry.digest.clone());
+            rows[2].push(entry.digest.as_ref().map(ToString::to_string).unwrap_or_default());
         }
         printer.print_table(
             &["Binding".into(), "Group".into(), "Digest".into()],

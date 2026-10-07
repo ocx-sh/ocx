@@ -79,8 +79,8 @@ ocx_index ocx_index::transport_wire_tests::a_retry_after_on_the_wire_is_waited_o
 # guards read the tree once, not ten times`), and that one parse is the floor:
 # nextest runs EACH TEST IN ITS OWN PROCESS, so no cache can amortise the walk
 # across the guards no matter where it lives. A global syntax-tree cache was
-# tried and measured HARMFUL — `no_classification_in_libraries` went 0.92 s to
-# 1.82 s on allocator pressure alone from holding 600 trees.
+# tried and measured HARMFUL — a whole-workspace scan went 0.92 s to 1.82 s on
+# allocator pressure alone from holding 600 trees.
 #
 # Numbers below are a `taskset -c 0-3` proxy of the CI runner, which is the
 # shape that decides this — part of the win is intra-test parallelism, so a
@@ -91,7 +91,6 @@ ocx_index ocx_index::transport_wire_tests::a_retry_after_on_the_wire_is_waited_o
 # granularity and the test count, and the count is floored by NEXTEST_FLOOR.
 ocx_test_support::workspace_structure every_utility_error_reaching_the_cli_is_armed
 ocx_test_support::workspace_structure no_module_path_in_output
-ocx_test_support::workspace_structure no_classification_in_libraries
 ocx_test_support::workspace_structure no_log_shim
 ocx_test_support::workspace_structure every_source_file_is_reachable
 ocx_test_support::workspace_structure ssrf_guard_ratchet

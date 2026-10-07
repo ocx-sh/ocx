@@ -82,34 +82,62 @@ fn refuse_redirects() -> reqwest::redirect::Policy {
     })
 }
 
+/// The text of a failed Sigstore request for a log line: the whole cause chain, the URL left out (an operator-supplied
+/// endpoint may embed credentials).
+///
+/// A refused redirect's cause is the only place the "point the URL at the final host" remedy lives.
+pub fn describe_send_failure(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// Ceiling on a Sigstore trust-service response body; neither the protocols nor `reqwest` bound one, and honest
 /// answers are kilobytes.
 pub const MAX_SIGSTORE_RESPONSE_BYTES: u64 = 1024 * 1024;
 
+/// Why [`read_body_capped`] produced no body; the two answer different next actions (retry vs. a bad response).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyReadError {
+    /// The body is over [`MAX_SIGSTORE_RESPONSE_BYTES`], declared or counted.
+    Oversize,
+    /// The stream broke before the body ended.
+    Transport,
+}
+
 /// Read a Sigstore trust-service response body, refusing one above the cap.
 ///
-/// `None` for a transport failure and an over-cap body alike; the running total bounds a body whose
-/// `Content-Length` is absent or lies.
-pub async fn read_body_capped(response: reqwest::Response) -> Option<Vec<u8>> {
+/// The running total bounds a body whose `Content-Length` is absent or lies.
+///
+/// # Errors
+///
+/// [`BodyReadError::Oversize`] for an over-cap body, [`BodyReadError::Transport`] for a stream that broke mid-read.
+pub async fn read_body_capped(response: reqwest::Response) -> Result<Vec<u8>, BodyReadError> {
     use futures::StreamExt as _;
 
     if let Some(declared) = response.content_length()
         && declared > MAX_SIGSTORE_RESPONSE_BYTES
     {
-        return None;
+        return Err(BodyReadError::Oversize);
     }
     // Sized only after the cap refused an over-declared body, so a hostile Content-Length cannot drive the allocation.
     let hint = response.content_length().unwrap_or(0).min(MAX_SIGSTORE_RESPONSE_BYTES);
     let mut body = Vec::with_capacity(hint as usize);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
+        let chunk = chunk.map_err(|_| BodyReadError::Transport)?;
         if body.len() as u64 + chunk.len() as u64 > MAX_SIGSTORE_RESPONSE_BYTES {
-            return None;
+            return Err(BodyReadError::Oversize);
         }
         body.extend_from_slice(&chunk);
     }
-    Some(body)
+    Ok(body)
 }
 
 /// Addresses the SSRF guard approved, keyed by hostname: written by [`resolve_sigstore_url`], read by
@@ -236,22 +264,45 @@ async fn resolve_sigstore_url_with_rules(
 
 /// Reason why a user-supplied Sigstore endpoint URL was rejected.
 ///
-/// `reason` never carries raw input (CWE-209): a parse failure omits it, and a parsed URL is echoed only through
-/// `scrub_for_echo`.
-#[derive(Debug, thiserror::Error)]
+/// `reason` never carries raw input (CWE-209): a parse failure omits it, and a parsed URL is echoed only as a
+/// [`RedactedUrl`](crate::RedactedUrl).
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[error("{reason}")]
+#[exit(delegate = kind)]
 pub struct UrlRejection {
     /// Short description of why the URL was rejected.
     pub reason: String,
-    /// The exit code a bare rejection classifies to: 64, or 69 for an endpoint that does not resolve.
-    exit: ocx_exit::ExitCode,
+    kind: UrlRejectionKind,
+}
+
+/// What kind of rejection a [`UrlRejection`] is; it alone decides the exit code and `error.detail` slug.
+#[derive(Debug, Clone, Copy, thiserror::Error, ocx_exit::Classify)]
+#[exit(family = "UrlRejection")]
+enum UrlRejectionKind {
+    /// The URL itself is unacceptable: malformed, wrong scheme, embedded credentials or a refused address.
+    #[error("invalid endpoint URL")]
+    #[exit(
+        UsageError,
+        slug = "invalid_endpoint_url",
+        summary = "A Sigstore endpoint URL failed validation"
+    )]
+    Invalid,
+    /// The endpoint host does not resolve: the flag was fine, the network was not.
+    #[error("endpoint host does not resolve")]
+    #[exit(
+        Unavailable,
+        slug = "endpoint_unresolvable",
+        summary = "An endpoint host does not resolve"
+    )]
+    Unresolvable,
 }
 
 impl UrlRejection {
-    /// The exit code a bare rejection classifies to.
+    /// The exit code this rejection classifies to: 64, or 69 for an endpoint that does not resolve.
     #[must_use]
-    pub fn exit(&self) -> ocx_exit::ExitCode {
-        self.exit
+    pub fn exit_code(&self) -> ocx_exit::ExitCode {
+        // Neither kind defers, so `Failure` is unreachable.
+        ocx_exit::ClassifyExitCode::classify(&self.kind).unwrap_or(ocx_exit::ExitCode::Failure)
     }
 }
 
@@ -259,14 +310,14 @@ impl From<crate::ssrf::SsrfError> for UrlRejection {
     /// Carries an SSRF verdict through the `InvalidEndpointUrl` channel, keeping the CLI's variant and exit contract.
     fn from(error: crate::ssrf::SsrfError) -> Self {
         // Not `error.classify()`, the registry guard's table (forbidden = 78): a rejected Sigstore endpoint is 64.
-        let exit = match error {
-            crate::ssrf::SsrfError::Resolution { .. } => ocx_exit::ExitCode::Unavailable,
+        let kind = match error {
+            crate::ssrf::SsrfError::Resolution { .. } => UrlRejectionKind::Unresolvable,
             // No wildcard, so a new variant is a compile error rather than a silent 64.
-            crate::ssrf::SsrfError::ForbiddenTarget { .. } => ocx_exit::ExitCode::UsageError,
+            crate::ssrf::SsrfError::ForbiddenTarget { .. } => UrlRejectionKind::Invalid,
         };
         Self {
             reason: error.to_string(),
-            exit,
+            kind,
         }
     }
 }
@@ -276,26 +327,9 @@ impl UrlRejection {
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
-            exit: ocx_exit::ExitCode::UsageError,
+            kind: UrlRejectionKind::Invalid,
         }
     }
-
-    /// The exit code this rejection classifies to.
-    #[must_use]
-    pub fn exit_code(&self) -> ocx_exit::ExitCode {
-        self.exit
-    }
-}
-
-/// Strip userinfo, query and fragment from a URL before a rejection echoes it: each can carry a secret.
-fn scrub_for_echo(url: &Url) -> Url {
-    let mut scrubbed = url.clone();
-    // The setters fail only on a cannot-be-a-base URL, which names no host to echo.
-    let _ = scrubbed.set_username("");
-    let _ = scrubbed.set_password(None);
-    scrubbed.set_query(None);
-    scrubbed.set_fragment(None);
-    scrubbed
 }
 
 /// Validate a user-supplied Sigstore endpoint URL.
@@ -312,7 +346,7 @@ pub fn validate_sigstore_url(raw: &str, _flag_name: &str) -> Result<Url, UrlReje
     if !url.username().is_empty() || url.password().is_some() {
         return Err(UrlRejection::new(format!(
             "URL must not embed credentials (sanitized: `{}`)",
-            scrub_for_echo(&url)
+            crate::RedactedUrl::from(url.clone())
         )));
     }
     let scheme = url.scheme();
@@ -321,7 +355,7 @@ pub fn validate_sigstore_url(raw: &str, _flag_name: &str) -> Result<Url, UrlReje
         ("http", true) => Ok(url),
         ("http", false) => Err(UrlRejection::new(format!(
             "URL must use HTTPS (sanitized: `{}`); HTTP only accepted for loopback hosts",
-            scrub_for_echo(&url)
+            crate::RedactedUrl::from(url.clone())
         ))),
         (other, _) => Err(UrlRejection::new(format!(
             "URL must use HTTPS or HTTP on loopback (got scheme `{other}`)"
@@ -348,6 +382,37 @@ mod tests {
         .no_proxy()
         .build()
         .expect("the shared builder produces a client")
+    }
+
+    /// A refused redirect is permanent, and the line a log carries still names the remedy.
+    #[tokio::test]
+    async fn a_refused_redirect_is_not_transient_and_describes_the_remedy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let redirector = TcpListener::bind("127.0.0.1:0").await.expect("bind redirector");
+        let addr = redirector.local_addr().expect("redirector address");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = redirector.accept().await {
+                let mut scratch = [0_u8; 1024];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/\r\nContent-Length: 0\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+
+        let error = hermetic_sigstore_client()
+            .get(format!("http://{addr}/api/v1/log/publicKey"))
+            .send()
+            .await
+            .expect_err("a redirect is refused");
+        assert!(!crate::transport_policy::is_transient_transport_error(&error));
+        let text = describe_send_failure(error);
+        assert!(text.contains("point the URL at the final host"), "{text}");
+        assert!(!text.contains(&addr.to_string()), "the URL is left out: {text}");
     }
 
     /// Chain a `reqwest::Error` into one string, so an assertion sees the
@@ -936,7 +1001,7 @@ mod tests {
             .await
             .expect("the flooding endpoint answers");
         assert!(
-            read_body_capped(response).await.is_none(),
+            read_body_capped(response).await == Err(BodyReadError::Oversize),
             "an unbounded trust-service body was read into memory instead of being refused"
         );
     }
@@ -990,6 +1055,40 @@ mod tests {
         );
     }
 
+    /// A stream that dies mid-body is a transport fault, not an over-cap body: the caller retries the first and
+    /// reports the second. The server promises 100 bytes, sends 10, and hangs up.
+    #[tokio::test]
+    async fn a_body_stream_that_breaks_mid_read_is_a_transport_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind truncating endpoint");
+        let addr = listener.local_addr().expect("truncating endpoint address");
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 1024];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789")
+                    .await;
+                // Dropping the socket closes it short of the declared length.
+            }
+        });
+
+        let response = hermetic_sigstore_client()
+            .get(format!("http://{addr}/api/v1/log/publicKey"))
+            .send()
+            .await
+            .expect("the endpoint answers its headers");
+        assert_eq!(
+            read_body_capped(response).await,
+            Err(BodyReadError::Transport),
+            "a mid-stream break must classify as transport, not as an oversize body"
+        );
+    }
+
     /// The other half: an honest response still comes back whole, so the cap
     /// cannot be satisfied by refusing everything.
     #[tokio::test]
@@ -1016,7 +1115,7 @@ mod tests {
             .expect("the endpoint answers");
         assert_eq!(
             read_body_capped(response).await.as_deref(),
-            Some(&b"{\"logIndex\":1}"[..]),
+            Ok(&b"{\"logIndex\":1}"[..]),
             "an under-cap body must be returned unchanged"
         );
     }

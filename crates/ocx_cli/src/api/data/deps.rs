@@ -18,27 +18,31 @@ fn name_tag(id: &ocx_oci::PackageRef, theme: &Theme) -> String {
 }
 
 /// A node in the dependency tree (for tree view output).
-///
-/// `visibility` is `None` for root nodes (the packages the user asked about)
-/// and `Some(v)` for dependencies, where `v` is the visibility as declared
-/// by the parent — not the propagated result.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "DependencyNode")]
 pub struct Dependency {
+    /// The package, digest-pinned.
     pub identifier: ocx_oci::PackageRef,
+    /// Whether this package already appeared earlier in the tree; its dependencies are listed there.
     pub repeated: bool,
+    /// The visibility the parent declared for this edge, not the propagated result; absent on a root.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
+    /// This package's own dependencies.
     pub dependencies: Vec<Dependency>,
 }
 
 /// Tree view of the dependency graph (default output).
 #[derive(Serialize, schemars::JsonSchema)]
+#[schemars(rename = "DependencyTree")]
 pub struct Dependencies {
-    pub roots: Vec<Dependency>,
+    /// One tree per requested package, in request order.
+    pub items: Vec<Dependency>,
 }
 
 impl Dependencies {
-    pub fn new(roots: Vec<Dependency>) -> Self {
-        Self { roots }
+    pub fn new(items: Vec<Dependency>) -> Self {
+        Self { items }
     }
 }
 
@@ -70,8 +74,11 @@ impl TreeItem for Dependency {
 }
 
 impl Printable for Dependencies {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Dependencies";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        for root in &self.roots {
+        for root in &self.items {
             printer.print_tree(root);
         }
     }
@@ -80,27 +87,34 @@ impl Printable for Dependencies {
 /// Flat view of the resolved dependency order.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct FlatDependencies {
-    pub entries: Vec<FlatDependency>,
+    /// Every dependency in resolution order.
+    pub items: Vec<FlatDependency>,
 }
 
+/// One dependency in the flat view.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct FlatDependency {
+    /// The package, digest-pinned.
     pub identifier: ocx_oci::PackageRef,
+    /// The dependency's resolved visibility; a requested root is `public`.
     pub visibility: Visibility,
 }
 
 impl FlatDependencies {
-    pub fn new(entries: Vec<FlatDependency>) -> Self {
-        Self { entries }
+    pub fn new(items: Vec<FlatDependency>) -> Self {
+        Self { items }
     }
 }
 
 impl Printable for FlatDependencies {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "FlatDependencies";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Cells are pre-inked and carry no style of their own, so colour-off output is byte-identical.
         let theme = printer.theme();
         let mut rows: [Vec<Cell>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for entry in &self.entries {
+        for entry in &self.items {
             let id = &entry.identifier;
             rows[0].push(Cell::new(name_tag(id, &theme)));
             rows[1].push(Cell::new(theme.visibility(
@@ -118,9 +132,10 @@ impl Printable for FlatDependencies {
 /// Why view — all paths from roots to a target dependency.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DependenciesTrace {
+    /// Every path from a requested root to the target, root first.
     pub paths: Vec<Vec<ocx_oci::PackageRef>>,
+    /// Why no path was found; present only when `paths` is empty.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 
@@ -131,6 +146,9 @@ impl DependenciesTrace {
 }
 
 impl Printable for DependenciesTrace {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "DependenciesTrace";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if self.paths.is_empty() {
             if let Some(ref msg) = self.message {

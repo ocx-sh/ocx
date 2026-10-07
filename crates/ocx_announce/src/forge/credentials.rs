@@ -13,47 +13,32 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use super::{ForgeToken, WriteTransport, is_valid_path_segment};
 
-/// Every environment variable the credential precedence ladder reads.
+/// Every environment variable the credential precedence ladder reads, by registry name.
 ///
-/// Tests isolate against [`ALL`]: `ocx_util::env::var` falls through to the real
-/// environment for any key a test did not override, so a partly isolated test
-/// passes or fails on the ambient environment.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the precedence ladder, which lands with its body; delete this attribute in the same change (DX-98)"
-    )
-)]
+/// Tests isolate against [`ALL`]: a key a test did not override falls through to the real
+/// environment, so a partly isolated test passes or fails on the ambient environment.
+#[cfg(test)]
 mod var {
-    /// Re-exported, never re-spelled: [`CREDENTIAL_KEYS`](ocx_config::env::keys::CREDENTIAL_KEYS) scrubs
-    /// `OCX_ANNOUNCE_GIT_TOKEN` from plugin children, and a second literal lets a rename silently end that scrub.
-    pub use ocx_config::env::keys::{OCX_ANNOUNCE_GIT_TOKEN, OCX_ANNOUNCE_TOKEN};
+    use ocx_env::EnvVar;
 
-    /// The user half of the push pair; unset means [`super::GitPushCredential::DEFAULT_USERNAME`].
-    pub const OCX_ANNOUNCE_GIT_USERNAME: &str = "OCX_ANNOUNCE_GIT_USERNAME";
+    pub const OCX_ANNOUNCE_TOKEN: &EnvVar = ocx_env::OCX_ANNOUNCE_TOKEN.declaration();
+    pub const OCX_ANNOUNCE_GIT_TOKEN: &EnvVar = ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration();
+    pub const OCX_ANNOUNCE_GIT_USERNAME: &EnvVar = &ocx_env::OCX_ANNOUNCE_GIT_USERNAME;
+    pub const GITLAB_CI: &EnvVar = &ocx_env::GITLAB_CI;
+    pub const CI_JOB_TOKEN: &EnvVar = ocx_env::CI_JOB_TOKEN.declaration();
+    pub const CI_PROJECT_PATH: &EnvVar = &ocx_env::CI_PROJECT_PATH;
 
-    /// GitLab's marker that this process is a CI job.
-    pub const GITLAB_CI: &str = "GITLAB_CI";
-
-    /// The token a GitLab CI job runs under.
-    pub const CI_JOB_TOKEN: &str = "CI_JOB_TOKEN";
-
-    /// The **publishing** project's full path, checked against the index project's job-token allowlist.
-    pub const CI_PROJECT_PATH: &str = "CI_PROJECT_PATH";
-
-    /// Not read by the ladder; listed so a ladder test isolates the whole CI identity.
+    /// Not read by the ladder and not declared; listed so a ladder test isolates the whole CI identity.
     pub const CI_PROJECT_ID: &str = "CI_PROJECT_ID";
 
-    /// Every name above; a rung whose variable is missing here escapes test isolation.
-    pub const ALL: &[&str] = &[
+    /// Every declared variable above; a rung whose variable is missing here escapes test isolation.
+    pub const ALL: &[&EnvVar] = &[
         OCX_ANNOUNCE_TOKEN,
         OCX_ANNOUNCE_GIT_TOKEN,
         OCX_ANNOUNCE_GIT_USERNAME,
         GITLAB_CI,
         CI_JOB_TOKEN,
         CI_PROJECT_PATH,
-        CI_PROJECT_ID,
     ];
 }
 
@@ -91,7 +76,7 @@ impl GitPushCredential {
 /// `api_is_job_token` would send a `JOB-TOKEN` header for a credential that is not one.
 #[derive(Clone, Debug)]
 pub struct ForgeCredentials {
-    /// Empty means unauthenticated — the `--out` path.
+    /// Empty means unauthenticated — the `--output` path.
     api: ForgeToken,
     /// `None` leaves git's own credential helpers in charge.
     push: Option<GitPushCredential>,
@@ -118,7 +103,9 @@ impl ForgeCredentials {
             push_is_job_token: false,
             push_is_explicit: false,
             in_gitlab_ci: in_gitlab_ci(),
-            publishing_project: non_empty(var::CI_PROJECT_PATH).filter(|path| is_valid_project_path(path)),
+            publishing_project: ocx_env::CI_PROJECT_PATH
+                .get()
+                .filter(|path| is_valid_project_path(path)),
         }
     }
 
@@ -131,12 +118,20 @@ impl ForgeCredentials {
     #[must_use]
     pub fn resolve(transport: WriteTransport) -> Self {
         let job_token = (transport == WriteTransport::Git && in_gitlab_ci())
-            .then(|| non_empty(var::CI_JOB_TOKEN))
+            .then(|| ocx_env::CI_JOB_TOKEN.get())
             .flatten();
-        let api = non_empty(var::OCX_ANNOUNCE_TOKEN).or(job_token).unwrap_or_default();
+        // `get` reads empty as unset: CI runners export empty variables, and an empty
+        // `OCX_ANNOUNCE_TOKEN` would win rung 1 and leave a good `CI_JOB_TOKEN` unused.
+        let api = ocx_env::OCX_ANNOUNCE_TOKEN
+            .get()
+            .or(job_token)
+            .map(ocx_env::Sensitive::into_inner)
+            .unwrap_or_default();
 
         // An empty API credential falls through to `None`, or the push injects a header that authenticates as nobody.
-        let explicit_push = non_empty(var::OCX_ANNOUNCE_GIT_TOKEN);
+        let explicit_push = ocx_env::OCX_ANNOUNCE_GIT_TOKEN
+            .get()
+            .map(ocx_env::Sensitive::into_inner);
         let push_is_explicit = explicit_push.is_some();
         let push_secret = explicit_push.or_else(|| (!api.is_empty()).then(|| api.clone()));
 
@@ -231,7 +226,8 @@ fn is_valid_project_path(path: &str) -> bool {
 /// A `:` makes it count as absent: HTTP Basic splits on the first colon, so
 /// `a:b` would re-partition the pair into a 401 that reads like a bad token.
 fn push_username() -> String {
-    non_empty(var::OCX_ANNOUNCE_GIT_USERNAME)
+    ocx_env::OCX_ANNOUNCE_GIT_USERNAME
+        .get()
         .filter(|username| !username.contains(':'))
         .unwrap_or_else(|| GitPushCredential::DEFAULT_USERNAME.to_string())
 }
@@ -240,22 +236,15 @@ fn push_username() -> String {
 ///
 /// Requires a non-empty `CI_JOB_TOKEN`, or `"" == ""` claims a job token outside CI.
 fn is_job_token(secret: &str) -> bool {
-    non_empty(var::CI_JOB_TOKEN).is_some_and(|token| token == secret)
+    ocx_env::CI_JOB_TOKEN
+        .get()
+        .is_some_and(|token| token.expose() == secret)
 }
 
 /// Whether this process is a GitLab CI job; the one spelling the ladder and
 /// [`ForgeCredentials::in_gitlab_ci`] share, so they cannot disagree.
 fn in_gitlab_ci() -> bool {
-    non_empty(var::GITLAB_CI).is_some()
-}
-
-/// An environment variable's value, or `None` when it is unset **or empty**.
-///
-/// CI runners export empty variables: an empty `OCX_ANNOUNCE_TOKEN` would win rung 1
-/// and leave a job with a good `CI_JOB_TOKEN` unauthenticated.
-/// An empty `OCX_ANNOUNCE_GIT_TOKEN` would inject a header that authenticates as nobody.
-fn non_empty(key: &str) -> Option<String> {
-    ocx_util::env::var(key).filter(|value| !value.is_empty())
+    ocx_env::GITLAB_CI.get().is_some()
 }
 
 #[cfg(test)]
@@ -267,18 +256,18 @@ mod tests {
 
     /// The environment lock with **every** ladder input explicitly removed.
     ///
-    /// Taking `ocx_util::env::overrides::lock()` alone isolates nothing:
-    /// `get_override` returns `None` for a key no test set, and
-    /// `ocx_util::env::var` then falls through to `std::env::var` (DX-22). A
+    /// Taking `ocx_env::overrides::lock()` alone isolates nothing:
+    /// a key no test set falls through to the process environment (DX-22). A
     /// ladder test that overrides three of its seven inputs is therefore
     /// reading the ambient environment for the other four, and its green is that
     /// machine's green. Clearing [`var::ALL`] up front is what makes every case
     /// below a statement about the code.
-    fn isolated() -> ocx_util::env::overrides::EnvLock {
-        let env = ocx_util::env::overrides::lock();
-        for name in var::ALL {
-            env.remove(*name);
+    fn isolated() -> ocx_env::overrides::EnvLock {
+        let env = ocx_env::overrides::lock();
+        for var in var::ALL {
+            env.remove(var);
         }
+        env.remove_raw(var::CI_PROJECT_ID);
         env
     }
 
@@ -348,7 +337,7 @@ mod tests {
     /// alone. The constructor's own call to this filter is covered separately,
     /// by `a_publishing_project_path_reaching_the_constructor_is_refused_unless_every_segment_is_legal`
     /// below, which exercises `CI_PROJECT_PATH` through
-    /// [`ocx_util::env::var`]'s test seam.
+    /// the `ocx_env` override seam.
     ///
     /// Reds on: dropping the `filter` in the constructor is caught by the
     /// sibling constructor-level test below; this one pins the predicate's own
@@ -376,7 +365,7 @@ mod tests {
 
     /// The constructor-level sibling of the predicate test above: exercises
     /// [`ForgeCredentials::new`] itself against a live (overridden)
-    /// `CI_PROJECT_PATH`, on the [`ocx_util::env::overrides::EnvLock`] seam.
+    /// `CI_PROJECT_PATH`, on the [`ocx_env::overrides::EnvLock`] seam.
     ///
     /// This is the check that catches a dropped `.filter(is_valid_project_path)`
     /// call in the constructor — the predicate test above cannot, by
@@ -413,7 +402,7 @@ mod tests {
     /// told from never having run.
     ///
     /// Reds on: dropping `.filter(is_valid_project_path)` from the ladder;
-    /// reading `CI_PROJECT_PATH` with `ocx_util::env::var` instead of `non_empty`
+    /// reading `CI_PROJECT_PATH` with `get_raw` instead of `get`
     /// (the illegal row is unaffected, but a future empty-path row would be).
     #[test]
     fn the_ladder_refuses_a_publishing_project_path_with_an_illegal_segment() {
@@ -444,7 +433,7 @@ mod tests {
     /// that makes the ladder tests below unfalsifiable if repeated there.
     ///
     /// Reds on: comparing `Option<String>` equality directly instead of
-    /// gating on `non_empty`'s filter — the third case sets `CI_JOB_TOKEN` to
+    /// gating on `get`'s non-empty filter — the third case sets `CI_JOB_TOKEN` to
     /// the *present but empty* string (not absent), which only a working
     /// non-emptiness qualifier tells apart from a genuine match against an
     /// equally empty API token.
@@ -481,7 +470,7 @@ mod tests {
     /// perfectly good `CI_JOB_TOKEN` and produce a silently unauthenticated run.
     ///
     /// Reds on: consulting the job-token rung first; reading rung 1 with
-    /// `ocx_util::env::var` instead of the non-empty filter.
+    /// `get_raw` instead of the non-empty `get`.
     #[test]
     fn the_api_ladder_prefers_a_non_empty_ocx_token_over_the_job_token() {
         let env = isolated();
@@ -608,7 +597,7 @@ mod tests {
         env.set(var::GITLAB_CI, "true");
         env.set(var::CI_JOB_TOKEN, "glcbt-64-notarealjobtoken");
         env.set(var::CI_PROJECT_PATH, "acme/publisher");
-        env.set(var::CI_PROJECT_ID, "4711");
+        env.set_raw(var::CI_PROJECT_ID, "4711");
 
         // Rung 1 wins with the job token's own value.
         env.set(var::OCX_ANNOUNCE_TOKEN, "glcbt-64-notarealjobtoken");
@@ -654,7 +643,7 @@ mod tests {
     /// and no push credential — not an error and not `None`.
     ///
     /// WP-14 raises the `AuthError` (80) this earns for a write, and exempts
-    /// `--out`; both need a value to look at, and this is it.
+    /// `--output`; both need a value to look at, and this is it.
     ///
     /// Reds on: returning `Option<ForgeToken>`/`None` from the ladder; raising
     /// an error at this rung.
@@ -763,7 +752,7 @@ mod tests {
     /// qualifier exists for.
     ///
     /// The flag has two consumers and neither can be served by
-    /// `api_is_job_token`: C-029's readable-`false` refusal at exit 86 fires
+    /// `api_is_job_token`: C-029's readable-`false` refusal at exit 82 fires
     /// only when the **push** credential is a job token, and C-060's
     /// `push_credential_kind` names the push half. Each row asserts the resolved
     /// secret beside the flag, so a row cannot go green by resolving a different
@@ -887,7 +876,7 @@ mod tests {
     ///
     /// This divergence is the whole reason the second flag exists, and it is
     /// the one case a test asserting only that the two agree would pass with
-    /// either flag deleted. C-029's exit-86 refusal keys on the push flag:
+    /// either flag deleted. C-029's exit-82 refusal keys on the push flag:
     /// keyed on the API flag it would fire here, on a run whose push credential
     /// the project's job-token setting does not govern at all.
     ///
@@ -939,7 +928,7 @@ mod tests {
     /// for a variable ocx did not ask for.
     ///
     /// Reds on: hardcoding the default; deleting the default; reading the
-    /// username with `var` instead of `non_empty`; accepting a username
+    /// username with `get_raw` instead of `get`; accepting a username
     /// containing `:`.
     #[test]
     fn the_push_username_is_honoured_defaulted_and_sanitised() {

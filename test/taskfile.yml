@@ -182,7 +182,7 @@ tasks:
       # so the pytest entry points and `bazel:test:accept` test one binary.
       # `//crates/ocx_cli:ocx` carries the `__testing` provenance placeholders
       # (`crates/ocx_cli/BUILD.bazel`) and every tier crate's `rust_library`
-      # enables the `__testing` seams (currently the `__OCX_SELF_IMAGE`
+      # enables the `__testing` seams (currently the `__OCX_TESTING_SELF_IMAGE`
       # override in `ocx_oci::identifier::ocx_cli_identifier` that lets
       # `test_self_update.py::test_self_update_installs_newer_version`
       # redirect the canonical `ocx.sh/ocx/cli` to localhost:5000). The seams
@@ -251,6 +251,7 @@ tasks:
         {{.CLI_ARGS | default "-v"}}
         2>&1 | tee {{.TEST_RUN_LOG}}
       - task: .suite-ceilings
+      - task: .conformance-floor
       # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
       # configured for it (taskfiles/telemetry.taskfile.yml). Reached only by a
       # green run — a red one stops at the pytest step above, and in CI the
@@ -336,6 +337,16 @@ tasks:
     cmd: >-
       python3 {{.TASKFILE_DIR}}/../scripts/suite_ceilings.py --log {{.TEST_RUN_LOG}}
       --skip-ceiling-file {{.SKIP_CEILING_FILE}} --xfail-ceiling-file {{.XFAIL_CEILING_FILE}}
+
+  .conformance-floor:
+    desc: >-
+      Fail when a full run validated fewer distinct `--format json` schema
+      roots than test/CONFORMANCE_FLOOR, read off the run's JUnit report, and
+      print the conformance hook's findings. A subset run is reported as not
+      floored.
+    dir: '{{.TASKFILE_DIR}}'
+    # scripts/tests/test_conformance_floor.py is the checker's red/green proof.
+    cmd: python3 {{.TASKFILE_DIR}}/../scripts/conformance_floor.py --junit {{.JUNIT_XML}}
 
   smoke:
     desc: >-

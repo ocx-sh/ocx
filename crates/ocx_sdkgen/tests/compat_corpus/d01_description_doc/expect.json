@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushReport's `message` description is reworded without changing its meaning (a `doc` ledger entry, no bump).",
+  "findings": [
+    {
+      "code": "D01",
+      "pointer": "/$defs/PushReportRoot/properties/message",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

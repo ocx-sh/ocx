@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "The StatusReport root is removed.",
+  "findings": [
+    {
+      "code": "B01",
+      "pointer": "/reports/StatusReport",
+      "subjects": [
+        "StatusReport"
+      ]
+    }
+  ]
+}

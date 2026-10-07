@@ -3,18 +3,37 @@
 
 //! Error taxonomy for the forge REST client.
 
+use ocx_exit::{Pick, Row};
+use ocx_oci::transport_policy::{is_transient_status, is_transient_transport_error};
+
 use super::{CapabilityName, ForgeKind, Redacted, WriteTransport};
 
 /// Failures raised by the forge client; no variant carries the token.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
+// The catch-all slug the retired `_` arm answered for a future variant; published in the error schema, so kept.
+#[exit(reserve(
+    Failure,
+    slug = "forge_failed",
+    summary = "A forge operation failed with an unclassified cause"
+))]
 #[non_exhaustive]
 pub enum ForgeError {
     /// A repository coordinate string is not in `[HOST/]NAMESPACE/PROJECT` form.
     #[error("invalid repository coordinate {value}, expected [HOST/]NAMESPACE/PROJECT")]
+    #[exit(
+        UsageError,
+        slug = "invalid_repo_coordinate",
+        summary = "A repository coordinate is not a valid owner/name"
+    )]
     InvalidRepoCoordinate { value: String },
 
     /// A nested namespace on a forge whose namespaces are a single segment.
     #[error("{forge} has no nested namespaces, but {namespace} is nested")]
+    #[exit(
+        UsageError,
+        slug = "nested_namespace_unsupported",
+        summary = "The forge does not support nested namespaces"
+    )]
     NestedNamespaceUnsupported { forge: String, namespace: String },
 
     /// A forge kind could not be derived from a host and none was given.
@@ -23,11 +42,21 @@ pub enum ForgeError {
     #[error(
         "cannot tell which forge {host} is; pass --forge github or --forge gitlab, or write the host out if {host} is a group name (gitlab.com/{host}/...)"
     )]
+    #[exit(
+        UsageError,
+        slug = "forge_kind_unknown",
+        summary = "The forge kind of a self-hosted host is unknown; name it explicitly"
+    )]
     ForgeKindUnknown { host: String },
 
     /// A fork was requested into the namespace that already owns the upstream, which no forge can do.
     #[error(
         "{upstream} already lives under {namespace}, which cannot fork it: omit --fork to announce from a branch on the index repository itself"
+    )]
+    #[exit(
+        UsageError,
+        slug = "self_fork_refused",
+        summary = "The fork namespace is the upstream's own"
     )]
     SelfForkRefused { upstream: String, namespace: String },
 
@@ -38,10 +67,23 @@ pub enum ForgeError {
     #[error(
         "--fork is on {fork_host} but --index-repo is on {index_host}; a fork lives on the same instance as its upstream"
     )]
+    #[exit(
+        UsageError,
+        slug = "fork_host_mismatch",
+        summary = "The fork lives on another host than the index"
+    )]
     ForkHostMismatch { fork_host: String, index_host: String },
 
     /// The no-redirect forge HTTP client could not be constructed.
     #[error("failed to build the forge HTTP client")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "forge_client_build",
+            summary = "The forge HTTP client could not be built"
+        )
+    )]
     ClientBuild {
         #[source]
         source: reqwest::Error,
@@ -49,6 +91,11 @@ pub enum ForgeError {
 
     /// A request never completed (connect, TLS, timeout, or read failure).
     #[error("forge request to {url} failed")]
+    #[exit(with = transport_row,
+        rows(
+            (TempFail, slug = "forge_transport_transient", summary = "Reaching the forge failed in a way a retry may clear"),
+            (Unavailable, slug = "forge_transport_failed", summary = "The forge could not be reached"),
+        ))]
     Transport {
         url: String,
         #[source]
@@ -60,10 +107,25 @@ pub enum ForgeError {
     /// The git transport also raises this for a rejected credential, with a fixed
     /// `detail`: the stderr it holds can carry the credential itself.
     #[error("forge returned HTTP status {status} for {url}{detail}")]
+    #[exit(with = status_row,
+        rows(
+            (AuthError, slug = "forge_auth_failed", summary = "The forge rejected the request's credentials"),
+            (TempFail, slug = "forge_transient", summary = "The forge answered with a status a retry may clear"),
+            (Unavailable, slug = "forge_unavailable", summary = "The forge answered with a server error"),
+            (defer(Failure), slug = "forge_status", summary = "The forge answered with an unexpected HTTP status"),
+        ))]
     Status { url: String, status: u16, detail: String },
 
     /// A request body could not be serialized before sending.
     #[error("failed to encode a forge request body")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "forge_request_encode",
+            summary = "A forge request body could not be encoded"
+        )
+    )]
     RequestEncode {
         #[source]
         source: serde_json::Error,
@@ -71,6 +133,10 @@ pub enum ForgeError {
 
     /// A success response body could not be parsed as JSON.
     #[error("failed to decode the forge response from {url}")]
+    #[exit(
+        chain,
+        fallback(Failure, slug = "forge_decode", summary = "A forge response could not be decoded")
+    )]
     Decode {
         url: String,
         #[source]
@@ -79,35 +145,71 @@ pub enum ForgeError {
 
     /// A success response body lacked a field the client needs.
     #[error("forge response from {url} is missing the field {field}")]
+    #[exit(
+        defer(Failure),
+        slug = "forge_missing_field",
+        summary = "A forge response lacks a required field"
+    )]
     MissingField { url: String, field: String },
 
     /// A fork's parent is not the upstream (a same-named stranger); refused before any write.
     #[error("fork parent {actual} does not match upstream {expected}")]
+    #[exit(
+        defer(Failure),
+        slug = "fork_parent_mismatch",
+        summary = "The fork's parent is not the expected upstream"
+    )]
     ForkParentMismatch { expected: String, actual: String },
 
     /// A fork response carries no parent to verify against the upstream.
     #[error("fork response carries no parent to verify against upstream {expected}")]
+    #[exit(defer(Failure), slug = "fork_parent_absent", summary = "The fork reports no parent")]
     ForkParentAbsent { expected: String },
 
     /// A fork response lacked an identity field.
     #[error("fork response is missing the field {field}")]
+    #[exit(
+        defer(Failure),
+        slug = "fork_field_missing",
+        summary = "A fork response lacks a required field"
+    )]
     ForkFieldMissing { field: String },
 
     /// A fork's own path is not in `namespace/project` form.
     #[error("fork path {full_path} is not in namespace/project form")]
+    #[exit(
+        defer(Failure),
+        slug = "malformed_fork_full_name",
+        summary = "A fork's full name is malformed"
+    )]
     MalformedForkFullName { full_path: String },
 
     /// A verified fork is not owned by the requested owner.
     #[error("fork owner {actual} does not match the requested owner {expected}")]
+    #[exit(
+        defer(Failure),
+        slug = "fork_owner_mismatch",
+        summary = "The fork is owned by another account than expected"
+    )]
     ForkOwnerMismatch { expected: String, actual: String },
 
     /// A fork did not become ready within the bounded readiness deadline.
     #[error("fork not ready within {deadline_secs}s")]
+    #[exit(
+        defer(Failure),
+        slug = "fork_not_ready",
+        summary = "The fork did not become ready in time"
+    )]
     ForkNotReady { deadline_secs: u64 },
 
     /// A compare response carried a `status` value the client does not model.
     /// Never guessed: read as "not ahead" it strands a committed announce with no pull request.
     #[error("forge compare {url} returned an unmodelled status {status}")]
+    #[exit(
+        defer(Failure),
+        slug = "unknown_compare_status",
+        summary = "A forge compare returned a status the client does not model"
+    )]
     UnknownCompareStatus { url: String, status: String },
 
     /// The credential cannot push to the repository the fork-free announce path commits to.
@@ -116,11 +218,22 @@ pub enum ForgeError {
     /// write with 404, indistinguishable mid-sequence from the fresh-fork race
     /// [`super::GitHubForge::commit_files`] retries for.
     #[error("no push access to {repo}: the announce credential is missing write (push) permission on that repository")]
+    #[exit(
+        AuthError,
+        slug = "forge_push_access_denied",
+        summary = "The credential may not push to the repository"
+    )]
     PushAccessDenied { repo: String },
 
     /// A fast-forward-only ref update was rejected because a concurrent announce
     /// advanced the branch; the caller re-reads the head, regenerates, and retries.
     #[error("ref update for branch {branch} is not a fast-forward")]
+    // All three of this and `StaleLease`, `MergeRequestUnconfirmed` are races a rerun clears.
+    #[exit(
+        TempFail,
+        slug = "forge_non_fast_forward",
+        summary = "The push was not a fast-forward; another writer moved the branch"
+    )]
     NonFastForward { branch: String },
 
     /// A commit onto a fork 404ed through its git-data retries while its base commit
@@ -128,11 +241,21 @@ pub enum ForgeError {
     #[error(
         "git write onto fork {fork} failed with 404: the base commit is not reachable there, which is what a fork behind upstream looks like — syncing {branch} from upstream reported: {sync}"
     )]
+    #[exit(
+        defer(Failure),
+        slug = "fork_base_unreachable",
+        summary = "The fork's branch cannot reach the upstream base"
+    )]
     ForkBaseUnreachable { fork: String, branch: String, sync: String },
 
     /// A write transport this forge cannot serve, refused by
     /// [`super::ForgeKind::validate_transport`] before any network call.
     #[error("the {transport} write transport is not supported on {forge}; drop --transport to write over the API")]
+    #[exit(
+        UsageError,
+        slug = "forge_transport_unsupported",
+        summary = "The forge does not support the selected transport"
+    )]
     TransportUnsupported {
         forge: ForgeKind,
         transport: WriteTransport,
@@ -141,6 +264,11 @@ pub enum ForgeError {
     /// One operation the selected transport cannot perform, such as a fork operation
     /// over git; [`Self::TransportUnsupported`] refuses a whole transport.
     #[error("{operation} is not available over the {transport} write transport")]
+    #[exit(
+        UsageError,
+        slug = "forge_transport_operation_unsupported",
+        summary = "The selected transport does not support this operation"
+    )]
     TransportOperationUnsupported {
         operation: String,
         transport: WriteTransport,
@@ -152,10 +280,20 @@ pub enum ForgeError {
     #[error(
         "the forge users API is not reachable with this credential; give the owner as LOGIN:ID so no lookup is needed"
     )]
+    #[exit(
+        UsageError,
+        slug = "users_api_unavailable",
+        summary = "The forge offers no users API to resolve owners through"
+    )]
     UsersApiUnavailable,
 
     /// `git` is absent, unusable, or older than the git transport's floor; raised before any network call.
     #[error("the git write transport cannot run: {reason}")]
+    #[exit(
+        Unavailable,
+        slug = "git_unavailable",
+        summary = "The git executable the transport needs is unavailable"
+    )]
     GitUnavailable { reason: String },
 
     /// A rendered merge-request push option carried a value the git wire forbids.
@@ -165,6 +303,11 @@ pub enum ForgeError {
     /// Unclassified (exit 1) like [`Self::GitCommandFailed`]: no flag reaches this value, so
     /// [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError) would wrongly blame the command line.
     #[error("the push option {key} carries a value the git wire forbids: {reason}")]
+    #[exit(
+        defer(Failure),
+        slug = "push_option_refused",
+        summary = "The forge refused a git push option"
+    )]
     PushOptionRefused { key: &'static str, reason: String },
 
     /// A `git` plumbing step failed for a reason nothing models.
@@ -172,6 +315,8 @@ pub enum ForgeError {
     /// `stderr` stays [`Redacted`], never `String`: git's stderr can carry a secret
     /// inside forge-controlled bytes, and `redact` is the only way to build one.
     #[error("git {command} failed with {status}: {stderr}")]
+    // `GitCommandFailed`/`GitPushFailed` stay exit 1: no remedy a caller could branch on.
+    #[exit(defer(Failure), slug = "git_command_failed", summary = "A git command failed")]
     GitCommandFailed {
         command: String,
         status: String,
@@ -182,24 +327,44 @@ pub enum ForgeError {
     ///
     /// The server's words pass through verbatim, so `stderr` stays [`Redacted`].
     #[error("git push failed ({status}): {stderr}")]
+    #[exit(
+        defer(Failure),
+        slug = "git_push_failed",
+        summary = "A git push failed for an unrecognised reason"
+    )]
     GitPushFailed { status: String, stderr: Redacted },
 
     /// A leased force-push was refused because the branch moved since it was read;
     /// the git counterpart of [`Self::NonFastForward`].
     #[error("the branch {branch} moved since it was read, so the leased force-push was refused")]
+    #[exit(TempFail, slug = "forge_stale_lease", summary = "The branch moved since it was read")]
     StaleLease { branch: String },
 
     /// The server refused the push for a reason that is not a capability gate
-    /// (a protected branch or a pre-receive hook).
+    /// (a protected branch or a pre-receive hook): the credential lacks the
+    /// permission, exit 77.
     #[error("the push to {branch} was refused by the server: {reason}")]
+    #[exit(
+        PermissionDenied,
+        slug = "forge_push_refused",
+        summary = "The forge refused the push"
+    )]
     PushRefused { branch: String, reason: String },
 
     /// A capability the selected write transport needs is disabled on the project
-    /// or unavailable on the instance.
+    /// or unavailable on the instance, or the publisher is not on the index
+    /// project's job-token allowlist.
     ///
-    /// Only an administrator can fix it, hence its own exit code. `remedy` names the
-    /// setting, and both projects when the check compared two.
+    /// Only an administrator can fix it. A job-token push the project disables
+    /// exits 82 (the forge cannot do it as configured); an allowlist miss exits 77,
+    /// an authorisation gap a grant closes. `remedy` names the setting, and both
+    /// projects when the check compared two.
     #[error("{capability} is unavailable on {repo}: {remedy}")]
+    #[exit(with = capability_row,
+        rows(
+            (PermissionDenied, slug = "forge_publisher_not_allowlisted", summary = "The publishing project is not on the index project's job-token allowlist"),
+            (Unsupported, slug = "forge_capability_unavailable", summary = "The forge or project lacks a capability the transport needs"),
+        ))]
     WriteCapabilityUnavailable {
         capability: CapabilityName,
         repo: String,
@@ -211,6 +376,11 @@ pub enum ForgeError {
     #[error(
         "the push succeeded but no merge request appeared within {deadline_secs}s; rerun the command to pick up one the server created late"
     )]
+    #[exit(
+        TempFail,
+        slug = "merge_request_unconfirmed",
+        summary = "The forge did not confirm the merge request in time"
+    )]
     MergeRequestUnconfirmed { deadline_secs: u64 },
 }
 
@@ -218,6 +388,39 @@ pub enum ForgeError {
 ///
 /// The one spelling for the binary's exit classification and
 /// `git_workspace::confirm_merge_request`, so they cannot disagree on which statuses mean the forge broke.
+/// A transient status exits 75 and a server fault 69, the registry's own split: a rerun may clear the first, never the
+/// second. A 401/403 is an auth failure; any other status defers to the chain walker.
+fn status_row(error: &ForgeError, [auth, transient, unavailable, other]: [Row; 4]) -> Pick<'_> {
+    let ForgeError::Status { status, .. } = error else {
+        return Pick::row(other);
+    };
+    Pick::row(match *status {
+        401 | 403 => auth,
+        status if is_transient_status(status) => transient,
+        status if is_server_fault(status) => unavailable,
+        _ => other,
+    })
+}
+
+/// An allowlist miss is a grant the caller can obtain (77); any other capability gap is the forge's to enable (82).
+fn capability_row(error: &ForgeError, [not_allowlisted, unavailable]: [Row; 2]) -> Pick<'_> {
+    match error {
+        ForgeError::WriteCapabilityUnavailable {
+            capability: CapabilityName::JobTokenAllowlist,
+            ..
+        } => Pick::row(not_allowlisted),
+        _ => Pick::row(unavailable),
+    }
+}
+
+/// A connect or timeout fault a retry may clear exits 75, any other transport fault 69.
+fn transport_row(error: &ForgeError, [transient, failed]: [Row; 2]) -> Pick<'_> {
+    match error {
+        ForgeError::Transport { source, .. } if is_transient_transport_error(source) => Pick::row(transient),
+        _ => Pick::row(failed),
+    }
+}
+
 #[must_use]
 pub fn is_server_fault(status: u16) -> bool {
     (500..=599).contains(&status)
@@ -363,7 +566,7 @@ mod tests {
                     repo: "acme/index".to_string(),
                     remedy: "enable Settings > CI/CD > Job token permissions on acme/index".to_string(),
                 },
-                Some(ExitCode::ForgeCapabilityUnavailable),
+                Some(ExitCode::Unsupported),
             ),
             (
                 ForgeError::MergeRequestUnconfirmed { deadline_secs: 30 },

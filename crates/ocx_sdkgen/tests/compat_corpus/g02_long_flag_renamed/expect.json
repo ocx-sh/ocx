@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --cascade` is renamed `--cascade-tags` with no window.",
+  "findings": [
+    {
+      "code": "G02",
+      "pointer": "/root/commands/0/commands/0/args/2",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

@@ -13,6 +13,7 @@ use ocx_package::{
 };
 
 use crate::api::data::push::SignedPlatformReport;
+use crate::command::deprecated;
 use crate::command::{index_common, package_sign_common};
 use crate::options::key::KeyOpt;
 use crate::options::rekor_upload::RekorUploadOpt;
@@ -38,8 +39,12 @@ ephemeral builds with `--no-keep-tag`, or prune frees no storage.";
 ))]
 pub struct PackagePush {
     /// Will cascade rolling releases, ie. pushing 1.2.3 will also update 1.2, 1, etc.
-    #[clap(long = "cascade", short = 'c')]
+    #[clap(long = "cascade")]
     cascade: bool,
+
+    // 0.7 removal: the `-c` spelling of `--cascade`.
+    #[clap(id = deprecated::PUSH_C.arg_id(), short = 'c', hide = true)]
+    deprecated_c: bool,
 
     /// Let the pushed tag's variant also own the un-prefixed version track
     #[arg(long_help = "\
@@ -375,7 +380,7 @@ impl PackagePush {
         };
         let annotations = merge_annotations(generated, &self.annotation);
 
-        let outcome = if self.cascade {
+        let outcome = if self.cascade || self.deprecated_c {
             let existing_tags = publisher
                 .list_tags(target.clone())
                 .await
@@ -417,7 +422,7 @@ impl PackagePush {
         // Platform manifests, never the index, whose digest a later platform merge rewrites.
         let platform_digests = outcome.platform_digests.clone();
         // `--build-timestamp` rewrites the tag at publish time, so the report names the tag written, not the input.
-        let pushed = identifier.clone_with_tag(&outcome.primary_tag).to_string();
+        let pushed = identifier.clone_with_tag(&outcome.primary_tag);
         let mut report =
             crate::api::data::push::PushReport::from_outcome(pushed, outcome).with_annotations(annotations);
         // Post-push failures are never rolled back: each becomes a report row plus a log line.
@@ -436,21 +441,20 @@ impl PackagePush {
                     Ok(signed) => {
                         // A `both` platform that lost one leg fails but still reports the leg that landed.
                         let result = signed.result;
-                        let leg = result
-                            .first_failure()
-                            .map(|kind| (package_sign_common::leg_exit_code(kind), kind.to_string()));
+                        let leg = result.first_failure().map(|kind| {
+                            (
+                                package_sign_common::leg_exit_code(kind),
+                                package_sign_common::leg_slug(kind),
+                                kind.to_string(),
+                            )
+                        });
                         let signature = package_sign_common::signature_report(&identifier, Some(&platform), result);
                         match leg {
-                            Some((code, message)) => {
+                            Some((code, slug, message)) => {
                                 failures.push(code);
-                                SignedPlatformReport::failed(
-                                    platform.to_string(),
-                                    Some(signature),
-                                    package_sign_common::category_slug(code),
-                                    message,
-                                )
+                                SignedPlatformReport::failed(platform, Some(signature), slug, message)
                             }
-                            None => SignedPlatformReport::completed(platform.to_string(), signature),
+                            None => SignedPlatformReport::completed(platform, signature),
                         }
                     }
                     Err(error) => {
@@ -458,7 +462,7 @@ impl PackagePush {
                         failures.push(crate::exit::classify_library_error(error.as_ref()));
                         log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{error:#}")));
                         SignedPlatformReport::failed(
-                            platform.to_string(),
+                            platform,
                             None,
                             package_sign_common::error_slug("package push", &error),
                             format!("{error:#}"),
@@ -503,7 +507,7 @@ impl PackagePush {
     /// # Errors
     ///
     /// A forbidden endpoint URL, a malformed `--key` (exit 64), an unimplemented key backend
-    /// (exit 85) or a keyless `--no-rekor-upload` (exit 64), each a `SignError` carrying the identifier.
+    /// (exit 82) or a keyless `--no-rekor-upload` (exit 64), each a `SignError` carrying the identifier.
     async fn resolve_signing(
         &self,
         context: &crate::app::Context,
@@ -577,13 +581,12 @@ impl PackagePush {
             .await
             .map_err(package_sign_common::attest_error_into_anyhow)?
             .result;
-        // Neither is required: `simplesigning` writes only the `.att` sidecar, still a published attestation.
-        Ok(crate::api::data::push::AttestationOutcome::Succeeded {
-            referrer_digest: result.referrer.map(|leg| leg.manifest_digest.to_string()),
-            sidecar_digest: result.sidecar.map(|leg| leg.manifest_digest.to_string()),
-            predicate_type: result.predicate_type,
-            signed: result.signed,
-        })
+        Ok(crate::api::data::push::AttestationOutcome::succeeded(
+            result.referrer.map(|leg| leg.manifest_digest),
+            result.sidecar.map(|leg| leg.manifest_digest),
+            result.predicate_type,
+            result.signed,
+        ))
     }
 }
 

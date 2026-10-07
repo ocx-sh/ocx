@@ -24,6 +24,8 @@ rust_library(
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_config",
+        "//crates/ocx_env",
+        "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
         "//crates/ocx_store",
@@ -105,6 +107,8 @@ rust_test(
     ) + [
         ":ocx_package",
         "//crates/ocx_config",
+        "//crates/ocx_env",
+        "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
         "//crates/ocx_store",
@@ -160,6 +164,8 @@ rust_test(
     ) + [
         ":ocx_package",
         "//crates/ocx_config",
+        "//crates/ocx_env",
+        "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
         "//crates/ocx_store",

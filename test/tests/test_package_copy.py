@@ -61,7 +61,11 @@ def _copy(
 
 def _dispositions(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
     report = json.loads(result.stdout)
-    return {row["platform"]: row["disposition"] for row in report["platforms"]}
+    return {
+        "/".join(filter(None, (row["platform"]["os"], row["platform"]["architecture"], row["platform"].get("variant")))):
+        row["disposition"]
+        for row in report["manifests"]
+    }
 
 
 def _target_has_tag(target_registry: str, repo: str, tag: str) -> bool:
@@ -223,11 +227,7 @@ def test_copy_merges_into_the_target_index_instead_of_replacing_it(
     # "replaced" too would pass just as well against a build that always
     # reported "replaced", which is not the contract this test names.
     assert dispositions[host] == "added"
-    # WP-B/WP-D are switching `disposition` to a `#[serde(rename_all =
-    # "kebab-case")]` enum (subsystem-cli-api.md "Typed Enums Over
-    # Strings"); RED until that lands. Spelling per team-lead's message,
-    # unconfirmed against a published WP-B artifact at write time.
-    assert dispositions[other] == "kept-not-in-source"
+    assert dispositions[other] == "kept_not_in_source"
 
 
 def test_copy_within_the_same_registry_to_a_different_repository(
@@ -494,20 +494,20 @@ def test_a_signature_survives_the_promotion(
     assert verified.returncode == 0, verified.stderr
 
 
-def test_referrers_against_a_registry_without_the_api_exits_84(
+def test_referrers_against_a_registry_without_the_api_exits_82(
     ocx: OcxRunner, legacy_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
     """A registry with no Referrers API cannot hold the signature, so a copy
-    that was asked to carry referrers refuses (84) rather than silently
+    that was asked to carry referrers refuses (82) rather than silently
     promoting an artifact whose provenance stayed behind.
 
-    Paired with the `--no-referrers` run below, which proves the 84 comes from
+    Paired with the `--no-referrers` run below, which proves the 82 comes from
     the capability probe and not merely from the target being another host.
     """
     package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     refused = _copy(ocx, legacy_registry, "--to", legacy_registry, package.short, check=False)
-    assert refused.returncode == 84, refused.stderr
+    assert refused.returncode == 82, refused.stderr
 
     allowed = _copy(
         ocx, legacy_registry, "--to", legacy_registry, "--no-referrers", package.short, check=False
@@ -605,7 +605,7 @@ def test_a_cosign_sidecar_signature_survives_the_promotion(
         check=False,
     )
     assert verified.returncode == 0, f"stdout: {verified.stdout}\nstderr: {verified.stderr.strip()}"
-    [entry] = json.loads(verified.stdout)["data"]["signatures"]
+    [entry] = json.loads(verified.stdout)["signatures"]
     assert entry["discovery_method"] == "sidecar_tag", entry
     assert entry["signature_format"] == "simplesigning", entry
 
@@ -621,7 +621,7 @@ def test_sidecar_tags_land_on_a_registry_without_the_referrers_api(
     could never run against `registry:2` — and this test would pass by never
     executing.
 
-    So the assertion is deliberately two-sided: the copy still exits 84, proving
+    So the assertion is deliberately two-sided: the copy still exits 82, proving
     the referrers verdict is unchanged, **and** the sidecar is already at the
     destination, proving the sweep ran before it. The `.att` tag, which the
     source never had, is the control that keeps the positive from being vacuous.
@@ -629,7 +629,7 @@ def test_sidecar_tags_land_on_a_registry_without_the_referrers_api(
     subject, tag, layer_digest = _push_signed_subject(ocx.registry, unique_repo)
 
     refused = _copy_by_digest(ocx, legacy_registry, unique_repo, subject, check=False)
-    assert refused.returncode == 84, refused.stderr
+    assert refused.returncode == 82, refused.stderr
 
     assert _target_has_tag(legacy_registry, unique_repo, tag), (
         "the sidecar must have landed before the referrers gate refused the target"
@@ -934,12 +934,11 @@ def test_the_description_travels_only_when_asked(
     plain = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert plain.returncode == 0, plain.stderr
     assert not _target_has_tag(target_registry, package.repo, "__ocx.desc")
-    # A flag that was not passed reports null, so the key is always there to
-    # branch on rather than absent on the path a consumer cares about.
-    assert json.loads(plain.stdout)["description"] is None
+    # A flag that was not passed leaves the description outcome absent.
+    assert "description" not in json.loads(plain.stdout)
 
     with_description = _copy(
-        ocx, target_registry, "--to", target_registry, "--description", package.short
+        ocx, target_registry, "--to", target_registry, "--with-description", package.short
     )
     assert with_description.returncode == 0, with_description.stderr
     assert _target_has_tag(target_registry, package.repo, "__ocx.desc")
@@ -1040,7 +1039,7 @@ def test_copy_reads_an_index_served_source_at_its_physical_registry(
         "copy",
         "--to",
         target_registry,
-        "--description",
+        "--with-description",
         f"{logical}:1.0.0",
         env_overlay={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},{target_registry},{index_host}"},
     )
@@ -1072,7 +1071,7 @@ def test_description_pull_reads_an_index_served_package_at_its_physical_registry
         logical,
         env_overlay={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},{index_host}"},
     )
-    assert data[logical]["title"] == "Routed Tool"
+    assert data["descriptions"][logical]["title"] == "Routed Tool"
 
 
 def test_describe_from_reads_an_index_served_source_at_its_physical_registry(

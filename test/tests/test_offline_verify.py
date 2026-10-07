@@ -22,6 +22,7 @@ cache key must survive the kill) or a port nothing listens on.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -51,6 +52,7 @@ def _verify(
     rekor_url: str | None = None,
     identity: str | None = None,
     extra_env: dict[str, str],
+    json_format: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``package verify``. The trust root comes from ``extra_env`` only.
 
@@ -60,6 +62,7 @@ def _verify(
     return subprocess.run(
         [
             str(ocx.binary),
+            *(["--format", "json"] if json_format else []),
             "package", "verify",
             "--certificate-identity", identity or stack.identity,
             "--certificate-oidc-issuer", stack.issuer,
@@ -97,7 +100,7 @@ def test_online_verify_populates_cache_then_offline_verify_succeeds(
     Step 2 (online verify) TOFU-fetches the Rekor key and caches it with the
     Fulcio CA under ``$OCX_HOME/state/trust_root/``. The relay is then closed.
     Step 4 (``OCX_OFFLINE=1``, no ``OCX_SIGSTORE_TRUSTED_ROOT``) must succeed purely
-    from the cache — if it fetched the Rekor key it would be refused and exit 83.
+    from the cache — if it fetched the Rekor key it would be refused and exit 81.
     Both runs address the same relay, so the cache entry is the same one.
     """
     pkg = published_package
@@ -183,23 +186,50 @@ def test_offline_verify_without_trust_material_fails_not_skips(
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """OFFLINE verify with no cache and no override → exit 78, naming the remedy.
+    """OFFLINE verify with no cache and no override → exit 81 ``offline_mode``, naming the remedy.
 
     The package is signed (so a signature exists), but no prior verify ran, so
     the trust-root cache is empty. Rekor is deliberately left *reachable* here:
-    the refusal must come from the offline policy, not from connectivity.
+    the refusal must come from the offline policy, not from connectivity. It is
+    a policy refusal (81), not a trust-root fault (78): online the same run
+    would fetch the material.
     """
     pkg = published_package
     _sign(ocx, sigstore_stack, identity_token, pkg)
 
-    result = _verify(ocx, sigstore_stack, pkg, extra_env={"OCX_OFFLINE": "1"})
-    assert result.returncode == 78, (
-        f"offline verify without trust material must fail with exit 78 (never skip), "
+    result = _verify(ocx, sigstore_stack, pkg, extra_env={"OCX_OFFLINE": "1"}, json_format=True)
+    assert result.returncode == 81, (
+        f"offline verify without trust material must fail with exit 81 (never skip), "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    assert "--sigstore-trusted-root" in result.stderr or "online verify" in result.stderr, (
-        f"error must name the remedy, got: {result.stderr.strip()}"
+    assert json.loads(result.stdout)["error"]["detail"] == "offline_mode", result.stdout
+    assert "--sigstore-trusted-root" in result.stderr or "online verify" in result.stdout, (
+        f"error must name the remedy, got: {result.stderr.strip()} {result.stdout.strip()}"
     )
+
+
+def test_offline_verify_with_a_trusted_root_lacking_a_rekor_key_exits_81(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """A well-formed trusted root with no Rekor key, OFFLINE → exit 81 ``offline_mode``, not 78 ``trust_root_load``.
+
+    The document is valid; only the key fetch that `--offline` forbids is missing. The control runs the
+    identical document online (Rekor reachable), where the key is fetched and the verify succeeds.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    keyless = {"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_without_rekor_key(tmp_path))}
+
+    offline = _verify(ocx, sigstore_stack, pkg, extra_env={**keyless, "OCX_OFFLINE": "1"}, json_format=True)
+    assert offline.returncode == 81, f"got {offline.returncode}\nstdout: {offline.stdout}\nstderr: {offline.stderr}"
+    assert json.loads(offline.stdout)["error"]["detail"] == "offline_mode", offline.stdout
+
+    online = _verify(ocx, sigstore_stack, pkg, extra_env=keyless)
+    assert online.returncode == 0, f"the same document must verify online: {online.stderr}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

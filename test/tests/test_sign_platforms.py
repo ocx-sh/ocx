@@ -180,7 +180,7 @@ def verify_flags(
     if platform is not None:
         flags += ["--platform", platform]
     if mode == "key-env":
-        flags += ["--key", str(COSIGN_PUB)]
+        flags += ["--sigstore-trusted-root", str(stack.trust_root), "--key", str(COSIGN_PUB)]
     else:
         flags += [
             "--rekor-url", stack.rekor_url,
@@ -433,7 +433,7 @@ def test_push_sign_writes_one_signature_per_platform_then_verify_per_platform(
             f"verify --platform {platform} failed ({result.returncode})\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        data = json.loads(result.stdout)["data"]
+        data = json.loads(result.stdout)
         assert data["subject_digest"] == digest, (
             f"verify --platform {platform} accepted {data['subject_digest']}, "
             f"not that platform's manifest {digest}"
@@ -501,7 +501,7 @@ def test_push_sign_against_local_fulcio_and_rekor_signs_and_verifies(
         f"verify failed ({result.returncode})\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    data = json.loads(result.stdout)["data"]
+    data = json.loads(result.stdout)
     assert data["subject_digest"] == subject
     assert data["certificate_identity"] == sigstore_stack.identity, (
         "the certificate must come from the Fulcio the flag named"
@@ -564,7 +564,7 @@ def test_sign_tags_file_over_an_index_then_verify_on_the_tag(
         f"sweep failed ({result.returncode})\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    rows = {row["tag"]: row for row in json.loads(result.stdout)["data"]["tags"]}
+    rows = {row["tag"]: row for row in json.loads(result.stdout)["items"]}
     assert set(rows) == {first.tag, second.tag}, rows
 
     for tag, index_digest in index_digests.items():
@@ -593,7 +593,7 @@ def test_sign_tags_file_over_an_index_then_verify_on_the_tag(
             f"verify on {tag} failed ({verify.returncode})\n"
             f"stdout: {verify.stdout}\nstderr: {verify.stderr}"
         )
-        assert json.loads(verify.stdout)["data"]["subject_digest"] == index_digest, (
+        assert json.loads(verify.stdout)["subject_digest"] == index_digest, (
             f"verify on {tag} accepted something other than the index"
         )
 
@@ -645,8 +645,8 @@ def test_sign_dash_p_narrows_to_that_platform(
         f"sign -p {AMD64} failed ({result.returncode})\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    data = json.loads(result.stdout)["data"]
-    assert data["platform"] == AMD64
+    data = json.loads(result.stdout)
+    assert data["platform"] == {"os": "linux", "architecture": "amd64"}
     assert data["key_backend"] == expected_key_backend(mode), (
         f"signed under a backend other than {mode}: {data!r}"
     )

@@ -26,6 +26,8 @@ rust_library(
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_config",
         "//crates/ocx_console",
+        "//crates/ocx_env",
+        "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
         "//crates/ocx_package",
@@ -70,8 +72,6 @@ rust_test(
         "--test-threads=1",
         "--exact",
         "--skip=activation::one_install_bin_derivation::only_the_store_derives_the_install_bin_directory",
-        "--skip=launch::firewall_tests::every_allowlisted_file_still_exists",
-        "--skip=launch::firewall_tests::every_launch_exemption_is_enumerated",
         "--skip=launch::firewall_tests::no_process_spawn_outside_launch",
         "--skip=launcher::generate::tests::a_relative_candidate_is_never_bakeable_even_when_it_exists",
     ],

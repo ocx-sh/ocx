@@ -6,10 +6,25 @@
 use std::path::{Path, PathBuf};
 
 /// Failure modes of [`ensure_empty_or_absent`].
-#[derive(Debug)]
+#[derive(Debug, ocx_exit::Classify)]
 pub enum EmptyOrAbsentError {
+    #[exit(
+        UsageError,
+        slug = "destination_not_a_directory",
+        summary = "The destination exists and is not a directory"
+    )]
     NotADirectory { path: PathBuf },
+    #[exit(
+        UsageError,
+        slug = "destination_not_empty",
+        summary = "The destination directory is not empty"
+    )]
     NonEmpty { path: PathBuf },
+    #[exit(
+        IoError,
+        slug = "destination_check_io",
+        summary = "Inspecting the destination directory failed"
+    )]
     Io { path: PathBuf, source: std::io::Error },
 }
 

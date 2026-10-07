@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "The `name` of PushStatus entry `pushed` changes, renaming the generated SDK variant.",
+  "findings": [
+    {
+      "code": "B08",
+      "pointer": "/$defs/PushStatus/x-ocx-enum/0",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

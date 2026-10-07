@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "`package push --platform` accepts many values per occurrence.",
+  "findings": []
+}

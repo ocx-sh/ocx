@@ -53,18 +53,17 @@ impl FromStr for ActivateMode {
 impl ActivateMode {
     /// Reads the `OCX_TOOLCHAIN_ACTIVATE` tier: empty is unset, an unrecognised
     /// value warns and counts as absent, whitespace is not trimmed.
-    /// Through `ocx_util::env::var`, never `std::env::var`, or the unit tests
+    /// Through the `ocx_env` registry, never `std::env::var`, or the unit tests
     /// lose the override seam and race in nextest's shared process.
     pub fn from_env() -> Option<Self> {
-        let key = ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE;
-        let value = ocx_util::env::var(key)?;
-        if value.is_empty() {
-            return None;
-        }
+        let value = ocx_env::OCX_TOOLCHAIN_ACTIVATE.get()?;
         match value.to_ascii_lowercase().parse::<Self>() {
             Ok(mode) => Some(mode),
             Err(error) => {
-                log::warn!("Environment variable '{key}' ignored: {error}");
+                log::warn!(
+                    "Environment variable '{}' ignored: {error}",
+                    ocx_env::OCX_TOOLCHAIN_ACTIVATE.name
+                );
                 None
             }
         }
@@ -100,18 +99,17 @@ impl clap_builder::ValueEnum for ActivateMode {
 }
 
 /// Reads the `OCX_TOOLCHAIN_PINNED` tier with `ActivateMode::from_env`'s contract.
-/// `Option<bool>`, not `ocx_util::env::flag`, which collapses unset and false:
+/// `Option<bool>`, not `EnvVar::bool_or`, which collapses unset and false:
 /// only the floor may answer for an unset tier.
 pub fn pinned_from_env() -> Option<bool> {
-    let key = ocx_config::env::keys::OCX_TOOLCHAIN_PINNED;
-    let value = ocx_util::env::var(key)?;
-    if value.is_empty() {
-        return None;
-    }
+    let value = ocx_env::OCX_TOOLCHAIN_PINNED.get()?;
     match ocx_util::boolean_string::BooleanString::try_from(value.as_str()) {
         Ok(boolean) => Some(boolean.into()),
         Err(error) => {
-            log::warn!("Environment variable '{key}' ignored: {error}");
+            log::warn!(
+                "Environment variable '{}' ignored: {error}",
+                ocx_env::OCX_TOOLCHAIN_PINNED.name
+            );
             None
         }
     }
@@ -122,7 +120,6 @@ mod tests {
     use super::*;
 
     use crate::ladder::Ladder;
-    use ocx_config::env::keys;
 
     // ── C-006: one wire vocabulary, four producers ──────────────────────────
 
@@ -195,8 +192,8 @@ mod tests {
 
     // ── C-006: `OCX_TOOLCHAIN_ACTIVATE` ─────────────────────────────────────
     //
-    // Every reader test goes through `ocx_util::env::overrides::lock()`, the crate's
-    // `#[cfg(test)]` override seam for `ocx_util::env::var` — never
+    // Every reader test goes through `ocx_env::overrides::lock()`, the crate's
+    // `#[cfg(test)]` override seam for every `ocx_env` read — never
     // `std::env::set_var`, which is process-global and racy across a test
     // binary's threads.
     //
@@ -211,8 +208,8 @@ mod tests {
     /// C-006: an unset variable is an absent tier, not the floor.
     #[test]
     fn activate_from_env_is_absent_when_the_variable_is_unset() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(keys::OCX_TOOLCHAIN_ACTIVATE);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_ACTIVATE);
         assert_eq!(
             ActivateMode::from_env(),
             None,
@@ -225,8 +222,8 @@ mod tests {
     /// is decided **before** parsing.
     #[test]
     fn activate_from_env_treats_an_empty_value_as_absent() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_TOOLCHAIN_ACTIVATE, "");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "");
         assert_eq!(ActivateMode::from_env(), None, "an empty value is an absent tier");
     }
 
@@ -235,9 +232,9 @@ mod tests {
     /// answers `None` either way.
     #[test]
     fn activate_from_env_does_not_trim_a_padded_value() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for padded in [" bin", "bin ", "\tbin", "   "] {
-            env.set(keys::OCX_TOOLCHAIN_ACTIVATE, padded);
+            env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, padded);
             assert_eq!(
                 ActivateMode::from_env(),
                 None,
@@ -249,18 +246,18 @@ mod tests {
     /// C-006 / C-015: ASCII case is folded, so `Bin` is `bin`.
     #[test]
     fn activate_from_env_folds_ascii_case() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for spelling in ["bin", "Bin", "BIN", "bIn"] {
-            env.set(keys::OCX_TOOLCHAIN_ACTIVATE, spelling);
+            env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, spelling);
             assert_eq!(
                 ActivateMode::from_env(),
                 Some(ActivateMode::Bin),
                 "`OCX_TOOLCHAIN_ACTIVATE={spelling}` must fold to `bin`"
             );
         }
-        env.set(keys::OCX_TOOLCHAIN_ACTIVATE, "ENV");
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "ENV");
         assert_eq!(ActivateMode::from_env(), Some(ActivateMode::Env));
-        env.set(keys::OCX_TOOLCHAIN_ACTIVATE, "None");
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "None");
         assert_eq!(ActivateMode::from_env(), Some(ActivateMode::None));
     }
 
@@ -275,9 +272,9 @@ mod tests {
     /// reader's own return value.
     #[test]
     fn activate_from_env_falls_back_to_absent_on_an_unrecognised_value() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for garbage in ["sometimes", "Bin;rm -rf /", "binn", "0"] {
-            env.set(keys::OCX_TOOLCHAIN_ACTIVATE, garbage);
+            env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, garbage);
             assert_eq!(
                 ActivateMode::from_env(),
                 None,
@@ -291,9 +288,9 @@ mod tests {
     /// would admit it.
     #[test]
     fn activate_from_env_refuses_a_value_that_belongs_to_the_pinned_key() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for foreign in ["true", "false", "1", "0", "yes", "off"] {
-            env.set(keys::OCX_TOOLCHAIN_ACTIVATE, foreign);
+            env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, foreign);
             assert_eq!(
                 ActivateMode::from_env(),
                 None,
@@ -312,9 +309,9 @@ mod tests {
     /// distinguish the two folds for this vocabulary, so no test here can.
     #[test]
     fn activate_from_env_refuses_a_non_ascii_lookalike() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for lookalike in ["ＢＩＮ", "bın", "ｂｉｎ", "ｅｎｖ"] {
-            env.set(keys::OCX_TOOLCHAIN_ACTIVATE, lookalike);
+            env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, lookalike);
             assert_eq!(
                 ActivateMode::from_env(),
                 None,
@@ -328,8 +325,8 @@ mod tests {
     /// C-007: an unset variable is an absent tier.
     #[test]
     fn pinned_from_env_is_absent_when_the_variable_is_unset() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove(keys::OCX_TOOLCHAIN_PINNED);
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_TOOLCHAIN_PINNED);
         assert_eq!(
             pinned_from_env(),
             None,
@@ -340,17 +337,17 @@ mod tests {
     /// C-007: an exported-but-empty value is absent, before parsing.
     #[test]
     fn pinned_from_env_treats_an_empty_value_as_absent() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_TOOLCHAIN_PINNED, "");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "");
         assert_eq!(pinned_from_env(), None, "an empty value is an absent tier");
     }
 
     /// C-007: the value is not trimmed — ` true` is an unrecognised value.
     #[test]
     fn pinned_from_env_does_not_trim_a_padded_value() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for padded in [" true", "true ", "\tfalse", "   "] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, padded);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, padded);
             assert_eq!(
                 pinned_from_env(),
                 None,
@@ -362,9 +359,9 @@ mod tests {
     /// C-007: the shipped boolean vocabulary, truthy half.
     #[test]
     fn pinned_from_env_accepts_the_shipped_truthy_vocabulary() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for truthy in ["1", "y", "yes", "on", "true"] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, truthy);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, truthy);
             assert_eq!(
                 pinned_from_env(),
                 Some(true),
@@ -378,12 +375,12 @@ mod tests {
     /// environment tier's true" observable at all.
     ///
     /// This is why the reader yields `Option<bool>` rather than going through
-    /// [`ocx_util::env::flag`], which collapses absent and false into one `bool`.
+    /// [`ocx_env::EnvVar::bool_or`], which collapses absent and false into one `bool`.
     #[test]
     fn pinned_from_env_reports_an_explicit_false_as_some_false_not_absent() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for falsy in ["0", "n", "no", "off", "false"] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, falsy);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, falsy);
             assert_eq!(
                 pinned_from_env(),
                 Some(false),
@@ -395,9 +392,9 @@ mod tests {
     /// C-007 / C-015: case is folded.
     #[test]
     fn pinned_from_env_folds_case() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for spelling in ["TRUE", "True", "tRuE", "YES", "On"] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, spelling);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, spelling);
             assert_eq!(
                 pinned_from_env(),
                 Some(true),
@@ -405,7 +402,7 @@ mod tests {
             );
         }
         for spelling in ["FALSE", "False", "OFF", "No"] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, spelling);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, spelling);
             assert_eq!(
                 pinned_from_env(),
                 Some(false),
@@ -417,9 +414,9 @@ mod tests {
     /// C-007: a value that belongs to `OCX_TOOLCHAIN_ACTIVATE` is refused here.
     #[test]
     fn pinned_from_env_refuses_a_value_that_belongs_to_the_activate_key() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for foreign in ["bin", "env", "none"] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, foreign);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, foreign);
             assert_eq!(
                 pinned_from_env(),
                 None,
@@ -434,9 +431,9 @@ mod tests {
     /// choice of fold.
     #[test]
     fn pinned_from_env_refuses_a_non_ascii_lookalike() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         for lookalike in ["ＴＲＵＥ", "ｔｒｕｅ", "yｅs", "оn"] {
-            env.set(keys::OCX_TOOLCHAIN_PINNED, lookalike);
+            env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, lookalike);
             assert_eq!(
                 pinned_from_env(),
                 None,
@@ -455,8 +452,8 @@ mod tests {
     /// resolves to **`Bin`**. The environment variable is the weakest tier.
     #[test]
     fn an_ocx_toml_activate_beats_the_environment_tier() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_TOOLCHAIN_ACTIVATE, "none");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "none");
         let ladder = Ladder {
             cli: None,
             file: Some(ActivateMode::Bin),
@@ -480,8 +477,8 @@ mod tests {
     /// [`pinned_from_env`] can say `Some(false)`.
     #[test]
     fn an_ocx_toml_pinned_false_beats_an_environment_pinned_true() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_TOOLCHAIN_PINNED, "true");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "true");
         let ladder = Ladder {
             cli: None,
             file: Some(false),
@@ -502,8 +499,8 @@ mod tests {
     /// resolves to **`true`**. The flag is the most specific tier.
     #[test]
     fn the_pinned_flag_beats_both_the_file_and_the_environment_tier() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_TOOLCHAIN_PINNED, "false");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_PINNED, "false");
         let ladder = Ladder {
             cli: Some(true),
             file: Some(false),
@@ -531,8 +528,8 @@ mod tests {
     /// the property that has a reachable red.
     #[test]
     fn an_unrecognised_environment_activate_leaves_the_ocx_toml_value_standing() {
-        let env = ocx_util::env::overrides::lock();
-        env.set(keys::OCX_TOOLCHAIN_ACTIVATE, "garbage");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "garbage");
         let ladder = Ladder {
             cli: None,
             file: Some(ActivateMode::Bin),

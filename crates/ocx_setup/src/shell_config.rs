@@ -4,7 +4,7 @@
 //! Surgical `[shell]` writes into the home-tier `$OCX_HOME/config.toml`.
 //!
 //! `[shell]` is not fenced: an explicit flag overwrites a hand-written value and
-//! exit 82 never applies.
+//! exit 81 never applies.
 
 use std::path::{Path, PathBuf};
 
@@ -85,7 +85,7 @@ pub async fn set(locks_root: &Path, config_path: &Path, key: ShellKey, value: Sh
 }
 
 /// Render a freshly created `[shell]` table before every table already in the document.
-// Appended at the end it lands inside the `[managed]` fence, which then reads `Dirty` and setup exits 82.
+// Appended at the end it lands inside the `[managed]` fence, which then reads `Dirty` and setup exits 81.
 fn hoist_above_every_table(document: &mut DocumentMut) {
     // Parsed tables number from zero, so -1 sorts first without renumbering anyone else's table.
     if let Some(Item::Table(shell)) = document.get_mut("shell") {
@@ -254,8 +254,8 @@ mod tests {
         );
     }
 
-    /// C-051: a failure **publishing** the file is 74 `IoError`, never 82
-    /// `DirtyRcBlock` — `[shell]` is not fenced, so there is no dirty state to
+    /// C-051: a failure **publishing** the file is 74 `IoError`, never 81
+    /// `PolicyBlocked` — `[shell]` is not fenced, so there is no dirty state to
     /// report.
     ///
     /// The fixture has to reach `write_bytes_atomic` to mean anything, so the
@@ -347,7 +347,7 @@ mod tests {
     /// end of document, so a newly created `[shell]` table placed after the
     /// last table lands **inside** that fence: the block then hashes to
     /// something its own marker disagrees with, classifies `Dirty`, and
-    /// `ocx self setup --hook` exits **82** — the one code C-051 says this
+    /// `ocx self setup --hook` exits **81** — the one code C-051 says this
     /// write must never produce. `--force` then collapses the fence and
     /// deletes the toggle with it.
     #[tokio::test]

@@ -54,7 +54,7 @@ pub struct Source {
 impl Source {
     /// Read and parse `path`, panicking with file and position on any failure (property 5).
     ///
-    /// Not memoised: holding the 19 MB corpus's trees took `no_classification_in_libraries` from 0.92 s to 1.82 s.
+    /// Not memoised: holding the 19 MB corpus's trees took a whole-workspace scan from 0.92 s to 1.82 s.
     pub fn parse(path: &Path) -> Self {
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("boundary harness: read {}: {error}", slashed(path)));

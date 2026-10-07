@@ -5,8 +5,13 @@ use super::architecture::Architecture;
 use super::operating_system::OperatingSystem;
 
 /// An error that occurred while parsing or validating an OCI platform.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, ocx_exit::Classify)]
 #[error("invalid platform '{input}': {kind}")]
+#[exit(
+    DataError,
+    slug = "invalid_platform",
+    summary = "A platform string does not follow the platform grammar"
+)]
 #[non_exhaustive]
 pub struct PlatformError {
     pub input: String,

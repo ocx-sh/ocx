@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "Public `OCX_COMPRESSION` is renamed `OCX_COMPRESS` with a RETIRED window naming its removal.",
+  "findings": []
+}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The seven published schemas are pinned byte-for-byte to committed goldens.
+//! Every schema kind, and the `cli.json` grammar document, is pinned byte-for-byte to a committed golden.
 //!
 //! `website/schema.taskfile.yml` writes each kind through the
 //! `//crates/ocx_schema:schemas` Bazel genrule (`task schema:generate`); this test runs
@@ -91,4 +91,7 @@ golden_tests! {
     patch_schema_matches_golden => "patch",
     reports_schema_matches_golden => "reports",
     execution_record_schema_matches_golden => "execution-record",
+    errors_schema_matches_golden => "errors",
+    cli_document_matches_golden => "cli",
+    cli_schema_matches_golden => "cli-schema",
 }

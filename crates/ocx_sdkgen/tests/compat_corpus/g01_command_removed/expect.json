@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package status` is removed.",
+  "findings": [
+    {
+      "code": "G01",
+      "pointer": "/root/commands/0/commands/1",
+      "subjects": [
+        "package status"
+      ]
+    }
+  ]
+}

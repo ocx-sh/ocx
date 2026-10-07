@@ -10,7 +10,7 @@ type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
 /// Forces [`ShimBinStore::ensure`] down its lost-race leg; valued by store root so it reaches exactly one store.
 #[cfg(any(test, feature = "__testing"))]
-const LOST_PUBLISH_RACE_SEAM: &str = "__OCX_TESTING_SHIM_LOST_PUBLISH_RACE";
+const LOST_PUBLISH_RACE_SEAM: &ocx_env::EnvVar = &ocx_env::__OCX_TESTING_SHIM_LOST_PUBLISH_RACE;
 
 /// Hashes [`crate::shim::SHIM_BYTES`] rather than reading `SHIM_SHA256`, which is `""` off Windows and names no file.
 fn shim_digest() -> &'static ocx_oci::Digest {
@@ -28,7 +28,9 @@ fn shim_digest() -> &'static ocx_oci::Digest {
 /// A seam because no black-box input reaches the lost-race leg: pre-check and re-check test the same condition.
 #[cfg(any(test, feature = "__testing"))]
 fn simulated_lost_race(root: &Path) -> bool {
-    std::env::var_os(LOST_PUBLISH_RACE_SEAM).is_some_and(|armed| Path::new(&armed) == root)
+    LOST_PUBLISH_RACE_SEAM
+        .get_os()
+        .is_some_and(|armed| Path::new(&armed) == root)
 }
 
 #[cfg(not(any(test, feature = "__testing")))]
@@ -57,7 +59,8 @@ fn publish_staged(
         // Drop first, as a real failed persist does, so the seam leaves the same filesystem state.
         drop(temp);
         return Err(std::io::Error::other(format!(
-            "{LOST_PUBLISH_RACE_SEAM}: simulated publish failure"
+            "{}: simulated publish failure",
+            LOST_PUBLISH_RACE_SEAM.name
         )));
     }
     publish_with(temp, target, publish)
@@ -541,12 +544,9 @@ mod tests {
     /// re-check fails the first leg; one that swallows every publish failure
     /// fails the second.
     ///
-    /// One test function owns the process-global variable for the whole
-    /// binary — the serial scope of a single `#[test]` is the ordering
-    /// guarantee (precedent:
-    /// `host_capabilities::detect_with_ocx_test_libc_override_cases`). The
-    /// seam is additionally scoped by value to one store root, so an armed
-    /// seam cannot reach a store another test is publishing into.
+    /// The seam is set through the override table and scoped by value to one
+    /// store root, so an armed seam cannot reach a store another test is
+    /// publishing into.
     #[tokio::test]
     async fn ensure_converges_when_the_publish_loses_the_race() {
         let tmp = tempfile::tempdir().unwrap();
@@ -560,13 +560,11 @@ mod tests {
         // where `SHIM_BYTES` is empty and byte-equality proves nothing.
         tokio::fs::write(&published, SENTINEL).await.unwrap();
 
-        // SAFETY: this test is the only place that touches
-        // `LOST_PUBLISH_RACE_SEAM`, and it is removed again before the next
-        // await point that could observe it.
-        unsafe { std::env::set_var(LOST_PUBLISH_RACE_SEAM, &root) };
+        let env = ocx_env::overrides::lock();
+        let seam = LOST_PUBLISH_RACE_SEAM;
+        env.set(seam, root.to_str().expect("temp path is utf-8"));
         let converged = store.ensure().await;
-        // SAFETY: see above.
-        unsafe { std::env::remove_var(LOST_PUBLISH_RACE_SEAM) };
+        env.remove(seam);
 
         assert_eq!(
             converged.expect("a losing publish must not surface an error to the caller"),
@@ -588,11 +586,9 @@ mod tests {
         let empty_root = tmp.path().join("no-winner");
         let empty_store = ShimBinStore::new(empty_root.clone());
 
-        // SAFETY: see above.
-        unsafe { std::env::set_var(LOST_PUBLISH_RACE_SEAM, &empty_root) };
+        env.set(seam, empty_root.to_str().expect("temp path is utf-8"));
         let propagated = empty_store.ensure().await;
-        // SAFETY: see above.
-        unsafe { std::env::remove_var(LOST_PUBLISH_RACE_SEAM) };
+        env.remove(seam);
 
         assert!(
             propagated.is_err(),

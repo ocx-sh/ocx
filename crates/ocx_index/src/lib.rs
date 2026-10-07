@@ -42,7 +42,10 @@ pub mod wire_writer;
 pub fn current_timestamp() -> String {
     #[cfg(any(test, feature = "__testing"))]
     {
-        if let Ok(fixed) = std::env::var("__OCX_TESTING_ANNOUNCE_CLOCK") {
+        if let Some(fixed) = ocx_env::__OCX_TESTING_ANNOUNCE_CLOCK
+            .get_raw()
+            .and_then(|value| value.into_string().ok())
+        {
             return fixed;
         }
     }
@@ -2279,48 +2282,25 @@ mod tests {
     /// reds every test holding the guard (C-006). A test that borrowed
     /// production's own constant would follow the rename and prove nothing.
     ///
-    /// The real process variable is written rather than
-    /// [`ocx_util::env::overrides::EnvLock`]'s override map, because that map is only
-    /// consulted by `ocx_util::env::var`, while a real variable is seen by both
-    /// `ocx_util::env::var` (which falls through to it) and `std::env::var` — so
-    /// the pin lands whichever way production reads the seam, and this test does
-    /// not silently dictate that choice. `EnvLock` is still held, for the
-    /// process-wide serialisation it exists to provide.
+    /// Written through the override table, which every read of the seam consults;
+    /// dropping the `EnvLock` clears the pin, so a panicking test cannot leak it into a sibling.
     struct ClockSeam {
-        _lock: ocx_util::env::overrides::EnvLock,
+        _lock: ocx_env::overrides::EnvLock,
     }
 
     impl ClockSeam {
         /// Pins the seam to `instant` until the guard drops.
         fn pinned(instant: &str) -> Self {
-            let lock = ocx_util::env::overrides::lock();
-            // SAFETY: nextest (`taskfiles/rust.taskfile.yml:146`) gives every
-            // test its own process, and `EnvLock` serialises this write against
-            // every test that goes through `ocx_util::env::overrides`. Two seams opt out
-            // of that serialisation instead — `ocx_oci::host_capabilities` and
-            // `file_structure::shim_bin_store` — each safe only because one test
-            // function owns its variable.
-            unsafe { std::env::set_var("__OCX_TESTING_ANNOUNCE_CLOCK", instant) };
+            let lock = ocx_env::overrides::lock();
+            lock.set(&ocx_env::__OCX_TESTING_ANNOUNCE_CLOCK, instant);
             Self { _lock: lock }
         }
 
         /// Holds the seam **unset**, so production renders the wall clock.
         fn unset() -> Self {
-            let lock = ocx_util::env::overrides::lock();
-            // SAFETY: see `ClockSeam::pinned`.
-            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
+            let lock = ocx_env::overrides::lock();
+            lock.remove(&ocx_env::__OCX_TESTING_ANNOUNCE_CLOCK);
             Self { _lock: lock }
-        }
-    }
-
-    impl Drop for ClockSeam {
-        fn drop(&mut self) {
-            // SAFETY: see `ClockSeam::pinned`. A struct's own `Drop` runs before
-            // its fields', so the variable is gone before `_lock` releases the
-            // mutex. Unconditional, so a stub that panics mid-test cannot leak
-            // the pin into a sibling — the Specify phase runs against
-            // `unimplemented!()`, where every one of these tests panics.
-            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
         }
     }
 

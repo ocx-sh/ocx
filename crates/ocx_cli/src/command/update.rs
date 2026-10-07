@@ -109,7 +109,7 @@ impl Update {
         };
 
         // Built while the guard still holds the declaration the tag column reads; the commit consumes it.
-        let mut report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref());
+        let mut report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref())?;
         // Offline and frozen runs read a snapshot that may lag the registry, so they report no version.
         if !context.is_offline() && !context.config_view().frozen {
             report.fill_versions(&concrete_versions(resolve_index, report.version_lookups()).await);
@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn exit_code(err: &CommandError) -> Option<ocx_exit::ExitCode> {
-        use crate::exit::ClassifyExitCode as _;
+        use ocx_exit::ClassifyExitCode as _;
         err.classify()
     }
 

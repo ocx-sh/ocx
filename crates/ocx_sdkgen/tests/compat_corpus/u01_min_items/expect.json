@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "PushReport's `layers` gains `minItems`, a keyword outside the allowlist.",
+  "findings": [
+    {
+      "code": "U01",
+      "pointer": "/$defs/PushReportRoot/properties/layers",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

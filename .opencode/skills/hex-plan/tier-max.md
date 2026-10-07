@@ -16,7 +16,7 @@ As [`tier-xhigh.md` § Phase 1](tier-xhigh.md#phase-1-discover-parallel-full).
 
 ## Phase 2: Research (parallel, 5 axes — mandatory, one `competitive-research`)
 
-As [`tier-xhigh.md` § Phase 2](tier-xhigh.md#phase-2-research-parallel-3-axes--mandatory)
+As [`tier-xhigh.md` § Phase 2](tier-xhigh.md#phase-2-research-0-or-1-axis-3-when-asked)
 with **5** `researcher` workers: the gate's ranked candidates fill four
 axes, and the fifth is always focus `competitive-research`
 ([`workers/researcher.md`](../hex-core/references/workers/researcher.md)),
@@ -26,9 +26,9 @@ seeded from the project's product knowledge via `hex.md › Pointers`.
 
 As [`tier-xhigh.md` § Phase 3](tier-xhigh.md#phase-3-classify-sequential).
 
-## Phase 4: Design (architect mandatory, ADR mandatory)
+## Phase 4: Design (architect only for a new one-way door)
 
-As [`tier-xhigh.md` § Phase 4](tier-xhigh.md#phase-4-design-architect-mandatory-adr-mandatory).
+As [`tier-xhigh.md` § Phase 4](tier-xhigh.md#phase-4-design-architect-only-for-a-new-one-way-door).
 
 ## Phase 5: Decompose (sequential)
 
@@ -36,8 +36,9 @@ As [`tier-xhigh.md` § Phase 5](tier-xhigh.md#phase-5-decompose-sequential).
 
 ## Phase 6: Review (parallel panel + every adversary + simulators)
 
-As [`tier-xhigh.md` § Phase 6](tier-xhigh.md#phase-6-review-parallel-panel--mandatory-cross-model),
-the Round 1 batch widened:
+As [`tier-xhigh.md` § Phase 6](tier-xhigh.md#phase-6-review-one-reviewer-panel--cross-model-for-a-new-one-way-door-or-when-asked),
+the Round 1 batch widened — naming `max` is the user's ask, so the panel and
+cross-model review always run:
 
 - **every configured adversary** launches last in the batch, one call per
   entry of a list-valued `adversary` key, findings union-triaged with

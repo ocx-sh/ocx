@@ -189,6 +189,14 @@ jobs:
       # a backlog number. uv is its one tool, and this job had none.
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # test_contract_baseline.py walks HEAD's ancestry to its newest vX.Y.Z
+      # tag; the depth-1 checkout has neither, and its tag floor reds without
+      # them. Release tags only, plus the history that reaches them.
+      - name: Fetch release tags
+        run: |
+          unshallow=()
+          if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then unshallow=(--unshallow); fi
+          git fetch --no-tags --recurse-submodules=no "${unshallow[@]}" origin '+refs/tags/v*:refs/tags/v*'
       - name: Lint tier
         run: task test:lint:structure
       # The C-021 parity matrix drives all nine hook shells, but no runner image
@@ -391,7 +399,7 @@ jobs:
       # dropping it here would leave that job with nothing to run. `task
       # rust:build` is a `bazel build` of `//crates/ocx_cli:ocx` — the binary
       # the Bazel acceptance targets run, carrying the `__testing` provenance
-      # and the `__OCX_SELF_IMAGE` seam the self-setup / self-update tests use
+      # and the `__OCX_TESTING_SELF_IMAGE` seam the self-setup / self-update tests use
       # to redirect `ocx.sh/ocx/cli` at the fixture registry — copied to
       # `test/bin/ocx`. Directly after the doc ratchet, not up beside Suite
       # census, because it needs `ocx exec bazel`, the cache credential and

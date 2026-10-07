@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --jobs` defaults to 8 instead of 4.",
+  "findings": [
+    {
+      "code": "G09",
+      "pointer": "/root/commands/0/commands/0/args/3",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

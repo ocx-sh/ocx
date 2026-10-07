@@ -89,7 +89,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
     )
     ocx.plain("index", "update", short)
 
-    result = ocx.json("package", "install", short)
+    result = ocx.json("package", "install", short)["packages"]
     content = Path(result[short]["path"]) / "content"
 
     assert_dir_exists(content)
@@ -161,7 +161,8 @@ def test_cascade_layout_annotations_identical_across_tags(ocx: OcxRunner, unique
         str(bundle_b),
     )
     ocx.plain("index", "update", unique_repo)
-    tags = ocx.json("index", "list", unique_repo)[unique_repo]
+    (entry,) = ocx.json("index", "list", unique_repo)["items"]
+    tags = entry["tags"]
     for expected in ("3.28.1", "3.28", "3"):
         assert expected in tags, f"cascade must produce tag {expected}, got {tags}"
 

@@ -61,11 +61,16 @@ impl fmt::Display for SessionPathFormat {
 /// A directory that cannot be encoded for a session-PATH format, refused before any write (exit 78).
 // No `From<io::Error>`: a stray `?` on a write would turn a never-block failure into a refusal.
 // Messages use `{path:?}`, never `display`, since a refused path may carry a newline (CWE-117).
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, ocx_exit::Classify)]
 pub enum SessionPathError {
     /// The directory carries a character the format cannot represent and does
     /// not escape.
     #[error("{path:?} cannot be registered in {format}: it contains {character:?}, {reason}")]
+    #[exit(
+        ConfigError,
+        slug = "session_path_unencodable",
+        summary = "A session PATH entry contains a character the host format cannot store"
+    )]
     Unencodable {
         /// The directory that was to be registered.
         path: PathBuf,
@@ -79,6 +84,11 @@ pub enum SessionPathError {
 
     /// The directory is not valid UTF-8.
     #[error("{path:?} is not valid UTF-8 and cannot be registered in {format}")]
+    #[exit(
+        ConfigError,
+        slug = "session_path_not_utf8",
+        summary = "A session PATH entry is not valid UTF-8"
+    )]
     NotUtf8 {
         /// The directory that was to be registered.
         path: PathBuf,
@@ -88,6 +98,11 @@ pub enum SessionPathError {
 
     /// The directory is relative.
     #[error("{path:?} is relative and cannot be registered in {format}: a session PATH entry must be absolute")]
+    #[exit(
+        ConfigError,
+        slug = "session_path_not_absolute",
+        summary = "A session PATH entry is not an absolute path"
+    )]
     NotAbsolute {
         /// The directory that was to be registered.
         path: PathBuf,

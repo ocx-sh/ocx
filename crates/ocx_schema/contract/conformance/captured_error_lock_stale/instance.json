@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "command": "pull",
+  "exit_code": 65,
+  "error": {
+    "kind": "data_error",
+    "detail": "lock_stale",
+    "message": "ocx.lock is stale (it does not match ocx.toml); run `ocx lock`: ocx.lock is stale (it does not match ocx.toml); run `ocx lock`",
+    "context": {}
+  }
+}

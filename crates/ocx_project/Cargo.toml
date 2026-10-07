@@ -6,17 +6,26 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Internal-only escape hatch, forwarded from `ocx`. Gates the project-mutation
+# fault seam (`__OCX_TESTING_FAULT`) the crash-recovery acceptance tests drive;
+# a release binary lacks the read and the declaration it names.
+__testing = ["ocx_env/__testing"]
+
 [dependencies]
 # The tiers this one composes over, every edge sanctioned by
 # `scripts/crate_map.toml`'s `ocx_project` row.
 ocx_config.workspace = true
 ocx_index.workspace = true
 ocx_oci.workspace = true
+ocx_exit.workspace = true
 ocx_package.workspace = true
 ocx_shell.workspace = true
 ocx_store.workspace = true
 ocx_trust.workspace = true
 ocx_util.workspace = true
+# The environment registry every variable this crate reads is declared in.
+ocx_env.workspace = true
 
 chrono.workspace = true
 clap_builder.workspace = true
@@ -44,12 +53,12 @@ workspace = true
 # The moved tests' own needs: an async trait for the resolver fakes, and the
 # fixture/boundary helpers every crate's tests may use.
 async-trait.workspace = true
-# `__testing` ONLY — both runtime edges are in `[dependencies]` above. Without
-# these two rows the crate's test target builds only inside a `--workspace`
-# run, where a sibling's `__testing` unifies the feature in: `cargo test -p
-# ocx_project` alone fails with 34 errors on `ocx_util::env::overrides` and
-# `ocx_index::IndexImpl`. A dev edge enabling `__testing` is allowed from every
-# crate, and the pattern is `ocx_lib`'s.
+# `__testing` ONLY — the runtime edges are in `[dependencies]` above. Without
+# these rows the crate's test target builds only inside a `--workspace` run,
+# where a sibling's `__testing` unifies the feature in: `cargo test -p
+# ocx_project` alone fails on `ocx_env::overrides` and `ocx_index::IndexImpl`.
+# A dev edge enabling `__testing` is allowed from every crate, and the pattern
+# is `ocx_lib`'s.
 ocx_config = { workspace = true, features = ["__test_scaffolding"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 ocx_index = { workspace = true, features = ["__testing"] }
-ocx_util = { workspace = true, features = ["__testing"] }

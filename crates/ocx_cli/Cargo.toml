@@ -26,9 +26,11 @@ __testing = [
   "ocx_announce/__testing",
   "ocx_config/__testing",
   "ocx_console/__testing",
+  "ocx_env/__testing",
   "ocx_index/__testing",
   "ocx_package/__testing",
   "ocx_package_manager/__testing",
+  "ocx_project/__testing",
   "ocx_shell/__testing",
   "ocx_oci/__testing",
   "ocx_store/__testing",
@@ -48,12 +50,14 @@ __testing = [
 vergen-gix = { version = "=9.1.0", default-features = false, features = ["build", "cargo", "rustc"] }
 
 [dependencies]
-# The extracted settings tier: the binary loads the config (`ConfigLoader`),
-# classifies its errors (`exit/ocx_config.rs`) and reads `Env` directly, so
-# the row is a first-class edge rather than a re-export through `ocx_lib`.
 ocx_announce.workspace = true
+# The extracted settings tier: the binary loads the config (`ConfigLoader`) and
+# reads `Env` directly, so the row is a first-class edge rather than a
+# re-export through `ocx_lib`.
 ocx_config.workspace = true
 ocx_console.workspace = true
+# The environment registry; read sites move onto it from `ocx_util::env`.
+ocx_env.workspace = true
 ocx_exit.workspace = true
 # The resolution-index tier: `app::context` builds the index chain itself
 # (`LocalIndex`, `OcxIndex`, `OciIndex`) and the `ocx index` commands name
@@ -64,40 +68,35 @@ ocx_index.workspace = true
 # and the client directly, so the row is a first-class edge rather than a
 # re-export through `ocx_lib`.
 ocx_oci.workspace = true
-# The storage tier: `exit/ocx_store.rs` classifies its errors and the CLI
-# builds a `FileStructure`/`ToolchainStore` directly, so the row is a
-# first-class edge rather than a re-export through `ocx_lib`.
-# The Starlark host: `command/script_runner.rs` drives `run_script` and
-# `api/data/script_run.rs` mirrors its outcome kinds, so the row is a
-# first-class edge rather than a re-export through `ocx_lib`.
 # The package tier: metadata, versioning, the publisher — the CLI builds and
 # reads all three directly, so the row is a first-class edge rather than a
 # re-export through `ocx_lib`.
 ocx_package.workspace = true
 ocx_project.workspace = true
 ocx_package_manager.workspace = true
+# The Starlark host: `command/script_runner.rs` drives `run_script` and
+# `api/data/script_run.rs` mirrors its outcome kinds, so the row is a
+# first-class edge rather than a re-export through `ocx_lib`.
 ocx_script.workspace = true
-# The signing tier: `exit/ocx_sign.rs` classifies `SignError`,
-# `VerifyError` and `SbomError`, and `package_sign*.rs` drives the sign,
-# attest and verify pipelines directly.
+# The signing tier: `package_sign*.rs` drives the sign, attest and verify
+# pipelines directly, and `exit.rs` lists its error types in `families!`.
 ocx_sign.workspace = true
 # The shell and CI export tier: `self activate` and `shell state` drive the
-# reconciler and hook emission directly, and `exit/ocx_shell.rs` classifies the
-# CI-detection error family.
+# reconciler and hook emission directly.
 ocx_shell.workspace = true
-# The self-install tier, extracted at WP-36: `self setup`, `config setup` and
-# `config update` call it directly, `shell state` probes its witness shim, and
-# `exit/ocx_setup.rs` classifies its error family.
+# The self-install tier: `self setup`, `config setup` and `config update` call
+# it directly, and `shell state` probes its witness shim.
 ocx_setup.workspace = true
+# The storage tier: the CLI builds a `FileStructure`/`ToolchainStore` directly,
+# so the row is a first-class edge rather than a re-export through `ocx_lib`.
 ocx_store.workspace = true
-# The trust-policy tier: `exit/ocx_sign.rs` classifies its errors and
-# `package_sign_common.rs` builds a `CompiledPolicy` from the resolved tiers.
+# The trust-policy tier: `package_sign_common.rs` builds a `CompiledPolicy`
+# from the resolved tiers.
 ocx_trust.workspace = true
 ocx_util.workspace = true
 
-# `AuthError::Helper` wraps `docker_credential::CredentialRetrievalError`, and
-# that error's exit-code classification lives here (`exit::ocx_oci`), so the
-# binary must name the variants the mapping turns on.
+# `AuthError::Helper` wraps `docker_credential::CredentialRetrievalError`; the
+# classification tests in `exit/ocx_oci.rs` build one to check its exit code.
 docker_credential.workspace = true
 
 chrono.workspace = true
@@ -145,33 +144,21 @@ zeroize.workspace = true
 ocx_config = { workspace = true, features = ["__testing"] }
 # `capture` — where `app::seam` reads a command's printer output from.
 ocx_console = { workspace = true, features = ["__testing"] }
+# The registry's override table, behind `ocx_util::env::overrides`.
+ocx_env = { workspace = true, features = ["__testing"] }
 ocx_oci = { workspace = true, features = ["__testing"] }
 ocx_store = { workspace = true, features = ["__testing"] }
 ocx_util = { workspace = true, features = ["__testing"] }
 # `pki` — a real refused-certificate `reqwest::Error` for the forge transport row.
 ocx_test_support.workspace = true
-# The relocated classification tests fabricate the two foreign error values the
-# ladder matches on: `toml::de::Error` (a `ConfigError` source) and a
-# `reqwest::Error` (a `ForgeError::Transport` source). Neither has a public
-# constructor, so the tests build a real one.
+# The classification tests fabricate two foreign error values: `toml::de::Error`
+# (a `ConfigError` source) and a `reqwest::Error` (a `ForgeError::Transport`
+# source). Neither has a public constructor, so the tests build a real one.
 toml.workspace = true
 reqwest.workspace = true
 # `ProjectErrorKind::ManifestEditParse` carries a `toml_edit` parse error, and
 # the exit code it classifies to is asserted here.
 toml_edit.workspace = true
-# DEC-46's enrichment added two columns to the frozen baseline. That it added
-# only columns is checked rather than claimed: a sha256 over the five columns
-# that existed before, recorded in the file and recomputed by the test.
-sha2.workspace = true
-# The pre-split classification baseline is compared arm by arm, and a
-# line-oriented scan of the source cannot do that: a rustfmt-wrapped `impl`
-# header hides a whole impl, a nested `match` manufactures arms, and a textual
-# `Error::` -> `Self::` rewrite mangles every enum whose name ends in `Error`.
-# The same parser the workspace-structure guards already use reads the arms
-# structurally instead.
-syn = { workspace = true, features = ["visit-mut"] }
-quote.workspace = true
-proc-macro2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

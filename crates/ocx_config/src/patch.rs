@@ -43,7 +43,7 @@ pub struct PatchConfig {
 }
 
 /// Fully resolved [`PatchConfig`], forwarded to child processes as
-/// [`crate::env::keys::OCX_PATCHES`] JSON so launchers apply the same patch tier.
+/// [`ocx_env::OCX_PATCHES`] JSON so launchers apply the same patch tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPatchConfig {
     /// The patch registry (e.g. `"internal.company.com/ocx-patches"`).
@@ -65,8 +65,13 @@ pub struct ResolvedPatchConfig {
 }
 
 /// Error raised while resolving [`PatchConfig`] or decoding `OCX_PATCHES`.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[non_exhaustive]
+#[exit(
+    ConfigError,
+    slug = "patch_config_invalid",
+    summary = "A patch-tier setting is invalid"
+)]
 pub enum PatchConfigError {
     /// The `registry` field is present but empty, a no-op tier that would skip every companion.
     #[error("patch registry is empty")]
@@ -169,7 +174,7 @@ pub fn expand_patch_path(template: &str, registry_host: &str, repository: &str) 
     }
 }
 
-/// Serialises a [`ResolvedPatchConfig`] into the [`crate::env::keys::OCX_PATCHES`] JSON; `None`
+/// Serialises a [`ResolvedPatchConfig`] into the [`ocx_env::OCX_PATCHES`] JSON; `None`
 /// for `None`, so [`crate::env::Env::apply_ocx_config`] removes an inherited value.
 pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<String> {
     let config = patches?;
@@ -190,7 +195,7 @@ pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<St
     }
 }
 
-/// Parses [`crate::env::keys::OCX_PATCHES`] back; an absent or empty value is `Ok(None)`.
+/// Parses [`ocx_env::OCX_PATCHES`] back; an absent or empty value is `Ok(None)`.
 ///
 /// # Errors
 ///
@@ -198,12 +203,9 @@ pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<St
 /// companion env: [`PatchConfigError::MalformedEnvJson`] or
 /// [`PatchConfigError::MissingRegistryField`].
 pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigError> {
-    let Some(raw) = ocx_util::env::var(crate::env::keys::OCX_PATCHES) else {
+    let Some(raw) = ocx_env::OCX_PATCHES.get() else {
         return Ok(None);
     };
-    if raw.is_empty() {
-        return Ok(None);
-    }
     let map = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
         .map_err(|source| PatchConfigError::MalformedEnvJson { source })?;
 
@@ -596,7 +598,7 @@ mod tests {
     /// `false` (backward compatible).
     #[test]
     fn ocx_patches_round_trip_system_required() {
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
         let original = ResolvedPatchConfig {
             registry: "system.corp/patches".to_string(),
             path_template: "{registry}/{repository}".to_string(),
@@ -605,14 +607,14 @@ mod tests {
             no_patches: std::collections::BTreeSet::new(),
         };
         let json = encode_patches(Some(&original)).expect("encode");
-        env_guard.set(crate::env::keys::OCX_PATCHES, json);
+        env_guard.set(&ocx_env::OCX_PATCHES, json);
         let parsed = patches_from_env().expect("valid").expect("Some");
         assert!(parsed.system_required, "system_required must survive the round-trip");
         assert_eq!(parsed, original);
 
         // Backward-compat: a value lacking the key decodes to false.
         env_guard.set(
-            crate::env::keys::OCX_PATCHES,
+            &ocx_env::OCX_PATCHES,
             r#"{"registry":"r","path_template":"{registry}/{repository}","required":true}"#,
         );
         let legacy = patches_from_env().expect("valid").expect("Some");
@@ -628,7 +630,7 @@ mod tests {
     /// compatible with a value produced by an older ocx).
     #[test]
     fn ocx_patches_round_trip_no_patches() {
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
         let original = ResolvedPatchConfig {
             registry: "corp.example.com/patches".to_string(),
             path_template: "{registry}/{repository}".to_string(),
@@ -639,7 +641,7 @@ mod tests {
                 .collect(),
         };
         let json = encode_patches(Some(&original)).expect("encode");
-        env_guard.set(crate::env::keys::OCX_PATCHES, json);
+        env_guard.set(&ocx_env::OCX_PATCHES, json);
         let parsed = patches_from_env().expect("valid").expect("Some");
         assert_eq!(
             parsed.no_patches, original.no_patches,
@@ -649,7 +651,7 @@ mod tests {
 
         // Backward-compat: a value lacking the key decodes to an empty set.
         env_guard.set(
-            crate::env::keys::OCX_PATCHES,
+            &ocx_env::OCX_PATCHES,
             r#"{"registry":"r","path_template":"{registry}/{repository}","required":true}"#,
         );
         let legacy = patches_from_env().expect("valid").expect("Some");
@@ -1007,8 +1009,8 @@ mod tests {
     /// Traces: stub manifest — "returns `Ok(None)` when absent/empty".
     #[test]
     fn patches_from_env_returns_none_when_absent() {
-        let env_guard = ocx_util::env::overrides::lock();
-        env_guard.remove(crate::env::keys::OCX_PATCHES);
+        let env_guard = ocx_env::overrides::lock();
+        env_guard.remove(&ocx_env::OCX_PATCHES);
         let result = patches_from_env();
         assert!(
             matches!(result, Ok(None)),
@@ -1021,8 +1023,8 @@ mod tests {
     /// Traces: stub manifest — "returns `Ok(None)` when absent/empty".
     #[test]
     fn patches_from_env_returns_none_when_empty_string() {
-        let env_guard = ocx_util::env::overrides::lock();
-        env_guard.set(crate::env::keys::OCX_PATCHES, "");
+        let env_guard = ocx_env::overrides::lock();
+        env_guard.set(&ocx_env::OCX_PATCHES, "");
         let result = patches_from_env();
         assert!(
             matches!(result, Ok(None)),
@@ -1035,8 +1037,8 @@ mod tests {
     /// Traces: stub manifest — "`Err(MalformedEnvJson)` on bad JSON".
     #[test]
     fn patches_from_env_errors_on_malformed_json() {
-        let env_guard = ocx_util::env::overrides::lock();
-        env_guard.set(crate::env::keys::OCX_PATCHES, "not valid json {{{");
+        let env_guard = ocx_env::overrides::lock();
+        env_guard.set(&ocx_env::OCX_PATCHES, "not valid json {{{");
         let result = patches_from_env();
         assert!(
             matches!(result, Err(PatchConfigError::MalformedEnvJson { .. })),
@@ -1053,10 +1055,10 @@ mod tests {
     /// mirrors path.
     #[test]
     fn patches_from_env_errors_on_valid_json_missing_registry() {
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
         // Valid JSON object but missing the `registry` key — externally injected / corrupted.
         env_guard.set(
-            crate::env::keys::OCX_PATCHES,
+            &ocx_env::OCX_PATCHES,
             r#"{"path_template":"{registry}/{repository}","required":true}"#,
         );
         let result = patches_from_env();
@@ -1074,7 +1076,7 @@ mod tests {
     /// OCX_PATCHES back yields the same resolved patches".
     #[test]
     fn ocx_patches_round_trip_via_encode_and_parse() {
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
 
         let original = ResolvedPatchConfig {
             registry: "internal.company.com/ocx-patches".to_string(),
@@ -1085,7 +1087,7 @@ mod tests {
         };
         let json =
             encode_patches(Some(&original)).expect("encode_patches must return Some for a valid ResolvedPatchConfig");
-        env_guard.set(crate::env::keys::OCX_PATCHES, json);
+        env_guard.set(&ocx_env::OCX_PATCHES, json);
 
         let parsed = patches_from_env()
             .expect("valid OCX_PATCHES JSON must parse without error")
@@ -1102,7 +1104,7 @@ mod tests {
     /// Traces: Phase 1 — "explicit required=false respected".
     #[test]
     fn ocx_patches_round_trip_required_false() {
-        let env_guard = ocx_util::env::overrides::lock();
+        let env_guard = ocx_env::overrides::lock();
 
         let original = ResolvedPatchConfig {
             registry: "corp.patches.io".to_string(),
@@ -1112,7 +1114,7 @@ mod tests {
             no_patches: std::collections::BTreeSet::new(),
         };
         let json = encode_patches(Some(&original)).expect("encode must succeed");
-        env_guard.set(crate::env::keys::OCX_PATCHES, json);
+        env_guard.set(&ocx_env::OCX_PATCHES, json);
 
         let parsed = patches_from_env()
             .expect("valid JSON must parse")

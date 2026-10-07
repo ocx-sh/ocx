@@ -213,7 +213,7 @@ mod seam {
             "{tool}"
         );
         assert!(
-            tool.get("platforms").is_none(),
+            tool.get("platform_digests").is_none(),
             "unlocked bindings carry no platforms key"
         );
     }
@@ -240,9 +240,9 @@ mod seam {
                 .is_some_and(|generated_by| generated_by.starts_with("ocx ")),
             "{data}"
         );
-        let platforms = data["groups"]["default"]["tools"][REPO]["platforms"]
+        let platforms = data["groups"]["default"]["tools"][REPO]["platform_digests"]
             .as_object()
-            .expect("a locked binding carries a platforms map");
+            .expect("a locked binding carries a platform_digests map");
         assert!(
             platforms.contains_key("linux/amd64") && platforms.contains_key("linux/arm64"),
             "{platforms:?}"
@@ -302,11 +302,11 @@ mod seam {
         );
         let tools = &data["groups"]["default"]["tools"];
         assert!(
-            tools["undeclared-in-lock"].get("platforms").is_none(),
-            "the binding added since the last lock is the one without platforms: {tools}"
+            tools["undeclared-in-lock"].get("platform_digests").is_none(),
+            "the binding added since the last lock is the one without platform digests: {tools}"
         );
         assert!(
-            tools[REPO].get("platforms").is_some(),
+            tools[REPO].get("platform_digests").is_some(),
             "the already-locked sibling keeps its pins: {tools}"
         );
     }
@@ -359,17 +359,17 @@ mod seam {
         let default_env = &data["groups"]["default"]["env"];
         assert_eq!(
             default_env["CI"],
-            serde_json::json!({"type": "constant", "value": "1"}),
+            serde_json::json!({"kind": "constant", "value": "1"}),
             "{default_env}"
         );
         assert_eq!(
             default_env["NODE_BIN"],
-            serde_json::json!({"type": "path", "value": "node_modules/.bin"}),
+            serde_json::json!({"kind": "path", "value": "node_modules/.bin"}),
             "a relative path value must stay verbatim - anchoring it is composition"
         );
         assert_eq!(
             data["groups"]["lint"]["env"],
-            serde_json::json!({"STRICT": {"type": "constant", "value": "yes"}})
+            serde_json::json!({"STRICT": {"kind": "constant", "value": "yes"}})
         );
         assert!(
             data["groups"]["lint"]["env"].get("CI").is_none(),

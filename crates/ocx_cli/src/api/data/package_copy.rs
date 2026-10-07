@@ -5,17 +5,21 @@ use std::fmt;
 
 use ocx_console::Cell;
 use ocx_package::publisher::{CopyOutcome, Disposition};
+use ocx_util::wire_words;
 use serde::Serialize;
 
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
 
-/// Whether this run copied or only planned.
-#[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CopyStatus {
-    Copied,
-    Planned,
+wire_words! {
+    /// Whether this run copied or only planned.
+    #[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
+    pub enum CopyStatus {
+        /// The copy was written to the target.
+        Copied = "copied",
+        /// `--dry-run`: the copy was planned and nothing was written.
+        Planned = "planned",
+    }
 }
 
 impl CopyStatus {
@@ -30,10 +34,7 @@ impl CopyStatus {
 
 impl fmt::Display for CopyStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Copied => "copied",
-            Self::Planned => "planned",
-        })
+        f.write_str(self.as_str())
     }
 }
 
@@ -42,7 +43,7 @@ impl fmt::Display for CopyStatus {
 /// Reported as a field so a CI job reading `--format json` finds out whether
 /// the catalog page travelled; a stderr warning is not a field.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum DescriptionOutcome {
     /// Pulled from the source and pushed to the target.
     Copied,
@@ -76,9 +77,9 @@ pub struct CopyReport {
     pub target: String,
     /// `copied`, or `planned` under `--dry-run`.
     pub status: CopyStatus,
-    /// One row per platform the target offers after this copy, including any it
-    /// already had that the source does not ship.
-    pub platforms: Vec<CopiedPlatformRow>,
+    /// One row per platform manifest the target offers after this copy,
+    /// including any it already had that the source does not ship.
+    pub manifests: Vec<CopiedPlatformRow>,
     /// Rolling tags written in addition to the target's own tag.
     pub cascade_tags_written: Vec<String>,
     /// Digest-named `__ocx.keep.<algorithm>-<hex>` tags written, one per distinct
@@ -91,21 +92,24 @@ pub struct CopyReport {
     /// Sidecar tags the target already held under a different manifest, and
     /// this copy therefore refused to overwrite. Non-empty means exit 65.
     pub sidecar_conflicts: Vec<String>,
+    /// Blob traffic, summed over every platform.
     pub blobs: BlobSummary,
-    /// What became of the repository description, or `null` when
-    /// `--description` was not passed.
+    /// What became of the repository description; absent when
+    /// `--with-description` was not passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<DescriptionOutcome>,
 }
 
 /// What became of one platform.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CopiedPlatformRow {
-    pub platform: String,
+    /// The platform this manifest serves.
+    pub platform: ocx_oci::Platform,
     /// The leaf digest the target serves for this platform. For a
-    /// `kept-not-in-source` row this is the digest it already had.
-    pub digest: String,
+    /// `kept_not_in_source` row this is the digest it already had.
+    pub digest: ocx_oci::Digest,
     /// Typed, so JSON carries `added` / `unchanged` / `replaced` /
-    /// `kept-not-in-source` while the table renders the prose.
+    /// `kept_not_in_source` while the table renders the prose.
     pub disposition: Disposition,
 }
 
@@ -130,12 +134,12 @@ impl CopyReport {
             } else {
                 CopyStatus::Copied
             },
-            platforms: outcome
+            manifests: outcome
                 .platforms
                 .iter()
                 .map(|row| CopiedPlatformRow {
-                    platform: row.platform.to_string(),
-                    digest: row.digest.to_string(),
+                    platform: row.platform.clone(),
+                    digest: row.digest.clone(),
                     disposition: row.disposition,
                 })
                 .collect(),
@@ -176,7 +180,7 @@ impl CopyReport {
             "{}: {} platform(s), {cascade}, {} keep tag(s), {} referrer(s); \
              blobs {} present, {} mounted, {} uploaded",
             sanitize_for_terminal(&self.target),
-            self.platforms.len(),
+            self.manifests.len(),
             self.keep_tags_written.len(),
             self.referrers_copied,
             self.blobs.present,
@@ -213,15 +217,15 @@ impl CopyReport {
     /// The three plain columns as `print_table` writes them, assertable without a terminal.
     fn plain_rows(&self) -> [Vec<String>; 3] {
         [
-            self.platforms
+            self.manifests
                 .iter()
-                .map(|row| sanitize_for_terminal(&row.platform))
+                .map(|row| sanitize_for_terminal(&row.platform.to_string()))
                 .collect(),
-            self.platforms
+            self.manifests
                 .iter()
-                .map(|row| sanitize_for_terminal(&row.digest))
+                .map(|row| sanitize_for_terminal(&row.digest.to_string()))
                 .collect(),
-            self.platforms
+            self.manifests
                 .iter()
                 .map(|row| self.result_cell(row.disposition))
                 .collect(),
@@ -230,6 +234,9 @@ impl CopyReport {
 }
 
 impl Printable for CopyReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "CopyReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         data.print_table(
             &["Platform".into(), "Digest".into(), "Result".into()],
@@ -247,22 +254,26 @@ mod tests {
 
     /// Every shape the CWE-150 finding measured: a raw ESC opening a CSI
     /// sequence, a newline, a NUL, and a right-to-left override.
-    const HOSTILE: &str = "linux/\u{1b}[31mam\nd64\u{0}\u{202e}";
+    const HOSTILE: &str = "\u{1b}[31mam\nd64\u{0}\u{202e}";
 
     fn row(platform: &str, disposition: Disposition) -> CopiedPlatformRow {
+        platform_row(platform.parse().expect("platform"), disposition)
+    }
+
+    fn platform_row(platform: ocx_oci::Platform, disposition: Disposition) -> CopiedPlatformRow {
         CopiedPlatformRow {
-            platform: platform.to_string(),
-            digest: format!("sha256:{}", "a".repeat(64)),
+            platform,
+            digest: ocx_oci::Digest::Sha256("a".repeat(64)),
             disposition,
         }
     }
 
-    fn report(status: CopyStatus, platforms: Vec<CopiedPlatformRow>) -> CopyReport {
+    fn report(status: CopyStatus, manifests: Vec<CopiedPlatformRow>) -> CopyReport {
         CopyReport {
             source: "dev.example.com/acme/tool:1.4.2".to_string(),
             target: "prod.example.com/acme/tool:1.4.2".to_string(),
             status,
-            platforms,
+            manifests,
             cascade_tags_written: Vec::new(),
             keep_tags_written: Vec::new(),
             referrers_copied: 0,
@@ -292,7 +303,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&Disposition::Replaced).unwrap(), r#""replaced""#);
         assert_eq!(
             serde_json::to_string(&Disposition::KeptNotInSource).unwrap(),
-            r#""kept-not-in-source""#
+            r#""kept_not_in_source""#
         );
 
         assert_eq!(
@@ -305,7 +316,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&DescriptionOutcome::SkippedDryRun).unwrap(),
-            r#""skipped-dry-run""#
+            r#""skipped_dry_run""#
         );
     }
 
@@ -350,7 +361,14 @@ mod tests {
     /// every cascade tag off the target's own tag list. CWE-150 / SEC-34.
     #[test]
     fn registry_text_is_neutralized_before_it_reaches_the_terminal() {
-        let mut hostile = report(CopyStatus::Copied, vec![row(HOSTILE, Disposition::Added)]);
+        // A variant is free text read off the source index.
+        let platform = ocx_oci::Platform::Specific {
+            os: ocx_oci::OperatingSystem::Linux,
+            arch: ocx_oci::Architecture::Arm64,
+            variant: Some(HOSTILE.to_string()),
+            os_features: Vec::new(),
+        };
+        let mut hostile = report(CopyStatus::Copied, vec![platform_row(platform, Disposition::Added)]);
         hostile.cascade_tags_written = vec![HOSTILE.to_string()];
         hostile.sidecar_conflicts = vec![HOSTILE.to_string()];
         hostile.target = format!("prod.example.com/acme/{HOSTILE}");

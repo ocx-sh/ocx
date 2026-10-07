@@ -74,7 +74,11 @@ tasks:
     # anywhere else. Same reasoning as `shell:shellcheck`'s exclusion of the
     # shebang-less snippets next door. The vendored hex-loop skill links a
     # `goal.md` template that hex-init 0.5.0 (latest) never ships — an upstream
-    # arcana gap, excluded by URL until the bundle fixes it.
+    # arcana gap, excluded by URL until the bundle fixes it. The four excludes
+    # after it are the same kind: the published hex bundle links `../DESIGN.md`
+    # (not shipped), `hex-execute/overlays.md` (deleted) and two anchors its
+    # own vendored hex-core does not carry yet. Drop all four when `grim update`
+    # brings a hex release whose skills link-check clean.
     dir: '{{.TASKFILE_DIR}}'
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
@@ -85,6 +89,10 @@ tasks:
         --exclude-path worktrees
         --exclude-path rules/docs-quality/checks/fixtures
         --exclude 'hex-init/assets/templates/goal\.md'
+        --exclude 'skills/DESIGN\.md$'
+        --exclude 'hex-execute/overlays\.md#review-axis$'
+        --exclude 'hex-core/references/worktree\.md#pipeline-worktree-mechanics$'
+        --exclude 'hex-core/references/loop\.md#review-calls$'
         --format json --output {{.REPORTS_DIR}}/lint-links.json
         ../CLAUDE.md ../AGENTS.md .
     sources: *claude-sources

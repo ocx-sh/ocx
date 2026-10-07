@@ -2,7 +2,8 @@ name: Verify Deep
 
 # The deep tier of the two-tier gate (subsystem-ci.md "Verification tiers"):
 # the 3-OS build + unit matrix, the Windows-arm64 cross-compile, the full
-# acceptance suite with the Sigstore stack, and `satellite-verify`. Runs on
+# acceptance suite with the Sigstore stack, `satellite-verify` and
+# `satellite-contract`. Runs on
 # demand, on `main`, in the merge queue and weekly — NOT per pull request,
 # because a deep run is ≈113 runner-minutes against the basic tier's ≈18, most
 # of it Windows and macOS minutes (subsystem-ci.md "Cost Factors"), and every
@@ -20,6 +21,13 @@ on:
   # The manual invocation, and with the `pull_request` trigger gone the only
   # way a branch gets deep coverage before it lands.
   workflow_dispatch:
+    inputs:
+      # Both satellite jobs check ocx-mirror out at this ref: the branch a
+      # same-series mirror fix lives on, before it merges.
+      mirror_ref:
+        description: ocx-mirror branch, tag or SHA for the satellite jobs (empty = its default branch).
+        type: string
+        default: ''
   # Reusable: composed into the pre-release `release-readiness.yml` gate so a
   # single dispatch reports one GO/NO-GO across all platforms.
   workflow_call:
@@ -129,7 +137,7 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
           # Test-only artifacts: `ocx/__testing` compiles in the loopback-only
-          # test seams (__OCX_SELF_IMAGE). The acceptance job does not run
+          # test seams (__OCX_TESTING_SELF_IMAGE). The acceptance job does not run
           # them — `bazel:test:accept` builds its binary under Bazel.
           features: ocx/__testing
       # nextest is the engine on macOS and Windows only. The two legs are split
@@ -150,7 +158,11 @@ jobs:
           # The only leg where Windows PowerShell 5.1 meets the emitted wrapper
           # (ocx#524); both interpreters ship on the image, so a skip is a red.
           __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'pwsh,powershell' || '' }}
-        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
+        # `real_binary::` is the generated SDK's run against the Bazel-built `ocx`
+        # (`ocx_sdkgen`'s `sdk_rust` target, which names that binary at compile
+        # time). Without it those tests fail by design rather than pass on nothing,
+        # so the legs that have no Bazel build filter them out.
+        run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked -E 'not test(real_binary::)'
       - name: Setup Task
         if: matrix.job.name == 'Linux'
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
@@ -549,6 +561,8 @@ jobs:
         with:
           repository: ocx-sh/ocx-mirror
           path: ocx-mirror
+          # Empty off `workflow_dispatch`: the default branch.
+          ref: ${{ inputs.mirror_ref }}
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
@@ -571,3 +585,51 @@ jobs:
         env:
           OCX_MIRROR_DIR: ${{ github.workspace }}/ocx-mirror
         run: task satellite:verify --force
+
+  satellite-contract:
+    name: Satellite Contract (ocx-mirror)
+    if: github.event_name != 'schedule' || inputs.full
+    # NON-BLOCKING until the ocx-mirror change that marks its six ocx spawn
+    # sites `ocx_contract_site` merges: until then the floor is red by
+    # construction. Drop this line in the commit after that merge; then the
+    # job becomes required. Never required while the line is set — the same
+    # reason as `satellite-verify` above.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    # Reads two public repositories; nothing here writes.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ocx
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: ocx
+          submodules: true
+          persist-credentials: false
+      - name: Checkout ocx-mirror
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ocx-sh/ocx-mirror
+          path: ocx-mirror
+          ref: ${{ inputs.mirror_ref }}
+          persist-credentials: false
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rust-src-dir: ocx
+          matcher: true
+          rustflags: ""
+          # The candidate `ocx` and the mirror share this target dir.
+          cache-workspaces: "ocx -> .tmp/satellite-verify/cargo-target"
+          cache-on-failure: true
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Run ocx-mirror's acceptance suite against the candidate ocx
+        env:
+          OCX_MIRROR_DIR: ${{ github.workspace }}/ocx-mirror
+        run: task satellite:contract --force

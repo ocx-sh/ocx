@@ -118,7 +118,8 @@ def test_index_list_variants(
     )
 
     result = ocx.json("index", "list", "--variants", unique_repo)
-    variants = result[unique_repo]
+    (entry,) = result["items"]
+    variants = entry["variants"]
     assert "" in variants, f"Expected empty string (default variant) in variants: {variants}"
     assert "debug" in variants, f"Expected 'debug' in variants: {variants}"
     assert "pgo" in variants, f"Expected 'pgo' in variants: {variants}"

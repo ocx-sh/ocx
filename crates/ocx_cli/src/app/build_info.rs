@@ -29,12 +29,16 @@ const SHORT_SHA_LEN: usize = 8;
 /// ```
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Provenance {
+    /// The release channel the binary was built for (`dev`, `stable`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<&'static str>,
+    /// The git commit the binary was built from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<CommitInfo>,
+    /// The build environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildInfo>,
+    /// The CI run that built the binary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiInfo>,
 }
@@ -72,14 +76,18 @@ pub struct BuildInfo {
 /// workflow that exported the standard `GITHUB_*` env vars.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CiInfo {
+    /// The CI system (`github-actions`).
     pub provider: &'static str,
     /// Direct link to the run that produced this binary.
     /// Composed as `{server_url}/{repository}/actions/runs/{run_id}`.
     pub run_url: String,
+    /// The workflow name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
+    /// The git ref the run built (`refs/tags/v1.2.3`).
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
+    /// The commit SHA the run built.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
 }

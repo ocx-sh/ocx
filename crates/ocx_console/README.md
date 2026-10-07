@@ -5,7 +5,7 @@ and themes, progress bars, and the per-stream colour decision.
 
 **Tier:** ecosystem
 
-**May depend on:** `ocx_exit`, `ocx_util`
+**May depend on:** `ocx_exit`, `ocx_util`, `ocx_env`
 
 **Named dependency exceptions:** none
 

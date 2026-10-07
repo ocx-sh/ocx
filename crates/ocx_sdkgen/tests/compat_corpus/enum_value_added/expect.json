@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushStatus gains the value `deferred`.",
+  "findings": []
+}

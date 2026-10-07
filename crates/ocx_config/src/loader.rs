@@ -19,11 +19,6 @@ pub const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 /// and a bare walk would answer differently for the same directory.
 const PROJECT_FILE_NAME: &str = "ocx.toml";
 
-/// Test-only seam redirecting [`ConfigLoader::system_path`], so the SYSTEM-scope lock is
-/// exercisable without root.
-#[cfg(any(test, feature = "__testing"))]
-pub const SYSTEM_CONFIG_OVERRIDE: &str = "__OCX_TESTING_SYSTEM_CONFIG";
-
 /// Inputs to config discovery; the loader reads no ambient state beyond these.
 pub struct ConfigInputs<'a> {
     /// `--config FILE` CLI flag (highest priority among explicit paths).
@@ -94,8 +89,8 @@ impl ConfigLoader {
     /// # Errors
     /// Same as [`Self::load`].
     pub async fn load_with_local_view(inputs: ConfigInputs<'_>) -> Result<LoadedConfig> {
-        let no_config = ocx_util::env::flag("OCX_NO_CONFIG", false);
-        let raw_env_config_file = ocx_util::env::var("OCX_CONFIG");
+        let no_config = ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false);
+        let raw_env_config_file = ocx_env::OCX_CONFIG.get_raw().and_then(|value| value.into_string().ok());
         if raw_env_config_file.as_deref() == Some("") {
             log::debug!("OCX_CONFIG is set to empty string — skipped via escape hatch");
         }
@@ -191,7 +186,7 @@ impl ConfigLoader {
 
     /// The managed snapshot's path, or `None` under `OCX_NO_CONFIG=1`.
     fn managed_snapshot_candidate() -> Option<PathBuf> {
-        if ocx_util::env::flag("OCX_NO_CONFIG", false) {
+        if ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false) {
             return None;
         }
         let ocx_home = crate::home::default_ocx_root()?;
@@ -214,10 +209,10 @@ impl ConfigLoader {
 
         // From `local_only`, overlay included, or an overlay-only seed arms `required` while its
         // payload never folds here.
-        let env_override = if ocx_util::env::flag(crate::env::keys::OCX_NO_CONFIG, false) {
+        let env_override = if ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false) {
             None
         } else {
-            ocx_util::env::var(crate::env::keys::OCX_MANAGED_CONFIG).filter(|value| !value.is_empty())
+            ocx_env::OCX_MANAGED_CONFIG.get()
         };
         // Shared with the `required` gate, or a locked source A plus `OCX_MANAGED_CONFIG=B` skips
         // the fold here while `required` reports A satisfied.
@@ -478,7 +473,7 @@ impl ConfigLoader {
             return Self::resolve_explicit_project_path(&path).await;
         }
 
-        if ocx_util::env::flag("OCX_NO_PROJECT", false) {
+        if ocx_env::OCX_NO_PROJECT.bool_or(false).unwrap_or(false) {
             return Ok(None);
         }
 
@@ -486,8 +481,8 @@ impl ConfigLoader {
         let walk_result = match cwd {
             Some(start) => {
                 // Normalized, or a relative ceiling (`<cwd>/..`) equals no walk level and never fires.
-                let ceiling = ocx_util::env::var("OCX_CEILING_PATH")
-                    .filter(|value| !value.is_empty())
+                let ceiling = ocx_env::OCX_CEILING_PATH
+                    .get()
                     .map(|value| ocx_util::fs::path::lexical_normalize(&start.join(value)));
                 Self::walk_for_project_file(start, ceiling.as_deref()).await
             }
@@ -505,10 +500,12 @@ impl ConfigLoader {
         if let Some(path) = flag {
             return Some(path.to_path_buf());
         }
-        if ocx_util::env::flag("OCX_NO_PROJECT", false) {
+        if ocx_env::OCX_NO_PROJECT.bool_or(false).unwrap_or(false) {
             return None;
         }
-        let raw_env = ocx_util::env::var("OCX_PROJECT");
+        let raw_env = ocx_env::OCX_PROJECT
+            .get_raw()
+            .and_then(|value| value.into_string().ok());
         if raw_env.as_deref() == Some("") {
             log::debug!("OCX_PROJECT is set to empty string — skipped via escape hatch");
         }
@@ -742,7 +739,7 @@ impl ConfigLoader {
                 Self::parse_config_stripping_refused_consent(&contents, path.display()).map_err(|source| {
                     Error::Parse {
                         path: path.to_path_buf(),
-                        source,
+                        source: Box::new(source),
                     }
                 })?;
             if let Some(update) = parsed.update.as_mut() {
@@ -1109,11 +1106,14 @@ impl ConfigLoader {
             .filter(|declared| !declared.policy.is_empty() || declared.sigstore.is_some());
     }
 
-    /// System config: `/etc/ocx/config.toml`, redirectable through `SYSTEM_CONFIG_OVERRIDE` in test
+    /// System config: `/etc/ocx/config.toml`, redirectable through `__OCX_TESTING_SYSTEM_CONFIG` in test
     /// builds only.
     pub fn system_path() -> PathBuf {
         #[cfg(any(test, feature = "__testing"))]
-        if let Some(path) = ocx_util::env::var(SYSTEM_CONFIG_OVERRIDE) {
+        if let Some(path) = ocx_env::__OCX_TESTING_SYSTEM_CONFIG
+            .get_raw()
+            .and_then(|value| value.into_string().ok())
+        {
             return PathBuf::from(path);
         }
         PathBuf::from("/etc/ocx/config.toml")
@@ -1123,7 +1123,7 @@ impl ConfigLoader {
     /// `~/.config/ocx/config.toml` (via `dirs::config_dir`).
     pub fn user_path() -> Option<PathBuf> {
         #[cfg(any(test, feature = "__testing"))]
-        if ocx_util::env::overrides::is_hermetic() {
+        if ocx_env::overrides::is_hermetic() {
             return hermetic_config_dir().map(|d| d.join("ocx").join("config.toml"));
         }
         dirs::config_dir().map(|d| d.join("ocx").join("config.toml"))
@@ -1148,15 +1148,19 @@ impl ConfigLoader {
 #[cfg(any(test, feature = "__testing"))]
 fn hermetic_config_dir() -> Option<PathBuf> {
     if cfg!(windows) {
-        return ocx_util::env::var("APPDATA").map(PathBuf::from);
+        return ocx_env::APPDATA
+            .get_raw()
+            .and_then(|value| value.into_string().ok())
+            .map(PathBuf::from);
     }
     if cfg!(target_os = "macos") {
-        return ocx_util::env::home_dir().map(|home| home.join("Library").join("Application Support"));
+        return ocx_env::home_dir().map(|home| home.join("Library").join("Application Support"));
     }
-    ocx_util::env::var("XDG_CONFIG_HOME")
+    ocx_env::XDG_CONFIG_HOME
+        .get()
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .or_else(|| ocx_util::env::home_dir().map(|home| home.join(".config")))
+        .or_else(|| ocx_env::home_dir().map(|home| home.join(".config")))
 }
 
 #[cfg(test)]
@@ -1181,16 +1185,22 @@ mod tests {
     /// survive the flag), so a developer machine that happens to carry a real
     /// `/etc/ocx/config.toml` would otherwise leak into every hermetic-mode
     /// assertion below. Same rationale as `EnvLock::isolate_project_home`.
-    fn without_system_config(env: &ocx_util::env::overrides::EnvLock) {
-        env.set(SYSTEM_CONFIG_OVERRIDE, "/nonexistent/ocx-test-system/config.toml");
+    fn without_system_config(env: &ocx_env::overrides::EnvLock) {
+        env.set(
+            &ocx_env::__OCX_TESTING_SYSTEM_CONFIG,
+            "/nonexistent/ocx-test-system/config.toml",
+        );
     }
 
     /// Point the SYSTEM tier at `content` written into `dir`, so the
     /// `lock_as_system` pass runs against it exactly as it does for
     /// `/etc/ocx/config.toml`.
-    fn with_system_config(env: &ocx_util::env::overrides::EnvLock, dir: &TempDir, content: &str) {
+    fn with_system_config(env: &ocx_env::overrides::EnvLock, dir: &TempDir, content: &str) {
         let path = write_config(dir, "system-config.toml", content);
-        env.set(SYSTEM_CONFIG_OVERRIDE, path.to_str().expect("temp path is utf-8"));
+        env.set(
+            &ocx_env::__OCX_TESTING_SYSTEM_CONFIG,
+            path.to_str().expect("temp path is utf-8"),
+        );
     }
 
     // ── load_and_merge tests (Step 3.3) ──────────────────────────────────────
@@ -1370,17 +1380,16 @@ mod tests {
 
     // ── load() orchestration tests ───────────────────────────────────────────
     //
-    // Env-touching tests acquire `ocx_util::env::overrides::lock()` — a process-wide
-    // mutex whose Drop clears all overrides. Overrides route through
-    // `ocx_util::env::var`'s `#[cfg(test)]` branch; no `std::env::set_var`, no
-    // `unsafe`.
+    // Env-touching tests acquire `ocx_env::overrides::lock()` — a process-wide
+    // mutex whose Drop clears all overrides, which every `ocx_env` read consults;
+    // no `std::env::set_var`, no `unsafe`.
 
     #[tokio::test]
     async fn load_with_no_config_returns_default() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1398,12 +1407,12 @@ mod tests {
     #[tokio::test]
     async fn load_with_no_config_and_explicit_path_loads_only_explicit() {
         // OCX_NO_CONFIG=1 with --config → explicit file still loads.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "hermetic.toml", "[registry]\ndefault = \"hermetic.example\"");
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
         let inputs = ConfigInputs {
             explicit_path: Some(&path),
             explicit_project_path: None,
@@ -1422,16 +1431,16 @@ mod tests {
     #[tokio::test]
     async fn load_with_no_config_and_env_path_still_loads_env_path() {
         // OCX_NO_CONFIG=1 with OCX_CONFIG → env-var path still loads.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(
             &dir,
             "env-hermetic.toml",
             "[registry]\ndefault = \"env-hermetic.example\"",
         );
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.set("OCX_CONFIG", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1450,10 +1459,10 @@ mod tests {
     #[tokio::test]
     async fn load_with_empty_ocx_config_file_treats_as_unset() {
         // OCX_CONFIG="" is the escape hatch — treated as unset, not an error.
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.set("OCX_CONFIG", "");
+        env.set(&ocx_env::OCX_CONFIG, "");
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1467,10 +1476,10 @@ mod tests {
 
     #[tokio::test]
     async fn load_with_nonexistent_explicit_path_errors() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
         let nonexistent = PathBuf::from("/tmp/ocx-test-nonexistent-config-99999.toml");
         let inputs = ConfigInputs {
             explicit_path: Some(&nonexistent),
@@ -1488,12 +1497,12 @@ mod tests {
 
     #[tokio::test]
     async fn load_with_ocx_config_file_env_loads_that_file() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "ci.toml", "[registry]\ndefault = \"ci.example\"");
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.set("OCX_CONFIG", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1511,12 +1520,12 @@ mod tests {
     /// equal to what `load` returns.
     #[tokio::test]
     async fn load_with_local_view_merged_and_local_only_are_identical() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "ci.toml", "[registry]\ndefault = \"ci.example\"");
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.set("OCX_CONFIG", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1540,13 +1549,13 @@ mod tests {
     async fn load_with_explicit_path_layers_on_top_of_env_path() {
         // Both OCX_CONFIG and --config set → both load; --config (highest
         // file-tier precedence) wins on conflicting scalars.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let env_file = write_config(&dir, "env.toml", "[registry]\ndefault = \"env.example\"");
         let explicit_file = write_config(&dir, "explicit.toml", "[registry]\ndefault = \"explicit.example\"");
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.set("OCX_CONFIG", env_file.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, env_file.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: Some(&explicit_file),
             explicit_project_path: None,
@@ -1579,9 +1588,9 @@ mod tests {
 
     #[tokio::test]
     async fn builtin_tier_makes_ocx_sh_index_bearing() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1597,9 +1606,9 @@ mod tests {
 
     #[tokio::test]
     async fn builtin_tier_leaves_every_other_namespace_plain_oci() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1622,15 +1631,15 @@ mod tests {
 
     #[tokio::test]
     async fn user_index_overrides_the_builtin_ocx_sh_index() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(
             &dir,
             "corp.toml",
             "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
         );
-        env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1649,11 +1658,11 @@ mod tests {
     /// base URL — `ocx.sh` falls back to plain OCI.
     #[tokio::test]
     async fn empty_user_index_disables_the_builtin_ocx_sh_index() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, "plain.toml", "[registries.\"ocx.sh\"]\nindex = \"\"\n");
-        env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1671,15 +1680,15 @@ mod tests {
     /// erase the built-in `index` — the table merges key-by-key, field-wise.
     #[tokio::test]
     async fn user_entry_without_index_keeps_the_builtin_ocx_sh_index() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let path = write_config(
             &dir,
             "trusted.toml",
             "[registries.\"ocx.sh\"]\ntrusted_hosts = [\"registry.corp\"]\n",
         );
-        env.set("OCX_NO_CONFIG", "1");
-        env.set("OCX_CONFIG", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1703,7 +1712,7 @@ mod tests {
     /// otherwise be silently routed back to the public index.
     #[tokio::test]
     async fn a_discovered_tier_index_overrides_the_builtin_ocx_sh_index() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         // `$OCX_HOME/config.toml` is the one discovered tier a test can plant
         // (system and user paths are host-absolute).
@@ -1712,10 +1721,10 @@ mod tests {
             "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
         )
         .unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1807,9 +1816,9 @@ mod tests {
     /// builds its client from `local_only`.
     #[tokio::test]
     async fn builtin_tier_is_present_in_both_loaded_views() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -1834,9 +1843,9 @@ mod tests {
     #[test]
     fn system_path_is_etc_ocx_config_toml() {
         // Holds the env lock so a concurrently-running test cannot have the
-        // `SYSTEM_CONFIG_OVERRIDE` seam set while this asserts the real path.
-        let env = ocx_util::env::overrides::lock();
-        env.remove(SYSTEM_CONFIG_OVERRIDE);
+        // `__OCX_TESTING_SYSTEM_CONFIG` seam set while this asserts the real path.
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG);
         let path = ConfigLoader::system_path();
         assert_eq!(path, PathBuf::from("/etc/ocx/config.toml"));
     }
@@ -1862,9 +1871,9 @@ mod tests {
 
     #[test]
     fn home_path_uses_ocx_home_env_var() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
         let path = ConfigLoader::home_path();
         assert!(path.is_some(), "home_path() should return Some when OCX_HOME is set");
         let expected = dir.path().join("config.toml");
@@ -1882,7 +1891,7 @@ mod tests {
         // including it or failing the whole discovery pass.
         use std::os::unix::fs::PermissionsExt;
 
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let locked_home = dir.path().join("locked-home");
         std::fs::create_dir(&locked_home).unwrap();
@@ -1893,10 +1902,10 @@ mod tests {
         // log+skip rather than silently collapse.
         std::fs::set_permissions(&locked_home, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        env.set("OCX_HOME", locked_home.to_str().unwrap());
+        env.set(&ocx_env::OCX_HOME, locked_home.to_str().unwrap());
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
 
         let paths = ConfigLoader::discover_paths()
             .await
@@ -1920,7 +1929,7 @@ mod tests {
         // tier directories from aiming the link at an arbitrary readable
         // file. Explicit paths (--config, OCX_CONFIG) are out of scope
         // for this check — those are trusted caller input.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("ocx-home");
         std::fs::create_dir(&home).unwrap();
@@ -1930,10 +1939,10 @@ mod tests {
         let symlink_path = home.join("config.toml");
         std::os::unix::fs::symlink(&target, &symlink_path).expect("create symlink");
 
-        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set(&ocx_env::OCX_HOME, home.to_str().unwrap());
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
 
         let paths = ConfigLoader::discover_paths()
             .await
@@ -1969,14 +1978,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_system_config_is_fatal() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let target = write_config(&dir, "fleet.toml", "[records]\ndir = \"/var/log/ocx/records\"\n");
         let link = dir.path().join("system-config.toml");
         std::os::unix::fs::symlink(&target, &link).expect("create symlink");
-        env.set(SYSTEM_CONFIG_OVERRIDE, link.to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.set(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG, link.to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
 
         let error = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
@@ -1994,14 +2003,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_system_config_is_fatal_under_no_config() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let target = write_config(&dir, "fleet.toml", "[records]\ndir = \"/var/log/ocx/records\"\n");
         let link = dir.path().join("system-config.toml");
         std::os::unix::fs::symlink(&target, &link).expect("create symlink");
-        env.set(SYSTEM_CONFIG_OVERRIDE, link.to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        env.set(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG, link.to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
 
         let error = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
@@ -2020,13 +2029,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_unreadable_system_config_is_fatal() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let not_a_dir = write_config(&dir, "not-a-dir", "");
         let candidate = not_a_dir.join("config.toml");
-        env.set(SYSTEM_CONFIG_OVERRIDE, candidate.to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.set(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG, candidate.to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
 
         let error = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
@@ -2042,10 +2051,10 @@ mod tests {
     /// the ordinary case on nearly every host, and must stay silent.
     #[tokio::test]
     async fn an_absent_system_config_is_not_fatal() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
 
         ConfigLoader::load(ConfigInputs {
             explicit_path: None,
@@ -2062,7 +2071,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_non_system_candidate_is_still_skipped() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         without_system_config(&env);
         let target = write_config(&dir, "target.toml", "[registry]\ndefault = \"symlinked.example\"");
@@ -2083,8 +2092,8 @@ mod tests {
         // With OCX_HOME removed, home_path() falls back to the shared home resolver.
         // The result is platform-dependent: Some(path ending in .ocx/config.toml)
         // when HOME is set, None otherwise. Both are valid outcomes.
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_HOME");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_HOME);
         let path = ConfigLoader::home_path();
         if let Some(path) = path {
             assert!(
@@ -2113,7 +2122,7 @@ mod tests {
     // Phase 1 (stub), every test fails with the `unimplemented!()` panic on
     // `project_path`; Phase 4 impl flips them to pass.
     //
-    // All env-touching tests acquire `ocx_util::env::overrides::lock()` — the same
+    // All env-touching tests acquire `ocx_env::overrides::lock()` — the same
     // process-wide mutex used by the `load()` tests above.
 
     /// Helper: write a file at `path` with the given content.
@@ -2124,10 +2133,10 @@ mod tests {
     /// Plan bullet: `--project <valid>` → loads the file.
     #[tokio::test]
     async fn project_path_explicit_flag_loads_valid_file() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("ocx.toml");
         write_file(&path, "");
@@ -2140,10 +2149,10 @@ mod tests {
     /// Plan bullet: `--project <missing>` → `NotFound` (79).
     #[tokio::test]
     async fn project_path_explicit_flag_missing_returns_not_found() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let missing = PathBuf::from("/tmp/ocx-project-path-test-missing-explicit.toml");
         let err = ConfigLoader::project_path(None, Some(&missing))
             .await
@@ -2168,10 +2177,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_explicit_io_error_surfaces_as_io() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let bad = PathBuf::from("/dev/null/not-a-real-file.toml");
         let err = ConfigLoader::project_path(None, Some(&bad))
             .await
@@ -2192,13 +2201,13 @@ mod tests {
     /// Plan bullet: `OCX_PROJECT=<valid>` → loads the file.
     #[tokio::test]
     async fn project_path_env_var_loads_valid_file() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("custom-name.toml");
         write_file(&path, "");
-        env.set("OCX_PROJECT", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_PROJECT, path.to_str().unwrap());
         let resolved = ConfigLoader::project_path(None, None)
             .await
             .expect("env-var path should resolve");
@@ -2211,12 +2220,12 @@ mod tests {
     /// has no `ocx.toml` above it up to the ceiling → returns `None`.
     #[tokio::test]
     async fn project_path_empty_env_var_treated_as_unset() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.set("OCX_PROJECT", "");
-        env.remove("OCX_NO_PROJECT");
+        env.set(&ocx_env::OCX_PROJECT, "");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
         let dir = TempDir::new().unwrap();
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
         let resolved = ConfigLoader::project_path(Some(dir.path()), None)
             .await
             .expect("empty env var should be treated as unset, not an error");
@@ -2229,8 +2238,8 @@ mod tests {
     /// Plan bullet: `OCX_NO_PROJECT=1` → skips CWD walk + env-var path; returns `None`.
     #[tokio::test]
     async fn project_path_no_project_returns_none() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_PROJECT", "1");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_PROJECT, "1");
         let dir = TempDir::new().unwrap();
         // Even placing a valid ocx.toml at cwd must not be discovered.
         let cwd_project = dir.path().join("ocx.toml");
@@ -2238,7 +2247,7 @@ mod tests {
         // And a valid env-var path must also be ignored.
         let env_path = dir.path().join("env.toml");
         write_file(&env_path, "");
-        env.set("OCX_PROJECT", env_path.to_str().unwrap());
+        env.set(&ocx_env::OCX_PROJECT, env_path.to_str().unwrap());
         let resolved = ConfigLoader::project_path(Some(dir.path()), None)
             .await
             .expect("OCX_NO_PROJECT=1 with no explicit flag must return Ok(None)");
@@ -2251,10 +2260,10 @@ mod tests {
     /// Plan bullet: `OCX_NO_PROJECT=1` + `--project <valid>` → still loads.
     #[tokio::test]
     async fn project_path_no_project_does_not_block_explicit_flag() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_PROJECT", "1");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_PROJECT, "1");
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("flag.toml");
         write_file(&path, "");
@@ -2269,13 +2278,13 @@ mod tests {
     /// escapes the kill switch — the env var does not.
     #[tokio::test]
     async fn project_path_no_project_prunes_env_var() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_PROJECT", "1");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_PROJECT, "1");
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("env-hermetic.toml");
         write_file(&path, "");
-        env.set("OCX_PROJECT", path.to_str().unwrap());
+        env.set(&ocx_env::OCX_PROJECT, path.to_str().unwrap());
         let resolved = ConfigLoader::project_path(None, None)
             .await
             .expect("OCX_NO_PROJECT=1 must prune the env-var path per ADR G3");
@@ -2288,9 +2297,9 @@ mod tests {
     /// that sees all three must return the highest-precedence one.
     #[tokio::test]
     async fn project_path_flag_beats_env_beats_walk_precedence() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
 
         // CWD-walk candidate at the root of a throw-away workspace.
@@ -2302,7 +2311,7 @@ mod tests {
         // Env-var candidate.
         let env_path = dir.path().join("env.toml");
         write_file(&env_path, "");
-        env.set("OCX_PROJECT", env_path.to_str().unwrap());
+        env.set(&ocx_env::OCX_PROJECT, env_path.to_str().unwrap());
 
         // Explicit-flag candidate (highest).
         let flag_path = dir.path().join("flag.toml");
@@ -2322,15 +2331,15 @@ mod tests {
     /// when both are set (focused assertion separate from the three-tier test).
     #[tokio::test]
     async fn project_path_explicit_takes_precedence_over_env_when_both_set() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let file_a = dir.path().join("a.toml");
         let file_b = dir.path().join("b.toml");
         write_file(&file_a, "");
         write_file(&file_b, "");
-        env.set("OCX_PROJECT", file_b.to_str().unwrap());
+        env.set(&ocx_env::OCX_PROJECT, file_b.to_str().unwrap());
         let resolved = ConfigLoader::project_path(None, Some(&file_a))
             .await
             .expect("both explicit sources should resolve");
@@ -2344,13 +2353,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_explicit_escapes_ceiling() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let ceiling = dir.path().join("ceiling");
         std::fs::create_dir(&ceiling).unwrap();
-        env.set("OCX_CEILING_PATH", ceiling.to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, ceiling.to_str().unwrap());
         // File lives OUTSIDE the ceiling — must still resolve via --project.
         let outside = dir.path().join("outside.toml");
         write_file(&outside, "");
@@ -2366,10 +2375,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_explicit_follows_symlink() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("real.toml");
         write_file(&target, "");
@@ -2395,15 +2404,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_rejects_symlink() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let workspace = dir.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         // .git/ absent, ceiling bounds the walk to the temp dir.
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         // Put the real ocx.toml outside the walk, then symlink into workspace.
         let target = dir.path().join("real.toml");
@@ -2425,10 +2434,10 @@ mod tests {
     /// Matches Cargo `--manifest-path` semantics.
     #[tokio::test]
     async fn project_path_explicit_accepts_any_basename() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("fixture-manifest.project");
         write_file(&path, "");
@@ -2442,9 +2451,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_finds_root_ocx_toml_from_nested_cwd() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("repo");
         std::fs::create_dir(&root).unwrap();
@@ -2452,7 +2461,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let project = root.join("ocx.toml");
         write_file(&project, "");
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         let resolved = ConfigLoader::project_path(Some(&nested), None)
             .await
@@ -2467,10 +2476,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_stops_at_git_boundary() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         // Parent workspace holds an ocx.toml — this must NOT be returned.
         let parent_project = dir.path().join("ocx.toml");
@@ -2481,7 +2490,7 @@ mod tests {
         std::fs::create_dir(inner.join(".git")).unwrap();
         let nested = inner.join("src");
         std::fs::create_dir(&nested).unwrap();
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         let resolved = ConfigLoader::project_path(Some(&nested), None)
             .await
@@ -2502,10 +2511,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_stops_at_git_worktree_linkfile() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         // Parent workspace holds an ocx.toml — this must NOT be returned.
         let parent_project = dir.path().join("ocx.toml");
@@ -2516,7 +2525,7 @@ mod tests {
         std::fs::write(worktree.join(".git"), "gitdir: /some/path/.git/worktrees/wt\n").unwrap();
         let nested = worktree.join("src");
         std::fs::create_dir(&nested).unwrap();
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         let resolved = ConfigLoader::project_path(Some(&nested), None)
             .await
@@ -2551,15 +2560,15 @@ mod tests {
     async fn project_path_walk_stops_at_a_symlinked_git_entry() {
         use std::os::unix::fs::symlink;
 
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         // The decoy the walk must never reach: without a boundary at the
         // checkout root, the ascent finds this and adopts it.
         write_file(&dir.path().join("ocx.toml"), "");
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         // (a) `.git` is a symlink to a real git directory living elsewhere.
         let real_git = dir.path().join("elsewhere").join(".git");
@@ -2599,9 +2608,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_finds_ocx_toml_at_git_root_level() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -2610,7 +2619,7 @@ mod tests {
         write_file(&project, "");
         let nested = repo.join("src").join("deep");
         std::fs::create_dir_all(&nested).unwrap();
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         let resolved = ConfigLoader::project_path(Some(&nested), None)
             .await
@@ -2633,10 +2642,10 @@ mod tests {
     /// can tell *this directory governs no project* from *this file is missing*.
     #[tokio::test]
     async fn project_path_explicit_directory_resolves_to_its_project_file() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let project = dir.path().join("ocx.toml");
         write_file(&project, "");
@@ -2656,10 +2665,10 @@ mod tests {
     /// `Error::Io` (74).
     #[tokio::test]
     async fn project_path_explicit_directory_without_a_project_file_is_none() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
 
         let resolved = ConfigLoader::project_path(None, Some(dir.path()))
@@ -2680,10 +2689,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_explicit_device_rejected_as_io() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let target = PathBuf::from("/dev/null");
         let err = ConfigLoader::project_path(None, Some(&target))
             .await
@@ -2704,12 +2713,12 @@ mod tests {
     /// Plan bullet: No `ocx.toml`, no explicit path → returns `None`.
     #[tokio::test]
     async fn project_path_returns_none_when_no_source() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
         let resolved = ConfigLoader::project_path(Some(dir.path()), None)
             .await
             .expect("no sources should resolve to None, not error");
@@ -2722,11 +2731,11 @@ mod tests {
     /// Plan bullets only test the valid env-var path explicitly.
     #[tokio::test]
     async fn project_path_env_var_missing_file_returns_not_found() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let missing = PathBuf::from("/tmp/ocx-project-path-test-missing-env.toml");
-        env.set("OCX_PROJECT", missing.to_str().unwrap());
+        env.set(&ocx_env::OCX_PROJECT, missing.to_str().unwrap());
         let err = ConfigLoader::project_path(None, None)
             .await
             .expect_err("missing env-var path should be FileNotFound");
@@ -2759,11 +2768,11 @@ mod tests {
     /// per-prompt hook is the shipped bug this guards.
     #[tokio::test]
     async fn project_path_walk_without_git_or_ceiling_returns_none() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         // Use a temp dir far inside /tmp; no ocx.toml anywhere on the path
         // to `/`. The resolver must terminate at the filesystem root and
         // return None — never hang, never error.
@@ -2822,10 +2831,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_stops_at_ceiling() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         // ocx.toml at the OUTERMOST level (above the ceiling).
         let outer_project = dir.path().join("ocx.toml");
@@ -2833,7 +2842,7 @@ mod tests {
         // Ceiling sits inside the tempdir; walk starts below the ceiling.
         let ceiling = dir.path().join("ceiling");
         std::fs::create_dir(&ceiling).unwrap();
-        env.set("OCX_CEILING_PATH", ceiling.to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, ceiling.to_str().unwrap());
         let cwd = ceiling.join("project");
         std::fs::create_dir(&cwd).unwrap();
 
@@ -2858,10 +2867,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_stops_at_a_relative_ceiling() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         // ocx.toml above the ceiling — the file an unbounded walk would find.
         write_file(&dir.path().join("ocx.toml"), "");
@@ -2871,7 +2880,7 @@ mod tests {
         std::fs::create_dir(&cwd).unwrap();
 
         // Written relative to `cwd`, the directory the walk starts from.
-        env.set("OCX_CEILING_PATH", "..");
+        env.set(&ocx_env::OCX_CEILING_PATH, "..");
 
         let resolved = ConfigLoader::project_path(Some(&cwd), None)
             .await
@@ -2890,17 +2899,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_empty_ceiling_does_not_bound_the_walk() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let outer_project = dir.path().join("ocx.toml");
         write_file(&outer_project, "");
         let cwd = dir.path().join("nested");
         std::fs::create_dir(&cwd).unwrap();
 
-        env.set("OCX_CEILING_PATH", "");
+        env.set(&ocx_env::OCX_CEILING_PATH, "");
 
         let resolved = ConfigLoader::project_path(Some(&cwd), None)
             .await
@@ -2925,16 +2934,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_finds_ocx_toml_at_the_ceiling_itself() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let ceiling = dir.path().join("workspace");
         std::fs::create_dir(&ceiling).unwrap();
         let project = ceiling.join("ocx.toml");
         write_file(&project, "");
-        env.set("OCX_CEILING_PATH", ceiling.to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, ceiling.to_str().unwrap());
         let cwd = ceiling.join("crates").join("inner");
         std::fs::create_dir_all(&cwd).unwrap();
 
@@ -2963,7 +2972,7 @@ mod tests {
     /// the walk, would pass this assertion alone.
     #[tokio::test]
     async fn walk_does_not_adopt_the_global_toolchain_manifest() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let home = env.isolate_project_home();
         write_file(&home.path().join(PROJECT_FILE_NAME), "");
         let cwd = home.path().join("sub");
@@ -2987,10 +2996,10 @@ mod tests {
     /// guard refuses the *discovery* of that file, not the file.
     #[tokio::test]
     async fn project_path_explicit_flag_still_reaches_the_global_manifest() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let home = env.isolate_project_home();
         let manifest = home.path().join(PROJECT_FILE_NAME);
         write_file(&manifest, "");
@@ -3018,10 +3027,10 @@ mod tests {
     /// `OCX_HOME` at a directory inside their checkout.
     #[tokio::test]
     async fn walk_finds_a_project_above_a_nested_ocx_home() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let project_root = dir.path().join("proj");
         let home = project_root.join("home");
@@ -3030,7 +3039,7 @@ mod tests {
         let project = project_root.join(PROJECT_FILE_NAME);
         write_file(&project, "");
         write_file(&home.join(PROJECT_FILE_NAME), "");
-        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set(&ocx_env::OCX_HOME, home.to_str().unwrap());
 
         let resolved = ConfigLoader::project_path(Some(&cwd), None)
             .await
@@ -3052,10 +3061,10 @@ mod tests {
     /// and not an empty fixture.
     #[tokio::test]
     async fn no_project_stays_a_hard_none_above_a_nested_ocx_home() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_NO_PROJECT", "1");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::OCX_NO_PROJECT, "1");
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let project_root = dir.path().join("proj");
         let home = project_root.join("home");
@@ -3063,7 +3072,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         write_file(&project_root.join(PROJECT_FILE_NAME), "");
         write_file(&home.join(PROJECT_FILE_NAME), "");
-        env.set("OCX_HOME", home.to_str().unwrap());
+        env.set(&ocx_env::OCX_HOME, home.to_str().unwrap());
 
         let resolved = ConfigLoader::project_path(Some(&cwd), None)
             .await
@@ -3085,17 +3094,17 @@ mod tests {
     /// the root absolutely.
     #[tokio::test]
     async fn walk_skips_a_relative_ocx_home() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
-        env.remove("OCX_CEILING_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
         let cwd = home.join("sub");
         std::fs::create_dir_all(&cwd).unwrap();
         write_file(&home.join(PROJECT_FILE_NAME), "");
         // `..` from the walk's start is this tree's relative spelling of $OCX_HOME.
-        env.set("OCX_HOME", "..");
+        env.set(&ocx_env::OCX_HOME, "..");
 
         let resolved = ConfigLoader::walk_for_project_file(&cwd, None).await;
 
@@ -3127,10 +3136,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_over_the_os_path_limit_stops_without_erroring() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let _ocx_home = env.isolate_project_home();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("r");
         std::fs::create_dir(&root).unwrap();
@@ -3138,7 +3147,7 @@ mod tests {
         // ascent.
         let decoy = root.join("ocx.toml");
         write_file(&decoy, "");
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
 
         // Grow in 200-byte strides while they fit, then in single bytes, so the
         // deepest directory sits within one byte of the real limit.
@@ -3184,16 +3193,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_no_ceiling_no_git_finds_ocx_toml_many_levels_up() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_NO_PROJECT");
-        env.remove("OCX_PROJECT");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_PROJECT);
         let dir = TempDir::new().unwrap();
         // Set the ceiling at the tempdir so the test cannot accidentally walk
         // past it into the real filesystem; the `ocx.toml` is placed just
         // below the ceiling so the walk has work to do without leaving the
         // sandbox. This still stresses five levels of parent traversal, which
         // is the point of the test.
-        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_CEILING_PATH, dir.path().to_str().unwrap());
         let root = dir.path().join("r");
         std::fs::create_dir(&root).unwrap();
         let project = root.join("ocx.toml");
@@ -3244,12 +3253,12 @@ mod tests {
     /// overrides the seed's own `[managed]` values.
     #[tokio::test]
     async fn managed_snapshot_merges_above_home_below_config_and_strips_managed_section() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3319,12 +3328,12 @@ mod tests {
     /// `fold_managed_tier`, and the payload's `self = "apply"` wins over the local `manual`.
     #[tokio::test]
     async fn managed_payload_update_section_is_ignored() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3368,12 +3377,12 @@ mod tests {
             "update = 1\n[registry]\ndefault = \"managed-registry\"\n",
             "[registry]\ndefault = \"managed-registry\"\n[update]\ninterval = []\n",
         ] {
-            let env = ocx_util::env::overrides::lock();
+            let env = ocx_env::overrides::lock();
             let dir = TempDir::new().unwrap();
-            env.set("OCX_HOME", dir.path().to_str().unwrap());
-            env.remove("OCX_CONFIG");
-            env.remove("OCX_NO_CONFIG");
-            env.remove("OCX_MANAGED_CONFIG");
+            env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+            env.remove(&ocx_env::OCX_CONFIG);
+            env.remove(&ocx_env::OCX_NO_CONFIG);
+            env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
             std::fs::write(
                 dir.path().join("config.toml"),
@@ -3403,12 +3412,12 @@ mod tests {
     #[tokio::test]
     async fn local_malformed_update_never_fails_the_load() {
         for local_update in ["update = 1\n", "[update]\ninterval = 3600\n", "[update]\nself = 5\n"] {
-            let env = ocx_util::env::overrides::lock();
+            let env = ocx_env::overrides::lock();
             let dir = TempDir::new().unwrap();
-            env.set("OCX_HOME", dir.path().to_str().unwrap());
-            env.remove("OCX_CONFIG");
-            env.remove("OCX_NO_CONFIG");
-            env.remove("OCX_MANAGED_CONFIG");
+            env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+            env.remove(&ocx_env::OCX_CONFIG);
+            env.remove(&ocx_env::OCX_NO_CONFIG);
+            env.remove(&ocx_env::OCX_MANAGED_CONFIG);
             std::fs::write(dir.path().join("config.toml"), local_update).unwrap();
 
             let inputs = ConfigInputs {
@@ -3426,12 +3435,12 @@ mod tests {
     /// never reaches `Config`, mirrors/registry/patches included.
     #[tokio::test]
     async fn managed_snapshot_source_mismatch_is_never_merged() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3464,12 +3473,12 @@ mod tests {
     /// snapshot file.
     #[tokio::test]
     async fn managed_snapshot_corrupt_embedded_toml_treated_as_absent() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3502,11 +3511,11 @@ mod tests {
     /// `OCX_MANAGED_CONFIG` (when set) over the seed's `managed.source`.
     #[tokio::test]
     async fn managed_snapshot_identity_gate_uses_env_override_when_set() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3514,7 +3523,7 @@ mod tests {
         )
         .unwrap();
         // The snapshot's provenance matches the ENV override, not the seed.
-        env.set("OCX_MANAGED_CONFIG", "override.test/managed-config:v1");
+        env.set(&ocx_env::OCX_MANAGED_CONFIG, "override.test/managed-config:v1");
         write_managed_snapshot(
             dir.path(),
             "override.test/managed-config:v1",
@@ -3543,12 +3552,12 @@ mod tests {
     /// `merged`, while the overlay's own conflicting value still wins.
     #[tokio::test]
     async fn managed_snapshot_seed_only_in_overlay_still_folds_payload() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         // Deliberately no home-tier config.toml — the seed exists ONLY in
         // the --config overlay below.
 
@@ -3592,12 +3601,12 @@ mod tests {
     /// not the base tiers alone.
     #[tokio::test]
     async fn managed_snapshot_overlay_source_overrides_home_seed_for_identity_gate() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3640,12 +3649,12 @@ mod tests {
     /// the wrong identity.
     #[tokio::test]
     async fn managed_snapshot_home_seed_source_is_absent_once_overlay_overrides_it() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3686,12 +3695,12 @@ mod tests {
     /// managed-config snapshot (no new loader error variant, ADR Decision A).
     #[tokio::test]
     async fn managed_snapshot_malformed_json_is_treated_as_absent() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -3718,13 +3727,13 @@ mod tests {
     /// (hermetic means hermetic).
     #[tokio::test]
     async fn no_config_suppresses_managed_snapshot_even_with_matching_env_override() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
-        env.set("OCX_MANAGED_CONFIG", "registry.test/managed-config:v1");
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.set(&ocx_env::OCX_MANAGED_CONFIG, "registry.test/managed-config:v1");
 
         write_managed_snapshot(
             dir.path(),
@@ -3755,12 +3764,12 @@ mod tests {
     /// reuses `Config::merge`, which already respects `system_locked`.
     #[tokio::test]
     async fn managed_snapshot_cannot_override_system_locked_registry() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         write_managed_snapshot(
             dir.path(),
@@ -3814,12 +3823,12 @@ mod tests {
     /// `OCX_MANAGED_CONFIG` names a different (mismatched) source.
     #[tokio::test]
     async fn managed_snapshot_system_locked_source_folds_despite_mismatched_env_override() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.set("OCX_MANAGED_CONFIG", "hostile.test/evil-config:latest");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.set(&ocx_env::OCX_MANAGED_CONFIG, "hostile.test/evil-config:latest");
 
         write_managed_snapshot(
             dir.path(),
@@ -3865,12 +3874,12 @@ mod tests {
     /// `config update --check` — is what the gate reads.
     #[tokio::test]
     async fn managed_snapshot_unparseable_payload_folds_nothing_and_reports_unusable() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         write_managed_snapshot(dir.path(), "corp.example.com/ocx-config:user", "not = [valid toml");
 
@@ -3907,12 +3916,12 @@ mod tests {
     /// "unfamiliar" — the latter would fail a fleet closed on every rollout.
     #[tokio::test]
     async fn managed_snapshot_payload_from_a_newer_ocx_folds_and_reports_applied() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         write_managed_snapshot(
             dir.path(),
@@ -4044,12 +4053,12 @@ mod tests {
     /// `OCX_NO_CONFIG=1` is a caller, and used to be the one way out.
     #[tokio::test]
     async fn no_config_keeps_a_system_locked_records_policy() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
-        env.set("OCX_HOME", home.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         let sink = absolute_sink("var/log/ocx/records");
         with_system_config(
             &env,
@@ -4081,12 +4090,12 @@ mod tests {
     /// the loudest caller channel there is, and a locked block still wins.
     #[tokio::test]
     async fn no_config_system_locked_records_beats_an_explicit_config_file() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
-        env.set("OCX_HOME", home.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         let sink = absolute_sink("var/log/ocx/records");
         with_system_config(
             &env,
@@ -4121,16 +4130,16 @@ mod tests {
     /// still pruned by the flag, exactly as before.
     #[tokio::test]
     async fn no_config_prunes_an_unlocked_home_tier_records_section() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let home = TempDir::new().unwrap();
         std::fs::write(
             home.path().join("config.toml"),
             "[records]\ndir = \"/tmp/home-tier-records\"\n",
         )
         .unwrap();
-        env.set("OCX_HOME", home.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         without_system_config(&env);
 
         let config = ConfigLoader::load(ConfigInputs {
@@ -4153,12 +4162,12 @@ mod tests {
     /// still prunes it, while the `[records]` block in the same file survives.
     #[tokio::test]
     async fn no_config_prunes_system_sections_that_did_not_lock() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
-        env.set("OCX_HOME", home.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         with_system_config(
             &env,
             &dir,
@@ -4192,13 +4201,13 @@ mod tests {
     /// every hermetic invocation instead of enforcing anything.
     #[tokio::test]
     async fn no_config_still_suppresses_a_system_managed_tier() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
-        env.set("OCX_HOME", home.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         with_system_config(
             &env,
             &dir,
@@ -4353,12 +4362,12 @@ mod tests {
     /// system-locked entry's `index` value.
     #[tokio::test]
     async fn managed_snapshot_cannot_override_system_locked_registries_entry() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         write_managed_snapshot(
             dir.path(),
@@ -4948,12 +4957,12 @@ mod tests {
     /// from — never sees the managed payload's material.
     #[tokio::test]
     async fn a_managed_extra_ca_certs_pem_beats_the_home_tier_and_yields_to_the_explicit_tier() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         without_system_config(&env);
 
         std::fs::write(
@@ -5023,11 +5032,11 @@ mod tests {
     /// that never set one.
     #[tokio::test]
     async fn no_config_prunes_an_unlocked_extra_ca_certs_pair() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         without_system_config(&env);
         std::fs::write(dir.path().join("config.toml"), "extra_ca_certs = \"home-ca.pem\"\n").unwrap();
 
@@ -5042,7 +5051,7 @@ mod tests {
             .merged
         };
 
-        env.remove("OCX_NO_CONFIG");
+        env.remove(&ocx_env::OCX_NO_CONFIG);
         let merged = load().await;
         assert_eq!(
             merged.extra_ca_certs.as_deref(),
@@ -5051,7 +5060,7 @@ mod tests {
         );
         assert!(!merged.extra_ca_certs_system_locked, "premise: nothing locked it");
 
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         let merged = load().await;
         assert_eq!(
             merged.extra_ca_certs, None,
@@ -5613,12 +5622,12 @@ mod tests {
     /// reports `PayloadUnusable` and folds nothing.
     #[tokio::test]
     async fn c344_a_refused_consent_table_in_a_managed_payload_folds_everything_else() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         // Digest-pinned, so `guard_managed_shell_consent` is not what removes
         // the table — the refusal strip is.
@@ -5750,12 +5759,12 @@ mod tests {
     async fn c034_ec_cfg_005_a_managed_hook_beats_the_home_tiers_own_false() {
         use crate::ConfigTier;
 
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         // Pinned to the digest `write_managed_snapshot` stamps, so
         // `snapshot_matches_source`'s digest clause is satisfied and the
@@ -5798,7 +5807,7 @@ mod tests {
         // same load — `OCX_CONFIG` merges after it, and the user chose the file.
         let explicit_dir = TempDir::new().unwrap();
         let explicit = write_config(&explicit_dir, "chosen.toml", "[shell]\nhook = false\n");
-        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, explicit.to_str().unwrap());
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
@@ -5844,12 +5853,12 @@ mod tests {
     async fn extra_ca_certs_tier_records_the_tier_that_actually_set_the_key() {
         use crate::ConfigTier;
 
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         without_system_config(&env);
         let load = || async {
             ConfigLoader::load_with_local_view(ConfigInputs {
@@ -5895,7 +5904,7 @@ mod tests {
 
         // `OCX_CONFIG` outranks the managed fold, in both views.
         let explicit = write_config(&dir, "chosen.toml", "extra_ca_certs_pem = \"explicit\"\n");
-        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, explicit.to_str().unwrap());
         let loaded = load().await;
         assert_eq!(loaded.merged.extra_ca_certs_pem.as_deref(), Some("explicit"));
         assert_eq!(loaded.extra_ca_certs_tier, Some(ConfigTier::Explicit));
@@ -5905,9 +5914,9 @@ mod tests {
         // nothing once that path is dropped — the record stays with the system
         // tier, whose `_pem` is what resolves. The home tier is silent so the
         // system lock is not what decides this load.
-        env.remove("OCX_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
         let system = write_config(&dir, "system.toml", &extra_ca_certs_pem_line());
-        env.set(SYSTEM_CONFIG_OVERRIDE, system.to_str().unwrap());
+        env.set(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG, system.to_str().unwrap());
         std::fs::write(
             dir.path().join("config.toml"),
             format!("[managed]\nsource = \"{source}\"\nrequired = false\n"),
@@ -5947,11 +5956,11 @@ mod tests {
     async fn extra_ca_certs_system_lock_beats_every_lower_tier() {
         use crate::ConfigTier;
 
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         with_system_config(&env, &dir, &extra_ca_certs_pem_line());
         let source = "registry.test/managed-config:stable";
         std::fs::write(
@@ -5961,7 +5970,7 @@ mod tests {
         .unwrap();
         write_managed_snapshot(dir.path(), source, "extra_ca_certs_pem = \"managed\"\n");
         let explicit = write_config(&dir, "chosen.toml", "extra_ca_certs_pem = \"explicit\"\n");
-        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, explicit.to_str().unwrap());
         let load = || async {
             ConfigLoader::load_with_local_view(ConfigInputs {
                 explicit_path: None,
@@ -5993,7 +6002,7 @@ mod tests {
 
         // The flag prunes the home tier and the snapshot; the locked pair and
         // its record stay, and `OCX_CONFIG` still cannot outbid them.
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         let loaded = load().await;
         assert!(loaded.merged.extra_ca_certs_system_locked);
         assert_eq!(
@@ -6023,13 +6032,13 @@ mod tests {
     /// `/managed/grant` joins the set.
     #[tokio::test]
     async fn a33_ec_cfg_007_ocx_config_grants_consent_the_digest_gate_never_reaches() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
-        env.remove(crate::shell::OCX_CONSENT_PATHS);
-        env.remove(crate::shell::OCX_CONSENT_NAMESPACES);
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        env.remove(&ocx_env::OCX_CONSENT_PATHS);
+        env.remove(&ocx_env::OCX_CONSENT_NAMESPACES);
 
         // A tag, not a digest: whoever can move it can swap the grant.
         std::fs::write(
@@ -6049,7 +6058,7 @@ mod tests {
             "chosen.toml",
             "[shell.consent]\npaths = [\"/explicit/grant\"]\n",
         );
-        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        env.set(&ocx_env::OCX_CONFIG, explicit.to_str().unwrap());
 
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
@@ -6089,33 +6098,33 @@ mod tests {
     /// goes empty.
     #[tokio::test]
     async fn a33_ec_cfg_008_no_config_prunes_config_tier_grants_but_not_the_env_channel() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
-        env.remove(crate::shell::OCX_CONSENT_PATHS);
-        env.remove(crate::shell::OCX_CONSENT_NAMESPACES);
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        env.remove(&ocx_env::OCX_CONSENT_PATHS);
+        env.remove(&ocx_env::OCX_CONSENT_NAMESPACES);
         std::fs::write(
             dir.path().join("config.toml"),
             "[shell.consent]\npaths = [\"/home/grant\"]\n",
         )
         .unwrap();
 
-        env.remove("OCX_NO_CONFIG");
+        env.remove(&ocx_env::OCX_NO_CONFIG);
         assert_eq!(
             consent_after_load().await.paths,
             vec![PathBuf::from("/home/grant")],
             "premise: without the flag the home tier's entry really is a grant"
         );
 
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         assert!(
             consent_after_load().await.paths.is_empty(),
             "OCX_NO_CONFIG=1 prunes the discovered chain, so every config-tier grant goes with it"
         );
 
-        env.set(crate::shell::OCX_CONSENT_PATHS, "/env/grant");
+        env.set(&ocx_env::OCX_CONSENT_PATHS, "/env/grant");
         assert_eq!(
             consent_after_load().await.paths,
             vec![PathBuf::from("/env/grant")],
@@ -6154,15 +6163,15 @@ mod tests {
     #[tokio::test]
     async fn a13_records_every_config_tier_candidate_including_absent_ones() {
         // The env lock, and a SYSTEM candidate this test names itself: the
-        // loader reads `SYSTEM_CONFIG_OVERRIDE`, `OCX_CONFIG` and
+        // loader reads `__OCX_TESTING_SYSTEM_CONFIG`, `OCX_CONFIG` and
         // `OCX_NO_CONFIG` from the ambient environment, so without both it
         // could observe a sibling's fixture mid-run — the symlinked system
         // config two tests over turns this into a fatal load, intermittently.
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().expect("tempdir");
         without_system_config(&env);
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
         let explicit = write_config(&dir, "explicit.toml", "[shell]\nhook = true\n");
 
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
@@ -6194,11 +6203,11 @@ mod tests {
     /// `$OCX_HOME` tiers, which the flag genuinely prunes, drop out.
     #[tokio::test]
     async fn a13_under_no_config_records_the_system_tier_and_nothing_below_it() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().expect("tempdir");
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.set("OCX_NO_CONFIG", "1");
-        env.remove("OCX_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
         without_system_config(&env);
 
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
@@ -6225,12 +6234,12 @@ mod tests {
     /// `dir`, `name` and `required` are pinned together.
     #[tokio::test]
     async fn managed_snapshot_cannot_override_system_locked_records() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         write_managed_snapshot(
             dir.path(),
@@ -6284,12 +6293,12 @@ mod tests {
     /// statement about the lock rather than about a missing merge arm.
     #[tokio::test]
     async fn managed_snapshot_overrides_unlocked_records() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let dir = TempDir::new().unwrap();
-        env.set("OCX_HOME", dir.path().to_str().unwrap());
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
 
         write_managed_snapshot(
             dir.path(),
@@ -6349,13 +6358,13 @@ mod tests {
     /// panic on `verify-deep.yml`'s `macos-latest` leg. That helper is at
     /// `crate` scope for exactly this reason: the reasoning was written
     /// once in `config.rs` and this module could not see it.
-    fn toolchain_anchor(env: &ocx_util::env::overrides::EnvLock) -> Option<TempDir> {
+    fn toolchain_anchor(env: &ocx_env::overrides::EnvLock) -> Option<TempDir> {
         let anchor = crate::sandbox_or_skip()?;
-        env.set("OCX_HOME", anchor.path().to_str().expect("temp path is utf-8"));
-        env.remove(crate::env::keys::OCX_TOOLCHAIN_DIR);
-        env.remove("OCX_CONFIG");
-        env.remove("OCX_NO_CONFIG");
-        env.remove("OCX_MANAGED_CONFIG");
+        env.set(&ocx_env::OCX_HOME, anchor.path().to_str().expect("temp path is utf-8"));
+        env.remove(&ocx_env::OCX_TOOLCHAIN_DIR);
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
         without_system_config(env);
         Some(anchor)
     }
@@ -6366,7 +6375,7 @@ mod tests {
     /// allow-listing; this pins that it stays that way.
     #[tokio::test]
     async fn managed_payload_carries_toolchain_dir_into_the_merged_config() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let Some(anchor) = toolchain_anchor(&env) else { return };
         let fleet_root = anchor.path().join("fleet");
 
@@ -6412,7 +6421,7 @@ mod tests {
     /// is what an operator edits to fix it.
     #[tokio::test]
     async fn managed_payload_toolchain_dir_faces_the_identical_refusal() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let Some(anchor) = toolchain_anchor(&env) else { return };
 
         std::fs::write(
@@ -6425,7 +6434,7 @@ mod tests {
         // the value would be refused as `Relative` — a real refusal, but not
         // the system-location one this row is about.
         let system_location = if cfg!(windows) {
-            PathBuf::from(ocx_util::env::var("SystemRoot").unwrap_or_else(|| r"C:\Windows".to_string()))
+            PathBuf::from(ocx_env::SYSTEM_ROOT.get().unwrap_or_else(|| r"C:\Windows".to_string()))
         } else {
             PathBuf::from("/usr")
         };
@@ -6465,7 +6474,7 @@ mod tests {
     /// forwards its own resolved root as `OCX_TOOLCHAIN_DIR`.
     #[tokio::test]
     async fn hermetic_mode_prunes_an_ambient_toolchain_dir_and_the_environment_tier_takes_over() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let Some(anchor) = toolchain_anchor(&env) else { return };
         let dir = TempDir::new().unwrap();
         with_system_config(
@@ -6473,9 +6482,9 @@ mod tests {
             &dir,
             &toml_path_line("toolchain_dir", &anchor.path().join("from-system")),
         );
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         env.set(
-            crate::env::keys::OCX_TOOLCHAIN_DIR,
+            &ocx_env::OCX_TOOLCHAIN_DIR,
             anchor.path().join("from-env").to_str().expect("temp path is utf-8"),
         );
 
@@ -6509,7 +6518,7 @@ mod tests {
     /// afterwards. So the explicit file still beats the environment tier.
     #[tokio::test]
     async fn hermetic_mode_keeps_an_explicit_config_toolchain_dir() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let Some(anchor) = toolchain_anchor(&env) else { return };
         let dir = TempDir::new().unwrap();
         let explicit = write_config(
@@ -6517,9 +6526,9 @@ mod tests {
             "explicit.toml",
             &toml_path_line("toolchain_dir", &anchor.path().join("from-file")),
         );
-        env.set("OCX_NO_CONFIG", "1");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
         env.set(
-            crate::env::keys::OCX_TOOLCHAIN_DIR,
+            &ocx_env::OCX_TOOLCHAIN_DIR,
             anchor.path().join("from-env").to_str().expect("temp path is utf-8"),
         );
 

@@ -6,7 +6,7 @@ any caller gets without an explicit tier — the shape most pre-merge reviews
 should take. Stage 1 runs spec-compliance and test-coverage in parallel;
 Stage 2 runs the full quality/security/performance/docs perspective set
 against changed files, each firing only when its trigger matches. The
-cross-model pass auto-fires on one-way-door signals, off otherwise.
+cross-model pass runs in every call.
 
 `Read` this file from [`SKILL.md`](SKILL.md) after the config is announced.
 Shared vocabulary is linked, not restated: roles in
@@ -26,7 +26,8 @@ worker needed for this size.
 
 ## Phase 2: Stage 1 — Correctness (parallel, 2 workers)
 
-Launch **in a single batch** so they run concurrently
+Per pipeline slice ([`SKILL.md` § Seats](SKILL.md#worker-assignment-shared-across-tiers)),
+launch **in a single batch** so they run concurrently
 ([`protocol.md`](../hex-core/references/protocol.md#worker-coordination)):
 
 - **1** `reviewer` (focus `spec`, phase `post-implementation`) — reviews
@@ -42,8 +43,8 @@ Launch **in a single batch** so they run concurrently
   the **Specify** phase produced adequate tests: new code has tests, bug
   fixes have regression tests, edge cases are covered.
 
-Model class per [`models.md`](../hex-core/references/models.md) rows
-`reviewer:spec` / `reviewer:quality`, tier `high`. If Stage 1 turns up
+All seats are `standard` class. With 2+ pipelines, add **1** seams
+`reviewer` (focus `spec`) to the batch. If Stage 1 turns up
 actionable findings, surface them prominently — polishing code that
 doesn't meet spec or lacks tests wastes downstream effort. Stage 2 still
 runs in parallel (not gated on Stage 1), but Stage 1's actionable findings
@@ -73,8 +74,8 @@ perspectives fire, or when a `perspectives.always` rule matches):
   matches changed files (CLI/flags, config/env, schema, install docs,
   changelog — from project context per
   [`doc-reviewer`](../hex-core/references/workers/doc-reviewer.md)).
-- the configured **cross-model adversary**, last in the batch, **when
-  `adversary=on`** — it occupies no worker slot and is triaged in Phase 5
+- the configured **cross-model adversary**, last in the batch — it occupies
+  no worker slot and is triaged in Phase 5
   ([adversary contract](../hex-core/references/adversary.md#adversary-contract),
   `adr_0016` C-987).
 
@@ -82,9 +83,7 @@ Each `reviewer` seat's brief carries the
 [`checklist.md`](../hex-core/references/checklist.md#composition) section of
 its own focus. Each reviewer classifies findings actionable or deferred and tags each with a
 [severity](../hex-core/references/severity.md#finding-severity); a
-Suggest-severity finding is reported but never gates the verdict. Model class
-per
-[`models.md`](../hex-core/references/models.md), tier `high`. Peak
+Suggest-severity finding is reported but never gates the verdict. Peak
 concurrency: up to 4 Stage 2 workers (Stage 1's 2 already done) — within the
 effective cap `min(8, max-workers)`; a lower cap batches Stage 2 per
 [`protocol.md`](../hex-core/references/protocol.md#worker-coordination)
@@ -113,10 +112,9 @@ those too).
 
 **Gate** — RCA is complete for every Block/High finding.
 
-## Phase 5: Cross-model pass (`adversary`, when it fires)
+## Phase 5: Cross-model pass (`adversary`)
 
-When `adversary=on` (user flag, or classifier-inferred from a one-way-door
-or security signal), the configured adversary skill was **launched last in
+The configured adversary skill was **launched last in
 Phase 3's batch** — `code-diff` scope for a diff target, `plan-artifact`
 scope for a markdown target
 ([`overlays.md`](overlays.md), [adversary contract](../hex-core/references/adversary.md#adversary-contract));
@@ -133,7 +131,7 @@ Triage 4-way:
 
 When the adversary produces no review — the skill is unavailable, or it ran and
 did not complete one — log `Cross-model review skipped: <reason>`
-and continue.
+and continue. Never wait for it.
 
 **Gate** — triage is complete (or the skip is logged).
 
@@ -198,7 +196,7 @@ the handoff from [`SKILL.md`](SKILL.md) with:
 - Scope: medium (one-way door, where signals fire)
 - Tier: high
 - Baseline: <base>
-- Overlays: breadth=full, rca=on, adversary=<off|on>
+- Overlays: breadth=full, rca=on, adversary=on
 ```
 
 If actionable findings exist:

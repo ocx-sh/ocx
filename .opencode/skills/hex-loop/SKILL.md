@@ -19,9 +19,8 @@ confirmation**, which is why it carries no approval gate of its own
 ([`protocol.md` § The meta-plan approval gate](../hex-core/references/protocol.md#the-meta-plan-approval-gate)
 lists it as exempt).
 
-It is a hex skill, not a fifth orchestrator: no `classify.md`, no
-`overlays.md`, no `tier-*.md`, and no tier vocabulary. It spawns nothing; the
-flow is one fixed pipeline with nothing for a tier to select.
+It is a hex skill, not a fifth orchestrator: no tier vocabulary. It spawns
+nothing; the flow is one fixed sequence with nothing for a tier to select.
 
 **Entry is explicit invocation only, never a description match.** Its output
 is a paste for a human, so a model-invoked run would only write a stray goal
@@ -303,7 +302,7 @@ in this session" are references, not invocations.
 |---|---|---|
 | discussion | `Run the /hex-plan skill on "<title>, per <path>".` | one per bullet in its `## Requirements` |
 | ADR | `Run the /hex-plan skill on "<title>, per <path>".` | one per `## Decision` normative item |
-| plan | `Run the /hex-execute skill on <path>.` | "every WP merged" |
+| plan | `Run the /hex-execute skill on <path>.` | "every pipeline landed" |
 | spec | `Run the /hex-architect skill on <path>, then the /hex-plan skill on its design.` | one per `C-` heading |
 | PR | `Run the /hex-plan skill on <PR ref>, over its open review threads and linked issues.` | one per open item — review thread, linked or closing issue, or `#N` its body references that is still open; none → the note `— PR <ref>: 0 open items; criteria come from extras only` |
 | issue | `Run the /hex-plan skill on <issue ref>.` | its acceptance criteria, else "issue resolved as stated" |
@@ -311,6 +310,10 @@ in this session" are references, not invocations.
 | existing goal file | re-print only | its own |
 
 An extras sentence naming an entry skill wins over this table.
+
+`paused` is a first-class loop state, owned by I7: the run is waiting on
+background work or an event, and it is never a stall or a violation of any
+I-line, so a client's goal check or stop hook must not report it.
 
 What `refinement-rounds` counts — outer cycles, CI fix ⇄ re-finalize passes
 included — is defined once, in

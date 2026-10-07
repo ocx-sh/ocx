@@ -141,7 +141,7 @@ def test_inspect_closure_closure_and_surface(
     # nothing to the interface surface — the same node-admission gate
     # binaries/entrypoints use.
     for entry in interface["env"]:
-        assert entry["type"] in ("path", "constant"), entry
+        assert entry["kind"] in ("path", "constant"), entry
     assert "PATH" in _env_keys_for_repo(interface["env"], unique_repo), (
         "root's public PATH must be summarized on the interface surface"
     )
@@ -500,7 +500,7 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
     # Regression: `leaf_b`'s OWN private var crosses no edge, so it is absent
     # from the parent's private surface AND from `ocx env --self`.
     insp_private_keys = {entry["key"] for entry in surface["private"]["env"]}
-    env_self_keys = {entry["key"] for entry in env_self["entries"]}
+    env_self_keys = {entry["key"] for entry in env_self["items"]}
     assert "LEAF_B_SECRET" not in insp_private_keys, insp_private_keys
     assert "LEAF_B_SECRET" not in env_self_keys, env_self_keys
 

@@ -4,27 +4,42 @@
 //! Error taxonomy for the claim orchestration.
 //!
 //! [`ClaimError::Forge`] is `#[error(transparent)]`, so the CLI's chain walker never sees the
-//! wrapped `ForgeError`: `ClaimError` must stay in the CLI's `try_downcast!` ladder, or every
+//! wrapped `ForgeError`: `ClaimError` must stay in the CLI's `families!` list, or every
 //! forge-derived exit code collapses to 1.
 
 use crate::forge::ForgeError;
 
 /// Failures raised by [`claim`](super::claim).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ClaimError {
     /// No forge was supplied; claim reads the committed index root through one in every mode,
-    /// `--out` included.
+    /// `--output` included.
     #[error("claim requires a forge to read the committed index root")]
+    #[exit(
+        defer(Failure),
+        slug = "forge_required",
+        summary = "No forge was supplied to read the committed index root through"
+    )]
     ForgeRequired,
 
     /// `--repository` is not a well-formed `oci://host/path` pointer.
     ///
     /// Not transparent over the index error, which classifies to 65; a malformed flag is 64.
     #[error("malformed --repository {value}: expected oci://host/path")]
+    #[exit(
+        UsageError,
+        slug = "malformed_repository",
+        summary = "The repository is not a well-formed oci:// pointer"
+    )]
     MalformedRepository { value: String },
 
     /// The owner ladder reached its terminal rung with nothing to write.
     #[error("no acting identity: the credential has no account and the CI environment named none — pass --owner")]
+    #[exit(
+        UsageError,
+        slug = "no_acting_identity",
+        summary = "No owner could be determined to write into the claim"
+    )]
     NoActingIdentity,
 
     /// A supplied login carries a character outside `[A-Za-z0-9._-]`.
@@ -32,6 +47,11 @@ pub enum ClaimError {
     /// The login is the only operator free text in a request body a human merges; drop this check
     /// and an operator string is interpolated into that body.
     #[error("invalid owner login {login}: expected only letters, digits, dot, underscore or hyphen")]
+    #[exit(
+        UsageError,
+        slug = "invalid_owner_login",
+        summary = "An owner login carries a character outside letters, digits, dot, underscore and hyphen"
+    )]
     InvalidOwnerLogin { login: String },
 
     /// The same owner was supplied twice.
@@ -39,23 +59,40 @@ pub enum ClaimError {
     /// Verbatim repeats are refused over the supplied spellings, so the exit code does not depend
     /// on the users API being reachable.
     #[error("duplicate owner {login}: each owner is named once")]
+    #[exit(UsageError, slug = "duplicate_owner", summary = "The same owner was supplied twice")]
     DuplicateOwner { login: String },
 
     /// The forge has no account with this login; a supplied id that disagrees is
     /// [`Self::OwnerIdMismatch`] instead.
     #[error("unknown owner {login}: the forge has no such account")]
+    #[exit(
+        NotFound,
+        slug = "owner_unknown",
+        summary = "The forge has no account with this login"
+    )]
     OwnerUnknown { login: String },
 
     /// A supplied `LOGIN:ID` whose id disagrees with the forge's.
     #[error("owner {login} has id {actual} on the forge, not {supplied}")]
+    #[exit(
+        UsageError,
+        slug = "owner_id_mismatch",
+        summary = "A supplied owner id disagrees with the forge account"
+    )]
     OwnerIdMismatch { login: String, supplied: u64, actual: u64 },
 
     /// The acting identity is a bot, on an explicit or a detected list.
     #[error("owner {login} is a bot account; name a human owner with --owner")]
+    #[exit(UsageError, slug = "bot_identity", summary = "The acting identity is a bot account")]
     BotIdentity { login: String },
 
     /// The index base ref does not exist; the ref is a constant, so this is a broken invariant.
     #[error("index base ref {base_ref} does not exist on {repo}")]
+    #[exit(
+        defer(Failure),
+        slug = "missing_base_ref",
+        summary = "The index base branch does not exist"
+    )]
     MissingBaseRef { repo: String, base_ref: String },
 
     /// The `NonFastForward` retry re-read the winning head and found no root there.
@@ -63,13 +100,19 @@ pub enum ClaimError {
     /// Never default to the freshly rendered root: that silently clobbers the concurrent writer
     /// whose commit won the race.
     #[error("no root at {path} on the winning head of {branch} after a non-fast-forward retry")]
+    #[exit(
+        defer(Failure),
+        slug = "missing_head_root",
+        summary = "A concurrent claim's or announce's head carries no index root"
+    )]
     MissingHeadRoot { branch: String, path: String },
 
-    /// Writing the `--out` tree failed.
+    /// Writing the `--output` tree failed.
     ///
     /// A bare `io::Error` classifies to exit 1 for every kind but `PermissionDenied`, so this
     /// wrapper is what makes a write failure exit 74.
     #[error("failed to write {path}")]
+    #[exit(IoError, slug = "output_write", summary = "Writing the output tree failed")]
     OutputWrite {
         path: String,
         #[source]
@@ -78,6 +121,11 @@ pub enum ClaimError {
 
     /// A committed root whose `name` disagrees with the identifier the re-claim names.
     #[error("committed root names {committed}, not the {expected} this claim names")]
+    #[exit(
+        DataError,
+        slug = "root_name_mismatch",
+        summary = "The committed index root names a different package"
+    )]
     RootNameMismatch { committed: String, expected: String },
 
     /// A re-claim supplied a `--repository` other than the committed one.
@@ -85,6 +133,11 @@ pub enum ClaimError {
     /// Refused rather than updated: repointing where a package's bytes come from must not be a
     /// side effect of adding an owner.
     #[error("committed root points at {committed}, not the supplied {supplied}")]
+    #[exit(
+        DataError,
+        slug = "repository_mismatch",
+        summary = "A re-claim supplied a repository other than the committed one"
+    )]
     RepositoryMismatch { committed: String, supplied: String },
 
     /// A description observation failed while rendering the claim's root.
@@ -92,10 +145,13 @@ pub enum ClaimError {
     /// Claim runs announce's `observe_desc` verbatim and classifies through the inner error, so
     /// the exit codes match announce's.
     #[error(transparent)]
+    // `#[error(transparent)]` hides both nodes from the chain walker, so delegate explicitly.
+    #[exit(delegate = 0)]
     Description(#[from] crate::announce::AnnounceError),
 
     /// Any forge failure, classified by [`ForgeError`] itself.
     #[error(transparent)]
+    #[exit(delegate = 0)]
     Forge(#[from] ForgeError),
 }
 

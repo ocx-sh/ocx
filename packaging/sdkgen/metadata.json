@@ -1,0 +1,14 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "value": "${installPath}/bin",
+      "type": "path",
+      "required": true,
+      "visibility": "public"
+    }
+  ],
+  "binaries": ["ocx-sdkgen"]
+}

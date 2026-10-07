@@ -135,7 +135,7 @@ def announce_json(ocx: OcxRunner, fake_forge: FakeForge, *args: str, **kwargs: A
 
 def committed_root(fake_forge: FakeForge, package: str, *, owner: str = "forkuser", repo: str = "index") -> dict:
     """Reads + parses a fork branch's just-committed root (bypasses HTTP —
-    `--out` mode never surfaces fork-committed state, and the real forge has
+    `--output` mode never surfaces fork-committed state, and the real forge has
     no diff endpoint to poll)."""
     branch = branch_name(package)
     raw = fake_forge.read_file(owner, repo, f"p/{package}.json", branch=branch)

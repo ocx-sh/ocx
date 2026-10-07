@@ -10,7 +10,7 @@ pub mod clap_parse;
 pub mod command;
 pub mod conventions;
 pub mod error;
-pub mod error_envelope;
+pub mod error_document;
 pub mod exit;
 pub mod options;
 pub mod tracing_init;

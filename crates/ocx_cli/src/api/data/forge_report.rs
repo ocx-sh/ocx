@@ -4,84 +4,197 @@
 //! The report vocabulary `ocx package claim` and `ocx package announce` share: one renderer, or
 //! the two drift. No `Display` sits beside the `Serialize` derives here, for the same reason.
 
-use ocx_announce::forge::{CapabilityCheck, CapabilityName, CheckStatus, ForgeCredentials, WriteTransport};
-use serde::{Serialize, Serializer};
+use ocx_announce::announce::AnnounceStatus;
+use ocx_announce::claim::{ClaimStatus, OwnerIdentitySource};
+use ocx_announce::forge::{CapabilityCheck, CapabilityName, CheckStatus, ForgeCredentials, ForgeKind, WriteTransport};
+use ocx_util::wire_words;
+use serde::Serialize;
 
-/// Serializes a library-owned closed vocabulary by its `Display` spelling, which is its wire form.
-/// `ForgeKind` has no library spelling test: only the golden claim-report document holds `github`/`gitlab`.
-pub fn serialize_display<T: std::fmt::Display, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(value)
+/// The forge the run wrote to, after `--forge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Forge {
+    /// GitHub.com or a GitHub Enterprise Server instance.
+    Github,
+    /// GitLab.com or a self-managed GitLab instance.
+    Gitlab,
 }
 
-/// [`serialize_display`] for an `Option` field, whose absence renders `null`.
-pub fn serialize_optional_display<T: std::fmt::Display, S: Serializer>(
-    value: &Option<T>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match value {
-        Some(value) => serializer.collect_str(value),
-        None => serializer.serialize_none(),
+impl From<ForgeKind> for Forge {
+    fn from(kind: ForgeKind) -> Self {
+        match kind {
+            ForgeKind::GitHub => Self::Github,
+            ForgeKind::GitLab => Self::Gitlab,
+        }
     }
 }
 
-/// The API credential's kind.
-///
-/// ocx reports only a kind it can observe: a personal access token, a deploy
-/// token and an OAuth token all report as `token`.
-// No `Pat`/`DeployToken`/`Oauth` arm: ocx cannot observe the difference (`credential_kind_wire_spellings`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum CredentialKind {
-    /// The credential is this environment's own `CI_JOB_TOKEN`.
-    JobToken,
-    /// A credential ocx holds but cannot classify further.
-    Token,
-    /// The ladder resolved nothing — the unauthenticated `--out` path.
-    None,
+wire_words! {
+    /// The write transport the run used.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum Transport {
+        /// The forge's REST API.
+        Api = "api",
+        /// A local `git` clone and one authenticated push.
+        Git = "git",
+    }
 }
 
-impl CredentialKind {
-    /// Every kind, in declaration order; the spelling test pairs against this array, so a new arm reds.
-    pub const ALL: [Self; 3] = [Self::JobToken, Self::Token, Self::None];
+impl From<WriteTransport> for Transport {
+    fn from(transport: WriteTransport) -> Self {
+        match transport {
+            WriteTransport::Api => Self::Api,
+            WriteTransport::Git => Self::Git,
+        }
+    }
 }
 
-/// The push credential's kind; `null` means the `api` transport pushed nothing.
-///
-/// `git-helper` is a different statement: a push happened and git's own
-/// credential helpers authenticated it.
-// `null` is `Option::None` at the call site, never `GitHelper`
-// (`push_credential_kind_git_helper_is_distinct_from_null`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum PushCredentialKind {
-    /// The push secret is this environment's own `CI_JOB_TOKEN`.
-    JobToken,
-    /// A push secret ocx injected but cannot classify further.
-    Token,
-    /// Nothing was injected; git's own credential helpers are in charge.
-    GitHelper,
+wire_words! {
+    /// Whether a forge write moved anything.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum WriteStatus {
+        /// The committed or proposed content already matched, so nothing was written.
+        Unchanged = "unchanged",
+        /// The run created or moved the content.
+        Updated = "updated",
+    }
 }
 
-impl PushCredentialKind {
-    /// Every kind, in declaration order. Same role as [`CredentialKind::ALL`].
-    pub const ALL: [Self; 3] = [Self::JobToken, Self::Token, Self::GitHelper];
+impl From<AnnounceStatus> for WriteStatus {
+    fn from(status: AnnounceStatus) -> Self {
+        match status {
+            AnnounceStatus::Unchanged => Self::Unchanged,
+            AnnounceStatus::Updated => Self::Updated,
+        }
+    }
+}
+
+impl From<ClaimStatus> for WriteStatus {
+    fn from(status: ClaimStatus) -> Self {
+        match status {
+            ClaimStatus::Unchanged => Self::Unchanged,
+            ClaimStatus::Updated => Self::Updated,
+        }
+    }
+}
+
+wire_words! {
+    /// Which rule produced an identity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum IdentitySource {
+        /// The forge answered: its users API, or its own account behind the credential.
+        Resolved = "resolved",
+        /// A `LOGIN:ID` pair was taken on the operator's word because the users API was unreachable.
+        Asserted = "asserted",
+        /// The CI environment's variables named the identity.
+        CiEnvironment = "ci_environment",
+    }
+}
+
+impl From<OwnerIdentitySource> for IdentitySource {
+    fn from(source: OwnerIdentitySource) -> Self {
+        match source {
+            OwnerIdentitySource::Resolved => Self::Resolved,
+            OwnerIdentitySource::Asserted => Self::Asserted,
+            OwnerIdentitySource::CiEnvironment => Self::CiEnvironment,
+        }
+    }
+}
+
+wire_words! {
+    /// The API credential's kind.
+    ///
+    /// ocx reports only a kind it can observe: a personal access token, a deploy
+    /// token and an OAuth token all report as `token`.
+    // No `Pat`/`DeployToken`/`Oauth` arm: ocx cannot observe the difference (`credential_kind_wire_spellings`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum CredentialKind {
+        /// The credential is this environment's own `CI_JOB_TOKEN`.
+        JobToken = "job_token",
+        /// A credential ocx holds but cannot classify further.
+        Token = "token",
+        /// The ladder resolved nothing — the unauthenticated `--output` path.
+        None = "none",
+    }
+}
+
+wire_words! {
+    /// The push credential's kind; absent when the `api` transport pushed nothing.
+    ///
+    /// `git_helper` is a different statement: a push happened and git's own
+    /// credential helpers authenticated it.
+    // Absent is `Option::None` at the call site, never `GitHelper`
+    // (`push_credential_kind_git_helper_is_distinct_from_null`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum PushCredentialKind {
+        /// The push secret is this environment's own `CI_JOB_TOKEN`.
+        JobToken = "job_token",
+        /// A push secret ocx injected but cannot classify further.
+        Token = "token",
+        /// Nothing was injected; git's own credential helpers are in charge.
+        GitHelper = "git_helper",
+    }
+}
+
+wire_words! {
+    /// A write-preflight capability.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum Capability {
+        /// The local `git` version against the floor the git transport needs.
+        GitVersion = "git_version",
+        /// The credential's push permission on the repository being written.
+        PushAccess = "push_access",
+        /// Whether the project lets a CI job token push to its repository.
+        JobTokenPush = "job_token_push",
+        /// Whether the index project's job-token allowlist admits the publishing project.
+        JobTokenAllowlist = "job_token_allowlist",
+    }
+}
+
+impl From<CapabilityName> for Capability {
+    fn from(name: CapabilityName) -> Self {
+        match name {
+            CapabilityName::GitVersion => Self::GitVersion,
+            CapabilityName::PushAccess => Self::PushAccess,
+            CapabilityName::JobTokenPush => Self::JobTokenPush,
+            CapabilityName::JobTokenAllowlist => Self::JobTokenAllowlist,
+        }
+    }
+}
+
+wire_words! {
+    /// How one capability check came out. There is no `failed`: a check that fails raises an error
+    /// and no report is rendered.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum CapabilityStatus {
+        /// The capability was read and is present.
+        Passed = "passed",
+        /// The forge did not let the credential read the capability; never fails the run.
+        Unknown = "unknown",
+        /// The check does not apply to this run's forge, transport or credential.
+        Skipped = "skipped",
+    }
+}
+
+impl From<CheckStatus> for CapabilityStatus {
+    fn from(status: CheckStatus) -> Self {
+        match status {
+            CheckStatus::Passed => Self::Passed,
+            CheckStatus::Unknown => Self::Unknown,
+            CheckStatus::Skipped => Self::Skipped,
+        }
+    }
 }
 
 /// One row of the write preflight.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CapabilityCheckEntry {
-    /// The capability's wire name — `git-version`, `push-access`,
-    /// `job-token-push` or `job-token-allowlist`.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub name: CapabilityName,
-    /// `"passed"`, `"unknown"` or `"skipped"`. There is no `"failed"`: a check
-    /// that fails raises an error and no report is rendered.
-    #[serde(serialize_with = "serialize_display")]
-    #[schemars(with = "String")]
-    pub status: CheckStatus,
-    /// A human-readable qualifier where the forge exposes one, `null`
-    /// otherwise.
+    /// The capability this row reports on.
+    pub name: Capability,
+    /// How the check came out.
+    pub status: CapabilityStatus,
+    /// A human-readable qualifier where the forge exposes one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -92,8 +205,8 @@ impl CapabilityCheckEntry {
         checks
             .iter()
             .map(|check| Self {
-                name: check.name,
-                status: check.status,
+                name: check.name.into(),
+                status: check.status.into(),
                 detail: check.detail.clone(),
             })
             .collect()
@@ -133,9 +246,12 @@ pub fn push_credential_kind(credentials: &ForgeCredentials, transport: WriteTran
 
 #[cfg(test)]
 mod tests {
-    use ocx_announce::forge::{CapabilityName, CheckStatus, ForgeCredentials, ForgeToken, PushAccess, WriteTransport};
+    use ocx_announce::forge::{CapabilityName, ForgeCredentials, ForgeToken, PushAccess, WriteTransport};
 
-    use super::{CapabilityCheckEntry, CredentialKind, PushCredentialKind, credential_kind, push_credential_kind};
+    use super::{
+        Capability, CapabilityCheckEntry, CapabilityStatus, CredentialKind, PushCredentialKind, credential_kind,
+        push_credential_kind,
+    };
 
     /// The wire spelling of one vocabulary value, read off `Serialize` — which
     /// is the renderer the report uses, so nothing else can be asserted here by
@@ -174,18 +290,18 @@ mod tests {
     ///
     /// Red at the stub: the vocabulary is unrendered.
     /// Mutation once implemented: add a fourth `CredentialKind` arm, or drop
-    /// `#[serde(rename_all = "kebab-case")]` so `job-token` becomes `JobToken`.
+    /// `#[serde(rename_all = "snake_case")]` so `job_token` becomes `JobToken`.
     #[test]
     fn credential_kind_wire_spellings() {
         let spellings: Vec<String> = CredentialKind::ALL.iter().copied().map(wire).collect();
         assert_eq!(
             spellings,
-            vec!["job-token".to_string(), "token".to_string(), "none".to_string()],
+            vec!["job_token".to_string(), "token".to_string(), "none".to_string()],
             "the C-060 API credential vocabulary is exactly these three words, in this order"
         );
     }
 
-    /// C-060: four push values, three of them words and the fourth `null`.
+    /// C-060: four push states, three of them words and the fourth an absent key.
     ///
     /// Red at the stub: the vocabulary is unrendered.
     /// Mutation once implemented: add a `Pat` arm; the arity pairing reds.
@@ -194,15 +310,36 @@ mod tests {
         let spellings: Vec<String> = PushCredentialKind::ALL.iter().copied().map(wire).collect();
         assert_eq!(
             spellings,
-            vec!["job-token".to_string(), "token".to_string(), "git-helper".to_string()],
-            "the C-060 push credential vocabulary is exactly these three words plus null"
+            vec!["job_token".to_string(), "token".to_string(), "git_helper".to_string()],
+            "the C-060 push credential vocabulary is exactly these three words plus absence"
         );
+    }
+
+    /// The report's forge and transport words are the `--forge`/`--transport` flag values.
+    #[test]
+    fn forge_and_transport_wire_match_the_flag_values() {
+        use clap::ValueEnum;
+        use ocx_announce::forge::{ForgeKind, WriteTransport};
+        for kind in ForgeKind::value_variants() {
+            assert_eq!(wire(super::Forge::from(*kind)), kind.to_string());
+        }
+        for transport in WriteTransport::value_variants() {
+            assert_eq!(wire(super::Transport::from(*transport)), transport.to_string());
+        }
+    }
+
+    /// The report's identity-source word is the one stderr and the request body print.
+    #[test]
+    fn identity_source_wire_matches_the_library_word() {
+        for source in ocx_announce::claim::OwnerIdentitySource::ALL {
+            assert_eq!(wire(super::IdentitySource::from(source)), source.to_string());
+        }
     }
 
     /// C-060 / C-063: the two credential states a unit test can construct
     /// without the process environment map to the right word.
     ///
-    /// The `job-token` row is **not** here: `ForgeCredentials::api_is_job_token`
+    /// The `job_token` row is **not** here: `ForgeCredentials::api_is_job_token`
     /// is derived from `CI_JOB_TOKEN` inside the library, and `ocx_cli`'s test
     /// binary links a non-`cfg(test)` `ocx_lib`, so it has no override seam and
     /// would have to mutate the real process environment. That rung is covered
@@ -229,7 +366,7 @@ mod tests {
         );
     }
 
-    /// C-060: `push_credential_kind` is `null` under `api` — **even when a push
+    /// C-060: `push_credential_kind` is absent under `api` — **even when a push
     /// credential was resolved**.
     ///
     /// `ForgeCredentials::resolve` populates the push half whenever an API
@@ -239,7 +376,7 @@ mod tests {
     ///
     /// Red at the stub: `push_credential_kind` is `unimplemented!()`.
     /// Mutation once implemented: drop the `WriteTransport::Api => None` gate.
-    /// A credential with no push half then falls to `git-helper`, so this reds
+    /// A credential with no push half then falls to `git_helper`, so this reds
     /// even without an environment-resolved push secret.
     #[test]
     fn push_credential_kind_is_null_under_the_api_transport() {
@@ -250,10 +387,10 @@ mod tests {
         );
     }
 
-    /// C-060 / S-029: `git-helper` and `null` are different statements.
+    /// C-060 / S-029: `git_helper` and an absent key are different statements.
     ///
-    /// `git-helper` says a push happened and git's own helpers authenticated
-    /// it; `null` says no push was attempted. An implementation mapping
+    /// `git_helper` says a push happened and git's own helpers authenticated
+    /// it; absence says no push was attempted. An implementation mapping
     /// `push().is_none()` straight onto `Option::None` collapses them.
     ///
     /// Red at the stub: `push_credential_kind` is `unimplemented!()`.
@@ -263,7 +400,7 @@ mod tests {
         assert_eq!(
             push_credential_kind(&resolved_token(), WriteTransport::Git),
             Some(PushCredentialKind::GitHelper),
-            "no injected push secret under the git transport is `git-helper`, never null"
+            "no injected push secret under the git transport is `git_helper`, never absent"
         );
     }
 
@@ -281,22 +418,22 @@ mod tests {
     #[test]
     fn capability_rows_are_projected_in_declaration_order_including_skipped() {
         let entries = CapabilityCheckEntry::from_checks(PushAccess::skipped_all().checks());
-        let names: Vec<CapabilityName> = entries.iter().map(|entry| entry.name).collect();
+        let names: Vec<Capability> = entries.iter().map(|entry| entry.name).collect();
         assert_eq!(
             names,
-            CapabilityName::ALL.to_vec(),
+            CapabilityName::ALL.map(Capability::from).to_vec(),
             "every capability row is projected, in CapabilityName declaration order"
         );
         assert!(
-            entries.iter().all(|entry| entry.status == CheckStatus::Skipped),
+            entries.iter().all(|entry| entry.status == CapabilityStatus::Skipped),
             "a run that checked nothing still reports every row, as `skipped`"
         );
-        // The wire half, so the typed field cannot silently change spelling:
-        // the row's `name`/`status` render as the library's own words.
+        // The wire half: snake_case words, and an absent `detail` rather than `null`.
         let row = serde_json::to_value(&entries[0]).expect("a row serializes");
-        assert_eq!(
-            row.get("name").and_then(serde_json::Value::as_str),
-            Some(CapabilityName::ALL[0].to_string().as_str())
+        assert_eq!(row.get("name").and_then(serde_json::Value::as_str), Some("git_version"));
+        assert!(
+            row.get("detail").is_none(),
+            "an unset detail is omitted, never null: {row}"
         );
         assert_eq!(
             row.get("status").and_then(serde_json::Value::as_str),

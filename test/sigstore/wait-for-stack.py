@@ -42,7 +42,7 @@ def endpoints() -> list[tuple[str, str, str]]:
         # gate goes green over a stack that cannot sign. Measured: the signer
         # sat at `lookup sigstore-mysql: no such host` from 13:40:53 to
         # 13:57:01 while Rekor held `restarts=0`, and 44 signing rows failed
-        # with exit 83 (`transparency_log_unavailable`) inside that window.
+        # with exit 75 (`transparency_log_unavailable`) inside that window.
         # `/healthz` is the honest probe because it checks database access --
         # it answers 503 with that very string while the signer is stuck.
         ("trillian-log-signer", f"http://localhost:{signer}/healthz",

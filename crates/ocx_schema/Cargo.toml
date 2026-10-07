@@ -21,6 +21,11 @@ ocx_package.workspace = true
 ocx_oci.workspace = true
 schemars.workspace = true
 serde_json.workspace = true
+# `cli.json` walks the clap tree and names the env and exit vocabularies it documents.
+clap.workspace = true
+ocx_env.workspace = true
+ocx_exit.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

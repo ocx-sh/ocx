@@ -30,7 +30,7 @@ pub async fn acquire_project_lock(project_root: &Path, locks_root: &Path) -> Res
 /// - [`ProjectErrorKind::Locked`] — still held after [`CONTENTION_BUDGET`].
 /// - [`ProjectErrorKind::Io`] — lock I/O failed, or `config_path` is a symlink.
 pub async fn acquire_project_lock_for_file(config_path: &Path, locks_root: &Path) -> Result<LockedFile, Error> {
-    let io = |path: &Path, error: std::io::Error| Error::Project(ProjectError::new(path, ProjectErrorKind::Io(error)));
+    let io = |path: &Path, error: std::io::Error| Error::from(ProjectError::new(path, ProjectErrorKind::Io(error)));
 
     let parent = config_path
         .parent()
@@ -49,7 +49,7 @@ pub async fn acquire_project_lock_for_file(config_path: &Path, locks_root: &Path
         .await
         .map_err(|error| {
             if error.cause.kind() == std::io::ErrorKind::TimedOut {
-                return Error::Project(ProjectError::new(config_path, ProjectErrorKind::Locked));
+                return Error::from(ProjectError::new(config_path, ProjectErrorKind::Locked));
             }
             io(&error.path, error.cause)
         })?;
@@ -64,7 +64,7 @@ pub async fn acquire_project_lock_for_file(config_path: &Path, locks_root: &Path
 /// document to edit and re-publish. A one-scheduling-gap window survives until
 /// the caller's read; closing it needs `O_NOFOLLOW` on that read.
 async fn refuse_symlink_at(config_path: &Path) -> Result<(), Error> {
-    let refusal = |io_error| Error::Project(ProjectError::new(config_path, ProjectErrorKind::Io(io_error)));
+    let refusal = |io_error| Error::from(ProjectError::new(config_path, ProjectErrorKind::Io(io_error)));
     match tokio::fs::symlink_metadata(config_path).await {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(refusal(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

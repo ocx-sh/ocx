@@ -1,0 +1,14 @@
+{
+  "kind": "errors",
+  "verdict": "break",
+  "change": "The slug `bad_flag` is removed from the ErrorDetail registry.",
+  "findings": [
+    {
+      "code": "R03",
+      "pointer": "/$defs/ErrorDetail/x-ocx-enum/0",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

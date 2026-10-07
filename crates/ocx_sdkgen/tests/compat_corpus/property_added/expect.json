@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "PushReport gains an optional `attempts` property.",
+  "findings": []
+}

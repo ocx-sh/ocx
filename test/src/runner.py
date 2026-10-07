@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from src import conformance
+
 # ---------------------------------------------------------------------------
 # Platform helpers
 # ---------------------------------------------------------------------------
@@ -133,6 +135,8 @@ class OcxRunner:
             check=False,
             **streams,
         )
+        if format == "json":
+            conformance.observe(args, result.stdout, result.returncode)
         if check and result.returncode != 0:
             raise AssertionError(
                 f"ocx {' '.join(args)} failed (rc={result.returncode})\n"

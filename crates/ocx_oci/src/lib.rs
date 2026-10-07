@@ -212,6 +212,12 @@ pub use oci_identifier::{OciIdentifier, PinnedOciIdentifier};
 pub mod repository;
 pub use repository::Repository;
 
+pub mod redacted_url;
+pub use redacted_url::RedactedUrl;
+
+pub mod registry_host;
+pub use registry_host::{RegistryHost, RegistryHostError};
+
 mod file_storage;
 pub use file_storage::FileStorage;
 

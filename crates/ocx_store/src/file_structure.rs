@@ -112,7 +112,7 @@ impl FileStructure {
 
     /// The directory the installed `ocx` itself resolves from.
     ///
-    /// Derived from [`ocx_oci::ocx_cli_identifier`], never a literal, or `__OCX_SELF_IMAGE` stops moving it under test.
+    /// Derived from [`ocx_oci::ocx_cli_identifier`], never a literal, or `__OCX_TESTING_SELF_IMAGE` stops moving it under test.
     pub fn ocx_install_bin_path(&self) -> PathBuf {
         self.symlinks
             .current(&ocx_oci::ocx_cli_identifier())

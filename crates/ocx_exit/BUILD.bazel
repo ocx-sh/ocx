@@ -16,7 +16,9 @@ rust_library(
         exclude = ["src/**/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
+    proc_macro_deps = all_crate_deps(proc_macro = True) + [
+        "//crates/ocx_exit_derive",
+    ],
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_exit"},
     version = "0.6.2",
     deps = all_crate_deps(normal = True),
@@ -44,6 +46,32 @@ rust_test(
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_exit"},
     deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "derive_test",
+    srcs = [
+        "tests/derive.rs",
+    ],
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_exit"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":ocx_exit",
+    ],
 )
 
 rust_doc_test(

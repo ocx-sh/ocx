@@ -23,6 +23,7 @@ writing), so this file does not re-validate it.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -78,34 +79,37 @@ def cli_ref_text() -> str:
     return CLI_REF.read_text(encoding="utf-8")
 
 
+_FENCE = re.compile(r"\s*```")
+_HEADING_LINE = re.compile(r"(#{1,6})\s")
+
+
 def _slice_section_by_anchor(text: str, anchor: str) -> str:
-    """Return text from `anchor` to the next H3/H4/H5 heading at the same
-    or higher level (or EOF). Used to bound checks to a specific command's
-    body so `**Usage**` in a sibling doesn't satisfy the assertion.
+    """Return text from `anchor` to the next heading at the same or higher
+    level (or EOF). Used to bound checks to a specific command's body so
+    `**Usage**` in a sibling doesn't satisfy the assertion.
 
-    `anchor` is the literal `{#xxx}` form. We match any heading line that
-    contains the anchor, then stop at the next heading at level <= the
-    starting level.
+    `anchor` is the literal `{#xxx}` form. We match an H3-H5 heading line
+    ending in the anchor, then stop at the next heading at level <= the
+    starting level. Fenced blocks are skipped: a `# comment` line inside a
+    shell fence is not a heading, and treating it as one cuts the section
+    short at the first example.
     """
-    heading_re = re.compile(
-        rf"^(#{{3,5}})\s.*{re.escape(anchor)}\s*$",
-        re.MULTILINE,
-    )
-    start = heading_re.search(text)
-    assert start is not None, f"anchor {anchor} not found"
-    start_level = len(start.group(1))
-    body_start = start.end()
-    tail = text[body_start:]
-
-    # Stop at the next heading whose level <= start_level.
-    next_heading = re.search(
-        rf"^#{{1,{start_level}}}\s",
-        tail,
-        re.MULTILINE,
-    )
-    if next_heading is None:
-        return tail
-    return tail[: next_heading.start()]
+    in_fence = False
+    start_level = 0
+    body: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+        heading = None if in_fence else _HEADING_LINE.match(line)
+        if not start_level:
+            if heading and 3 <= len(heading.group(1)) <= 5 and line.rstrip().endswith(anchor):
+                start_level = len(heading.group(1))
+            continue
+        if heading and len(heading.group(1)) <= start_level:
+            break
+        body.append(line)
+    assert start_level, f"anchor {anchor} not found"
+    return "".join(body)
 
 
 # ---------------------------------------------------------------------------
@@ -476,3 +480,206 @@ def test_no_unmarked_moved_root_command_in_prose() -> None:
         "`<!-- /moved-command-ok -->` if it documents the removal:\n  "
         + "\n  ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Reference coverage — every command and flag of the published CLI document
+# ---------------------------------------------------------------------------
+
+# `cli.json` is read as data; a hidden command is exempt with its subtree.
+CLI_GOLDEN = PROJECT_ROOT / "crates" / "ocx_schema" / "tests" / "golden" / "cli.json"
+
+# Commands whose anchor is not their space-joined path: the toolchain-tier `env`
+# takes `{#env-root}`, and the package-tier `deps` and `which` kept the
+# anchors they had as root commands.
+ANCHOR_OVERRIDES = {("env",): "env-root", ("package", "deps"): "deps", ("package", "which"): "which"}
+
+# Measured at 73 visible commands, 293 long flags on them and 13 global flags;
+# the slack absorbs a removal, and a reader that stopped descending (commands
+# or args) reds long before it.
+MIN_COMMAND_NODES = 70
+MIN_COMMAND_FLAGS = 280
+MIN_GLOBAL_FLAGS = 12
+
+_OPTIONS_END = re.compile(r"(\*\*|:::)")
+
+
+def _visible_commands(node: dict) -> list[dict]:
+    """Every non-hidden command node under `node`, `node` itself excluded."""
+    found: list[dict] = []
+    for child in node.get("commands") or []:
+        if child["hidden"]:
+            continue
+        found.append(child)
+        found.extend(_visible_commands(child))
+    return found
+
+
+def _options_block(section: str, command_anchors: set[str]) -> str:
+    """The lines after `**Options**` up to the next bold label or callout.
+
+    The section ends at the first heading that is itself a command, so a child
+    command's Options block never counts toward its parent's flags. A heading
+    that only subdivides one command's prose (`package create`'s build receipt)
+    does not end it.
+    """
+    kept: list[str] = []
+    inside = False
+    in_fence = False
+    for line in section.splitlines():
+        if _FENCE.match(line):
+            in_fence = not in_fence
+        if not in_fence and _HEADING_LINE.match(line) and line.rstrip().endswith(tuple(command_anchors)):
+            break
+        if line.strip() == "**Options**":
+            inside = True
+        elif inside and _OPTIONS_END.match(line):
+            inside = False
+        elif inside:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _name_cells(block: str) -> list[str]:
+    """The flag-name part of each Options row: a table's first cell, a bullet's text before `:`."""
+    cells: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("|"):
+            cells.append(line.split("|")[1])
+        elif line.startswith("- "):
+            cells.append(line[2:].split(":")[0])
+    return cells
+
+
+def _names_flag(cells: list[str], long: str) -> bool:
+    needle = re.compile(rf"(?<![\w-])--{re.escape(long)}(?![\w-])")
+    return any(needle.search(cell) for cell in cells)
+
+
+def _command_anchor(node: dict) -> str:
+    path = tuple(node["path"])
+    return "{#" + ANCHOR_OVERRIDES.get(path, "-".join(path)) + "}"
+
+
+def command_reference_problems(cli_root: dict, page: str) -> list[str]:
+    nodes = _visible_commands(cli_root)
+    problems: list[str] = []
+    if len(nodes) < MIN_COMMAND_NODES:
+        problems.append(f"only {len(nodes)} visible commands read (floor {MIN_COMMAND_NODES})")
+    command_flags = 0
+    command_anchors = {_command_anchor(node) for node in nodes}
+    for node in nodes:
+        path = tuple(node["path"])
+        anchor = _command_anchor(node)
+        try:
+            section = _slice_section_by_anchor(page, anchor)
+        except AssertionError:
+            problems.append(f"`ocx {' '.join(path)}` has no heading with `{anchor}`")
+            continue
+        cells = _name_cells(_options_block(section, command_anchors))
+        flags = [arg["long"] for arg in node["args"] if arg.get("long") and not arg["hidden"]]
+        command_flags += len(flags)
+        problems += [
+            f"`ocx {' '.join(path)}` Options block has no row for `--{long}`"
+            for long in flags
+            if not _names_flag(cells, long)
+        ]
+    if command_flags < MIN_COMMAND_FLAGS:
+        problems.append(f"only {command_flags} command flags read (floor {MIN_COMMAND_FLAGS})")
+    general = page[page.index("## General Options") : page.index("## Exit codes")]
+    headings = [line for line in general.splitlines() if line.startswith("### ")]
+    global_flags = [arg["long"] for arg in cli_root["args"] if arg.get("long") and not arg["hidden"]]
+    problems += [
+        f"General Options has no heading for the global flag `--{long}`"
+        for long in global_flags
+        if not any(f"`--{long}`" in h for h in headings)
+    ]
+    if len(global_flags) < MIN_GLOBAL_FLAGS:
+        problems.append(f"only {len(global_flags)} global flags read (floor {MIN_GLOBAL_FLAGS})")
+    return problems
+
+
+@pytest.fixture(scope="module")
+def cli_root() -> dict:
+    return json.loads(CLI_GOLDEN.read_text(encoding="utf-8"))["root"]
+
+
+def test_command_reference_covers_every_command_and_flag(cli_root: dict, cli_ref_text: str) -> None:
+    assert command_reference_problems(cli_root, cli_ref_text) == []
+
+
+def test_a_flag_missing_from_its_options_block_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    row = re.compile(r"^\| `--no-pull` .*\n", re.MULTILINE)
+    mutated = row.sub("", cli_ref_text, count=1)
+    assert mutated != cli_ref_text, "mutation did not land"
+    assert command_reference_problems(cli_root, mutated) == [
+        "`ocx add` Options block has no row for `--no-pull`"
+    ]
+
+
+def test_a_flag_named_only_in_another_rows_description_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    """`package test`'s `--output` row says "exclusive with `--keep`"; that is not a row for `--keep`."""
+    row = re.compile(r"^\| `--keep` .*\n", re.MULTILINE)
+    mutated = row.sub("", cli_ref_text, count=1)
+    assert mutated != cli_ref_text, "mutation did not land"
+    assert "`--keep`" in mutated, "the surviving mention is the point of the case"
+    assert command_reference_problems(cli_root, mutated) == [
+        "`ocx package test` Options block has no row for `--keep`"
+    ]
+
+
+def test_a_command_without_its_anchor_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    mutated = cli_ref_text.replace("{#package-cascade}", "{#package-cascade-gone}")
+    assert mutated != cli_ref_text, "mutation did not land"
+    assert command_reference_problems(cli_root, mutated) == [
+        "`ocx package cascade` has no heading with `{#package-cascade}`"
+    ]
+
+
+def test_a_global_flag_missing_from_general_options_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    mutated = cli_ref_text.replace("### `--jobs` {#arg-jobs}", "### Parallelism {#arg-jobs}")
+    assert mutated != cli_ref_text, "mutation did not land"
+    assert command_reference_problems(cli_root, mutated) == [
+        "General Options has no heading for the global flag `--jobs`"
+    ]
+
+
+def test_a_short_command_walk_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    truncated = {**cli_root, "commands": cli_root["commands"][:5]}
+    problems = command_reference_problems(truncated, cli_ref_text)
+    assert any("visible commands read" in problem for problem in problems), problems
+
+
+def _without_command_args(node: dict) -> dict:
+    return {**node, "args": [], "commands": [_without_command_args(c) for c in node.get("commands") or []]}
+
+
+def test_a_walk_that_read_no_command_flags_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    stripped = {**_without_command_args(cli_root), "args": cli_root["args"]}
+    assert any(arg.get("long") for node in _visible_commands(cli_root) for arg in node["args"]), "nothing to strip"
+    assert command_reference_problems(stripped, cli_ref_text) == [
+        f"only 0 command flags read (floor {MIN_COMMAND_FLAGS})"
+    ]
+
+
+def test_a_walk_that_read_no_global_flags_is_red(cli_root: dict, cli_ref_text: str) -> None:
+    assert any(arg.get("long") for arg in cli_root["args"]), "nothing to strip"
+    assert command_reference_problems({**cli_root, "args": []}, cli_ref_text) == [
+        f"only 0 global flags read (floor {MIN_GLOBAL_FLAGS})"
+    ]
+
+
+def test_a_childs_options_block_does_not_count_for_its_parent() -> None:
+    anchors = {"{#parent-child}"}
+    section = "Prose only.\n\n#### `child` {#parent-child}\n\n**Options**\n\n- `--only-child`: x\n"
+    assert _options_block(section, anchors) == ""
+    own = "##### Receipt {#parent-receipt}\n\n**Options**\n\n- `--own`: x\n\n#### `child` {#parent-child}\n\n- `--c`: y\n"
+    assert _options_block(own, anchors) == "\n- `--own`: x\n"
+
+
+def test_a_hidden_command_is_not_required(cli_root: dict, cli_ref_text: str) -> None:
+    hidden = [c for c in cli_root["commands"] if c["hidden"]]
+    assert hidden, "the golden carries no hidden command, so this case proves nothing"
+    subtree = {" ".join(child["path"]) for c in hidden for child in c.get("commands") or []}
+    assert "launcher exec" in subtree, "the golden no longer carries the hidden `launcher exec` this case names"
+    assert "launcher exec" not in {" ".join(c["path"]) for c in _visible_commands(cli_root)}

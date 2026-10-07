@@ -999,7 +999,7 @@ def test_package_pull_through_a_terminating_connect_proxy(
     assert set(connect_proxy.tunnels) == {ocx.registry}, (
         f"every tunnel must be the registry authority; saw {connect_proxy.tunnels}"
     )
-    root = Path(json.loads(green.stdout)[pkg.fq])
+    root = Path(json.loads(green.stdout)["paths"][pkg.fq])
     assert (root / "metadata.json").is_file(), (
         f"pull must materialise the package at {root}"
     )

@@ -146,7 +146,7 @@ fn build_index_http_client(hardening: &TransportHardening, extra_roots: &ocx_uti
 /// Test seam replacing the three index timeouts, as `connect,idle,outer` milliseconds, so the
 /// acceptance row for the shipped bounds need not out-wait minutes in real time.
 #[cfg(any(test, feature = "__testing"))]
-const TESTING_TIMEOUTS_ENV: &str = "__OCX_TESTING_INDEX_TIMEOUTS_MS";
+const TESTING_TIMEOUTS_ENV: &ocx_env::EnvVar = &ocx_env::__OCX_TESTING_INDEX_TIMEOUTS_MS;
 
 /// [`TESTING_TIMEOUTS_ENV`] parsed, or `None` when it is unset.
 ///
@@ -154,17 +154,19 @@ const TESTING_TIMEOUTS_ENV: &str = "__OCX_TESTING_INDEX_TIMEOUTS_MS";
 /// real deadline and still pass.
 #[cfg(any(test, feature = "__testing"))]
 fn testing_hardening_override() -> Option<TransportHardening> {
-    let raw = std::env::var(TESTING_TIMEOUTS_ENV).ok()?;
+    let raw = TESTING_TIMEOUTS_ENV.get_raw()?.into_string().ok()?;
+    let name = TESTING_TIMEOUTS_ENV.name;
     let millis: Vec<u64> = raw
         .split(',')
         .map(|field| {
-            field.trim().parse().unwrap_or_else(|_| {
-                panic!("{TESTING_TIMEOUTS_ENV} must be `connect,idle,outer` milliseconds, got {raw:?}")
-            })
+            field
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} must be `connect,idle,outer` milliseconds, got {raw:?}"))
         })
         .collect();
     let [connect, idle, outer] = millis[..] else {
-        panic!("{TESTING_TIMEOUTS_ENV} must name exactly three milliseconds values, got {raw:?}")
+        panic!("{name} must name exactly three milliseconds values, got {raw:?}")
     };
     Some(TransportHardening {
         connect_timeout: std::time::Duration::from_millis(connect),

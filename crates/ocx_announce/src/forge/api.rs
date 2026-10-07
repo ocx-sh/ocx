@@ -92,8 +92,7 @@ pub struct ForgeIdentity {
     pub bot: bool,
 }
 
-/// A capability the write preflight reports on; renaming a `Display` spelling breaks
-/// the JSON report pipelines parse.
+/// A capability the write preflight reports on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityName {
     /// The local `git` version against the floor the git transport needs.
@@ -421,7 +420,7 @@ pub trait Forge: Send + Sync {
 mod tests {
     use super::*;
 
-    /// C-012's wire vocabulary, paired against [`CapabilityName::ALL`].
+    /// The capabilities' message spellings, paired against [`CapabilityName::ALL`]; report rows are snake_case.
     ///
     /// The pairing is what makes the arity a guard rather than a number this
     /// test wrote for itself: the spellings are read out of `ALL` positionally,

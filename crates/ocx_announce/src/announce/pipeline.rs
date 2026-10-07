@@ -59,7 +59,7 @@ pub struct ObservedDesc {
     pub desc: Option<Value>,
     /// The readme blob, and the logo blob when there is one, verbatim.
     ///
-    /// Carried on every run, not only when `desc` moved, or `--out` writes a root
+    /// Carried on every run, not only when `desc` moved, or `--output` writes a root
     /// naming a `desc.readme` object it never wrote and the index rejects it.
     pub blobs: Vec<DescBlob>,
 }
@@ -1472,8 +1472,8 @@ mod tests {
     /// committed `desc` object alone, so a `--refresh` of a package whose
     /// description never changes keeps the C6 short-circuit intact.
     ///
-    /// Its CAS blobs still ride along. The `--out` contract materializes the
-    /// whole entry every run (`announce --out dir && publish dir`), and the
+    /// Its CAS blobs still ride along. The `--output` contract materializes the
+    /// whole entry every run (`announce --output dir && publish dir`), and the
     /// curated tags' CAS objects are already re-written unconditionally — a
     /// `desc.readme` the run alone omitted is a dangling reference the index
     /// refuses.
@@ -2007,12 +2007,12 @@ mod tests {
 
     // ── write_out ────────────────────────────────────────────────────────────
 
-    /// `--out` renders the file set a commit would produce, and since the
+    /// `--output` renders the file set a commit would produce, and since the
     /// orphan sweep that set carries removals. All three cases ride one map,
     /// because they only mean anything together: the removal lands, the removal
     /// that hits nothing is the same no-op the forge drivers owe rather than an
     /// error, and neither disturbs the write beside them. A caller pointing
-    /// `--out` at the directory a previous run filled is where this is visible
+    /// `--output` at the directory a previous run filled is where this is visible
     /// at all — a fresh directory makes every `Delete` the second case.
     ///
     /// The return value is the *written* paths: a deletion is not a written
@@ -2991,41 +2991,17 @@ mod tests {
     /// ignores the pin produces today, which can never equal it.
     const PINNED_INSTANT: &str = "2001-02-03T04:05:06Z";
 
-    /// Owns `__OCX_TESTING_ANNOUNCE_CLOCK` for the lifetime of one test.
-    ///
-    /// The name is a literal here, never a constant shared with production, so
-    /// renaming what production reads leaves the pin inert and reds the test.
-    /// The real process variable is written rather than
-    /// [`ocx_util::env::overrides::EnvLock`]'s override map, because a real variable is
-    /// visible to `std::env::var` and to `ocx_util::env::var` alike — this test must
-    /// not dictate which of the two the shared clock reads through. `EnvLock` is
-    /// held for the process-wide serialisation it provides.
+    /// Owns `__OCX_TESTING_ANNOUNCE_CLOCK` for the lifetime of one test; the lock clears it on drop.
     struct ClockSeam {
-        _lock: ocx_util::env::overrides::EnvLock,
+        _lock: ocx_env::overrides::EnvLock,
     }
 
     impl ClockSeam {
         /// Pins the seam to `instant` until the guard drops.
         fn pinned(instant: &str) -> Self {
-            let lock = ocx_util::env::overrides::lock();
-            // SAFETY: nextest (`taskfiles/rust.taskfile.yml:146`) gives every
-            // test its own process, and `EnvLock` serialises this write against
-            // every test that goes through `ocx_util::env::overrides`. Two seams opt out
-            // of that serialisation instead — `ocx_oci::host_capabilities` and
-            // `file_structure::shim_bin_store` — each safe only because one test
-            // function owns its variable.
-            unsafe { std::env::set_var("__OCX_TESTING_ANNOUNCE_CLOCK", instant) };
+            let lock = ocx_env::overrides::lock();
+            lock.set(&ocx_env::__OCX_TESTING_ANNOUNCE_CLOCK, instant);
             Self { _lock: lock }
-        }
-    }
-
-    impl Drop for ClockSeam {
-        fn drop(&mut self) {
-            // SAFETY: see `ClockSeam::pinned`. A struct's own `Drop` runs before
-            // its fields', so the pin is gone before `_lock` releases the mutex.
-            // Unconditional, so a stub that panics mid-test cannot leak it into a
-            // sibling — the Specify phase runs against `unimplemented!()`.
-            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
         }
     }
 

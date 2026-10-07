@@ -1,0 +1,14 @@
+{
+  "kind": "errors",
+  "verdict": "break",
+  "change": "The `exit_code` member of slug `package_not_found` changes.",
+  "findings": [
+    {
+      "code": "R03",
+      "pointer": "/$defs/ErrorDetail/x-ocx-enum/1",
+      "subjects": [
+        "*"
+      ]
+    }
+  ]
+}

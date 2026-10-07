@@ -25,18 +25,35 @@ use ocx_shell::shell::reconcile::{self, Ledger, LedgerEntry, Plan, ProjectScope,
 use ocx_store::file_structure;
 
 /// What one per-prompt session can fail with.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum SessionError {
     /// `ocx.lock` is absent, or no longer describes the `ocx.toml` beside it.
     #[error("{0}")]
+    #[exit(delegate = 0)]
     Lock(#[from] LockCurrency),
 
     /// Any library error the composition raised.
     #[error("{0}")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "activation_failed",
+            summary = "Shell activation failed with an unclassified cause"
+        )
+    )]
     Library(#[from] crate::Error),
 
     /// Two contributors to one list key declared different separators.
     #[error("{0}")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "activation_failed",
+            summary = "Shell activation failed with an unclassified cause"
+        )
+    )]
     ListSeparator(#[from] ListSeparatorError),
 }
 
@@ -419,7 +436,7 @@ async fn project_entries(
 fn fold_global_launch_identities(global: &[Entry], project: &mut [Entry]) {
     use ocx_package::launch::LaunchIdentities;
 
-    let key = ocx_config::env::keys::OCX_LAUNCH_IDENTITIES;
+    let key = ocx_env::OCX_LAUNCH_IDENTITIES.name;
     let Some(global_value) = global.iter().rev().find(|entry| entry.key == key) else {
         return;
     };
@@ -911,7 +928,7 @@ pub fn walk_is_indeterminate(recorded_dir: Option<&Path>, cwd: Option<&Path>) ->
     if !recorded_dir.is_absolute() {
         return false;
     }
-    if ocx_util::env::flag("OCX_NO_PROJECT", false) {
+    if matches!(ocx_env::OCX_NO_PROJECT.bool_or(false), Ok(true)) {
         return false;
     }
     let Some(cwd) = cwd else {
@@ -1706,7 +1723,7 @@ mod session_path_tests {
 
     fn identities_entry(value: String) -> Entry {
         Entry {
-            key: ocx_config::env::keys::OCX_LAUNCH_IDENTITIES.to_owned(),
+            key: ocx_env::OCX_LAUNCH_IDENTITIES.name.to_owned(),
             value,
             kind: ModifierKind::Constant,
             separator: None,
@@ -1743,7 +1760,7 @@ mod session_path_tests {
     fn leaving_the_project_retires_its_launch_identities() {
         let global_value = format!(r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}}}}"#);
         let project_value = format!(r#"{{"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"]}}}}"#);
-        let key = ocx_config::env::keys::OCX_LAUNCH_IDENTITIES.to_owned();
+        let key = ocx_env::OCX_LAUNCH_IDENTITIES.name.to_owned();
 
         for global in [Vec::new(), vec![identities_entry(global_value.clone())]] {
             let mut before = Env::clean();
@@ -2452,7 +2469,6 @@ mod stamp_gate_tests {
 /// The `activate` ladder's first production resolution.
 #[cfg(test)]
 mod activate_ladder_tests {
-    use ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE;
     use ocx_project::ProjectConfig;
     use ocx_project::activate::{ACTIVATE_FLOOR, ActivateMode};
 
@@ -2478,8 +2494,8 @@ mod activate_ladder_tests {
     #[tokio::test]
     async fn c005_c006_the_file_tier_outranks_the_environment_tier() {
         let (_dir, config) = config_with(Some("bin")).await;
-        let lock = ocx_util::env::overrides::lock();
-        lock.set(OCX_TOOLCHAIN_ACTIVATE, "none");
+        let lock = ocx_env::overrides::lock();
+        lock.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "none");
 
         assert_eq!(activate_mode(&config), ActivateMode::Bin, "C-006: `ocx.toml` decides");
     }
@@ -2490,8 +2506,8 @@ mod activate_ladder_tests {
     #[tokio::test]
     async fn c006_an_absent_file_tier_falls_to_the_environment_tier() {
         let (_dir, config) = config_with(None).await;
-        let lock = ocx_util::env::overrides::lock();
-        lock.set(OCX_TOOLCHAIN_ACTIVATE, "bin");
+        let lock = ocx_env::overrides::lock();
+        lock.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "bin");
 
         assert_eq!(activate_mode(&config), ActivateMode::Bin);
     }
@@ -2505,8 +2521,8 @@ mod activate_ladder_tests {
     #[tokio::test]
     async fn c007_both_tiers_absent_resolves_to_the_named_floor() {
         let (_dir, config) = config_with(None).await;
-        let lock = ocx_util::env::overrides::lock();
-        lock.remove(OCX_TOOLCHAIN_ACTIVATE);
+        let lock = ocx_env::overrides::lock();
+        lock.remove(&ocx_env::OCX_TOOLCHAIN_ACTIVATE);
 
         assert_eq!(activate_mode(&config), ACTIVATE_FLOOR);
     }
@@ -2521,8 +2537,8 @@ mod activate_ladder_tests {
     #[tokio::test]
     async fn c006_an_unrecognised_environment_value_falls_through_to_the_floor() {
         let (_dir, config) = config_with(None).await;
-        let lock = ocx_util::env::overrides::lock();
-        lock.set(OCX_TOOLCHAIN_ACTIVATE, "always");
+        let lock = ocx_env::overrides::lock();
+        lock.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "always");
 
         assert_eq!(activate_mode(&config), ACTIVATE_FLOOR);
     }
@@ -2535,8 +2551,8 @@ mod activate_ladder_tests {
     #[tokio::test]
     async fn c006_a_file_tier_of_none_is_a_stated_value_not_an_absent_one() {
         let (_dir, config) = config_with(Some("none")).await;
-        let lock = ocx_util::env::overrides::lock();
-        lock.set(OCX_TOOLCHAIN_ACTIVATE, "bin");
+        let lock = ocx_env::overrides::lock();
+        lock.set(&ocx_env::OCX_TOOLCHAIN_ACTIVATE, "bin");
 
         assert_eq!(activate_mode(&config), ActivateMode::None);
     }

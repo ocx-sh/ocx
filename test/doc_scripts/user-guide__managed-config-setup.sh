@@ -9,7 +9,7 @@ set -euo pipefail
 # managed-config artifact, aliased "internal.company.com" (via [mirrors]) to
 # the local test registry, and published a stand-in ocx/cli release for the
 # bootstrap seam below. The region is exactly what an operator runs.
-export __OCX_SELF_IMAGE="$REGISTRY/$REPO_SELF"
+export __OCX_TESTING_SELF_IMAGE="$REGISTRY/$REPO_SELF"
 
 # region cast
 ocx self setup --managed-config internal.company.com/ocx-config:user --no-modify-path

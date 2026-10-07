@@ -1,134 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_util` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_util` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_util::archive::Error as ArchiveError;
-use ocx_util::boolean_string::BooleanStringError;
 use ocx_util::compression::error::Error as CompressionError;
-use ocx_util::error::{Error as UtilError, FileError, SerializationError};
-use ocx_util::fs::EmptyOrAbsentError;
-use ocx_util::fs::SameFilesystemError;
-use ocx_util::fs::SymlinkWalkError;
-use ocx_util::fs::path::PathEscapeError;
+use ocx_util::error::{Error as UtilError, FileError};
 use ocx_util::singleflight::Error as SingleflightError;
-
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for ArchiveError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Io { .. } => ExitCode::IoError,
-            Self::Tar(_)
-            | Self::Zip(_)
-            | Self::EntryEscape(_)
-            | Self::SymlinkEscape { .. }
-            | Self::HardLinkEscape { .. }
-            | Self::UnsupportedFormat(_)
-            | Self::GnuSparseUnsupported(_)
-            | Self::ExtractionCapExceeded { .. } => ExitCode::DataError,
-            Self::Internal(_) => ExitCode::Failure,
-            Self::Compression(error) => return error.classify(),
-            Self::File(error) => return error.classify(),
-        })
-    }
-}
-
-impl ClassifyExitCode for CompressionError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::UnknownFormat(_) | Self::DecodeOnly(_) => ExitCode::DataError,
-            Self::Open { .. } | Self::Create { .. } | Self::Io(_) => ExitCode::IoError,
-            Self::EngineInit(_) => ExitCode::Failure,
-        })
-    }
-}
-
-impl ClassifyExitCode for SingleflightError {
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            // `None` lets the walker reach the leader's typed error; a `Some` would mask its code.
-            Self::Failed(_) => None,
-            Self::Abandoned => Some(ExitCode::Failure),
-            Self::Timeout | Self::CapacityExceeded { .. } => Some(ExitCode::TempFail),
-        }
-    }
-}
-
-impl ClassifyExitCode for EmptyOrAbsentError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::NotADirectory { .. } | Self::NonEmpty { .. } => ExitCode::UsageError,
-            Self::Io { .. } => ExitCode::IoError,
-        })
-    }
-}
-
-impl ClassifyExitCode for PathEscapeError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for SameFilesystemError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::IoError)
-    }
-}
-
-impl ClassifyExitCode for BooleanStringError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for FileError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::IoError)
-    }
-}
-
-impl ClassifyExitCode for SerializationError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(ExitCode::DataError)
-    }
-}
-
-impl ClassifyExitCode for UtilError {
-    /// Both arms are `#[error(transparent)]`, so only this delegation reaches their codes.
-    fn classify(&self) -> Option<ExitCode> {
-        match self {
-            Self::File(error) => error.classify(),
-            Self::Serialization(error) => error.classify(),
-        }
-    }
-}
-
-impl ClassifyExitCode for SymlinkWalkError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::Ancestor { .. } => ExitCode::UsageError,
-            Self::Io { .. } => ExitCode::IoError,
-        })
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, BooleanStringError);
-    downcast_arm!(cause, UtilError);
-    downcast_arm!(cause, FileError);
-    downcast_arm!(cause, SerializationError);
-    downcast_arm!(cause, SymlinkWalkError);
-    downcast_arm!(cause, SameFilesystemError);
-    downcast_arm!(cause, EmptyOrAbsentError);
-    downcast_arm!(cause, ArchiveError);
-    downcast_arm!(cause, CompressionError);
-    downcast_arm!(cause, SingleflightError);
-    downcast_arm!(cause, PathEscapeError);
-    None
-}
 
 #[cfg(test)]
 mod tests {
@@ -139,17 +17,16 @@ mod tests {
     }
 
     use super::*;
-    use ocx_exit::ExitCode;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
 
     /// C-042: the exit code `ConfigError::InvalidBooleanString` took, asserted
     /// at the type's new home and through the chain walker the binary really
-    /// runs — so the `downcast_arm!` registration above is exercised too,
+    /// runs — so the `families!` entry is exercised too,
     /// rather than being a line whose green is indistinguishable from never
     /// having run.
     ///
-    /// The expected value is read from the pre-split baseline
-    /// (`classify_baseline_7adaea62.json`, `Error` /
-    /// `crates/ocx_lib/src/config/error.rs:143` → `ExitCode::DataError`),
+    /// The expected value is read from the pre-split source
+    /// (`crates/ocx_lib/src/config/error.rs:143` at `7adaea62` → `ExitCode::DataError`),
     /// never off the arm below.
     #[test]
     fn invalid_boolean_string_still_classifies_as_data_error() {
@@ -158,6 +35,31 @@ mod tests {
         let error = BooleanString::try_from("maybe").expect_err("`maybe` is not a boolean spelling");
         assert_eq!(error.classify(), Some(ExitCode::DataError));
         assert_eq!(classify(error), ExitCode::DataError);
+    }
+
+    /// Reds on: a delegating or chain-walking arm whose slug names another cause than the code does.
+    #[test]
+    fn util_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+        use ocx_util::singleflight::SharedError;
+
+        assert_detail(&ArchiveError::EntryEscape("../escape".into()), "archive_entry_escape");
+        assert_detail(
+            &ArchiveError::internal(std::io::Error::other("boom")),
+            "archive_internal",
+        );
+        let codec = CompressionError::Io(std::io::Error::other("codec boom"));
+        assert_detail(&ArchiveError::Compression(codec), "compression_io");
+        let denied = FileError::new(
+            "/store",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EACCES"),
+        );
+        assert_detail(&UtilError::File(denied), "file_io");
+        let escaped = SharedError::for_test(ArchiveError::EntryEscape("../escape".into()));
+        assert_detail(&SingleflightError::Failed(escaped), "archive_entry_escape");
+        let unclassified = SharedError::for_test(std::io::Error::other("leader boom"));
+        assert_detail(&SingleflightError::Failed(unclassified), "singleflight_failed");
+        assert_detail(&SingleflightError::Timeout, "singleflight_timeout");
     }
 
     // recovered from crate::exit::classify

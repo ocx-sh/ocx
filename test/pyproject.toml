@@ -25,7 +25,9 @@ pythonpath = [".", "src"]
 # joins the `-m smoke` selection, which `lint/test_smoke_coverage.py` would report as
 # a verb without coverage rather than as a typo. `--strict-markers` turns the
 # typo into a collection error at the line that carries it.
-addopts = "--strict-markers"
+# `-p src.conformance` loads the hook that copies the conformance properties
+# `OcxRunner` records onto each test's JUnit record (`src/conformance.py`).
+addopts = "--strict-markers -p src.conformance"
 markers = [
     # The smoke tier (`task test:smoke`): one marked happy path per visible
     # top-level `ocx` verb, run with `-m smoke -n auto --dist loadgroup` inside
@@ -84,7 +86,7 @@ dev = [
     "cryptography>=42",
     "pyjwt[crypto]>=2.8",
     "ruff>=0.16",
-    "jsonschema>=4.23",
+    "jsonschema[format-nongpl]>=4.23",
     "in-toto-attestation>=0.9.3",
     "packageurl-python>=0.17.6",
     "pyyaml>=6.0.3",

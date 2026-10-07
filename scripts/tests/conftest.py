@@ -6,7 +6,7 @@ the only entry point: discovery replaces the hand-kept list, `-n auto` the
 sequential run, and `test_every_gate_script_has_tests` the completeness check.
 
 The session is budgeted like the lint tier: a clean run above
-`OCX_TOOLING_BUDGET_SECONDS` (default 20) wall clock turns red, so a proof that
+`OCX_TOOLING_BUDGET_SECONDS` (default 30) wall clock turns red, so a proof that
 starts re-deriving what one pass already computed cannot slow the loop unseen.
 """
 
@@ -24,7 +24,7 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
 BUDGET_ENV = "OCX_TOOLING_BUDGET_SECONDS"
-DEFAULT_BUDGET_SECONDS = 20.0
+DEFAULT_BUDGET_SECONDS = 30.0  # 13.5 s alone, 26 s beside the rest of `task verify`'s phase 1
 _CLOCK = pytest.StashKey[tuple[float, float]]()
 
 

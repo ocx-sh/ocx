@@ -87,6 +87,10 @@ fn rewrite_help_invocation(argv: Vec<OsString>) -> Vec<OsString> {
 
 /// Builds the plugin command: the user args after the subcommand name (git style, not cargo's
 /// re-passed name), resolution-affecting config forwarded, bearer credentials removed.
+#[expect(
+    clippy::disallowed_types,
+    reason = "git-style `ocx-<name>` plugin dispatch; an ocx extension, not a resolved package tool or a recording frame"
+)]
 fn build_plugin_command(
     binary: &Path,
     argv: &[OsString],
@@ -108,8 +112,8 @@ fn build_plugin_command(
     cmd.args(argv.get(1..).unwrap_or(&[]));
     cmd.envs(env);
     // `envs` cannot unset an inherited key, so without this a bearer credential reaches the plugin.
-    for credential in ocx_config::env::keys::CREDENTIAL_KEYS {
-        cmd.env_remove(credential);
+    for credential in ocx_env::all().filter(|var| var.child == ocx_env::Child::Scrub) {
+        cmd.env_remove(credential.name);
     }
 
     Ok(cmd)
@@ -179,11 +183,15 @@ mod tests {
             .filter(|(_, value)| value.is_none())
             .map(|(key, _)| key.to_string_lossy().into_owned())
             .collect();
+        let credentials: Vec<&str> = ocx_env::all()
+            .filter(|var| var.child == ocx_env::Child::Scrub)
+            .map(|var| var.name)
+            .collect();
         assert!(
-            !ocx_config::env::keys::CREDENTIAL_KEYS.is_empty(),
+            !credentials.is_empty(),
             "an empty credential list would make the loop below vacuous"
         );
-        for credential in ocx_config::env::keys::CREDENTIAL_KEYS {
+        for credential in credentials {
             assert!(
                 removed.iter().any(|key| key == credential),
                 "{credential} reaches the plugin; removed = {removed:?}"

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_config::env;
-
 use super::{Context, background_check};
 
 /// Throttled background-refresh probe for the corporate managed-config tier, sibling of
@@ -15,7 +13,7 @@ use super::{Context, background_check};
 /// `check_managed_config_refresh` unless its `refresh` posture is
 /// [`ocx_config::refresh::RefreshPolicy::Manual`].
 pub async fn check_for_managed_config_refresh(ctx: &Context) {
-    if let Some(reason) = background_check::skip_reason(env::keys::OCX_NO_CONFIG_REFRESH, ctx.is_offline()) {
+    if let Some(reason) = background_check::skip_reason(&ocx_env::OCX_NO_CONFIG_REFRESH, ctx.is_offline()) {
         log::debug!("Managed-config refresh skipped: {reason}");
         return;
     }

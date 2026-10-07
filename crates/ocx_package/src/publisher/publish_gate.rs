@@ -132,16 +132,26 @@ async fn verify_any_pin_provenance(
 }
 
 /// Errors from the pre-push dependency-pin gate.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum PublishGateError {
     /// The pinned digest resolves to an image INDEX, not a manifest.
     #[error(
         "dependency '{identifier}' pins an image INDEX digest; a tag's index is rewritten on every platform push and its old digest is garbage-collected, so this pin will break — re-run `ocx package create` to pin platform manifest digests"
     )]
+    #[exit(
+        DataError,
+        slug = "dependency_pinned_to_index",
+        summary = "A dependency is pinned to an image index rather than a platform manifest"
+    )]
     DependencyPinnedToIndex { identifier: Box<ocx_oci::PinnedPackageRef> },
     /// A dependency of an `any` bundle whose own index does not offer the pinned digest as `any`.
     #[error(
         "dependency '{identifier}' pins digest '{digest}' for the `any` platform, but the dependency's own image index does not advertise that digest as `any`; re-run `ocx package create --platform any` to re-resolve it"
+    )]
+    #[exit(
+        DataError,
+        slug = "any_pin_not_advertised_as_any",
+        summary = "A dependency pinned as `any` is not published for any platform"
     )]
     AnyPinNotAdvertisedAsAny {
         identifier: Box<ocx_oci::PackageRef>,
@@ -149,6 +159,14 @@ pub enum PublishGateError {
     },
     /// The `any` provenance check could not fetch the dependency's index; fails closed.
     #[error("failed to verify `any` pin provenance for dependency '{identifier}'")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "any_pin_provenance_unavailable",
+            summary = "Verifying an `any` pin's provenance failed with an unclassified cause"
+        )
+    )]
     AnyPinProvenanceUnavailable {
         identifier: Box<ocx_oci::PackageRef>,
         #[source]
@@ -156,9 +174,22 @@ pub enum PublishGateError {
     },
     /// The pinned manifest does not exist in the registry.
     #[error("dependency manifest '{identifier}' not found in the registry")]
+    #[exit(
+        NotFound,
+        slug = "dependency_manifest_not_found",
+        summary = "A pinned dependency manifest is not in the registry"
+    )]
     DependencyManifestNotFound { identifier: Box<ocx_oci::PinnedPackageRef> },
     /// Pin verification failed for another reason (auth, network, ...).
     #[error("failed to verify dependency pin '{identifier}'")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "dependency_pin_verification_failed",
+            summary = "Verifying a dependency pin failed with an unclassified cause"
+        )
+    )]
     Verification {
         identifier: Box<ocx_oci::PinnedPackageRef>,
         #[source]
@@ -166,6 +197,14 @@ pub enum PublishGateError {
     },
     /// The index could not route the dependency, or the SSRF floor refused the route.
     #[error("failed to route dependency '{identifier}' through the index")]
+    #[exit(
+        chain,
+        fallback(
+            Failure,
+            slug = "dependency_routing_failed",
+            summary = "Routing a dependency through the index failed with an unclassified cause"
+        )
+    )]
     Routing {
         identifier: Box<ocx_oci::PinnedPackageRef>,
         #[source]

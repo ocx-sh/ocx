@@ -37,9 +37,9 @@ with the batch widened:
 
 As `tier-xhigh.md` § Phase 4.
 
-## Phase 5: Cross-model pass (mandatory, every adversary)
+## Phase 5: Cross-model pass (every adversary)
 
-As [`tier-xhigh.md` § Phase 5](tier-xhigh.md#phase-5-cross-model-pass-mandatory),
+As [`tier-xhigh.md` § Phase 5](tier-xhigh.md#phase-5-cross-model-pass),
 triaging the **union** of every adversary's return with duplicate merge;
 a finding two adversaries raise is one finding with two attributions.
 

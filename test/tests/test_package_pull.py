@@ -12,7 +12,7 @@ def test_package_pull_populates_object_store(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
     """ocx package pull <pkg> downloads to the object store."""
-    result = ocx.json("package", "pull", published_package.short)
+    result = ocx.json("package", "pull", published_package.short)["paths"]
 
     root = Path(result[published_package.short])
     assert_dir_exists(root)
@@ -61,7 +61,7 @@ def test_package_pull_is_idempotent(
     ocx: OcxRunner, published_package: PackageInfo
 ) -> None:
     """Pulling the same package twice succeeds and returns the same path."""
-    result1 = ocx.json("package", "pull", published_package.short)
-    result2 = ocx.json("package", "pull", published_package.short)
+    result1 = ocx.json("package", "pull", published_package.short)["paths"]
+    result2 = ocx.json("package", "pull", published_package.short)["paths"]
 
     assert result1[published_package.short] == result2[published_package.short]

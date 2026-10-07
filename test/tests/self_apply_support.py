@@ -46,7 +46,7 @@ def apply_env(
     """
     return {
         **ocx.env,
-        "__OCX_SELF_IMAGE": f"{ocx.registry}/{repo}",
+        "__OCX_TESTING_SELF_IMAGE": f"{ocx.registry}/{repo}",
         "HOME": str(home),
         "OCX_SELF_UPDATE": "apply",
         "OCX_UPDATE_CHECK_INTERVAL": "0",

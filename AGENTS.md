@@ -106,4 +106,4 @@ Also: `scp -o BatchMode=yes`, `ssh -o BatchMode=yes`, `apt-get -y`,
 - **Never push to remote** — the human decides when to push (CI has real cost).
 - All changes must be committed locally on a feature branch.
 - **Never commit directly to `main`**.
-- Run `task verify` after any implementation change.
+- Run `task verify` after any implementation change. Inside a hex run, step commits and merges on hex-owned branches skip it (`--no-verify` allowed); the run's integration and release gates satisfy this rule.

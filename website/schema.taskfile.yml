@@ -15,7 +15,7 @@ tasks:
   generate:
     desc: >-
       Generate every published JSON Schema (metadata, config, project,
-      project-lock, patch, reports, execution-record) from the Bazel genrule
+      project-lock, patch, reports, execution-record, errors) from the Bazel genrule
       //crates/ocx_schema:schemas into src/public/schemas/<kind>/.
     # No `sources:` fingerprint: Bazel is the cache, and a cache hit costs one
     # analysis. The repository root, because `ocx exec` resolves `bazel` from
@@ -37,18 +37,19 @@ tasks:
       # Output paths from `cquery --output=files`, never a spelled `bazel-bin/`
       # path (that symlink follows whichever configuration built last). The
       # whole set is checked before any file is written, so a target that
-      # stopped producing exactly the seven schemas publishes nothing. Copy
+      # stopped producing exactly the eight schemas publishes nothing. Copy
       # beside, reset the mode (Bazel outputs are read-only and executable),
       # then rename.
       - cmd: |
           set -eu
           expected='config/v1.json
+          errors/v2.json
           execution-record/v1.json
           metadata/v1.json
           patch/v1.json
           project-lock/v3.json
           project/v1.json
-          reports/v1.json'
+          reports/v2.json'
           expected=$(printf '%s\n' "$expected" | sort)
           err=$(mktemp)
           trap 'rm -f "$err" "{{.SCHEMA_DIR}}"/*/*.new' EXIT
@@ -56,15 +57,15 @@ tasks:
             echo "schema:generate: cquery failed; nothing written" >&2; cat "$err" >&2; exit 1; }
           got=$(printf '%s\n' "$files" | sed -n 's|^.*/schemas/||p' | sort)
           count=$(printf '%s\n' "$files" | wc -l)
-          if [ "$got" != "$expected" ] || [ "$count" -ne 7 ]; then
-            echo "schema:generate: {{.SCHEMA_TARGET}} does not report exactly the 7 schemas; nothing written. cquery reported:" >&2
+          if [ "$got" != "$expected" ] || [ "$count" -ne 8 ]; then
+            echo "schema:generate: {{.SCHEMA_TARGET}} does not report exactly the 8 schemas; nothing written. cquery reported:" >&2
             printf '%s\n' "$files" >&2
             exit 1
           fi
           for src in $files; do
             [ -f "$src" ] || { echo "schema:generate: bazel reports $src, which is not a file" >&2; exit 1; }
           done
-          # Stage all seven before renaming any, so a failed copy publishes nothing.
+          # Stage all eight before renaming any, so a failed copy publishes nothing.
           for src in $files; do
             dst="{{.SCHEMA_DIR}}/${src##*/schemas/}"
             mkdir -p "$(dirname "$dst")"

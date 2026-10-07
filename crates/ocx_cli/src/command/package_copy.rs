@@ -8,6 +8,7 @@ use clap::Parser;
 use ocx_package::publisher::{CopyRequest, Publisher};
 
 use crate::api::data::package_copy::{CopyReport, DescriptionOutcome};
+use crate::command::deprecated;
 use crate::error::UsageError;
 use crate::options;
 
@@ -42,8 +43,12 @@ pub struct PackageCopy {
     /// Computed against the target's own tag list, not the source's: whether
     /// `1.4` should move depends on what the target already publishes, and a
     /// staging registry ahead of production has a different answer.
-    #[clap(long = "cascade", short = 'c')]
+    #[clap(long = "cascade")]
     cascade: bool,
+
+    // 0.7 removal: the `-c` spelling of `--cascade`.
+    #[clap(id = deprecated::COPY_C.arg_id(), short = 'c', hide = true)]
+    deprecated_c: bool,
 
     #[clap(flatten)]
     keep_tag: options::KeepTag,
@@ -56,8 +61,12 @@ pub struct PackageCopy {
     /// Off by default, because a description is repository-level prose rather
     /// than part of the version being promoted, and environments legitimately
     /// carry different ones. `ocx package description push --from` copies it alone.
-    #[clap(long = "description")]
-    description: bool,
+    #[clap(long = "with-description")]
+    with_description: bool,
+
+    // 0.7 removal: the `--description` spelling of `--with-description`.
+    #[clap(id = deprecated::COPY_DESCRIPTION.arg_id(), long = "description", hide = true)]
+    deprecated_description: bool,
 
     /// Record an OCI annotation on the target's image index. Repeatable.
     ///
@@ -124,7 +133,7 @@ impl PackageCopy {
                     source: &source,
                     target: &target,
                     platforms: self.platform.clone(),
-                    cascade: self.cascade,
+                    cascade: self.cascade || self.deprecated_c,
                     keep_tag: self.keep_tag.enabled(),
                     referrers: self.referrers.enabled(),
                     annotations: &annotations,
@@ -136,7 +145,7 @@ impl PackageCopy {
 
         // Copied after the package lands, never instead of it; reported as a field, not a stderr
         // warning, since `--format json` is how CI learns whether the description travelled.
-        let description = if !self.description {
+        let description = if !(self.with_description || self.deprecated_description) {
             None
         } else if self.dry_run {
             Some(DescriptionOutcome::SkippedDryRun)

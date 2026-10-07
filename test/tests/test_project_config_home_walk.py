@@ -68,7 +68,7 @@ def test_cwd_inside_ocx_home_is_not_a_project(ocx: OcxRunner, tmp_path: Path) ->
         f"stderr={walked_state.stderr!r}"
     )
     walked_report = json.loads(walked_state.stdout)
-    assert walked_report["project_dir"] is None, (
+    assert walked_report.get("project_dir") is None, (
         f"no project is in effect from a cwd under $OCX_HOME; "
         f"project_dir={walked_report['project_dir']!r}"
     )

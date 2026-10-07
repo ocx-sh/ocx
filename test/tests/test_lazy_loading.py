@@ -127,7 +127,7 @@ def _env_json(ocx: OcxRunner, project: Path, *args: str) -> dict:
 
 def _path_values(env_payload: dict) -> list[str]:
     """Every `PATH` entry's value, in emitted (apply) order."""
-    return [entry["value"] for entry in env_payload["entries"] if entry["key"] == "PATH"]
+    return [entry["value"] for entry in env_payload["items"] if entry["key"] == "PATH"]
 
 
 def _is_materialized(ocx: OcxRunner, project: Path, pkg: PackageInfo) -> bool:
@@ -150,7 +150,7 @@ def _is_materialized(ocx: OcxRunner, project: Path, pkg: PackageInfo) -> bool:
         f"ocx package which must exit 0 or {EXIT_NOT_FOUND}; got {result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
-    located = json.loads(result.stdout)[pkg.short]
+    located = json.loads(result.stdout)["paths"][pkg.short]
     assert located["kind"] == "package", (
         f"a store probe with no policy flag must answer from the package store; got {located}"
     )
@@ -299,10 +299,10 @@ def test_s001_lazy_mode_always_puts_a_shim_dir_on_path_with_no_content(
     )
 
     eager = _env_json(ocx, project, "--lazy-mode", "never")
-    assert [entry for entry in lazy["entries"] if entry["value"] != str(shim_bin)] == eager["entries"], (
+    assert [entry for entry in lazy["items"] if entry["value"] != str(shim_bin)] == eager["items"], (
         "S-001: apart from the shim slot the deferred env must equal the eager env\n"
-        f"deferred: {json.dumps(lazy['entries'], indent=2)}\n"
-        f"eager:    {json.dumps(eager['entries'], indent=2)}"
+        f"deferred: {json.dumps(lazy['items'], indent=2)}\n"
+        f"eager:    {json.dumps(eager['items'], indent=2)}"
     )
     assert lazy["binaries"] == eager["binaries"], (
         "S-001: the admitted `binaries` attribution must not depend on lazy-mode"
@@ -762,7 +762,7 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
         f"S-007: --lazy-mode always must resolve a deferred tool through its shim tree; "
         f"rc={deferred.returncode}\nstderr:\n{deferred.stderr}"
     )
-    located = json.loads(deferred.stdout)[pkg.short]
+    located = json.loads(deferred.stdout)["paths"][pkg.short]
     assert located["kind"] == "shim", (
         f"S-007: a tool with no content resolves as a shim under the lazy policy; got {located}"
     )
@@ -781,7 +781,7 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
             f"S-007: a materialized package must resolve under {policy or 'no policy flag'}; "
             f"rc={warm.returncode}\nstderr:\n{warm.stderr}"
         )
-        located = json.loads(warm.stdout)[pkg.short]
+        located = json.loads(warm.stdout)["paths"][pkg.short]
         assert located["kind"] == "package", (
             f"S-007: {policy or 'no policy flag'} must report the package store once content "
             f"exists; got {located}"
@@ -1310,7 +1310,7 @@ def test_sequence_7_the_deferred_advisory_is_raised_once_and_names_the_deferred_
     identically-shaped packages make that falsifiable: a classifier that also
     ran over eagerly-composed tools would report two advisories instead of one.
 
-    The advisory kind here is `install-path-rooted-non-path-var`, which
+    The advisory kind here is `install_path_rooted_non_path_var`, which
     `make_package`'s default env raises on its own (`<REPO>_HOME` is a
     `constant` rooted at `${installPath}`). Any kind proves the "deferred only"
     clause; this one needs no fixture surgery to produce.
@@ -1337,7 +1337,7 @@ def test_sequence_7_the_deferred_advisory_is_raised_once_and_names_the_deferred_
     assert eager.repo not in advisories[0]["package"], (
         f"sequence 7: the eagerly-composed package raises none; got {advisories[0]}"
     )
-    assert advisories[0]["kind"] == "install-path-rooted-non-path-var", (
+    assert advisories[0]["kind"] == "install_path_rooted_non_path_var", (
         f"sequence 7: unexpected advisory kind; got {advisories[0]}"
     )
 
@@ -1352,7 +1352,7 @@ def test_c015_pull_serializes_the_advisories_it_warns_about(
     for the identical package is already serialized by `ocx env` — one wire
     surface carrying C-015's payload while its sibling drops it is the defect.
 
-    The advisory kind is `install-path-rooted-non-path-var`, which
+    The advisory kind is `install_path_rooted_non_path_var`, which
     `make_package`'s default env raises on its own (`<REPO>_HOME` is a
     `constant` rooted at `${installPath}`), so no fixture surgery is needed.
     """
@@ -1370,7 +1370,7 @@ def test_c015_pull_serializes_the_advisories_it_warns_about(
         f"C-015: the deferred tool's advisory must reach --format json; got "
         f"{json.dumps(payload, indent=2)}"
     )
-    assert advisories[0]["kind"] == "install-path-rooted-non-path-var", (
+    assert advisories[0]["kind"] == "install_path_rooted_non_path_var", (
         f"C-015: unexpected advisory kind; got {advisories[0]}"
     )
     assert pkg.repo in advisories[0]["package"], (
@@ -1379,9 +1379,9 @@ def test_c015_pull_serializes_the_advisories_it_warns_about(
     assert advisories[0]["message"] in result.stderr, (
         f"C-015: the same advisory must also reach the human channel; stderr:\n{result.stderr}"
     )
-    rows = {key: value for key, value in payload.items() if key != "advisories"}
+    rows = payload["paths"]
     assert len(rows) == 1 and next(iter(rows.values()))["kind"] == "shim", (
-        f"C-015: the reserved advisories key must not displace the pulled row; got {rows}"
+        f"the advisories must not displace the pulled row; got {rows}"
     )
 
 
@@ -1406,7 +1406,7 @@ def test_pull_materializes_a_package_any_selected_group_wants_eager(
     result = _run(ocx, project, "--format", "json", "pull")
 
     assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
-    rows = {key: value for key, value in json.loads(result.stdout).items() if key != "advisories"}
+    rows = json.loads(result.stdout)["paths"]
     assert [row["kind"] for row in rows.values()] == ["package"], f"one eager row expected; got {rows}"
     assert _is_materialized(ocx, project, pkg), "the default group's eager binding must be pre-warmed"
 
@@ -1472,7 +1472,7 @@ def test_sequence_8_offline_regenerates_a_collected_shim_when_the_metadata_is_lo
         f"sequence 8: --no-pull turns the same absence into an omission, not a failure; "
         f"rc={omitted.returncode}\nstderr:\n{omitted.stderr}"
     )
-    assert json.loads(omitted.stdout)["entries"] == [], (
+    assert json.loads(omitted.stdout)["items"] == [], (
         f"sequence 8: the omitted tool contributes no entries; got {omitted.stdout}"
     )
     assert "hello not installed" in omitted.stderr, (

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/reports/v1.json",
+  "reports": {
+    "Listing": { "$ref": "#/$defs/Listing" }
+  },
+  "$defs": {
+    "Listing": {
+      "description": "L09: a root that is not a `*Root` wrapper; L10: top-level `error`; L13: top-level `entries`.",
+      "type": "object",
+      "properties": {
+        "entries": { "description": "Rows.", "type": "array", "items": { "type": "string" } },
+        "error": { "description": "A failure beside the payload.", "type": "string" },
+        "nested": { "description": "L14: a wrapper referenced from a payload.", "$ref": "#/$defs/OtherRoot" }
+      },
+      "required": ["entries", "error", "nested"]
+    },
+    "OtherRoot": {
+      "description": "A wrapper that is not in the root list.",
+      "type": "object",
+      "properties": {
+        "schema_version": { "description": "Version.", "const": 1 }
+      },
+      "required": ["schema_version"]
+    },
+    "Digest": {
+      "description": "Content digest.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]+$"
+    },
+    "Kinds": {
+      "description": "L04: a closed `enum`.",
+      "type": "string",
+      "enum": ["first", "second"]
+    },
+    "Thing": {
+      "description": "One violation per property.",
+      "type": "object",
+      "properties": {
+        "maybe": { "description": "L01 + L03.", "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "either": { "description": "L02.", "type": ["string", "integer"] },
+        "camelCase": { "description": "L06.", "type": "string" },
+        "mode": {
+          "description": "L07.",
+          "type": "string",
+          "x-ocx-enum": [{ "value": "Bad-Value", "description": "Not snake_case." }]
+        },
+        "undocumented": { "type": "string" },
+        "created_at": { "description": "L11: not a `Timestamp`.", "type": "string" },
+        "hash": { "description": "L12: the digest pattern outside `Digest`.", "type": "string", "pattern": "^sha256:[0-9a-f]+$" },
+        "extra": { "description": "L15.", "type": "object", "additionalProperties": false },
+        "merged": { "description": "L17.", "allOf": [{ "type": "string" }] },
+        "status": { "description": "L18: not a scalar-enum `$def`.", "type": "string" },
+        "dry_run": { "description": "L18: a dry run beside `status`.", "type": "boolean" },
+        "variant": {
+          "description": "L05: a union with no unknown arm.",
+          "oneOf": [
+            {
+              "description": "The one known arm.",
+              "type": "object",
+              "properties": { "type": { "description": "Tag.", "type": "string", "const": "one" } },
+              "required": ["type"]
+            }
+          ]
+        }
+      },
+      "required": ["maybe", "either", "camelCase", "mode", "undocumented", "created_at", "hash", "extra", "merged", "status", "dry_run", "variant"]
+    }
+  }
+}

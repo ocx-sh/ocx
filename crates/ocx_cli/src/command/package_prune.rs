@@ -39,8 +39,8 @@ use crate::options;
     when either is briefly unreachable, or a tag is not in the index yet or is still present after \
     its delete; 78 when the index points at a forbidden host; \
     79 when the index has no such package; 80 when the credential cannot delete; 81 for a durable \
-    tag, a namespace with no index, or `--offline`; 87 when the registry does not delete tags. \
-    A dry run exits 81 or 75 exactly as the real run would; 80 and 87 surface only on a real delete.\n\n\
+    tag, a namespace with no index, or `--offline`; 82 when the registry does not delete tags. \
+    A dry run exits 81 or 75 exactly as the real run would; 80 and 82 surface only on a real delete.\n\n\
     Details: <https://ocx.sh/docs/reference/command-line#package-prune>"
 )]
 // Exactly one selection mode: both is a conflict, neither a missing argument, each exit 64.
@@ -321,7 +321,7 @@ mod tests {
             "--build-timestamp=datetime",
             "--tags-file",
             "--force",
-            "80 and 87 surface only on a real delete",
+            "80 and 82 surface only on a real delete",
             "https://ocx.sh/docs/reference/command-line#package-prune",
         ] {
             assert!(help.contains(needle), "long help must mention {needle}:\n{help}");

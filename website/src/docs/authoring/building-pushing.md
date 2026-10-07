@@ -90,7 +90,7 @@ Cascade is a publisher convention, not a registry-enforced rule. The registry se
 A [variant][in-depth-versioning-variants] is a tag prefix — `full-1.2.3`, `slim-1.2.3` — and each variant cascades in its own track. A package whose every build is a named variant therefore publishes no bare `1.2.3` at all, and `ocx package install acme/mytool` with no variant resolves nothing. `--default` lets the pushed tag's own variant also own the un-prefixed track:
 
 ```shell
-ocx package push -c -p linux/amd64 --default \
+ocx package push --cascade -p linux/amd64 --default \
   -i ghcr.io/acme/tools/mytool:full-1.2.3 mytool-full-1.2.3-linux-amd64.tar.xz
 ```
 
@@ -107,7 +107,7 @@ A published package tells a consumer nothing about where it came from. Registrie
 The [OCI image spec][oci-annotations] reserves `org.opencontainers.image.source` for the answer, and [GHCR][ghcr-repo-link] reads it: set it and the package page shows the repository link and the package inherits that repository's permissions; omit it and neither happens, whatever the path looks like. State it at push time with `--annotation`:
 
 ```shell
-ocx package push -c -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
+ocx package push --cascade -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
   --annotation org.opencontainers.image.source=https://github.com/acme/widget \
   widget-1.2.3-linux-amd64.tar.xz
 ```
@@ -119,7 +119,7 @@ The annotation lands on the [image index][oci-image-index] of every tag the push
 In CI the values are already in the environment, and `--ci-annotations` reads them:
 
 ```shell
-ocx package push -c --ci-annotations=gitlab -i $CI_REGISTRY_IMAGE/widget:1.2.3 \
+ocx package push --cascade --ci-annotations=gitlab -i $CI_REGISTRY_IMAGE/widget:1.2.3 \
   widget-1.2.3-linux-amd64.tar.xz
 ```
 

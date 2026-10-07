@@ -17,7 +17,7 @@ pub struct ShellCompletion {
     ///
     /// Without this flag the script is always printed, which is what redirecting
     /// it into a file wants. With it, the same policy `ocx self activate`
-    /// applies decides whether anything is printed at all: `OCX_NO_COMPLETIONS`,
+    /// applies decides whether anything is printed at all: `OCX_NO_COMPLETION`,
     /// then `completions` under `[shell]` in config.toml, then whether the
     /// session is interactive.
     ///
@@ -26,9 +26,12 @@ pub struct ShellCompletion {
     #[clap(long = "if-enabled")]
     if_enabled: bool,
 
-    /// The shell to generate the completions for
-    #[clap(long, value_enum)]
-    shell: Option<clap_complete::Shell>,
+    /// The shell to generate the completions for: bash, elvish, fish, powershell or zsh.
+    ///
+    /// Takes the same shell names as every other `--shell`; the shells
+    /// without completion support are refused.
+    #[clap(long, value_enum, hide_possible_values = true)]
+    shell: Option<shell::Shell>,
 
     /// Session interactivity, as the calling shell measured it.
     ///
@@ -47,7 +50,11 @@ impl ShellCompletion {
         let mut cmd = crate::app::Cli::command();
         let cmd_name = cmd.get_name().to_string();
         let shell = match self.shell {
-            Some(shell) => shell,
+            Some(shell) => shell.try_into().map_err(|_| {
+                crate::error::UsageError::new(format!(
+                    "{shell} has no completion support; use --shell bash, elvish, fish, powershell or zsh"
+                ))
+            })?,
             None => {
                 if let Some(shell) = shell::Shell::detect() {
                     match shell.try_into() {

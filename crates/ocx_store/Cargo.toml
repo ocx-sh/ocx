@@ -11,8 +11,8 @@ publish = false
 # (`subsystem-tests.md` "Test-Only Seams"). Gates `shim_bin_store`'s
 # `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` seam, which forces the lost-publish
 # race the acceptance binary cannot otherwise reach. Forwarded by `ocx_lib`'s
-# and `ocx`'s own `__testing`.
-__testing = []
+# and `ocx`'s own `__testing`; forwards `ocx_env`'s, which declares that seam.
+__testing = ["ocx_env/__testing"]
 
 # The seams `ocx_lib`'s own tests drive across the crate boundary, which a bare
 # `#[cfg(test)]` cannot reach. Deliberately NOT forwarded by `ocx`'s
@@ -23,12 +23,16 @@ __test_scaffolding = []
 [dependencies]
 # `$OCX_HOME` and the toolchain-home resolution this crate renders into.
 ocx_config.workspace = true
+# The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
+ocx_exit.workspace = true
 # Digests, layer layouts and the platform vocabulary: what the three CAS tiers
 # are keyed by and what `assemble` places.
 ocx_oci.workspace = true
 # The bottom tier: `fs` (symlinks, locks, atomic publish, walkers), `error`,
 # the extension-trait prelude.
 ocx_util.workspace = true
+# The environment registry `OCX_NO_CODESIGN` and the publish-race seam are read through.
+ocx_env.workspace = true
 
 dunce.workspace = true
 hex.workspace = true
@@ -48,11 +52,11 @@ windows-sys.workspace = true
 # is `__test_scaffolding`-gated there — deliberately NOT forwarded by `ocx`'s
 # `__testing`, so it stays out of the acceptance binary (WP-26).
 ocx_config = { workspace = true, features = ["__test_scaffolding"] }
-# `ocx_util::env::overrides`, the process-environment table this crate's tests
+# `ocx_env::overrides`, the process-environment table this crate's tests
 # write through. A dev edge that enables `__testing` is allowed from every
 # crate (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps
 # the feature out of the normal build, so the runtime row above stays seamless.
-ocx_util = { workspace = true, features = ["__testing"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 
 [lints]
 workspace = true

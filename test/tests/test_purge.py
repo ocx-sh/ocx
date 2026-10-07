@@ -54,7 +54,7 @@ def test_purge_removes_object_directory(
 ):
     """ocx install <pkg>; ocx uninstall --purge <pkg>"""
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)
+    result = ocx.json("package", "install", pkg.short)["packages"]
     candidate = Path(result[pkg.short]["path"])
     content = candidate.resolve()
     assert_dir_exists(content)
@@ -313,8 +313,8 @@ def test_purge_preserves_shared_layer_inodes(
     ocx.json("package", "install", "--select", short_a)
     ocx.json("package", "install", "--select", short_b)
 
-    result_a = ocx.json("package", "which", short_a)
-    result_b = ocx.json("package", "which", short_b)
+    result_a = ocx.json("package", "which", short_a)["paths"]
+    result_b = ocx.json("package", "which", short_b)["paths"]
     root_a = Path(result_a[short_a]["path"])
     root_b = Path(result_b[short_b]["path"])
     file_a = root_a / "content" / shared_file_rel

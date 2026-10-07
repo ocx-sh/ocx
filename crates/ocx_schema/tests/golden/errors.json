@@ -1,0 +1,2760 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ErrorDocument",
+  "description": "The document a failed invocation prints on stdout under `--format json`.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Version of this document's shape.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "command": {
+      "description": "The command that failed, as its words (`\"package sign\"`); empty when the command line named none.",
+      "type": "string"
+    },
+    "exit_code": {
+      "$ref": "#/$defs/ExitCode",
+      "description": "The process exit code."
+    },
+    "error": {
+      "description": "What failed.",
+      "$ref": "#/$defs/ErrorBody"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "exit_code",
+    "error"
+  ],
+  "$defs": {
+    "ErrorBody": {
+      "description": "The `error` object of an error document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ErrorCategory",
+          "description": "Coarse error category."
+        },
+        "detail": {
+          "$ref": "#/$defs/ErrorDetail",
+          "description": "The specific error within its category (e.g., `\"oidc_token_rejected\"`)."
+        },
+        "message": {
+          "description": "Full user-facing message.",
+          "type": "string"
+        },
+        "context": {
+          "description": "The packages the failure is about; always emitted, possibly empty.",
+          "$ref": "#/$defs/ErrorContext"
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "context"
+      ]
+    },
+    "ErrorContext": {
+      "description": "The packages an error is about.",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "description": "The package a sign or verify failure is about.",
+          "$ref": "#/$defs/PackageRef"
+        },
+        "source": {
+          "description": "The package a copy failure reads from.",
+          "$ref": "#/$defs/PackageRef"
+        },
+        "target": {
+          "description": "The repository a copy failure writes to.",
+          "$ref": "#/$defs/PackageRef"
+        }
+      }
+    },
+    "PackageRef": {
+      "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
+      "type": "string"
+    },
+    "ExitCode": {
+      "type": "integer",
+      "description": "The process exit code.",
+      "x-ocx-enum": [
+        {
+          "value": 0,
+          "name": "Success",
+          "description": "The command succeeded",
+          "category": "internal"
+        },
+        {
+          "value": 1,
+          "name": "Failure",
+          "description": "The command failed and no more specific code applies",
+          "category": "internal"
+        },
+        {
+          "value": 64,
+          "name": "UsageError",
+          "description": "The command line is invalid: unknown flag, wrong argument count or bad syntax",
+          "category": "usage_error"
+        },
+        {
+          "value": 65,
+          "name": "DataError",
+          "description": "Input data is malformed or fails verification",
+          "category": "data_error"
+        },
+        {
+          "value": 69,
+          "name": "Unavailable",
+          "description": "A required service is unavailable and rerunning will not help",
+          "category": "unavailable"
+        },
+        {
+          "value": 74,
+          "name": "IoError",
+          "description": "A filesystem read or write failed",
+          "category": "io_error"
+        },
+        {
+          "value": 75,
+          "name": "TempFail",
+          "description": "A transient failure; the same command may succeed on retry",
+          "category": "temp_fail"
+        },
+        {
+          "value": 77,
+          "name": "PermissionDenied",
+          "description": "The operation was refused for lack of permission",
+          "category": "permission_denied"
+        },
+        {
+          "value": 78,
+          "name": "ConfigError",
+          "description": "Configuration is invalid or incomplete",
+          "category": "config_error"
+        },
+        {
+          "value": 79,
+          "name": "NotFound",
+          "description": "A named package, tag, file or resource does not exist",
+          "category": "not_found"
+        },
+        {
+          "value": 80,
+          "name": "AuthError",
+          "description": "Authentication failed or credentials are missing",
+          "category": "auth_error"
+        },
+        {
+          "value": 81,
+          "name": "PolicyBlocked",
+          "description": "A local policy or safeguard refused the operation; loosen the flag or pass --force",
+          "category": "permission_denied"
+        },
+        {
+          "value": 82,
+          "name": "Unsupported",
+          "description": "The operation as requested is not supported or not enabled by this registry, forge or build; retrying will not help",
+          "category": "unsupported"
+        }
+      ]
+    },
+    "ErrorCategory": {
+      "type": "string",
+      "description": "The coarse class of an error.",
+      "x-ocx-enum": [
+        {
+          "value": "usage_error",
+          "name": "UsageError",
+          "description": "The command line is invalid"
+        },
+        {
+          "value": "config_error",
+          "name": "ConfigError",
+          "description": "Configuration is invalid or incomplete"
+        },
+        {
+          "value": "data_error",
+          "name": "DataError",
+          "description": "Input data is malformed or fails verification"
+        },
+        {
+          "value": "auth_error",
+          "name": "AuthError",
+          "description": "Authentication failed or credentials are missing"
+        },
+        {
+          "value": "permission_denied",
+          "name": "PermissionDenied",
+          "description": "The operation was refused: a permission or a local policy"
+        },
+        {
+          "value": "not_found",
+          "name": "NotFound",
+          "description": "A named package, tag, file or resource does not exist"
+        },
+        {
+          "value": "unavailable",
+          "name": "Unavailable",
+          "description": "A required service is unavailable and rerunning will not help"
+        },
+        {
+          "value": "temp_fail",
+          "name": "TempFail",
+          "description": "A transient failure; the same command may succeed on retry"
+        },
+        {
+          "value": "unsupported",
+          "name": "Unsupported",
+          "description": "The operation as requested is not supported or not enabled by this registry, forge or build; retrying will not help"
+        },
+        {
+          "value": "io_error",
+          "name": "IoError",
+          "description": "A filesystem read or write failed"
+        },
+        {
+          "value": "internal",
+          "name": "Internal",
+          "description": "A failure with no more specific category"
+        }
+      ]
+    },
+    "ErrorDetail": {
+      "type": "string",
+      "description": "The specific error within its class.",
+      "x-ocx-enum": [
+        {
+          "value": "activation_failed",
+          "description": "Shell activation failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "agnostic_platform_libc_claim",
+          "description": "A libc-agnostic platform ships a binary that needs a libc",
+          "exit_code": 65
+        },
+        {
+          "value": "ambiguous_extra_ca_certs",
+          "description": "Both extra_ca_certs and extra_ca_certs_pem are declared",
+          "exit_code": 78
+        },
+        {
+          "value": "ambiguous_host_leaf",
+          "description": "ocx.lock pins several platforms this host could run, none preferred",
+          "exit_code": 65
+        },
+        {
+          "value": "ambiguous_trust_root",
+          "description": "The payload declares both trusted_root and trusted_root_json",
+          "exit_code": 78
+        },
+        {
+          "value": "announce_failed",
+          "description": "Announcing failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "any_pin_not_advertised_as_any",
+          "description": "A dependency pinned as `any` is not published for any platform",
+          "exit_code": 65
+        },
+        {
+          "value": "any_pin_provenance_unavailable",
+          "description": "Verifying an `any` pin's provenance failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "archive_entry_escape",
+          "description": "An archive entry path escapes the extraction root",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_extraction_cap_exceeded",
+          "description": "Extraction exceeded the decompressed-size cap",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_gnu_sparse_unsupported",
+          "description": "An archive entry uses the unsupported GNU sparse format",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_hard_link_escape",
+          "description": "An archive hard link does not resolve inside the extraction root",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_internal",
+          "description": "An internal archive operation failed",
+          "exit_code": 1
+        },
+        {
+          "value": "archive_io",
+          "description": "Reading or writing an archive entry failed",
+          "exit_code": 74
+        },
+        {
+          "value": "archive_symlink_escape",
+          "description": "An archive symlink points outside the extraction root",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_tar_invalid",
+          "description": "The tar stream is malformed",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_unsupported_format",
+          "description": "The archive format is not supported",
+          "exit_code": 65
+        },
+        {
+          "value": "archive_zip_invalid",
+          "description": "The zip archive is malformed",
+          "exit_code": 65
+        },
+        {
+          "value": "attestation_budget_exhausted",
+          "description": "The attestations together exceed the total size limit",
+          "exit_code": 65
+        },
+        {
+          "value": "attestation_not_found",
+          "description": "No verified attestation matches the requested predicate type",
+          "exit_code": 79
+        },
+        {
+          "value": "attestation_payload_too_large",
+          "description": "The attestation statement exceeds its size limit",
+          "exit_code": 65
+        },
+        {
+          "value": "attestation_too_large",
+          "description": "The attestation envelope exceeds its size limit",
+          "exit_code": 65
+        },
+        {
+          "value": "auth_env_missing",
+          "description": "An environment variable the authentication type needs is not set",
+          "exit_code": 78
+        },
+        {
+          "value": "bin_scan_failed",
+          "description": "Scanning for interface binaries failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "bin_scan_unsupported_host",
+          "description": "This host cannot scan for the target platform's executables",
+          "exit_code": 65
+        },
+        {
+          "value": "binding_already_exists",
+          "description": "A binding with this name already exists",
+          "exit_code": 64
+        },
+        {
+          "value": "binding_ambiguous",
+          "description": "A binding exists in several groups and no group was named",
+          "exit_code": 64
+        },
+        {
+          "value": "binding_not_declared",
+          "description": "The named binding is not declared in ocx.toml",
+          "exit_code": 79
+        },
+        {
+          "value": "binding_not_found",
+          "description": "The named binding does not exist in ocx.toml",
+          "exit_code": 79
+        },
+        {
+          "value": "binding_value_invalid",
+          "description": "A binding's value is not a valid identifier",
+          "exit_code": 78
+        },
+        {
+          "value": "binding_value_missing_registry",
+          "description": "A binding's identifier names no registry",
+          "exit_code": 78
+        },
+        {
+          "value": "blob_not_found",
+          "description": "The registry has no such blob",
+          "exit_code": 79
+        },
+        {
+          "value": "bot_identity",
+          "description": "The acting identity is a bot account",
+          "exit_code": 64
+        },
+        {
+          "value": "builder_mismatch",
+          "description": "The provenance builder does not match the pinned builder",
+          "exit_code": 65
+        },
+        {
+          "value": "bundle_parse_failed",
+          "description": "The signature bundle could not be parsed",
+          "exit_code": 65
+        },
+        {
+          "value": "candidate_limit_exhausted",
+          "description": "The examination cap was reached with candidates unexamined and none passing",
+          "exit_code": 65
+        },
+        {
+          "value": "catalog_document_absent",
+          "description": "The index source serves no catalog document",
+          "exit_code": 69
+        },
+        {
+          "value": "cert_chain_invalid",
+          "description": "The certificate chain does not verify against the trust root",
+          "exit_code": 65
+        },
+        {
+          "value": "certificate_validity_window",
+          "description": "The log entry time falls outside the certificate validity window",
+          "exit_code": 65
+        },
+        {
+          "value": "ci_export_write",
+          "description": "Writing the CI export stream failed",
+          "exit_code": 74
+        },
+        {
+          "value": "ci_file_write",
+          "description": "Writing a CI export file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "ci_missing_env",
+          "description": "A CI environment variable the export needs is not set",
+          "exit_code": 78
+        },
+        {
+          "value": "client_internal",
+          "description": "A registry operation failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "client_io",
+          "description": "Reading or writing a local file during a registry operation failed",
+          "exit_code": 74
+        },
+        {
+          "value": "client_serialization",
+          "description": "A registry document could not be serialized or parsed",
+          "exit_code": 65
+        },
+        {
+          "value": "command_not_executable",
+          "description": "The command resolves to a file that is not executable",
+          "exit_code": 65
+        },
+        {
+          "value": "command_not_found",
+          "description": "The command does not resolve in the composed environment",
+          "exit_code": 65
+        },
+        {
+          "value": "command_trampoline_refused",
+          "description": "The command resolves to a toolchain launcher that would re-enter itself",
+          "exit_code": 65
+        },
+        {
+          "value": "committed_tags_dropped",
+          "description": "The announce would drop tags the index already committed",
+          "exit_code": 65
+        },
+        {
+          "value": "compression_create",
+          "description": "Creating compressed output failed",
+          "exit_code": 74
+        },
+        {
+          "value": "compression_decode_only",
+          "description": "The format can be extracted but not written",
+          "exit_code": 65
+        },
+        {
+          "value": "compression_engine_init",
+          "description": "The compression engine failed to initialize",
+          "exit_code": 1
+        },
+        {
+          "value": "compression_io",
+          "description": "A compression stream failed to read or write",
+          "exit_code": 74
+        },
+        {
+          "value": "compression_open",
+          "description": "Opening a file for decompression failed",
+          "exit_code": 74
+        },
+        {
+          "value": "compression_unknown_format",
+          "description": "The compression algorithm could not be determined",
+          "exit_code": 65
+        },
+        {
+          "value": "config_edit_io",
+          "description": "Reading or writing the config file being edited failed",
+          "exit_code": 74
+        },
+        {
+          "value": "config_edit_locked",
+          "description": "Another process holds the lock on the config file being edited",
+          "exit_code": 75
+        },
+        {
+          "value": "config_edit_malformed",
+          "description": "The config file being edited has a shape the edit cannot apply to",
+          "exit_code": 74
+        },
+        {
+          "value": "config_edit_parse",
+          "description": "The config file being edited does not parse as TOML",
+          "exit_code": 74
+        },
+        {
+          "value": "config_edit_too_large",
+          "description": "The config file being edited exceeds the allowed size",
+          "exit_code": 78
+        },
+        {
+          "value": "config_file_not_found",
+          "description": "An explicitly named config or project file does not exist",
+          "exit_code": 79
+        },
+        {
+          "value": "config_file_too_large",
+          "description": "A config file exceeds the allowed size",
+          "exit_code": 78
+        },
+        {
+          "value": "config_io",
+          "description": "Reading a config file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "config_parse",
+          "description": "A config file does not parse",
+          "exit_code": 78
+        },
+        {
+          "value": "credential_helper_failed",
+          "description": "The credential helper failed to supply credentials",
+          "exit_code": 80
+        },
+        {
+          "value": "credential_helper_invalid_json",
+          "description": "The credential helper answered with invalid JSON",
+          "exit_code": 65
+        },
+        {
+          "value": "credential_helper_not_on_path",
+          "description": "The configured credential helper is not on PATH",
+          "exit_code": 78
+        },
+        {
+          "value": "credential_helper_timeout",
+          "description": "The credential helper did not answer in time",
+          "exit_code": 75
+        },
+        {
+          "value": "credential_helper_unsafe_path",
+          "description": "The credential helper resolves to an unsafe path",
+          "exit_code": 78
+        },
+        {
+          "value": "credential_store_write",
+          "description": "Writing the credential store failed",
+          "exit_code": 74
+        },
+        {
+          "value": "declared_binary_not_executable",
+          "description": "A declared binary is not executable",
+          "exit_code": 65
+        },
+        {
+          "value": "decompression_cap_exceeded",
+          "description": "A layer decompressed past the size cap",
+          "exit_code": 65
+        },
+        {
+          "value": "delete_needs_tag",
+          "description": "A tag delete names no single tag, or also names a digest",
+          "exit_code": 64
+        },
+        {
+          "value": "dependency_ambiguous_platform",
+          "description": "Several of a dependency's platforms match the target equally",
+          "exit_code": 65
+        },
+        {
+          "value": "dependency_conflict",
+          "description": "Dependencies pin conflicting versions of one repository",
+          "exit_code": 65
+        },
+        {
+          "value": "dependency_declaration_invalid",
+          "description": "A package declares its dependencies invalidly",
+          "exit_code": 65
+        },
+        {
+          "value": "dependency_manifest_not_found",
+          "description": "A pinned dependency manifest is not in the registry",
+          "exit_code": 79
+        },
+        {
+          "value": "dependency_no_compatible_platform",
+          "description": "A dependency is published for no platform compatible with the target",
+          "exit_code": 65
+        },
+        {
+          "value": "dependency_not_found",
+          "description": "A dependency is not in the selected index",
+          "exit_code": 79
+        },
+        {
+          "value": "dependency_pin_resolution_failed",
+          "description": "Resolving a dependency pin failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "dependency_pin_verification_failed",
+          "description": "Verifying a dependency pin failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "dependency_pinned_to_index",
+          "description": "A dependency is pinned to an image index rather than a platform manifest",
+          "exit_code": 65
+        },
+        {
+          "value": "dependency_routing_failed",
+          "description": "Routing a dependency through the index failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "dependency_setup_failed",
+          "description": "Setting up a dependency failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "desc_disappeared",
+          "description": "The package description vanished between two reads",
+          "exit_code": 65
+        },
+        {
+          "value": "destination_check_io",
+          "description": "Inspecting the destination directory failed",
+          "exit_code": 74
+        },
+        {
+          "value": "destination_not_a_directory",
+          "description": "The destination exists and is not a directory",
+          "exit_code": 64
+        },
+        {
+          "value": "destination_not_empty",
+          "description": "The destination directory is not empty",
+          "exit_code": 64
+        },
+        {
+          "value": "destination_through_symlink",
+          "description": "A destination path resolves through a symlink",
+          "exit_code": 64
+        },
+        {
+          "value": "digest_mismatch",
+          "description": "Downloaded content does not hash to its expected digest",
+          "exit_code": 65
+        },
+        {
+          "value": "digest_missing",
+          "description": "The identifier carries no digest after resolution",
+          "exit_code": 65
+        },
+        {
+          "value": "direct_digest_pin_in_any_target",
+          "description": "An `any` package pins a dependency by a platform-specific digest",
+          "exit_code": 65
+        },
+        {
+          "value": "dispatch_object_digest_mismatch",
+          "description": "A stored dispatch object does not hash to its claimed digest",
+          "exit_code": 65
+        },
+        {
+          "value": "docker_credential_retrieval",
+          "description": "Reading Docker credentials failed",
+          "exit_code": 80
+        },
+        {
+          "value": "duplicate_binding_across_groups",
+          "description": "A binding is defined in more than one selected group",
+          "exit_code": 64
+        },
+        {
+          "value": "duplicate_owner",
+          "description": "The same owner was supplied twice",
+          "exit_code": 64
+        },
+        {
+          "value": "duplicate_platform_key",
+          "description": "ocx.lock lists the same platform twice for one binding",
+          "exit_code": 65
+        },
+        {
+          "value": "empty_group_filter",
+          "description": "A group filter names an empty group",
+          "exit_code": 64
+        },
+        {
+          "value": "empty_push_set",
+          "description": "A push names no target platform",
+          "exit_code": 65
+        },
+        {
+          "value": "endpoint_unresolvable",
+          "description": "An endpoint host does not resolve",
+          "exit_code": 69
+        },
+        {
+          "value": "entrypoint_collision",
+          "description": "Two packages declare the same entrypoint name",
+          "exit_code": 65
+        },
+        {
+          "value": "extra_ca_certs_invalid",
+          "description": "The extra CA bundle the payload names is not usable",
+          "exit_code": 65
+        },
+        {
+          "value": "extra_ca_certs_not_utf8",
+          "description": "The extra CA bundle is not UTF-8 and cannot be persisted",
+          "exit_code": 65
+        },
+        {
+          "value": "extra_ca_certs_pem_invalid",
+          "description": "The extra CA bundle inlined in the payload is not usable",
+          "exit_code": 78
+        },
+        {
+          "value": "extra_ca_certs_read_failed",
+          "description": "Reading the extra CA bundle the payload names failed",
+          "exit_code": 74
+        },
+        {
+          "value": "extra_ca_file_invalid",
+          "description": "The extra CA bundle file holds no usable certificate",
+          "exit_code": 65
+        },
+        {
+          "value": "extra_ca_file_too_large",
+          "description": "The extra CA bundle file exceeds the allowed size",
+          "exit_code": 74
+        },
+        {
+          "value": "extra_ca_unreadable",
+          "description": "The extra CA bundle cannot be read",
+          "exit_code": 74
+        },
+        {
+          "value": "extra_ca_value_invalid",
+          "description": "The configured extra CA bundle value holds no usable certificate",
+          "exit_code": 78
+        },
+        {
+          "value": "extra_ca_value_too_large",
+          "description": "The configured extra CA bundle value exceeds the allowed size",
+          "exit_code": 78
+        },
+        {
+          "value": "feature_mismatch",
+          "description": "The package needs a platform feature this host lacks",
+          "exit_code": 65
+        },
+        {
+          "value": "file_io",
+          "description": "Reading or writing an internal file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "forbidden_registry_target",
+          "description": "The rewritten registry resolves into a forbidden address range",
+          "exit_code": 78
+        },
+        {
+          "value": "forge_auth_failed",
+          "description": "The forge rejected the request's credentials",
+          "exit_code": 80
+        },
+        {
+          "value": "forge_capability_unavailable",
+          "description": "The forge or project lacks a capability the transport needs",
+          "exit_code": 82
+        },
+        {
+          "value": "forge_client_build",
+          "description": "The forge HTTP client could not be built",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_decode",
+          "description": "A forge response could not be decoded",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_failed",
+          "description": "A forge operation failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_kind_unknown",
+          "description": "The forge kind of a self-hosted host is unknown; name it explicitly",
+          "exit_code": 64
+        },
+        {
+          "value": "forge_missing_field",
+          "description": "A forge response lacks a required field",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_non_fast_forward",
+          "description": "The push was not a fast-forward; another writer moved the branch",
+          "exit_code": 75
+        },
+        {
+          "value": "forge_publisher_not_allowlisted",
+          "description": "The publishing project is not on the index project's job-token allowlist",
+          "exit_code": 77
+        },
+        {
+          "value": "forge_push_access_denied",
+          "description": "The credential may not push to the repository",
+          "exit_code": 80
+        },
+        {
+          "value": "forge_push_refused",
+          "description": "The forge refused the push",
+          "exit_code": 77
+        },
+        {
+          "value": "forge_request_encode",
+          "description": "A forge request body could not be encoded",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_required",
+          "description": "No forge was supplied to read the committed index root through",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_stale_lease",
+          "description": "The branch moved since it was read",
+          "exit_code": 75
+        },
+        {
+          "value": "forge_status",
+          "description": "The forge answered with an unexpected HTTP status",
+          "exit_code": 1
+        },
+        {
+          "value": "forge_transient",
+          "description": "The forge answered with a status a retry may clear",
+          "exit_code": 75
+        },
+        {
+          "value": "forge_transport_failed",
+          "description": "The forge could not be reached",
+          "exit_code": 69
+        },
+        {
+          "value": "forge_transport_operation_unsupported",
+          "description": "The selected transport does not support this operation",
+          "exit_code": 64
+        },
+        {
+          "value": "forge_transport_transient",
+          "description": "Reaching the forge failed in a way a retry may clear",
+          "exit_code": 75
+        },
+        {
+          "value": "forge_transport_unsupported",
+          "description": "The forge does not support the selected transport",
+          "exit_code": 64
+        },
+        {
+          "value": "forge_unavailable",
+          "description": "The forge answered with a server error",
+          "exit_code": 69
+        },
+        {
+          "value": "fork_base_unreachable",
+          "description": "The fork's branch cannot reach the upstream base",
+          "exit_code": 1
+        },
+        {
+          "value": "fork_field_missing",
+          "description": "A fork response lacks a required field",
+          "exit_code": 1
+        },
+        {
+          "value": "fork_host_mismatch",
+          "description": "The fork lives on another host than the index",
+          "exit_code": 64
+        },
+        {
+          "value": "fork_not_ready",
+          "description": "The fork did not become ready in time",
+          "exit_code": 1
+        },
+        {
+          "value": "fork_owner_mismatch",
+          "description": "The fork is owned by another account than expected",
+          "exit_code": 1
+        },
+        {
+          "value": "fork_parent_absent",
+          "description": "The fork reports no parent",
+          "exit_code": 1
+        },
+        {
+          "value": "fork_parent_mismatch",
+          "description": "The fork's parent is not the expected upstream",
+          "exit_code": 1
+        },
+        {
+          "value": "forwarded_env_invalid",
+          "description": "The OCX_ENV value a parent ocx forwarded is malformed",
+          "exit_code": 65
+        },
+        {
+          "value": "fulcio_bad_request",
+          "description": "The certificate authority rejected the signing request",
+          "exit_code": 78
+        },
+        {
+          "value": "fulcio_unavailable",
+          "description": "The certificate authority is unreachable or overloaded",
+          "exit_code": 75
+        },
+        {
+          "value": "git_command_failed",
+          "description": "A git command failed",
+          "exit_code": 1
+        },
+        {
+          "value": "git_push_failed",
+          "description": "A git push failed for an unrecognised reason",
+          "exit_code": 1
+        },
+        {
+          "value": "git_unavailable",
+          "description": "The git executable the transport needs is unavailable",
+          "exit_code": 69
+        },
+        {
+          "value": "group_holds_direct_binding",
+          "description": "A group table holds a binding outside its tools table",
+          "exit_code": 78
+        },
+        {
+          "value": "host_resolution_failed",
+          "description": "A registry host could not be resolved",
+          "exit_code": 75
+        },
+        {
+          "value": "identity_mismatch",
+          "description": "The certificate identity does not match the required signer",
+          "exit_code": 77
+        },
+        {
+          "value": "identity_token_file_permissive",
+          "description": "The identity token file is readable by group or other",
+          "exit_code": 77
+        },
+        {
+          "value": "index_dispatch_digest_mismatch",
+          "description": "A dispatch object does not hash to the digest its root claims",
+          "exit_code": 65
+        },
+        {
+          "value": "index_http_failed",
+          "description": "An index request failed",
+          "exit_code": 69
+        },
+        {
+          "value": "index_http_transient",
+          "description": "An index request failed in a way a retry may clear",
+          "exit_code": 75
+        },
+        {
+          "value": "index_manifest_not_found",
+          "description": "The registry has no manifest for a tag the index update walked",
+          "exit_code": 79
+        },
+        {
+          "value": "index_named_by_digest",
+          "description": "The source names an image index by digest, which cannot merge into the target",
+          "exit_code": 64
+        },
+        {
+          "value": "index_path_invalid",
+          "description": "A local index path is invalid",
+          "exit_code": 1
+        },
+        {
+          "value": "index_resolution_blocked",
+          "description": "A local policy refused resolving through the index",
+          "exit_code": 81
+        },
+        {
+          "value": "index_root_missing_field",
+          "description": "The committed index root lacks a required field",
+          "exit_code": 1
+        },
+        {
+          "value": "index_root_not_object",
+          "description": "The committed index root is not a JSON object",
+          "exit_code": 1
+        },
+        {
+          "value": "index_root_parse",
+          "description": "The committed index root is not valid JSON",
+          "exit_code": 1
+        },
+        {
+          "value": "index_serialization",
+          "description": "An index document could not be serialized",
+          "exit_code": 65
+        },
+        {
+          "value": "index_singleflight_failed",
+          "description": "A shared index operation failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "index_source_failed",
+          "description": "An index source failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "integration_namespace_invalid",
+          "description": "An integrations namespace is invalid",
+          "exit_code": 65
+        },
+        {
+          "value": "integration_too_large",
+          "description": "An integrations payload exceeds its size limit",
+          "exit_code": 65
+        },
+        {
+          "value": "integrations_too_large",
+          "description": "A package's integrations exceed the per-package size limit",
+          "exit_code": 65
+        },
+        {
+          "value": "internal",
+          "description": "A failure no classifier recognises",
+          "exit_code": 1
+        },
+        {
+          "value": "internal_path_invalid",
+          "description": "An internal store path has an unexpected structure",
+          "exit_code": 1
+        },
+        {
+          "value": "invalid_auth_type",
+          "description": "The configured authentication type is not recognized",
+          "exit_code": 78
+        },
+        {
+          "value": "invalid_binary_name",
+          "description": "A binary name is not valid",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_binding_name",
+          "description": "A binding name carries a character outside the allowed set",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_boolean_string",
+          "description": "A value is not one of the accepted boolean spellings",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_build_metadata",
+          "description": "A version's build metadata is invalid",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_digest",
+          "description": "A digest is not a valid algorithm-prefixed hash",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_encoding",
+          "description": "Registry content is not valid UTF-8",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_endpoint_url",
+          "description": "A Sigstore endpoint URL failed validation",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_env",
+          "description": "An OCX environment variable holds a value its declaration refuses",
+          "exit_code": 78
+        },
+        {
+          "value": "invalid_group_name",
+          "description": "A group name carries a character outside the allowed set",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_identifier",
+          "description": "A package identifier does not parse",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_image_index",
+          "description": "An image index document is invalid",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_index_url",
+          "description": "A configured index URL is invalid",
+          "exit_code": 78
+        },
+        {
+          "value": "invalid_layer_layout",
+          "description": "A layer's strip-components or prefix annotation is invalid",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_layer_ref",
+          "description": "A layer reference or its layout suffix does not parse",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_list_separator",
+          "description": "A package env entry declares an unusable list separator",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_logo_content",
+          "description": "The logo file's content does not match its format",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_managed_config_source",
+          "description": "The managed-config source is not a valid OCI identifier",
+          "exit_code": 78
+        },
+        {
+          "value": "invalid_manifest",
+          "description": "A manifest is invalid",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_owner_login",
+          "description": "An owner login carries a character outside letters, digits, dot, underscore and hyphen",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_platform",
+          "description": "A platform string does not follow the platform grammar",
+          "exit_code": 65
+        },
+        {
+          "value": "invalid_repo_coordinate",
+          "description": "A repository coordinate is not a valid owner/name",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_tag",
+          "description": "A tag is malformed, or not one the operation may act on",
+          "exit_code": 64
+        },
+        {
+          "value": "invalid_toolchain_name_charset",
+          "description": "A group or binding name carries a character toolchain paths refuse",
+          "exit_code": 78
+        },
+        {
+          "value": "invalid_trust_policy",
+          "description": "The payload declares an unusable trust-policy entry",
+          "exit_code": 78
+        },
+        {
+          "value": "invalid_version_spec",
+          "description": "The version argument is not a tag, a digest, or a tag pinned to a digest",
+          "exit_code": 64
+        },
+        {
+          "value": "issuer_mismatch",
+          "description": "The certificate OIDC issuer does not match the required issuer",
+          "exit_code": 77
+        },
+        {
+          "value": "json_serialization",
+          "description": "JSON could not be serialized or deserialized",
+          "exit_code": 65
+        },
+        {
+          "value": "key_backend_unavailable",
+          "description": "The signing key backend is temporarily unavailable",
+          "exit_code": 75
+        },
+        {
+          "value": "key_malformed",
+          "description": "A signing or verification key holds no usable key",
+          "exit_code": 65
+        },
+        {
+          "value": "key_reference_invalid",
+          "description": "A key reference could not be parsed",
+          "exit_code": 64
+        },
+        {
+          "value": "key_unreadable",
+          "description": "A signing or verification key could not be read from its location",
+          "exit_code": 74
+        },
+        {
+          "value": "launch_identities_invalid",
+          "description": "The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed",
+          "exit_code": 78
+        },
+        {
+          "value": "launch_spawn_failed",
+          "description": "The resolved command could not be started",
+          "exit_code": 1
+        },
+        {
+          "value": "launcher_path_not_utf8",
+          "description": "A path baked into a generated launcher is not valid UTF-8",
+          "exit_code": 65
+        },
+        {
+          "value": "launcher_unsafe_character",
+          "description": "A value baked into a generated launcher contains an unsafe character",
+          "exit_code": 65
+        },
+        {
+          "value": "layer_layout_failed",
+          "description": "Resolving a layer layout failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "layer_not_staged",
+          "description": "A layer the package needs was not staged",
+          "exit_code": 1
+        },
+        {
+          "value": "layer_size_exceeded",
+          "description": "A layer declares a size above the allowed maximum",
+          "exit_code": 65
+        },
+        {
+          "value": "libc_lint_read",
+          "description": "Reading a file while checking its libc requirement failed",
+          "exit_code": 74
+        },
+        {
+          "value": "libc_lint_scan_failed",
+          "description": "Walking the content tree for the libc check failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "libc_scan_scope_modifier",
+          "description": "The libc scan scope carries a modifier it cannot honour",
+          "exit_code": 65
+        },
+        {
+          "value": "libc_scan_scope_unresolvable",
+          "description": "The libc scan scope cannot be resolved",
+          "exit_code": 65
+        },
+        {
+          "value": "link_path_occupied",
+          "description": "The install link path holds something other than an ocx package link",
+          "exit_code": 65
+        },
+        {
+          "value": "list_separator_invalid",
+          "description": "A list-valued environment entry conflicts with or edges on its separator",
+          "exit_code": 65
+        },
+        {
+          "value": "lock_missing",
+          "description": "ocx.lock does not exist",
+          "exit_code": 78
+        },
+        {
+          "value": "lock_repository_not_bare",
+          "description": "ocx.lock records a repository carrying a tag or digest",
+          "exit_code": 78
+        },
+        {
+          "value": "lock_stale",
+          "description": "ocx.lock does not match ocx.toml",
+          "exit_code": 65
+        },
+        {
+          "value": "login_rejected",
+          "description": "The registry rejected the supplied credentials",
+          "exit_code": 80
+        },
+        {
+          "value": "malformed_catalog_key",
+          "description": "An index source served a malformed catalog key",
+          "exit_code": 65
+        },
+        {
+          "value": "malformed_fork_full_name",
+          "description": "A fork's full name is malformed",
+          "exit_code": 1
+        },
+        {
+          "value": "malformed_index_document",
+          "description": "An index document is not valid JSON of the expected shape",
+          "exit_code": 65
+        },
+        {
+          "value": "malformed_physical_ref",
+          "description": "An index root carries a malformed physical repository reference",
+          "exit_code": 65
+        },
+        {
+          "value": "malformed_physical_repository",
+          "description": "The index root names a malformed registry repository",
+          "exit_code": 1
+        },
+        {
+          "value": "malformed_repository",
+          "description": "The repository is not a well-formed oci:// pointer",
+          "exit_code": 64
+        },
+        {
+          "value": "malformed_root_document",
+          "description": "A local index root document is not valid JSON of the expected shape",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_contains_managed_section",
+          "description": "The managed-config payload contains a [managed] section",
+          "exit_code": 78
+        },
+        {
+          "value": "managed_config_entry_too_large",
+          "description": "The managed-config config.toml entry exceeds the allowed size",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_input_not_found",
+          "description": "A file the managed-config payload names does not exist",
+          "exit_code": 79
+        },
+        {
+          "value": "managed_config_invalid",
+          "description": "The managed-config settings are invalid, or a system lock refuses the change",
+          "exit_code": 78
+        },
+        {
+          "value": "managed_config_invalid_archive",
+          "description": "The managed-config layer is not a readable archive",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_invalid_toml",
+          "description": "The fetched managed-config payload is not valid TOML",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_key_by_path",
+          "description": "The payload declares a trust-policy key signer by path instead of inline",
+          "exit_code": 78
+        },
+        {
+          "value": "managed_config_layer_digest_mismatch",
+          "description": "The managed-config layer does not hash to its declared digest",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_layer_size_exceeded",
+          "description": "The managed-config layer declares a size above the allowed maximum",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_missing_config_toml",
+          "description": "The managed-config layer contains no config.toml",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_no_any_platform",
+          "description": "The managed-config package has no any/any platform entry",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_no_gzip_layer",
+          "description": "The managed-config package has no tar+gzip layer",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_payload_invalid_toml",
+          "description": "The managed-config payload is not a valid config file",
+          "exit_code": 78
+        },
+        {
+          "value": "managed_config_payload_read_failed",
+          "description": "Reading the managed-config payload failed",
+          "exit_code": 74
+        },
+        {
+          "value": "managed_config_payload_too_large",
+          "description": "The managed-config payload exceeds the allowed size",
+          "exit_code": 78
+        },
+        {
+          "value": "managed_config_snapshot_write",
+          "description": "Writing the managed-config snapshot failed",
+          "exit_code": 74
+        },
+        {
+          "value": "managed_config_source_not_found",
+          "description": "The registry has no managed-config package at the configured source",
+          "exit_code": 79
+        },
+        {
+          "value": "managed_config_stage_failed",
+          "description": "Staging the managed-config payload for publishing failed",
+          "exit_code": 74
+        },
+        {
+          "value": "managed_config_unexpected_manifest",
+          "description": "The managed-config package has an unexpected manifest shape",
+          "exit_code": 65
+        },
+        {
+          "value": "managed_config_update_failed",
+          "description": "Syncing the managed-config snapshot failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "manifest_not_found",
+          "description": "The registry has no such manifest",
+          "exit_code": 79
+        },
+        {
+          "value": "merge_request_unconfirmed",
+          "description": "The forge did not confirm the merge request in time",
+          "exit_code": 75
+        },
+        {
+          "value": "metadata_ambiguous",
+          "description": "More than one candidate package metadata file was found",
+          "exit_code": 64
+        },
+        {
+          "value": "metadata_blob_too_large",
+          "description": "A package metadata blob exceeds the size cap",
+          "exit_code": 65
+        },
+        {
+          "value": "metadata_invalid_layer_path",
+          "description": "A layer path cannot anchor a metadata file search",
+          "exit_code": 64
+        },
+        {
+          "value": "metadata_required",
+          "description": "No package metadata file was given or found",
+          "exit_code": 64
+        },
+        {
+          "value": "mirror_config_invalid",
+          "description": "A registry mirror setting is invalid",
+          "exit_code": 78
+        },
+        {
+          "value": "missing_base_ref",
+          "description": "The index base branch does not exist",
+          "exit_code": 1
+        },
+        {
+          "value": "missing_digest",
+          "description": "An identifier the store needs pinned carries no digest",
+          "exit_code": 65
+        },
+        {
+          "value": "missing_head_root",
+          "description": "A concurrent claim's or announce's head carries no index root",
+          "exit_code": 1
+        },
+        {
+          "value": "missing_list_separator",
+          "description": "A list-valued package env entry omits its separator",
+          "exit_code": 65
+        },
+        {
+          "value": "multiple_attestations",
+          "description": "More than one verified attestation matched",
+          "exit_code": 65
+        },
+        {
+          "value": "multiple_signatures",
+          "description": "The envelope carries other than exactly one signature",
+          "exit_code": 65
+        },
+        {
+          "value": "nested_image_index",
+          "description": "An image index nests another image index, which OCI does not support",
+          "exit_code": 65
+        },
+        {
+          "value": "nested_namespace_unsupported",
+          "description": "The forge does not support nested namespaces",
+          "exit_code": 64
+        },
+        {
+          "value": "no_acting_identity",
+          "description": "No owner could be determined to write into the claim",
+          "exit_code": 64
+        },
+        {
+          "value": "no_credential_store",
+          "description": "No credential helper or store is available to save credentials in",
+          "exit_code": 78
+        },
+        {
+          "value": "no_curated_tags",
+          "description": "No tag is left to announce once reserved tags are dropped",
+          "exit_code": 64
+        },
+        {
+          "value": "no_host_leaf",
+          "description": "ocx.lock pins no platform this host can run",
+          "exit_code": 78
+        },
+        {
+          "value": "no_identity_provided",
+          "description": "No signer identity was given by flags or a matching trust policy",
+          "exit_code": 64
+        },
+        {
+          "value": "no_indexable_tag",
+          "description": "The repository carries no tag the index can record",
+          "exit_code": 79
+        },
+        {
+          "value": "no_matching_platform",
+          "description": "The source index offers no requested platform",
+          "exit_code": 64
+        },
+        {
+          "value": "no_project",
+          "description": "No ocx.toml exists in the working directory or any parent",
+          "exit_code": 64
+        },
+        {
+          "value": "no_project_in",
+          "description": "The explicitly selected project directory holds no ocx.toml",
+          "exit_code": 64
+        },
+        {
+          "value": "no_signatures_found",
+          "description": "The target has no signature referrers",
+          "exit_code": 79
+        },
+        {
+          "value": "no_usable_bundle",
+          "description": "Referrers exist but none is a recognised Sigstore bundle",
+          "exit_code": 79
+        },
+        {
+          "value": "non_utf8_wire_name",
+          "description": "A local index path is not valid UTF-8",
+          "exit_code": 65
+        },
+        {
+          "value": "noncanonical_platform_key",
+          "description": "ocx.lock records a platform key not in canonical form",
+          "exit_code": 65
+        },
+        {
+          "value": "not_a_manifest",
+          "description": "The registry did not answer with a manifest",
+          "exit_code": 65
+        },
+        {
+          "value": "not_in_index",
+          "description": "The package is not listed in the index",
+          "exit_code": 79
+        },
+        {
+          "value": "observe_raced",
+          "description": "A tag appeared between the two reads of one announce",
+          "exit_code": 75
+        },
+        {
+          "value": "offline_attest_refused",
+          "description": "Attaching was refused because offline mode is on",
+          "exit_code": 81
+        },
+        {
+          "value": "offline_manifest_missing",
+          "description": "Offline mode and the manifest is not stored locally",
+          "exit_code": 81
+        },
+        {
+          "value": "offline_mode",
+          "description": "A network operation was attempted in offline mode",
+          "exit_code": 81
+        },
+        {
+          "value": "offline_sign_refused",
+          "description": "Signing was refused because offline mode is on",
+          "exit_code": 81
+        },
+        {
+          "value": "oidc_pre_check_failed",
+          "description": "The OIDC token failed a client-side check before reaching the certificate authority",
+          "exit_code": 77
+        },
+        {
+          "value": "oidc_token_rejected",
+          "description": "The certificate authority rejected the OIDC token",
+          "exit_code": 80
+        },
+        {
+          "value": "output_write",
+          "description": "Writing the output tree failed",
+          "exit_code": 74
+        },
+        {
+          "value": "owner_id_mismatch",
+          "description": "A supplied owner id disagrees with the forge account",
+          "exit_code": 64
+        },
+        {
+          "value": "owner_unknown",
+          "description": "The forge has no account with this login",
+          "exit_code": 79
+        },
+        {
+          "value": "package_authoring_invalid",
+          "description": "Package metadata cannot be authored as given",
+          "exit_code": 65
+        },
+        {
+          "value": "package_file_io",
+          "description": "Reading or writing a package file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "package_internal",
+          "description": "A package operation failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "package_key_invalid",
+          "description": "A package key is not a valid identifier",
+          "exit_code": 78
+        },
+        {
+          "value": "package_key_missing_registry",
+          "description": "A package key names no registry",
+          "exit_code": 78
+        },
+        {
+          "value": "package_manager_internal_file",
+          "description": "Reading or writing an internal package file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "package_manager_serialization",
+          "description": "A package document could not be serialized",
+          "exit_code": 65
+        },
+        {
+          "value": "package_not_found",
+          "description": "The package does not exist",
+          "exit_code": 79
+        },
+        {
+          "value": "package_serialization",
+          "description": "A package document could not be serialized",
+          "exit_code": 65
+        },
+        {
+          "value": "package_task_failed",
+          "description": "A per-package operation failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "patch_blob_write_failed",
+          "description": "Persisting a patch descriptor blob failed",
+          "exit_code": 74
+        },
+        {
+          "value": "patch_config_invalid",
+          "description": "A patch-tier setting is invalid",
+          "exit_code": 78
+        },
+        {
+          "value": "patch_descriptor_invalid_json",
+          "description": "A patch descriptor is not valid JSON of the expected shape",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_descriptor_too_large",
+          "description": "A patch descriptor exceeds its structural limits",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_descriptor_unsupported_version",
+          "description": "A patch descriptor has a version this build does not understand",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_descriptor_vanished",
+          "description": "A pinned patch descriptor is no longer in the registry",
+          "exit_code": 79
+        },
+        {
+          "value": "patch_discovery_failed",
+          "description": "Discovering patches failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "patch_layer_digest_mismatch",
+          "description": "A patch descriptor layer does not hash to its declared digest",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_layer_size_exceeded",
+          "description": "A patch descriptor layer declares a size above the allowed maximum",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_manifest_digest_mismatch",
+          "description": "A patch descriptor manifest does not hash to its declared digest",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_policy_blocked",
+          "description": "A local policy refused fetching a patch descriptor",
+          "exit_code": 81
+        },
+        {
+          "value": "patch_project_config_unreadable",
+          "description": "The project config patches would freeze into is unreadable",
+          "exit_code": 78
+        },
+        {
+          "value": "patch_snapshot_active",
+          "description": "Patch pins cannot advance while OCX_PATCH_SNAPSHOT is set",
+          "exit_code": 78
+        },
+        {
+          "value": "patch_snapshot_descriptor_missing",
+          "description": "The patch snapshot names a descriptor that is not stored locally",
+          "exit_code": 79
+        },
+        {
+          "value": "patch_snapshot_unsupported_version",
+          "description": "The patch snapshot has a format version this build does not understand",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_unexpected_artifact_type",
+          "description": "A patch descriptor manifest carries an unexpected artifact type",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_unexpected_layer_media_type",
+          "description": "A patch descriptor layer carries an unexpected media type",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_unexpected_manifest",
+          "description": "A patch descriptor manifest has an unexpected shape",
+          "exit_code": 65
+        },
+        {
+          "value": "patch_wrong_layer_count",
+          "description": "A patch descriptor manifest carries other than exactly one layer",
+          "exit_code": 65
+        },
+        {
+          "value": "path_escape",
+          "description": "A relative path is absolute, escapes its root, or is otherwise unsafe to join",
+          "exit_code": 65
+        },
+        {
+          "value": "payload_type_unsupported",
+          "description": "The envelope payload type is not in-toto JSON",
+          "exit_code": 65
+        },
+        {
+          "value": "permission_denied",
+          "description": "The operating system refused access to a file or directory",
+          "exit_code": 77
+        },
+        {
+          "value": "pin_digest_mismatch",
+          "description": "The registry resolved the pinned tag to a different digest",
+          "exit_code": 65
+        },
+        {
+          "value": "pinned_identifier_missing_digest",
+          "description": "An identifier that must be pinned carries no digest",
+          "exit_code": 65
+        },
+        {
+          "value": "plain_http_index_not_allowed",
+          "description": "An index URL uses plain HTTP for a host not allowed to",
+          "exit_code": 78
+        },
+        {
+          "value": "platform_ambiguous",
+          "description": "The source is a single-platform manifest and more than one platform was named",
+          "exit_code": 64
+        },
+        {
+          "value": "platform_required",
+          "description": "The source is a single-platform manifest and no platform was named",
+          "exit_code": 64
+        },
+        {
+          "value": "predicate_not_json",
+          "description": "The predicate file is not JSON",
+          "exit_code": 65
+        },
+        {
+          "value": "predicate_too_large",
+          "description": "The predicate or statement exceeds its size limit",
+          "exit_code": 65
+        },
+        {
+          "value": "predicate_type_mismatch",
+          "description": "The signed predicate type is not the requested one",
+          "exit_code": 65
+        },
+        {
+          "value": "project_already_exists",
+          "description": "ocx.toml already exists at the target path",
+          "exit_code": 64
+        },
+        {
+          "value": "project_env_invalid_key",
+          "description": "ocx.toml sets an invalid environment variable name",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_invalid_separator",
+          "description": "An ocx.toml environment entry has an unusable list separator",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_invalid_value",
+          "description": "An ocx.toml environment entry has a value of the wrong shape",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_path_separator_in_value",
+          "description": "An ocx.toml path value contains the platform path separator",
+          "exit_code": 65
+        },
+        {
+          "value": "project_env_reserved_key",
+          "description": "ocx.toml sets a reserved OCX environment key",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_separator_edged_value",
+          "description": "An ocx.toml list value starts or ends with its separator",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_separator_on_non_list",
+          "description": "An ocx.toml environment entry sets a separator on a non-list value",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_unknown_modifier",
+          "description": "An ocx.toml environment entry names an unknown modifier type",
+          "exit_code": 78
+        },
+        {
+          "value": "project_env_unknown_value_field",
+          "description": "An ocx.toml environment entry table holds an unknown field",
+          "exit_code": 78
+        },
+        {
+          "value": "project_file_too_large",
+          "description": "A project file exceeds the allowed size",
+          "exit_code": 78
+        },
+        {
+          "value": "project_internal_file",
+          "description": "Reading or writing an internal project file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "project_io",
+          "description": "Reading or writing a project file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "project_load_failed",
+          "description": "Loading the project failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "project_locked",
+          "description": "Another process holds the lock on ocx.toml",
+          "exit_code": 75
+        },
+        {
+          "value": "project_manifest_edit_diverged",
+          "description": "The edited ocx.toml no longer matches the staged configuration",
+          "exit_code": 1
+        },
+        {
+          "value": "project_manifest_not_editable",
+          "description": "ocx.toml is not an editable TOML document",
+          "exit_code": 78
+        },
+        {
+          "value": "project_registry_io",
+          "description": "Reading or writing the project registry failed",
+          "exit_code": 74
+        },
+        {
+          "value": "project_resolution_blocked",
+          "description": "A local policy refused resolving a binding",
+          "exit_code": 81
+        },
+        {
+          "value": "project_toml_invalid",
+          "description": "ocx.toml or ocx.lock is not valid TOML of the expected shape",
+          "exit_code": 78
+        },
+        {
+          "value": "project_toml_serialize",
+          "description": "A project file could not be serialized",
+          "exit_code": 78
+        },
+        {
+          "value": "provenance_version_unsupported",
+          "description": "The provenance predicate type is older than SLSA v1.0",
+          "exit_code": 64
+        },
+        {
+          "value": "prune_digest_tag",
+          "description": "A digest was given where prune takes a tag",
+          "exit_code": 64
+        },
+        {
+          "value": "prune_no_index",
+          "description": "No index is configured to check the tags against",
+          "exit_code": 81
+        },
+        {
+          "value": "prune_not_a_prerelease",
+          "description": "The --prerelease value is not a pre-release without a build",
+          "exit_code": 64
+        },
+        {
+          "value": "prune_package_not_bare",
+          "description": "The package argument carries a tag or digest",
+          "exit_code": 64
+        },
+        {
+          "value": "prune_refused_durable",
+          "description": "The index still lists a tag prune would delete, and the tag is durable",
+          "exit_code": 81
+        },
+        {
+          "value": "prune_refused_pending",
+          "description": "The index still lists a tag prune would delete, pending an announce",
+          "exit_code": 75
+        },
+        {
+          "value": "prune_tag_still_present",
+          "description": "A deleted tag is still present in the registry",
+          "exit_code": 75
+        },
+        {
+          "value": "pull_request_unmergeable",
+          "description": "The open announce pull request conflicts with the index",
+          "exit_code": 65
+        },
+        {
+          "value": "push_option_refused",
+          "description": "The forge refused a git push option",
+          "exit_code": 1
+        },
+        {
+          "value": "record_exemption_refused",
+          "description": "The execution-record exemption was refused",
+          "exit_code": 74
+        },
+        {
+          "value": "record_inputs_incomplete",
+          "description": "An execution record frame carries no argv",
+          "exit_code": 1
+        },
+        {
+          "value": "record_name_not_a_filename",
+          "description": "The record name is not a plain filename",
+          "exit_code": 78
+        },
+        {
+          "value": "record_serialize_failed",
+          "description": "Serializing an execution record failed",
+          "exit_code": 74
+        },
+        {
+          "value": "record_sink_symlink",
+          "description": "The execution-record sink is a symlink",
+          "exit_code": 78
+        },
+        {
+          "value": "record_template_not_unique",
+          "description": "The record name template has no varying component",
+          "exit_code": 78
+        },
+        {
+          "value": "record_template_unknown_placeholder",
+          "description": "The record name template names an unknown placeholder",
+          "exit_code": 78
+        },
+        {
+          "value": "record_write_failed",
+          "description": "Writing an execution record failed",
+          "exit_code": 74
+        },
+        {
+          "value": "records_required_without_sink",
+          "description": "Execution records are required but no sink is configured",
+          "exit_code": 78
+        },
+        {
+          "value": "referrers_unsupported",
+          "description": "The registry supports neither the OCI Referrers API nor a referrers fallback tag",
+          "exit_code": 82
+        },
+        {
+          "value": "registry_auth_failed",
+          "description": "The registry rejected the request's authentication",
+          "exit_code": 80
+        },
+        {
+          "value": "registry_delete_unsupported",
+          "description": "The registry does not delete tags",
+          "exit_code": 82
+        },
+        {
+          "value": "registry_transient",
+          "description": "A registry operation failed in a way a retry may clear",
+          "exit_code": 75
+        },
+        {
+          "value": "registry_unavailable",
+          "description": "A registry operation failed in a way a retry does not clear",
+          "exit_code": 69
+        },
+        {
+          "value": "registry_unreachable",
+          "description": "The registry could not be reached",
+          "exit_code": 69
+        },
+        {
+          "value": "rekor_inclusion_proof_absent",
+          "description": "The bundle carries no transparency log inclusion proof",
+          "exit_code": 65
+        },
+        {
+          "value": "rekor_set_absent_tsa_present",
+          "description": "The bundle has a timestamp authority stamp but no transparency log timestamp, which this build cannot verify",
+          "exit_code": 65
+        },
+        {
+          "value": "rekor_set_invalid",
+          "description": "The transparency log timestamp does not verify against the log key",
+          "exit_code": 65
+        },
+        {
+          "value": "rekor_set_malformed",
+          "description": "The transparency log answered with an unusable timestamp or body",
+          "exit_code": 65
+        },
+        {
+          "value": "rekor_upload_required_for_keyless",
+          "description": "Skipping the transparency log upload requires a signing key",
+          "exit_code": 64
+        },
+        {
+          "value": "rendered_config_too_large",
+          "description": "Persisting the extra CA bundle would exceed the config size limit",
+          "exit_code": 78
+        },
+        {
+          "value": "repository_escapes_index_home",
+          "description": "An index repository path escapes its source directory",
+          "exit_code": 65
+        },
+        {
+          "value": "repository_mismatch",
+          "description": "A re-claim supplied a repository other than the committed one",
+          "exit_code": 65
+        },
+        {
+          "value": "repository_not_found",
+          "description": "The registry has no such repository",
+          "exit_code": 79
+        },
+        {
+          "value": "required_path_missing",
+          "description": "A required path does not exist",
+          "exit_code": 79
+        },
+        {
+          "value": "reserved_env_key",
+          "description": "A package env entry sets a reserved OCX key",
+          "exit_code": 65
+        },
+        {
+          "value": "reserved_group_name",
+          "description": "ocx.toml declares a reserved group name",
+          "exit_code": 78
+        },
+        {
+          "value": "resolve_timeout",
+          "description": "Resolving a binding timed out",
+          "exit_code": 75
+        },
+        {
+          "value": "retired_env",
+          "description": "A retired OCX environment variable is set",
+          "exit_code": 78
+        },
+        {
+          "value": "root_name_mismatch",
+          "description": "The committed index root names a different package",
+          "exit_code": 65
+        },
+        {
+          "value": "root_repository_mismatch",
+          "description": "A derived index root points at another repository",
+          "exit_code": 65
+        },
+        {
+          "value": "same_filesystem_check_failed",
+          "description": "Probing whether two paths share a filesystem failed",
+          "exit_code": 74
+        },
+        {
+          "value": "sbom_media_type_unsupported",
+          "description": "An unsigned SBOM referrer declares a media type outside the SBOM set",
+          "exit_code": 65
+        },
+        {
+          "value": "selection_ambiguous",
+          "description": "The selection matches more than one package",
+          "exit_code": 65
+        },
+        {
+          "value": "self_fork_refused",
+          "description": "The fork namespace is the upstream's own",
+          "exit_code": 64
+        },
+        {
+          "value": "separator_edged_list_value",
+          "description": "A package list value starts or ends with its separator",
+          "exit_code": 65
+        },
+        {
+          "value": "session_path_not_absolute",
+          "description": "A session PATH entry is not an absolute path",
+          "exit_code": 78
+        },
+        {
+          "value": "session_path_not_utf8",
+          "description": "A session PATH entry is not valid UTF-8",
+          "exit_code": 78
+        },
+        {
+          "value": "session_path_unencodable",
+          "description": "A session PATH entry contains a character the host format cannot store",
+          "exit_code": 78
+        },
+        {
+          "value": "setup_bootstrap_failed",
+          "description": "Installing ocx into the content store failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "setup_io",
+          "description": "Reading or writing a setup file failed",
+          "exit_code": 74
+        },
+        {
+          "value": "setup_profile_subprocess",
+          "description": "A shell subprocess setup needs could not run",
+          "exit_code": 69
+        },
+        {
+          "value": "shell_section_in_project",
+          "description": "ocx.toml declares a [shell] section, which only config.toml may hold",
+          "exit_code": 78
+        },
+        {
+          "value": "shim_claim_unfulfilled",
+          "description": "A declared interface name does not exist in the package",
+          "exit_code": 65
+        },
+        {
+          "value": "shim_name_invalid",
+          "description": "A shim name is not a valid binary name",
+          "exit_code": 65
+        },
+        {
+          "value": "shim_name_not_claimed",
+          "description": "A shim name is not an interface name the package declares",
+          "exit_code": 65
+        },
+        {
+          "value": "shim_names_not_enumerable",
+          "description": "The package's interface names cannot be enumerated",
+          "exit_code": 65
+        },
+        {
+          "value": "short_blob_read",
+          "description": "The registry ended a blob download early",
+          "exit_code": 75
+        },
+        {
+          "value": "sidecar_requires_signature",
+          "description": "A sidecar signature format was requested without a signing identity",
+          "exit_code": 64
+        },
+        {
+          "value": "signature_invalid",
+          "description": "The signature does not verify over the subject digest",
+          "exit_code": 65
+        },
+        {
+          "value": "simple_signing_claim_unsupported",
+          "description": "The simple signing payload declares an unsupported claim type",
+          "exit_code": 65
+        },
+        {
+          "value": "singleflight_abandoned",
+          "description": "The leader of shared in-flight work stopped without a result",
+          "exit_code": 1
+        },
+        {
+          "value": "singleflight_capacity_exceeded",
+          "description": "Too many distinct operations were in flight at once",
+          "exit_code": 75
+        },
+        {
+          "value": "singleflight_failed",
+          "description": "Shared in-flight work failed with an unclassified cause",
+          "exit_code": 1
+        },
+        {
+          "value": "singleflight_timeout",
+          "description": "Waiting for shared in-flight work timed out",
+          "exit_code": 75
+        },
+        {
+          "value": "ssrf_forbidden_target",
+          "description": "A registry host resolves to an address outside the trusted set",
+          "exit_code": 78
+        },
+        {
+          "value": "statement_subject_absent",
+          "description": "The signed statement carries no subjects",
+          "exit_code": 65
+        },
+        {
+          "value": "statement_subject_mismatch",
+          "description": "No subject in the signed statement binds the target digest",
+          "exit_code": 65
+        },
+        {
+          "value": "statement_subject_weak_algorithm",
+          "description": "A statement subject carries no sha256 digest",
+          "exit_code": 65
+        },
+        {
+          "value": "statement_type_unsupported",
+          "description": "The statement type is not an accepted in-toto statement type",
+          "exit_code": 65
+        },
+        {
+          "value": "subject_digest_mismatch",
+          "description": "The registry served subject bytes that do not hash to the resolved digest",
+          "exit_code": 65
+        },
+        {
+          "value": "subject_digest_unsupported",
+          "description": "The subject digest is not sha256",
+          "exit_code": 65
+        },
+        {
+          "value": "symlink_not_found",
+          "description": "The package has no candidate or current symlink to resolve",
+          "exit_code": 79
+        },
+        {
+          "value": "symlink_requires_tag",
+          "description": "Symlink resolution needs a tag, not a digest",
+          "exit_code": 65
+        },
+        {
+          "value": "symlink_walk_io",
+          "description": "Inspecting a destination path component failed",
+          "exit_code": 74
+        },
+        {
+          "value": "system_config_invalid",
+          "description": "The system-wide config file is unusable",
+          "exit_code": 78
+        },
+        {
+          "value": "tag_not_an_image_index",
+          "description": "A tag to announce does not point at an image index",
+          "exit_code": 65
+        },
+        {
+          "value": "tag_not_found",
+          "description": "The registry has no such tag",
+          "exit_code": 79
+        },
+        {
+          "value": "target_not_an_index",
+          "description": "A platform was requested but the reference names a single manifest",
+          "exit_code": 79
+        },
+        {
+          "value": "target_not_found",
+          "description": "The reference resolves to no manifest for the requested platform",
+          "exit_code": 79
+        },
+        {
+          "value": "task_panicked",
+          "description": "A package task panicked",
+          "exit_code": 1
+        },
+        {
+          "value": "template_ambiguous_dependency_ref",
+          "description": "An interpolation token names an ambiguous dependency",
+          "exit_code": 65
+        },
+        {
+          "value": "template_ambiguous_self_env_ref",
+          "description": "An interpolation token names an env var declared more than once",
+          "exit_code": 65
+        },
+        {
+          "value": "template_dependency_not_installed",
+          "description": "An interpolation token names a dependency that is not installed",
+          "exit_code": 79
+        },
+        {
+          "value": "template_disallowed_token",
+          "description": "An interpolation token is not permitted in this field",
+          "exit_code": 65
+        },
+        {
+          "value": "template_modifier_not_applicable",
+          "description": "An interpolation modifier does not apply to its token",
+          "exit_code": 65
+        },
+        {
+          "value": "template_undefined_self_env_ref",
+          "description": "An interpolation token names an env var not declared before it",
+          "exit_code": 65
+        },
+        {
+          "value": "template_unknown_dependency_ref",
+          "description": "An interpolation token names an unknown dependency",
+          "exit_code": 65
+        },
+        {
+          "value": "template_unknown_field",
+          "description": "An interpolation token names an unknown field",
+          "exit_code": 65
+        },
+        {
+          "value": "template_unknown_modifier",
+          "description": "An interpolation token carries an unknown modifier",
+          "exit_code": 65
+        },
+        {
+          "value": "template_unknown_token",
+          "description": "An interpolation token is not recognised",
+          "exit_code": 65
+        },
+        {
+          "value": "template_value_too_large",
+          "description": "An interpolated value exceeds its size budget",
+          "exit_code": 65
+        },
+        {
+          "value": "tlog_binding_mismatch",
+          "description": "The transparency log entry does not match the received envelope",
+          "exit_code": 65
+        },
+        {
+          "value": "too_many_attestations",
+          "description": "The target has more attestation referrers than the candidate limit",
+          "exit_code": 65
+        },
+        {
+          "value": "toolchain_dir_group_or_world_writable",
+          "description": "The toolchain_dir directory is writable by other users",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_inaccessible",
+          "description": "The toolchain_dir setting names a path that cannot be inspected",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_inside_global_home",
+          "description": "The toolchain_dir setting resolves inside the global toolchain home",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_is_containment_anchor",
+          "description": "The toolchain_dir setting names the home directory or OCX_HOME itself",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_no_containment_anchor",
+          "description": "No home directory or OCX_HOME exists to contain toolchain_dir",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_not_a_directory",
+          "description": "The toolchain_dir setting names something other than a directory",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_not_owner_owned",
+          "description": "The toolchain_dir directory is not owned by the current user",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_outside_home",
+          "description": "The toolchain_dir setting resolves outside the home directory and OCX_HOME",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_parent_component",
+          "description": "The toolchain_dir setting contains a '..' component",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_relative",
+          "description": "The toolchain_dir setting is a relative path",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_system_prefix",
+          "description": "The toolchain_dir setting resolves to a system location",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_dir_unexpandable",
+          "description": "The toolchain_dir setting starts with a '~' that cannot be expanded",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_home_not_absolute",
+          "description": "The toolchain home is not an absolute path",
+          "exit_code": 65
+        },
+        {
+          "value": "toolchain_name_control_character",
+          "description": "A toolchain group or entry name contains a control character",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_name_empty",
+          "description": "A toolchain group or entry name is empty",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_name_path_prefix",
+          "description": "A toolchain group or entry name carries a path prefix",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_name_relative",
+          "description": "A toolchain group or entry name is a relative path component",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_name_separator",
+          "description": "A toolchain group or entry name contains a path separator",
+          "exit_code": 78
+        },
+        {
+          "value": "toolchain_name_trailing_dot_or_space",
+          "description": "A toolchain group or entry name ends with a dot or a space",
+          "exit_code": 78
+        },
+        {
+          "value": "transparency_body_mismatch",
+          "description": "The transparency log entry belongs to another subject",
+          "exit_code": 65
+        },
+        {
+          "value": "transparency_log_key_unavailable",
+          "description": "The transparency log answered its public-key request with a client error",
+          "exit_code": 69
+        },
+        {
+          "value": "transparency_log_response_invalid",
+          "description": "The transparency log answered with a public-key body that is oversize or not text",
+          "exit_code": 65
+        },
+        {
+          "value": "transparency_log_unavailable",
+          "description": "The transparency log is unavailable",
+          "exit_code": 75
+        },
+        {
+          "value": "transparency_log_unreachable",
+          "description": "The transparency log cannot be reached and a rerun will not change that",
+          "exit_code": 69
+        },
+        {
+          "value": "traversal_limit_exceeded",
+          "description": "Copying a manifest graph exceeded a traversal limit",
+          "exit_code": 65
+        },
+        {
+          "value": "trust_policy_invalid",
+          "description": "A trust policy entry is malformed",
+          "exit_code": 78
+        },
+        {
+          "value": "trust_root_load",
+          "description": "Trust material failed to load",
+          "exit_code": 78
+        },
+        {
+          "value": "trust_root_unavailable",
+          "description": "The trust root could not be loaded",
+          "exit_code": 78
+        },
+        {
+          "value": "trust_root_unreadable",
+          "description": "A trust root file named by the operator could not be read",
+          "exit_code": 74
+        },
+        {
+          "value": "trusted_root_invalid",
+          "description": "The named file is not a usable Sigstore trusted root",
+          "exit_code": 78
+        },
+        {
+          "value": "trusted_root_read_failed",
+          "description": "Reading the trusted root the payload names failed",
+          "exit_code": 74
+        },
+        {
+          "value": "unclaimed_package",
+          "description": "The package has no index entry to announce into",
+          "exit_code": 79
+        },
+        {
+          "value": "undeclared_binary",
+          "description": "A scanned executable is not declared in binaries",
+          "exit_code": 65
+        },
+        {
+          "value": "undeclared_libc",
+          "description": "A binary needs a libc the package's platform does not declare",
+          "exit_code": 65
+        },
+        {
+          "value": "unexpected_artifact_type",
+          "description": "An artifact carries an unexpected artifact type",
+          "exit_code": 65
+        },
+        {
+          "value": "unexpected_layer_media_type",
+          "description": "A layer carries an unexpected media type",
+          "exit_code": 65
+        },
+        {
+          "value": "unexpected_manifest_type",
+          "description": "An image index arrived where an image manifest was expected",
+          "exit_code": 65
+        },
+        {
+          "value": "unfollowed_redirect",
+          "description": "The registry answered with a redirect the transport did not follow",
+          "exit_code": 65
+        },
+        {
+          "value": "unknown_compare_status",
+          "description": "A forge compare returned a status the client does not model",
+          "exit_code": 1
+        },
+        {
+          "value": "unknown_env_modifier",
+          "description": "A package env entry declares a type this build does not know",
+          "exit_code": 65
+        },
+        {
+          "value": "unknown_group",
+          "description": "A group filter names a group ocx.toml does not declare",
+          "exit_code": 64
+        },
+        {
+          "value": "unknown_group_section",
+          "description": "A group table holds an unknown key",
+          "exit_code": 78
+        },
+        {
+          "value": "unparseable_elf",
+          "description": "A file carries an ELF header but cannot be parsed",
+          "exit_code": 65
+        },
+        {
+          "value": "unrecognized_interpreter",
+          "description": "A binary names an ELF interpreter no libc family claims",
+          "exit_code": 65
+        },
+        {
+          "value": "unresolved_tag",
+          "description": "A tag to announce does not exist in the registry",
+          "exit_code": 79
+        },
+        {
+          "value": "unsafe_destination",
+          "description": "The registry named a destination the transport refuses",
+          "exit_code": 65
+        },
+        {
+          "value": "unsigned_rejected_by_policy",
+          "description": "An unsigned document was refused because a signature is required",
+          "exit_code": 77
+        },
+        {
+          "value": "unsigned_type_unsupported",
+          "description": "An unsigned attach names a predicate type with no SBOM media type",
+          "exit_code": 64
+        },
+        {
+          "value": "unsupported_declaration_hash_version",
+          "description": "ocx.lock records a declaration hash version this build does not understand",
+          "exit_code": 78
+        },
+        {
+          "value": "unsupported_index_format",
+          "description": "The index format version is not supported",
+          "exit_code": 65
+        },
+        {
+          "value": "unsupported_key_backend",
+          "description": "A key reference names a recognised key backend this build does not implement",
+          "exit_code": 82
+        },
+        {
+          "value": "unsupported_lock_version",
+          "description": "ocx.lock has a version this build does not understand",
+          "exit_code": 78
+        },
+        {
+          "value": "unsupported_logo_format",
+          "description": "The logo file has an unsupported format",
+          "exit_code": 65
+        },
+        {
+          "value": "unsupported_media_type",
+          "description": "A manifest carries an unsupported media type",
+          "exit_code": 65
+        },
+        {
+          "value": "unsupported_tlog_entry_kind",
+          "description": "The transparency log entry kind is not accepted",
+          "exit_code": 65
+        },
+        {
+          "value": "unyank_tag_not_curated",
+          "description": "A tag to unyank is not a curated tag",
+          "exit_code": 1
+        },
+        {
+          "value": "update_section_in_project",
+          "description": "ocx.toml declares an [update] section, which only config.toml may hold",
+          "exit_code": 78
+        },
+        {
+          "value": "usage",
+          "description": "The command was invoked with arguments it cannot act on",
+          "exit_code": 64
+        },
+        {
+          "value": "users_api_unavailable",
+          "description": "The forge offers no users API to resolve owners through",
+          "exit_code": 64
+        },
+        {
+          "value": "version_invalid",
+          "description": "A package version does not parse",
+          "exit_code": 65
+        },
+        {
+          "value": "walked_digest_mismatch",
+          "description": "A source answered a digest request with different content",
+          "exit_code": 65
+        },
+        {
+          "value": "wrong_layer_count",
+          "description": "An artifact carries other than exactly one layer",
+          "exit_code": 65
+        },
+        {
+          "value": "yank_tag_not_curated",
+          "description": "A tag to yank is not a curated tag",
+          "exit_code": 1
+        },
+        {
+          "value": "yank_unyank_overlap",
+          "description": "The same tag is both yanked and unyanked",
+          "exit_code": 1
+        },
+        {
+          "value": "yanked_refused",
+          "description": "The resolved version is yanked",
+          "exit_code": 65
+        }
+      ]
+    }
+  },
+  "$id": "https://ocx.sh/schemas/errors/v2.json"
+}

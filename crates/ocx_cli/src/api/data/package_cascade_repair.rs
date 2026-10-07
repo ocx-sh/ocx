@@ -23,7 +23,9 @@ use crate::api::Printable;
 // never covered the alias.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct RepairEntry {
+    /// The package's findings, the same report `cascade check` prints.
     pub report: CascadeReport,
+    /// The alias writes this run planned.
     pub planned: Vec<PlannedWrite>,
     /// Empty for a preview run: nothing was attempted.
     pub outcomes: Vec<RepairOutcome>,
@@ -35,16 +37,17 @@ pub struct RepairEntry {
 
 /// What `cascade repair` did, one entry per package in input order.
 ///
-/// Each of `entries` carries the finding report, the planned writes, their
-/// outcomes and the `tags` this run left present; `dry_run` and `tags_file`
-/// (`null` when `--tags-file` was not passed) are run-wide.
+/// `dry_run` and `tags_file` are run-wide.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeRepair {
-    pub entries: Vec<RepairEntry>,
+    /// One entry per package: the finding report, the planned writes, their outcomes and the `tags` this run
+    /// left present.
+    pub items: Vec<RepairEntry>,
     /// True when nothing was written because the run was a preview.
     pub dry_run: bool,
-    /// Where `--tags-file` was written, when the flag was passed.
+    /// Where `--tags-file` was written; absent when the flag was not passed.
     // The follow-up hint can only name the file the user actually asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags_file: Option<PathBuf>,
     /// Packages an index source claims but has no root for yet, so the index layer compared nothing;
     /// plain only, to tell that silence from "agrees". Not serialized: the JSON key set is pinned.
@@ -55,7 +58,7 @@ pub struct PackageCascadeRepair {
 impl PackageCascadeRepair {
     /// A run in which no package needed a write: a clean run, or a preview with nothing to repair.
     pub fn from_reports(reports: Vec<CascadeReport>, dry_run: bool) -> Self {
-        let entries = reports
+        let items = reports
             .into_iter()
             .map(|report| RepairEntry {
                 planned: Vec::new(),
@@ -65,7 +68,7 @@ impl PackageCascadeRepair {
             })
             .collect();
         Self {
-            entries,
+            items,
             dry_run,
             tags_file: None,
             index_layer_skipped: Vec::new(),
@@ -76,7 +79,7 @@ impl PackageCascadeRepair {
     /// package, or "refused" reads like "never planned".
     fn table_rows(&self) -> Vec<[String; 4]> {
         let mut rows = Vec::new();
-        for entry in &self.entries {
+        for entry in &self.items {
             let report = &entry.report;
             let package = report
                 .logical
@@ -104,7 +107,7 @@ impl PackageCascadeRepair {
                         if *verified { "written" } else { "written-unverified" },
                         written_detail(digest, dropped),
                     ),
-                    WriteOutcome::Refused(reason) => ("refused", refusal_detail(reason)),
+                    WriteOutcome::Refused { reason } => ("refused", refusal_detail(reason)),
                     WriteOutcome::Raced { expected, live } => ("raced", raced_detail(expected.as_ref(), live.as_ref())),
                     WriteOutcome::Failed { message } => ("failed", message.clone()),
                 };
@@ -117,7 +120,7 @@ impl PackageCascadeRepair {
     /// True when this run put at least one alias write on the wire.
     fn wrote_anything(&self) -> bool {
         !self.dry_run
-            && self.entries.iter().any(|entry| {
+            && self.items.iter().any(|entry| {
                 entry
                     .outcomes
                     .iter()
@@ -129,7 +132,7 @@ impl PackageCascadeRepair {
     /// only found staleness does not, and a preview gets neither.
     fn print_follow_up_hints(&self, data: &ocx_console::DataInterface) {
         let wrote = self.wrote_anything();
-        for entry in &self.entries {
+        for entry in &self.items {
             let report = &entry.report;
             let stale_index = !report.index_findings.is_empty();
             if !wrote && !stale_index {
@@ -162,6 +165,9 @@ impl PackageCascadeRepair {
 }
 
 impl Printable for PackageCascadeRepair {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PackageCascadeRepair";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         let mut columns: [Vec<Cell>; 4] = Default::default();
@@ -174,7 +180,7 @@ impl Printable for PackageCascadeRepair {
         }
         // The Package column is dropped for a single-package run, where it would repeat one value.
         let headers: [ocx_console::Column; 4] = ["Package".into(), "Tag".into(), "Status".into(), "Detail".into()];
-        let first = usize::from(self.entries.len() < 2);
+        let first = usize::from(self.items.len() < 2);
         data.print_table(&headers[first..], &columns[first..]);
 
         if self.dry_run {
@@ -288,9 +294,9 @@ mod tests {
         }
     }
 
-    fn repair(entries: Vec<RepairEntry>, dry_run: bool) -> PackageCascadeRepair {
+    fn repair(items: Vec<RepairEntry>, dry_run: bool) -> PackageCascadeRepair {
         PackageCascadeRepair {
-            entries,
+            items,
             dry_run,
             tags_file: None,
             index_layer_skipped: Vec::new(),
@@ -305,9 +311,11 @@ mod tests {
                 outcome("3", written(false, &[])),
                 outcome(
                     "2",
-                    WriteOutcome::Refused(Unrepairable::WouldEmptyIndex {
-                        tag: AliasTag::Version(version("2")),
-                    }),
+                    WriteOutcome::Refused {
+                        reason: Unrepairable::WouldEmptyIndex {
+                            tag: AliasTag::Version(version("2")),
+                        },
+                    },
                 ),
                 outcome(
                     "1",
@@ -404,7 +412,7 @@ mod tests {
     #[test]
     fn a_preview_reports_its_plan_instead_of_outcomes() {
         let mut clean = PackageCascadeRepair::from_reports(vec![report()], true);
-        clean.entries[0].planned = vec![PlannedWrite {
+        clean.items[0].planned = vec![PlannedWrite {
             tag: AliasTag::Version(version("3.28")),
             index: ocx_oci::ImageIndex {
                 schema_version: 2,
@@ -441,11 +449,11 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["dry_run", "entries", "tags_file"],
-            "pin the field set a --format json consumer actually parses: {value}"
+            vec!["dry_run", "items"],
+            "pin the field set a --format json consumer actually parses; no `--tags-file`, no key: {value}"
         );
 
-        let mut entry_keys: Vec<&str> = value["entries"][0]
+        let mut entry_keys: Vec<&str> = value["items"][0]
             .as_object()
             .expect("each entry is an object")
             .keys()
@@ -457,6 +465,28 @@ mod tests {
             vec!["outcomes", "planned", "report", "tags"],
             "one vocabulary per document: the entry's tag list is `tags`, and the run-wide \
              destination beside it is `tags_file` - never `announce_tags` next to either"
+        );
+    }
+
+    #[test]
+    fn json_outcomes_are_type_tagged_and_a_refusal_nests_its_reason() {
+        let refused = WriteOutcome::Refused {
+            reason: Unrepairable::WouldEmptyIndex {
+                tag: AliasTag::Version(version("2")),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&refused).unwrap(),
+            serde_json::json!({"type": "refused", "reason": {"type": "would_empty_index", "tag": "2"}})
+        );
+        let raced = WriteOutcome::Raced {
+            expected: None,
+            live: Some(digest()),
+        };
+        assert_eq!(
+            serde_json::to_value(&raced).unwrap(),
+            serde_json::json!({"type": "raced", "live": digest().to_string()}),
+            "the side that never held the tag is omitted, never null"
         );
     }
 

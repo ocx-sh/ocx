@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "Hidden `package describe` is removed before its named removal release (99.0).",
+  "findings": [
+    {
+      "code": "G01",
+      "pointer": "/root/commands/0/commands/2",
+      "subjects": [
+        "package describe"
+      ]
+    }
+  ]
+}

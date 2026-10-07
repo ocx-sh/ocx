@@ -20,10 +20,6 @@ const LOCK_SCOPE: &str = "config-edit";
 /// How long an edit waits behind another editor before giving up.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Test seam: hold the lock this many milliseconds between read and write.
-#[cfg(any(test, feature = "__testing"))]
-const HOLD_OVERRIDE: &str = "__OCX_TESTING_CONFIG_EDIT_HOLD_MS";
-
 /// What an [`edit`] did to the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditOutcome {
@@ -34,10 +30,15 @@ pub enum EditOutcome {
 }
 
 /// Why an `edit` did not land.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum EditError {
     /// The directory, the lock, the read or the atomic write failed.
     #[error("I/O error for {}", path.display())]
+    #[exit(
+        IoError,
+        slug = "config_edit_io",
+        summary = "Reading or writing the config file being edited failed"
+    )]
     Io {
         /// The path that failed.
         path: PathBuf,
@@ -47,12 +48,22 @@ pub enum EditError {
     },
     /// Another `ocx` held the edit lock past the timeout.
     #[error("{} is locked by another process", path.display())]
+    #[exit(
+        TempFail,
+        slug = "config_edit_locked",
+        summary = "Another process holds the lock on the config file being edited"
+    )]
     Locked {
         /// The `config.toml` the edit waited for — never the hashed lock file.
         path: PathBuf,
     },
     /// The file on disk is not TOML; it is left exactly as it was.
     #[error("{} does not parse as TOML", path.display())]
+    #[exit(
+        IoError,
+        slug = "config_edit_parse",
+        summary = "The config file being edited does not parse as TOML"
+    )]
     Parse {
         /// The file that would not parse.
         path: PathBuf,
@@ -62,6 +73,11 @@ pub enum EditError {
     },
     /// The file parses but has a shape the closure cannot edit; it is left as it was.
     #[error("{}: {reason}", path.display())]
+    #[exit(
+        IoError,
+        slug = "config_edit_malformed",
+        summary = "The config file being edited has a shape the edit cannot apply to"
+    )]
     Malformed {
         /// The file that was refused.
         path: PathBuf,
@@ -72,6 +88,11 @@ pub enum EditError {
     #[error(
         "editing {} would leave it at {bytes} bytes, over the {MAX_CONFIG_SIZE}-byte config limit",
         path.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "config_edit_too_large",
+        summary = "The config file being edited exceeds the allowed size"
     )]
     TooLarge {
         /// The `config.toml` the write was refused for.
@@ -214,8 +235,12 @@ where
 
     let rendered = apply(path, &original)?;
 
+    // Test seam: hold the lock this many milliseconds between read and write.
     #[cfg(any(test, feature = "__testing"))]
-    if let Some(millis) = ocx_util::env::var(HOLD_OVERRIDE).and_then(|value| value.parse().ok()) {
+    if let Some(millis) = ocx_env::__OCX_TESTING_CONFIG_EDIT_HOLD_MS
+        .get()
+        .and_then(|value| value.parse().ok())
+    {
         std::thread::sleep(Duration::from_millis(millis));
     }
 

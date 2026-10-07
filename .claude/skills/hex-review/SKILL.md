@@ -1,6 +1,6 @@
 ---
 name: hex-review
-description: Tiered adversarial review orchestrator for a working tree, branch diff, pull request, or plan/markdown artifact before it lands on main — a staged reviewer panel (spec, quality, security, performance, docs), root-cause analysis, and an optional cross-model adversarial gate scale with diff size via tier (low|medium|high|xhigh|max, auto by default). Use for pre-merge checks, code review, branch or PR review, diff review, plan or ADR review, adversarial review, root-cause analysis, or any "review this before I merge" request. Never edits the code or diff under review, and never commits — its writes are the plan's Status block, an append-only convergence check, and — on an approved, converged fold — the resolved spec file and a fold receipt; the fix loop is /hex-execute's job.
+description: Tiered adversarial review orchestrator for a working tree, branch diff, pull request, or plan/markdown artifact before it lands on main — a staged reviewer panel (spec, quality, security, performance, docs), root-cause analysis, and a cross-model adversarial pass (codex, medium and up) scale with diff size via tier (low|medium|high|xhigh|max, auto by default). Use for pre-merge checks, code review, branch or PR review, diff review, plan or ADR review, adversarial review, root-cause analysis, or any "review this before I merge" request. Never edits the code or diff under review, and never commits — its writes are the plan's Status block, an append-only convergence check, and — on an approved, converged fold — the resolved spec file and a fold receipt; the fix loop is /hex-execute's job.
 license: Apache-2.0
 metadata:
   summary: Tiered swarm review — diff or artifact to verdict via adversarial reviewer panel
@@ -13,13 +13,16 @@ metadata:
 Thin dispatcher. It resolves the review target and baseline, classifies the
 diff's tier, resolves overlays, runs the single meta-plan approval gate,
 announces the resolved config, and hands off to the matching tier file.
-Unlike `hex-plan` and `hex-execute`, hex-review never edits its own output
-or loops on it — the reviewer panel runs **once** per invocation and
-reports; iterating on the findings is
+hex-review never edits its own output or loops on it — the reviewer panel
+runs **once** per invocation and reports; applying the findings is
 [`/hex-execute`'s job](../hex-core/references/loop.md#the-review-fix-loop).
 The phase plans live in the five `tier-<tier>.md` files; the shared vocabulary (tiers, worker roles, model classes,
 the memory file) lives in the `hex-core` reference library and is **linked
 here, never copied**.
+
+**Loop mode** — the caller is `/hex-execute` or `/hex-loop`, not a human.
+It runs autonomously: no gate prompt, no question, ever (step 5). The report
+and the findings go back to the caller.
 
 Shared contracts:
 [`protocol.md`](../hex-core/references/protocol.md) ·
@@ -40,10 +43,11 @@ If `hex-core` is not installed: `grim add ghcr.io/michael-herwig/arcana/hex-core
   classifier never emits it
   ([`protocol.md`](../hex-core/references/protocol.md#tier-grammar)).
 - **target** (one of):
-  - empty — the **working tree**: uncommitted changes (staged + unstaged)
-    against `HEAD`. If the working tree is clean, fall back to the current
-    branch's diff against the resolved baseline and say so in the
-    announce block.
+  - empty — in loop mode, `anchor..HEAD` (the plan's `Reviewed:` anchor when
+    valid, else the resolved baseline; step 2). Otherwise the **working
+    tree**: uncommitted changes (staged + unstaged) against `HEAD`. If the
+    working tree is clean, fall back to the current branch's diff against the
+    resolved baseline and say so in the announce block.
   - a **branch name** — diffed against the resolved baseline.
   - `<N>` / `#<N>` / `PR <N>` / `pull/<N>` / a full GitHub PR URL — an
     explicit pull request.
@@ -122,7 +126,7 @@ or halt the same way.
 **Federation pre-flight (C-320).** For a federated target — one tracing to a
 plan that carries a `Repo` column — resolve nothing about the union scope until
 every participating repo is proven reachable. Run
-[C-303's pre-flight](../hex-core/references/worktree.md#worktree-work-package-mechanics)
+[C-303's pre-flight](../hex-core/references/worktree.md#pipeline-worktree-mechanics)
 in its **read-only** form for **every distinct `Repo` value the plan uses** —
 clauses (i) `--show-toplevel` and (ii) `--git-common-dir`, plus a
 `status --porcelain` read check — and **halt** with the same `Error:`/`Fix:`
@@ -139,10 +143,11 @@ checked.
 
 Read [`classify.md`](classify.md). For a diff target, compute file count,
 lines changed, and areas touched once, then apply its tier signals,
-structural markers, and overlay triggers. It emits a candidate tier
-(**only** `low`, `medium`, `high`, or `xhigh`), a confidence flag, and an overlay
-set. Low confidence forces the gate in step 5. Never ask a mid-flow
-question during classification — ambiguity is resolved at the single gate.
+structural markers, and overlay triggers. It emits the lowest tier whose
+limits all hold (**only** `low`, `medium`, `high`, or `xhigh`), a confidence
+flag, and an overlay set. Low confidence forces the gate in step 5 (not in
+loop mode). Never ask a mid-flow question during classification —
+ambiguity is resolved at the single gate.
 
 ### 4. Resolve overlays
 
@@ -155,7 +160,8 @@ flags. Later wins; **user flags always override** (see
 
 Exactly one gate, before any worker launches
 ([`protocol.md`](../hex-core/references/protocol.md#the-meta-plan-approval-gate)).
-Its weight scales:
+**Loop mode never blocks here:** announce the resolved config (step 6) and
+proceed at every tier, low confidence included. Otherwise its weight scales:
 
 - **Confident `low` / `medium` / `high`** (an explicit user tier always counts as
   confident — the classifier never ran) — announce the resolved config (step 6)
@@ -181,14 +187,15 @@ hex-review
   Target:    HEAD (branch: feature/export)
   Overlays:  breadth=full                     (tier baseline)
              rca=on                           (tier baseline)
-             adversary=on                     (classifier: dependency-manifest change)
+             adversary=on                     (tier baseline)
   Spawn set:
-    reviewer: spec (post-implementation)      (tier baseline)
-    reviewer: quality (test-coverage)         (tier baseline)
+    reviewer: spec (post-implementation)      (tier baseline, per pipeline)
+    reviewer: quality (test-coverage)         (tier baseline, per pipeline)
+    reviewer: spec (seams)                    (tier baseline, 2+ pipelines)
     reviewer: quality                         (tier baseline)
     reviewer: security                        (classifier: auth path touched)
     doc-reviewer                              (classifier: CLI flag doc trigger)
-  Models:    fast-balanced default; reviewer:security → deep-reasoning  (models.md)
+  Models:    standard, all seats                (models.md)
   Adversary: codex-adversary, code-diff scope  (hex.md preference)
   Degraded:  no — subagent spawning available
 ```
@@ -235,21 +242,34 @@ Roles are indexed in [`workers.md`](../hex-core/references/workers.md);
 the orchestrator loads a full persona (spawn-prompt template, output
 contract) only for roles in the resolved spawn set
 ([spawn-selection precedence](../hex-core/references/protocol.md#spawn-selection-precedence)).
-The model class for each role × tier is in
-[`models.md`](../hex-core/references/models.md). This table maps roles to
-review stages; the tier files set the actual counts and firing conditions.
+This table maps roles to review stages; the tier files set the actual counts
+and firing conditions.
+
+**Seats.**
+
+- **Class.** Every seat is `standard`
+  ([`models.md`](../hex-core/references/models.md)) at every tier. Tier scales
+  the seat count only. `deep` seats run only when the user asks for them.
+- **Split.** A target made of pipelines (a plan's, one worktree each) gets its
+  Stage 1 seats once per pipeline, scoped to that pipeline's paths, plus one
+  `reviewer` (focus `spec`) seat for the seams — the contract-wave files and
+  where pipelines meet. One pipeline, or no plan: one slice, no seams seat.
+  Stage 2 seats cover the whole range.
+- **Evidence.** Seats consume the integration gate's evidence from the brief.
+  A seat runs at most one targeted test of its own, never the suite.
 
 | Stage | Role | Count | Purpose |
 |---|---|---|---|
-| Stage 1 — Correctness | `reviewer` (focus `spec`, phase `post-implementation`) | 1 | design ↔ implementation traceability; also runs the [convergence check](../hex-core/references/loop.md#convergence-contract) when the target traces to a plan |
-| Stage 1 — Correctness | `reviewer` (focus `quality`, test-coverage emphasis) | 0–1 | Specify-phase test adequacy (`high` and above) |
+| Stage 1 — Correctness | `reviewer` (focus `spec`, phase `post-implementation`) | 1 per pipeline | design ↔ implementation traceability; also runs the [convergence check](../hex-core/references/loop.md#convergence-contract) when the target traces to a plan |
+| Stage 1 — Correctness | `reviewer` (focus `quality`, test-coverage emphasis) | 0–1 per pipeline | Specify-phase test adequacy (`high` and above) |
+| Stage 1 — Correctness | `reviewer` (focus `spec`, seams) | 0–1 | contract-wave files and cross-pipeline boundaries (2+ pipelines) |
 | Stage 2 — Panel | `reviewer` (focus `quality`) | 1 | naming, style, pattern compliance |
 | Stage 2 — Panel | `reviewer` (focus `security`) | 0–1 | fires on security-sensitive paths |
 | Stage 2 — Panel | `reviewer` (focus `performance`) | 0–1 | fires on hot-path / async changes |
 | Stage 2 — Panel | `doc-reviewer` | 0–1 | fires on a doc-trigger match |
 | Stage 2 — Panel (`high` and above) | `architect` | 0–1 | boundary / dependency-direction review |
 | Stage 2 — Panel (`high` and above) | `researcher` | 0–1 | SOTA / known-pitfall gap check |
-| Adversary | configured adversary skill (`code-diff` or `plan-artifact`) | 0–1 (every configured entry at `max`) | cross-model review |
+| Adversary | configured adversary skill (`code-diff` or `plan-artifact`) | 1 at `medium`+ (every configured entry at `max`) | cross-model review |
 | Stage 2 — Panel (`max`) | `simulator` | 0 (4+ at `max` only) | one user pattern each against the target; reported, never fixed |
 
 A project's `tiers.hex-review.<tier>.counts` can override any Count cell
@@ -260,7 +280,9 @@ Concurrency cap and degraded mode:
 [`protocol.md`](../hex-core/references/protocol.md#worker-coordination). The
 adversary skill name comes from `hex.md › Preferences`
 ([adversary contract](../hex-core/references/adversary.md#adversary-contract));
-`codex-adversary` is only an example value. A markdown-artifact target uses
+`codex-adversary` is only an example value. The adversary runs in every call
+at `medium` and up; when it is unavailable, log the skip line and continue —
+never wait for it. A markdown-artifact target uses
 the `plan-artifact` scope; every other target uses `code-diff`.
 
 ## Project rules and conventions
@@ -271,8 +293,8 @@ from **project context** (the client's ambient instructions / project
 rules) and the pointers in the Pointers section of
 `.agents/memory/hex.md`
 ([`memory.md`](../hex-core/references/memory.md#the-three-sections)).
-"Verify" anywhere below means **run the project's documented verification**
-([`verify.md`](../hex-core/references/verify.md#verification)). Path
+Reviewers never run the project's verification; they read the gate evidence
+(§ Worker assignment). Path
 hints from `hex.md › Preferences` (e.g. "security review mandatory under
 `src/auth/**`") fold into perspective selection at classification time
 ([`classify.md`](classify.md)).
@@ -294,10 +316,8 @@ no active plan is found — never invent one. An Approve never writes the
 terminal review state — `done`, or `landing` for a plan carrying a `Repo`
 column — where the run ended with a non-empty stranded set
 ([`decompose.md`](../hex-core/references/decompose.md#parallel-by-default-decomposition)).
-This skill is the `L3` trunk level of [Review by join
-level](../hex-core/references/loop.md#review-by-join-level): it runs only
-when invoked, nothing in `/hex-execute` requires it, and it remains the sole
-writer of the terminal review state.
+This skill runs when invoked, by the user or in loop mode, and remains the
+sole writer of the terminal review state.
 Writing the `Reviewed:` anchor is a Status-block write, the class of write
 `hex-review` already performs — a branch-scope pass only
 ([`loop.md`](../hex-core/references/loop.md#the-last-reviewed-anchor)).
@@ -308,7 +328,7 @@ Writing the `Reviewed:` anchor is a Status-block write, the class of write
 as `git -C <repo> diff <base>...hex/<plan-slug>` and presented to the panel as
 one diff set with each hunk labelled by its repo. `<base>` is the frozen
 per-repo base SHA **read from the plan's `Repos:` ledger**
-([`worktree.md` C-317/C-324](../hex-core/references/worktree.md#worktree-work-package-mechanics)),
+([`worktree.md` C-317/C-324](../hex-core/references/worktree.md#pipeline-worktree-mechanics)),
 **never re-resolved** from a trunk ref that may have moved since execution
 started. The C-320 pre-flight (step 2) has already proven every participating
 repo reachable, so the union is never silently narrower than the plan. Absent a
@@ -318,7 +338,7 @@ below are unchanged.
 
 When the target traces to a plan artifact, also run the
 [convergence check](../hex-core/references/loop.md#convergence-contract):
-the orchestrator — never a worker — appends any gap as new WP rows at the
+the orchestrator — never a worker — appends any gap as new pipeline rows at the
 end of the plan's Parallelization table (their wave derives as the next
 topological level); the plan stays byte-identical when nothing is
 outstanding ("Converged").
@@ -444,6 +464,9 @@ uncommitted (revert is `git checkout -- <file>`, see
 [`archive.md`](../hex-core/references/archive.md#revert)). Every finding is
 reported, not applied; the fix loop belongs to
 [`/hex-execute`](../hex-core/references/loop.md#the-review-fix-loop).
+**Fix rounds** are the caller's: cap 2, each re-review covers the fix delta
+only ([`loop.md`](../hex-core/references/loop.md#delta-round-scope)); what
+remains after round 2 goes to the user.
 
 ## Constraints
 
@@ -462,7 +485,7 @@ reported, not applied; the fix loop belongs to
   single-repo plans keep `review → done` byte-identically. `landing` is the
   terminal review state the [Fold-Back phase](#the-review-report) already keys
   on.
-- **No mid-flow questions** — ambiguity is resolved at the single gate.
+- **No mid-flow questions** — ambiguity is resolved at the single gate; in loop mode there is no gate and no question.
 - **Never exceed the concurrency cap**
   ([`protocol.md`](../hex-core/references/protocol.md#worker-coordination)).
 - **Always** cite specific files and lines; **always** pair a finding with

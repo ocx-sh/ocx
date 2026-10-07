@@ -109,7 +109,7 @@ impl Inspect {
             self.resolved_packages(&context, &filtered, &declared, &platform)
                 .await?
         } else {
-            locked_packages(&filtered, &declared)
+            locked_packages(&filtered, &declared)?
         };
 
         // In application order, as declared, not merged: package values are `${installPath}`-templated,
@@ -157,12 +157,15 @@ impl Inspect {
             .map(|((tool, declared), result)| {
                 PackageInspect::new(tool.binding.clone(), declared.clone(), platform.clone(), result)
             })
-            .collect())
+            .collect::<Result<_, _>>()?)
     }
 }
 
 /// The default path: each binding straight from `ocx.lock`, offline, choosing no platform.
-fn locked_packages(selected: &[SelectedTool], declared: &[ocx_oci::PackageRef]) -> Vec<PackageInspect> {
+fn locked_packages(
+    selected: &[SelectedTool],
+    declared: &[ocx_oci::PackageRef],
+) -> Result<Vec<PackageInspect>, ocx_oci::platform::error::PlatformError> {
     selected
         .iter()
         .zip(declared)

@@ -20,12 +20,18 @@ rust_library(
         allow_empty = True,
         exclude = ["src/**/*.rs"],
     ),
+    # The graph is test-only, so the library carries the fault seam the
+    # acceptance binary (`//crates/ocx_cli:ocx`) needs — `ocx`'s cargo
+    # `__testing` forwards this crate's.
+    crate_features = ["__testing"],
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_project"},
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_config",
+        "//crates/ocx_env",
+        "//crates/ocx_exit",
         "//crates/ocx_index",
         "//crates/ocx_oci",
         "//crates/ocx_package",
@@ -85,4 +91,6 @@ rust_test(
 rust_doc_test(
     name = "ocx_project_doc_test",
     crate = ":ocx_project",
+    # rust_doc_test does not inherit the library's features.
+    crate_features = ["__testing"],
 )

@@ -630,7 +630,7 @@ def _alias_managed_config_host(ocx: OcxRunner, path_prefix: str) -> None:
 def managed_config_onboard(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Provision a workstation onboarding onto the ``[managed]`` config tier.
 
-    Publishes a stand-in ``ocx`` release for the ``__OCX_SELF_IMAGE`` bootstrap
+    Publishes a stand-in ``ocx`` release for the ``__OCX_TESTING_SELF_IMAGE`` bootstrap
     seam that ``ocx self setup`` always probes (mirrors
     ``test_managed_config.py::_publish_self_image``), pushes a managed-config
     artifact, and aliases the corporate host from the product example

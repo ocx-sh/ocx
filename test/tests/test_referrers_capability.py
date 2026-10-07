@@ -3,8 +3,8 @@
 """Acceptance tests for the referrers-API capability cache (#106).
 
 The cache-then-probe wiring itself (``from_cache`` → ``probe`` →
-``write_cache``, exit 84 when the write path cannot proceed) is covered by
-``test_sign.py::test_sign_referrers_unsupported_exits_84`` against the
+``write_cache``, the tag-schema fallback write when the API is absent) is covered by
+``test_sign.py::test_sign_lands_in_the_fallback_index_on_a_registry_without_the_referrers_api`` against the
 ``legacy_registry`` negative fixture. The **verify** path no longer probes at
 all: it reads the OCI referrers tag-schema fallback instead of refusing, so a
 registry with neither answers 79 — see

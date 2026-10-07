@@ -30,7 +30,8 @@ pub struct SkippedBinding {
     pub name: String,
     /// Owning group — `default` for the top-level `[tools]` table.
     pub group: String,
-    /// The declared tag; `null` when the binding spells none (a bare name or a digest).
+    /// The declared tag; absent when the binding spells none (a bare name or a digest).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// Why the tag did not move.
     pub reason: SkipReason,
@@ -109,6 +110,9 @@ impl UpgradeReport {
 }
 
 impl Printable for UpgradeReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "UpgradeReport";
+
     fn print_plain(&self, printer: &DataInterface) {
         self.render(printer, false);
     }
@@ -120,6 +124,9 @@ impl Printable for UpgradeReport {
 pub struct VerboseUpgradeReport(pub UpgradeReport);
 
 impl Printable for VerboseUpgradeReport {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "VerboseUpgradeReport";
+
     fn print_plain(&self, printer: &DataInterface) {
         self.0.render(printer, true);
     }
@@ -172,6 +179,9 @@ mod tests {
         let verbose = serde_json::to_value(VerboseUpgradeReport(report)).expect("the wrapper serializes");
         assert_eq!(plain, verbose);
         assert_eq!(plain["skipped"][0]["reason"], "latest");
-        assert_eq!(plain["skipped"][0]["tag"], serde_json::Value::Null);
+        assert!(
+            plain["skipped"][0].get("tag").is_none(),
+            "an absent tag is omitted, not null"
+        );
     }
 }

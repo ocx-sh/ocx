@@ -1,0 +1,28 @@
+[package]
+name = "ocx_env"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Gates `overrides`, the test-only environment table, and every `Testing`
+# declaration. Enable it from `[dev-dependencies]` only: resolver v3 keeps a
+# dev-dependency feature out of the normal build, so a release binary lacks
+# both the table and the test-only variables.
+__testing = ["dep:tempfile"]
+
+[dependencies]
+# `ocx_exit` is the one `ocx_*` edge, for the error types' `#[derive(Classify)]`.
+ocx_exit.workspace = true
+# Std only otherwise: every satellite links this crate. `tempfile` backs
+# `EnvLock::isolate_project_home` and exists only under `__testing`.
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `cfg(test)` compiles `overrides` without the feature.
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -19,6 +19,7 @@ use ocx_shell::shell::coexistence::Observation;
 use ocx_shell::shell::reconcile::ScopeId;
 use ocx_store::file_structure::StateStore;
 use ocx_store::reference_manager::ReferenceManager;
+use ocx_util::time::Timestamp;
 
 /// The only stamp schema version this binary writes or accepts.
 const STAMP_VERSION: u8 = 1;
@@ -39,8 +40,8 @@ pub struct ConsentStamp {
     /// The normalized source set consented to.
     pub sources: BTreeSet<String>,
 
-    /// RFC 3339 UTC instant the stamp was written.
-    pub stamped_at: String,
+    /// The instant the stamp was written.
+    pub stamped_at: Timestamp,
 }
 
 /// The activation predicate's answer.
@@ -103,7 +104,7 @@ impl Grant {
 // Each variant must be individually reachable and tested: `ocx shell state`
 // exists to report them all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "reason")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum Reason {
     /// No valid stamp and no matching grant — with the project's derived source
     /// set and the grants it was tested against, so the user can see what to
@@ -128,17 +129,18 @@ pub enum Reason {
     /// not corroborate it, so clause 2 refuses.
     ///
     /// `claimed_sources` is what `ocx.lock` says, `verified_sources` what
-    /// `refs/origins/` proves. `None` means nothing could be verified (no host
+    /// `refs/origins/` proves. An absent one means nothing could be verified (no host
     /// leaf, not materialized, or predating origin recording) and clears at the
     /// next `ocx pull` — except for a digest already materialized under another
-    /// repository, which never clears. A `Some` that disagrees means a stored
+    /// repository, which never clears. A present one that disagrees means a stored
     /// digest came from a repository outside the granted namespace.
     // It never clears: a store hit mints no marker for the lock's repository.
     UncorroboratedNamespace {
         /// The source set derived from `ocx.lock`'s repository fields.
         claimed_sources: BTreeSet<String>,
-        /// The source set derived from the store's recorded pull origins, or
-        /// `None` when no complete record exists.
+        /// The source set derived from the store's recorded pull origins;
+        /// absent when no complete record exists.
+        #[serde(skip_serializing_if = "Option::is_none")]
         verified_sources: Option<BTreeSet<String>>,
     },
     /// The hook is disabled — naming which of the five enablement rungs decided
@@ -149,7 +151,8 @@ pub enum Reason {
     HookDisabled {
         /// The deciding rung, rendered (`--no-hook`, `OCX_NO_HOOK`, `[shell] hook`, …).
         rung: String,
-        /// The config tier that set it, when rung 4 decided.
+        /// The config tier that set it; present only when rung 4 decided.
+        #[serde(skip_serializing_if = "Option::is_none")]
         tier: Option<String>,
     },
     /// Yielded to another live per-prompt hook — naming the **live signal
@@ -499,7 +502,7 @@ fn record_at(target: &Path, project_dir: &Path, sources: &BTreeSet<String>) -> c
         v: STAMP_VERSION,
         project_dir: project_dir.to_path_buf(),
         sources: sources.clone(),
-        stamped_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        stamped_at: Timestamp::from(chrono::Utc::now()),
     };
     let bytes = serde_json::to_vec_pretty(&stamp).map_err(|e| io_error(target, std::io::Error::other(e)))?;
 
@@ -516,7 +519,7 @@ fn record_at(target: &Path, project_dir: &Path, sources: &BTreeSet<String>) -> c
 
 /// Attach `path` context to an I/O failure on the stamp path.
 fn io_error(path: &Path, source: std::io::Error) -> crate::Error {
-    crate::Error::Project(ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(source)))
+    crate::Error::from(ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(source)))
 }
 
 #[cfg(test)]
@@ -582,7 +585,7 @@ mod tests {
             v: STAMP_VERSION,
             project_dir: project_dir.to_path_buf(),
             sources: sources(entries),
-            stamped_at: "2026-08-25T00:00:00Z".to_string(),
+            stamped_at: serde_json::from_str(r#""2026-08-25T00:00:00Z""#).expect("valid instant"),
         }
     }
 

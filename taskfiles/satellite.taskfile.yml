@@ -7,8 +7,9 @@ version: '3'
 # satellite ocx-mirror against this workspace, so a break in an ecosystem
 # crate reds here instead of at the satellite's next pointer bump, and refuse
 # a satellite that links the operations tier (the satellite linking rule).
-# `task verify` does not run it; verify-deep.yml does (plan DEC-4: with
-# `continue-on-error: true` until the mirror re-points).
+# `contract` is the runtime arm: the mirror's acceptance suite against the ocx
+# this tree builds. `task verify` runs neither; verify-deep.yml runs both,
+# each `continue-on-error: true` until the mirror side lands.
 
 vars:
   # The env var wins; the default is the sibling checkout the four worktrees
@@ -24,6 +25,16 @@ vars:
   # The operations tier: what a satellite may not name (ADR § "Stability
   # tiers", satellite linking rule). `ocx_cli` is the package `ocx` to cargo.
   OPERATIONS_CRATES: ocx_store ocx_shell ocx_project ocx_package_manager ocx_setup ocx_announce ocx_script ocx_test_support ocx_cli
+  # Both binaries `contract` runs, built into the shared target dir.
+  CANDIDATE_OCX: '{{.MIRROR_TARGET_DIR}}/debug/ocx{{exeExt}}'
+  MIRROR_BINARY: '{{.MIRROR_TARGET_DIR}}/debug/ocx-mirror{{exeExt}}'
+  # The mirror's registries publish 5001/5002, which ocx's own suite binds
+  # too, and its conftest never stops them; `contract` does.
+  MIRROR_COMPOSE: '{{.MIRROR_WORKTREE}}/test/docker-compose.yml'
+  # Outside the worktree, so it survives the run for `contract:floor`.
+  CONTRACT_REPORT: '{{.SCRATCH}}/contract-sites.xml'
+  # One acceptance test per mirror site that spawns ocx and parses its output.
+  CONTRACT_SITE_FLOOR: 6
 
 tasks:
   verify:
@@ -47,14 +58,66 @@ tasks:
       5. the worktree is removed (a `defer:` covers the failure path)
       The live mirror checkout ends byte-identical with one worktree entry.
     cmds:
+      # Sweep what an interrupted run left behind.
+      - task: .worktree:remove
+      - defer: { task: .worktree:remove }
+      - task: .worktree:add
+      - task: .build
+      - task: .closure
+      # Explicit as well as deferred: a failing deferred command does not
+      # fail the task, and the worktree entry must be gone on a green run.
+      - task: .worktree:remove
+
+  contract:
+    desc: Run ocx-mirror's acceptance suite against the ocx this tree builds and floor on 6 passed ocx_contract_site tests
+    summary: |
+      1. the mirror worktree and overlay of `satellite:verify`
+      2. `cargo build --workspace --features ocx_mirror/__testing` there, and
+         the candidate `ocx` (`-p ocx --features ocx/__testing`) from this
+         tree, both into the shared target dir
+      3. the mirror's pytest suite under its `test/`, OCX_COMMAND and
+         OCX_TEST_BINARY naming the candidate: first `-m ocx_contract_site`
+         with a JUnit report, then everything else
+      4. `contract:floor` on that report (scripts/satellite_contract.py,
+         also the pytest plugin recording each test's site id): red on any
+         failed, errored or skipped testcase, on fewer than 6 distinct site
+         ids among the passed ones, and on a missing report
+      4b. the SDK arm (`.contract:sdk`, C-034): skipped with its reason
+         printed until the mirror depends on `ocx-sdk` (X5, a change in the
+         mirror repository); red from then on until the regenerate-and-build
+         step is wired, so a skip can never outlive its cause
+      5. the mirror's registries are stopped and the worktree is removed
+         (`defer:` covers the failure path)
+      The registries come up through the mirror's own conftest (docker).
+    cmds:
+      - task: .worktree:remove
+      - defer: { task: .worktree:remove }
+      - task: .worktree:add
+      - defer: { task: .contract:stop }
+      - task: .build
+        vars: { FEATURES: ocx_mirror/__testing }
+      - task: .candidate
+      - task: .contract:run
+      - task: .contract:sdk
+      - task: .contract:stop
+      - task: .worktree:remove
+
+  contract:floor:
+    desc: Floor a contract-site JUnit report (REPORT, default the last `satellite:contract` run's; FLOOR, default 6 distinct sites)
+    vars:
+      REPORT: '{{.REPORT | default .CONTRACT_REPORT}}'
+      FLOOR: '{{.FLOOR | default .CONTRACT_SITE_FLOOR}}'
+    cmds:
+      - python3 '{{.ROOT_DIR}}/scripts/satellite_contract.py' --report '{{.REPORT}}' --floor '{{.FLOOR}}'
+
+  .worktree:add:
+    internal: true
+    cmds:
       # A `cmds:` entry, not a precondition: `--force` skips preconditions
       # and a missing checkout must never read as a pass.
       - >-
         test -f '{{.MIRROR_DIR}}/Cargo.toml' || {
-          echo "satellite:verify: no ocx-mirror checkout at {{.MIRROR_DIR}} — set OCX_MIRROR_DIR to a checkout of ocx-sh/ocx-mirror" >&2; exit 1; }
-      # Sweep what an interrupted run left behind.
-      - task: .worktree:remove
-      - defer: { task: .worktree:remove }
+          echo "satellite: no ocx-mirror checkout at {{.MIRROR_DIR}} — set OCX_MIRROR_DIR to a checkout of ocx-sh/ocx-mirror" >&2; exit 1; }
       - mkdir -p '{{.SCRATCH}}'
       - git -C '{{.MIRROR_DIR}}' worktree add --detach '{{.MIRROR_WORKTREE}}' HEAD
       - mkdir -p '{{.MIRROR_WORKTREE}}/external/ocx'
@@ -63,17 +126,6 @@ tasks:
         --exclude target/ --exclude .git --exclude .tmp/ --exclude .agents/
         --exclude .task/ --exclude node_modules/ --exclude .venv/ --exclude test/bin/
         '{{.ROOT_DIR}}/' '{{.MIRROR_WORKTREE}}/external/ocx/'
-      - task: .build
-      - task: .closure
-      # Explicit as well as deferred: a failing deferred command does not
-      # fail the task, and the worktree entry must be gone on a green run.
-      - task: .worktree:remove
-
-  clean:
-    desc: Delete the satellite scratch under .tmp/satellite-verify — the mirror worktree and its cargo target (several GB per checkout)
-    cmds:
-      - task: .worktree:remove
-      - rm -rf '{{.SCRATCH}}'
 
   .worktree:remove:
     internal: true
@@ -103,7 +155,65 @@ tasks:
     # for. The re-resolve happens in the disposable worktree and is never
     # written back to the live checkout.
     cmds:
-      - cargo build --workspace
+      - cargo build --workspace{{if .FEATURES}} --features {{.FEATURES}}{{end}}
+
+  .candidate:
+    internal: true
+    dir: '{{.ROOT_DIR}}'
+    env:
+      CARGO_TARGET_DIR: '{{.MIRROR_TARGET_DIR}}'
+    # `__testing`: the same test-only build the acceptance binaries are.
+    cmds:
+      - cargo build -p ocx --locked --features ocx/__testing
+
+  .contract:stop:
+    internal: true
+    # `stop`, not `down`: kept containers restart on the next `up -d`. This
+    # also stops a stack that was already running before the run.
+    cmds:
+      - "[ ! -f '{{.MIRROR_COMPOSE}}' ] || docker compose -f '{{.MIRROR_COMPOSE}}' stop"
+
+  .contract:run:
+    internal: true
+    dir: '{{.MIRROR_WORKTREE}}/test'
+    env:
+      OCX_COMMAND: '{{.CANDIDATE_OCX}}'
+      OCX_TEST_BINARY: '{{.CANDIDATE_OCX}}'
+      OCX_MIRROR_COMMAND: '{{.MIRROR_BINARY}}'
+    cmds:
+      # A stale report from an earlier run must never be floored.
+      - rm -f '{{.CONTRACT_REPORT}}'
+      # The exit status is not the verdict here: the floor reads every
+      # failure, error and skip off the report, and an empty selection
+      # (pytest exits 5) writes a report with zero testcases. The plugin
+      # writes each test's site id into the report for the floor to count.
+      - cmd: >-
+          PYTHONPATH='{{.ROOT_DIR}}/scripts' uv run pytest -n auto -p no:cacheprovider -p satellite_contract
+          -m ocx_contract_site --junitxml='{{.CONTRACT_REPORT}}'
+        ignore_error: true
+      - task: contract:floor
+      - uv run pytest -n auto -p no:cacheprovider -m 'not ocx_contract_site'
+
+  # The SDK arm of `contract`: regenerate the SDK from this tree's goldens and
+  # build the mirror against it. Until the mirror takes the SDK as a
+  # dependency (X5, which needs a grant in the mirror's repository) there is
+  # nothing to build against, so the arm says so and does nothing. The probe
+  # is the cause it names: a manifest outside the overlaid `external/` naming
+  # `ocx-sdk`. Once one does, a silent skip would be a gate that passes
+  # while skipping the thing it exists for, so the arm fails instead.
+  .contract:sdk:
+    internal: true
+    dir: '{{.MIRROR_WORKTREE}}'
+    cmds:
+      - |
+        set -eu
+        manifests=$(git ls-files -z -- 'Cargo.toml' '*/Cargo.toml' | grep -zv '^external/' | tr -cd '\0' | wc -c)
+        [ "$manifests" -ge 1 ] || { echo "satellite:contract SDK arm: the probe listed no mirror manifest" >&2; exit 1; }
+        if git ls-files -z -- 'Cargo.toml' '*/Cargo.toml' | grep -zv '^external/' | xargs -0 grep -qE '^[[:space:]]*"?ocx[-_]sdk"?([.][[:alnum:]_-]+)?[[:space:]]*=|dependencies[.]ocx[-_]sdk[]]'; then
+          echo "satellite:contract SDK arm: ocx-mirror now depends on ocx-sdk, but this arm does not regenerate the SDK and build against it yet" >&2
+          exit 1
+        fi
+        echo "satellite:contract SDK arm: skipped - ocx-mirror does not depend on ocx-sdk yet (X5 moves it onto the SDK; needs a grant in the mirror repository)"
 
   .closure:
     internal: true

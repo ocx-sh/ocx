@@ -298,6 +298,10 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         // resolved posture bounds it, since `Launch::exempt` grants no exemption
         // under `required = true`.
         let policy = context.records(ocx_package_manager::record::RecordsOptions::default())?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`ocx patch test` is a maintainer preview over local artifacts; the resolved recording policy bounds the exemption"
+        )]
         let launch = Launch::exempt(
             process_env,
             &resolved,

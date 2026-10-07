@@ -15,8 +15,9 @@ ignored = ["liblzma"]
 # Internal-only escape hatch, the same `__name` convention `ocx_lib` uses.
 # Gates `testing`, the transport doubles the signing pipelines drive their unit
 # tests through (`RecordingTransport`, `SbomTransport`). Compile-gated out of
-# release artifacts — a release build physically lacks the module.
-__testing = []
+# release artifacts — a release build physically lacks the module. Forwards
+# `ocx_env`'s, which declares the `__OCX_TESTING_*` seams this crate reads.
+__testing = ["ocx_env/__testing"]
 
 [dependencies]
 # The rendering tier: the pull/push paths report byte progress through
@@ -25,9 +26,11 @@ ocx_console.workspace = true
 # The process-outcome vocabulary. Named because `ssrf`'s refusal and the
 # transport's retry ladder classify themselves.
 ocx_exit.workspace = true
-# The bottom tier: `archive`, `compression`, `fs`, `env`, `tls` and the
+# The bottom tier: `archive`, `compression`, `fs`, `tls` and the
 # `FileError`/`SerializationError` pair this crate's io paths raise.
 ocx_util.workspace = true
+# The environment registry every variable this crate reads is declared in.
+ocx_env.workspace = true
 
 # The distribution-spec client this crate wraps, vendored at
 # `external/rust-oci-client`. Its `Reference`, manifest and descriptor types are
@@ -101,9 +104,9 @@ h2.workspace = true
 # `test-util` ONLY — `tokio::time::pause()` for the retry ladder's virtual-clock
 # tests. `pause()` reachable from production code would be a runtime footgun.
 tokio = { workspace = true, features = ["test-util"] }
-# `ocx_util::env::overrides`, the process-environment table this crate's tests
+# `ocx_env::overrides`, the process-environment table this crate's tests
 # write through.
-ocx_util = { workspace = true, features = ["__testing"] }
+ocx_env = { workspace = true, features = ["__testing"] }
 
 [lints]
 workspace = true

@@ -89,10 +89,10 @@ impl ConfigSetupArgs {
         )
         .await?;
 
-        // Exit 82 on an untouched dirty fence, as `self setup`; dry-run never returns it.
+        // Exit 81 on an untouched dirty fence, as `self setup`; dry-run never returns it.
         let dirty = matches!(outcome, ocx_setup::ManagedConfigSetupOutcome::Dirty);
         let exit = if dirty && !self.force && !self.dry_run {
-            OcxExitCode::DirtyRcBlock.into()
+            OcxExitCode::PolicyBlocked.into()
         } else {
             ExitCode::SUCCESS
         };

@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "The `description` member of PushStatus entry `skipped` is reworded without changing its meaning (a `doc` ledger entry).",
+  "findings": [
+    {
+      "code": "D01",
+      "pointer": "/$defs/PushStatus/x-ocx-enum/1",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

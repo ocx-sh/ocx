@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "command": "external",
+  "exit_code": 64,
+  "error": {
+    "kind": "usage_error",
+    "detail": "usage",
+    "message": "unknown subcommand 'paths'; if `ocx-paths` is an official OCX plugin, install it with `ocx --global add ocx.sh/ocx/paths`, otherwise put an `ocx-paths` binary on your PATH",
+    "context": {}
+  }
+}

@@ -53,13 +53,13 @@ pytestmark = pytest.mark.command("package_announce")
 JOB_TOKEN = "glcbt_test_job_token_JOB_TOKEN_VALUE_1234567890"
 
 
-# ── --out mode: byte-exact root + content-addressed CAS objects ────────────
+# ── --output mode: byte-exact root + content-addressed CAS objects ────────────
 
 
 def test_announce_out_writes_canonical_root_and_content_addressed_cas(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`--out` writes the rebuilt root in the CONTRACTS §14 byte form (2-space
+    """`--output` writes the rebuilt root in the CONTRACTS §14 byte form (2-space
     indent, trailing newline) and every CAS object as the registry's own image
     index, byte-for-byte.
 
@@ -107,12 +107,12 @@ def test_announce_out_writes_canonical_root_and_content_addressed_cas(
 
     out_dir = tmp_path / "out"
     report = announce_json(
-        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--out", str(out_dir), package
+        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--output", str(out_dir), package
     )
 
     assert report["status"] == "updated"
-    assert report["pull_request_url"] is None
-    assert report["fork"] is None
+    assert "pull_request_url" not in report
+    assert "fork" not in report
     written = report["written_paths"]
     assert written, "at least the root must be written"
     for relative in written:
@@ -171,7 +171,7 @@ def test_announce_out_writes_canonical_root_and_content_addressed_cas(
 
     out_dir_2 = tmp_path / "out2"
     report_2 = announce_json(
-        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--out", str(out_dir_2), package
+        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--output", str(out_dir_2), package
     )
     assert sorted(report_2["written_paths"]) == sorted(written)
     for relative in written:
@@ -182,8 +182,8 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
     """C6 is scoped to "no commit, no pull request" — a local write is neither,
-    so `--out` materializes the whole entry on every run. A pipeline shaped
-    `announce --out dir && publish dir` must never find an empty directory just
+    so `--output` materializes the whole entry on every run. A pipeline shaped
+    `announce --output dir && publish dir` must never find an empty directory just
     because nothing moved; only `status` reports that. The byte contract makes
     the repeated write idempotent.
 
@@ -204,7 +204,7 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     first_dir = tmp_path / "first"
-    first = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(first_dir), package)
+    first = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(first_dir), package)
     assert first["status"] == "updated"
     assert first["desc_status"] == "updated", "the description moved from null to an object"
 
@@ -222,11 +222,11 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
 
     second_dir = tmp_path / "second"
-    second = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(second_dir), package)
+    second = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(second_dir), package)
     assert second["status"] == "unchanged", "nothing moved, so the status must say so"
     assert second["desc_status"] == "unchanged", "the description did not move either"
     assert sorted(second["written_paths"]) == sorted(first["written_paths"]), (
-        "an unchanged --out run must still write the whole entry, not an empty directory"
+        "an unchanged --output run must still write the whole entry, not an empty directory"
     )
     assert readme_relative in second["written_paths"], (
         "the unchanged run's root still points at the readme, so it must write it too"
@@ -276,7 +276,7 @@ def test_announce_refuses_a_tag_resolving_to_a_bare_manifest(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     result = announce(
-        ocx, fake_forge, "--tags", "9.9.9", "--out", str(tmp_path / "out"), package, check=False
+        ocx, fake_forge, "--tags", "9.9.9", "--output", str(tmp_path / "out"), package, check=False
     )
 
     assert result.returncode == 65, f"expected DataError (65), got {result.returncode}: {result.stderr}"
@@ -375,13 +375,13 @@ def test_announce_fork_unchanged_with_no_branch_is_a_pure_noop(
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
-    # Materialize the canonical committed root via `--out`, then seed those exact
+    # Materialize the canonical committed root via `--output`, then seed those exact
     # bytes as the index-main root so the fork run reads an already-matching
     # state. Seeding the RAW bytes (not a re-serialized dict) is essential: the
-    # unchanged short-circuit compares bytes, and only the canonical `--out`
+    # unchanged short-circuit compares bytes, and only the canonical `--output`
     # form is byte-identical to what a fork run would regenerate.
     out_dir = tmp_path / "out"
-    announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(out_dir), package)
+    announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(out_dir), package)
     root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
     fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
 
@@ -389,8 +389,8 @@ def test_announce_fork_unchanged_with_no_branch_is_a_pure_noop(
         ocx, fake_forge, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL, package
     )
     assert report["status"] == "unchanged"
-    assert report["pull_request_url"] is None
-    assert report["fork"] is None
+    assert "pull_request_url" not in report
+    assert "fork" not in report
     assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 0
     assert fake_forge.request_count("POST", "/repos/ocx-sh/index/pulls") == 0
     assert fake_forge.request_count("POST", "/repos/forkuser/index/git/commits") == 0
@@ -411,10 +411,10 @@ def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     # Same setup as the no-branch no-op: materialize the canonical root via
-    # `--out` and seed those raw bytes as the index-main root (the byte compare
+    # `--output` and seed those raw bytes as the index-main root (the byte compare
     # only matches the canonical form).
     out_dir = tmp_path / "out"
-    announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(out_dir), package)
+    announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(out_dir), package)
     root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
     fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
     # ...then park the announce branch exactly ON that base: it exists, and it
@@ -427,8 +427,8 @@ def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
         ocx, fake_forge, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL, package
     )
     assert report["status"] == "unchanged"
-    assert report["pull_request_url"] is None
-    assert report["fork"] is None
+    assert "pull_request_url" not in report
+    assert "fork" not in report
     assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 0
     assert fake_forge.request_count("POST", "/repos/ocx-sh/index/pulls") == 0
     assert fake_forge.request_count("POST", "/repos/forkuser/index/git/commits") == 0
@@ -588,7 +588,7 @@ def test_announce_identical_race_retry_makes_no_empty_diff_commit(
     # clock is pinned (`FIXED_CLOCK`) and `regenerate` carries an unmoved digest
     # verbatim, so these bytes are what the fork run below regenerates too.
     out_dir = tmp_path / "winner"
-    announce_json(ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--out", str(out_dir), package)
+    announce_json(ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--output", str(out_dir), package)
     winning_files = {
         path.relative_to(out_dir).as_posix(): path.read_bytes() for path in out_dir.rglob("*") if path.is_file()
     }
@@ -1616,7 +1616,7 @@ def test_announce_ssrf_forbidden_repository_refused_before_any_registry_call(
         fake_forge,
         "--tags",
         "1.0.0",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         package,
         check=False,
@@ -1657,7 +1657,7 @@ def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
         fake_forge,
         "--tags",
         "1.0.0",
-        "--out",
+        "--output",
         str(tmp_path / "out"),
         package,
         extra_env={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},127.0.0.1:{port}"},
@@ -1671,7 +1671,7 @@ def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
 def test_announce_direct_commits_the_branch_to_the_index_repo_and_opens_a_pull_request(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """With neither `--out` nor `--fork`, the announce branch is committed onto
+    """With neither `--output` nor `--fork`, the announce branch is committed onto
     the INDEX repository itself and the pull request is opened from there — no
     fork is looked up, created, or written to anywhere.
 
@@ -1696,7 +1696,7 @@ def test_announce_direct_commits_the_branch_to_the_index_repo_and_opens_a_pull_r
 
     assert report["status"] == "updated"
     assert report["pull_request_url"]
-    assert report["fork"] is None, "the fork-free path has no fork to report"
+    assert "fork" not in report, "the fork-free path has no fork to report"
     # The rebuilt root is on the index repo's announce branch...
     branch = branch_name(package)
     committed = fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch=branch)
@@ -1749,7 +1749,7 @@ def test_announce_direct_without_push_access_fails_closed_naming_repo_and_permis
 def test_announce_requires_the_credential_for_every_mode_that_writes(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`OCX_ANNOUNCE_TOKEN` gates writing, not forking: `--out` is the one mode
+    """`OCX_ANNOUNCE_TOKEN` gates writing, not forking: `--output` is the one mode
     that runs without it, and the fork-free path — which has no `--fork` to key
     a credential check off — is refused just like `--fork` is."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
@@ -1765,16 +1765,16 @@ def test_announce_requires_the_credential_for_every_mode_that_writes(
     )
     assert "OCX_ANNOUNCE_TOKEN" in tokenless_direct.stderr
 
-    tokenless_out = announce(ocx, fake_forge, *shared, "--out", str(tmp_path / "out"), package, token=None, check=False)
-    assert tokenless_out.returncode == 0, f"--out writes nothing remote and must still run: {tokenless_out.stderr}"
+    tokenless_out = announce(ocx, fake_forge, *shared, "--output", str(tmp_path / "out"), package, token=None, check=False)
+    assert tokenless_out.returncode == 0, f"--output writes nothing remote and must still run: {tokenless_out.stderr}"
     # E-27 / C-061: the unauthenticated rung is REPORTED, not only tolerated.
-    # `require_credential` short-circuits on `--out` before it reads the
+    # `require_credential` short-circuits on `--output` before it reads the
     # credential, so this run resolves an empty `ForgeCredentials` and must say
     # so. Nothing else in the suite observes that rung: the two assertions above
     # are satisfied by the old direct-env read and by the ladder alike, which is
     # why they cannot carry the C-063 migration on their own.
     assert json.loads(tokenless_out.stdout)["credential_kind"] == "none", (
-        f"an --out run with no credential reports the rung that answered: {tokenless_out.stdout}"
+        f"an --output run with no credential reports the rung that answered: {tokenless_out.stdout}"
     )
 
 
@@ -1786,7 +1786,7 @@ def test_an_empty_ocx_variable_falls_through_to_the_job_token_rung(
     the job.
 
     The assertion that observes the ladder. Its sibling above --
-    `credential_kind == "none"` on a tokenless `--out` run -- does not: both the
+    `credential_kind == "none"` on a tokenless `--output` run -- does not: both the
     ladder and the direct `std::env::var(OCX_ANNOUNCE_TOKEN)` read it replaced
     report `none` for a run that has no credential at all, so that assertion
     stays green under a revert. Only a run where a *different* rung answers can
@@ -1893,7 +1893,7 @@ def test_announce_accepts_the_positional_package(
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
-    result = announce(ocx, fake_forge, "--tags", "1.0.0", "--out", str(tmp_path / "out"), package)
+    result = announce(ocx, fake_forge, "--tags", "1.0.0", "--output", str(tmp_path / "out"), package)
 
     assert result.returncode == 0, f"the positional form is the canonical one: {result.stderr}"
     assert json.loads(result.stdout)["package"] == package
@@ -1931,7 +1931,7 @@ def test_deprecated_package_flag_warns_once_on_stderr_only(
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
-    result = announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(tmp_path / "out"))
+    result = announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--output", str(tmp_path / "out"))
 
     assert result.returncode == 0, f"the deprecated spelling still executes: {result.stderr}"
     report = json.loads(result.stdout)
@@ -1941,3 +1941,28 @@ def test_deprecated_package_flag_warns_once_on_stderr_only(
         f"the notice fires exactly once, naming the form that replaces the flag: {result.stderr}"
     )
     assert "0.7" in result.stderr, f"the notice names the release that removes the flag: {result.stderr}"
+
+
+def test_deprecated_out_flag_warns_once_and_keeps_stdout(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """The renamed `--out` still writes the entry, warns once on stderr naming
+    its replacement and the removal release, and prints the report `--output`
+    prints.
+
+    Mutation: drop the `warn_renamed_flags` call (the count reds at 0), or warn
+    through the report printer (the stdout equality reds).
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    current = announce(ocx, fake_forge, "--tags", "1.0.0", "--output", str(tmp_path / "current"), package)
+    old = announce(ocx, fake_forge, "--tags", "1.0.0", "--out", str(tmp_path / "old"), package)
+
+    assert json.loads(old.stdout) == json.loads(current.stdout), "the old spelling changes nothing on stdout"
+    assert (tmp_path / "old" / "p" / f"{package}.json").is_file(), "the old spelling still writes the entry"
+    assert old.stderr.count("is renamed to") == 1, f"one warning, once: {old.stderr}"
+    assert "--output" in old.stderr and "0.7" in old.stderr, f"names the replacement and the release: {old.stderr}"
+    assert "is renamed to" not in current.stderr, f"the current spelling warns about nothing: {current.stderr}"

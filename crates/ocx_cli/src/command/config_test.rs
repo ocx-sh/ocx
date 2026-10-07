@@ -219,7 +219,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
             mirrors.contains(&"ghcr.io") && mirrors.contains(&"quay.io"),
             "both the machine mirror and the candidate mirror must appear in the effective view: {mirrors:?}"
         );
-        assert_eq!(report["patches"]["registry"], "corp.example.com/ocx-patches");
+        assert_eq!(report["patches"]["repository_prefix"], "corp.example.com/ocx-patches");
         assert_eq!(report["patches"]["required"], false);
         assert_eq!(
             report["patches"]["path_template"], "{registry}/{repository}",
@@ -265,7 +265,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
             report["registry_default"], "overlay.example",
             "an explicit overlay outranks an adopted payload, so it must outrank the candidate"
         );
-        assert_eq!(report["patches"]["registry"], "overlay.example/patches");
+        assert_eq!(report["patches"]["repository_prefix"], "overlay.example/patches");
     }
 
     /// The overlay only outranks keys it actually sets.
@@ -282,7 +282,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
             .await;
 
         assert_eq!(report["registry_default"], "overlay.example");
-        assert_eq!(report["patches"]["registry"], "corp.example.com/patches");
+        assert_eq!(report["patches"]["repository_prefix"], "corp.example.com/patches");
     }
 
     /// The reported tier posture is the machine's own; the tier defaults to
@@ -326,7 +326,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
 
         let report = fixture.report(&candidate, &[]).await;
 
-        assert!(report["managed"].is_null(), "{report}");
+        assert!(report.get("managed").is_none(), "{report}");
     }
 
     #[tokio::test]
@@ -537,7 +537,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
 
         let report = fixture.report(&candidate, &[("OCX_PATCHES", PATCHES_ENV)]).await;
 
-        assert_eq!(report["patches"]["registry"], "env.example.com/patches");
+        assert_eq!(report["patches"]["repository_prefix"], "env.example.com/patches");
     }
 
     /// Config tier beats the env tier.
@@ -549,7 +549,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
 
         let report = fixture.report(&candidate, &[("OCX_PATCHES", PATCHES_ENV)]).await;
 
-        assert_eq!(report["patches"]["registry"], "corp.example.com/patches");
+        assert_eq!(report["patches"]["repository_prefix"], "corp.example.com/patches");
     }
 
     // ── Unknown-key warnings (exit 0) ─────────────────────────────────────
@@ -578,7 +578,7 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
             "a typo'd key must be listed by its full path: {unknown:?}"
         );
         assert!(
-            report["registry_default"].is_null(),
+            report.get("registry_default").is_none(),
             "the typo means nothing was actually set - the preview must not pretend otherwise"
         );
     }

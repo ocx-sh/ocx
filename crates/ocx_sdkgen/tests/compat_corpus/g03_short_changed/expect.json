@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push -p` becomes `-P`.",
+  "findings": [
+    {
+      "code": "G03",
+      "pointer": "/root/commands/0/commands/0/args/1",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

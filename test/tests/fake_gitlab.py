@@ -268,7 +268,7 @@ class GitLabRoutes:
         # 18.4 / hidden-setting instance, which is the only case yielding
         # `unknown`-and-proceed and therefore the only one C-044's promotion
         # covers. Defaulting to `False` here would refuse every existing
-        # consumer at 86 before it pushed; defaulting to `True` would make the
+        # consumer at 77 before it pushed; defaulting to `True` would make the
         # unreadable case unreachable.
         #
         #
@@ -481,7 +481,7 @@ class GitLabRoutes:
         to push here with their own job token.
 
         Three outcomes (C-029): a list CONTAINING the publishing project passes;
-        a list without it is a miss and refuses at 86 naming both project paths;
+        a list without it is a miss and refuses at 77 naming both project paths;
         a refusal is `unreadable`, which proceeds. An absent key is an EMPTY list —
         a miss — and never an unreadable one: a single "absent means unreadable"
         rule would make the miss unreachable, and the two produce different exit
@@ -491,13 +491,13 @@ class GitLabRoutes:
         GitLab's default page is 20 while the client asks for 100 and walks to a
         short page; a fake that answered every page in full would let a
         single-page client pass, and a single-page client turns a publishing
-        project on page two into a false 86 before any push. Serving the
+        project on page two into a false 77 before any push. Serving the
         requested window is what makes the walk observable at all.
 
         Refusal is the **production-common** answer, not an edge case: the
         endpoint requires Maintainer or Owner on the index project while the
         preflight's own bar is Developer, so the publisher this check exists for
-        reads `unknown` rather than a verdict. That makes the 86-miss path
+        reads `unknown` rather than a verdict. That makes the 77-miss path
         reachable only under a credential that clears the bar — the split pair —
         which the consuming rows say in their own doc comments.
         """

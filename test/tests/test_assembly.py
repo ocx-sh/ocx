@@ -70,7 +70,7 @@ def _find_content_path(ocx: OcxRunner, short: str) -> Path:
     `ocx package which` reports the package root; this helper traverses into `content/`
     so call sites that exercise installed files keep their natural shape.
     """
-    result = ocx.json("package", "which", short)
+    result = ocx.json("package", "which", short)["paths"]
     return Path(result[short]["path"]) / "content"
 
 

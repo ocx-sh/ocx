@@ -25,7 +25,7 @@ Values 1, 2 shell-reserved (1 = generic error, 2 = Bash builtin misuse). 128+ si
 
 - **Own the enum** — define `#[repr(u8)]` enum in library crate's `cli` submodule (`<lib>::cli::ExitCode`) instead of depending on `sysexits` or `exitcode` crates. Values = stable POSIX conventions; ownership decouples binaries from external dep.
 - **Align with `sysexits.h`** — 64 usage, 65 data, 69 unavailable, 74 I/O, 77 permission, 78 config. Convention backend tools and shell scripts expect.
-- **Reserve private range above 78** — 79–127 free (below shell-reserved 128+, above `EX__MAX = 78`). Use for tool-specific codes sysexits skip (e.g., "auth failure", "offline-blocked").
+- **Reserve the range above 78 for next-action codes** — 79–127 sits below shell-reserved 128+ and above `EX__MAX = 78`. Spend it only under [Choosing a code](#choosing-a-code): each number there names an action no sysexits code offers ("not found", "auth failure", "policy refused", "unsupported"), never a feature.
 - **`#[non_exhaustive]` required** — adding variant must not break semver.
 - **`From<ExitCode> for std::process::ExitCode`** — lets `main()` return code directly, no explicit cast at call sites.
 - **One enum per workspace, shared by all binaries** — primary CLI and sibling tools (e.g., mirror/publisher) consume same enum. Prevents drift.
@@ -35,112 +35,77 @@ Values 1, 2 shell-reserved (1 = generic error, 2 = Bash builtin misuse). 128+ si
 ## Canonical Shape
 
 ```rust
-/// Process exit codes used by all binaries in this workspace.
-///
-/// Numeric values align with BSD sysexits.h (EX__BASE = 64) to avoid collisions
-/// with shell-reserved codes (1–2) and signal-derived codes (128+).
+/// Process exit codes shared by every binary in this workspace. Values align with
+/// BSD sysexits.h (EX__BASE = 64), clear of shell-reserved 1-2 and signal-derived 128+.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum ExitCode {
-    /// Successful completion.
-    Success = 0,
-    /// Generic failure — use only when no specific code applies.
-    Failure = 1,
-    /// Bad CLI invocation: unknown flag, wrong argument count, invalid syntax.
-    /// Mirrors `EX_USAGE` (64).
-    UsageError = 64,
-    /// Input data malformed: bad identifier format, invalid digest, corrupted manifest.
-    /// Mirrors `EX_DATAERR` (65).
-    DataError = 65,
-    /// Required resource unavailable: network down, registry unreachable.
-    /// Mirrors `EX_UNAVAILABLE` (69).
-    Unavailable = 69,
-    /// I/O error: filesystem permission denied, disk full, read/write failure.
-    /// Mirrors `EX_IOERR` (74).
-    IoError = 74,
-    /// Temporary failure that may succeed on retry: rate limit, transient network.
-    /// Mirrors `EX_TEMPFAIL` (75).
-    TempFail = 75,
-    /// Insufficient permissions: registry 403, filesystem `EPERM`.
-    /// Mirrors `EX_NOPERM` (77).
-    PermissionDenied = 77,
-    /// Configuration error: bad config file, missing required field, parse failure.
-    /// Mirrors `EX_CONFIG` (78).
-    ConfigError = 78,
-    /// Resource not found: package 404, explicit config path absent.
-    /// Tool-specific; first slot above `EX_CONFIG`.
-    NotFound = 79,
-    /// Authentication failure: registry 401, missing credentials.
-    /// Tool-specific.
-    AuthError = 80,
-    /// A deliberate local policy (`--offline`, `--frozen`, or the prune safeguard
-    /// against deleting a durable tag) refused an operation — not a fault.
-    /// Distinct from `Unavailable`; `--force` bypasses the prune safeguard.
-    PolicyBlocked = 81,
-    /// A managed shell-integration block was left untouched because it carried
-    /// user edits and the command ran without a force flag. Tool-specific;
-    /// script-discoverable so a rerun with `--force` is easy. Distinct from
-    /// `ConfigError = 78`: the content is valid but intentionally user-modified.
-    DirtyRcBlock = 82,
-    /// Rekor transparency log service unavailable. Used by the sign path
-    /// (Rekor upload failure) AND the verify path (Rekor-required verification
-    /// cannot complete: SET absent + TSA absent, or Rekor lookup returns 5xx/timeout).
-    /// Tool-specific; distinct from `Unavailable` to let operators distinguish
-    /// "registry down" (retry likely helps) from "Rekor down" (sign cannot complete,
-    /// verify fails if Rekor is needed for SET presence but the log itself is
-    /// unreachable). Invalid Rekor SET content maps to `DataError = 65`, not here —
-    /// that is a data-integrity failure, not a service availability failure.
-    TransparencyLogUnavailable = 83,
-    /// Registry does not implement the OCI Referrers API and has no fallback-tag
-    /// referrers index. The operation cannot proceed — discovery fails hard rather
-    /// than silently returning empty results. Tool-specific.
-    ReferrersUnsupported = 84,
-    /// A key reference (`--key`, a `[[trust.policy]]` signer, managed config) names a recognised
-    /// but unimplemented backend (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
-    /// `k8s://`); "not built yet", never a `config_error`.
-    UnsupportedKeyBackend = 85,
-    /// A reachable forge refuses a write because the instance or target project lacks the
-    /// capability the transport needs (job-token push disabled, publisher not allowlisted);
-    /// the credential is valid and an administrator, not the caller, must act.
-    ForgeCapabilityUnavailable = 86,
-    /// The registry does not delete tags (405, 400 `UNSUPPORTED`, or 400 `DIGEST_INVALID` from a
-    /// registry that deletes by digest only); an operator must enable deletion or use another
-    /// registry, so a retry never helps.
-    RegistryDeleteUnsupported = 87,
-}
-
-impl From<ExitCode> for std::process::ExitCode {
-    fn from(code: ExitCode) -> Self {
-        std::process::ExitCode::from(code as u8)
-    }
+    Success = 0,          // successful completion
+    Failure = 1,          // generic failure; only when no specific code applies
+    UsageError = 64,      // bad invocation (EX_USAGE): fix the command line
+    DataError = 65,       // malformed input (EX_DATAERR): fix the data
+    Unavailable = 69,     // service unreachable (EX_UNAVAILABLE): restore it
+    IoError = 74,         // local I/O fault (EX_IOERR): fix the filesystem
+    TempFail = 75,        // may succeed on retry (EX_TEMPFAIL): the only retry code
+    PermissionDenied = 77, // refused (EX_NOPERM): obtain the permission
+    ConfigError = 78,     // bad configuration (EX_CONFIG): fix the config
+    NotFound = 79,        // the named thing does not exist: name something that does
+    AuthError = 80,       // missing or rejected credentials: supply or refresh them
+    PolicyBlocked = 81,   // a local policy or safeguard refused: loosen it or force past it
+    Unsupported = 82,     // valid request the service or build lacks; never retry (gRPC UNIMPLEMENTED)
 }
 ```
 
 ---
 
+## Choosing a code
+
+A code is a promise about what the caller does next, so a script can `case $?` with no per-feature table.
+
+- **A code names the caller's next action**: fix the command line, fix the data, retry, obtain a permission, supply credentials, loosen a policy, use another service. It never names the feature that failed.
+- **Feature identity goes in a detail field**: a stable slug in the machine-readable error document (the RFC 9457 `type`, the gRPC error details). A new feature adds a slug under an existing code, not a number.
+- **A new code needs a next action no existing code has.** Ask what the caller does differently; "this failure is new" is not an answer. A code with fewer than three distinct slugs under it is a feature code in disguise.
+- **A retired number is never reused.** Record it in a `RETIRED` list and test that no variant takes it. Reuse silently changes the meaning for every script keyed on it; if one unavoidable reuse happens, name it once, before the contract is frozen.
+- **Retry is one code.** Exactly one code means "the same command may succeed later"; no feature-specific transient code beside it.
+
+Prior art: [gRPC status codes](https://grpc.io/docs/guides/status-codes/) (few codes chosen by caller action, specifics in error details), [sysexits.h](https://man7.org/linux/man-pages/man3/sysexits.h.3head.html) (generic codes, none tied to a feature), [RFC 9457](https://datatracker.ietf.org/doc/html/rfc9457) (coarse status plus a fine `type`).
+
+---
+
 ## Error → Exit Code Classification
 
-Use free function, not trait method. Trait methods couple every error type to exit-code taxonomy → circular dep (errors → `ExitCode` → `main.rs` → errors). Free function walks `anyhow::Error::chain()` and downcasts each known subtree, keeping dep direction clean.
+**The type that owns an error declares its own code.** Put the classification trait and `ExitCode` in a leaf crate that every library may depend on and that depends on none of them. Dependency direction stays acyclic (libraries → leaf ← binary), so each library implements the trait for its own error types, in the crate that declares them.
+
+```rust
+// leaf crate: `trait ClassifyExitCode { fn classify(&self) -> Option<ExitCode>; }`
+// (`None` defers to the next cause). Library crate, next to the error:
+#[derive(Debug, thiserror::Error, Classify)]
+pub enum InstallError {
+    #[error("offline")]
+    #[exit(PolicyBlocked, slug = "install_offline", summary = "An install was refused offline")]
+    Offline,
+    #[error(transparent)]
+    #[exit(delegate)] // the inner type classifies itself
+    Package(#[from] PackageError),
+}
+```
+
+- **Prefer a derive over a hand-written `impl`.** The derive makes a variant with no declared code a compile error, which a hand-written exhaustive `match` only does until someone adds `_ =>`. Each row carries the code, the error's stable machine-readable slug and a one-line summary, so all three are declared once, side by side.
+- **The binary keeps one free function** that walks `anyhow::Error::chain()`, asks each cause to classify itself, and falls back to `ExitCode::Failure`. It owns what no library can: foreign error types (`std::io::Error`, a dependency's error) and the process boundary.
+- **One registry list in the binary** names every classifiable type and generates the downcast ladder, so a type is added in one place. A hand-written `downcast_ref` chain drifts: a new type compiles, never matches, and exits with the fall-through code.
+- **A type whose code is chosen at run time** is the one reason for a hand-written `impl`.
+
+**Layered errors** (outer enum → context struct → discriminant enum): each layer delegates to the next; the innermost kind owns the code.
+
+**Default fall-through.** A chain with no classified cause exits `ExitCode::Failure`. Lock it with a test so it cannot silently change.
 
 ```rust
 pub fn classify_error(err: &anyhow::Error) -> ExitCode {
     for cause in err.chain() {
-        // Match the outer library error type first (three-layer pattern).
-        if let Some(e) = cause.downcast_ref::<MyLibError>() {
-            return match e {
-                MyLibError::OfflineMode        => ExitCode::PolicyBlocked,
-                MyLibError::Io { .. }          => ExitCode::IoError,
-                MyLibError::Config(ce)         => classify_config(ce),
-                MyLibError::PackageManager(pe) => match pe.kind() {
-                    PackageErrorKind::NotFound  => ExitCode::NotFound,
-                    PackageErrorKind::Ambiguous => ExitCode::DataError,
-                    _                           => ExitCode::Failure,
-                },
-                _ => continue,
-            };
+        if let Some(code) = try_classify(cause) {   // registry-generated ladder
+            return code;
         }
-        // Subsystem types that may surface standalone via `.context()`.
         if let Some(io) = cause.downcast_ref::<std::io::Error>()
             && io.kind() == std::io::ErrorKind::PermissionDenied
         {
@@ -151,20 +116,17 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
 }
 ```
 
-**Three-layer error pattern.** If library uses `Error → PackageError → PackageErrorKind` pattern (outer enum, context-bearing middle struct, discriminant-only inner enum), `classify_error` downcasts *outermost* `Error` first, then pattern-matches to inner `kind`. Cannot `downcast_ref::<PackageErrorKind>()` directly unless kind attached as own `anyhow::context` — unusual.
-
-**Default fall-through.** Any subtree not classified falls through to `ExitCode::Failure`. Acceptable v1 behavior if test locks in fall-through so it cannot silently change later.
-
 ---
 
 ## Anti-Patterns
 
 ### Block
 
+- **A code minted for one feature's failure** (`ExitCode::FooFeatureUnavailable`), or one reused after retirement. See [Choosing a code](#choosing-a-code).
 - **Single-digit numeric codes for semantic categories** (e.g., `exit 3` for "network error"). Collides with shell-reserved 1/2, no discoverable meaning.
 - **Bash `exit $?` chains with magic numbers** inside the CLI itself — use enum, not literals.
 - **Different binaries in same workspace using different exit-code taxonomies** — blocks shared error handling in CI scripts. One enum, shared.
-- **Trait-based error-to-exit-code mapping per error type** — circular dep lib → cli → lib. Use free function walking error chain.
+- **Classification of an error type you own defined outside the crate that owns it**, or a **hand-maintained downcast list that can drift** from the set of types. The first forces the owner to export internals; the second silently exits with the fall-through code for any type added after it. Declare the code beside the type (derive) and generate the ladder from one registry list.
 - **`std::process::exit(N)` from inside library code** — libraries never exit; return `Result`. Exits at `main.rs`.
 
 ### Warn
@@ -214,23 +176,15 @@ mytool install foo:1.0
 case $? in
     0)  echo "installed" ;;
     64) echo "usage error; check flags" ;;
-    69) echo "registry unavailable; a rerun will not help" ;;
     75) echo "temporary failure; retry with backoff" ;;
     78) echo "bad config; fix and retry" ;;
     79) echo "not found; pin a different version" ;;
-    80) echo "auth failed; refresh credentials" ;;
-    81) echo "policy blocked (offline/frozen); loosen the flag or update the index" ;;
-    82) echo "managed shell rc block left dirty; rerun with --force" ;;
-    83) echo "rekor unavailable; retry or skip signing" ;;
-    84) echo "registry lacks referrers support; use a registry with OCI 1.1 referrers" ;;
-    85) echo "key backend not implemented; use a file key" ;;
-    86) echo "forge lacks a capability the transport needs; ask an administrator or use --transport api" ;;
-    87) echo "registry does not delete tags; use a registry that does" ;;
+    80) echo "auth failed; supply or refresh credentials" ;;
+    81) echo "policy blocked; loosen the flag or force past the safeguard" ;;
+    82) echo "capability unsupported; use another service or build; never retry" ;;
     *)  echo "unknown failure ($?)"; exit 1 ;;
 esac
 ```
-
-Primary value of enum for backend/automation tools: programmatic failure discrimination without parsing stderr.
 
 ---
 

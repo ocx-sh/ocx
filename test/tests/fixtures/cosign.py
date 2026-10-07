@@ -291,8 +291,8 @@ def cosign_binary() -> Path:
     """
     entries = [
         Path(entry["value"])
-        for entry in _ocx_json("--project", str(_PROJECT), "env")["entries"]
-        if entry["type"] == "path"
+        for entry in _ocx_json("--project", str(_PROJECT), "env")["items"]
+        if entry["kind"] == "path"
     ]
     name = "cosign.exe" if os.name == "nt" else "cosign"
     for directory in entries:

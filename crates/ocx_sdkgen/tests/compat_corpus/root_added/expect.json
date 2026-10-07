@@ -1,0 +1,6 @@
+{
+  "kind": "reports",
+  "verdict": "non_break",
+  "change": "A TagReport root is added at schema_version 1.",
+  "findings": []
+}

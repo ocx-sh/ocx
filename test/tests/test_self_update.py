@@ -4,7 +4,7 @@
 
 These tests exercise both the `ocx --format json version` contract that
 `query_installed_version` depends on, and the end-to-end self-update install
-path via the private `__OCX_SELF_IMAGE` test-only seam (URI-1).
+path via the private `__OCX_TESTING_SELF_IMAGE` test-only seam (URI-1).
 
 The seam is gated behind the `__testing` Cargo feature in `ocx_lib` and
 `ocx_cli`. The test binary is built with that feature enabled (see
@@ -36,6 +36,7 @@ from src import (
     make_package,
     registry_dir,
 )
+from src.conformance import GOLDEN
 from src.registry import fetch_platform_manifest_digest
 
 pytestmark = pytest.mark.command("version", "status")
@@ -194,7 +195,7 @@ def test_version_json_reports_placeholder_provenance(ocx: OcxRunner) -> None:
 
     payload = ocx.json("version")
 
-    assert set(payload) == {"version", "channel", "commit", "build", "ci"}, (
+    assert set(payload) == {"schema_version", "version", "channel", "commit", "build", "ci", "contract"}, (
         f"version report key set changed: {sorted(payload)!r}"
     )
     assert payload["channel"] == "test", f"channel: {payload['channel']!r}"
@@ -206,8 +207,49 @@ def test_version_json_reports_placeholder_provenance(ocx: OcxRunner) -> None:
     assert payload["build"]["timestamp"] == epoch, f"build: {payload['build']!r}"
 
 
+def _golden(name: str) -> dict:
+    return json.loads((GOLDEN / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def _command_versions(command: dict, out: dict[str, int]) -> dict[str, int]:
+    """Every command that declares an output mode, i.e. every command with a contract entry."""
+    if command["output"]:
+        out[" ".join(command["path"])] = command["version"]
+    for child in command.get("commands", []):
+        _command_versions(child, out)
+    return out
+
+
+def test_version_json_reports_the_contract_versions(ocx: OcxRunner) -> None:
+    """`contract` carries every gated document's version, so a caller can refuse a
+    mismatched command before running it: the error document's version, each
+    command's version from the grammar, and each report root's pinned
+    `schema_version` — read here from the committed goldens, not from ocx.
+    """
+    reports = _golden("reports")
+    expected_reports = {}
+    for name, entry in reports["reports"].items():
+        wrapper = reports["$defs"][entry["$ref"].removeprefix("#/$defs/")]
+        expected_reports[name] = wrapper["properties"]["schema_version"]["const"]
+    expected_commands = _command_versions(_golden("cli")["root"], {})
+    # The error document's version is its `$id` major.
+    expected_errors = int(_golden("errors")["$id"].rsplit("/v", 1)[1].removesuffix(".json"))
+    assert len(expected_reports) >= 50 and len(expected_commands) >= 50, (
+        f"the goldens read as {len(expected_reports)} roots and {len(expected_commands)} commands"
+    )
+
+    payload = ocx.json("version")
+
+    assert next(iter(payload)) == "schema_version", f"first key: {next(iter(payload))!r}"
+    assert payload["schema_version"] == expected_reports["VersionData"]
+    contract = payload["contract"]
+    assert contract["errors"] == expected_errors
+    assert contract["commands"] == expected_commands
+    assert contract["reports"] == expected_reports
+
+
 # ---------------------------------------------------------------------------
-# URI-1 — End-to-end self-update install path via `__OCX_SELF_IMAGE` seam
+# URI-1 — End-to-end self-update install path via `__OCX_TESTING_SELF_IMAGE` seam
 #
 # Two versions of a stand-in "ocx" package are published to the loopback
 # registry and the canonical `ocx.sh/ocx/cli` identifier is redirected onto
@@ -420,7 +462,7 @@ def _hand_off_receipt(receipt: Path) -> dict[str, str]:
 def _run_self_update_via_seam(
     ocx: OcxRunner, repo: str, *extra_flags: str, home: Path
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``ocx --format json [extra_flags] self update`` with the ``__OCX_SELF_IMAGE`` seam.
+    """Run ``ocx --format json [extra_flags] self update`` with the ``__OCX_TESTING_SELF_IMAGE`` seam.
 
     ``home`` is keyword-only and mandatory, and must be a directory this test
     owns. The hand-off child runs a real ``ocx self setup``, which auto-detects
@@ -430,7 +472,7 @@ def _run_self_update_via_seam(
     """
     home.mkdir(parents=True, exist_ok=True)
     env = dict(ocx.env)
-    env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
+    env["__OCX_TESTING_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
     env["HOME"] = str(home)
     return subprocess.run(
         [str(ocx.binary), "--format", "json", *extra_flags, "self", "update"],
@@ -843,7 +885,7 @@ def test_self_update_reports_pulled_and_exits_75_when_the_handoff_fails(
     assert (payload.get("from"), payload.get("to")) == ("0.0.1", "0.0.2"), (
         f"a pulled outcome still reports both versions; got: {payload!r}"
     )
-    assert payload.get("handoff") == {"reason": "exited", "detail": _HANDOFF_REFUSAL_CODE}, (
+    assert payload.get("handoff") == {"type": "exited", "exit_code": _HANDOFF_REFUSAL_CODE}, (
         f"the child's exit must be carried verbatim; got: {payload!r}"
     )
 
@@ -860,14 +902,14 @@ def test_self_update_reports_pulled_and_exits_75_when_the_handoff_fails(
 
 
 @_skip_on_windows
-def test_self_update_reports_installed_when_the_child_exits_82(
+def test_self_update_reports_installed_when_the_child_exits_81(
     ocx: OcxRunner,
     tmp_path: Path,
     unique_repo: str,
 ) -> None:
-    """A child that selects and *then* exits 82 is a successful update.
+    """A child that selects and *then* exits 81 is a successful update.
 
-    Exit 82 (``DirtyRcBlock``) happens in the child's profile phase, which runs
+    Exit 81 (``PolicyBlocked``) happens in the child's profile phase, which runs
     after its select — so the binary the user asked for is already the one
     ``current`` names. This is the case that separates a verdict keyed on the
     ``current`` symlink from one keyed on the child's exit status: the latter
@@ -893,15 +935,15 @@ def test_self_update_reports_installed_when_the_child_exits_82(
     result = _run_self_update_via_seam(ocx, repo, home=home)
 
     assert result.returncode == 0, (
-        f"a swap that completed must exit 0 even when the child's setup ended 82; "
+        f"a swap that completed must exit 0 even when the child's setup ended 81; "
         f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     payload = json.loads(result.stdout)
     assert payload.get("status") == "installed", (
         f"the swap landed, so the status is 'installed' whatever the child exited with; got: {payload!r}"
     )
-    assert payload.get("handoff") == {"reason": "exited", "detail": 82}, (
-        f"the completed update must still carry the child's 82; got: {payload!r}"
+    assert payload.get("handoff") == {"type": "exited", "exit_code": 81}, (
+        f"the completed update must still carry the child's 81; got: {payload!r}"
     )
 
     _hand_off_receipt(receipt)
@@ -913,7 +955,7 @@ def test_self_update_reports_installed_when_the_child_exits_82(
         f"a dirty profile must be advised with the flag that overrides it; got:\n{result.stderr}"
     )
     assert bashrc.read_text() == tampered, (
-        "the dirty block must be left byte-identical — that is why the child exited 82"
+        "the dirty block must be left byte-identical — that is why the child exited 81"
     )
 
 

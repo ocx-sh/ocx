@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "PushReport's `annotations` map values change from string to a Digest reference.",
+  "findings": [
+    {
+      "code": "B04",
+      "pointer": "/$defs/PushReportRoot/properties/annotations/additionalProperties",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

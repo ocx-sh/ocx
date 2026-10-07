@@ -389,7 +389,7 @@ def _frozen_env_entries(ocx: OcxRunner, target: str, *root_args: str) -> list[di
     assert result.returncode == 0, (
         f"--frozen package env must succeed; rc={result.returncode}\nstderr: {result.stderr}"
     )
-    return json.loads(result.stdout)["entries"]
+    return json.loads(result.stdout)["items"]
 
 
 def _entry_by_key(entries: list[dict], key: str) -> dict | None:
@@ -526,7 +526,7 @@ def test_snapshot_install_writes_no_pin_record(
         extra_env={"OCX_PATCH_SNAPSHOT": str(snapshot_path)},
     )
     assert env.returncode == 0, f"package env under the snapshot must succeed; rc={env.returncode}\n{env.stderr}"
-    entry = _entry_by_key(json.loads(env.stdout)["entries"], "RECORDED_CA")
+    entry = _entry_by_key(json.loads(env.stdout)["items"], "RECORDED_CA")
     assert entry is not None and entry["value"] == "/certs/recorded/ca.pem", (
         f"the snapshot-pinned companion must compose with no record behind it; got {entry}"
     )

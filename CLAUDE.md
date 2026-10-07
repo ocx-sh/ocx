@@ -14,13 +14,15 @@ Early stage. Core lib + CLI implemented.
 
 **Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. No `ocx_*` crate is a published library; the binary is the only consumer.
 
-**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `verify-deep.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
+**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_env`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `verify-deep.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
 
-**Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
+**Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`, the `--format json` reports and error document, the `OCX_*` environment variables, and the `ocx-sdkgen` CLI with its output layout. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
 
 **Even interfaces break pre-1.0.** A break is announced in the changelog and nowhere else — no migration prose in user docs, no dual-form parsing, no warning schedule. The one hard exception: already-published packages must keep resolving, so metadata and OCI manifest changes stay backward compatible on the read path.
 
-**Batched-window carve-out.** A rename reaching dozens of files across docs, tests and downstream repos may ship one deprecation window instead of a hard break, on these terms: the old spelling stays as a *hidden* command — a clap alias is undetectable at parse time, so a warning needs its own hidden variant — it warns once on stderr and never on stdout, its removal release is named when the window opens, and every old spelling in flight lives in one `deprecated.rs` deleted whole, and is listed in that file's `RENAMED` — the authority `test/lint/test_deprecated_spellings.py` reads to sweep the repo for stale invocations, so a window opened without an entry there is a window nothing enforces. One window per release pair, not one per rename; still no migration prose in user docs. In flight, all deprecated in 0.6 and removed in 0.7: `ocx run` → `ocx exec`, `ocx package describe` → `ocx package description push`, `ocx package info` → `ocx package description pull`, and the `ocx package announce --package` flag → its positional.
+**Machine-facing break records.** Once the interface-contract baseline exists ([`adr_ocx_interface_contract.md`](./.claude/artifacts/adr_ocx_interface_contract.md)), a break to a gated machine document — a `--format json` report root, the error document, or a command in `cli.json` — also needs an entry in the contract ledger (`ledger.toml`, beside the waivers in `crates/ocx_schema/contract/`) and a bumped version on what broke; the compat gate fails without both. The entry and the number are for programs: SDKs and scripts detect the break from the version, before they run the command. People still learn about it from the changelog, through the commit subject, and nowhere else. The ledger is not release notes and adds no migration prose to user docs.
+
+**Batched-window carve-out.** A rename reaching dozens of files across docs, tests and downstream repos may ship one deprecation window instead of a hard break, on these terms: the old spelling stays as a *hidden* command — a clap alias is undetectable at parse time, so a warning needs its own hidden variant — it warns once on stderr and never on stdout, its removal release is named when the window opens, and every old spelling in flight lives in one `deprecated.rs` deleted whole, as a `RenamedCommand` or `RenamedFlag` const — published through `cli.json`'s `deprecated` field, which `test/lint/test_deprecated_spellings.py` reads to sweep the repo for stale invocations, so a spelling that is not a row there is one nothing enforces. An env spelling in flight is a `RETIRED` row with window status, published in `cli.json`'s `retired` array and swept the same way. One window per release pair, not one per rename; still no migration prose in user docs. In flight, all deprecated in 0.6 and removed in 0.7: `ocx run` → `ocx exec`, `ocx package describe` → `ocx package description push`, `ocx package info` → `ocx package description pull`, the `ocx package announce --package` flag → its positional, `-c` → `--cascade` on `config push`, `package copy` and `package push`, `ocx package create -l` → `--compression-level`, `ocx index catalog --tags` → `--with-tags`, `ocx package copy --description` → `--with-description`, `--out` → `--output`/`-o` on `package announce` and `package claim`, and the `OCX_NO_COMPLETIONS` variable → `OCX_NO_COMPLETION` and `OCX_LOG` → `OCX_LOG_LEVEL`.
 
 Practical test: if only this repo can observe the change, just make it. If a published artifact or someone's script can observe it, weigh it — then still just make it, and write the changelog line — which means the commit subject (see below), never the file.
 
@@ -36,14 +38,13 @@ Applies to EVERY subagent spawn (Agent tool, Workflow `agent()` incl. ultracode,
 
 | Task | Model |
 |---|---|
-| **Security review, code review, adversarial/verification passes** | **Opus 5** (`opus`) |
-| **Non-mechanical implementation** — multi-subsystem, async/concurrency, error + exit-code semantics, OCI/wire-format or serializer work, auth/SSRF/credential paths | **Opus 5** (`opus`) |
-| ADR / architecture decisions; or Sonnet demonstrably fell short twice on the same subtask | Opus (`opus`) — may fan work back out to Sonnet workers |
-| **Default** — exploration, codebase search, research, web fetch, docs, mechanical edits, test scaffolding, planning workers | **Sonnet 5** (`sonnet`) |
+| **Default** — implementation (incl. multi-file, error/exit-code, wire-format work), code review, verification passes, exploration, research, docs, tests, planning workers | **Sonnet 5** (`sonnet`) |
+| **Complex or architectural work** — ADR / architecture decisions, open design (shape not yet decided), multi-subsystem redesigns, security review of auth/SSRF/credential paths | **Opus 5** (`opus`) — may fan work back out to Sonnet workers |
+| Same subtask failed twice on Sonnet | Opus (`opus`) |
 | Final synthesis/decision over results multiple agents prepared (research + context pre-digested) | Fable — main loop / last instance only; (near-)NEVER as subagent; prefer Opus even here |
 
-- **Never** Fable for review, research, implementation. Scale **out** (parallel workers with crisp handovers: goal, inputs, output contract) *and* **up** on the review/correctness axis — a cheap review of a security diff is a false economy.
-- "Mechanical" = local change, shape already decided (rename, doc fix, fixture, single-file edit against an existing pattern). If the *design* is still open, it is Opus.
+- **Never** Fable for review, research, implementation. Scale **out** (parallel workers with crisp handovers: goal, inputs, output contract).
+- Escalate by **counter, not rationale**: a worker's own claim that its task is "contract", "wire-format" or "security-adjacent" is never grounds for Opus. Raise effort on Sonnet before switching model; the cross-model Codex pass adds the second perspective.
 - **Cross-model (Codex) reviews**: `luna` (trivial) / `terra` (**default** — cost-efficient, use in small review loops too, not just high tiers) / `sol` (max-tier one-way-door gates). One-shot adversarial pass, no cross-family looping. See "Cross-model model tiers" in [workflow-swarm.md](./.claude/rules/workflow-swarm.md).
 
 ## Project Identity
@@ -58,7 +59,7 @@ Before plan/research/architectural decision, scan "By concern" in catalog. Auto-
 
 ## Build & Development
 
-Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify:scoped --force` (per task / review-fix iteration — T0 lint + rows check, then routed/scoped checks; escalates to full `task verify` when a path demands it), `task verify` (full gate — mechanically enforced at WP merge by the commit gate, required at finalize, never merely a convention), `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` (or a green `task verify:scoped --force`) after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
+Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify:scoped --force` (per task / review-fix iteration — T0 lint + rows check, then routed/scoped checks; escalates to full `task verify` when a path demands it), `task verify` (full gate — required at finalize, on `main` and for `release:`), `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit. Verification level is the agent's call (`workflow-git.md` § Verification Levels). Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
 **Project toolchain.** `ocx.toml` lists `actionlint`, `bazel`, `bun`, `cosign`, `git-cliff`, `go-task`, `lychee`, `prek`, `python` (CPython 3.14, which uv prefers through the root `uv.toml` and the Bazel acceptance runner pins), `shellcheck`, `shfmt`, `uv`. `ocx self setup` wires a per-prompt hook that puts them on `PATH` when you `cd` in and takes them off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [getting-started.md](./website/src/docs/getting-started.md) § Project Toolchain.
 
@@ -73,17 +74,19 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 
 ## Architecture
 
-21 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
+24 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
 
 | Crate | Owns |
 |---|---|
-| `ocx_exit` [interface] | Process-outcome vocabulary: `ExitCode` and the `error.detail` slug — an exit code is a CLI contract |
+| `ocx_exit` [interface] | Process-outcome vocabulary: `ExitCode`, the `error.detail` slug, the classification traits and `DetailEntry` — an exit code is a CLI contract |
+| `ocx_exit_derive` [internal] | `#[derive(Classify)]`: an error variant declares its exit code and `error.detail` slug (re-exported by `ocx_exit`) |
+| `ocx_env` [ecosystem] | Environment registry: every `OCX_*` / `__OCX_*` variable declared once with its doc, value kind, visibility, secrecy and child propagation, and the one read seam |
 | `ocx_util` [ecosystem] | Domain-free primitives: fs, locking, extension traits, singleflight, TLS roots, archive, compression, path-context errors |
 | `ocx_console` [ecosystem] | Presentation vocabulary: rendering, printer, theme, styles, progress, data interface |
 | `ocx_oci` [ecosystem] | Distribution-spec-generic registry work: references, digests, manifests, transport, referrers, SSRF guard, auth |
 | `ocx_trust` [ecosystem] | Signer-identity policy: `[[trust.policy]]`, tiered resolution, compiled identity rules |
 | `ocx_sign` [ecosystem] | Supply-chain signing: keyless Sigstore sign, DSSE attest, verify, cosign simplesigning, SBOM referrers |
-| `ocx_config` [ecosystem] | Resolved settings from files and environment: the config tiers, the managed tier, env-var vocabulary |
+| `ocx_config` [ecosystem] | Resolved settings from files and environment: the config tiers, the managed tier, settings validation |
 | `ocx_store` [internal] | The on-disk layout: three-tier CAS, symlink namespace, package materialisation, shim blobs |
 | `ocx_index` [ecosystem] | The OCX resolution-index protocol and its local collection |
 | `ocx_package` [ecosystem] | Package identity, metadata, versioning, cascade, authoring, publication |
@@ -94,9 +97,10 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 | `ocx_announce` [internal] | Index publication: announce pipeline, forge drivers, index claim |
 | `ocx_script` [internal] | The Starlark host API for `ocx package test --script` |
 | `ocx_setup` [internal] | Self-install: bootstrap, env shim files, managed RC blocks, profile detection |
+| `ocx_sdkgen` [internal; its CLI is an interface] | Published-document contract: the schema subset `reports`, `errors` and `cli.json` may use, and the lint that holds them to it |
 | `ocx_test_support` [internal] | Shared unit-test fixtures and the process-environment override seam — dev-dependency only |
 
-Three are not tier crates: `ocx_cli` [interface] is the application layer (argv, context, commands, reports, and **all** error-to-exit-code classification, pkg `ocx`); `ocx_schema` [internal] generates JSON Schema at build time; `ocx_shim` [interface] is the Windows `.exe` launcher and its wire ABI.
+Three are not tier crates: `ocx_cli` [interface] is the application layer (argv, context, commands, reports, and the error-to-exit-code chain walk plus the foreign and CLI-local error types it classifies, pkg `ocx`); `ocx_schema` [internal] generates JSON Schema at build time; `ocx_shim` [interface] is the Windows `.exe` launcher and its wire ABI.
 
 The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Three deps patched to submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential`, `sigstore` (`sigstore-rs`).
 
@@ -110,6 +114,7 @@ Subsystem rules auto-load on path match. Read relevant one before work on that a
 | Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_package_manager/src/**` |
 | CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
 | Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_script/src/**` |
+| Machine interface | [subsystem-interface-contract.md](./.claude/rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, CLI report/command/option/exit modules, `environment.md`, `command-line.md` |
 | Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 | Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
 
@@ -131,7 +136,7 @@ Eight principles distill every rule, skill, standard. Deep dive: [`quality-core.
 Read before write. Grep before create. Never modify unread code — grep all callers before change function.
 
 ### 2. Prove It Works
-Tests for customer use case first. Run before commit. Regression test per bug fix. All gates pass — tests, linter, types, build.
+Tests for customer use case first. Run before commit. Regression test per bug fix. All gates pass — tests, linter, types, build. Inside a hex run, step commits and merges on hex-owned branches skip verification (`--no-verify` allowed); the run's integration and release gates satisfy this rule.
 
 ### 3. Keep It Safe
 No secrets in code — env vars / secret managers. Validate external input. Parameterized queries only. Least privilege. Flag vulnerabilities immediately.
@@ -170,7 +175,7 @@ On user feedback or corrections, evaluate if insight should persist as AI config
 
 Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). No `Co-Authored-By` trailers. `chore:` for AI settings/CLAUDE.md/tooling (no changelog).
 
-Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). **Before finalize, a conventional commit does not need the full `task verify`:** run the checks the change needs, then `task verify:mark` (the allowed escape hatch — name the deferral in the commit body). `verify:scoped` escalates to the full run on any taskfile, BUILD/bzl, `scripts/**` or workflow edit; that is the case the hatch is for. The full `task verify` runs once, at finalize. Landing: `/hex-finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
+Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). **Before finalize, a conventional commit does not need the full `task verify`:** run the checks the change needs — none for docs, one run after a batch of commits — then `task verify:mark`, the unconditional escape hatch (merge commits included; name the deferral in the commit body). The full `task verify` runs once, at finalize. Landing: `/hex-finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
 
 Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `./.claude/artifacts/`; templates → `./.claude/templates/artifacts/`. Filename patterns: `adr_<topic>.md`, `system_design_<comp>.md`, `design_spec_<comp>.md`, `plan_<task>.md`, `security_audit_<date>.md`.
 

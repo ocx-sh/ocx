@@ -67,7 +67,7 @@ impl LogSettings {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
         let ansi = self.stderr_color.unwrap_or_else(|| ColorMode::Auto.config().stderr);
-        let filter = self.build_env_filter("CONSOLE", std::iter::empty())?;
+        let filter = self.build_env_filter(std::iter::empty())?;
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_ansi(ansi)
             .event_format(event_format(&filter))
@@ -91,7 +91,7 @@ impl LogSettings {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
         let ansi = self.stderr_color.unwrap_or_else(|| ColorMode::Auto.config().stderr);
-        let filter = self.build_env_filter("CONSOLE", std::iter::empty())?;
+        let filter = self.build_env_filter(std::iter::empty())?;
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_ansi(ansi)
             .event_format(event_format(&filter))
@@ -104,29 +104,21 @@ impl LogSettings {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
-    /// Builds an `EnvFilter` from `OCX_LOG_{extra_name}` → `OCX_LOG` → `RUST_LOG` → the default level.
+    /// Builds an `EnvFilter` from `OCX_LOG_CONSOLE` → `OCX_LOG_LEVEL` → `RUST_LOG` → the default level.
     ///
     /// # Errors
     /// When the resolved env var holds an invalid filter directive.
     pub fn build_env_filter<'a>(
         &'a self,
-        extra_name: &str,
         extra_filter: impl Iterator<Item = &'a String>,
     ) -> Result<tracing_subscriber::filter::EnvFilter, Box<dyn std::error::Error + Send + Sync>> {
-        let name_env = format!("OCX_LOG_{extra_name}");
-
         let builder = tracing_subscriber::EnvFilter::builder();
-        let builder = {
-            if std::env::var(&name_env).is_ok() {
-                builder.with_env_var(name_env)
-            } else if std::env::var("OCX_LOG").is_ok() {
-                builder.with_env_var("OCX_LOG")
-            } else if std::env::var("RUST_LOG").map(|v| !v.is_empty()).unwrap_or(false) {
-                builder.with_env_var("RUST_LOG")
-            } else {
-                builder
-            }
-        };
+        // Set and UTF-8, empty included. Read here, never by the builder: only `ocx_env` honours a retired spelling.
+        let read = |var: &'static ocx_env::EnvVar| var.get_raw().and_then(|value| value.into_string().ok());
+        let directives = read(&ocx_env::OCX_LOG_CONSOLE)
+            .or_else(|| read(&ocx_env::OCX_LOG_LEVEL))
+            .or_else(|| ocx_env::RUST_LOG.get())
+            .unwrap_or_default();
 
         let builder = {
             if self.filter.is_empty() {
@@ -145,7 +137,7 @@ impl LogSettings {
             let console_level: tracing_subscriber::filter::LevelFilter = console_level.into();
             builder.parse(console_level.to_string())?
         } else {
-            builder.from_env()?
+            builder.parse(directives)?
         };
 
         Ok(self

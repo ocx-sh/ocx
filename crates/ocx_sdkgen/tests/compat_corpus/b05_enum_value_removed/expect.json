@@ -1,0 +1,14 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "The `x-ocx-enum` entry `skipped` of PushStatus is removed (member `value`).",
+  "findings": [
+    {
+      "code": "B05",
+      "pointer": "/$defs/PushStatus/x-ocx-enum/1",
+      "subjects": [
+        "PushReport"
+      ]
+    }
+  ]
+}

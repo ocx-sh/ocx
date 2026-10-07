@@ -8,6 +8,7 @@ use ocx_package::metadata::authoring::AuthoringMetadata;
 use ocx_util::prelude::*;
 use ocx_util::{archive, compression};
 
+use crate::command::deprecated;
 use crate::options;
 
 #[derive(Parser)]
@@ -56,8 +57,17 @@ pub struct PackageCreate {
     #[clap(short, long)]
     metadata: Option<std::path::PathBuf>,
     /// Compression level to use for the package bundle
-    #[arg(short = 'l', long, value_enum, default_value_t = options::CompressionLevel::Default)]
+    #[arg(long, value_enum, default_value_t = options::CompressionLevel::Default)]
     compression_level: options::CompressionLevel,
+    // 0.7 removal: the `-l` spelling of `--compression-level`.
+    #[arg(
+        id = deprecated::CREATE_L.arg_id(),
+        short = 'l',
+        value_enum,
+        hide = true,
+        conflicts_with = "compression_level"
+    )]
+    deprecated_l: Option<options::CompressionLevel>,
     /// Number of compression threads (0 = auto-detect, 1 = single-threaded)
     #[arg(short = 'j', long, default_value_t = 0)]
     threads: u32,
@@ -177,12 +187,13 @@ impl PackageCreate {
                 .await
                 .map_err(|error| ocx_util::error::FileError::new(parent, error))?;
         }
+        let compression_level = self.deprecated_l.unwrap_or(self.compression_level);
         let compression_options =
-            compression::CompressionOptions::from_level(self.compression_level.into()).with_threads(self.threads);
+            compression::CompressionOptions::from_level(compression_level.into()).with_threads(self.threads);
         log::info!(
             "Creating package bundle from {} with compression level {:?}",
             self.path.display(),
-            self.compression_level
+            compression_level
         );
         {
             let _spin = context.progress().spinner(format!("Bundling {}", self.path.display()));

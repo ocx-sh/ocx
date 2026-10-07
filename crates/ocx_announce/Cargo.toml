@@ -11,8 +11,9 @@ publish = false
 # test-only surface that must never reach the release binary. This tier's own
 # seams are the forge base-URL and retry-schedule overrides in
 # `forge/{github,gitlab,git_workspace}.rs`; it forwards no sibling's, because
-# nothing it drives is gated anywhere else.
-__testing = []
+# nothing it drives is gated anywhere else — except `ocx_env`'s, which declares
+# those seams' variables.
+__testing = ["ocx_env/__testing"]
 
 [dependencies]
 # Every workspace edge below is a row of `scripts/crate_map.toml`'s
@@ -21,6 +22,7 @@ __testing = []
 # names no root error, and the one the split dissolved left no successor to
 # reach for.
 ocx_config.workspace = true
+ocx_env.workspace = true
 ocx_exit.workspace = true
 ocx_index.workspace = true
 ocx_oci.workspace = true
@@ -57,6 +59,8 @@ which.workspace = true
 # The FIFO helpers and fixture paths the forge and claim tests drive. Dev-only
 # by construction (`scripts/crate_map.toml` `[dev].allowed_everywhere`).
 ocx_test_support = { path = "../ocx_test_support" }
+# `cfg(test)` writes the environment through `ocx_env::overrides`.
+ocx_env = { workspace = true, features = ["__testing"] }
 # `announce/pipeline.rs`'s tests stand a local HTTP peer up to drive the
 # observe path. Test-only: the production transport is `reqwest`, never a
 # hand-built hyper service.

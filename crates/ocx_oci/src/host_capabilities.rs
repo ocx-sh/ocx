@@ -72,7 +72,7 @@ impl HostCapabilities {
     /// Detect host capabilities; a failed probe contributes nothing, never an error.
     pub async fn detect() -> Self {
         // Test-only seam (subsystem-tests.md § Test-Only Seams):
-        // `__OCX_TEST_LIBC` short-circuits the real probe with comma-separated
+        // `__OCX_TESTING_LIBC` short-circuits the real probe with comma-separated
         // family tokens ("glibc"/"musl"/"glibc,musl"/"none" or "" for {}); once
         // set, never falls through to the real probe.
         #[cfg(any(test, feature = "__testing"))]
@@ -115,19 +115,20 @@ fn decode_libc_tags<'tags>(tags: impl IntoIterator<Item = &'tags String>) -> BTr
         .collect()
 }
 
-/// The `__OCX_TEST_LIBC` seam value, decoded, when the variable is set.
+/// The `__OCX_TESTING_LIBC` seam value, decoded, when the variable is set.
 ///
 /// Extracted so [`HostCapabilities::detect`] and the persisted-record path check
 /// the same condition: an unset variable must fall through to the real probe,
 /// and a set one must never reach (or be reached from) the on-disk record.
 #[cfg(any(test, feature = "__testing"))]
 fn test_libc_override() -> Option<BTreeSet<LibcFlavor>> {
-    std::env::var("__OCX_TEST_LIBC")
-        .ok()
+    ocx_env::__OCX_TESTING_LIBC
+        .get_raw()
+        .and_then(|value| value.into_string().ok())
         .map(|value| parse_test_libc_set(&value))
 }
 
-/// Parse the `__OCX_TEST_LIBC` seam value into a libc set.
+/// Parse the `__OCX_TESTING_LIBC` seam value into a libc set.
 ///
 /// Comma-separated family tokens; unknown tokens (including `none` and empty
 /// strings) contribute nothing, so `"none"` and `""` both yield the empty set.
@@ -440,6 +441,10 @@ fn loader_name_looks_glibc(loader_name: &str) -> bool {
 ///
 /// SECURITY: every spawn is bounded by [`PROBE_TIMEOUT`], or a wedged loader stalls startup.
 #[cfg(target_os = "linux")]
+#[expect(
+    clippy::disallowed_types,
+    reason = "libc detection runs a discovered loader with `--version` to classify its banner"
+)]
 async fn probe_loader(path: std::path::PathBuf) -> Option<(std::path::PathBuf, LibcFlavor)> {
     if tokio::fs::metadata(&path).await.is_err() {
         return None;
@@ -784,7 +789,7 @@ fn init_cache(capabilities: &HostCapabilities) {
 
 // Unit tests for HostCapabilities. Detection probes the real filesystem
 // (ld.so), so tests needing an actual host loader are `#[ignore]`d; the main
-// vector uses the `__OCX_TEST_LIBC` short-circuit (`HostCapabilities::detect`'s
+// vector uses the `__OCX_TESTING_LIBC` short-circuit (`HostCapabilities::detect`'s
 // doc comment) for reproducible CI results.
 
 #[cfg(test)]
@@ -803,40 +808,30 @@ mod tests {
         BTreeSet::from([LibcFlavor::Glibc, LibcFlavor::Musl])
     }
 
-    // ── __OCX_TEST_LIBC override cases ─────────────────────────────────
-    //
-    // All override cases are consolidated into ONE test so exactly one test
-    // function owns the process-global `__OCX_TEST_LIBC` variable. Running the
-    // cases sequentially within a single `#[test]` provides the same ordering
-    // guarantee as `serial_test` without a new dependency. Precedent:
-    // `update_check.rs` uses the same pattern for `__OCX_SELF_IMAGE`.
+    // ── __OCX_TESTING_LIBC override cases ─────────────────────────────────
 
     #[tokio::test]
     async fn detect_with_ocx_test_libc_override_cases() {
-        // SAFETY: this is the only test that touches __OCX_TEST_LIBC; serial
-        // scope of a single #[test] provides ordering.
-        unsafe { std::env::set_var("__OCX_TEST_LIBC", "glibc") };
+        let env = ocx_env::overrides::lock();
+        let key = &ocx_env::__OCX_TESTING_LIBC;
+        env.set(key, "glibc");
         let caps = HostCapabilities::detect().await;
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("__OCX_TEST_LIBC") };
-        assert_eq!(caps.libcs, glibc_only(), "__OCX_TEST_LIBC=glibc must yield {{Glibc}}");
+        assert_eq!(
+            caps.libcs,
+            glibc_only(),
+            "__OCX_TESTING_LIBC=glibc must yield {{Glibc}}"
+        );
 
-        // SAFETY: see above.
-        unsafe { std::env::set_var("__OCX_TEST_LIBC", "musl") };
+        env.set(key, "musl");
         let caps = HostCapabilities::detect().await;
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("__OCX_TEST_LIBC") };
-        assert_eq!(caps.libcs, musl_only(), "__OCX_TEST_LIBC=musl must yield {{Musl}}");
+        assert_eq!(caps.libcs, musl_only(), "__OCX_TESTING_LIBC=musl must yield {{Musl}}");
 
-        // SAFETY: see above.
-        unsafe { std::env::set_var("__OCX_TEST_LIBC", "glibc,musl") };
+        env.set(key, "glibc,musl");
         let caps = HostCapabilities::detect().await;
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("__OCX_TEST_LIBC") };
         assert_eq!(
             caps.libcs,
             both(),
-            "__OCX_TEST_LIBC=glibc,musl must yield {{Glibc, Musl}}"
+            "__OCX_TESTING_LIBC=glibc,musl must yield {{Glibc, Musl}}"
         );
         assert_eq!(
             caps.os_features(),
@@ -844,13 +839,17 @@ mod tests {
             "dual-libc host must advertise both os.features tags, sorted"
         );
 
-        // SAFETY: see above.
-        unsafe { std::env::set_var("__OCX_TEST_LIBC", "none") };
+        env.set(key, "none");
         let caps = HostCapabilities::detect().await;
-        // SAFETY: see above.
-        unsafe { std::env::remove_var("__OCX_TEST_LIBC") };
-        assert!(caps.libcs.is_empty(), "__OCX_TEST_LIBC=none must yield an empty set");
+        assert!(caps.libcs.is_empty(), "__OCX_TESTING_LIBC=none must yield an empty set");
         assert!(caps.os_features().is_empty(), "empty set must yield empty os_features");
+
+        env.set(key, "");
+        let caps = HostCapabilities::detect().await;
+        assert!(
+            caps.libcs.is_empty(),
+            "a set-but-empty __OCX_TESTING_LIBC must yield an empty set"
+        );
     }
 
     // ── os_features() mapping ────────────────────────────────────────
@@ -974,7 +973,7 @@ mod tests {
 
     /// On non-Linux platforms, detect() must return an empty set without
     /// spawning subprocesses. Compiled and exercised on every platform; the
-    /// assertion holds on all targets because __OCX_TEST_LIBC is not set in
+    /// assertion holds on all targets because __OCX_TESTING_LIBC is not set in
     /// this test (we rely on impl to return an empty set on non-Linux).
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
@@ -994,7 +993,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires real Alpine+gcompat host; exercises ld.so probe path"]
     async fn detect_on_alpine_gcompat_host_returns_musl_only() {
-        // __OCX_TEST_LIBC unset — real probe.
+        // __OCX_TESTING_LIBC unset — real probe.
         let caps = HostCapabilities::detect().await;
         assert_eq!(
             caps.libcs,
@@ -1020,7 +1019,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a loader that outputs corrupt --version; exercises error-handling path"]
     async fn detect_with_corrupt_loader_output_returns_empty_no_panic() {
-        // __OCX_TEST_LIBC unset — exercises the real error path in detect().
+        // __OCX_TESTING_LIBC unset — exercises the real error path in detect().
         let caps = HostCapabilities::detect().await;
         assert!(caps.libcs.is_empty(), "corrupt loader output must yield an empty set");
     }

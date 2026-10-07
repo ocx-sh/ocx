@@ -1,0 +1,15 @@
+{
+  "kind": "reports",
+  "verdict": "break",
+  "change": "The shared Digest `pattern` changes; both roots reach it.",
+  "findings": [
+    {
+      "code": "B06",
+      "pointer": "/$defs/Digest",
+      "subjects": [
+        "PushReport",
+        "StatusReport"
+      ]
+    }
+  ]
+}

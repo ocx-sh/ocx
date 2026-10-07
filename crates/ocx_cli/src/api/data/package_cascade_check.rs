@@ -4,18 +4,16 @@
 //! Report data for `ocx package cascade check`.
 
 use ocx_console::Cell;
-use ocx_package::cascade::graph::{CascadeReport, IndexFinding, SlotStatus, Unrepairable};
+use ocx_package::cascade::graph::{CascadeReport, IndexFinding, Unrepairable};
 use serde::Serialize;
 
 use crate::api::Printable;
 
 /// What `cascade check` found, one entry per package in input order.
-///
-/// `reports` holds one report object per package, carrying that package's
-/// alias states, slot rows, index findings and ignored tags.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeCheck {
-    pub reports: Vec<CascadeReport>,
+    /// One report per package, in input order: its alias states, slot rows, index findings and ignored tags.
+    pub items: Vec<CascadeReport>,
     /// Packages an index source claims but has no root for yet, so the index layer compared nothing;
     /// plain only, to tell that silence from "agrees". Not serialized: the JSON key set is pinned.
     #[serde(skip)]
@@ -23,9 +21,9 @@ pub struct PackageCascadeCheck {
 }
 
 impl PackageCascadeCheck {
-    pub fn new(reports: Vec<CascadeReport>) -> Self {
+    pub fn new(items: Vec<CascadeReport>) -> Self {
         Self {
-            reports,
+            items,
             index_layer_skipped: Vec::new(),
         }
     }
@@ -33,7 +31,7 @@ impl PackageCascadeCheck {
     /// The plain table's cells, row-major, before styling, so tests can assert them without a terminal.
     fn table_rows(&self) -> Vec<[String; 5]> {
         let mut rows = Vec::new();
-        for report in &self.reports {
+        for report in &self.items {
             let package = report
                 .logical
                 .as_ref()
@@ -43,7 +41,7 @@ impl PackageCascadeCheck {
                     package.clone(),
                     row.tag.to_string(),
                     ocx_oci::render_native_platform(&row.platform),
-                    slot_status_label(row.status).to_string(),
+                    row.status.as_str().to_string(),
                     digest_transition(row.observed.as_deref(), row.expected.as_deref()),
                 ]);
             }
@@ -67,7 +65,7 @@ impl PackageCascadeCheck {
             for item in &report.unrepairable {
                 let (tag, detail) = match item {
                     Unrepairable::ChildManifestMissing { tag, digest } => {
-                        (tag, format!("child manifest gone: {}", short_digest(digest)))
+                        (tag, format!("child manifest gone: {}", digest.to_short_string()))
                     }
                     // Not "gone": this build cannot address the algorithm, so presence was never checked.
                     Unrepairable::ChildDigestUnaddressable { tag, digest } => {
@@ -89,6 +87,9 @@ impl PackageCascadeCheck {
 }
 
 impl Printable for PackageCascadeCheck {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "PackageCascadeCheck";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         let mut columns: [Vec<Cell>; 5] = Default::default();
@@ -108,11 +109,11 @@ impl Printable for PackageCascadeCheck {
             "Status".into(),
             "Detail".into(),
         ];
-        let first = usize::from(self.reports.len() < 2);
+        let first = usize::from(self.items.len() < 2);
         data.print_table(&headers[first..], &columns[first..]);
 
         // `check` never writes, so its index staleness is the announce hop's to fix, then a local sync.
-        for report in &self.reports {
+        for report in &self.items {
             if report.index_findings.is_empty() {
                 continue;
             }
@@ -142,17 +143,6 @@ pub fn stale_index_hint(package: &str) -> String {
     format!("index behind the registry - run: ocx package announce {package} --refresh")
 }
 
-/// A slot status's `Serialize` spelling, so both output modes show the same word.
-fn slot_status_label(status: SlotStatus) -> &'static str {
-    match status {
-        SlotStatus::Ok => "ok",
-        SlotStatus::Missing => "missing",
-        SlotStatus::Stale => "stale",
-        SlotStatus::Orphan => "orphan",
-        SlotStatus::Duplicate => "duplicate",
-    }
-}
-
 /// `observed -> expected` in short digests, or whichever side exists.
 fn digest_transition(observed: Option<&str>, expected: Option<&str>) -> String {
     match (observed, expected) {
@@ -171,7 +161,7 @@ fn short_digest(digest: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ocx_package::cascade::graph::{AliasTag, SlotRow};
+    use ocx_package::cascade::graph::{AliasTag, SlotRow, SlotStatus};
 
     use super::*;
 
@@ -259,7 +249,7 @@ mod tests {
         report.unrepairable = vec![
             Unrepairable::ChildManifestMissing {
                 tag: AliasTag::Root { variant: None },
-                digest: OBSERVED.to_string(),
+                digest: ocx_oci::Digest::try_from(OBSERVED).unwrap(),
             },
             Unrepairable::ChildDigestUnaddressable {
                 tag: AliasTag::Root { variant: None },
@@ -327,7 +317,7 @@ mod tests {
     // are pinned here rather than left to drift unnoticed.
 
     #[test]
-    fn json_top_level_is_a_reports_wrapper() {
+    fn json_top_level_is_an_items_list() {
         let check = PackageCascadeCheck::new(vec![report_with(Vec::new(), Vec::new())]);
         let value = serde_json::to_value(&check).unwrap();
         let mut keys: Vec<&str> = value
@@ -337,7 +327,48 @@ mod tests {
             .map(String::as_str)
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, vec!["reports"], "the whole JSON contract is this one wrapper key");
+        assert_eq!(keys, vec!["items"], "the whole JSON contract is this one list key");
+    }
+
+    /// Every union in the report is tagged by `type` in snake_case, and an unset digest is omitted.
+    #[test]
+    fn json_unions_are_type_tagged_and_unset_digests_are_omitted() {
+        let mut report = report_with(
+            vec![slot_row("3.28", SlotStatus::Missing, None, Some(EXPECTED))],
+            vec![IndexFinding::NotCommitted {
+                tag: AliasTag::Root { variant: None },
+            }],
+        );
+        report.aliases.insert(
+            AliasTag::Root { variant: None },
+            ocx_package::cascade::graph::AliasState::NotAnIndex {
+                digest: ocx_oci::Digest::try_from(OBSERVED).unwrap(),
+            },
+        );
+        report.unrepairable = vec![Unrepairable::ChildDigestUnaddressable {
+            tag: AliasTag::Root { variant: None },
+            digest: "blake3:0011".to_string(),
+        }];
+        let value = serde_json::to_value(PackageCascadeCheck::new(vec![report])).unwrap();
+        let item = &value["items"][0];
+        assert_eq!(
+            item["aliases"]["latest"],
+            serde_json::json!({"type": "not_an_index", "digest": OBSERVED})
+        );
+        assert_eq!(
+            item["index_findings"][0],
+            serde_json::json!({"type": "not_committed", "tag": "latest"})
+        );
+        assert_eq!(
+            item["unrepairable"][0],
+            serde_json::json!({"type": "child_digest_unaddressable", "tag": "latest", "digest_text": "blake3:0011"})
+        );
+        let row = item["rows"][0].as_object().unwrap();
+        assert!(
+            !row.contains_key("observed"),
+            "an unset digest is omitted, never null: {row:?}"
+        );
+        assert!(!item.as_object().unwrap().contains_key("logical"), "{item}");
     }
 
     #[test]
@@ -355,7 +386,7 @@ mod tests {
 
         assert_eq!(
             keys,
-            vec!["reports"],
+            vec!["items"],
             "a plain-mode note must not grow the pinned key set: {value}"
         );
     }
@@ -369,7 +400,7 @@ mod tests {
             }],
         )]);
         let value = serde_json::to_value(&check).unwrap();
-        let mut keys: Vec<&str> = value["reports"][0]
+        let mut keys: Vec<&str> = value["items"][0]
             .as_object()
             .expect("each report is an object")
             .keys()
@@ -383,11 +414,10 @@ mod tests {
                 "identifier",
                 "ignored_tags",
                 "index_findings",
-                "logical",
                 "rows",
                 "unrepairable",
             ],
-            "pin the field set a --format json consumer actually parses: {value}"
+            "pin the field set a --format json consumer parses; an unset `logical` is omitted: {value}"
         );
     }
 

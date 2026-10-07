@@ -41,6 +41,8 @@ libc.workspace = true
 # by building this crate instead of escalating the whole gate
 # (`scripts/scoped_gate.py` routes `manifests` at C-019 (2)).
 dunce.workspace = true
+# `shim_env_literals_are_registry_names` reads the registry's declared names.
+ocx_env = { workspace = true, features = ["__testing"] }
 serde_json.workspace = true
 tempfile.workspace = true
 toml.workspace = true

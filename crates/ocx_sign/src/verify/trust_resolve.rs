@@ -84,9 +84,7 @@ pub async fn resolve_trust_root(
     }
 
     if offline {
-        return Err(VerifyErrorKind::TrustRootLoad(
-            TrustRootLoadReason::OfflineTrustMaterialUnavailable,
-        ));
+        return Err(VerifyErrorKind::OfflineNoPinnedRekorKey);
     }
     TrustRoot::load_embedded(&state.tuf_cache_dir()).await
 }
@@ -94,9 +92,7 @@ pub async fn resolve_trust_root(
 /// Refuse, offline only, a trust root without a pinned Rekor key: nothing else can check the SET.
 fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot, VerifyErrorKind> {
     if offline && root.rekor_public_key_pem().is_none() {
-        return Err(VerifyErrorKind::TrustRootLoad(
-            TrustRootLoadReason::OfflineTrustMaterialUnavailable,
-        ));
+        return Err(VerifyErrorKind::OfflineNoPinnedRekorKey);
     }
     Ok(root)
 }
@@ -129,13 +125,8 @@ mod tests {
         let state = SigningStatePaths::new(tmp.path().join("state"));
         let result = resolve_trust_root(None, None, None, &state, "rekor.example", true).await;
         assert!(
-            matches!(
-                result,
-                Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::OfflineTrustMaterialUnavailable
-                ))
-            ),
-            "offline + no material must be OfflineTrustMaterialUnavailable, got {result:?}"
+            matches!(result, Err(VerifyErrorKind::OfflineNoPinnedRekorKey)),
+            "offline + no material must be OfflineNoPinnedRekorKey, got {result:?}"
         );
     }
 
@@ -155,13 +146,8 @@ mod tests {
 
         let offline = resolve_trust_root(None, None, None, &state, "rekor.example", true).await;
         assert!(
-            matches!(
-                offline,
-                Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::OfflineTrustMaterialUnavailable
-                ))
-            ),
-            "offline + keyless cache must be OfflineTrustMaterialUnavailable, got {offline:?}"
+            matches!(offline, Err(VerifyErrorKind::OfflineNoPinnedRekorKey)),
+            "offline + keyless cache must be OfflineNoPinnedRekorKey, got {offline:?}"
         );
 
         let online = resolve_trust_root(None, None, None, &state, "rekor.example", false)
@@ -316,7 +302,7 @@ mod tests {
     ///
     /// The two outcomes are told apart by the error kind, not by success: with
     /// nothing cached and `offline` set, falling through lands on
-    /// `OfflineTrustMaterialUnavailable`, so a refusal that produced *that*
+    /// `OfflineNoPinnedRekorKey`, so a refusal that produced *that*
     /// would be indistinguishable from the absence case. Both halves are
     /// asserted in one test so the discriminator is proved, not assumed.
     #[tokio::test]
@@ -327,12 +313,7 @@ mod tests {
         let absent = tmp.path().join("absent-trusted-root.json");
         let fell_through = resolve_trust_root(None, None, Some(&absent), &state, "rekor.example", true).await;
         assert!(
-            matches!(
-                fell_through,
-                Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::OfflineTrustMaterialUnavailable
-                ))
-            ),
+            matches!(fell_through, Err(VerifyErrorKind::OfflineNoPinnedRekorKey)),
             "an absent convention file must fall through to the cache rung, got {fell_through:?}"
         );
 

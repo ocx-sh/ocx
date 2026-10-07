@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --compression` now requires `--compression=VALUE`.",
+  "findings": [
+    {
+      "code": "G11",
+      "pointer": "/root/commands/0/commands/0/args/4",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

@@ -137,6 +137,8 @@ filegroup(
         "pyproject.toml",
         "uv.lock",
         "zot-config.json",
+        # `src/conformance.py` validates every `--format json` stdout against these.
+        "//crates/ocx_schema:golden",
     ] + glob(
         [
             "sigstore/**",

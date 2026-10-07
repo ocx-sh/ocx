@@ -72,7 +72,12 @@ impl schemars::JsonSchema for Env {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Vec<var::Var>>::json_schema(generator)
+        let mut schema = <Vec<var::Var>>::json_schema(generator);
+        schema.insert(
+            "description".to_owned(),
+            "A package's declared environment variables, in declaration order.".into(),
+        );
+        schema
     }
 }
 

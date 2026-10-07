@@ -81,8 +81,8 @@ def test_dep_install_path_resolves_to_content_dir(
     ocx.plain("package", "install", "--select", app.short)
 
     env_result = ocx.json("package", "env", app.short)
-    dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
-    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
+    dep_path_entry = next((e for e in env_result["items"] if e["key"] == "DEP_PATH"), None)
+    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["items"]]}"
 
     resolved = dep_path_entry["value"]
     # Token must be expanded — no literal ${deps. remaining
@@ -96,7 +96,7 @@ def test_dep_install_path_resolves_to_content_dir(
     # reports the package root; ${deps.NAME.installPath} resolves to the
     # dep's content tree (`<root>/content`), so the resolved value must
     # equal the leaf's package root joined with `content`.
-    leaf_paths = ocx.json("package", "which", leaf.short)
+    leaf_paths = ocx.json("package", "which", leaf.short)["paths"]
     expected_leaf_root = leaf_paths[leaf.short]["path"]
     assert expected_leaf_root, (
         f"`ocx package which {leaf.short}` must return the leaf's package root; got: {leaf_paths!r}"
@@ -152,8 +152,8 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     ocx.plain("package", "install", "--select", a.short)
 
     env_result = ocx.json("package", "env", a.short)
-    c_path_entry = next((e for e in env_result["entries"] if e["key"] == "C_PATH"), None)
-    keys = [e["key"] for e in env_result["entries"]]
+    c_path_entry = next((e for e in env_result["items"] if e["key"] == "C_PATH"), None)
+    keys = [e["key"] for e in env_result["items"]]
     assert c_path_entry is not None, (
         f"C_PATH (declared on B) must propagate to A through Public chain; got keys={keys}"
     )
@@ -165,7 +165,7 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     # template was expanded against C and not silently against the consumer.
     # `ocx package which` returns the package root, so we join `content/` to compare
     # against the runtime ${installPath} value.
-    c_paths = ocx.json("package", "which", c.short)
+    c_paths = ocx.json("package", "which", c.short)["paths"]
     expected_c_root = c_paths[c.short]["path"]
     assert expected_c_root, f"`ocx package which {c.short}` returned no package root: {c_paths!r}"
     expected_c_content = str(Path(expected_c_root) / "content")
@@ -189,8 +189,8 @@ def test_dep_install_path_with_explicit_name(
     ocx.plain("package", "install", "--select", app.short)
 
     env_result = ocx.json("package", "env", app.short)
-    dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
-    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
+    dep_path_entry = next((e for e in env_result["items"] if e["key"] == "DEP_PATH"), None)
+    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["items"]]}"
 
     resolved = dep_path_entry["value"]
     assert "${deps." not in resolved, f"explicit-name token not expanded: {resolved!r}"
@@ -212,8 +212,8 @@ def test_dep_install_path_mixed_with_install_path(
     ocx.plain("package", "install", "--select", app.short)
 
     env_result = ocx.json("package", "env", app.short)
-    dep_path_entry = next((e for e in env_result["entries"] if e["key"] == "DEP_PATH"), None)
-    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["entries"]]}"
+    dep_path_entry = next((e for e in env_result["items"] if e["key"] == "DEP_PATH"), None)
+    assert dep_path_entry is not None, f"DEP_PATH missing in env: {[e['key'] for e in env_result["items"]]}"
 
     resolved = dep_path_entry["value"]
     assert "${deps." not in resolved, f"dep token not expanded: {resolved!r}"
@@ -271,7 +271,7 @@ def test_launcher_exec_refuses_an_undeclared_dep_token_at_composition(
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
 
-    install_dir = ocx.json("package", "which", pkg.short)
+    install_dir = ocx.json("package", "which", pkg.short)["paths"]
     pkg_root_str = install_dir[pkg.short]["path"]
     assert pkg_root_str, "find must return a package root for the installed package"
     pkg_root = Path(pkg_root_str)
@@ -394,7 +394,7 @@ def test_uppercase_dep_name_token_rejected_at_consumption(
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
 
-    install_dir = ocx.json("package", "which", pkg.short)
+    install_dir = ocx.json("package", "which", pkg.short)["paths"]
     pkg_root_str = install_dir[pkg.short]["path"]
     assert pkg_root_str, "find must return a package root for the installed package"
     pkg_root = Path(pkg_root_str)
@@ -479,7 +479,7 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
     ocx.plain("package", "install", "--select", r_pkg.short)
 
     # Locate R's installed package root.
-    find_result = ocx.json("package", "which", r_pkg.short)
+    find_result = ocx.json("package", "which", r_pkg.short)["paths"]
     r_root_str = find_result[r_pkg.short]["path"]
     assert r_root_str, f"`ocx package which {r_pkg.short}` must return R's package root"
     r_root = Path(r_root_str)

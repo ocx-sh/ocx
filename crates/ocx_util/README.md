@@ -4,7 +4,7 @@ Domain-free primitives: fs, locking, extension traits, async singleflight, TLS r
 
 **Tier:** ecosystem
 
-**May depend on:** none
+**May depend on:** `ocx_exit`
 
 **Named dependency exceptions:** none
 
@@ -14,7 +14,6 @@ is `src/lib.rs`, so the tier's own name appears in no path. `archive`,
 modules here; `utility::tls` (the bundled Mozilla seed) is `tls::embedded_roots`,
 under the module it always documented itself against.
 
-The `__testing` feature gates `env::overrides`, the process-environment
-override table tests write through. Enable it from `[dev-dependencies]` only —
-resolver v3 keeps a dev-dependency feature out of the normal build, so a
-release binary physically lacks the table.
+The `__testing` feature gates `singleflight`'s test-only constructor. Enable it
+from `[dev-dependencies]` only — resolver v3 keeps a dev-dependency feature out
+of the normal build, so a release binary physically lacks it.

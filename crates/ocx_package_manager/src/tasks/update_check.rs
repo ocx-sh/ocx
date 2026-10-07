@@ -17,13 +17,7 @@ fn default_throttle() -> Duration {
 use super::super::PackageManager;
 
 /// The reason an update check was skipped.
-///
-/// Programmatic consumers (JSON, scripts) can distinguish skip causes without
-/// string parsing. JSON serialization produces a discriminated object:
-/// - Unit variants: `{"reason": "bootstrap"}`
-/// - Variants with detail: `{"reason": "registry_probe_failed", "detail": "…"}`
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
-#[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum SkippedReason {
     /// The subprocess version query failed: binary absent (true bootstrap),
     /// non-zero exit, or unparseable JSON output. The check cannot compare
@@ -81,18 +75,15 @@ pub enum UpdateCheckResult {
 ///
 /// Does not by itself mean the update was not installed: a child that failed
 /// late may already have swapped the binary.
-///
-/// Serialized as a discriminated object: `{"reason": "exited", "detail": 82}`.
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 // Never the verdict: the `current` symlink decides installed vs pulled; this value only picks the advice.
-#[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum HandoffFailure {
     /// The new binary could not be started at all — it could not be resolved
     /// out of the package just pulled, or the spawn itself failed. The inner
     /// string carries the underlying error context.
     SpawnFailed(String),
-    /// The child ran and exited non-zero, carrying its exit code. `82`
-    /// (`DirtyRcBlock`) is the expected one: the setup completed the swap but
+    /// The child ran and exited non-zero, carrying its exit code. `81`
+    /// (`PolicyBlocked`) is the expected one: the setup completed the swap but
     /// left a user-edited shell profile alone.
     Exited(i32),
     /// The child was killed by a signal (Unix only), carrying the signal
@@ -364,6 +355,10 @@ const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Runs with `env_clear()` plus `resolve_env`'s entries only, so `version::Version::execute` must not read
 /// `HOME`/`PATH`/`OCX_*` or this falls through to `Bootstrap`. See `subsystem-package-manager.md`
 /// "OCX Configuration Forwarding".
+#[expect(
+    clippy::disallowed_types,
+    reason = "self re-entry runs ocx's own binary, so no package is resolved and no tool environment composed"
+)]
 async fn query_installed_version(manager: &PackageManager, identifier: &ocx_oci::PackageRef) -> Option<String> {
     // Via `current`, not tag resolution, which needs `:latest` and breaks on registries with no cascade tags.
     let info = manager
@@ -461,6 +456,10 @@ async fn hand_off_setup(
 /// Spawns `binary` with the hand-off argv and classifies how it ended.
 ///
 /// No deadline: a timeout could only kill a setup mid-write, leaving a half-migrated machine.
+#[expect(
+    clippy::disallowed_types,
+    reason = "self re-entry runs ocx's own binary, so no package is resolved and no tool environment composed"
+)]
 async fn run_handoff(
     binary: &std::path::Path,
     tag: &str,
@@ -566,7 +565,7 @@ async fn current_names(
 
 /// Turns the observed state plus the hand-off outcome into the reported result.
 ///
-/// Keyed on `current`, never the exit status: a child failing after its select (a dirty RC block exits 82)
+/// Keyed on `current`, never the exit status: a child failing after its select (a dirty RC block exits 81)
 /// already completed the update.
 fn self_update_verdict(
     current_moved: bool,
@@ -994,44 +993,6 @@ mod tests {
         );
     }
 
-    // ── SkippedReason Serialize round-trip tests ─────────────────────────────
-
-    /// Unit variants serialize to `{"reason": "<snake_case_name>"}`.
-    #[test]
-    fn skipped_reason_serialize_unit_variants() {
-        use super::SkippedReason;
-
-        let json = serde_json::to_string(&SkippedReason::Bootstrap).unwrap();
-        assert_eq!(json, r#"{"reason":"bootstrap"}"#);
-
-        let json = serde_json::to_string(&SkippedReason::Offline).unwrap();
-        assert_eq!(json, r#"{"reason":"offline"}"#);
-
-        let json = serde_json::to_string(&SkippedReason::Throttled).unwrap();
-        assert_eq!(json, r#"{"reason":"throttled"}"#);
-
-        let json = serde_json::to_string(&SkippedReason::NotFound).unwrap();
-        assert_eq!(json, r#"{"reason":"not_found"}"#);
-
-        let json = serde_json::to_string(&SkippedReason::UnparseableLatest).unwrap();
-        assert_eq!(json, r#"{"reason":"unparseable_latest"}"#);
-
-        let json = serde_json::to_string(&SkippedReason::NoReleaseTag).unwrap();
-        assert_eq!(json, r#"{"reason":"no_release_tag"}"#);
-    }
-
-    /// Detail variants serialize to `{"reason": "…", "detail": "…"}`.
-    #[test]
-    fn skipped_reason_serialize_detail_variants() {
-        use super::SkippedReason;
-
-        let json = serde_json::to_string(&SkippedReason::RegistryProbeFailed("timeout".into())).unwrap();
-        assert_eq!(json, r#"{"reason":"registry_probe_failed","detail":"timeout"}"#);
-
-        let json = serde_json::to_string(&SkippedReason::UnparseableCurrent("dev-build".into())).unwrap();
-        assert_eq!(json, r#"{"reason":"unparseable_current","detail":"dev-build"}"#);
-    }
-
     // ── TC-B2: query_installed_version failure-mode coverage ─────────────────
     //
     // The function collapses four distinct failure modes to `Option<String>`:
@@ -1128,9 +1089,9 @@ mod tests {
     async fn handoff_spawns_the_argv_it_builds() {
         let tmp = tempfile::tempdir().unwrap();
         let recorded = tmp.path().join("argv");
-        // 82 = DirtyRcBlock, the failure the design specifically must not read
+        // 81 = PolicyBlocked, the failure the design specifically must not read
         // as "the update failed".
-        let recorder = write_argv_recorder(tmp.path(), &recorded, 82);
+        let recorder = write_argv_recorder(tmp.path(), &recorded, 81);
 
         let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
 
@@ -1150,7 +1111,7 @@ mod tests {
             "the child must receive exactly the hand-off argv"
         );
         assert!(
-            matches!(outcome, Some(super::HandoffFailure::Exited(82))),
+            matches!(outcome, Some(super::HandoffFailure::Exited(81))),
             "a non-zero child must be classified by its exit code; got: {outcome:?}"
         );
     }
@@ -1238,7 +1199,7 @@ mod tests {
     // ── The verdict is the symlink, not the exit status ──────────────────────
 
     /// The select is the child's FIRST phase, so a child that failed in a later
-    /// one — exit 82, a shell profile with local edits — has already repointed
+    /// one — exit 81, a shell profile with local edits — has already repointed
     /// `current`. That update succeeded.
     ///
     /// Keying the verdict on the exit status would report a completed update as
@@ -1247,7 +1208,7 @@ mod tests {
     fn installed_when_current_moved_even_though_child_failed() {
         let result = super::self_update_verdict(
             true,
-            Some(super::HandoffFailure::Exited(82)),
+            Some(super::HandoffFailure::Exited(81)),
             Some("0.6.0".to_owned()),
             "0.6.1".to_owned(),
         );
@@ -1257,7 +1218,7 @@ mod tests {
                 assert_eq!(from.as_deref(), Some("0.6.0"));
                 assert_eq!(to, "0.6.1");
                 assert!(
-                    matches!(handoff, Some(super::HandoffFailure::Exited(82))),
+                    matches!(handoff, Some(super::HandoffFailure::Exited(81))),
                     "the failure must survive onto the result so the caller can advise"
                 );
             }

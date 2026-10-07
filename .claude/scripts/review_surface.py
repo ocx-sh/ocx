@@ -78,7 +78,7 @@ WIRE_FILES = re.compile(
     r"|fixtures/index_wire/"
 )
 CLI_FILES = re.compile(r"crates/ocx_cli/src/")
-EXIT_FILES = re.compile(r"(cli/exit_code\.rs|cli/classify\.rs|/error\.rs$)")
+EXIT_FILES = re.compile(r"(ocx_exit(_derive)?/|ocx_cli/src/exit(\.rs|/)|/error\.rs$)")
 TESTY = re.compile(r"crates/[^/]+/tests/|^test/|fixtures/")
 SCAFFOLD = re.compile(r"^\.claude/|^\.agents/|^taskfiles/|^\.github/")
 
@@ -187,7 +187,7 @@ def tier_of(path: str, body: str, in_test: bool) -> str:
         return "T6"
     if WIRE_FILES.search(path) or re.search(r"#\[serde\(|deny_unknown_fields", body):
         return "T0"
-    if CLI_FILES.search(path) or EXIT_FILES.search(path) or "try_downcast!" in body:
+    if CLI_FILES.search(path) or EXIT_FILES.search(path) or "#[derive(Classify)]" in body:
         return "T1"
     if re.match(r"^\s*pub(\([^)]*\))?\s+(fn|struct|enum|trait|type|const)\b", body) or re.match(
         r"^\s*impl\b.*\bfor\b", body

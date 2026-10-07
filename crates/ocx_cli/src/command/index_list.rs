@@ -149,10 +149,7 @@ impl IndexList {
                 .fetch_manifest(&target, IndexOperation::Query)
                 .await?
             {
-                Some((_, manifest)) => ocx_oci::Platform::from_manifest(&manifest)
-                    .into_iter()
-                    .map(|p| p.to_string())
-                    .collect(),
+                Some((_, manifest)) => ocx_oci::Platform::from_manifest(&manifest),
                 None => {
                     log::warn!("Manifest not found for '{}' - skipping.", target);
                     Vec::new()

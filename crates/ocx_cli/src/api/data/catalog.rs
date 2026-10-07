@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use serde::Serialize;
 
@@ -14,60 +14,62 @@ use crate::api::data::sanitize_for_terminal;
 ///
 /// Plain format: one-column table (Repository) without tags, or two-column
 /// table (Repository | Tag) when tags are included.
-///
-/// JSON format: array of repository names without tags, or object keyed by
-/// repository name with tag arrays as values.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct Catalog {
-    pub repositories: CatalogData,
+    /// One entry per repository: in registry order without `--with-tags`, sorted by name with it.
+    pub items: Vec<CatalogEntry>,
+    #[serde(skip)]
+    with_tags: bool,
+}
+
+/// One repository of the catalog.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct CatalogEntry {
+    /// The repository name.
+    pub repository: String,
+    /// The repository's tags, sorted; present only when tags were requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 impl Catalog {
-    pub fn new(repositories: CatalogData) -> Self {
-        Self { repositories }
-    }
-
     pub fn without_tags(repositories: Vec<String>) -> Self {
-        Self::new(CatalogData::WithoutTags(repositories))
+        let items = repositories
+            .into_iter()
+            .map(|repository| CatalogEntry { repository, tags: None })
+            .collect();
+        Self {
+            items,
+            with_tags: false,
+        }
     }
 
     pub fn with_tags(tags: HashMap<String, Vec<String>>) -> Self {
         // Sorted, or output order follows the incoming hash order.
-        let sorted = tags
+        let mut items: Vec<CatalogEntry> = tags
             .into_iter()
             .map(|(repository, mut repository_tags)| {
                 repository_tags.sort();
-                (repository, repository_tags)
+                CatalogEntry {
+                    repository,
+                    tags: Some(repository_tags),
+                }
             })
             .collect();
-        Self::new(CatalogData::WithTags(sorted))
+        items.sort_by(|a, b| a.repository.cmp(&b.repository));
+        Self { items, with_tags: true }
     }
-}
 
-/// Polymorphic catalog payload: either a plain list of repository names or a
-/// map of repository names to their tags.
-#[derive(Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum CatalogData {
-    WithoutTags(Vec<String>),
-    WithTags(BTreeMap<String, Vec<String>>),
-}
-
-impl Catalog {
     /// The plain table's column-major rows, neutralized (CWE-150) since names and tags are
-    /// registry-authored; the second is empty for [`CatalogData::WithoutTags`].
+    /// registry-authored; the second is empty without tags.
     fn plain_rows(&self) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        match &self.repositories {
-            CatalogData::WithoutTags(repos) => {
-                for repo in repos {
-                    rows[0].push(sanitize_for_terminal(repo));
-                }
-            }
-            CatalogData::WithTags(tags) => {
-                for (repo, repo_tags) in tags {
-                    for tag in repo_tags {
-                        rows[0].push(sanitize_for_terminal(repo));
+        for entry in &self.items {
+            match &entry.tags {
+                None => rows[0].push(sanitize_for_terminal(&entry.repository)),
+                Some(tags) => {
+                    for tag in tags {
+                        rows[0].push(sanitize_for_terminal(&entry.repository));
                         rows[1].push(sanitize_for_terminal(tag));
                     }
                 }
@@ -78,10 +80,14 @@ impl Catalog {
 }
 
 impl Printable for Catalog {
+    const SCHEMA_VERSION: u32 = 1;
+    const ROOT: &'static str = "Catalog";
+
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        let headers: &[ocx_console::Column] = match &self.repositories {
-            CatalogData::WithoutTags(_) => &["Repository".into()],
-            CatalogData::WithTags(_) => &["Repository".into(), "Tag".into()],
+        let headers: &[ocx_console::Column] = if self.with_tags {
+            &["Repository".into(), "Tag".into()]
+        } else {
+            &["Repository".into()]
         };
         printer.print_table(
             headers,
@@ -150,13 +156,18 @@ mod tests {
             ],
         );
 
-        let CatalogData::WithTags(map) = &catalog.repositories else {
-            panic!("expected WithTags variant");
+        let tags_of = |name: &str| {
+            catalog
+                .items
+                .iter()
+                .find(|entry| entry.repository == name)
+                .and_then(|entry| entry.tags.clone())
+                .expect("the repository is listed with tags")
         };
         // Lexical (byte) sort, not semver: "0.10" < "0.2" because '1' < '2' at the
         // third byte. Intentional — the contract is determinism, not version order.
-        assert_eq!(map["zeta"], ["0.1", "0.10", "0.2"], "inner list must be sorted");
-        assert_eq!(map["mike"], ["1.0", "2.1", "3.2"], "inner list must be sorted");
+        assert_eq!(tags_of("zeta"), ["0.1", "0.10", "0.2"], "inner list must be sorted");
+        assert_eq!(tags_of("mike"), ["1.0", "2.1", "3.2"], "inner list must be sorted");
     }
 
     /// A name carrying every shape the finding measured: a raw ESC (the start of
@@ -193,5 +204,20 @@ mod tests {
         // legitimately serves, or it silently rewrites the listing.
         let catalog = Catalog::without_tags(vec!["kitware/cmake".to_string(), "ns/pkg".to_string()]);
         assert_eq!(catalog.plain_rows()[0], ["kitware/cmake", "ns/pkg"]);
+    }
+
+    #[test]
+    fn json_is_an_items_list_with_tags_only_when_requested() {
+        let bare = serde_json::to_value(Catalog::without_tags(vec!["ns/pkg".to_string()])).expect("serializes");
+        assert_eq!(bare, serde_json::json!({"items": [{"repository": "ns/pkg"}]}));
+        let tagged = serde_json::to_value(Catalog::with_tags(HashMap::from([(
+            "ns/pkg".to_string(),
+            vec!["2.0".to_string(), "1.0".to_string()],
+        )])))
+        .expect("serializes");
+        assert_eq!(
+            tagged,
+            serde_json::json!({"items": [{"repository": "ns/pkg", "tags": ["1.0", "2.0"]}]})
+        );
     }
 }

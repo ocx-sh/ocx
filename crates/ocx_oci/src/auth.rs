@@ -122,16 +122,18 @@ fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<crate::native::Au
 fn get_env_auth(registry: impl AsRef<str>) -> Result<Option<crate::native::Auth>> {
     let registry_slug = registry.to_slug();
 
-    let type_env = format!("OCX_AUTH_{}_TYPE", registry_slug);
-    let token_env = format!("OCX_AUTH_{}_TOKEN", registry_slug);
-    let user_env = format!("OCX_AUTH_{}_USER", registry_slug);
+    let name = |var: &ocx_env::EnvVar| var.name.replace("{REGISTRY}", &registry_slug);
+    let token_env = name(ocx_env::OCX_AUTH_TOKEN.declaration());
+    let user_env = name(&ocx_env::OCX_AUTH_USER);
 
-    let auth_type = match ocx_util::env::var(&type_env) {
+    let auth_type = match ocx_env::OCX_AUTH_TYPE.get_slot(&registry_slug) {
         Some(auth_type) => Some(AuthType::try_from(auth_type)?),
         None => None,
     };
-    let auth_user = ocx_util::env::var(&user_env);
-    let auth_token = ocx_util::env::var(&token_env);
+    let auth_user = ocx_env::OCX_AUTH_USER.get_slot(&registry_slug);
+    let auth_token = ocx_env::OCX_AUTH_TOKEN
+        .get_slot(&registry_slug)
+        .map(ocx_env::Sensitive::into_inner);
 
     match auth_type {
         Some(auth_type) => {
@@ -163,24 +165,24 @@ mod tests {
 
     #[test]
     fn test_get_docker_auth_no_credentials() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let auth = get_docker_auth("nonexistent.registry").unwrap();
         assert!(auth.is_none());
     }
 
     #[test]
     fn test_get_env_auth_basic() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_AUTH_test_registry_TYPE", "basic");
-        env.set("OCX_AUTH_test_registry_USER", "TEST_USER");
-        env.set("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_AUTH_test_registry_TYPE", "basic");
+        env.set_raw("OCX_AUTH_test_registry_USER", "TEST_USER");
+        env.set_raw("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(
             matches!(auth, Some(crate::native::Auth::Basic(user, token)) if user == "TEST_USER" && token == "TEST_TOKEN")
         );
 
-        env.remove("OCX_AUTH_test_registry_TYPE");
+        env.remove_raw("OCX_AUTH_test_registry_TYPE");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(
@@ -190,16 +192,37 @@ mod tests {
 
     #[test]
     fn test_get_env_auth_token() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("OCX_AUTH_test_registry_TYPE", "token");
-        env.set("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_AUTH_test_registry_TYPE", "token");
+        env.set_raw("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(matches!(auth, Some(crate::native::Auth::Bearer(token)) if token == "TEST_TOKEN"));
 
-        env.remove("OCX_AUTH_test_registry_TYPE");
+        env.remove_raw("OCX_AUTH_test_registry_TYPE");
 
         let auth = get_env_auth("test.registry").unwrap();
         assert!(matches!(auth, Some(crate::native::Auth::Bearer(token)) if token == "TEST_TOKEN"));
+    }
+
+    #[test]
+    fn test_get_env_auth_empty_value_reads_as_unset() {
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_AUTH_test_registry_TYPE", "");
+        env.set_raw("OCX_AUTH_test_registry_USER", "TEST_USER");
+        env.set_raw("OCX_AUTH_test_registry_TOKEN", "TEST_TOKEN");
+        let auth = get_env_auth("test.registry").unwrap();
+        assert!(
+            matches!(auth, Some(crate::native::Auth::Basic(user, token)) if user == "TEST_USER" && token == "TEST_TOKEN")
+        );
+
+        env.remove_raw("OCX_AUTH_test_registry_TYPE");
+        env.set_raw("OCX_AUTH_test_registry_USER", "");
+        let auth = get_env_auth("test.registry").unwrap();
+        assert!(matches!(auth, Some(crate::native::Auth::Bearer(token)) if token == "TEST_TOKEN"));
+
+        env.remove_raw("OCX_AUTH_test_registry_USER");
+        env.set_raw("OCX_AUTH_test_registry_TOKEN", "");
+        assert!(get_env_auth("test.registry").unwrap().is_none());
     }
 }

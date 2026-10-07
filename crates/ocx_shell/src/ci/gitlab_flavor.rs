@@ -88,7 +88,7 @@ impl Flavor for GitLabFlavor {
         separator: Option<&str>,
     ) -> Result<(), crate::ci::error::Error> {
         // An invalid key corrupts the `name` field; values are serde-escaped and need no guard.
-        if !ocx_util::env::is_valid_env_key(key) {
+        if !ocx_env::is_valid_env_key(key) {
             warn!("skipping invalid env-var key {key:?} for CI export");
             return Ok(());
         }
@@ -134,7 +134,7 @@ impl Drop for GitLabFlavor {
 
 /// Whether this process runs inside GitLab CI/CD.
 pub(super) fn detect() -> bool {
-    ocx_util::env::var("GITLAB_CI").as_deref() == Some("true")
+    ocx_env::GITLAB_CI.get().as_deref() == Some("true")
 }
 
 #[derive(Serialize)]
@@ -191,8 +191,8 @@ mod tests {
 
     #[test]
     fn single_path() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("LD_LIBRARY_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("LD_LIBRARY_PATH");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn path_accumulates_across_entries() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("LD_LIBRARY_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("LD_LIBRARY_PATH");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -230,15 +230,15 @@ mod tests {
             buf.contents(),
             format!(
                 "{{\"name\":\"LD_LIBRARY_PATH\",\"value\":\"/pkg2/lib{0}/pkg1/lib\"}}\n",
-                ocx_util::env::PATH_SEPARATOR
+                ocx_util::path::PATH_SEPARATOR
             )
         );
     }
 
     #[test]
     fn path_prepends_existing_env() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("LD_LIBRARY_PATH", "/existing/lib");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("LD_LIBRARY_PATH", "/existing/lib");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -251,7 +251,7 @@ mod tests {
             buf.contents(),
             format!(
                 "{{\"name\":\"LD_LIBRARY_PATH\",\"value\":\"/pkg/lib{0}/existing/lib\"}}\n",
-                ocx_util::env::PATH_SEPARATOR
+                ocx_util::path::PATH_SEPARATOR
             )
         );
     }
@@ -260,8 +260,8 @@ mod tests {
     fn path_key_flattened_with_existing() {
         // GitLab has no path channel: PATH is treated like any other path var,
         // prepended onto the existing process PATH.
-        let env = ocx_util::env::overrides::lock();
-        env.set("PATH", "/usr/bin");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::PATH, "/usr/bin");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -274,14 +274,14 @@ mod tests {
             buf.contents(),
             format!(
                 "{{\"name\":\"PATH\",\"value\":\"/pkg/bin{0}/usr/bin\"}}\n",
-                ocx_util::env::PATH_SEPARATOR
+                ocx_util::path::PATH_SEPARATOR
             )
         );
     }
 
     #[test]
     fn constant() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn constant_conflict_warns_last_wins() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn json_escapes_special_chars() {
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -329,8 +329,8 @@ mod tests {
 
     #[test]
     fn file_sink_writes_json_lines() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("LD_LIBRARY_PATH");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("LD_LIBRARY_PATH");
         let tmp = tempfile::tempdir().unwrap();
         let export = tmp.path().join("export.env");
 
@@ -349,7 +349,7 @@ mod tests {
     fn key_with_newline_skipped() {
         // A newline-bearing key is rejected: nothing is buffered and nothing
         // is emitted (Finding 3 — GitLab key charset / CWE-77 parity).
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -369,7 +369,7 @@ mod tests {
     fn key_with_invalid_charset_skipped() {
         // Keys with `=` or spaces are not valid identifiers and must be
         // dropped before they corrupt the JSON-lines `name` field.
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -390,7 +390,7 @@ mod tests {
         // The Drop impl flushes any buffered entries that were never explicitly
         // flushed. SharedBuf uses Arc<Mutex<Vec<u8>>>, so the clone held by
         // the test outlives the flavor and can observe the flushed output.
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let target = flavor(&buf);
 
@@ -417,8 +417,8 @@ mod tests {
 
     #[test]
     fn list_export_on_an_empty_ambient() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("JDK_JAVA_OPTIONS");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("JDK_JAVA_OPTIONS");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -435,8 +435,8 @@ mod tests {
         // A value already present in the ambient process env is removed from
         // its old position and re-appended at the back — re-exporting an
         // already-exported list variable must not grow it.
-        let env = ocx_util::env::overrides::lock();
-        env.set("JDK_JAVA_OPTIONS", "-ea -Xmx1g");
+        let env = ocx_env::overrides::lock();
+        env.set_raw("JDK_JAVA_OPTIONS", "-ea -Xmx1g");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -453,8 +453,8 @@ mod tests {
 
     #[test]
     fn list_entry_with_an_explicit_separator() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("GODEBUG");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("GODEBUG");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -477,8 +477,8 @@ mod tests {
         // By the time an entry reaches `write_entry`, `reconcile_list_separators`
         // has already settled every contributor to a key — a bare `None` here
         // legitimately means "nobody declared one", which folds with `" "`.
-        let env = ocx_util::env::overrides::lock();
-        env.remove("JDK_JAVA_OPTIONS");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("JDK_JAVA_OPTIONS");
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -508,7 +508,7 @@ mod tests {
         // FIRST and the list SECOND, but the constant bucket flushes last, so
         // its line is emitted last anyway — the inverse of call order.
         // Documented, not fixed.
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -531,7 +531,7 @@ mod tests {
     fn empty_entries_flush_writes_nothing() {
         // Calling flush() when no entries have been written must produce no
         // output and must not panic (closes coverage gap A2).
-        let _env = ocx_util::env::overrides::lock();
+        let _env = ocx_env::overrides::lock();
         let buf = SharedBuf::new();
         let mut target = flavor(&buf);
 
@@ -542,16 +542,16 @@ mod tests {
 
     #[test]
     fn detect_gitlab_ci() {
-        let env = ocx_util::env::overrides::lock();
-        env.set("GITLAB_CI", "true");
-        env.remove("GITHUB_ACTIONS");
+        let env = ocx_env::overrides::lock();
+        env.set(&ocx_env::GITLAB_CI, "true");
+        env.remove(&ocx_env::GITHUB_ACTIONS);
         assert_eq!(CiFlavor::detect(), Some(CiFlavor::GitLab));
     }
 
     #[test]
     fn detect_no_gitlab() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("GITLAB_CI");
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::GITLAB_CI);
         assert!(!super::detect());
     }
 }

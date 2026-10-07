@@ -1,16 +1,16 @@
 """libc-aware install resolution acceptance tests (Step 3.6).
 
 These tests exercise the full install path when the host's libc detection is
-controlled via the ``__OCX_TEST_LIBC`` env-override hook (Living Design Record
+controlled via the ``__OCX_TESTING_LIBC`` env-override hook (Living Design Record
 amendment 2026-05-28).
 
-__OCX_TEST_LIBC values (test-support only — not in user docs):
+__OCX_TESTING_LIBC values (test-support only — not in user docs):
   "glibc" → detection returns Some(Glibc); Platform::current() sets os.features=["libc.glibc"]
   "musl"  → detection returns Some(Musl); Platform::current() sets os.features=["libc.musl"]
   "none"  → detection returns None; Platform::current() sets os.features=None
   unset   → real ld.so probe (never used in CI; requires real host)
 
-Each test sets __OCX_TEST_LIBC on the ``OcxRunner.env`` dict and removes it when
+Each test sets __OCX_TESTING_LIBC on the ``OcxRunner.env`` dict and removes it when
 done (via pytest fixture teardown).  The tests publish two libc-tagged entries
 (plus an optional untagged fallback) and assert that install picks the correct
 one.
@@ -33,23 +33,23 @@ pytestmark = pytest.mark.command("install", "about", "version")
 def _installed_marker_via_seam(ocx: OcxRunner, short: str, libc: str) -> str:
     """Read the marker from the installed ``bin/hello`` binary.
 
-    Uses ``__OCX_TEST_LIBC`` during ``package which`` so that the host
+    Uses ``__OCX_TESTING_LIBC`` during ``package which`` so that the host
     detection is the same seam used during install; avoids having to pass an
     explicit ``--platform`` flag, which would break tests that exercise
     seam-driven selection (not explicit-platform selection).
     """
     try:
-        ocx.env["__OCX_TEST_LIBC"] = libc
-        which = ocx.json("package", "which", short)
+        ocx.env["__OCX_TESTING_LIBC"] = libc
+        which = ocx.json("package", "which", short)["paths"]
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
     pkg_root = Path(which[short]["path"])
     hello = pkg_root / "content" / "bin" / "hello"
     return hello.read_text()
 
 # ---------------------------------------------------------------------------
 # Real-host markers (manual). The seam-driven tests above force the detected
-# libc via __OCX_TEST_LIBC and run anywhere. The markers below run the REAL
+# libc via __OCX_TESTING_LIBC and run anywhere. The markers below run the REAL
 # discovery-then-identify probe (no seam) and are skipped unless run on the
 # named host with OCX_REAL_HOST_LIBC_TESTS set — they document the non-FHS
 # expectations the FHS-only allowlist could not satisfy. See
@@ -63,7 +63,7 @@ requires_real_host = pytest.mark.skipif(
     os.environ.get(REAL_HOST_LIBC_ENV) is None,
     reason=(
         f"set {REAL_HOST_LIBC_ENV}=1 on a real NixOS / Gentoo Prefix host to run; "
-        "exercises real PT_INTERP discovery (no __OCX_TEST_LIBC seam)"
+        "exercises real PT_INTERP discovery (no __OCX_TESTING_LIBC seam)"
     ),
 )
 
@@ -84,7 +84,7 @@ def test_install_selects_libc_glibc_on_glibc_host(
 
     Pushes a ``linux/amd64+libc.glibc`` entry and a ``linux/amd64+libc.musl``
     entry under the same tag, each with a distinct marker binary.  Then installs
-    with ``__OCX_TEST_LIBC=glibc`` and asserts that the glibc marker is
+    with ``__OCX_TESTING_LIBC=glibc`` and asserts that the glibc marker is
     materialised — proving that libc detection drives entry selection, not a
     no-op that would install either variant.
     """
@@ -110,11 +110,11 @@ def test_install_selects_libc_glibc_on_glibc_host(
     short = f"{unique_repo}:1.0.0"
 
     # Install with glibc seam — must pick the glibc entry.
-    ocx.env["__OCX_TEST_LIBC"] = "glibc"
+    ocx.env["__OCX_TESTING_LIBC"] = "glibc"
     try:
-        result = ocx.json("package", "install", short)
+        result = ocx.json("package", "install", short)["packages"]
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert short in result, f"Install result missing key for {short}: {result}"
     installed_path = Path(result[short]["path"])
@@ -157,7 +157,7 @@ def test_install_selects_libc_musl_on_alpine_gcompat_host(
     the "identity, not equivalence" rule from the ADR.
 
     Pushes both libc variants and asserts the musl marker is materialised when
-    ``__OCX_TEST_LIBC=musl``, proving the seam drives real entry discrimination.
+    ``__OCX_TESTING_LIBC=musl``, proving the seam drives real entry discrimination.
     """
     import platform as _platform
     if _platform.machine().lower() not in {"x86_64", "amd64"}:
@@ -181,11 +181,11 @@ def test_install_selects_libc_musl_on_alpine_gcompat_host(
     short = f"{unique_repo}:1.0.0"
 
     # Install with musl seam — must pick the musl entry.
-    ocx.env["__OCX_TEST_LIBC"] = "musl"
+    ocx.env["__OCX_TESTING_LIBC"] = "musl"
     try:
-        result = ocx.json("package", "install", short)
+        result = ocx.json("package", "install", short)["packages"]
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert short in result, f"Install result missing key for {short}: {result}"
     installed_path = Path(result[short]["path"])
@@ -229,7 +229,7 @@ def test_install_falls_back_when_libc_undetectable(
     satisfy any non-empty candidate os_features requirement.
 
     Pushes both a libc-tagged entry (glibc) and an untagged entry.  Installs
-    with ``__OCX_TEST_LIBC=none`` and asserts the UNTAGGED marker is installed
+    with ``__OCX_TESTING_LIBC=none`` and asserts the UNTAGGED marker is installed
     — not the glibc-tagged one — proving fallback is active and not a no-op.
     """
     import platform as _platform
@@ -255,11 +255,11 @@ def test_install_falls_back_when_libc_undetectable(
     short = f"{unique_repo}:1.0.0"
 
     # Simulate undetectable libc host.
-    ocx.env["__OCX_TEST_LIBC"] = "none"
+    ocx.env["__OCX_TESTING_LIBC"] = "none"
     try:
-        result = ocx.json("package", "install", short)
+        result = ocx.json("package", "install", short)["packages"]
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert short in result, f"Install result missing key for {short}: {result}"
     installed_path = Path(result[short]["path"])
@@ -299,7 +299,7 @@ def test_install_errors_when_no_compatible_entry(
     different-libc entry exists for the host's os+arch.
 
     Scenario: registry has ONLY a ``linux/amd64+libc.musl`` entry; the host
-    declares glibc via ``__OCX_TEST_LIBC=glibc``. The musl entry shares the
+    declares glibc via ``__OCX_TESTING_LIBC=glibc``. The musl entry shares the
     host os+arch but its ``os.features`` is not a subset of the glibc host's,
     so ``Index::select`` returns ``FeatureMismatch`` and install surfaces the
     ``feature mismatch:`` error.
@@ -314,7 +314,7 @@ def test_install_errors_when_no_compatible_entry(
     )
 
     # Host declares glibc — the musl-only entry cannot satisfy it.
-    ocx.env["__OCX_TEST_LIBC"] = "glibc"
+    ocx.env["__OCX_TESTING_LIBC"] = "glibc"
     try:
         proc = ocx.run(
             "package", "install", f"{unique_repo}:1.0.0",
@@ -322,7 +322,7 @@ def test_install_errors_when_no_compatible_entry(
             check=False,
         )
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert proc.returncode == 65, (
         f"install with no compatible libc entry must exit 65 (DataError); got returncode={proc.returncode}"
@@ -343,7 +343,7 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
     advertises BOTH libc families and the index carries one entry per family.
 
     A dual-libc host (Ubuntu + musl-tools, or a multi-target CI runner) sets
-    ``__OCX_TEST_LIBC=glibc,musl``, so `Platform::current()` reports
+    ``__OCX_TESTING_LIBC=glibc,musl``, so `Platform::current()` reports
     ``os.features=["libc.glibc","libc.musl"]``. Both the ``libc.glibc`` and
     ``libc.musl`` index entries are then equally specific matches (each
     satisfies exactly one of the host's two features) — `Index::select`
@@ -373,7 +373,7 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
     )
 
     # Dual-libc host — the seam's comma-separated form yields {Glibc, Musl}.
-    ocx.env["__OCX_TEST_LIBC"] = "glibc,musl"
+    ocx.env["__OCX_TESTING_LIBC"] = "glibc,musl"
     try:
         proc = ocx.run(
             "package", "install", f"{unique_repo}:1.0.0",
@@ -381,7 +381,7 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
             check=False,
         )
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert proc.returncode == 65, (
         f"install ambiguous between two equally-specific libc entries must exit 65 (DataError); "
@@ -400,14 +400,14 @@ def test_about_json_reports_host_platform_with_features(
     ocx: OcxRunner, seam: str, features: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``about --format json`` reports the host as ocx matches it: ``platforms[0]``
-    is the canonical string with its ``os.features``, ``features`` lists them, so
+    is the OCI platform object with its ``os.features``, ``features`` lists them, so
     a script needs no knowledge of the ``libc`` family."""
-    monkeypatch.setitem(ocx.env, "__OCX_TEST_LIBC", seam)
+    monkeypatch.setitem(ocx.env, "__OCX_TESTING_LIBC", seam)
     about = ocx.json("about")
 
     assert about["features"] == features
     assert about["libc"] == features
-    assert about["platforms"][0].endswith("+" + ",".join(features)), about["platforms"]
+    assert about["platforms"][0]["os.features"] == features, about["platforms"]
 
 
 @pytest.mark.skipif(
@@ -422,11 +422,11 @@ def test_about_plain_does_not_double_render_libc(ocx: OcxRunner) -> None:
     the Platforms row previously rendered via `Display`, duplicating the
     libc onto both rows (e.g. `Platforms: linux/amd64+libc.glibc, any`).
     """
-    ocx.env["__OCX_TEST_LIBC"] = "glibc"
+    ocx.env["__OCX_TESTING_LIBC"] = "glibc"
     try:
         result = ocx.run("about", format=None)
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert "Platforms: linux/amd64" in result.stdout, (
         f"Platforms row must render the bare os/arch, no +os_features suffix; got: {result.stdout!r}"
@@ -451,11 +451,11 @@ def test_version_verbose_does_not_double_render_libc(ocx: OcxRunner) -> None:
     `platform.to_string()` would duplicate `libc.glibc` (`linux/amd64+libc.glibc
     (libc.glibc)`). Sibling of `test_about_plain_does_not_double_render_libc`.
     """
-    ocx.env["__OCX_TEST_LIBC"] = "glibc"
+    ocx.env["__OCX_TESTING_LIBC"] = "glibc"
     try:
         result = ocx.run("version", "-v", format=None)
     finally:
-        ocx.env.pop("__OCX_TEST_LIBC", None)
+        ocx.env.pop("__OCX_TESTING_LIBC", None)
 
     assert "linux/amd64 (libc.glibc)" in result.stdout, (
         f"host row must render the bare os/arch plus the libc parenthetical; got: {result.stdout!r}"
@@ -487,7 +487,7 @@ def _package_root(ocx: OcxRunner, short: str, platform: str) -> Path:
     same entry that was installed — the real host probe would otherwise reject
     a non-host-libc entry.
     """
-    which = ocx.json("package", "which", "--platform", platform, short)
+    which = ocx.json("package", "which", "--platform", platform, short)["paths"]
     return Path(which[short]["path"])
 
 

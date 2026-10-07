@@ -136,7 +136,7 @@ async fn run_check(context: &crate::app::Context) -> anyhow::Result<ExitCode> {
     match load_project_with_lock(context).await {
         Ok(_) => Ok(ExitCode::SUCCESS),
         // Drift is the answer `--check` asks for, not a failure; a missing lock stays an error (78).
-        // JSON keeps the error: its `error.detail` envelope is the only report this check emits.
+        // JSON keeps the error: its `error.detail` error document is the only report this check emits.
         Err(ProjectContextError::Lock(ocx_project::LockCurrency::Stale { .. })) if !context.api().is_json() => Ok(
             crate::command::update::print_verdict("ocx.lock does not match ocx.toml; run `ocx lock` to update it"),
         ),

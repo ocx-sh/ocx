@@ -25,12 +25,24 @@ pub fn allows_plain_http(hosts: &[String], host: &str) -> bool {
 }
 
 /// A physical host was refused, or could not be resolved, by the SSRF guard.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum SsrfError {
     #[error("host {host} resolves to a forbidden address {ip}; add it to trusted_hosts to allow")]
+    // The Sigstore wrapper exits 64 for this (`From<SsrfError> for UrlRejection` in `endpoint.rs`); change both together.
+    #[exit(
+        ConfigError,
+        slug = "ssrf_forbidden_target",
+        summary = "A registry host resolves to an address outside the trusted set"
+    )]
     ForbiddenTarget { host: String, ip: IpAddr },
 
     #[error("failed to resolve host {host}")]
+    // A DNS failure at connect time is already 75; no portable split of NXDOMAIN from a flaky resolver.
+    #[exit(
+        TempFail,
+        slug = "host_resolution_failed",
+        summary = "A registry host could not be resolved"
+    )]
     Resolution {
         host: String,
         #[source]
@@ -424,10 +436,12 @@ pub struct DialPolicy<'a> {
 ///
 /// The pipelines fold this wording into `ForbiddenRegistryTarget` verbatim
 /// (`physical_dial_refusal_renders_the_index_wording`).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[error(
     "the physical host of {namespace}/… was refused; list it (bare host, no port) under [registries.\"{namespace}\"].trusted_hosts"
 )]
+// The verdict is the wrapped `SsrfError`'s, slug included.
+#[exit(delegate = source)]
 pub struct PhysicalDialRefused {
     pub namespace: String,
     #[source]

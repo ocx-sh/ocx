@@ -1,59 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the `ocx_index` error family.
-
-use ocx_exit::ExitCode;
+//! Test-only: the classification tests of the `ocx_index` family. Its types declare their own codes with `#[derive(Classify)]`.
 
 use ocx_index::error::Error as OciIndexError;
-
-use super::{ClassifyExitCode, downcast_arm};
-
-impl ClassifyExitCode for OciIndexError {
-    fn classify(&self) -> Option<ExitCode> {
-        Some(match self {
-            Self::RemoteManifestNotFound(_) | Self::NoIndexableTag(_) | Self::NotInIndex { .. } => ExitCode::NotFound,
-            Self::NestedImageIndex { .. } => ExitCode::DataError,
-            Self::Store(error) => return error.classify(),
-            Self::OciClient(error) => return error.classify(),
-            Self::Digest(error) => return error.classify(),
-            Self::PinnedIdentifier(error) => return error.classify(),
-            Self::File(error) => return error.classify(),
-            Self::PathInvalid(_) => ExitCode::Failure,
-            Self::SerializationFailure(_) => ExitCode::DataError,
-            // The full chain walker, not a single-hop `classify()`, or nested causes go unclassified.
-            Self::SourceWalkFailed(arc) | Self::SourceFetchFailed(arc) => {
-                return Some(super::classify_library_error(arc.as_error()));
-            }
-            // `None`, not `Some(Failure)`: a `Some` ends the walk before the leader's typed source, so waiters would exit 1.
-            Self::SingleflightFailed(_) => return None,
-            Self::PolicyResolutionBlocked { .. } => ExitCode::PolicyBlocked,
-            Self::UnsupportedIndexFormat { .. }
-            | Self::DispatchObjectDigestMismatch { .. }
-            | Self::WalkedDigestMismatch { .. }
-            | Self::YankedRefused { .. }
-            | Self::MalformedPhysicalRef { .. }
-            | Self::RootRepositoryMismatch { .. }
-            | Self::MalformedCatalogKey { .. }
-            | Self::InvalidImageIndex(_)
-            | Self::MalformedIndexDocument { .. } => ExitCode::DataError,
-            Self::IndexHttpFailed { .. } if self.is_transient_transport() => ExitCode::TempFail,
-            Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. } => ExitCode::Unavailable,
-            Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
-            Self::Ssrf { source, .. } => return source.classify(),
-        })
-    }
-}
-
-pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
-    downcast_arm!(cause, OciIndexError);
-    None
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_exit::ExitCode;
+    use ocx_exit::{ClassifyExitCode, ExitCode};
 
     // ── moved from ocx_lib::file_structure::index_store with the impl ──
 
@@ -101,6 +56,74 @@ mod tests {
             },
         };
         assert_eq!(error.classify(), Some(ExitCode::TempFail));
+    }
+
+    /// Reds on: an index slug, delegated or walked, naming another cause than the exit code does,
+    /// and a waiter reporting another slug than its leader.
+    #[test]
+    fn index_details_name_the_cause_that_decides_the_code() {
+        use crate::exit::tests::assert_detail;
+        use ocx_util::singleflight;
+
+        let cases: Vec<(OciIndexError, &str)> = vec![
+            (
+                OciIndexError::OciClient(ocx_oci::client::error::ClientError::Authentication(Box::new(
+                    std::io::Error::other("token refused"),
+                ))),
+                "registry_auth_failed",
+            ),
+            (
+                OciIndexError::YankedRefused {
+                    identifier: "ocx.sh/kitware/cmake:3.28".to_string(),
+                },
+                "yanked_refused",
+            ),
+            (
+                index_http_failed(Some(503), "unexpected status 503"),
+                "index_http_transient",
+            ),
+            (
+                index_http_failed(Some(403), "unexpected status 403"),
+                "index_http_failed",
+            ),
+        ];
+        for (inner, slug) in cases {
+            assert_detail(&inner, slug);
+            let arc = ocx_index::error::ArcError::from(inner);
+            assert_detail(&OciIndexError::SourceWalkFailed(arc.clone()), slug);
+            let waiter = OciIndexError::SingleflightFailed(singleflight::Error::Failed(
+                singleflight::SharedError::for_test(OciIndexError::SourceWalkFailed(arc)),
+            ));
+            assert_detail(&waiter, slug);
+        }
+        let timeout = OciIndexError::SingleflightFailed(singleflight::Error::Timeout);
+        assert_detail(&timeout, "singleflight_timeout");
+        let refused = OciIndexError::Ssrf {
+            source: ocx_oci::ssrf::PhysicalDialRefused {
+                namespace: "ocx.sh".to_string(),
+                source: ocx_oci::ssrf::SsrfError::Resolution {
+                    host: "no-such-registry.invalid".to_string(),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
+                },
+            },
+        };
+        assert_detail(&refused, "host_resolution_failed");
+    }
+
+    /// A source failure whose inner error classifies nowhere falls back to its own row, under its own code.
+    #[test]
+    fn an_unclassified_source_failure_falls_back_to_its_own_row() {
+        use crate::exit::tests::assert_detail;
+        use ocx_util::singleflight;
+
+        let unclassified = || {
+            OciIndexError::SingleflightFailed(singleflight::Error::Failed(singleflight::SharedError::for_test(
+                std::io::Error::other("leader died"),
+            )))
+        };
+        let arc = ocx_index::error::ArcError::from(unclassified());
+        assert_detail(&OciIndexError::SourceFetchFailed(arc.clone()), "index_source_failed");
+        assert_detail(&OciIndexError::SourceWalkFailed(arc), "index_source_failed");
     }
 
     fn index_http_failed(

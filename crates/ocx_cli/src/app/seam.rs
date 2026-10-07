@@ -23,7 +23,7 @@ use tracing::instrument::WithSubscriber as _;
 use super::{App, Cli};
 
 /// The complete environment one [`run`] executes in: a variable not in `vars`
-/// (or not UTF-8) reads as unset, and `ocx_util::env::current_dir` answers `cwd`.
+/// (or not UTF-8) reads as unset, and `ocx_env::current_dir` answers `cwd`.
 ///
 /// `cwd` is not the process working directory, so a relative path argument a
 /// command opens directly resolves against the test process's own — pass
@@ -75,10 +75,13 @@ async fn run_admitting(
 ) -> ExitCode {
     // ponytail: serialised via EnvLock; per-invocation env threading when concurrency matters.
     // Held across every `.await` below to serialise runs; taking it again inside the run deadlocks.
-    let lock = ocx_util::env::overrides::lock();
+    let lock = ocx_env::overrides::lock();
     for (key, value) in &env.vars {
         if let (Some(key), Some(value)) = (key.to_str(), value.to_str()) {
-            lock.set(key, value);
+            match ocx_env::all().find(|var| var.name == key) {
+                Some(var) => lock.set(var, value),
+                None => lock.set_raw(key, value),
+            }
         }
     }
     lock.hermetic(env.cwd.clone());
@@ -156,7 +159,7 @@ fn arm_exit_tripwire() {
 #[cfg(not(unix))]
 fn arm_exit_tripwire() {}
 
-/// A call-scoped fmt subscriber into the capture's stderr at `argv`'s level. `OCX_LOG`/`RUST_LOG`
+/// A call-scoped fmt subscriber into the capture's stderr at `argv`'s level. `OCX_LOG_LEVEL`/`RUST_LOG`
 /// are not read, and `log::` records are unbridged, so a `log::` diagnostic never reaches `err`.
 fn subscriber(argv: &[OsString]) -> impl tracing::Subscriber + Send + Sync {
     let level = Cli::try_parse_from(argv)
@@ -215,8 +218,8 @@ pub(super) fn active() -> bool {
 
 /// Refuse a verb the run in progress does not admit.
 pub(super) fn admit(command: Option<&crate::command::Command>) -> anyhow::Result<()> {
-    let name = command.map_or("", super::canonical_command_name);
-    if admitted_now().is_some_and(|admitted| admitted.contains(&name)) {
+    let name = command.map(super::canonical_command_name).unwrap_or_default();
+    if admitted_now().is_some_and(|admitted| admitted.contains(&name.as_str())) {
         return Ok(());
     }
     Err(super::CommandError::new(
@@ -310,6 +313,7 @@ mod tests {
     /// (the ambient `OCX_PROJECT` wins), `current_dir` ignoring the hermetic
     /// cwd (the walk starts from the crate directory).
     #[tokio::test]
+    #[expect(clippy::disallowed_methods, reason = "the ambient value the seam must ignore")]
     async fn seam_hermetic_env_ignores_the_process_environment_and_cwd() {
         let root = tempfile::tempdir().expect("tempdir");
         let home = root.path().join("ocx-home");
@@ -409,13 +413,16 @@ mod tests {
     /// `crates/ocx_cli/BUILD.bazel`.
     #[test]
     fn seam_poisoned_environment_is_present_under_its_bazel_target() {
-        let under_seam_target = std::env::var("TEST_TARGET").is_ok_and(|target| target.ends_with(":ocx_cli_seam_test"));
+        // Locked so a concurrent test's overrides cannot stand in for the process environment.
+        let _env = ocx_env::overrides::lock();
+        let under_seam_target =
+            ocx_env::dynamic("TEST_TARGET").is_some_and(|target| target.ends_with(":ocx_cli_seam_test"));
         if !under_seam_target {
             return;
         }
         let missing: Vec<String> = poisoned_keys()
             .into_iter()
-            .filter(|key| std::env::var_os(key).is_none_or(|value| !value.to_string_lossy().contains("poison")))
+            .filter(|key| ocx_env::dynamic_secret(key).is_none_or(|value| !value.expose().contains("poison")))
             .collect();
         assert!(
             missing.is_empty(),
@@ -425,7 +432,7 @@ mod tests {
         // a directory where the loader expects `config.toml` (kept, then an
         // error to read). A path that does not resolve, or a symlink, is
         // skipped by the loader, which neutralises the read instead.
-        let var = |key: &str| std::path::PathBuf::from(std::env::var_os(key).unwrap_or_default());
+        let var = |key: &str| std::path::PathBuf::from(ocx_env::dynamic(key).unwrap_or_default());
         for tier in [
             var("HOME").join(".config/ocx/config.toml"),
             var("XDG_CONFIG_HOME").join("ocx/config.toml"),
@@ -448,7 +455,7 @@ mod tests {
     }
 
     /// Every key `ocx_cli_seam_test` must poison — the process-environment
-    /// reads a third-party crate could make past `ocx_util::env`, plus the
+    /// reads a third-party crate could make past `ocx_env`, plus the
     /// registry-auth family for the default registry.
     fn poisoned_keys() -> Vec<String> {
         use ocx_util::prelude::StringExt as _;
@@ -630,14 +637,43 @@ mod tests {
         );
     }
 
+    /// Context init refuses an invalid hardening switch before any command work.
+    ///
+    /// Red state: drop the `check_hardening_env` call from `Context::try_init`.
+    #[tokio::test]
+    async fn seam_an_invalid_hardening_value_exits_78_naming_the_key_and_never_the_value() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let hardening: Vec<&str> = ocx_env::all()
+            .filter(|var| var.on_invalid == ocx_env::OnInvalid::Error)
+            .map(|var| var.name)
+            .collect();
+        assert!(
+            hardening.contains(&"OCX_OFFLINE"),
+            "the switch no later read guards: {hardening:?}"
+        );
+        for key in hardening {
+            let mut env = environment(&[("OCX_HOME", &root.path().join("ocx-home"))], root.path());
+            env.vars.insert(key.into(), "s3cr3t-value".into());
+            let outcome = drive(&["status"], &env).await;
+
+            assert_eq!(outcome.code, ExitCode::from(78), "{key}: stderr: {}", outcome.err);
+            assert!(outcome.err.contains(key), "names the key: {:?}", outcome.err);
+            assert!(
+                !outcome.err.contains("s3cr3t-value"),
+                "never the value: {:?}",
+                outcome.err
+            );
+        }
+    }
+
     // ── Invariant 5: output only through out/err ────────────────────────────
 
-    /// The report lands in `out` — and so does the JSON error envelope.
+    /// The report lands in `out` — and so does the JSON error document.
     ///
     /// Red states: `Line::write` bypassing the capture sink (the report goes
-    /// to the test process's stdout), the envelope printed with `println!`.
+    /// to the test process's stdout), the error document printed with `println!`.
     #[tokio::test]
-    async fn seam_report_and_error_envelope_land_in_out() {
+    async fn seam_report_and_error_document_land_in_out() {
         let root = tempfile::tempdir().expect("tempdir");
         let home = root.path().join("ocx-home");
         let wanted = project(root.path(), "wanted");
@@ -664,7 +700,7 @@ mod tests {
         assert_eq!(
             json(&failure.out)["command"],
             "status",
-            "the envelope is in out: {:?}",
+            "the error document is in out: {:?}",
             failure.out
         );
     }

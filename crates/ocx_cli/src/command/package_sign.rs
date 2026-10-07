@@ -179,9 +179,7 @@ impl PackageSign {
 
         // A `both` run that lost one leg still reports the leg that landed, but exits with the failure.
         let failure = result.first_failure().map(package_sign_common::leg_exit_code);
-        let report = package_sign_common::signature_report(&identifier, self.platform.as_ref(), result)
-            // Or the envelope's `exit_code` disagrees with the process's (`error_envelope.rs` invariant).
-            .with_exit_code(failure.unwrap_or(ocx_exit::ExitCode::Success));
+        let report = package_sign_common::signature_report(&identifier, self.platform.as_ref(), result);
         context.api().report(&report)?;
         Ok(failure.map_or(ExitCode::SUCCESS, ExitCode::from))
     }
@@ -215,19 +213,18 @@ impl PackageSign {
                 SweptOutcome::Done(report) => {
                     let result = report.result;
                     // A `both` run that lost one leg is a failed row still carrying the landed leg.
-                    let leg = result
-                        .first_failure()
-                        .map(|kind| (package_sign_common::leg_exit_code(kind), kind.to_string()));
+                    let leg = result.first_failure().map(|kind| {
+                        (
+                            package_sign_common::leg_exit_code(kind),
+                            package_sign_common::leg_slug(kind),
+                            kind.to_string(),
+                        )
+                    });
                     let signature = swept_signature_report(identifier, &entry.tag, result);
                     match leg {
-                        Some((code, message)) => {
+                        Some((code, slug, message)) => {
                             failures.push(code);
-                            SweptTagReport::failed(
-                                entry.tag,
-                                Some(signature),
-                                package_sign_common::category_slug(code),
-                                message,
-                            )
+                            SweptTagReport::failed(entry.tag, Some(signature), slug, message)
                         }
                         None => SweptTagReport::completed(entry.tag, signature),
                     }
@@ -237,9 +234,7 @@ impl PackageSign {
         }
 
         let exit_code = package_sign_common::sweep_exit_code(&failures);
-        context
-            .api()
-            .report(&SweepReport::new("package sign", rows, exit_code))?;
+        context.api().report(&SweepReport::new(rows))?;
         Ok(ExitCode::from(exit_code))
     }
 }
@@ -285,7 +280,7 @@ mod tests {
     /// regresses the identifier vanishes and this fails.
     #[test]
     fn sign_error_wrapped_in_package_error_still_populates_envelope_identifier() {
-        use crate::error_envelope::render_error_envelope;
+        use crate::error_document::render_error_document;
 
         let id = test_identifier();
         let package_error = PackageError::new(
@@ -296,7 +291,7 @@ mod tests {
             )))),
         );
         let err = sign_error_into_anyhow(package_error);
-        let json = render_error_envelope("package sign", &err).expect("render envelope");
+        let json = render_error_document("package sign", &err).expect("render envelope");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
 
         assert_eq!(parsed["exit_code"], 80);
@@ -341,7 +336,8 @@ mod tests {
         let report = swept_signature_report(&positional, "1.0.0", result);
 
         assert_eq!(
-            report.identifier, "registry.example/pkg:1.0.0",
+            report.identifier.to_string(),
+            "registry.example/pkg:1.0.0",
             "the row must name the swept tag, not the positional `9.9.9` the sweep never signed",
         );
     }

@@ -4,7 +4,7 @@ Signer-identity policy: `[[trust.policy]]` model, tiered resolution (`resolve_ti
 
 **Tier:** ecosystem
 
-**May depend on:** `ocx_oci`, `ocx_util`
+**May depend on:** `ocx_oci`, `ocx_util`, `ocx_env`
 
 **Named dependency exceptions:** none
 
@@ -24,6 +24,6 @@ crosses the public surface and sigstore is a structural dependency rather than
 an incidental one. Only the workspace's default feature set — this crate parses
 and holds a verification key; it neither signs nor talks to Fulcio or Rekor.
 
-No `ClassifyExitCode` impl lives here. Every error this crate raises is
+No `ClassifyExitCode` impl, hand-written or derived, lives here. Every error this crate raises is
 classified from `ocx_cli`, and each one is consumed by value into a caller's own
 kind before it can reach the chain walker — see `CLAUDE.md`.

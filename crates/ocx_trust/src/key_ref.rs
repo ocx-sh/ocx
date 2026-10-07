@@ -54,7 +54,9 @@ pub enum KeyEnvError {
 /// [`KeyEnvError::Unset`] when the variable is absent or empty, and
 /// [`KeyEnvError::TooLarge`] when its value exceeds [`MAX_KEY_PEM_BYTES`].
 pub fn read_key_env(name: &str) -> Result<String, KeyEnvError> {
-    let value = ocx_util::env::var(name)
+    // `dynamic_secret`: `OCX_SIGNING_KEY` is a declared secret, which `dynamic` refuses.
+    let value = ocx_env::dynamic_secret(name)
+        .map(ocx_env::Sensitive::into_inner)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| KeyEnvError::Unset { name: name.to_owned() })?;
     if value.len() as u64 > MAX_KEY_PEM_BYTES {
@@ -107,7 +109,7 @@ impl Scheme {
 
     /// Whether OCX implements this backend: [`Scheme::File`] and [`Scheme::Env`].
     ///
-    /// Not exhaustive: a backend forgotten here is refused as [`KeyRefError::UnsupportedBackend`] (exit 85) with no
+    /// Not exhaustive: a backend forgotten here is refused as [`KeyRefError::UnsupportedBackend`] (exit 82) with no
     /// build error; `only_the_file_and_env_backends_are_implemented` pins the membership.
     pub const fn is_implemented(self) -> bool {
         matches!(self, Self::File | Self::Env)
@@ -157,7 +159,7 @@ impl KeyRef {
     ///
     /// # Errors
     ///
-    /// [`KeyRefError::UnsupportedBackend`] for a recognised but unimplemented scheme (exit 85),
+    /// [`KeyRefError::UnsupportedBackend`] for a recognised but unimplemented scheme (exit 82),
     /// [`KeyRefError::UnknownScheme`] for an unrecognised one, [`KeyRefError::FileColonPrefix`] for `file:`, and
     /// [`KeyRefError::Empty`] when nothing follows the scheme.
     pub fn parse(value: &str) -> Result<Self, KeyRefError> {
@@ -238,7 +240,7 @@ impl fmt::Display for KeyRef {
 // No `#[non_exhaustive]`: `ocx_sign` matches this exhaustively, so a new variant must fail its build rather than
 // reach a `_` arm with the wrong exit code.
 pub enum KeyRefError {
-    /// A real backend OCX recognises but has not implemented. Exit 85.
+    /// A real backend OCX recognises but has not implemented. Exit 82.
     #[error("unsupported key backend `{scheme}`; only file-based keys are implemented")]
     UnsupportedBackend {
         /// The backend named by the reference.
@@ -515,7 +517,7 @@ mod tests {
     ///
     /// Recognised is not the same as implemented: forget the `Env` arm and
     /// `--key env://VAR` is refused as [`KeyRefError::UnsupportedBackend`]
-    /// (exit 85) while every spelling test above still passes.
+    /// (exit 82) while every spelling test above still passes.
     #[test]
     fn an_env_reference_is_implemented_not_merely_recognised() {
         assert!(Scheme::Env.is_implemented(), "env:// must reach a backend");
@@ -553,8 +555,8 @@ mod tests {
     /// C-033: unset and empty both refuse, and the message names the variable.
     #[test]
     fn read_key_env_refuses_an_unset_or_empty_variable() {
-        let env = ocx_util::env::overrides::lock();
-        env.remove("OCX_TEST_MISSING_KEY");
+        let env = ocx_env::overrides::lock();
+        env.remove_raw("OCX_TEST_MISSING_KEY");
         let unset = read_key_env("OCX_TEST_MISSING_KEY").expect_err("unset must refuse");
         assert_eq!(
             unset,
@@ -567,7 +569,7 @@ mod tests {
             "the refusal must name the variable: {unset}"
         );
 
-        env.set("OCX_TEST_EMPTY_KEY", "");
+        env.set_raw("OCX_TEST_EMPTY_KEY", "");
         assert_eq!(
             read_key_env("OCX_TEST_EMPTY_KEY"),
             Err(KeyEnvError::Unset {
@@ -577,20 +579,28 @@ mod tests {
         );
     }
 
+    /// `env://OCX_SIGNING_KEY`, the conventional reference, names a declared secret and still reads.
+    #[test]
+    fn read_key_env_reads_the_declared_signing_key() {
+        let env = ocx_env::overrides::lock();
+        env.set(ocx_env::OCX_SIGNING_KEY.declaration(), "pem");
+        assert_eq!(read_key_env("OCX_SIGNING_KEY").as_deref(), Ok("pem"));
+    }
+
     /// C-033: `MAX_KEY_PEM_BYTES` bounds the variable exactly as it bounds a
     /// file, so an oversized value is a data fault and not a key.
     #[test]
     fn read_key_env_bounds_the_value_at_the_shared_cap() {
-        let env = ocx_util::env::overrides::lock();
+        let env = ocx_env::overrides::lock();
         let cap = usize::try_from(MAX_KEY_PEM_BYTES).expect("cap fits a usize");
 
-        env.set("OCX_TEST_BIG_KEY", "k".repeat(cap));
+        env.set_raw("OCX_TEST_BIG_KEY", "k".repeat(cap));
         assert!(
             read_key_env("OCX_TEST_BIG_KEY").is_ok(),
             "a value exactly at the cap is still readable"
         );
 
-        env.set("OCX_TEST_BIG_KEY", "k".repeat(cap + 1));
+        env.set_raw("OCX_TEST_BIG_KEY", "k".repeat(cap + 1));
         let error = read_key_env("OCX_TEST_BIG_KEY").expect_err("one byte over the cap must refuse");
         assert_eq!(
             error,

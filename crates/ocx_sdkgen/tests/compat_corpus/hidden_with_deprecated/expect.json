@@ -1,0 +1,6 @@
+{
+  "kind": "cli",
+  "verdict": "non_break",
+  "change": "`package status` becomes hidden inside a named deprecation window.",
+  "findings": []
+}

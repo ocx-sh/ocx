@@ -4,7 +4,6 @@
 //! Report type for `ocx package sign` output.
 
 use ocx_console::Cell;
-use ocx_exit::ExitCode;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -16,11 +15,12 @@ use crate::api::data::sanitize_for_terminal;
 /// interchangeable: `payload_digest` is the SHA-256 of the signed blob (what
 /// the transparency record covers), `manifest_digest` that of the manifest it
 /// hangs from. `signer` is `"keyless-fulcio"`, or the key backend's own slug
-/// under a key.
+/// under a key. A partial run (one leg failed) still prints this report and
+/// exits non-zero.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SignatureReport {
-    /// User-facing identifier string that was signed (echoes the CLI arg).
-    pub identifier: String,
+    /// The package that was signed, resolved against the default registry.
+    pub identifier: ocx_oci::PackageRef,
     /// Digest of the subject manifest that the bundle signs.
     pub subject_digest: ocx_oci::Digest,
     /// One entry per wire shape that was written or attempted, in write order.
@@ -30,33 +30,32 @@ pub struct SignatureReport {
     /// reported alongside one that succeeded, and the exit code comes from the
     /// failure.
     pub legs: Vec<SignatureLegReport>,
-    /// Platform narrowed into (e.g., `linux/amd64`), or `any` when
-    /// `--platform` was absent and the run signed whatever resolved.
-    pub platform: String,
+    /// The `--platform` the run narrowed into; absent when none was given and
+    /// the run signed whatever the identifier resolved to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<ocx_oci::Platform>,
     /// Signing mechanism used: `"keyless-fulcio"`, or the key backend's own slug under a key.
     pub signer: String,
-    /// Certificate SAN (identity) embedded in the Fulcio cert.
-    pub certificate_identity: String,
-    /// Certificate OIDC issuer URL embedded in the Fulcio cert.
-    pub certificate_oidc_issuer: String,
+    /// Certificate SAN (identity) embedded in the Fulcio cert. Absent under a
+    /// key, and when no leg was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_identity: Option<String>,
+    /// Certificate OIDC issuer URL embedded in the Fulcio cert. Absent under a
+    /// key, and when no leg was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_oidc_issuer: Option<String>,
     /// Which key model produced this signature: `keyless`, `file`, or a
     /// key-backend scheme.
     pub key_backend: ocx_trust::key_ref::KeyBackendKind,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub public_key_hint: Option<String>,
-    /// Whether a transparency record was created, and its log index when so.
+    /// The Rekor log index of the transparency record this run created.
     ///
-    /// **Emitted unconditionally**, `null` included: under a key
-    /// `--rekor-upload` is opt-in, so the absence of a record is a legal
-    /// outcome the operator must be able to *see* rather than infer from a
-    /// missing key.
+    /// Absent when no record was created: legal under a key, where
+    /// `--rekor-upload` is opt-in.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transparency_log_index: Option<u64>,
-    /// The code the process will exit with, for the JSON envelope's own
-    /// `exit_code` field. Not part of `data` — it is envelope, not report.
-    #[serde(skip)]
-    exit_code: ExitCode,
 }
 
 /// One wire shape's outcome, as reported.
@@ -67,28 +66,24 @@ pub struct SignatureLegReport {
     /// Digest of the signed payload blob — the Sigstore bundle under `bundle`,
     /// the simplesigning claim under `simplesigning`. Absent when the leg failed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub payload_digest: Option<ocx_oci::Digest>,
     /// Digest of the manifest the payload hangs from — the OCI referrer under
     /// `bundle`, the `sha256-<hex>.sig` sidecar under `simplesigning`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub manifest_digest: Option<ocx_oci::Digest>,
     /// Why the leg failed, when it did. `None` means it was written.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub error: Option<String>,
 }
 
-/// Names an absent `--platform` `any`, the word the sign/attest/verify errors use.
-// Stays a string, never null: consumers read the shipped field unconditionally.
-fn platform_label(platform: Option<&ocx_oci::Platform>) -> String {
-    platform.map_or_else(|| "any".to_string(), ocx_oci::Platform::to_string)
+/// The signing pipeline's empty certificate field (key mode, or no leg written) as absent.
+fn certificate_field(value: String) -> Option<String> {
+    Some(value).filter(|value| !value.is_empty())
 }
 
 impl SignatureReport {
     pub fn new(
-        identifier: String,
+        identifier: ocx_oci::PackageRef,
         subject_digest: ocx_oci::Digest,
         legs: Vec<SignatureLegReport>,
         platform: Option<&ocx_oci::Platform>,
@@ -99,22 +94,14 @@ impl SignatureReport {
             identifier,
             subject_digest,
             legs,
-            platform: platform_label(platform),
+            platform: platform.cloned(),
             signer: "keyless-fulcio".to_string(),
-            certificate_identity,
-            certificate_oidc_issuer,
+            certificate_identity: certificate_field(certificate_identity),
+            certificate_oidc_issuer: certificate_field(certificate_oidc_issuer),
             key_backend: ocx_trust::key_ref::KeyBackendKind::Keyless,
             public_key_hint: None,
             transparency_log_index: None,
-            exit_code: ExitCode::Success,
         }
-    }
-
-    /// Record the code the process exits with, so the envelope agrees with it.
-    #[must_use]
-    pub fn with_exit_code(mut self, exit_code: ExitCode) -> Self {
-        self.exit_code = exit_code;
-        self
     }
 
     /// Record which key model signed (moving `signer` with it), and its key hint under a key.
@@ -145,19 +132,30 @@ impl SignatureReport {
     /// foreign input, and a per-field filter would need re-arguing for each new field.
     fn plain_fields(&self) -> Vec<(String, String)> {
         let mut fields = vec![
-            ("Identifier".to_string(), sanitize_for_terminal(&self.identifier)),
+            (
+                "Identifier".to_string(),
+                sanitize_for_terminal(&self.identifier.to_string()),
+            ),
             (
                 "Subject digest".to_string(),
                 sanitize_for_terminal(&self.subject_digest.to_string()),
             ),
-            ("Platform".to_string(), sanitize_for_terminal(&self.platform)),
+            (
+                "Platform".to_string(),
+                sanitize_for_terminal(
+                    &self
+                        .platform
+                        .as_ref()
+                        .map_or_else(|| "any".to_string(), ToString::to_string),
+                ),
+            ),
             (
                 "Certificate identity".to_string(),
-                sanitize_for_terminal(&self.certificate_identity),
+                sanitize_for_terminal(self.certificate_identity.as_deref().unwrap_or_default()),
             ),
             (
                 "Certificate OIDC issuer".to_string(),
-                sanitize_for_terminal(&self.certificate_oidc_issuer),
+                sanitize_for_terminal(self.certificate_oidc_issuer.as_deref().unwrap_or_default()),
             ),
             (
                 "Key backend".to_string(),
@@ -184,7 +182,14 @@ impl SignatureReport {
     }
 }
 
+impl crate::api::data::sweep::SweptReport for SignatureReport {
+    const SWEEP_ROOT: &'static str = "SweepReport<SignatureReport>";
+}
+
 impl Printable for SignatureReport {
+    const SCHEMA_VERSION: u32 = 2;
+    const ROOT: &'static str = "SignatureReport";
+
     fn print_plain(&self, data: &ocx_console::DataInterface) {
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
         for (label, value) in self.plain_fields() {
@@ -193,28 +198,16 @@ impl Printable for SignatureReport {
         }
         data.print_table(&["Field".into(), "Value".into()], &rows);
     }
-
-    /// Emit the JSON envelope; its `exit_code` is the process's, non-zero on a partial run.
-    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        let parsed: serde_json::Value = serde_json::from_str(&self.envelope()?)?;
-        Ok(data.print_json(&parsed)?)
-    }
-}
-
-impl SignatureReport {
-    /// The envelope `print_json` emits, split out because `DataInterface` writes only to stdout.
-    fn envelope(&self) -> anyhow::Result<String> {
-        crate::error_envelope::render_envelope_with_exit_code("package sign", self, self.exit_code)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::data::is_bidi_control;
+
+    fn id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry("registry.example/pkg:1.0", "ocx.sh").expect("identifier")
+    }
 
     /// One written `bundle` leg — the default `--signature-format`.
     fn bundle_leg() -> SignatureLegReport {
@@ -228,7 +221,7 @@ mod tests {
 
     fn sample_report() -> SignatureReport {
         SignatureReport::new(
-            "registry.example/pkg:1.0".into(),
+            id(),
             ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![bundle_leg()],
             Some(&"linux/amd64".parse().expect("platform")),
@@ -240,7 +233,7 @@ mod tests {
     /// A run where the simplesigning leg failed and the bundle leg landed.
     fn partially_failed_report() -> SignatureReport {
         SignatureReport::new(
-            "registry.example/pkg:1.0".into(),
+            id(),
             ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![
                 bundle_leg(),
@@ -255,55 +248,87 @@ mod tests {
             "signer@example.com".into(),
             "https://accounts.google.com".into(),
         )
-        .with_exit_code(ExitCode::TempFail)
     }
 
-    /// The envelope of a partial `--signature-format both` run must report the
-    /// code the process exits with.
-    ///
-    /// `error_envelope.rs` states the invariant this defends — the envelope's
-    /// `exit_code` can never disagree with the process's — and a success
-    /// envelope hard-codes 0, so a report-then-fail command needs the other
-    /// renderer or it ships a `"exit_code":0` in front of a non-zero `$?`.
+    /// A partial `--signature-format both` run still reports the leg that
+    /// landed: hiding it would leave the operator re-signing what is already
+    /// published. The exit code is the process's alone; the report carries none.
     #[test]
-    fn a_partial_run_envelope_reports_the_failing_legs_exit_code() {
-        let json = partially_failed_report().envelope().expect("render ok");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(parsed["exit_code"], 75, "TempFail is 75: {parsed}");
-        // The leg that landed is still reported: hiding it would leave the
-        // operator re-signing what is already published.
+    fn a_partial_run_reports_the_landed_leg_and_no_exit_code() {
+        let document = serde_json::to_value(partially_failed_report()).expect("serialize");
         assert_eq!(
-            parsed["data"]["legs"][0]["manifest_digest"],
+            document["legs"][0]["manifest_digest"],
             format!("sha256:{}", "c".repeat(64))
         );
-        assert!(parsed["data"]["legs"][1]["error"].is_string());
+        assert!(document["legs"][1]["error"].is_string());
+        assert!(document.get("exit_code").is_none(), "{document}");
     }
 
     #[test]
-    fn json_output_contains_c_s1_1_envelope() {
-        // `DataInterface` writes to the process's stdout rather than a buffer,
-        // so the rendered document is reached through the same `envelope()`
-        // helper `print_json` parses — one call away from the printed bytes.
-        let report = sample_report();
-        let json = report.envelope().expect("render ok");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(parsed["schema_version"], 1);
-        assert_eq!(parsed["command"], "package sign");
-        assert_eq!(parsed["exit_code"], 0);
-        let data = &parsed["data"];
-        assert_eq!(data["identifier"], "registry.example/pkg:1.0");
+    fn json_output_is_the_unwrapped_report() {
+        let document = serde_json::to_value(sample_report()).expect("serialize");
+        for envelope_key in ["schema_version", "command", "exit_code", "data"] {
+            assert!(
+                document.get(envelope_key).is_none(),
+                "{envelope_key} leaked: {document}"
+            );
+        }
+        assert_eq!(document["identifier"], "registry.example/pkg:1.0");
         // JSON keeps every digest full, unlike plain mode — a shortened 12-hex
         // form also satisfies `starts_with("sha256:")`, so exact equality is
         // required to pin that JSON never shortens (see
-        // `print_plain_shortens_bundle_and_referrer_digests_but_not_subject`
+        // `print_plain_shortens_the_leg_digests_but_not_the_subject`
         // for the plain-mode counterpart).
-        assert_eq!(data["subject_digest"], format!("sha256:{}", "a".repeat(64)));
-        assert_eq!(data["legs"][0]["format"], "bundle");
-        assert_eq!(data["legs"][0]["payload_digest"], format!("sha256:{}", "b".repeat(64)));
-        assert_eq!(data["legs"][0]["manifest_digest"], format!("sha256:{}", "c".repeat(64)));
-        // C-S1-1 contract: platform must serialize as a plain string (e.g. "linux/amd64").
-        assert_eq!(data["platform"], "linux/amd64", "data[platform] must be a plain string");
-        assert_eq!(data["signer"], "keyless-fulcio");
+        assert_eq!(document["subject_digest"], format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(document["legs"][0]["format"], "bundle");
+        assert_eq!(
+            document["legs"][0]["payload_digest"],
+            format!("sha256:{}", "b".repeat(64))
+        );
+        assert_eq!(
+            document["legs"][0]["manifest_digest"],
+            format!("sha256:{}", "c".repeat(64))
+        );
+        assert_eq!(
+            document["platform"],
+            serde_json::json!({"architecture": "amd64", "os": "linux"}),
+            "platform is the OCI platform object"
+        );
+        assert_eq!(document["signer"], "keyless-fulcio");
+    }
+
+    /// Absent, never `null` or empty: no `--platform`, no transparency record,
+    /// and a key's missing certificate are each stated by the key's absence.
+    #[test]
+    fn unset_facts_are_absent_rather_than_null_or_empty() {
+        let report = SignatureReport::new(
+            id(),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
+            vec![bundle_leg()],
+            None,
+            String::new(),
+            String::new(),
+        )
+        .with_key_model(ocx_trust::key_ref::KeyBackendKind::File, Some("hint".into()));
+        let document = serde_json::to_value(&report).expect("serialize");
+        for absent in [
+            "platform",
+            "certificate_identity",
+            "certificate_oidc_issuer",
+            "transparency_log_index",
+        ] {
+            assert!(document.get(absent).is_none(), "{absent} must be absent: {document}");
+        }
+        // Positive control: the same keys are present once the facts exist.
+        let logged = serde_json::to_value(sample_report().with_transparency_log(Some(7))).expect("serialize");
+        for present in [
+            "platform",
+            "certificate_identity",
+            "certificate_oidc_issuer",
+            "transparency_log_index",
+        ] {
+            assert!(logged.get(present).is_some(), "{present} must be present: {logged}");
+        }
     }
 
     /// `print_plain` shortens `bundle_digest`/`referrer_digest` to 12 hex (only
@@ -361,7 +386,7 @@ mod tests {
     #[test]
     fn both_legs_get_a_row_and_a_failed_leg_says_so() {
         let report = SignatureReport::new(
-            "registry.example/pkg:1.0".into(),
+            id(),
             ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![
                 bundle_leg(),
@@ -406,7 +431,7 @@ mod tests {
     /// exact `(label, value)` pairs `print_plain` writes.
     fn rendered_with(hostile: &str) -> Vec<String> {
         let report = SignatureReport::new(
-            hostile.to_string(),
+            id(),
             ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![bundle_leg()],
             Some(&"linux/amd64".parse().expect("platform")),
@@ -533,17 +558,17 @@ mod tests {
         // `serde_json` escapes the C0 range by specification.
         let hostile = "\u{1b}]52;c;ZXZpbA==\u{7}signer@example.com";
         let report = SignatureReport::new(
-            "registry.example/pkg:1.0".into(),
+            id(),
             ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![bundle_leg()],
             Some(&"linux/amd64".parse().expect("platform")),
             hostile.to_string(),
             "https://accounts.google.com".into(),
         );
-        let json = crate::error_envelope::render_success_envelope("package sign", &report).expect("render ok");
+        let json = serde_json::to_string(&report).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(
-            parsed["data"]["certificate_identity"], hostile,
+            parsed["certificate_identity"], hostile,
             "JSON must carry the identity verbatim, not the display form"
         );
         assert!(
