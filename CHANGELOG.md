@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-10-07
+
+### Added
+
+- `ocx package create` stores a hard-linked file once and its other names as tar hard links *(package)*
+- `ocx package install --link &lt;PATH&gt;` keeps a package at a path you choose, and `package which`, `env` and `exec` read it back with `--link` *(package)*
+- The `ocx update` report names the version each advisory tag resolved to before and after *(update)*
+- An `[update]` table sets the ocx and toolchain update-check policy and interval, and `OCX_UPDATE_CHECK_INTERVAL` accepts `6h` and `1d` *(config)*
+- `[update] self = "apply"` installs a newer ocx automatically once the command finishes *(self)*
+- Ocx tells you when an advisory tag in your toolchain has moved past `ocx.lock` *(project)*
+- `ocx upgrade` moves advisory tags in `ocx.toml` to the newest series, and `--major` crosses a major version *(cli)*
+- Errors and warnings print as `error:` and `warning:` lines instead of timestamped log records *(cli)*
+- `ocx status` shows one compact row per tool, and `-v` adds digests and platform counts *(project)*
+
+### Fixed
+
+- A credential helper that writes over 64 KiB to stderr no longer hangs ocx for 30 s, and a timed-out helper is killed *(auth)*
+- MacOS setup explains that Login Items lists the session-PATH agent as "sh" *(setup)*
+- `ocx package push` refreshes the local index for the tags it wrote, so a moved tag no longer resolves to the old digest *(package)*
+- `ocx status` no longer reports a tool as unlocked for this platform when its lock entry names no libc variant *(project)*
+- The render leaves .DS_Store, desktop.ini and other OS metadata files alone instead of warning about them *(toolchain)*
+
+## [0.6.4] - 2026-10-01
+
+### Added
+
+- Add `ocx package prune` and ephemeral snapshot tags; announce removes vanished snapshot rows, and tags files list one tag per line **BREAKING**
+- A bare repository rule matches every tag and digest of it *(patches)* **BREAKING**
+- Package test applies matching patch companions to the bundle under test *(package)*
+- A patch companion's vars load as if its target declared them; interface-only vars no longer reach the target's own launchers *(patches)* **BREAKING**
+- Record each patch companion with its surface and dependencies *(record)*
+- Preview a target's private surface with ocx patch test --self and ocx patch why --self *(cli)*
+- Shell, direnv and CI exports carry launch identities, so patch rules reach entrypoints run from PATH *(env)*
+- `ocx about --format json` platforms entries carry the host's os.features, and a new features array lists them *(about)* **BREAKING**
+
+### Changed
+
+- Gate surfaces with a visibility mask *(composer)*
+
+### Documentation
+
+- Drop internal references and stale claims from help and schema text *(cli)*
+- Document how a patch composes as part of its target *(patches)*
+
+### Fixed
+
+- Log `package exec --rm` cleanup instead of printing status lines *(exec)*
+- Keep valid signatures intact on install so sealed app bundles still verify *(codesign)*
+- Tag-scoped patch rules now match tools resolved from ocx.lock *(project)*
+- Patch sync pins companions of rules that match an index name *(patches)*
+- Package install and package pull pick up a patch descriptor published after the last check *(patches)*
+- Exec resolves required patch companions live and never reaches the registry offline or under a frozen snapshot *(patches)*
+- Lock, pull and exec install the patch companions of ocx.toml tools *(project)*
+- Emit a dependency shared with the base or another companion once *(patches)*
+- Refuse a companion whose closure conflicts with its target's *(patches)* **BREAKING**
+- Keep a companion's launchers off PATH and claim its dependencies' names *(patches)*
+- Repository- and tag-scoped patch rules now reach a package's entrypoint launchers *(patches)*
+- The JSON report's identifier names the tag that was pushed, timestamp suffix included *(push)* **BREAKING**
+- Transient index, forge and registry-DNS failures exit 75 instead of 69 so a retrying CI loop can tell them from terminal ones *(exit)* **BREAKING**
+- A child ocx inherits the toolchain root its parent resolved from OCX_TOOLCHAIN_DIR *(exec)*
+- The Windows launcher's job-object attribute value now outlives CreateProcessW *(shim)*
+- A package selected under two groups is pulled eagerly when any group wants it *(pull)*
+
+### Release
+
+- V0.6.4
+
 ## [0.6.3] - 2026-09-25
 
 ### Added
@@ -74,6 +141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refuse an index-owned name with no recorded location under --offline (exit 81) only when it must be fetched
 - Keep the `--` separator when calling ocx through the PowerShell integration *(shell)*
 - Detect compressors by magic, decode every gzip/xz member *(compression)*
+
+### Release
+
+- V0.6.3
 
 ## [0.6.2] - 2026-09-15
 
@@ -1200,6 +1271,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.5]: https://github.com/ocx-sh/ocx/compare/v0.6.4..v0.6.5
+[0.6.4]: https://github.com/ocx-sh/ocx/compare/v0.6.3..v0.6.4
 [0.6.3]: https://github.com/ocx-sh/ocx/compare/v0.6.2..v0.6.3
 [0.6.2]: https://github.com/ocx-sh/ocx/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/ocx-sh/ocx/compare/v0.6.0..v0.6.1
