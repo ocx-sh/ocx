@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use ocx_console::{Annotation, DataInterface, Theme, TreeItem};
-use ocx_oci::Platform;
+use ocx_oci::{Platform, Selection};
 use ocx_package::metadata::env::modifier::ModifierKind;
 use ocx_project::{PackageSettings, ProjectConfig, ProjectEnv, ProjectLock};
 use serde::Serialize;
@@ -53,6 +53,10 @@ pub struct ToolStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     platforms: Option<BTreeMap<String, String>>,
+    /// The `(platform key, digest)` leaf this host runs, picked by the matcher
+    /// `ocx pull` and `ocx exec` use. `None` when unlocked. Plain view only.
+    #[serde(skip)]
+    host_leaf: Option<Selection<(String, String)>>,
 }
 
 /// One group's declarations. `default` is a group like any other: the
@@ -152,7 +156,14 @@ fn env_out(env: &ProjectEnv) -> BTreeMap<String, EnvValueOut> {
 
 impl StatusReport {
     /// Project config and lock into the report; `lock` is `Ok(None)` when absent, `Err` when unparseable.
-    pub fn new(project: &std::path::Path, config: &ProjectConfig, lock: Result<Option<&ProjectLock>, String>) -> Self {
+    ///
+    /// `host` only feeds the plain view's coverage mark; the JSON keeps every platform.
+    pub fn new(
+        project: &std::path::Path,
+        config: &ProjectConfig,
+        lock: Result<Option<&ProjectLock>, String>,
+        host: &Platform,
+    ) -> Self {
         let lock = match lock {
             Ok(lock) => lock,
             Err(error) => return Self::unreadable_lock(project, config, error),
@@ -187,7 +198,9 @@ impl StatusReport {
             let tool = entry.tools.entry(locked.name.clone()).or_insert_with(|| ToolStatus {
                 declared: None,
                 platforms: None,
+                host_leaf: None,
             });
+            tool.host_leaf = Some(owned(ocx_project::lookup_host_leaf(&locked.platforms, host)));
             tool.platforms = Some(
                 locked
                     .platforms
@@ -284,6 +297,15 @@ impl From<&PackageSettings> for PackageSettingsOut {
     }
 }
 
+fn owned(selection: Selection<(&ocx_oci::Digest, &str)>) -> Selection<(String, String)> {
+    let owned = |(digest, key): (&ocx_oci::Digest, &str)| (key.to_owned(), digest.to_string());
+    match selection {
+        Selection::Found(leaf) => Selection::Found(owned(leaf)),
+        Selection::Ambiguous(tied) => Selection::Ambiguous(tied.into_iter().map(owned).collect()),
+        Selection::None => Selection::None,
+    }
+}
+
 fn declared_tools(tools: &BTreeMap<String, ocx_oci::PackageRef>) -> BTreeMap<String, ToolStatus> {
     tools
         .iter()
@@ -293,6 +315,7 @@ fn declared_tools(tools: &BTreeMap<String, ocx_oci::PackageRef>) -> BTreeMap<Str
                 ToolStatus {
                     declared: Some(identifier.to_string()),
                     platforms: None,
+                    host_leaf: None,
                 },
             )
         })
@@ -348,22 +371,20 @@ impl TreeItem for Node {
 
 impl ToolStatus {
     /// Host-facing lock summary for the plain tree; the JSON keeps every platform.
-    fn plain_annotation(&self, host: &Platform) -> String {
+    fn plain_annotation(&self) -> String {
         let Some(platforms) = &self.platforms else {
             return "not locked".to_owned();
         };
-        let host_key = host.to_string();
-        match platforms.get(&host_key) {
-            Some(digest) => format!("{} platform(s), {host_key}: {digest}", platforms.len()),
-            None => format!("{} platform(s), none for {host_key}", platforms.len()),
+        match &self.host_leaf {
+            Some(Selection::Found((key, digest))) => format!("{} platform(s), {key}: {digest}", platforms.len()),
+            Some(Selection::Ambiguous(_)) => format!("{} platform(s), ambiguous for this platform", platforms.len()),
+            _ => format!("{} platform(s), none for this platform", platforms.len()),
         }
     }
 }
 
 impl Printable for StatusReport {
     fn print_plain(&self, data: &DataInterface) {
-        let host = Platform::current().unwrap_or_else(Platform::any);
-
         let mut sections = Vec::new();
 
         let lock_label = match (self.lock.present, self.lock.error.as_deref(), self.lock.current) {
@@ -378,8 +399,7 @@ impl Printable for StatusReport {
             let mut children = Vec::new();
             for (binding, tool) in &group.tools {
                 let declared = tool.declared.as_deref().unwrap_or("(not declared)");
-                children
-                    .push(Node::leaf(format!("{binding} = {declared}")).with_annotation(tool.plain_annotation(&host)));
+                children.push(Node::leaf(format!("{binding} = {declared}")).with_annotation(tool.plain_annotation()));
             }
             for (key, value) in &group.env {
                 children
@@ -457,6 +477,47 @@ mod tests {
         );
     }
 
+    /// Regression: a lock pinning only `linux/amd64` serves a glibc host, so
+    /// status must not claim the host is uncovered. Same matcher as `ocx exec`.
+    #[test]
+    fn a_bare_platform_leaf_covers_a_libc_tagged_host() {
+        let config =
+            ProjectConfig::from_toml_str("[tools]\nlychee = \"ocx.sh/lychee/lychee:0\"\n").expect("parse ocx.toml");
+        let lock = ProjectLock::from_toml_str(&format!(
+            "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\n\
+             declaration_hash = \"{hash}\"\n\
+             generated_by = \"ocx 0.5.8\"\ngenerated_at = \"2026-08-27T00:00:00Z\"\n\n\
+             [[tool]]\nname = \"lychee\"\ngroup = \"default\"\nrepository = \"ocx.sh/lychee/lychee\"\n\n\
+             [tool.platforms]\n\"linux/amd64\" = \"sha256:{leaf}\"\n",
+            hash = config.declaration_hash_cached(),
+            leaf = "1".repeat(64),
+        ))
+        .expect("parse lock");
+        let report = |host: &str| {
+            let host: Platform = host.parse().expect("platform");
+            StatusReport::new(std::path::Path::new("/project"), &config, Ok(Some(&lock)), &host)
+        };
+
+        let glibc = report("linux/amd64+libc.glibc");
+        let tool = &glibc.groups["default"].tools["lychee"];
+        assert!(
+            matches!(&tool.host_leaf, Some(Selection::Found((key, _))) if key == "linux/amd64"),
+            "the bare linux/amd64 leaf must cover a glibc host"
+        );
+        assert!(
+            !tool.plain_annotation().contains("none for"),
+            "a covered binding is not reported as uncovered"
+        );
+
+        let darwin = report("darwin/arm64");
+        assert!(
+            darwin.groups["default"].tools["lychee"]
+                .plain_annotation()
+                .ends_with("none for this platform"),
+            "a genuinely uncovered host is still marked"
+        );
+    }
+
     /// `ocx pull` refuses a lock entry naming another repository under a fresh
     /// hash, so status must not call that lock current.
     #[test]
@@ -473,7 +534,8 @@ mod tests {
         ))
         .expect("parse lock");
 
-        let report = StatusReport::new(std::path::Path::new("/project"), &config, Ok(Some(&lock)));
+        let host: Platform = "linux/amd64".parse().expect("platform");
+        let report = StatusReport::new(std::path::Path::new("/project"), &config, Ok(Some(&lock)), &host);
         assert_eq!(report.lock.current, Some(false));
         assert_eq!(
             report.lock.declaration_hash.as_deref(),
