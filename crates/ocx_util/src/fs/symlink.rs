@@ -244,17 +244,15 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         }
 
         // A removal error with `to` already gone means a peer won; only a still-present `to` counts.
-        if is_link(to) || to.exists() {
-            if let Err(error) = remove_link(to) {
-                if is_link(to) || to.exists() {
-                    if is_transient_lock_error(&error) {
-                        last_error = Some(error);
-                        continue;
-                    }
-                    return Err(error);
-                }
-                // `to` is gone despite the error — a peer removed it. Proceed.
+        if (is_link(to) || to.exists())
+            && let Err(error) = remove_link(to)
+            && (is_link(to) || to.exists())
+        {
+            if is_transient_lock_error(&error) {
+                last_error = Some(error);
+                continue;
             }
+            return Err(error);
         }
 
         match std::fs::rename(from, to) {
