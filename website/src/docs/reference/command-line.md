@@ -1408,7 +1408,7 @@ Home       /home/user/.ocx
 
 ### `status` {#status}
 
-Reports what `ocx.toml` and `ocx.lock` say, without resolving anything. Offline, read-only, and never writes either file: no registry is contacted, no platform is selected, no package metadata is read, and no relative `path` value is anchored to the project root.
+Reports what `ocx.toml` and `ocx.lock` say, without resolving anything. Offline, read-only, and never writes either file: no registry is contacted, the JSON report selects no platform, no package metadata is read, and no relative `path` value is anchored to the project root.
 
 Status answers on projects that other commands refuse. A missing `ocx.lock` exits 78 for [`pull`](#pull) and [`exec`](#exec); a drifted one exits 65; an unparseable one fails outright. All three are states `status` reports as payload and still exits `0` for — it is the command you reach for when the project is broken.
 
@@ -1422,11 +1422,24 @@ ocx status
 
 **Options**
 
+- `-v`, `--verbose`: Show each binding's host digest and locked platform count. Affects the plain output only.
 - `-h`, `--help`: Print help information.
 
 There is no `-g`/`--group` and no NAME argument. The report is a keyed object a caller narrows itself, and a filter here would only hide rows rather than change any answer — unlike in `inspect`, where the selection decides what gets composed.
 
 Honors the global [`--format`][arg-format] and [`--project`][arg-project] / [`--global`][global-flag] flags. [`--offline`][arg-offline] is accepted and inert: this command never reaches the network.
+
+**Plain output**
+
+```text
+/home/you/code/app/ocx.toml
+├── lock: current
+├── go-task  ocx.sh/go-task/task:3
+├── newtool  ocx.sh/newtool:1 · not locked
+└── shfmt    ocx.sh/shfmt/shfmt:3 · not locked for this platform
+```
+
+One row per binding, with a mark only where something needs attention: `not locked` (declared since the last `ocx lock`), `not locked for this platform` (no locked leaf runs on this host, using the same platform matching as `pull` and `exec`), `ambiguous for this platform`, or `orphaned in ocx.lock` (no longer declared, in a stale lock). Group headings appear once the project declares more than one group.
 
 **JSON shape**
 

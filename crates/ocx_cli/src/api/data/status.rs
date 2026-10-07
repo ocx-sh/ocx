@@ -131,6 +131,9 @@ pub struct StatusReport {
     /// string. Reported here because it is excluded from `declaration_hash`,
     /// so nothing lock-derived can surface it.
     package_settings: BTreeMap<String, PackageSettingsOut>,
+    /// `--verbose`: the plain view adds host digests and platform counts.
+    #[serde(skip)]
+    verbose: bool,
 }
 
 /// Per-package resolve-time policy from `[package."<id>"]`.
@@ -242,11 +245,18 @@ impl StatusReport {
                 .iter()
                 .map(|(identifier, settings)| (identifier.clone(), PackageSettingsOut::from(settings)))
                 .collect(),
+            verbose: false,
         }
     }
 }
 
 impl StatusReport {
+    /// Render host digests and platform counts in the plain view.
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
     /// The lock did not parse: report the declaration in full and the lock as present, unreadable.
     fn unreadable_lock(project: &std::path::Path, config: &ProjectConfig, error: String) -> Self {
         let mut groups: BTreeMap<String, GroupStatus> = BTreeMap::new();
@@ -285,6 +295,7 @@ impl StatusReport {
                 .iter()
                 .map(|(identifier, settings)| (identifier.clone(), PackageSettingsOut::from(settings)))
                 .collect(),
+            verbose: false,
         }
     }
 }
@@ -370,42 +381,77 @@ impl TreeItem for Node {
 }
 
 impl ToolStatus {
-    /// Host-facing lock summary for the plain tree; the JSON keeps every platform.
-    fn plain_annotation(&self) -> String {
-        let Some(platforms) = &self.platforms else {
-            return "not locked".to_owned();
-        };
-        match &self.host_leaf {
-            Some(Selection::Found((key, digest))) => format!("{} platform(s), {key}: {digest}", platforms.len()),
-            Some(Selection::Ambiguous(_)) => format!("{} platform(s), ambiguous for this platform", platforms.len()),
-            _ => format!("{} platform(s), none for this platform", platforms.len()),
+    /// Annotations for the plain row: only exceptional states, plus pins under `--verbose`.
+    ///
+    /// `lock_readable` gates "not locked": with no lock at all the lock line already says so.
+    fn plain_annotations(&self, lock_readable: bool, verbose: bool) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.declared.is_none() {
+            notes.push("orphaned in ocx.lock".to_owned());
         }
+        match &self.host_leaf {
+            None if lock_readable => notes.push("not locked".to_owned()),
+            None => {}
+            Some(Selection::None) => notes.push("not locked for this platform".to_owned()),
+            Some(Selection::Ambiguous(_)) => notes.push("ambiguous for this platform".to_owned()),
+            Some(Selection::Found((key, digest))) if verbose => notes.push(format!("{key}: {digest}")),
+            Some(Selection::Found(_)) => {}
+        }
+        if verbose && let Some(platforms) = &self.platforms {
+            let count = platforms.len();
+            notes.push(format!("{count} platform{}", if count == 1 { "" } else { "s" }));
+        }
+        notes
+    }
+}
+
+impl GroupStatus {
+    fn is_empty(&self) -> bool {
+        self.tools.is_empty() && self.env.is_empty()
+    }
+
+    /// One row per binding (name and reference in aligned columns), then one per env key.
+    fn plain_rows(&self, lock_readable: bool, verbose: bool) -> Vec<Node> {
+        let width = self
+            .tools
+            .keys()
+            .map(|binding| binding.chars().count())
+            .max()
+            .unwrap_or(0);
+        let tools = self.tools.iter().map(|(binding, tool)| {
+            let declared = tool.declared.as_deref().unwrap_or("(not declared)");
+            let mut node = Node::leaf(format!("{binding:<width$}  {declared}"));
+            node.annotations = tool.plain_annotations(lock_readable, verbose);
+            node
+        });
+        let env = self.env.iter().map(|(key, value)| {
+            Node::leaf(format!("env {key} = {}", value.value)).with_annotation(value.kind.to_string())
+        });
+        tools.chain(env).collect()
     }
 }
 
 impl Printable for StatusReport {
     fn print_plain(&self, data: &DataInterface) {
-        let mut sections = Vec::new();
-
         let lock_label = match (self.lock.present, self.lock.error.as_deref(), self.lock.current) {
             (false, _, _) => "lock: absent (run `ocx lock`)".to_owned(),
             (true, Some(error), _) => format!("lock: unreadable ({error})"),
             (true, _, Some(true)) => "lock: current".to_owned(),
             (true, _, _) => "lock: stale (does not match ocx.toml; run `ocx lock`)".to_owned(),
         };
-        sections.push(Node::leaf(lock_label));
+        let lock_readable = self.lock.present && self.lock.error.is_none();
+        let mut sections = vec![Node::leaf(lock_label)];
 
-        for (name, group) in &self.groups {
-            let mut children = Vec::new();
-            for (binding, tool) in &group.tools {
-                let declared = tool.declared.as_deref().unwrap_or("(not declared)");
-                children.push(Node::leaf(format!("{binding} = {declared}")).with_annotation(tool.plain_annotation()));
+        let shown: Vec<_> = self.groups.iter().filter(|(_, group)| !group.is_empty()).collect();
+        if let [(_, group)] = shown.as_slice() {
+            sections.extend(group.plain_rows(lock_readable, self.verbose));
+        } else {
+            for (name, group) in shown {
+                sections.push(Node::branch(
+                    format!("group {name}"),
+                    group.plain_rows(lock_readable, self.verbose),
+                ));
             }
-            for (key, value) in &group.env {
-                children
-                    .push(Node::leaf(format!("env {key} = {}", value.value)).with_annotation(value.kind.to_string()));
-            }
-            sections.push(Node::branch(format!("group {name}"), children));
         }
 
         for (identifier, settings) in &self.package_settings {
@@ -505,15 +551,14 @@ mod tests {
             "the bare linux/amd64 leaf must cover a glibc host"
         );
         assert!(
-            !tool.plain_annotation().contains("none for"),
-            "a covered binding is not reported as uncovered"
+            tool.plain_annotations(true, false).is_empty(),
+            "a covered binding carries no mark"
         );
 
         let darwin = report("darwin/arm64");
-        assert!(
-            darwin.groups["default"].tools["lychee"]
-                .plain_annotation()
-                .ends_with("none for this platform"),
+        assert_eq!(
+            darwin.groups["default"].tools["lychee"].plain_annotations(true, false),
+            ["not locked for this platform"],
             "a genuinely uncovered host is still marked"
         );
     }
