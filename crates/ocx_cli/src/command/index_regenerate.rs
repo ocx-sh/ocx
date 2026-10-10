@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::api::data::index::{RegenerateEntry, RegenerateReport};
-use crate::app::{CommandError, is_published_namespace};
+use crate::app::{CliRefusal, is_published_namespace};
 use crate::command::index_common;
 
 // See `adr_servable_index_snapshot.md` for why this command exists.
@@ -63,21 +63,18 @@ impl IndexRegenerate {
 ///
 /// # Errors
 ///
-/// [`CommandError`] (78) when the registry or a slug alias is derived, or the registry is not configured.
+/// [`CliRefusal::IndexSourceNotPublished`] (78) when the registry or a slug alias is derived, or the registry is not configured.
 fn ensure_published(
     config: &ocx_config::Config,
     local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
     registry: &str,
-) -> Result<(), CommandError> {
+) -> Result<(), CliRefusal> {
     let refuse = |reason: String| {
-        Err(CommandError::new(
-            format!(
-                "{reason} — a derived (plain-OCI) namespace's catalog is its p/ enumeration by grammar, \
-                 so it has no c/index.json to regenerate. \
-                 Set [registries.\"{registry}\"] index = \"<base-url>\" if it should be a published one."
-            ),
-            ocx_exit::ExitCode::ConfigError,
-        ))
+        Err(CliRefusal::IndexSourceNotPublished(format!(
+            "{reason} — a derived (plain-OCI) namespace's catalog is its p/ enumeration by grammar, \
+             so it has no c/index.json to regenerate. \
+             Set [registries.\"{registry}\"] index = \"<base-url>\" if it should be a published one."
+        )))
     };
 
     let Some(registries) = config.registries.as_ref() else {

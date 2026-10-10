@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::api::data::package_receipt::PackageReceipt;
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 
 #[derive(Parser)]
 pub struct PackageReceiptCommand {
@@ -25,13 +25,10 @@ impl PackageReceiptCommand {
                 context.api().report(&PackageReceipt::from(&receipt))?;
                 Ok(ExitCode::SUCCESS)
             }
-            None => Err(CommandError::new(
-                format!(
-                    "no build receipt at {}; `ocx package create` writes one beside the bundle",
-                    path.display()
-                ),
-                ocx_exit::ExitCode::NotFound,
-            )
+            None => Err(CliRefusal::BuildReceiptNotFound(format!(
+                "no build receipt at {}; `ocx package create` writes one beside the bundle",
+                path.display()
+            ))
             .into()),
         }
     }

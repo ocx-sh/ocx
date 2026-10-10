@@ -523,9 +523,9 @@ def test_upgrade_on_a_drifted_toml_exits_65(ocx: OcxRunner, tmp_path: Path) -> N
     _assert_untouched(project, drifted.encode(), lock_bytes)
 
 
-@pytest.mark.parametrize(("flag", "detail"), [("--offline", "offline_mode"), ("--frozen", None)])
+@pytest.mark.parametrize(("flag", "detail"), [("--offline", "offline_mode"), ("--frozen", "frozen_refused")])
 def test_upgrade_under_offline_or_frozen_exits_81(
-    ocx: OcxRunner, tmp_path: Path, flag: str, detail: str | None
+    ocx: OcxRunner, tmp_path: Path, flag: str, detail: str
 ) -> None:
     """Choosing a newer tag needs the registry, which both flags forbid."""
     project, _ = _locked_single(ocx, tmp_path, "up_policy")
@@ -536,6 +536,5 @@ def test_upgrade_under_offline_or_frozen_exits_81(
     assert result.returncode == EXIT_POLICY_BLOCKED, result.stderr
     error = _payload(result)["error"]
     assert error["kind"] == "permission_denied", result.stdout
-    if detail is not None:
-        assert error["detail"] == detail, result.stdout
+    assert error["detail"] == detail, result.stdout
     _assert_untouched(project, toml_bytes, lock_bytes)

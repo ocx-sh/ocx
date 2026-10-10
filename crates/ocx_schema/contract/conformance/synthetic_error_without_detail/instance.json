@@ -4,7 +4,6 @@
   "exit_code": 64,
   "error": {
     "kind": "usage_error",
-    "detail": "invalid_command_line",
     "message": "the following required arguments were not provided:",
     "context": {}
   }

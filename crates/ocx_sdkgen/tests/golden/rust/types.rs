@@ -2528,6 +2528,8 @@ pub enum ErrorDetail {
     AnyPinProvenanceUnavailable,
     /// An archive entry path escapes the extraction root
     ArchiveEntryEscape,
+    /// The archive extracted no entries
+    ArchiveExtractedNoEntries,
     /// Extraction exceeded the decompressed-size cap
     ArchiveExtractionCapExceeded,
     /// An archive entry uses the unsupported GNU sparse format
@@ -2568,6 +2570,8 @@ pub enum ErrorDetail {
     BindingNotDeclared,
     /// The named binding does not exist in ocx.toml
     BindingNotFound,
+    /// The named binding is declared in no selected group
+    BindingNotSelected,
     /// A binding's value is not a valid identifier
     BindingValueInvalid,
     /// A binding's identifier names no registry
@@ -2576,6 +2580,8 @@ pub enum ErrorDetail {
     BlobNotFound,
     /// The acting identity is a bot account
     BotIdentity,
+    /// No build receipt exists beside the bundle
+    BuildReceiptNotFound,
     /// The provenance builder does not match the pinned builder
     BuilderMismatch,
     /// The signature bundle could not be parsed
@@ -2712,6 +2718,8 @@ pub enum ErrorDetail {
     EndpointUnresolvable,
     /// Two packages declare the same entrypoint name
     EntrypointCollision,
+    /// An .envrc already exists and --force was not given
+    EnvrcExists,
     /// The extra CA bundle the payload names is not usable
     ExtraCaCertsInvalid,
     /// The extra CA bundle is not UTF-8 and cannot be persisted
@@ -2742,6 +2750,8 @@ pub enum ErrorDetail {
     ForgeCapabilityUnavailable,
     /// The forge HTTP client could not be built
     ForgeClientBuild,
+    /// A forge write found no API credential to authenticate with
+    ForgeCredentialMissing,
     /// A forge response could not be decoded
     ForgeDecode,
     /// A forge operation failed with an unclassified cause
@@ -2794,6 +2804,8 @@ pub enum ErrorDetail {
     ForkParentMismatch,
     /// The OCX_ENV value a parent ocx forwarded is malformed
     ForwardedEnvInvalid,
+    /// The verb discovers new digests, which frozen mode forbids
+    FrozenRefused,
     /// The certificate authority rejected the signing request
     FulcioBadRequest,
     /// The certificate authority is unreachable or overloaded
@@ -2838,6 +2850,8 @@ pub enum ErrorDetail {
     IndexSingleflightFailed,
     /// An index source failed with an unclassified cause
     IndexSourceFailed,
+    /// The registry is not a published index source, so it has no catalog to regenerate
+    IndexSourceNotPublished,
     /// An integrations namespace is invalid
     IntegrationNamespaceInvalid,
     /// An integrations payload exceeds its size limit
@@ -2858,6 +2872,9 @@ pub enum ErrorDetail {
     InvalidBooleanString,
     /// A version's build metadata is invalid
     InvalidBuildMetadata,
+    /// The command line names an unknown flag or nested subcommand, or a missing or malformed
+    /// argument
+    InvalidCommandLine,
     /// A digest is not a valid algorithm-prefixed hash
     InvalidDigest,
     /// Registry content is not valid UTF-8
@@ -3062,6 +3079,8 @@ pub enum ErrorDetail {
     NotInIndex,
     /// A tag appeared between the two reads of one announce
     ObserveRaced,
+    /// The ocx home is always active and takes no consent stamp
+    OcxHomeNeedsNoConsent,
     /// Attaching was refused because offline mode is on
     OfflineAttestRefused,
     /// Offline mode and the manifest is not stored locally
@@ -3389,6 +3408,8 @@ pub enum ErrorDetail {
     TemplateUnknownToken,
     /// An interpolated value exceeds its size budget
     TemplateValueTooLarge,
+    /// Unsanitized document bytes were bound for a terminal; redirect to a file or a pipe
+    TerminalOutputRefused,
     /// The transparency log entry does not match the received envelope
     TlogBindingMismatch,
     /// The target has more attestation referrers than the candidate limit
@@ -3540,6 +3561,7 @@ impl ErrorDetail {
             Self::AnyPinNotAdvertisedAsAny => "any_pin_not_advertised_as_any",
             Self::AnyPinProvenanceUnavailable => "any_pin_provenance_unavailable",
             Self::ArchiveEntryEscape => "archive_entry_escape",
+            Self::ArchiveExtractedNoEntries => "archive_extracted_no_entries",
             Self::ArchiveExtractionCapExceeded => "archive_extraction_cap_exceeded",
             Self::ArchiveGnuSparseUnsupported => "archive_gnu_sparse_unsupported",
             Self::ArchiveHardLinkEscape => "archive_hard_link_escape",
@@ -3560,10 +3582,12 @@ impl ErrorDetail {
             Self::BindingAmbiguous => "binding_ambiguous",
             Self::BindingNotDeclared => "binding_not_declared",
             Self::BindingNotFound => "binding_not_found",
+            Self::BindingNotSelected => "binding_not_selected",
             Self::BindingValueInvalid => "binding_value_invalid",
             Self::BindingValueMissingRegistry => "binding_value_missing_registry",
             Self::BlobNotFound => "blob_not_found",
             Self::BotIdentity => "bot_identity",
+            Self::BuildReceiptNotFound => "build_receipt_not_found",
             Self::BuilderMismatch => "builder_mismatch",
             Self::BundleParseFailed => "bundle_parse_failed",
             Self::CandidateLimitExhausted => "candidate_limit_exhausted",
@@ -3632,6 +3656,7 @@ impl ErrorDetail {
             Self::EmptyPushSet => "empty_push_set",
             Self::EndpointUnresolvable => "endpoint_unresolvable",
             Self::EntrypointCollision => "entrypoint_collision",
+            Self::EnvrcExists => "envrc_exists",
             Self::ExtraCaCertsInvalid => "extra_ca_certs_invalid",
             Self::ExtraCaCertsNotUtf8 => "extra_ca_certs_not_utf8",
             Self::ExtraCaCertsPemInvalid => "extra_ca_certs_pem_invalid",
@@ -3647,6 +3672,7 @@ impl ErrorDetail {
             Self::ForgeAuthFailed => "forge_auth_failed",
             Self::ForgeCapabilityUnavailable => "forge_capability_unavailable",
             Self::ForgeClientBuild => "forge_client_build",
+            Self::ForgeCredentialMissing => "forge_credential_missing",
             Self::ForgeDecode => "forge_decode",
             Self::ForgeFailed => "forge_failed",
             Self::ForgeKindUnknown => "forge_kind_unknown",
@@ -3673,6 +3699,7 @@ impl ErrorDetail {
             Self::ForkParentAbsent => "fork_parent_absent",
             Self::ForkParentMismatch => "fork_parent_mismatch",
             Self::ForwardedEnvInvalid => "forwarded_env_invalid",
+            Self::FrozenRefused => "frozen_refused",
             Self::FulcioBadRequest => "fulcio_bad_request",
             Self::FulcioUnavailable => "fulcio_unavailable",
             Self::GitCommandFailed => "git_command_failed",
@@ -3695,6 +3722,7 @@ impl ErrorDetail {
             Self::IndexSerialization => "index_serialization",
             Self::IndexSingleflightFailed => "index_singleflight_failed",
             Self::IndexSourceFailed => "index_source_failed",
+            Self::IndexSourceNotPublished => "index_source_not_published",
             Self::IntegrationNamespaceInvalid => "integration_namespace_invalid",
             Self::IntegrationTooLarge => "integration_too_large",
             Self::IntegrationsTooLarge => "integrations_too_large",
@@ -3705,6 +3733,7 @@ impl ErrorDetail {
             Self::InvalidBindingName => "invalid_binding_name",
             Self::InvalidBooleanString => "invalid_boolean_string",
             Self::InvalidBuildMetadata => "invalid_build_metadata",
+            Self::InvalidCommandLine => "invalid_command_line",
             Self::InvalidDigest => "invalid_digest",
             Self::InvalidEncoding => "invalid_encoding",
             Self::InvalidEndpointUrl => "invalid_endpoint_url",
@@ -3807,6 +3836,7 @@ impl ErrorDetail {
             Self::NotAManifest => "not_a_manifest",
             Self::NotInIndex => "not_in_index",
             Self::ObserveRaced => "observe_raced",
+            Self::OcxHomeNeedsNoConsent => "ocx_home_needs_no_consent",
             Self::OfflineAttestRefused => "offline_attest_refused",
             Self::OfflineManifestMissing => "offline_manifest_missing",
             Self::OfflineMode => "offline_mode",
@@ -3970,6 +4000,7 @@ impl ErrorDetail {
             Self::TemplateUnknownModifier => "template_unknown_modifier",
             Self::TemplateUnknownToken => "template_unknown_token",
             Self::TemplateValueTooLarge => "template_value_too_large",
+            Self::TerminalOutputRefused => "terminal_output_refused",
             Self::TlogBindingMismatch => "tlog_binding_mismatch",
             Self::TooManyAttestations => "too_many_attestations",
             Self::ToolchainDirGroupOrWorldWritable => "toolchain_dir_group_or_world_writable",
@@ -4053,6 +4084,7 @@ impl ErrorDetail {
             "any_pin_not_advertised_as_any" => Self::AnyPinNotAdvertisedAsAny,
             "any_pin_provenance_unavailable" => Self::AnyPinProvenanceUnavailable,
             "archive_entry_escape" => Self::ArchiveEntryEscape,
+            "archive_extracted_no_entries" => Self::ArchiveExtractedNoEntries,
             "archive_extraction_cap_exceeded" => Self::ArchiveExtractionCapExceeded,
             "archive_gnu_sparse_unsupported" => Self::ArchiveGnuSparseUnsupported,
             "archive_hard_link_escape" => Self::ArchiveHardLinkEscape,
@@ -4073,10 +4105,12 @@ impl ErrorDetail {
             "binding_ambiguous" => Self::BindingAmbiguous,
             "binding_not_declared" => Self::BindingNotDeclared,
             "binding_not_found" => Self::BindingNotFound,
+            "binding_not_selected" => Self::BindingNotSelected,
             "binding_value_invalid" => Self::BindingValueInvalid,
             "binding_value_missing_registry" => Self::BindingValueMissingRegistry,
             "blob_not_found" => Self::BlobNotFound,
             "bot_identity" => Self::BotIdentity,
+            "build_receipt_not_found" => Self::BuildReceiptNotFound,
             "builder_mismatch" => Self::BuilderMismatch,
             "bundle_parse_failed" => Self::BundleParseFailed,
             "candidate_limit_exhausted" => Self::CandidateLimitExhausted,
@@ -4145,6 +4179,7 @@ impl ErrorDetail {
             "empty_push_set" => Self::EmptyPushSet,
             "endpoint_unresolvable" => Self::EndpointUnresolvable,
             "entrypoint_collision" => Self::EntrypointCollision,
+            "envrc_exists" => Self::EnvrcExists,
             "extra_ca_certs_invalid" => Self::ExtraCaCertsInvalid,
             "extra_ca_certs_not_utf8" => Self::ExtraCaCertsNotUtf8,
             "extra_ca_certs_pem_invalid" => Self::ExtraCaCertsPemInvalid,
@@ -4160,6 +4195,7 @@ impl ErrorDetail {
             "forge_auth_failed" => Self::ForgeAuthFailed,
             "forge_capability_unavailable" => Self::ForgeCapabilityUnavailable,
             "forge_client_build" => Self::ForgeClientBuild,
+            "forge_credential_missing" => Self::ForgeCredentialMissing,
             "forge_decode" => Self::ForgeDecode,
             "forge_failed" => Self::ForgeFailed,
             "forge_kind_unknown" => Self::ForgeKindUnknown,
@@ -4186,6 +4222,7 @@ impl ErrorDetail {
             "fork_parent_absent" => Self::ForkParentAbsent,
             "fork_parent_mismatch" => Self::ForkParentMismatch,
             "forwarded_env_invalid" => Self::ForwardedEnvInvalid,
+            "frozen_refused" => Self::FrozenRefused,
             "fulcio_bad_request" => Self::FulcioBadRequest,
             "fulcio_unavailable" => Self::FulcioUnavailable,
             "git_command_failed" => Self::GitCommandFailed,
@@ -4208,6 +4245,7 @@ impl ErrorDetail {
             "index_serialization" => Self::IndexSerialization,
             "index_singleflight_failed" => Self::IndexSingleflightFailed,
             "index_source_failed" => Self::IndexSourceFailed,
+            "index_source_not_published" => Self::IndexSourceNotPublished,
             "integration_namespace_invalid" => Self::IntegrationNamespaceInvalid,
             "integration_too_large" => Self::IntegrationTooLarge,
             "integrations_too_large" => Self::IntegrationsTooLarge,
@@ -4218,6 +4256,7 @@ impl ErrorDetail {
             "invalid_binding_name" => Self::InvalidBindingName,
             "invalid_boolean_string" => Self::InvalidBooleanString,
             "invalid_build_metadata" => Self::InvalidBuildMetadata,
+            "invalid_command_line" => Self::InvalidCommandLine,
             "invalid_digest" => Self::InvalidDigest,
             "invalid_encoding" => Self::InvalidEncoding,
             "invalid_endpoint_url" => Self::InvalidEndpointUrl,
@@ -4320,6 +4359,7 @@ impl ErrorDetail {
             "not_a_manifest" => Self::NotAManifest,
             "not_in_index" => Self::NotInIndex,
             "observe_raced" => Self::ObserveRaced,
+            "ocx_home_needs_no_consent" => Self::OcxHomeNeedsNoConsent,
             "offline_attest_refused" => Self::OfflineAttestRefused,
             "offline_manifest_missing" => Self::OfflineManifestMissing,
             "offline_mode" => Self::OfflineMode,
@@ -4483,6 +4523,7 @@ impl ErrorDetail {
             "template_unknown_modifier" => Self::TemplateUnknownModifier,
             "template_unknown_token" => Self::TemplateUnknownToken,
             "template_value_too_large" => Self::TemplateValueTooLarge,
+            "terminal_output_refused" => Self::TerminalOutputRefused,
             "tlog_binding_mismatch" => Self::TlogBindingMismatch,
             "too_many_attestations" => Self::TooManyAttestations,
             "toolchain_dir_group_or_world_writable" => Self::ToolchainDirGroupOrWorldWritable,

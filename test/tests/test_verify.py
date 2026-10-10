@@ -1051,7 +1051,7 @@ def test_verify_integrated_time_outside_certificate_window_is_refused(
 #
 # Both rows are about one property: the JSON envelope's `exit_code` is the code
 # the process actually returns. Before WP9b these disagreed — a CLI-local
-# `CommandError` rendered as `1`/`internal` while the process exited 64 or 65
+# refusal rendered as `1`/`internal` while the process exited 64 or 65
 # (CLI-04) — so a consumer branching on the envelope read a different outcome
 # than a consumer branching on `$?`.
 # ──────────────────────────────────────────────────────────────────────────────

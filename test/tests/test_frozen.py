@@ -24,7 +24,7 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_digest, push_raw_config_package
 from src.runner import PackageInfo, registry_dir
 
-pytestmark = pytest.mark.command("patch_freeze", "index_update", "index_sync", "install")
+pytestmark = pytest.mark.command("patch_freeze", "index_update", "index_sync", "install", "upgrade")
 
 
 def _write_ocx_toml(project: Path, body: str) -> Path:
@@ -428,6 +428,47 @@ def test_frozen_index_update_exits_81(
         "the refusal happens before the patch piggyback, so it cannot warn about it; "
         f"stderr: {result.stderr}"
     )
+
+
+def _assert_frozen_refused(result: subprocess.CompletedProcess[str], verb: str) -> None:
+    """Exit 81 alone does not tell `--frozen` from `--offline` or a dirty profile; the slug does."""
+    assert result.returncode == POLICY_BLOCKED, (
+        f"--frozen {verb} must exit 81 (PolicyBlocked); rc={result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    error = json.loads(result.stdout)["error"]
+    assert error.get("detail") == "frozen_refused", (
+        f"--frozen {verb} must name its cause in error.detail; stdout: {result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("subcommand", ["sync", "update"])
+def test_frozen_index_discovery_names_its_cause_in_error_detail(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, subcommand: str
+) -> None:
+    """`ocx index sync` and `ocx index update` refuse `--frozen` with the `frozen_refused` slug."""
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    target = ocx.registry if subcommand == "sync" else base.short
+
+    result = ocx.run("--frozen", "index", subcommand, target, check=False)
+
+    _assert_frozen_refused(result, f"index {subcommand}")
+
+
+def test_frozen_upgrade_names_its_cause_in_error_detail(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`ocx upgrade` refuses `--frozen` with the `frozen_refused` slug, after its lock is found."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, f'[tools]\ntool = "{ocx.registry}/{unique_repo}:1.0.0"\n')
+    project_env = {"OCX_PROJECT": str(project / "ocx.toml")}
+    ocx.plain("lock", env_overrides=project_env)
+
+    result = ocx.run("--frozen", "upgrade", check=False, env_overrides=project_env)
+
+    _assert_frozen_refused(result, "upgrade")
 
 
 # No xdist group: the `[patches]` tier is a registry path of this test's own.

@@ -295,7 +295,7 @@ impl PackageCreate {
                 self.path.display()
             )
         };
-        crate::app::CommandError::new(message, ocx_exit::ExitCode::DataError).into()
+        crate::app::CliRefusal::ArchiveExtractedNoEntries(message).into()
     }
 
     /// Refuses `--bin-scan` without `--metadata` (exit 64): there is nothing to verify.

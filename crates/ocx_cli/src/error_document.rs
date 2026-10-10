@@ -77,7 +77,7 @@ pub struct ErrorContext {
 /// Render an `anyhow::Error` as the pretty-printed error document printed under `--format json`.
 ///
 /// Classified by [`crate::exit::classify_decision`], not the library pass, or a CLI-local
-/// `CommandError` reports `1` while the process exits 64; `detail` is the deciding cause's slug.
+/// refusal reports `1` while the process exits 64; `detail` is the deciding cause's slug.
 ///
 /// # Errors
 ///
@@ -133,7 +133,6 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> ErrorContext {
 mod tests {
     //! The error document is a published contract that `--format json` consumers match against.
     use super::*;
-    use ocx_exit::ExitCode;
 
     #[test]
     fn schema_version_is_one() {
@@ -437,23 +436,16 @@ mod tests {
     }
 
     #[test]
-    fn a_command_error_carries_the_code_the_process_exits_with() {
-        // The library classifier cannot downcast the CLI-local `CommandError`, so classifying with it
-        // reports 1 while the process exits 64. Literals, because comparing the document to the
+    fn a_cli_refusal_carries_its_exit_code_and_its_slug() {
+        // The library classifier cannot downcast a CLI-local refusal, so classifying with it reports 1
+        // and no slug while the process exits 81. Literals, because comparing the document to the
         // function it calls would pass under any classifier.
-        let err = anyhow::Error::new(crate::app::CommandError::new(
-            "refusing to write the predicate to a terminal".to_string(),
-            ExitCode::UsageError,
-        ));
-        let json = render_error_document("package sbom", &err).expect("render ok");
+        let err = anyhow::Error::new(crate::command::index_common::policy_blocked("`ocx index sync`"));
+        let json = render_error_document("index sync", &err).expect("render ok");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
 
-        assert_eq!(value["exit_code"], 64, "document: {json}");
-        assert_eq!(value["error"]["kind"], "usage_error", "document: {json}");
-        assert!(
-            value["error"].get("detail").is_none(),
-            "a command error carries no slug: {json}"
-        );
+        assert_eq!(value["exit_code"], 81, "document: {json}");
+        assert_eq!(value["error"]["detail"], "frozen_refused", "document: {json}");
         assert_eq!(
             value["exit_code"].as_u64().expect("exit_code is a number"),
             crate::exit::classify_error(err.as_ref()) as u8 as u64,

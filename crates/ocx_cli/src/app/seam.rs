@@ -222,10 +222,9 @@ pub(super) fn admit(command: Option<&crate::command::Command>) -> anyhow::Result
     if admitted_now().is_some_and(|admitted| admitted.contains(&name.as_str())) {
         return Ok(());
     }
-    Err(super::CommandError::new(
-        format!("`ocx {name}` is not admitted by the in-process seam; test it end to end"),
-        ocx_exit::ExitCode::UsageError,
-    )
+    Err(crate::error::UsageError::new(format!(
+        "`ocx {name}` is not admitted by the in-process seam; test it end to end"
+    ))
     .into())
 }
 
