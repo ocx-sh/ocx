@@ -43,9 +43,14 @@ tasks:
       1. `git worktree add` of the mirror's HEAD under .tmp/satellite-verify/
       2. rsync this tree over the worktree's external/ocx (target/, .git,
          .tmp/, .agents/ and the local tool dirs excluded)
-      3. `cargo build --workspace` there (CARGO_TARGET_DIR persists under
+      3. the lock check: when this tree is clean and its HEAD tree is the tree
+         of the commit the mirror's `external/ocx` pointer pins, the overlay IS the pinned
+         submodule, so `cargo metadata --locked` there fails on a Cargo.lock
+         that went stale against the pointer; a dirty or any other tree prints
+         one line naming why lock freshness was not checked
+      4. `cargo build --workspace` there (CARGO_TARGET_DIR persists under
          .tmp/satellite-verify/cargo-target, so repeats are warm)
-      4. the forward-closure check: `cargo tree -i <crate>` must answer
+      5. the forward-closure check: `cargo tree -i <crate>` must answer
          `did not match any packages` for every operations-tier crate —
          asserted on that text, never the exit code — except ocx_store,
          whose direct dependents must be a non-empty subset of {ocx_index,
@@ -55,13 +60,14 @@ tasks:
          which arm matched); and no mirror source or manifest names an
          operations crate — a walk listing fewer than two files is refused,
          never read as "nothing named"
-      5. the worktree is removed (a `defer:` covers the failure path)
+      6. the worktree is removed (a `defer:` covers the failure path)
       The live mirror checkout ends byte-identical with one worktree entry.
     cmds:
       # Sweep what an interrupted run left behind.
       - task: .worktree:remove
       - defer: { task: .worktree:remove }
       - task: .worktree:add
+      - task: .lock
       - task: .build
       - task: .closure
       # Explicit as well as deferred: a failing deferred command does not
@@ -144,16 +150,43 @@ tasks:
           [ ! -d '{{.MIRROR_DIR}}' ] || git -C '{{.MIRROR_DIR}}' worktree prune;
         fi
 
+  # The mirror's committed Cargo.lock against its own pinned pointer. `.build`
+  # re-resolves a stale lock silently, so a mirror whose lock lagged a pointer
+  # bump passed here and then dirtied the tree in CI's Bazel repin. The check
+  # is only meaningful when the overlay is the pinned submodule: a gitlink
+  # names a commit, so compare that commit's tree with HEAD's - and require a
+  # clean tree, because the overlay copies the working tree, not HEAD. Any
+  # other candidate may legitimately have moved the lock, and says so.
+  # ponytail: untracked files are ignored, so stray build output cannot turn the
+  # gate into a skip; a tracked change or drifted submodule still does.
+  .lock:
+    internal: true
+    dir: '{{.MIRROR_WORKTREE}}'
+    cmds:
+      - |
+        set -eu
+        pinned=$(git -C '{{.MIRROR_DIR}}' ls-tree HEAD external/ocx | awk '$2 == "commit" { print $3 }')
+        [ -n "$pinned" ] || { echo "satellite: the mirror has no external/ocx pointer at HEAD" >&2; exit 1; }
+        pinned_tree=$(git -C '{{.ROOT_DIR}}' rev-parse --verify -q "$pinned^{tree}" || true)
+        dirty=$(git -C '{{.ROOT_DIR}}' status --porcelain --untracked-files=no)
+        if [ -n "$pinned_tree" ] && [ -z "$dirty" ] && [ "$pinned_tree" = "$(git -C '{{.ROOT_DIR}}' rev-parse 'HEAD^{tree}')" ]; then
+          cargo metadata --locked --format-version 1 >/dev/null || {
+            echo "satellite: cargo metadata --locked failed on the mirror at its pinned external/ocx ($pinned) — if cargo says the lock file needs updating, run cargo update --workspace in the mirror and commit Cargo.lock" >&2; exit 1; }
+          echo "lock: the mirror's Cargo.lock is fresh against its external/ocx pointer ($pinned)"
+        else
+          if [ -n "$dirty" ]; then reason="this tree is dirty, so the overlay is not HEAD"; else reason="this tree is not the mirror's pinned external/ocx ($pinned)"; fi
+          echo "lock: freshness not checked - $reason"
+        fi
+
   .build:
     internal: true
     dir: '{{.MIRROR_WORKTREE}}'
     env:
       CARGO_TARGET_DIR: '{{.MIRROR_TARGET_DIR}}'
-    # No `--locked`: the mirror's Cargo.lock pins ocx_lib's transitive
-    # versions at the submodule pointer, and the overlaid tree may have moved
-    # them — that drift is lock noise, not the ecosystem break this gate is
-    # for. The re-resolve happens in the disposable worktree and is never
-    # written back to the live checkout.
+    # No `--locked`: the overlaid tree may differ from the pinned pointer, and
+    # the lock drift that causes is noise, not the ecosystem break this gate
+    # is for (`.lock` checks the pinned case). The re-resolve happens in the
+    # disposable worktree and is never written back to the live checkout.
     cmds:
       - cargo build --workspace{{if .FEATURES}} --features {{.FEATURES}}{{end}}
 
