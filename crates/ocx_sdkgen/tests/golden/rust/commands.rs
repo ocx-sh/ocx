@@ -2225,7 +2225,7 @@ impl Ocx {
     pub fn exec(&self, args: &ExecArgs) -> Result<Raw, Error> {
         let mut argv = self.argv(&["exec"]);
         args.push(&mut argv);
-        self.call_raw("exec", &[], argv)
+        self.call_passthrough("exec", &[], argv)
     }
 
     /// List available repositories in the registry
@@ -2297,7 +2297,7 @@ impl Ocx {
     pub fn launcher_exec(&self, args: &LauncherExecArgs) -> Result<Raw, Error> {
         let mut argv = self.argv(&["launcher", "exec"]);
         args.push(&mut argv);
-        self.call_raw("launcher exec", &[], argv)
+        self.call_passthrough("launcher exec", &[], argv)
     }
 
     /// Materialize a deferred package and run one of its declared names
@@ -2306,7 +2306,7 @@ impl Ocx {
     pub fn launcher_shim(&self, args: &LauncherShimArgs) -> Result<Raw, Error> {
         let mut argv = self.argv(&["launcher", "shim"]);
         args.push(&mut argv);
-        self.call_raw("launcher shim", &[], argv)
+        self.call_passthrough("launcher shim", &[], argv)
     }
 
     /// Resolve package tags to digests and write ocx.lock
@@ -2461,7 +2461,7 @@ impl Ocx {
     pub fn package_exec(&self, args: &PackageExecArgs) -> Result<Raw, Error> {
         let mut argv = self.argv(&["package", "exec"]);
         args.push(&mut argv);
-        self.call_raw("package exec", &[], argv)
+        self.call_passthrough("package exec", &[], argv)
     }
 
     /// Inspect one or more package references (candidates, metadata, or resolution chain)
@@ -2555,7 +2555,7 @@ impl Ocx {
     pub fn package_test(&self, args: &PackageTestArgs) -> Result<Raw, Error> {
         let mut argv = self.argv(&["package", "test"]);
         args.push(&mut argv);
-        self.call_raw("package test", &["ScriptRunReport"], argv)
+        self.call_passthrough("package test", &["ScriptRunReport"], argv)
     }
 
     /// Remove an installed candidate for one or more packages
@@ -2618,7 +2618,7 @@ impl Ocx {
     pub fn patch_test(&self, args: &PatchTestArgs) -> Result<Raw, Error> {
         let mut argv = self.argv(&["patch", "test"]);
         args.push(&mut argv);
-        self.call_raw("patch test", &["PatchTestReport", "ScriptRunReport"], argv)
+        self.call_passthrough("patch test", &["PatchTestReport", "ScriptRunReport"], argv)
     }
 
     /// Show which companion contributes each patched env var to a base, and by which descriptor
