@@ -92,9 +92,9 @@ genrule(
         "schemas/project/v1.json",
         "schemas/project-lock/v3.json",
         "schemas/patch/v1.json",
-        "schemas/reports/v2.json",
+        "schemas/reports/v1.json",
         "schemas/execution-record/v1.json",
-        "schemas/errors/v2.json",
+        "schemas/errors/v1.json",
     ],
     cmd = " && ".join([
         "$(location :ocx_schema_bin) metadata > $(location schemas/metadata/v1.json)",
@@ -102,9 +102,9 @@ genrule(
         "$(location :ocx_schema_bin) project > $(location schemas/project/v1.json)",
         "$(location :ocx_schema_bin) project-lock > $(location schemas/project-lock/v3.json)",
         "$(location :ocx_schema_bin) patch > $(location schemas/patch/v1.json)",
-        "$(location :ocx_schema_bin) reports > $(location schemas/reports/v2.json)",
+        "$(location :ocx_schema_bin) reports > $(location schemas/reports/v1.json)",
         "$(location :ocx_schema_bin) execution-record > $(location schemas/execution-record/v1.json)",
-        "$(location :ocx_schema_bin) errors > $(location schemas/errors/v2.json)",
+        "$(location :ocx_schema_bin) errors > $(location schemas/errors/v1.json)",
     ]),
 )
 

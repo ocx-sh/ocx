@@ -102,6 +102,8 @@ pub enum Outcome<R> {
 /// What a command returns when its stdout is not one report: the child's own output, or one of several documents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Raw {
+    /// For a command that runs another program (`exec`, `launcher exec`), that program's exit unless ocx refused
+    /// the run with an error document.
     pub exit_code: ExitCode,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -422,11 +424,42 @@ impl Ocx {
         }
     }
 
-    /// A command whose stdout the caller interprets.
+    /// A command whose stdout the caller interprets. A non-zero exit is an error unless stdout is one of `roots`,
+    /// which [`Raw::into_outcome`] then reads as a failed outcome. That check reads only the `schema_version`, not
+    /// which root stdout is: the caller's decode settles that.
     pub fn call_raw(&self, command: &'static str, roots: &[&'static str], argv: Argv) -> Result<Raw, Error> {
         self.verify(command, roots)?;
-        self.execute(argv)
+        let done = self.execute(argv)?;
+        if done.exit_code.is_success() {
+            return Ok(done);
+        }
+        let reported = parse_error_document(&done.stdout)?.is_none()
+            && roots
+                .iter()
+                .any(|root| decode_report::<Value>(root, &done.stdout).is_ok());
+        if reported { Ok(done) } else { Err(failure(done)) }
     }
+
+    /// A command that can run another program, which then owns stdout and the exit: any exit is returned as
+    /// [`Raw::exit_code`], except stdout that strictly decodes as ocx's error document for this `command`.
+    pub fn call_passthrough(&self, command: &'static str, roots: &[&'static str], argv: Argv) -> Result<Raw, Error> {
+        self.verify(command, roots)?;
+        let done = self.execute(argv)?;
+        if !done.exit_code.is_success()
+            && let Some(document) = own_error_document(command, &done.stdout)
+        {
+            return Err(Error::Ocx(Box::new(document)));
+        }
+        Ok(done)
+    }
+}
+
+/// The error document `stdout` is for `command`; `None` for anything else, which a child may print.
+fn own_error_document(command: &str, stdout: &[u8]) -> Option<ErrorDocument> {
+    let document: Value = serde_json::from_slice(stdout).ok()?;
+    check_version("the error document", contract::ERRORS, &document).ok()?;
+    let document: ErrorDocument = serde_json::from_value(document).ok()?;
+    (document.command == command).then_some(document)
 }
 
 /// The error a non-zero exit becomes: the error document when stdout is one, the bare exit otherwise.

@@ -589,12 +589,6 @@ jobs:
   satellite-contract:
     name: Satellite Contract (ocx-mirror)
     if: github.event_name != 'schedule' || inputs.full
-    # NON-BLOCKING until the ocx-mirror change that marks its six ocx spawn
-    # sites `ocx_contract_site` merges: until then the floor is red by
-    # construction. Drop this line in the commit after that merge; then the
-    # job becomes required. Never required while the line is set — the same
-    # reason as `satellite-verify` above.
-    continue-on-error: true
     runs-on: ubuntu-latest
     # Reads two public repositories; nothing here writes.
     permissions:

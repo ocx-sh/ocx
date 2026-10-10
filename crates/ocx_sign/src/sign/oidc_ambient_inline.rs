@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use ocx_env::{EnvVar, SecretVar};
+use ocx_oci::endpoint::BodyReadError;
 use zeroize::Zeroizing;
 
 use super::error::SignErrorKind;
@@ -124,12 +125,23 @@ impl TokenProvider for InlineAmbientProvider {
                 .header("Authorization", format!("Bearer {}", bearer.as_str()))
                 .send()
                 .await
-                .map_err(|_| SignErrorKind::OidcPreCheckFailed {
-                    reason: "gha_id_token_request_failed".to_string(),
+                .map_err(|e| {
+                    if ocx_oci::transport_policy::is_transient_transport_error(&e) {
+                        SignErrorKind::OidcTokenUnavailable
+                    } else {
+                        SignErrorKind::OidcPreCheckFailed {
+                            reason: "gha_id_token_request_failed".to_string(),
+                        }
+                    }
                 })?;
-            if !response.status().is_success() {
-                return Err(SignErrorKind::OidcPreCheckFailed {
-                    reason: "gha_id_token_request_rejected".to_string(),
+            let status = response.status();
+            if !status.is_success() {
+                return Err(if ocx_oci::transport_policy::is_transient_status(status.as_u16()) {
+                    SignErrorKind::OidcTokenUnavailable
+                } else {
+                    SignErrorKind::OidcPreCheckFailed {
+                        reason: "gha_id_token_request_rejected".to_string(),
+                    }
                 });
             }
             #[derive(serde::Deserialize)]
@@ -137,12 +149,15 @@ impl TokenProvider for InlineAmbientProvider {
                 value: String,
             }
             // Capped: the endpoint comes from the runner environment, which a compromised job controls.
-            let raw =
-                ocx_oci::endpoint::read_body_capped(response)
-                    .await
-                    .map_err(|_| SignErrorKind::OidcPreCheckFailed {
+            let raw = ocx_oci::endpoint::read_body_capped(response)
+                .await
+                .map_err(|fault| match fault {
+                    // The stream broke after the headers: the same retry as a failed send.
+                    BodyReadError::Transport => SignErrorKind::OidcTokenUnavailable,
+                    BodyReadError::Oversize => SignErrorKind::OidcPreCheckFailed {
                         reason: "gha_id_token_malformed".to_string(),
-                    })?;
+                    },
+                })?;
             let body: IdTokenResponse =
                 serde_json::from_slice(&raw).map_err(|_| SignErrorKind::OidcPreCheckFailed {
                     reason: "gha_id_token_malformed".to_string(),
@@ -267,6 +282,109 @@ mod tests {
             }
             assert_eq!(ambient_env(), expected, "{set:?}");
         }
+    }
+
+    // ── GitHub token exchange over a loopback stub ───────────────────────────
+
+    /// Run the GitHub exchange against a loopback stub that answers every connection with `response`.
+    async fn exchange_against_stub(response: &'static [u8]) -> Option<SignErrorKind> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the token stub");
+        let addr = listener.local_addr().expect("the token stub has an address");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 4096];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket.write_all(response).await;
+            }
+        });
+        exchange_at(addr).await
+    }
+
+    /// Run the GitHub exchange against whatever listens on `addr`.
+    async fn exchange_at(addr: std::net::SocketAddr) -> Option<SignErrorKind> {
+        let env = ocx_env::overrides::lock();
+        env.remove(GITLAB_TOKEN.declaration());
+        env.remove(CIRCLE_TOKEN.declaration());
+        env.set(GHA_URL, format!("http://{addr}/token?api-version=1"));
+        env.set(GHA_TOKEN.declaration(), "bearer");
+        let provider = InlineAmbientProvider { trusted_hosts: vec![] };
+        provider.acquire("sigstore").await.err()
+    }
+
+    #[tokio::test]
+    async fn a_503_from_the_token_endpoint_is_a_retry() {
+        let failure = exchange_against_stub(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            matches!(failure, Some(SignErrorKind::OidcTokenUnavailable)),
+            "got: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_body_that_breaks_mid_stream_is_a_retry() {
+        let failure =
+            exchange_against_stub(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"val").await;
+        assert!(
+            matches!(failure, Some(SignErrorKind::OidcTokenUnavailable)),
+            "got: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_dial_to_the_token_endpoint_is_a_retry() {
+        // Bind then drop, so nothing listens on the address and the connect is refused.
+        let addr = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a throwaway port")
+            .local_addr()
+            .expect("the throwaway port has an address");
+        let failure = exchange_at(addr).await;
+        assert!(
+            matches!(failure, Some(SignErrorKind::OidcTokenUnavailable)),
+            "got: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_from_the_token_endpoint_is_a_refusal_not_a_retry() {
+        // The refused redirect is the SSRF defence against re-sending the bearer to a `Location`; a retry cannot help.
+        let failure = exchange_against_stub(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(
+            reason(failure.expect("a redirect fails")),
+            "gha_id_token_request_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_403_from_the_token_endpoint_is_a_refusal_not_a_retry() {
+        let failure =
+            exchange_against_stub(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        assert_eq!(reason(failure.expect("a 403 fails")), "gha_id_token_request_rejected");
+    }
+
+    #[tokio::test]
+    async fn an_oversize_token_body_is_malformed_not_a_retry() {
+        let declared = ocx_oci::endpoint::MAX_SIGSTORE_RESPONSE_BYTES + 1;
+        let head: &'static [u8] = Box::leak(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n")
+                .into_bytes()
+                .into_boxed_slice(),
+        );
+        let failure = exchange_against_stub(head).await;
+        assert_eq!(
+            reason(failure.expect("an oversize body fails")),
+            "gha_id_token_malformed"
+        );
     }
 
     // ── ambient-source precedence ────────────────────────────────────────────

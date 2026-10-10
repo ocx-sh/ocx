@@ -26,7 +26,7 @@ Source ADR: `.claude/artifacts/adr_typed_contract_registries.md` (**Accepted**, 
 
 ## Objective
 
-Land D1–D17 so that each drift the ADR names fails `cargo check`, and delete the test scaffolding that a type makes redundant. Wire bytes do not change: `website/src/public/schemas/errors/v1.json`, `reports/v2.json`, `cli.json`, every schema golden under `crates/ocx_schema/tests/golden/`, every slug, exit code, flag spelling, env name and warning string stay byte-identical. Runtime `error.detail` values and exit codes also stay identical for every error.
+Land D1–D17 so that each drift the ADR names fails `cargo check`, and delete the test scaffolding that a type makes redundant. Wire bytes do not change: `website/src/public/schemas/errors/v1.json`, `reports/v1.json`, `cli.json`, every schema golden under `crates/ocx_schema/tests/golden/`, every slug, exit code, flag spelling, env name and warning string stay byte-identical. Runtime `error.detail` values and exit codes also stay identical for every error.
 
 ## Discovery facts the plan rests on
 
@@ -174,7 +174,7 @@ Each contract lists its property, then its evidence: the compile-time red, the s
 
 - **S-001** — A user hits any error, for example a bad registry URL, a TLS failure or a missing package. Result: the same exit code, the same `error.detail` slug and the same error document bytes as before. Error case: a dynamically delegated arm whose chain holds no classified cause still yields today's fallback slug (K-1). Proof: `test_exit_codes.py`, `test_error_document.py`, per-family unit tests.
 - **S-002** — A user runs a deprecated spelling (`ocx run`, `package copy -c`, `OCX_LOG`). Result: stderr shows the same one-time warning, and stdout is unchanged. Error case: an old and a new flag given together still conflict with the same clap error. Proof: `every_renamed_flag_still_parses_and_is_detected`, `a_renamed_value_flag_conflicts_with_its_replacement`, `test_deprecated_spellings.py`.
-- **S-003** — A tool reads `ocx --format json …`, `cli.json`, `errors/v1.json` or `reports/v2.json`. Result: byte-identical documents and ids. Proof: C-022.
+- **S-003** — A tool reads `ocx --format json …`, `cli.json`, `errors/v1.json` or `reports/v1.json`. Result: byte-identical documents and ids. Proof: C-022.
 - **S-004** — ocx-mirror maps a TLS config error. Result: it exits with the same code as before, now read from ocx's own classification. Proof: `cargo test -p ocx_mirror_error` and `satellite:verify`.
 - **S-005** — A developer adds an error variant, a command, a report root, a deprecated spelling, an sdkgen rule or a declared env var, and forgets its counterpart. Result: `cargo check` (or the clippy ratchet, for D16) names the missing counterpart. Proof: the C-004 `compile_fail` doctests and the per-step mutation logs.
 

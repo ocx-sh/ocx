@@ -25,7 +25,7 @@ use ocx_trust::CompiledPolicy;
 
 use crate::api::data::sanitize_for_terminal;
 use crate::api::data::sbom::{ListingVerification, RefusedEntry, SbomEntry, SbomListingReport, SbomSummaryOut};
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 use crate::command::package_sign_common;
 use crate::options;
 
@@ -395,12 +395,12 @@ fn destination(output: Option<&Path>) -> Option<OutputDestination> {
 
 /// Refuses writing raw predicate bytes to a terminal (exit 64): they are publisher-authored and
 /// unsanitized, so an OSC 52 sequence could set the clipboard (CWE-150).
-fn refuse_tty_output(destination: &OutputDestination, stdout_is_terminal: bool) -> Result<(), CommandError> {
+fn refuse_tty_output(destination: &OutputDestination, stdout_is_terminal: bool) -> Result<(), CliRefusal> {
     if matches!(destination, OutputDestination::Stdout) && stdout_is_terminal {
-        return Err(CommandError::new(
+        return Err(CliRefusal::TerminalOutputRefused(
             "refusing to write raw predicate bytes to a terminal: the document is publisher-authored \
-             and unsanitized; redirect to a file or a pipe",
-            ocx_exit::ExitCode::UsageError,
+             and unsanitized; redirect to a file or a pipe"
+                .to_owned(),
         ));
     }
     Ok(())

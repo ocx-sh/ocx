@@ -91,11 +91,10 @@ impl TokenProvider for DispatchingTokenProvider {
             return Ok(OidcToken::new(token.as_str().to_owned()));
         }
 
-        let ambient = self.detect_ambient();
-        if let Some(provider) = ambient
-            && let Ok(token) = provider.acquire(audience).await
-        {
-            return Ok(token);
+        // A detected provider's error is the answer: falling through would turn a transient fetch (75) into a
+        // `no_ambient_no_tty` refusal (77), and the browser fallback never yields a token.
+        if let Some(provider) = self.detect_ambient() {
+            return provider.acquire(audience).await;
         }
 
         if self.no_tty {
@@ -141,6 +140,8 @@ mod tests {
     /// `has_signing_material` hardwired to `true` reds here.
     #[test]
     fn without_an_override_the_answer_is_ambient_detection_alone() {
+        // Held so a sibling test's ambient overrides cannot land between the two reads.
+        let _env = ocx_env::overrides::lock();
         let ambient = InlineAmbientProvider::detect(&[])
             .or_else(|| AmbientIdProvider::detect(&[]))
             .is_some();
@@ -152,5 +153,48 @@ mod tests {
                 "the browser flow must not count as signing material; no_tty={no_tty}",
             );
         }
+    }
+
+    /// A detected ambient provider's transient failure must reach the caller as a retry (exit 75), not a refusal.
+    #[tokio::test]
+    async fn a_transient_ambient_failure_surfaces_through_the_dispatcher() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the token stub");
+        let addr = listener.local_addr().expect("the token stub has an address");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 4096];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        let env = ocx_env::overrides::lock();
+        env.remove(ocx_env::SIGSTORE_ID_TOKEN.declaration());
+        env.remove(ocx_env::CIRCLE_OIDC_TOKEN_V2.declaration());
+        env.set(
+            &ocx_env::ACTIONS_ID_TOKEN_REQUEST_URL,
+            format!("http://{addr}/token?api-version=1"),
+        );
+        env.set(ocx_env::ACTIONS_ID_TOKEN_REQUEST_TOKEN.declaration(), "bearer");
+
+        let provider = DispatchingTokenProvider::new(None, true, Vec::new());
+        assert!(provider.has_signing_material(), "the Actions pair is set");
+        let failure = provider
+            .acquire("sigstore")
+            .await
+            .expect_err("the token endpoint answers 503");
+        assert!(
+            matches!(failure, SignErrorKind::OidcTokenUnavailable),
+            "got: {failure:?}"
+        );
+        assert_eq!(
+            ocx_exit::ClassifyExitCode::classify(&failure),
+            Some(ocx_exit::ExitCode::TempFail)
+        );
     }
 }

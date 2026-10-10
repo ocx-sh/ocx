@@ -1,5 +1,7 @@
 # ADR: Registry-to-registry package copy (`ocx package copy`)
 
+**Amended by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (2026-10-07):** exit codes 82-87 and the `error.kind` values that twinned 83-87 are folded into next-action codes (82 `DirtyRcBlock` -> 81; 83 -> 75, 69, 65 or 81; 84, 85, 86 and 87 -> 82, with the job-token allowlist case of 86 -> 77). Every exit-code row below is historical; the `error.detail` slugs are unchanged.
+
 <!--
 Architecture Decision Record — MADR format.
 Owner: Architect (/architect). Handoff: Builder (/builder), Security Auditor (/security-auditor), QA (/qa-engineer).

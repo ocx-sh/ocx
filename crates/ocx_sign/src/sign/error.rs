@@ -144,6 +144,15 @@ pub enum SignErrorKind {
         reason: String,
     },
 
+    /// The CI provider's OIDC token endpoint failed transiently (send failure, 408/429/502/503/504, a broken body stream). Exit 75.
+    #[error("ambient OIDC token endpoint unavailable")]
+    #[exit(
+        TempFail,
+        slug = "oidc_token_unavailable",
+        summary = "The CI provider's OIDC token endpoint is unreachable or overloaded"
+    )]
+    OidcTokenUnavailable,
+
     /// The index-rewritten physical registry resolves into a forbidden range (CWE-918). Exit 78.
     #[error("refusing to dial the rewritten registry: {reason}")]
     #[exit(

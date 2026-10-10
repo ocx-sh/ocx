@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push -j` moves to a new arg while `--jobs` keeps the id, and the arg carrying `-j` becomes a string option.",
+  "findings": [
+    {
+      "code": "G06",
+      "pointer": "/root/commands/0/commands/0/args/3",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

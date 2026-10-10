@@ -5,7 +5,7 @@
 //!
 //! ```json
 //! {
-//!   "schema_version": 2,
+//!   "schema_version": 1,
 //!   "command": "package sign",
 //!   "exit_code": 80,
 //!   "error": {
@@ -24,9 +24,10 @@ use serde::Serialize;
 /// Version of the error document's shape; bump only on a rename, removal or re-nesting.
 ///
 /// New keys, new [`ErrorCategory`] variants and renames of a slug no release emitted do not bump.
-/// Version 2 removed five `error.kind` values and gave exit 82 a new meaning
-/// (`adr_exit_code_taxonomy.md`).
-pub const ERRORS_SCHEMA_VERSION: u32 = 2;
+/// The document stays at 1 until the contract baseline exists: the five `error.kind` values
+/// removed and the new meaning of exit 82 (`adr_exit_code_taxonomy.md`) are announced through
+/// the commit subject, not a bump.
+pub const ERRORS_SCHEMA_VERSION: u32 = 1;
 
 /// The document a failed invocation prints on stdout under `--format json`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -76,7 +77,7 @@ pub struct ErrorContext {
 /// Render an `anyhow::Error` as the pretty-printed error document printed under `--format json`.
 ///
 /// Classified by [`crate::exit::classify_decision`], not the library pass, or a CLI-local
-/// `CommandError` reports `1` while the process exits 64; `detail` is the deciding cause's slug.
+/// refusal reports `1` while the process exits 64; `detail` is the deciding cause's slug.
 ///
 /// # Errors
 ///
@@ -132,11 +133,10 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> ErrorContext {
 mod tests {
     //! The error document is a published contract that `--format json` consumers match against.
     use super::*;
-    use ocx_exit::ExitCode;
 
     #[test]
-    fn schema_version_is_two() {
-        assert_eq!(ERRORS_SCHEMA_VERSION, 2);
+    fn schema_version_is_one() {
+        assert_eq!(ERRORS_SCHEMA_VERSION, 1);
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
         };
         let actual = serde_json::to_string(&document).unwrap();
         let expected = concat!(
-            r#"{"schema_version":2,"command":"package sign","exit_code":80,"#,
+            r#"{"schema_version":1,"command":"package sign","exit_code":80,"#,
             r#""error":{"kind":"auth_error","detail":"oidc_token_rejected","#,
             r#""message":"Fulcio rejected OIDC token: issuer not in trust root","#,
             r#""context":{"identifier":"ocx.sh/cmake:3.28"}}}"#,
@@ -234,7 +234,7 @@ mod tests {
         let err = anyhow::anyhow!("synthetic error for document probe");
         let json = render_error_document("package sign", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 1);
         assert_eq!(parsed["command"], "package sign");
         assert_eq!(parsed["exit_code"], 1);
         assert_eq!(parsed["error"]["kind"], "internal");
@@ -257,7 +257,7 @@ mod tests {
         let rendered = render_error_document("", &err).expect("render ok");
         let expected = concat!(
             "{\n",
-            "  \"schema_version\": 2,\n",
+            "  \"schema_version\": 1,\n",
             "  \"command\": \"\",\n",
             "  \"exit_code\": 1,\n",
             "  \"error\": {\n",
@@ -436,23 +436,16 @@ mod tests {
     }
 
     #[test]
-    fn a_command_error_carries_the_code_the_process_exits_with() {
-        // The library classifier cannot downcast the CLI-local `CommandError`, so classifying with it
-        // reports 1 while the process exits 64. Literals, because comparing the document to the
+    fn a_cli_refusal_carries_its_exit_code_and_its_slug() {
+        // The library classifier cannot downcast a CLI-local refusal, so classifying with it reports 1
+        // and no slug while the process exits 81. Literals, because comparing the document to the
         // function it calls would pass under any classifier.
-        let err = anyhow::Error::new(crate::app::CommandError::new(
-            "refusing to write the predicate to a terminal".to_string(),
-            ExitCode::UsageError,
-        ));
-        let json = render_error_document("package sbom", &err).expect("render ok");
+        let err = anyhow::Error::new(crate::command::index_common::policy_blocked("`ocx index sync`"));
+        let json = render_error_document("index sync", &err).expect("render ok");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
 
-        assert_eq!(value["exit_code"], 64, "document: {json}");
-        assert_eq!(value["error"]["kind"], "usage_error", "document: {json}");
-        assert!(
-            value["error"].get("detail").is_none(),
-            "a command error carries no slug: {json}"
-        );
+        assert_eq!(value["exit_code"], 81, "document: {json}");
+        assert_eq!(value["error"]["detail"], "frozen_refused", "document: {json}");
         assert_eq!(
             value["exit_code"].as_u64().expect("exit_code is a number"),
             crate::exit::classify_error(err.as_ref()) as u8 as u64,

@@ -76,6 +76,7 @@ const OCX_METHODS: &[&str] = &[
     "call",
     "call_empty",
     "call_outcome",
+    "call_passthrough",
     "call_raw",
     "discover",
     "handshake",
@@ -1135,12 +1136,15 @@ impl Generator<'_> {
                     .map(|root| format!("{root:?}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // A child that owns stdout also owns the exit, so only an error document fails the call.
+                let method = if command.outputs.contains(&Output::Passthrough) {
+                    "call_passthrough"
+                } else {
+                    "call_raw"
+                };
                 (
                     "Raw".to_owned(),
-                    call_expression(
-                        "call_raw",
-                        &[format!("{path:?}"), format!("&[{list}]"), "argv".to_owned()],
-                    ),
+                    call_expression(method, &[format!("{path:?}"), format!("&[{list}]"), "argv".to_owned()]),
                 )
             }
         };
@@ -1515,6 +1519,28 @@ mod tests {
                     file.path.display()
                 );
             }
+        }
+    }
+
+    /// The generated crate builds in other repositories, where a lint `expect`ed here may never fire and
+    /// `unfulfilled_lint_expectations` would warn on every build.
+    #[test]
+    fn the_generated_code_suppresses_lints_with_allow_never_expect() {
+        let files = generate(&contract());
+        let allows = files
+            .iter()
+            .filter(|file| {
+                let unwrapped: String = file.contents.split_whitespace().collect();
+                unwrapped.contains("#[allow(clippy::disallowed_methods")
+            })
+            .count();
+        assert_eq!(allows, 1, "the environment read in spawn.rs is the one allowed lint");
+        for file in &files {
+            assert!(
+                !file.contents.contains("#[expect(") && !file.contents.contains("#![expect("),
+                "{}: an `expect` attribute",
+                file.path.display()
+            );
         }
     }
 

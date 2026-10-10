@@ -259,6 +259,10 @@
         "num_args": {
           "$ref": "#/$defs/Arity"
         },
+        "repeatable": {
+          "description": "Each occurrence adds its values to the earlier ones, so the argument may be given more than once.",
+          "type": "boolean"
+        },
         "global": {
           "description": "Accepted on every command below the declaring one.",
           "type": "boolean"

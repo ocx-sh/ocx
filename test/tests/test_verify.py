@@ -324,7 +324,7 @@ def test_verify_error_envelope_golden_shape(
     # pass silently — see test_verify_json_format_emits_single_envelope_on_stdout
     # for the dedicated single-stream contract test.
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 2
+    assert envelope["schema_version"] == 1
     assert envelope["command"] == "package verify"
     assert envelope["exit_code"] == 79
     assert "data" not in envelope, "error branch must not carry data"
@@ -1051,7 +1051,7 @@ def test_verify_integrated_time_outside_certificate_window_is_refused(
 #
 # Both rows are about one property: the JSON envelope's `exit_code` is the code
 # the process actually returns. Before WP9b these disagreed — a CLI-local
-# `CommandError` rendered as `1`/`internal` while the process exited 64 or 65
+# refusal rendered as `1`/`internal` while the process exited 64 or 65
 # (CLI-04) — so a consumer branching on the envelope read a different outcome
 # than a consumer branching on `$?`.
 # ──────────────────────────────────────────────────────────────────────────────

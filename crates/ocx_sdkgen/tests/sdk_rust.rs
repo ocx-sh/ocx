@@ -122,6 +122,27 @@ mod argv_and_refusals {
     }
 
     #[test]
+    fn a_repeatable_flag_sends_every_value_as_its_own_occurrence() {
+        let mut argv = sdk::wire::Argv::new();
+        sdk::ExecArgs {
+            env: vec!["A=1".to_owned(), "B=2".to_owned()],
+            groups: vec!["ci".to_owned(), "lint".to_owned()],
+            argv: vec!["true".to_owned()],
+            ..Default::default()
+        }
+        .push(&mut argv);
+        let invocation = argv.finish().expect("repeated values build");
+        for flag in ["--env=A=1", "--env=B=2", "--group=ci", "--group=lint"] {
+            assert!(
+                invocation.arguments.contains(&OsString::from(flag)),
+                "{flag} missing from {:?}",
+                invocation.arguments
+            );
+        }
+        let _: Vec<String> = sdk::PullArgs::default().groups;
+    }
+
+    #[test]
     fn a_terminated_positional_is_closed_with_the_terminator_before_the_next_one() {
         let mut argv = sdk::wire::Argv::new();
         sdk::PackageExecArgs {
@@ -722,15 +743,118 @@ mod fake_child {
     fn an_error_document_is_the_typed_error_whatever_the_command() {
         let directory = TempDir::new().expect("temp dir");
         let document = json!({
-            "schema_version": 2,
+            "schema_version": contract::ERRORS,
             "command": "package sign",
             "exit_code": 79,
             "error": { "kind": "not_found", "message": "gone", "context": {} },
         });
-        let failed = sign(client(&directory).0, &document, 79)
-            .expect("a raw run")
-            .into_outcome::<Value>("SignatureReport");
+        let failed = sign(client(&directory).0, &document, 79);
         assert!(matches!(failed, Err(Error::Ocx(_))), "{failed:?}");
+    }
+
+    #[test]
+    fn a_report_command_that_exits_non_zero_without_its_report_is_an_error() {
+        let directory = TempDir::new().expect("temp dir");
+        let document = json!({
+            "schema_version": contract::ERRORS,
+            "command": "pull",
+            "exit_code": 1,
+            "error": { "kind": "internal", "message": "boom", "context": {} },
+        });
+        let pull = |stdout: &str| {
+            client(&directory)
+                .0
+                .with_env("FAKE_STDOUT", stdout)
+                .with_env("FAKE_EXIT", "1")
+                .pull(&sdk::PullArgs::default())
+        };
+        let documented = pull(&document.to_string());
+        assert!(matches!(documented, Err(Error::Ocx(_))), "{documented:?}");
+        let bare = pull("");
+        assert!(matches!(bare, Err(Error::Exited { status: Some(1), .. })), "{bare:?}");
+    }
+
+    fn error_document(command: &str) -> String {
+        json!({
+            "schema_version": contract::ERRORS,
+            "command": command,
+            "exit_code": 79,
+            "error": { "kind": "not_found", "message": "gone", "context": {} },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_command_that_runs_another_program_returns_its_exit() {
+        let directory = TempDir::new().expect("temp dir");
+        let exec = |stdout: &str, exit: &str| {
+            client(&directory)
+                .0
+                .with_env("FAKE_STDOUT", stdout)
+                .with_env("FAKE_EXIT", exit)
+                .exec(&sdk::ExecArgs {
+                    argv: vec!["false".to_owned()],
+                    ..Default::default()
+                })
+        };
+        let raw = exec("child output", "1").expect("the child's exit is the result, not an error");
+        assert_eq!(raw.exit_code.value(), 1);
+        assert_eq!(raw.stdout, b"child output");
+        let refused = exec(&error_document("exec"), "79");
+        assert!(matches!(refused, Err(Error::Ocx(_))), "ocx's own refusal: {refused:?}");
+    }
+
+    #[test]
+    fn a_passthrough_child_that_prints_a_look_alike_error_document_keeps_its_output() {
+        let directory = TempDir::new().expect("temp dir");
+        let package_test = |stdout: &str| {
+            client(&directory)
+                .0
+                .with_env("FAKE_STDOUT", stdout)
+                .with_env("FAKE_EXIT", "1")
+                .package_test(&sdk::PackageTestArgs::default())
+        };
+        // Three keys of ocx's error document, but not the document: no `schema_version`, no typed `error`.
+        let loose = r#"{"command":"build","exit_code":1,"error":"failed"}"#;
+        let raw = package_test(loose).expect("a child's own JSON is its output, not ocx's refusal");
+        assert_eq!(raw.exit_code.value(), 1);
+        assert_eq!(raw.stdout, loose.as_bytes());
+        // A genuine ocx error document, but for another command: still the child's output.
+        let other = error_document("exec");
+        let raw = package_test(&other).expect("a document naming another command is not this call's refusal");
+        assert_eq!(raw.stdout, other.as_bytes());
+        // The control: the same document naming this command is ocx's refusal.
+        let refused = package_test(&error_document("package test"));
+        assert!(matches!(refused, Err(Error::Ocx(_))), "{refused:?}");
+    }
+
+    #[test]
+    fn a_shell_stream_command_that_exits_non_zero_is_an_error() {
+        let directory = TempDir::new().expect("temp dir");
+        let completion = |stdout: &str| {
+            client(&directory)
+                .0
+                .with_env("FAKE_STDOUT", stdout)
+                .with_env("FAKE_EXIT", "79")
+                .shell_completion(&sdk::ShellCompletionArgs::default())
+        };
+        let bare = completion("partial script");
+        assert!(matches!(bare, Err(Error::Exited { status: Some(79), .. })), "{bare:?}");
+        let documented = completion(&error_document("shell completion"));
+        assert!(matches!(documented, Err(Error::Ocx(_))), "{documented:?}");
+    }
+
+    #[test]
+    fn a_report_command_that_also_runs_a_child_keeps_the_childs_failed_output() {
+        let directory = TempDir::new().expect("temp dir");
+        let raw = client(&directory)
+            .0
+            .with_env("FAKE_STDOUT", "child output")
+            .with_env("FAKE_EXIT", "1")
+            .package_test(&sdk::PackageTestArgs::default())
+            .expect("a failing child in passthrough mode is the result, not an error");
+        assert_eq!(raw.exit_code.value(), 1);
+        assert_eq!(raw.stdout, b"child output");
     }
 }
 
@@ -803,18 +927,21 @@ mod real_binary {
     fn a_multiword_exec_command_is_parsed_by_the_binary_not_rejected_as_usage() {
         let home = TempDir::new().expect("temp dir");
         for command in [vec!["sh", "-c", "true"], vec!["--env=LD_PRELOAD=x", "--", "sh"]] {
-            let ran = client(&home)
-                .package_exec(&sdk::PackageExecArgs {
-                    packages: vec!["example.invalid/none:1".to_owned()],
-                    command: command.iter().map(|word| (*word).to_owned()).collect(),
-                    ..Default::default()
-                })
-                .expect("a raw run");
+            let ran = client(&home).package_exec(&sdk::PackageExecArgs {
+                packages: vec!["example.invalid/none:1".to_owned()],
+                command: command.iter().map(|word| (*word).to_owned()).collect(),
+                ..Default::default()
+            });
+            // ocx refuses the unresolvable package with its error document; a usage error would carry exit 64.
+            let exit_code = match &ran {
+                Ok(raw) => raw.exit_code.clone(),
+                Err(Error::Ocx(document)) => document.exit_code.clone(),
+                Err(other) => panic!("`{command:?}`: {other:?}"),
+            };
             assert_ne!(
-                ran.exit_code,
+                exit_code,
                 ExitCode::UsageError,
-                "`{command:?}` was a usage error: {}",
-                String::from_utf8_lossy(&ran.stderr)
+                "`{command:?}` was a usage error: {ran:?}"
             );
         }
     }

@@ -274,6 +274,11 @@
           "exit_code": 65
         },
         {
+          "value": "archive_extracted_no_entries",
+          "description": "The archive extracted no entries",
+          "exit_code": 65
+        },
+        {
           "value": "archive_extraction_cap_exceeded",
           "description": "Extraction exceeded the decompressed-size cap",
           "exit_code": 65
@@ -374,6 +379,11 @@
           "exit_code": 79
         },
         {
+          "value": "binding_not_selected",
+          "description": "The named binding is declared in no selected group",
+          "exit_code": 64
+        },
+        {
           "value": "binding_value_invalid",
           "description": "A binding's value is not a valid identifier",
           "exit_code": 78
@@ -392,6 +402,11 @@
           "value": "bot_identity",
           "description": "The acting identity is a bot account",
           "exit_code": 64
+        },
+        {
+          "value": "build_receipt_not_found",
+          "description": "No build receipt exists beside the bundle",
+          "exit_code": 79
         },
         {
           "value": "builder_mismatch",
@@ -734,6 +749,11 @@
           "exit_code": 65
         },
         {
+          "value": "envrc_exists",
+          "description": "An .envrc already exists and --force was not given",
+          "exit_code": 78
+        },
+        {
           "value": "extra_ca_certs_invalid",
           "description": "The extra CA bundle the payload names is not usable",
           "exit_code": 65
@@ -807,6 +827,11 @@
           "value": "forge_client_build",
           "description": "The forge HTTP client could not be built",
           "exit_code": 1
+        },
+        {
+          "value": "forge_credential_missing",
+          "description": "A forge write found no API credential to authenticate with",
+          "exit_code": 80
         },
         {
           "value": "forge_decode",
@@ -939,6 +964,11 @@
           "exit_code": 65
         },
         {
+          "value": "frozen_refused",
+          "description": "The verb discovers new digests, which frozen mode forbids",
+          "exit_code": 81
+        },
+        {
           "value": "fulcio_bad_request",
           "description": "The certificate authority rejected the signing request",
           "exit_code": 78
@@ -1049,6 +1079,11 @@
           "exit_code": 1
         },
         {
+          "value": "index_source_not_published",
+          "description": "The registry is not a published index source, so it has no catalog to regenerate",
+          "exit_code": 78
+        },
+        {
           "value": "integration_namespace_invalid",
           "description": "An integrations namespace is invalid",
           "exit_code": 65
@@ -1097,6 +1132,11 @@
           "value": "invalid_build_metadata",
           "description": "A version's build metadata is invalid",
           "exit_code": 65
+        },
+        {
+          "value": "invalid_command_line",
+          "description": "The command line names an unknown flag or nested subcommand, or a missing or malformed argument",
+          "exit_code": 64
         },
         {
           "value": "invalid_digest",
@@ -1609,6 +1649,11 @@
           "exit_code": 75
         },
         {
+          "value": "ocx_home_needs_no_consent",
+          "description": "The ocx home is always active and takes no consent stamp",
+          "exit_code": 64
+        },
+        {
           "value": "offline_attest_refused",
           "description": "Attaching was refused because offline mode is on",
           "exit_code": 81
@@ -1637,6 +1682,11 @@
           "value": "oidc_token_rejected",
           "description": "The certificate authority rejected the OIDC token",
           "exit_code": 80
+        },
+        {
+          "value": "oidc_token_unavailable",
+          "description": "The CI provider's OIDC token endpoint is unreachable or overloaded",
+          "exit_code": 75
         },
         {
           "value": "output_write",
@@ -2419,6 +2469,11 @@
           "exit_code": 65
         },
         {
+          "value": "terminal_output_refused",
+          "description": "Unsanitized document bytes were bound for a terminal; redirect to a file or a pipe",
+          "exit_code": 64
+        },
+        {
           "value": "tlog_binding_mismatch",
           "description": "The transparency log entry does not match the received envelope",
           "exit_code": 65
@@ -2756,5 +2811,5 @@
       ]
     }
   },
-  "$id": "https://ocx.sh/schemas/errors/v2.json"
+  "$id": "https://ocx.sh/schemas/errors/v1.json"
 }

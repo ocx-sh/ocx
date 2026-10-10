@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ocx.sh/schemas/errors/v2.json",
+  "$id": "https://ocx.sh/schemas/errors/v1.json",
   "title": "ErrorDocument",
   "description": "The error document.",
   "type": "object",
   "properties": {
     "schema_version": {
       "description": "Version of this document's shape.",
-      "const": 2
+      "const": 1
     },
     "command": {
       "description": "Canonical command string.",

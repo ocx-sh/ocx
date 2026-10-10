@@ -8,6 +8,7 @@ announce_failed	Failure	Announcing failed with an unclassified cause
 any_pin_not_advertised_as_any	DataError	A dependency pinned as `any` is not published for any platform
 any_pin_provenance_unavailable	Failure	Verifying an `any` pin's provenance failed with an unclassified cause
 archive_entry_escape	DataError	An archive entry path escapes the extraction root
+archive_extracted_no_entries	DataError	The archive extracted no entries
 archive_extraction_cap_exceeded	DataError	Extraction exceeded the decompressed-size cap
 archive_gnu_sparse_unsupported	DataError	An archive entry uses the unsupported GNU sparse format
 archive_hard_link_escape	DataError	An archive hard link does not resolve inside the extraction root
@@ -28,11 +29,13 @@ binding_already_exists	UsageError	A binding with this name already exists
 binding_ambiguous	UsageError	A binding exists in several groups and no group was named
 binding_not_declared	NotFound	The named binding is not declared in ocx.toml
 binding_not_found	NotFound	The named binding does not exist in ocx.toml
+binding_not_selected	UsageError	The named binding is declared in no selected group
 binding_value_invalid	ConfigError	A binding's value is not a valid identifier
 binding_value_missing_registry	ConfigError	A binding's identifier names no registry
 blob_not_found	NotFound	The registry has no such blob
 blob_not_found	NotFound	The registry has no such blob
 bot_identity	UsageError	The acting identity is a bot account
+build_receipt_not_found	NotFound	No build receipt exists beside the bundle
 builder_mismatch	DataError	The provenance builder does not match the pinned builder
 bundle_parse_failed	DataError	The signature bundle could not be parsed
 candidate_limit_exhausted	DataError	The examination cap was reached with candidates unexamined and none passing
@@ -98,9 +101,11 @@ duplicate_binding_across_groups	UsageError	A binding is defined in more than one
 duplicate_owner	UsageError	The same owner was supplied twice
 duplicate_platform_key	DataError	ocx.lock lists the same platform twice for one binding
 empty_group_filter	UsageError	A group filter names an empty group
+empty_group_filter	UsageError	A group filter names an empty group
 empty_push_set	DataError	A push names no target platform
 endpoint_unresolvable	Unavailable	An endpoint host does not resolve
 entrypoint_collision	DataError	Two packages declare the same entrypoint name
+envrc_exists	ConfigError	An .envrc already exists and --force was not given
 extra_ca_certs_invalid	DataError	The extra CA bundle the payload names is not usable
 extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
 extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
@@ -118,6 +123,7 @@ forbidden_registry_target	ConfigError	The rewritten registry resolves into a for
 forge_auth_failed	AuthError	The forge rejected the request's credentials
 forge_capability_unavailable	Unsupported	The forge or project lacks a capability the transport needs
 forge_client_build	Failure	The forge HTTP client could not be built
+forge_credential_missing	AuthError	A forge write found no API credential to authenticate with
 forge_decode	Failure	A forge response could not be decoded
 forge_failed	Failure	A forge operation failed with an unclassified cause
 forge_kind_unknown	UsageError	The forge kind of a self-hosted host is unknown; name it explicitly
@@ -145,6 +151,7 @@ fork_owner_mismatch	Failure	The fork is owned by another account than expected
 fork_parent_absent	Failure	The fork reports no parent
 fork_parent_mismatch	Failure	The fork's parent is not the expected upstream
 forwarded_env_invalid	DataError	The OCX_ENV value a parent ocx forwarded is malformed
+frozen_refused	PolicyBlocked	The verb discovers new digests, which frozen mode forbids
 fulcio_bad_request	ConfigError	The certificate authority rejected the signing request
 fulcio_unavailable	TempFail	The certificate authority is unreachable or overloaded
 git_command_failed	Failure	A git command failed
@@ -167,6 +174,7 @@ index_root_parse	Failure	The committed index root is not valid JSON
 index_serialization	DataError	An index document could not be serialized
 index_singleflight_failed	Failure	A shared index operation failed with an unclassified cause
 index_source_failed	Failure	An index source failed with an unclassified cause
+index_source_not_published	ConfigError	The registry is not a published index source, so it has no catalog to regenerate
 integration_namespace_invalid	DataError	An integrations namespace is invalid
 integration_too_large	DataError	An integrations payload exceeds its size limit
 integrations_too_large	DataError	A package's integrations exceed the per-package size limit
@@ -178,6 +186,7 @@ invalid_binary_name	DataError	A binary name is not valid
 invalid_binding_name	UsageError	A binding name carries a character outside the allowed set
 invalid_boolean_string	DataError	A value is not one of the accepted boolean spellings
 invalid_build_metadata	DataError	A version's build metadata is invalid
+invalid_command_line	UsageError	The command line names an unknown flag or nested subcommand, or a missing or malformed argument
 invalid_digest	DataError	A digest is not a valid algorithm-prefixed hash
 invalid_encoding	DataError	Registry content is not valid UTF-8
 invalid_endpoint_url	UsageError	A Sigstore endpoint URL failed validation
@@ -223,6 +232,7 @@ libc_scan_scope_modifier	DataError	The libc scan scope carries a modifier it can
 libc_scan_scope_unresolvable	DataError	The libc scan scope cannot be resolved
 link_path_occupied	DataError	The install link path holds something other than an ocx package link
 list_separator_invalid	DataError	A list-valued environment entry conflicts with or edges on its separator
+lock_missing	ConfigError	ocx.lock does not exist
 lock_missing	ConfigError	ocx.lock does not exist
 lock_missing	ConfigError	ocx.lock does not exist
 lock_repository_not_bare	ConfigError	ocx.lock records a repository carrying a tag or digest
@@ -290,6 +300,7 @@ not_a_manifest	DataError	The registry did not answer with a manifest
 not_in_index	NotFound	The package is not listed in the index
 not_in_index	NotFound	The package is not listed in the index
 observe_raced	TempFail	A tag appeared between the two reads of one announce
+ocx_home_needs_no_consent	UsageError	The ocx home is always active and takes no consent stamp
 offline_attest_refused	PolicyBlocked	Attaching was refused because offline mode is on
 offline_manifest_missing	PolicyBlocked	Offline mode and the manifest is not stored locally
 offline_mode	PolicyBlocked	A network operation was attempted in offline mode
@@ -297,6 +308,7 @@ offline_mode	PolicyBlocked	A network operation was attempted in offline mode
 offline_sign_refused	PolicyBlocked	Signing was refused because offline mode is on
 oidc_pre_check_failed	PermissionDenied	The OIDC token failed a client-side check before reaching the certificate authority
 oidc_token_rejected	AuthError	The certificate authority rejected the OIDC token
+oidc_token_unavailable	TempFail	The CI provider's OIDC token endpoint is unreachable or overloaded
 output_write	IoError	Writing the output tree failed
 output_write	IoError	Writing the output tree failed
 owner_id_mismatch	UsageError	A supplied owner id disagrees with the forge account
@@ -460,6 +472,7 @@ template_unknown_field	DataError	An interpolation token names an unknown field
 template_unknown_modifier	DataError	An interpolation token carries an unknown modifier
 template_unknown_token	DataError	An interpolation token is not recognised
 template_value_too_large	DataError	An interpolated value exceeds its size budget
+terminal_output_refused	UsageError	Unsanitized document bytes were bound for a terminal; redirect to a file or a pipe
 tlog_binding_mismatch	DataError	The transparency log entry does not match the received envelope
 too_many_attestations	DataError	The target has more attestation referrers than the candidate limit
 toolchain_dir_group_or_world_writable	ConfigError	The toolchain_dir directory is writable by other users
@@ -503,6 +516,7 @@ unexpected_manifest_type	DataError	An image index arrived where an image manifes
 unfollowed_redirect	DataError	The registry answered with a redirect the transport did not follow
 unknown_compare_status	Failure	A forge compare returned a status the client does not model
 unknown_env_modifier	DataError	A package env entry declares a type this build does not know
+unknown_group	UsageError	A group filter names a group ocx.toml does not declare
 unknown_group	UsageError	A group filter names a group ocx.toml does not declare
 unknown_group_section	ConfigError	A group table holds an unknown key
 unparseable_elf	DataError	A file carries an ELF header but cannot be parsed

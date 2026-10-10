@@ -27,12 +27,12 @@ macro_rules! cli_version {
 }
 macro_rules! errors_version {
     () => {
-        2
+        1
     };
 }
 macro_rules! reports_version {
     () => {
-        2
+        1
     };
 }
 // A foreign crate owns the number behind each of the next two; a test below pins the equality.

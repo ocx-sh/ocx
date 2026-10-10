@@ -25,7 +25,7 @@ use super::wire::Unknowns;
 pub const MINIMUM_OCX: &str = "0.6.4";
 
 /// The `schema_version` of the error document.
-pub const ERRORS: u32 = 2;
+pub const ERRORS: u32 = 1;
 
 /// Each command's contract version, keyed by its words below `ocx`, sorted.
 pub const COMMANDS: &[(&str, u32)] = &[

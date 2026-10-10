@@ -4882,7 +4882,7 @@ On error, `ocx package sign` emits the [error document](#arg-format). The `error
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "command": "package sign",
   "exit_code": 80,
   "error": {
@@ -4912,6 +4912,7 @@ On error, `ocx package sign` emits the [error document](#arg-format). The `error
 | `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index — drop the flag, rather than go looking for a build that was never missing |
 | `subject_digest_unsupported` | 65 | The reference resolves to a subject addressed by `sha384` or `sha512`; cosign artifacts address their subject by `sha256` alone. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
+| `oidc_token_unavailable` | 75 | The CI provider's OIDC token endpoint could not be reached, answered 408, 429, 502, 503 or 504, or broke off mid-response. A rerun may succeed |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any signing call is made |
 | `offline_sign_refused` | 81 | `--offline` is incompatible with `package sign` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
@@ -4982,7 +4983,7 @@ Two ways to tell `ocx package verify` whose signature to accept:
 - **Flags** — pass both `--certificate-identity` and `--certificate-oidc-issuer`. This is an exact-match pair that overrides any configured policy, matching the original flag-only behavior byte-for-byte.
 - **[`[[trust.policy]]`][config-trust]** — omit both flags. Verify first checks the pooled `config.toml`-tier ("operator") policies against the target's canonical `registry/repository`; if any match, the project `ocx.toml` is not consulted at all. Only when no operator policy matches does verify fall back to the project `ocx.toml`'s policies. See the [configuration reference][config-trust] for scope matching, most-specific-wins resolution, regex identities, and the operator-authoritative precedence rule. Reading `[[trust.policy]]` from `ocx.toml` here is the one documented exception to "OCI-tier commands never consult `ocx.toml`" — trust policy is a security posture, not toolchain-binding resolution.
 
-Supplying exactly one of the two flags is a usage error (exit 64) rejected by the argument parser (clap `requires`) *before* verification runs — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Because it is caught at parse time, its error document carries kind `usage_error` and no `error.detail` (it is not the `no_identity_provided` case). Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64, but *that* one is the `NoIdentityProvided` verify error, whose `detail` is `no_identity_provided`: there is no identity to check the signature against.
+Supplying exactly one of the two flags is a usage error (exit 64) rejected by the argument parser (clap `requires`) *before* verification runs — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Because it is caught at parse time, its error document carries kind `usage_error` and `error.detail` `invalid_command_line` (it is not the `no_identity_provided` case). Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64, but *that* one is the `NoIdentityProvided` verify error, whose `detail` is `no_identity_provided`: there is no identity to check the signature against.
 
 :::warning A bare Fulcio CA is not a trust root
 `ocx package verify` runs the full pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, SCT, [Rekor][rekor] SET and inclusion proof, subject-digest signature, identity and issuer match. With no trust root supplied by any rung of the ladder and no cached trust material, it fetches the public-good trust root over [TUF][sigstore-tuf].
@@ -4996,7 +4997,7 @@ A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier che
 |------|-----------|
 | 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
 | 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no userinfo) |
-| 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a usage error, with no `error.detail`) |
+| 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a usage error, with `error.detail` `invalid_command_line`) |
 | 65 | Data integrity failure: signature invalid, subject digest mismatch, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed. In `--attestation` mode, also: predicate type mismatch, a missing or weak-digest subject, an unrecognized in-toto statement or DSSE payload type, a SLSA provenance builder mismatch, more than one matching attestation with no `--type` to disambiguate, or the attestation exceeded its size or byte-budget limit |
 | 65 | `key_malformed` — a key file was read in full and its bytes are not an SPKI public key. The path was fine, the material was not, which is why this is not the 74 above; an inline `key_pem` in a config document that is not a key is 78 instead, since there the config text itself is what is wrong |
 | 65 | `TransparencyLogResponseInvalid` — the Rekor public key is over the size cap or not UTF-8; or `RekorSetAbsentTsaPresent` — the SET is absent and only an RFC 3161 TSA timestamp is present (Rekor v2) |
@@ -5080,7 +5081,7 @@ On error, `ocx package verify` emits the [error document](#arg-format). The `err
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "command": "package verify",
   "exit_code": 79,
   "error": {
@@ -5122,7 +5123,7 @@ The document shape matches the `package sign` error document (see [`package sign
 | `trust_root_load` | 78 | Trust root failed to load — malformed trusted-root JSON, no CT log key, or TUF fetch failed |
 | `trust_root_unreadable` | 74 | The trusted-root file a path names could not be read — missing, permission denied, not a regular file, or larger than the 1 MiB read ceiling. Reaches here from `--sigstore-trusted-root`, `OCX_SIGSTORE_TRUSTED_ROOT`, `[trust.sigstore] trusted_root`, and a present-but-unreadable `$OCX_HOME/sigstore/trusted-root.json`. Same 74 as `key_unreadable`, for the same reason: an unusable path the operator typed is a filesystem failure, not a configuration one |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any verification is attempted |
-| `no_identity_provided` | 64 | No identity to verify against: both certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target. (A lone flag is a clap parse error — still exit 64, kind `usage_error`, no `detail`.) |
+| `no_identity_provided` | 64 | No identity to verify against: both certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target. (A lone flag is a clap parse error — still exit 64, kind `usage_error`, `detail` `invalid_command_line`.) |
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
 | `key_unreadable` | 74 | The key file a path reference names could not be read — missing, permission denied, not a regular file, or another I/O failure. Byte-identical outcome to [`package sign`](#package-sign)'s 74 for the same `--key <path>`, so one flag with one value cannot mean two things depending on the verb. Reaches here from `--key` and from a `key` path signer in a matched [`[[trust.policy]]`][config-trust] entry alike |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
@@ -5323,6 +5324,7 @@ On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-pac
 | `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index — drop the flag, rather than go looking for a build that was never missing |
 | `subject_digest_unsupported` | 65 | The reference resolves to a subject addressed by `sha384` or `sha512`; cosign artifacts address their subject by `sha256` alone. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
+| `oidc_token_unavailable` | 75 | The CI provider's OIDC token endpoint could not be reached, answered 408, 429, 502, 503 or 504, or broke off mid-response. A rerun may succeed |
 | `offline_attest_refused` | 81 | `--offline` is incompatible with `package attest` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy |
@@ -5405,7 +5407,7 @@ Shares [`verify`][cmd-package-verify]'s exit-code taxonomy under `--verify` — 
 
 | Code | Condition |
 |------|-----------|
-| 64 | `--output -` requested on a TTY, or `--summary` combined with `--output`. `--no-verify` combined with a certificate flag is a clap parse error (kind `usage_error`, no `detail`). `no_identity_provided` — `--verify` demanded with no identity source to verify against: no certificate flags and no matching [`[[trust.policy]]`][config-trust] |
+| 64 | `--output -` requested on a TTY, or `--summary` combined with `--output`. `--no-verify` combined with a certificate flag is a clap parse error (kind `usage_error`, `detail` `invalid_command_line`). `no_identity_provided` — `--verify` demanded with no identity source to verify against: no certificate flags and no matching [`[[trust.policy]]`][config-trust] |
 | 65 | `MultipleAttestations` under `--output` — more than one attestation matches and none was named by `--type` |
 | 65 | `sbom_media_type_unsupported` — a raw referrer's payload layer declares a media type outside the SBOM set. Reachable under `--no-verify` only, since `--verify` refuses raw referrers before reading them. Listed in `refused` when the scan found anything else on the subject; when it is the only candidate, the refusal is promoted to the command's own error |
 | 65 | `key_malformed` — a `--key <path>` reference names a file that was read in full but whose bytes are not an SPKI public key. Shared with [`verify`][cmd-package-verify] |
@@ -6473,8 +6475,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 
 <!-- schemas -->
-[schema-reports]: https://ocx.sh/schemas/reports/v2.json
-[schema-errors]: https://ocx.sh/schemas/errors/v2.json
+[schema-reports]: https://ocx.sh/schemas/reports/v1.json
+[schema-errors]: https://ocx.sh/schemas/errors/v1.json
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views

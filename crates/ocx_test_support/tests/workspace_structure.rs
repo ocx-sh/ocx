@@ -1892,10 +1892,6 @@ fn library_subtrees(include_cli: bool) -> Vec<PathBuf> {
 // Classification is derived, never hand-written
 // ---------------------------------------------------------------------------
 
-/// The one hand-written classification impl: `CommandError` carries its exit code at runtime and has no
-/// slug, a shape `#[derive(Classify)]` cannot state.
-const HAND_IMPL_EXCEPTION: (&str, &str) = ("ocx_cli/src/app.rs", "CommandError");
-
 /// The classification traits a hand impl would name.
 const CLASSIFICATION_TRAITS: [&str; 2] = ["ClassifyExitCode", "ClassifyErrorKind"];
 
@@ -1905,9 +1901,8 @@ const CLASSIFICATION_TRAITS: [&str; 2] = ["ClassifyExitCode", "ClassifyErrorKind
 /// names, so a rename cannot hide an impl. `#[cfg(test)]` items are skipped: a test-only impl ships in no
 /// binary, and `ocx_exit`'s own tests need one to prove the traits apart from the derive. `tests/`
 /// directories sit outside `crates/*/src` and are not walked. A macro body is no item, so its tokens are
-/// read too; `quote!` is the derive's own output and is the one macro left out. With `exempt`,
-/// [`HAND_IMPL_EXCEPTION`] is not reported.
-fn hand_classification_impls(file: &Path, parsed: &syn::File, exempt: bool) -> Vec<Reach> {
+/// read too; `quote!` is the derive's own output and is the one macro left out.
+fn hand_classification_impls(file: &Path, parsed: &syn::File) -> Vec<Reach> {
     /// Alias -> the trait it renames, from every `use ... as` in the file.
     struct Renames(BTreeMap<String, &'static str>);
     impl Visit<'_> for Renames {
@@ -1924,7 +1919,6 @@ fn hand_classification_impls(file: &Path, parsed: &syn::File, exempt: bool) -> V
 
     struct Impls<'a> {
         file: &'a Path,
-        exempt: bool,
         renames: BTreeMap<String, &'static str>,
         found: Vec<Reach>,
     }
@@ -1964,13 +1958,7 @@ fn hand_classification_impls(file: &Path, parsed: &syn::File, exempt: bool) -> V
                 && let Some(last) = path.segments.last()
                 && let Some(name) = self.classification_trait(&last.ident.to_string())
             {
-                let on_exception = matches!(&*block.self_ty, syn::Type::Path(typed)
-                        if typed.path.segments.last().is_some_and(|segment| segment.ident == HAND_IMPL_EXCEPTION.1))
-                    && under_crates(self.file) == HAND_IMPL_EXCEPTION.0
-                    && name == "ClassifyExitCode";
-                if !(self.exempt && on_exception) {
-                    self.record(name, block.impl_token.span.start().line);
-                }
+                self.record(name, block.impl_token.span.start().line);
             }
             syn::visit::visit_item_impl(self, block);
         }
@@ -1998,7 +1986,6 @@ fn hand_classification_impls(file: &Path, parsed: &syn::File, exempt: bool) -> V
     renames.visit_file(parsed);
     let mut impls = Impls {
         file,
-        exempt,
         renames: renames.0,
         found: Vec::new(),
     };
@@ -2012,14 +1999,12 @@ fn crate_source_subtrees() -> Vec<PathBuf> {
 }
 
 /// A classification is derived, so no `crates/*/src` writes `impl ClassifyExitCode for` or
-/// `impl ClassifyErrorKind for` by hand, bar `CommandError`'s `ClassifyExitCode`.
+/// `impl ClassifyErrorKind for` by hand.
 ///
 /// Reds on: a hand impl in any crate's `src`, a path-qualified one, a renamed import of the trait, one
-/// behind `macro_rules!`, a `CommandError` impl outside `app.rs`. Floored on the files read, and on the
-/// exception being live: were `app.rs` to stop carrying it the exemption would excuse nothing while
-/// reading as a rule.
+/// behind `macro_rules!`. Floored on the files read.
 #[test]
-fn no_hand_written_classification_impl_outside_command_error() {
+fn no_hand_written_classification_impl() {
     let subtrees = crate_source_subtrees();
     let walked = assert_walk_floor("the hand-impl scan", &subtrees, floor::ALL_CRATE_SOURCES);
     assert!(walked > 0, "the hand-impl scan read no file");
@@ -2028,35 +2013,21 @@ fn no_hand_written_classification_impl_outside_command_error() {
         &fixture("classify_impl.rs.txt"),
         "a hand-written `impl ClassifyExitCode for` / `impl ClassifyErrorKind for`",
         &["ClassifyExitCode", "ClassifyErrorKind"],
-        &|file, source| hand_classification_impls(file, &source.file, true),
-    );
-
-    let app = crates_dir().join("ocx_cli/src/app.rs");
-    let bare = hand_classification_impls(&app, &Source::parse(&app).file, false);
-    assert_eq!(
-        bare.iter().map(|reach| reach.path.as_str()).collect::<Vec<_>>(),
-        ["ClassifyExitCode"],
-        "the `CommandError` exception is no longer the one impl `app.rs` carries"
+        &|file, source| hand_classification_impls(file, &source.file),
     );
 }
 
-/// The scan's own red and green: the witness holds exactly the shapes it must report, and `CommandError` is
-/// excused only in `app.rs`.
+/// The scan's own red and green: the witness holds exactly the shapes it must report.
 #[test]
-fn the_hand_impl_scan_reds_on_each_shape_and_greens_on_the_exception() {
+fn the_hand_impl_scan_reds_on_each_shape() {
     let witness = fixture("classify_impl.rs.txt");
     let source = Source::parse(&witness);
-    let reds = hand_classification_impls(&witness, &source.file, true);
+    let reds = hand_classification_impls(&witness, &source.file);
     assert_eq!(
         reds.iter().map(|reach| reach.path.as_str()).collect::<Vec<_>>(),
-        [
-            "ClassifyExitCode",
-            "ClassifyErrorKind",
-            "ClassifyExitCode",
-            "ClassifyExitCode"
-        ],
-        "plain, path-qualified, macro-hidden and a `CommandError` outside `app.rs` each red once; the \
-         commented and `#[cfg(test)]` ones never: {reds:?}"
+        ["ClassifyExitCode", "ClassifyErrorKind", "ClassifyExitCode"],
+        "plain, path-qualified and macro-hidden each red once; the commented and `#[cfg(test)]` ones \
+         never: {reds:?}"
     );
 }
 
@@ -2069,21 +2040,14 @@ fn the_hand_impl_scan_reads_a_renamed_trait_import_as_the_trait() {
          impl Exit for Item {}
          impl Kind for Other {}
          impl Code for NotATrait {}
-         macro_rules! hidden { () => { impl Exit for Macro {} }; }
-         impl Exit for CommandError {}",
+         macro_rules! hidden { () => { impl Exit for Macro {} }; }",
     )
     .expect("the renamed-import witness parses");
-    let reds = hand_classification_impls(Path::new("witness.rs"), &parsed, true);
+    let reds = hand_classification_impls(Path::new("witness.rs"), &parsed);
     assert_eq!(
         reds.iter().map(|reach| reach.path.as_str()).collect::<Vec<_>>(),
-        [
-            "ClassifyExitCode",
-            "ClassifyErrorKind",
-            "ClassifyExitCode",
-            "ClassifyExitCode"
-        ],
-        "each renamed impl reds as the trait it names, a rename of any other import never does, and \
-         `CommandError` is excused only in `app.rs`: {reds:?}"
+        ["ClassifyExitCode", "ClassifyErrorKind", "ClassifyExitCode"],
+        "each renamed impl reds as the trait it names, and a rename of any other import never does: {reds:?}"
     );
 }
 

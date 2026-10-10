@@ -74,7 +74,7 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 
 The vendored `rust-quality/cli-contract.md` carries a generic exit table. Where it conflicts with IC-22, **IC-22 wins**, per [`adr_exit_code_taxonomy.md`](../artifacts/adr_exit_code_taxonomy.md). The vendored file is never edited; these three rows are overridden:
 
-- **EXIT-06** ("a shipped number and its meaning are never reassigned") holds, with one named exception: 82 changes from `DirtyRcBlock` to `Unsupported` once, before any contract baseline exists. The error document moves to v2 and the commit subject names the break. No other number is reassigned.
+- **EXIT-06** ("a shipped number and its meaning are never reassigned") holds, with one named exception: 82 changes from `DirtyRcBlock` to `Unsupported` once, before any contract baseline exists. The error document stays at v1 until the contract baseline exists, and the commit subject names the break. No other number is reassigned.
 - **The row-82 text** (`DirtyRcBlock`, "Refused to rewrite a shell-RC block carrying user edits") is void. 82 is `Unsupported`; the dirty-profile refusal exits 81 `PolicyBlocked`.
 - **"83–99 unassigned"** ("allocate upward from 83") is void. 83–87 are retired forever (`ocx_exit::RETIRED`) and a new number needs a next action no existing code has (IC-22).
 

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "command": "launcher exec",
+  "exit_code": 64,
+  "error": {
+    "kind": "usage_error",
+    "message": "the following required arguments were not provided:",
+    "context": {}
+  }
+}
