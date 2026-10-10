@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --platform` stops repeating: a second occurrence is refused instead of adding a platform.",
+  "findings": [
+    {
+      "code": "G07",
+      "pointer": "/root/commands/0/commands/0/args/1",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

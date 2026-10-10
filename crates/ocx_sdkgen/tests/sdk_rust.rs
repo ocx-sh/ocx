@@ -122,6 +122,27 @@ mod argv_and_refusals {
     }
 
     #[test]
+    fn a_repeatable_flag_sends_every_value_as_its_own_occurrence() {
+        let mut argv = sdk::wire::Argv::new();
+        sdk::ExecArgs {
+            env: vec!["A=1".to_owned(), "B=2".to_owned()],
+            groups: vec!["ci".to_owned(), "lint".to_owned()],
+            argv: vec!["true".to_owned()],
+            ..Default::default()
+        }
+        .push(&mut argv);
+        let invocation = argv.finish().expect("repeated values build");
+        for flag in ["--env=A=1", "--env=B=2", "--group=ci", "--group=lint"] {
+            assert!(
+                invocation.arguments.contains(&OsString::from(flag)),
+                "{flag} missing from {:?}",
+                invocation.arguments
+            );
+        }
+        let _: Vec<String> = sdk::PullArgs::default().groups;
+    }
+
+    #[test]
     fn a_terminated_positional_is_closed_with_the_terminator_before_the_next_one() {
         let mut argv = sdk::wire::Argv::new();
         sdk::PackageExecArgs {

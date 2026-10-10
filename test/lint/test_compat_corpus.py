@@ -48,6 +48,7 @@ REQUIRED_CASES = {
     "g02_long_renamed_with_id_short_kept",
     "g03_short_dropped_with_id_rename",
     "g06_value_type_changed_with_id_rename",
+    "g07_repeatable_dropped",
     "union_variant_added",
     "b03_required_to_optional",
     "optional_to_required",
