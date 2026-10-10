@@ -1,0 +1,14 @@
+{
+  "kind": "cli",
+  "verdict": "break",
+  "change": "`package push --jobs` and `-j` move to two new args, and the one carrying `-j` becomes a string option.",
+  "findings": [
+    {
+      "code": "G06",
+      "pointer": "/root/commands/0/commands/0/args/3",
+      "subjects": [
+        "package push"
+      ]
+    }
+  ]
+}

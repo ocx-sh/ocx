@@ -786,7 +786,7 @@ impl Grammar {
             match new.iter().find(|other| text(other, "id") == text(arg, "id")) {
                 Some(next) => {
                     self.keywords += raw(arg) + raw(next);
-                    self.arg(arg, next, &pointer, subjects);
+                    self.arg(arg, next, new, &pointer, subjects);
                 }
                 None => {
                     self.keywords += raw(arg);
@@ -810,44 +810,57 @@ impl Grammar {
     }
 
     /// A removed argument is silent when its window has closed. Otherwise each spelling it had must live on under
-    /// another id, and the argument that carries one is compared like a surviving one.
+    /// another id.
     fn arg_removed(&mut self, arg: &Value, current: &[Value], pointer: &str, subjects: &BTreeSet<String>) {
         if removable(arg) {
             return;
         }
-        let mut carrier = None;
+        let messages = ["long flag removed", "short flag removed"];
+        if !self.spellings(arg, current, pointer, subjects, messages) {
+            self.emit(Code::G07, pointer, subjects, "positional removed");
+        }
+    }
+
+    fn arg(&mut self, a: &Value, b: &Value, current: &[Value], pointer: &str, subjects: &BTreeSet<String>) {
+        self.spellings(
+            a,
+            current,
+            pointer,
+            subjects,
+            ["long flag changed", "short letter changed"],
+        );
+        self.arg_semantics(a, b, pointer, subjects);
+    }
+
+    /// Compares `arg` with whichever current argument holds each of its spellings, whether or not that one shares
+    /// its id: `--long` and `-s` may now live on two args. A spelling no argument holds is a break, reported with
+    /// `messages` for long and short. Returns whether `arg` had a spelling at all.
+    fn spellings(
+        &mut self,
+        arg: &Value,
+        current: &[Value],
+        pointer: &str,
+        subjects: &BTreeSet<String>,
+        messages: [&str; 2],
+    ) -> bool {
         let mut spelled = false;
-        for (key, code, message) in [
-            ("long", Code::G02, "long flag removed"),
-            ("short", Code::G03, "short flag removed"),
-        ] {
+        for ((key, code), message) in [("long", Code::G02), ("short", Code::G03)].into_iter().zip(messages) {
             if !present(arg, key) {
                 continue;
             }
             spelled = true;
             match current.iter().find(|other| text(other, key) == text(arg, key)) {
-                Some(other) => {
-                    carrier.get_or_insert(other);
-                }
+                Some(carrier) => self.arg_semantics(arg, carrier, pointer, subjects),
                 None => self.emit(code, pointer, subjects, message),
             }
         }
-        if !spelled {
-            self.emit(Code::G07, pointer, subjects, "positional removed");
-        }
-        if let Some(next) = carrier {
-            self.arg(arg, next, pointer, subjects);
-        }
+        spelled
     }
 
-    fn arg(&mut self, a: &Value, b: &Value, pointer: &str, subjects: &BTreeSet<String>) {
+    /// Everything `arg` compares except the spellings. A carrier of both spellings is compared twice;
+    /// `record` keys findings by (pointer, code), so it reports each once.
+    fn arg_semantics(&mut self, a: &Value, b: &Value, pointer: &str, subjects: &BTreeSet<String>) {
         let mut breaks: Vec<(Code, &str)> = Vec::new();
-        if present(a, "long") && text(a, "long") != text(b, "long") {
-            breaks.push((Code::G02, "long flag changed"));
-        }
-        if present(a, "short") && text(a, "short") != text(b, "short") {
-            breaks.push((Code::G03, "short letter changed"));
-        }
         let unless = names(b, "required_unless");
         if (!flag(a, "required") && flag(b, "required"))
             || (flag(a, "required") && flag(b, "required") && !names(a, "required_unless").is_subset(&unless))
