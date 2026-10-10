@@ -71,6 +71,9 @@ pub struct ArgSpec {
     /// Arguments or groups that waive this argument's requirement; without one of them it is required.
     pub required_unless: Vec<String>,
     pub num_args: Arity,
+    /// Each occurrence adds its values to the earlier ones, so the argument may be given more than once.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub repeatable: bool,
     /// Accepted on every command below the declaring one.
     pub global: bool,
     pub hidden: bool,
@@ -369,6 +372,7 @@ fn arg_spec(command: &Command, arg: &Arg, relations: &Relations, root: bool, sou
             min: range.min_values(),
             max: (range.max_values() != usize::MAX).then_some(range.max_values()),
         },
+        repeatable: matches!(arg.get_action(), ArgAction::Append),
         global: arg.is_global_set(),
         hidden: arg.is_hide_set(),
         deprecated: deprecation(arg, path, sources),
@@ -1264,6 +1268,20 @@ mod tests {
         assert_eq!(
             parse(&command, &["t", "--alpha", "x"]).err(),
             Some(ErrorKind::WrongNumberOfValues)
+        );
+    }
+
+    #[test]
+    fn repeatable_is_exported_and_clap_agrees() {
+        let command = Command::new("t").arg(Arg::new("alpha").long("alpha").action(ArgAction::Append));
+        let cli = export(command.clone(), &no_sources());
+        assert!(arg_of(&cli, "alpha").repeatable);
+        assert!(!json(two_options(), &no_sources()).contains("repeatable"));
+        let matches = parse(&command, &["t", "--alpha", "x", "--alpha", "y"]).expect("repeats parse");
+        assert_eq!(matches.get_many::<String>("alpha").expect("values").count(), 2);
+        assert_eq!(
+            parse(&two_options(), &["t", "--alpha", "x", "--alpha", "y"]).err(),
+            Some(ErrorKind::ArgumentConflict)
         );
     }
 
