@@ -346,6 +346,7 @@ mod tests {
                 },
             ),
             ("oidc_pre_check_failed", OidcPreCheckFailed { reason: String::new() }),
+            ("oidc_token_unavailable", OidcTokenUnavailable),
             (
                 "forbidden_registry_target",
                 ForbiddenRegistryTarget {
@@ -435,7 +436,7 @@ mod tests {
         // against 12 arms. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            30,
+            31,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

@@ -297,6 +297,7 @@ offline_mode	PolicyBlocked	A network operation was attempted in offline mode
 offline_sign_refused	PolicyBlocked	Signing was refused because offline mode is on
 oidc_pre_check_failed	PermissionDenied	The OIDC token failed a client-side check before reaching the certificate authority
 oidc_token_rejected	AuthError	The certificate authority rejected the OIDC token
+oidc_token_unavailable	TempFail	The CI provider's OIDC token endpoint is unreachable or overloaded
 output_write	IoError	Writing the output tree failed
 output_write	IoError	Writing the output tree failed
 owner_id_mismatch	UsageError	A supplied owner id disagrees with the forge account

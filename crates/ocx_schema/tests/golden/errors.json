@@ -1639,6 +1639,11 @@
           "exit_code": 80
         },
         {
+          "value": "oidc_token_unavailable",
+          "description": "The CI provider's OIDC token endpoint is unreachable or overloaded",
+          "exit_code": 75
+        },
+        {
           "value": "output_write",
           "description": "Writing the output tree failed",
           "exit_code": 74

@@ -321,6 +321,7 @@ impl ErrorDetail {
             Self::OfflineSignRefused => Some(ExitCode::PolicyBlocked),
             Self::OidcPreCheckFailed => Some(ExitCode::PermissionDenied),
             Self::OidcTokenRejected => Some(ExitCode::AuthError),
+            Self::OidcTokenUnavailable => Some(ExitCode::TempFail),
             Self::OutputWrite => Some(ExitCode::IoError),
             Self::OwnerIdMismatch => Some(ExitCode::UsageError),
             Self::OwnerUnknown => Some(ExitCode::NotFound),
