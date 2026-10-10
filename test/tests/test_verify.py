@@ -324,7 +324,7 @@ def test_verify_error_envelope_golden_shape(
     # pass silently — see test_verify_json_format_emits_single_envelope_on_stdout
     # for the dedicated single-stream contract test.
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 2
+    assert envelope["schema_version"] == 1
     assert envelope["command"] == "package verify"
     assert envelope["exit_code"] == 79
     assert "data" not in envelope, "error branch must not carry data"

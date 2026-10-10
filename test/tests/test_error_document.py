@@ -81,7 +81,7 @@ def test_a_usage_error_prints_one_error_document(
 
     assert result.returncode == 64, result.stderr
     document = _document(result)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 1
     assert document["command"] == "package install"
     assert document["error"]["kind"] == "usage_error"
     assert "--not-a-real-flag" in document["error"]["message"]

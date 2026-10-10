@@ -6,7 +6,7 @@
 **Date:** 2026-10-03 (round-1 review and validation fixes applied the same day)
 **Deciders:** Michael Herwig (owner); Architect (Opus)
 **Tier:** xhigh
-**Reversibility:** one-way door, high. Phase 0 is two-way: lints, registry, tests, all internal. Phase 1 is **the door** for users: every user-visible break, the `reports/v2` `$id` and the root convention are one-way once scripts branch on them; reverting a break is a second break. In phase 2, the gate, ledger and differ stay two-way (internal), while publishing the `ocx-sdk` crate and the `ocx.sh/ocx/sdkgen` package is one-way, and every published `schema_version` integer can never decrease. The open-enum policy is a loosening promise and stays reversible toward stricter. The `cli` JSON Schema stays unpublished until an external consumer exists, so the `cli.json` format remains two-way.
+**Reversibility:** one-way door, high. Phase 0 is two-way: lints, registry, tests, all internal. Phase 1 is **the door** for users: every user-visible break, the `reports/v1` `$id` and the root convention are one-way once scripts branch on them; reverting a break is a second break. In phase 2, the gate, ledger and differ stay two-way (internal), while publishing the `ocx-sdk` crate and the `ocx.sh/ocx/sdkgen` package is one-way, and every published `schema_version` integer can never decrease. The open-enum policy is a loosening promise and stays reversible toward stricter. The `cli` JSON Schema stays unpublished until an external consumer exists, so the `cli.json` format remains two-way.
 **Blast radius:** external contract + cross-area. Every `--format json` root (56), the error document, the CLI grammar (73 visible command nodes, 284 `#[arg]` fields), every `OCX_*` variable (53 documented), two consumers (`ocx-mirror` lockstep, `ocx-sdk-python` sibling), the Bazel clippy lane, the release ceremony, the acceptance suite (105 modules parse JSON) and the AI-config rule catalog.
 **Domain Tags:** api | integration | devops | security
 **Related:** `.agents/discussions/ocx-interface-contract.md` (ratified dossier, data), `discover_ocx_interface_contract.md` (claim diff at `34337a6a2`), `system_design_ocx_interface_contract.md` (component contracts), round-1 reviews `review_adr_interface_contract_{spec,quality,security,sota,codex}.md`, validation review `review_adr_interface_contract_validation.md`
@@ -258,7 +258,7 @@ Component contracts and sketches: system design. This section fixes the rules.
 
 | Document | Kind | Published | Version carrier | Gated |
 |---|---|---|---|---|
-| Report roots | `reports` JSON Schema | `ocx.sh/schemas/reports/v2.json` | per-root `schema_version` | yes |
+| Report roots | `reports` JSON Schema | `ocx.sh/schemas/reports/v1.json` | per-root `schema_version` | yes |
 | Error document + exit/category/slug registry | `errors` JSON Schema (new) | `ocx.sh/schemas/errors/v1.json` | in-band `schema_version` = `$id` major | yes |
 | CLI grammar, command→output mapping, env manifest (Public, Foreign, Plumbing; SDKs use Public) | `cli.json` data + `cli` JSON Schema | **unpublished** (golden; embedded in `ocx-sdkgen`) | per-command `version`; document `schema_version` for layout | yes |
 | `metadata`, `config`, `project`, `project-lock`, `patch`, `execution-record` | existing | unchanged | existing ADR rules | no |
@@ -284,7 +284,7 @@ Component contracts and sketches: system design. This section fixes the rules.
 | Removed root or command | ledger entry `B01`/`G01` naming it; no version check | — |
 | Bump without entry / stale entry | red | red |
 
-The `schema_version` property and document `$id` are excluded from the differ; the version step owns them. Versions count from the bootstrap tag (§ Baseline rotation). During phase 1, `schema_version` emission and the `reports/v2` `$id` ship together in the **last** phase-1 release, so no release carries a version number over a still-moving shape. Request-side version pinning (`cargo metadata --format-version`, GitHub's dated API version) was weighed and deferred: lockstep with per-item refusal is coherent pre-1.0; the post-1.0 trigger is a consumer that cannot upgrade with ocx.
+The `schema_version` property and document `$id` are excluded from the differ; the version step owns them. Versions count from the bootstrap tag (§ Baseline rotation). During phase 1, `schema_version` emission and the `reports/v1` `$id` ship together in the **last** phase-1 release, so no release carries a version number over a still-moving shape. Request-side version pinning (`cargo metadata --format-version`, GitHub's dated API version) was weighed and deferred: lockstep with per-item refusal is coherent pre-1.0; the post-1.0 trigger is a consumer that cannot upgrade with ocx.
 
 ### Baseline rotation
 
@@ -302,7 +302,7 @@ The `schema_version` property and document `$id` are excluded from the differ; t
 
 `ENVELOPE_SCHEMA_VERSION` stays 1 through phase 1.
 
-*Amended 2026-10-07 by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md): retiring the `error.kind` values for 83–87 removes values and reusing 82 changes one's meaning, so the error document moves to v2 before the baseline is cut.*
+*Amended 2026-10-07 by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md): retiring the `error.kind` values for 83–87 removes values and reusing 82 changes one's meaning. Superseded 2026-10-10 by the owner decision under "Contract documents stay at v1": no baseline exists, so the error document stays at v1 and is edited in place.*
 
 ### Representation subset (shared by lint, differ, generator)
 
@@ -381,7 +381,7 @@ Open question 3 may add one sentence about env spellings in flight. The § Stabi
 | Phase | Scope | Entry | Exit |
 |---|---|---|---|
 | **0 — Vocabulary, lints, env registry** | `clippy.toml` + Bazel wiring; `ocx_env` declarations, seam API, every read routed, Testing cfg gating, retired-name scan; **ocx-mirror env migration in the same change series**; `ocx-sdk-python` upper-bound release; `task satellite:contract` (blocking consumer gate); vocabulary types; `errors` kind; `cli.json` export with full semantics, output modes and hermetic defaults; lint walker with waivers and exemptions; runtime conformance hook (warn-only until phase 1 ends); docs coverage tests; sync rule; CLAUDE.md text | V0 red/green proof incl. inverse and a `#[cfg(test)]` seed | All lints green with waivers; `disallowed_methods` baseline 0; `task satellite:verify` **and** `task satellite:contract` green at the phase-0 submodule pointer; V13 release-build proof red/green |
-| **1 — Coherence pass** | Reports (root convention, vocabulary, never-null, open enums, tagged unions, `type` fields renamed), errors (all families, init/usage documents, pretty print), flags (short collisions, type drift, `--output`), env (naming, polarity, retirements, hardening `on_invalid`), the 105 JSON-parsing acceptance modules and `SUITE_FLOOR`, `command-line.md` JSON sections (no migration prose), `schema.taskfile.yml`/genrule/`main.rs` for 8 schema files and `reports/v2`; mirror fixed in the same series for every root it parses | Phase 0 exit | Waivers empty; conformance hook blocking and green; `satellite:contract` green; all flag renames and `schema_version` emission in their single releases |
+| **1 — Coherence pass** | Reports (root convention, vocabulary, never-null, open enums, tagged unions, `type` fields renamed), errors (all families, init/usage documents, pretty print), flags (short collisions, type drift, `--output`), env (naming, polarity, retirements, hardening `on_invalid`), the 105 JSON-parsing acceptance modules and `SUITE_FLOOR`, `command-line.md` JSON sections (no migration prose), `schema.taskfile.yml`/genrule/`main.rs` for 8 schema files and the hardened `reports/v1`; mirror fixed in the same series for every root it parses | Phase 0 exit | Waivers empty; conformance hook blocking and green; `satellite:contract` green; all flag renames and `schema_version` emission in their single releases |
 | **2 — Baseline, gate, SDK** | Bootstrap rotation; compat gate; `ocx-sdkgen` (command layer + Rust types per open question 1); conformance corpus; `ocx-sdk-rust`; mirror's 6 sites onto the SDK; `machine-interface.md` | **Go/no-go:** (a) phase-1 exit met; (b) typify spike on the post-phase-1 `reports.json`: tagged dispatch, open-enum form, `Option` + default, measured; (c) oasdiff-adapter comparison on the mutation corpus: findings, adapter LOC, toolchain cost (pinned version + checksum, run without secrets); (d) owned differ + generator LOC estimate against consumer benefit. No-go = stop at C; the interim bump rule (§ Baseline rotation) then stays permanently | Gate red/green (V6); corpus green in Rust CI; SDK integration against real `ocx`; mirror on the SDK with `satellite:contract` green |
 
 `ocx-sdk-python`'s move to generated types is a follow-up plan after phase 2 (dossier scope).
@@ -474,8 +474,9 @@ Every gate has a reachable red and green (quality-core "Unchecked Green"); proof
 
 | Finding | Why deferred | Recommendation |
 |---|---|---|
-| Retired schema URLs (`reports/v1.json` 404s once v2 publishes; only the current version of each kind is published today) | A website commitment, the owner's call | Keep publishing frozen copies of every retired `$id` version |
 | `ocx_script`'s `ocx.env` deny is cosmetic: `ocx.run` children inherit `OCX_AUTH_*` and `OCX_ANNOUNCE_TOKEN` (pre-existing) | Needs a ruling on whether a `--script` script is a trust boundary | If it is, scrub the child env from the registry's `secret` set; if not, delete the deny |
+
+**Contract documents stay at v1 (owner decision 2026-10-10).** OCX is still hardening its interface pre-1.0, so the `reports` and `errors` documents stay at `v1`: no `v2`, no frozen copies of a retired `$id`. `https://ocx.sh/schemas/reports/v1.json`, published since v0.6.1, keeps resolving with the hardened content; `errors/v1.json` was never published, so nothing needs to stay compatible there. Until the first baseline is cut (`task contract:rotate`), hardening edits the v1 documents in place. After the baseline, the version step in § Versioning owns every bump.
 
 ## Handoff list (for `/hex-plan`)
 

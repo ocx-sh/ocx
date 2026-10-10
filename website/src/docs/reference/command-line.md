@@ -4882,7 +4882,7 @@ On error, `ocx package sign` emits the [error document](#arg-format). The `error
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "command": "package sign",
   "exit_code": 80,
   "error": {
@@ -5080,7 +5080,7 @@ On error, `ocx package verify` emits the [error document](#arg-format). The `err
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "command": "package verify",
   "exit_code": 79,
   "error": {
@@ -6473,8 +6473,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 
 <!-- schemas -->
-[schema-reports]: https://ocx.sh/schemas/reports/v2.json
-[schema-errors]: https://ocx.sh/schemas/errors/v2.json
+[schema-reports]: https://ocx.sh/schemas/reports/v1.json
+[schema-errors]: https://ocx.sh/schemas/errors/v1.json
 
 <!-- in-depth -->
 [exec-modes]: ../in-depth/environments.md#visibility-views

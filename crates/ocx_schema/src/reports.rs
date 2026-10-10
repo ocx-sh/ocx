@@ -495,7 +495,7 @@ mod tests {
             .into_iter()
             .filter(|(_, version)| *version != 1)
             .map(|(name, version)| {
-                assert_eq!(version, REPORTS_VERSION, "{name}");
+                assert_eq!(version, 2, "{name}");
                 name
             })
             .collect();
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn the_report_contract_is_published_as_v2() {
+    fn the_report_contract_is_published_as_v1() {
         let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
         assert_eq!(
             document["$id"],

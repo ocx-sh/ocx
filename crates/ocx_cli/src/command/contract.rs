@@ -18,7 +18,7 @@ use crate::api::Printable;
 pub struct ReportRoot(&'static str);
 
 impl ReportRoot {
-    /// The root name as published in `cli.json` and `reports/v2.json`.
+    /// The root name as published in `cli.json` and `reports/v1.json`.
     pub const fn as_str(self) -> &'static str {
         self.0
     }

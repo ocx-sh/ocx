@@ -82,7 +82,7 @@ A command that fails without writing a report prints one error document on stdou
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "command": "package sign",
   "exit_code": 80,
   "error": {
@@ -137,8 +137,8 @@ The command grammar, meaning flags, arguments and output modes, is described in 
 [sysexits-manpage]: https://man.freebsd.org/cgi/man.cgi?sysexits
 
 <!-- schemas -->
-[schema-reports]: https://ocx.sh/schemas/reports/v2.json
-[schema-errors]: https://ocx.sh/schemas/errors/v2.json
+[schema-reports]: https://ocx.sh/schemas/reports/v1.json
+[schema-errors]: https://ocx.sh/schemas/errors/v1.json
 
 <!-- commands -->
 [cmd-reference]: ./command-line.md

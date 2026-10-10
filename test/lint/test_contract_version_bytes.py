@@ -211,7 +211,7 @@ def _reports(
         defs[f"{name}Root"] = root
         roots[name] = {"$ref": f"#/$defs/{name}Root"}
     return {
-        "$id": "https://ocx.sh/schemas/reports/v2.json",
+        "$id": "https://ocx.sh/schemas/reports/v1.json",
         "reports": roots,
         "$defs": defs,
     }
