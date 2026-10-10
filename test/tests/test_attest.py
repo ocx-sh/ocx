@@ -196,6 +196,57 @@ def test_attest_publishes_a_bundle_referrer_carrying_three_annotations(
     )
 
 
+def test_attest_without_platform_attests_an_index_referenced_by_digest_alone(
+    ocx: OcxRunner,
+    published_two_versions: tuple[PackageInfo, PackageInfo],
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """`repo@<index digest>`, no tag, no `--platform`: the subject is the index.
+
+    The tag form is the only index path the rest of this module reaches. Two
+    versions, so the second cascade moves `latest` off v1's index: a digest-pinned
+    reference that fell back to the tag path would attest v2's index instead of
+    the one it names, which a single version's `latest` could not tell apart.
+    """
+    pkg, _v2 = published_two_versions
+    index_digest = reg.fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    latest_digest = reg.fetch_manifest_digest(ocx.registry, pkg.repo, "latest")
+    assert latest_digest != index_digest, "`latest` must have moved off v1's index"
+    platform_digest = reg.fetch_platform_manifest_digest(
+        ocx.registry, pkg.repo, pkg.tag, platform=current_platform()
+    )
+    assert index_digest != platform_digest, "the fixture must publish an image index"
+
+    result = ocx.run(
+        "package", "attest",
+        "--fulcio-url", sigstore_stack.fulcio_url,
+        "--rekor-url", sigstore_stack.rekor_url,
+        "--identity-token-file", str(identity_token),
+        "--predicate", str(cyclonedx_predicate(tmp_path)),
+        "--type", "cyclonedx",
+        f"{pkg.repo}@{index_digest}",
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert data["subject_digest"] == index_digest
+
+    status, referrers = reg.list_referrers(ocx.registry, pkg.repo, index_digest)
+    assert status == 200, status
+    assert data["referrer_digest"] in [entry["digest"] for entry in referrers["manifests"]], (
+        f"the attestation must be a referrer of the index {index_digest}"
+    )
+    latest_status, latest_referrers = reg.list_referrers(ocx.registry, pkg.repo, latest_digest)
+    assert latest_status == 200, latest_status
+    assert [
+        entry["digest"]
+        for entry in latest_referrers["manifests"]
+        if entry["artifactType"] == SIGSTORE_BUNDLE_V03
+    ] == [], "a digest-pinned reference must not be attested through `latest`"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # S-002 — offline refusal lands BEFORE the identity token is touched
 # ──────────────────────────────────────────────────────────────────────────────

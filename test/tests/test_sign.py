@@ -1429,6 +1429,92 @@ def test_sign_without_platform_signs_a_reference_that_is_a_bare_manifest(
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["subject_digest"] == platform_digest
+    assert _bundle_referrer_digests(ocx.registry, pkg.repo, platform_digest), (
+        f"a signature must land as a referrer of {platform_digest}, not only be reported"
+    )
+
+
+def _v1_digests_with_latest_moved(
+    ocx: OcxRunner, versions: tuple[PackageInfo, PackageInfo]
+) -> tuple[PackageInfo, str, str, str]:
+    """`(v1, v1's index, v1's child, latest's index)`, `latest` asserted to differ.
+
+    The second cascade moves `latest` to v2's index. A digest-pinned `v1` reference that
+    fell back to the tag path would resolve `latest` and sign v2's index, which a single
+    published version cannot distinguish: its `latest` is the very index under test.
+    """
+    v1, _v2 = versions
+    index_digest, platform_digest = _index_and_platform_digests(ocx, v1)
+    latest_digest = fetch_manifest_digest(ocx.registry, v1.repo, "latest")
+    assert latest_digest != index_digest, (
+        f"`latest` must have moved off {v1.short}'s index, or a tag-path fallback "
+        f"resolves to the same object and the test below measures nothing"
+    )
+    return v1, index_digest, platform_digest, latest_digest
+
+
+def test_sign_without_platform_signs_an_index_referenced_by_digest_alone(
+    ocx: OcxRunner,
+    published_two_versions: tuple[PackageInfo, PackageInfo],
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """`repo@<index digest>`, no tag, no `--platform`: the subject is the index.
+
+    Every other index-level test reaches the index through its tag, so a
+    digest-pinned reference that fell back to the tag path would pass them all.
+    """
+    pkg, index_digest, platform_digest, latest_digest = _v1_digests_with_latest_moved(
+        ocx, published_two_versions
+    )
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        f"{pkg.repo}@{index_digest}",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["subject_digest"] == index_digest
+    assert _bundle_referrer_digests(ocx.registry, pkg.repo, index_digest), (
+        f"a signature must land as a referrer of the index {index_digest}"
+    )
+    assert not _bundle_referrer_digests(ocx.registry, pkg.repo, platform_digest), (
+        "signing the index must not file anything against its child"
+    )
+    assert not _bundle_referrer_digests(ocx.registry, pkg.repo, latest_digest), (
+        "a digest-pinned reference must not be signed through `latest`"
+    )
+
+
+def test_sign_with_platform_narrows_an_index_referenced_by_digest_alone(
+    ocx: OcxRunner,
+    published_two_versions: tuple[PackageInfo, PackageInfo],
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """`repo@<index digest> --platform`: the subject is the child, not the index."""
+    pkg, index_digest, platform_digest, latest_digest = _v1_digests_with_latest_moved(
+        ocx, published_two_versions
+    )
+
+    result = ocx.run(
+        "package", "sign",
+        *sigstore_stack.sign_args(identity_token),
+        f"{pkg.repo}@{index_digest}",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["subject_digest"] == platform_digest
+    assert _bundle_referrer_digests(ocx.registry, pkg.repo, platform_digest)
+    assert not _bundle_referrer_digests(ocx.registry, pkg.repo, index_digest), (
+        "narrowing to the child must not file anything against the index"
+    )
+    assert not _bundle_referrer_digests(ocx.registry, pkg.repo, latest_digest), (
+        "a digest-pinned reference must not be signed through `latest`"
+    )
 
 
 # ---------------------------------------------------------------------------
