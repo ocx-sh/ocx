@@ -199,9 +199,9 @@ impl ConfigUpdateArgs {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DirenvExportArgs {
     /// Restrict the composition to the named group(s)
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Materialize resolved packages into the object store, installing on a local miss
     pub pull: bool,
     /// Skip materialization; resolve against local state only. Materialization is deferred to `ocx
@@ -240,9 +240,9 @@ impl DirenvInitArgs {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EnvArgs {
     /// Restrict the composition to the named group(s)
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Target shell for eval-safe export lines
     pub shell: Option<String>,
     /// Write the composed environment into a CI system's persistence channel
@@ -304,12 +304,12 @@ impl EnvArgs {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExecArgs {
     /// Restrict the composition to the named group(s)
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Start with a clean environment containing only the package variables, instead of inheriting
     /// the current shell environment
     pub clean: bool,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Control when a package's content downloads: now, or on first use
     pub lazy_mode: Option<String>,
     /// Compose digest paths instead of the toolchain links
@@ -456,11 +456,11 @@ impl InitArgs {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InspectArgs {
     /// Restrict the composition to the named group(s)
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Select this host's leaf and emit its metadata plus the OCI resolution chain
     pub resolve: bool,
     /// Compute each binding's dependency closure from metadata alone, without installing
@@ -604,7 +604,7 @@ pub struct PackageAnnounceArgs {
     /// is not named here is dropped. So is a reserved tag named here: an `__ocx` tag (the keep tag
     /// included) or a legacy `sha256.<hex>` one is not a version, so the run still succeeds and
     /// reports the drops
-    pub tags: Option<String>,
+    pub tags: Vec<String>,
     /// Add, update or remove the tags listed in this file: a listed tag the registry no longer has
     /// is removed from the index. Rows the file does not list are left as they are
     pub tags_file: Option<PathBuf>,
@@ -629,9 +629,9 @@ pub struct PackageAnnounceArgs {
     pub output: Option<PathBuf>,
     /// Mark a tag as yanked. Repeat for multiple tags. Requires `--yank-reason`; only applies to a
     /// tag already in the curated set
-    pub yank: Option<String>,
+    pub yank: Vec<String>,
     /// Clear the yanked marker from a tag. Repeat for multiple tags
-    pub unyank: Option<String>,
+    pub unyank: Vec<String>,
     /// Reason recorded on every tag named by `--yank` in this run
     pub yank_reason: Option<String>,
 }
@@ -686,7 +686,7 @@ pub struct PackageAttestArgs {
     /// Skip the Rekor entry
     pub no_rekor_upload: bool,
     /// Tags to sweep. Repeatable, and accepts a comma-separated list
-    pub tags: Option<String>,
+    pub tags: Vec<String>,
     /// Read tags from a file, one per line or comma-separated
     pub tags_file: Option<PathBuf>,
     /// Package identifier to attest (`registry/repo:tag\[@digest\]`)
@@ -780,7 +780,7 @@ pub struct PackageClaimArgs {
     pub repository: String,
     /// An owner of the package, as `LOGIN` or `LOGIN:ID`. Repeat for several, in the order they
     /// should be recorded
-    pub owner: Option<String>,
+    pub owner: Vec<String>,
     /// The upstream organization this package mirrors or repackages
     pub upstream_org: Option<String>,
     /// The upstream project's repository URL, as an absolute `http` or `https` URL carrying no
@@ -828,7 +828,7 @@ pub struct PackageCopyArgs {
     /// Full target reference, when the repository path or tag changes too
     pub identifier: Option<String>,
     /// Platform to copy. Repeatable
-    pub platform: Option<String>,
+    pub platform: Vec<String>,
     /// Recompute the rolling tags (`1.4`, `1`, `latest`) at the target
     pub cascade: bool,
     /// Write a `__ocx.keep.sha256-<hex>` tag for each platform manifest published (default)
@@ -842,7 +842,7 @@ pub struct PackageCopyArgs {
     /// Also copy the repository description (`__ocx.desc`): README and logo
     pub with_description: bool,
     /// Record an OCI annotation on the target's image index. Repeatable
-    pub annotation: Option<String>,
+    pub annotation: Vec<String>,
     /// Report what would be copied and write nothing
     pub dry_run: bool,
     /// Package to copy: `registry/repository:tag` or `registry/repository@sha256:...`
@@ -1042,7 +1042,7 @@ pub struct PackageEnvArgs {
     /// for full view semantics
     pub self_view: bool,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Resolve the content path via the installed candidate symlink
@@ -1114,7 +1114,7 @@ pub struct PackageExecArgs {
     /// Remove the packages from the store once the command finishes
     pub rm: bool,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Resolve the content path via the installed candidate symlink
@@ -1164,7 +1164,7 @@ pub struct PackageInspectArgs {
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Platform-select through the index and emit the OCI resolution chain (pinned identifier and
     /// walk-order chain digests: index, manifest, config) alongside the metadata and layers.
     /// Without `--resolve` or `--closure`, an image-index reference lists its platform candidates
@@ -1294,7 +1294,7 @@ pub struct PackagePushArgs {
     /// `pkg.tar.gz` -> `pkg-metadata.json`). Required when no file layers are provided
     pub metadata: Option<PathBuf>,
     /// Record an OCI annotation on the published image index. Repeatable
-    pub annotation: Option<String>,
+    pub annotation: Vec<String>,
     /// Stamp OCI annotations from the CI environment
     pub ci_annotations: Option<String>,
     /// After a successful push, append the pushed tag and any cascade tags to this file, one per
@@ -1493,7 +1493,7 @@ pub struct PackageSignArgs {
     /// Skip the Rekor entry
     pub no_rekor_upload: bool,
     /// Tags to sweep. Repeatable, and accepts a comma-separated list
-    pub tags: Option<String>,
+    pub tags: Vec<String>,
     /// Read tags from a file, one per line or comma-separated
     pub tags_file: Option<PathBuf>,
     /// Package identifier to sign (`registry/repo:tag\[@digest\]`)
@@ -1554,7 +1554,7 @@ pub struct PackageTestArgs {
     /// reach the child. Mirrors `ocx exec --clean`
     pub clean: bool,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Identifier under which the package is materialized. Tag form (`repo:tag`) only; an explicit
     /// `@digest` is rejected (the digest is computed locally during this command and supplying one
     /// would conflict)
@@ -1758,7 +1758,7 @@ pub struct PatchTestArgs {
     pub self_view: bool,
     /// Path to a local archive for a companion package, allowing the companion to be materialized
     /// without a registry round-trip. Repeatable
-    pub companion_archives: Option<PathBuf>,
+    pub companion_archives: Vec<PathBuf>,
     /// Base identifier to compose the descriptor onto
     pub base: String,
     /// Patch registry to compose against, as `HOST/PATH` (e.g. registry.corp.example/ocx-patches)
@@ -1767,7 +1767,7 @@ pub struct PatchTestArgs {
     /// trailing command
     pub script: Option<PathBuf>,
     /// Set an environment variable for this invocation, or pass one by name
-    pub env: Option<String>,
+    pub env: Vec<String>,
     /// Command to run in the composed environment, after `--`. Mutually exclusive with `--script`.
     /// When neither is given, the composed environment is printed
     pub command: Vec<String>,
@@ -1814,7 +1814,7 @@ pub struct PullArgs {
     /// Preview which locked packages are cached vs. would be fetched
     pub dry_run: bool,
     /// Restrict the pull to the named group(s)
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Control when a package's content downloads: now, or on first use
@@ -1917,7 +1917,7 @@ pub struct SelfSetupArgs {
     /// Write the env shims but touch neither a shell profile nor the session PATH
     pub no_modify_path: bool,
     /// Target an explicit profile file. Repeatable
-    pub profile: Option<PathBuf>,
+    pub profile: Vec<PathBuf>,
     /// Write no profile blocks at all
     pub no_profile: bool,
     /// Report the intended actions without writing anything
@@ -2070,7 +2070,7 @@ pub struct UpdateArgs {
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Advance every binding in the named group(s); freeze the rest
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Binding names to advance; freeze every other pin
     pub names: Vec<String>,
 }
@@ -2098,7 +2098,7 @@ pub struct UpgradeArgs {
     /// List the bindings that were left alone as well as the ones that moved
     pub verbose: bool,
     /// Upgrade every binding in the named group(s); leave the rest
-    pub groups: Option<String>,
+    pub groups: Vec<String>,
     /// Binding names to upgrade; leave every other binding as declared
     pub names: Vec<String>,
 }

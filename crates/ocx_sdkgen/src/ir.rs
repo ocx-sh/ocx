@@ -718,6 +718,8 @@ struct ArgNode {
     required: bool,
     num_args: Arity,
     #[serde(default)]
+    repeatable: bool,
+    #[serde(default)]
     global: bool,
     #[serde(default)]
     hidden: bool,
@@ -838,7 +840,8 @@ fn arguments(nodes: &[ArgNode], pointer: &str) -> Result<Vec<(bool, Arg)>, IrErr
                 id: node.id.clone(),
                 long: node.long.clone(),
                 position: node.position,
-                multiple: !matches!(value, ValueKind::Switch) && node.num_args.max.is_none_or(|max| max > 1),
+                multiple: !matches!(value, ValueKind::Switch)
+                    && (node.repeatable || node.num_args.max.is_none_or(|max| max > 1)),
                 value,
                 required: node.required,
                 after_terminator: node.last,

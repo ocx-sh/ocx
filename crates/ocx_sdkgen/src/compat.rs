@@ -868,6 +868,7 @@ impl Grammar {
             || max_a.zip(max_b).is_some_and(|(old, new)| new < old);
         if a.get("position") != b.get("position")
             || narrowed
+            || (flag(a, "repeatable") && !flag(b, "repeatable"))
             || ["last", "trailing_var_arg", "value_terminator"]
                 .iter()
                 .any(|key| set(a, key) != set(b, key))
