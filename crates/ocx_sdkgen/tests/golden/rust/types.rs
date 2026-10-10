@@ -3074,6 +3074,8 @@ pub enum ErrorDetail {
     OidcPreCheckFailed,
     /// The certificate authority rejected the OIDC token
     OidcTokenRejected,
+    /// The CI provider's OIDC token endpoint is unreachable or overloaded
+    OidcTokenUnavailable,
     /// Writing the output tree failed
     OutputWrite,
     /// A supplied owner id disagrees with the forge account
@@ -3811,6 +3813,7 @@ impl ErrorDetail {
             Self::OfflineSignRefused => "offline_sign_refused",
             Self::OidcPreCheckFailed => "oidc_pre_check_failed",
             Self::OidcTokenRejected => "oidc_token_rejected",
+            Self::OidcTokenUnavailable => "oidc_token_unavailable",
             Self::OutputWrite => "output_write",
             Self::OwnerIdMismatch => "owner_id_mismatch",
             Self::OwnerUnknown => "owner_unknown",
@@ -4323,6 +4326,7 @@ impl ErrorDetail {
             "offline_sign_refused" => Self::OfflineSignRefused,
             "oidc_pre_check_failed" => Self::OidcPreCheckFailed,
             "oidc_token_rejected" => Self::OidcTokenRejected,
+            "oidc_token_unavailable" => Self::OidcTokenUnavailable,
             "output_write" => Self::OutputWrite,
             "owner_id_mismatch" => Self::OwnerIdMismatch,
             "owner_unknown" => Self::OwnerUnknown,

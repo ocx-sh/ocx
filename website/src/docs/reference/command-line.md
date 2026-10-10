@@ -4912,6 +4912,7 @@ On error, `ocx package sign` emits the [error document](#arg-format). The `error
 | `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index — drop the flag, rather than go looking for a build that was never missing |
 | `subject_digest_unsupported` | 65 | The reference resolves to a subject addressed by `sha384` or `sha512`; cosign artifacts address their subject by `sha256` alone. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
+| `oidc_token_unavailable` | 75 | The CI provider's OIDC token endpoint could not be reached, answered 408, 429, 502, 503 or 504, or broke off mid-response. A rerun may succeed |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any signing call is made |
 | `offline_sign_refused` | 81 | `--offline` is incompatible with `package sign` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
@@ -5323,6 +5324,7 @@ On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-pac
 | `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index — drop the flag, rather than go looking for a build that was never missing |
 | `subject_digest_unsupported` | 65 | The reference resolves to a subject addressed by `sha384` or `sha512`; cosign artifacts address their subject by `sha256` alone. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
+| `oidc_token_unavailable` | 75 | The CI provider's OIDC token endpoint could not be reached, answered 408, 429, 502, 503 or 504, or broke off mid-response. A rerun may succeed |
 | `offline_attest_refused` | 81 | `--offline` is incompatible with `package attest` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy |
