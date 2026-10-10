@@ -1,5 +1,7 @@
 # ADR: OCI Referrers Discovery v2 (Slice 2 — External Discovery + SBOM)
 
+**Amended by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (2026-10-07):** exit codes 82-87 and the `error.kind` values that twinned 83-87 are folded into next-action codes (82 `DirtyRcBlock` -> 81; 83 -> 75, 69, 65 or 81; 84, 85, 86 and 87 -> 82, with the job-token allowlist case of 86 -> 77). Every exit-code row below is historical; the `error.detail` slugs are unchanged.
+
 ## Metadata
 
 - **Status:** SUPERSEDED (2026-08-20) — never implemented; zero code shipped from this design. Superseded by the milestone-4 revision recorded in `plan_milestone_split_supply_chain.md` (2026-07-09 split + 2026-08-20 amendment) and by `adr_sbom_attestations.md`. Key reversals: root-level `ocx sbom` is dead (package-tier `ocx package sbom` only, per the shipped `ocx package sign`/`verify` precedent); legacy cosign tag-based discovery (`.sig`/`.att` probes) is dead (referrers-only, cosign >= 3.0 floor, ADR S1-F); SPDX parsing is deferred (attach parity accepts spdx/spdxjson predicates, parse/summarize is CycloneDX-only); the separate referrer-index cache under `blobs/<registry>/.referrers/` is dead (shipped capability cache lives at `state/referrers/`). Historical record below is unchanged.
