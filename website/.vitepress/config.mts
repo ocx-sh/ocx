@@ -34,8 +34,10 @@ export default defineConfig({
     // https://vitepress.dev/reference/default-theme-config
     deployTarget,
     logo: '/logo.svg',
+    // `/` is the ocx.sh root site, not this SPA: leave it with a full page load.
+    logoLink: { link: '/', target: '_self' },
     nav: [
-      { text: 'Home', link: '/' },
+      { text: 'Home', link: '/', target: '_self' },
       { text: 'Roadmap', link: '/docs/roadmap' },
       { text: 'Catalog', link: 'https://index.ocx.sh', target: '_self', noIcon: true },
       { text: 'Docs', link: '/docs/user-guide' },
