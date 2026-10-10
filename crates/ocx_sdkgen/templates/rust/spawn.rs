@@ -30,7 +30,8 @@ pub struct Output {
 }
 
 /// The one read of this process's environment; everything else works from the snapshot it returns.
-#[expect(
+// `expect` here warns as unfulfilled in every consumer whose clippy.toml does not ban `vars_os`.
+#[allow(
     clippy::disallowed_methods,
     reason = "the SDK is the boundary that reads the caller's environment"
 )]

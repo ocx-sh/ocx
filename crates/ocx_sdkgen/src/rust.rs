@@ -1522,6 +1522,28 @@ mod tests {
         }
     }
 
+    /// The generated crate builds in other repositories, where a lint `expect`ed here may never fire and
+    /// `unfulfilled_lint_expectations` would warn on every build.
+    #[test]
+    fn the_generated_code_suppresses_lints_with_allow_never_expect() {
+        let files = generate(&contract());
+        let allows = files
+            .iter()
+            .filter(|file| {
+                let unwrapped: String = file.contents.split_whitespace().collect();
+                unwrapped.contains("#[allow(clippy::disallowed_methods")
+            })
+            .count();
+        assert_eq!(allows, 1, "the environment read in spawn.rs is the one allowed lint");
+        for file in &files {
+            assert!(
+                !file.contents.contains("#[expect(") && !file.contents.contains("#![expect("),
+                "{}: an `expect` attribute",
+                file.path.display()
+            );
+        }
+    }
+
     #[test]
     fn every_success_status_is_a_type_with_those_values_known() {
         let ir = contract();
