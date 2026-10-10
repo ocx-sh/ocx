@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 
 /// Writes a `.envrc` file in the current directory that wires
 /// `ocx direnv export` into [direnv](https://direnv.net). Run `direnv allow`
@@ -34,13 +34,10 @@ impl DirenvInit {
         let cwd = ocx_env::current_dir()?;
         let envrc = cwd.join(".envrc");
         if envrc.exists() && !self.force {
-            return Err(CommandError::new(
-                format!(
-                    ".envrc already exists at {}; pass --force to overwrite",
-                    envrc.display()
-                ),
-                ocx_exit::ExitCode::ConfigError,
-            )
+            return Err(CliRefusal::EnvrcExists(format!(
+                ".envrc already exists at {}; pass --force to overwrite",
+                envrc.display()
+            ))
             .into());
         }
         tokio::fs::write(&envrc, ENVRC_CONTENT)

@@ -27,11 +27,10 @@ pub(super) fn log_failure(action: &str, subject: &str, error: &anyhow::Error) {
 }
 
 /// The `--frozen` refusal `ocx index sync` and `ocx index update` share (exit 81).
-pub(crate) fn policy_blocked(operation: &str) -> crate::app::CommandError {
-    crate::app::CommandError::new(
-        format!("{operation} discovers new digests and cannot run in frozen mode; re-run it without --frozen"),
-        ocx_exit::ExitCode::PolicyBlocked,
-    )
+pub(crate) fn policy_blocked(operation: &str) -> crate::app::CliRefusal {
+    crate::app::CliRefusal::FrozenRefused(format!(
+        "{operation} discovers new digests and cannot run in frozen mode; re-run it without --frozen"
+    ))
 }
 
 /// Says so when a source lists no packages: the refresh emits no stdout, so otherwise "the mirror

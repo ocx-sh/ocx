@@ -157,7 +157,7 @@ operation — the exact shape the two guarantees permit.
 
 ```
 fn select_touched(config: &ProjectConfig, groups: &[String], names: &[String])
-    -> Result<Vec<(String, String)>, CommandError>   // UsageError (64) on unknown group/name
+    -> Result<Vec<(String, String)>, CliRefusal>     // UsageError (64) on unknown group/name
 
 resolve_lock_touched(candidate, pre_mutation, previous, index, &touched, opts) -> ProjectLock
 // candidate == pre_mutation == config for a lock-only op (upgrade stages the identity closure)

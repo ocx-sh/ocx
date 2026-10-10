@@ -3,9 +3,9 @@
 
 //! Error -> [`ExitCode`] classification for the `ocx` binary.
 
-use ocx_exit::{ClassifyErrorKind as _, ClassifyExitCode as _, Decision, Detail, ExitCode};
+use ocx_exit::{ClassifyErrorKind, ClassifyExitCode, Decision, Detail, ExitCode};
 
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 use crate::app::project_context::ProjectContextError;
 
 mod classify;
@@ -127,8 +127,9 @@ ocx_exit::families!(
     // ocx_sign
     ::ocx_sign::verify::VerifyError,
     ::ocx_sign::sign::SignError,
-    // the CLI-local pass answers this one before the ladder is reached
+    // the CLI-local pass answers these before the ladder is reached
     ProjectContextError: rows_only,
+    CliRefusal: rows_only,
 );
 
 /// One cause's verdict: the exit code and the `error.detail` slug of the same error.
@@ -171,27 +172,28 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ExitCode {
 /// The exit code for `err` and the `error.detail` slug of the cause that decided it.
 ///
 /// Two passes on purpose: merged into one walk, an earlier library cause would outrank a CLI-local one.
-/// A [`CommandError`] decides with no slug.
 pub fn classify_decision(err: &(dyn std::error::Error + 'static)) -> (ExitCode, Option<&'static str>) {
     for cause in std::iter::successors(Some(err), |e| e.source()) {
-        if let Some(pce) = cause.downcast_ref::<ProjectContextError>()
-            && let Some(code) = pce.classify()
-        {
-            let verdict = resolve(Decision {
-                code,
-                detail: pce.kind_detail(),
-            });
+        if let Some(verdict) = cli_local::<ProjectContextError>(cause).or_else(|| cli_local::<CliRefusal>(cause)) {
             return (verdict.code, Some(verdict.detail));
-        }
-        if let Some(ce) = cause.downcast_ref::<CommandError>()
-            && let Some(code) = ce.classify()
-        {
-            return (code, None);
         }
     }
     library_decision(err).map_or((ExitCode::Failure, None), |verdict| {
         (verdict.code, Some(verdict.detail))
     })
+}
+
+/// The verdict of `cause` when it is the CLI-local type `E` and classifies.
+fn cli_local<E>(cause: &(dyn std::error::Error + 'static)) -> Option<Verdict>
+where
+    E: ClassifyExitCode + ClassifyErrorKind + std::error::Error + 'static,
+{
+    let error = cause.downcast_ref::<E>()?;
+    let code = error.classify()?;
+    Some(resolve(Decision {
+        code,
+        detail: error.kind_detail(),
+    }))
 }
 
 /// Classify a [`std::error::Error`] chain against the library ladder alone, else [`ExitCode::Failure`].

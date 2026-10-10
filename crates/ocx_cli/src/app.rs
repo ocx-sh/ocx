@@ -29,6 +29,9 @@ pub mod plugin_dispatch;
 
 pub mod project_context;
 
+mod refusal;
+pub use refusal::CliRefusal;
+
 #[cfg(any(test, feature = "__testing"))]
 pub mod seam;
 
@@ -41,38 +44,6 @@ mod version;
 pub use version::version;
 
 pub mod build_info;
-
-/// A CLI-local command failure carrying its own exit code, for validations that exit other than 64.
-///
-/// Return this, not `eprintln!` + `Ok(ExitCode::…)`, so the message flows through [`finish`].
-#[derive(Debug)]
-pub struct CommandError {
-    message: String,
-    code: ocx_exit::ExitCode,
-}
-
-impl CommandError {
-    pub fn new(message: impl Into<String>, code: ocx_exit::ExitCode) -> Self {
-        Self {
-            message: message.into(),
-            code,
-        }
-    }
-}
-
-impl std::fmt::Display for CommandError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for CommandError {}
-
-impl ocx_exit::ClassifyExitCode for CommandError {
-    fn classify(&self) -> Option<ocx_exit::ExitCode> {
-        Some(self.code)
-    }
-}
 
 #[derive(Parser)]
 #[command(name = "ocx", about, long_about = None)]
@@ -295,7 +266,7 @@ fn print_usage_document(argv: &[std::ffi::OsString]) {
     let rendered = error.render().to_string();
     let first_line = rendered.lines().next().unwrap_or_default();
     let message = first_line.strip_prefix("error: ").unwrap_or(first_line);
-    let err = anyhow::Error::new(CommandError::new(message, ocx_exit::ExitCode::UsageError));
+    let err = anyhow::Error::new(CliRefusal::InvalidCommandLine(message.to_owned()));
     print_error_document(&usage_command_path(argv), &err);
 }
 

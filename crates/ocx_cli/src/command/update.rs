@@ -11,7 +11,7 @@ use ocx_project::{
 };
 
 use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock, record_activation_consent};
 use crate::conventions;
 use crate::options;
@@ -214,14 +214,11 @@ pub(crate) async fn concrete_versions(
 }
 
 /// The exit-78 error for a missing predecessor `ocx.lock`.
-pub(crate) fn missing_lock(lock_path: &std::path::Path) -> CommandError {
-    CommandError::new(
-        format!(
-            "ocx.lock not found at {}; run `ocx lock` to create it",
-            lock_path.display()
-        ),
-        ocx_exit::ExitCode::ConfigError,
-    )
+pub(crate) fn missing_lock(lock_path: &std::path::Path) -> CliRefusal {
+    CliRefusal::LockMissing(format!(
+        "ocx.lock not found at {}; run `ocx lock` to create it",
+        lock_path.display()
+    ))
 }
 
 /// Resolve the `-g` and name selection into the `(group, binding)` pairs a scoped `ocx update` re-resolves.
@@ -235,20 +232,20 @@ pub(crate) fn select_touched(
     config: &ProjectConfig,
     groups: &[String],
     names: &[String],
-) -> Result<Vec<(String, String)>, CommandError> {
-    let usage = |message: String| CommandError::new(message, ocx_exit::ExitCode::UsageError);
-
+) -> Result<Vec<(String, String)>, CliRefusal> {
     let scope: Option<Vec<String>> = if groups.is_empty() {
         None
     } else {
         for raw in groups {
             if raw.is_empty() {
-                return Err(usage(
+                return Err(CliRefusal::EmptyGroupFilter(
                     "empty group segment in --group value; check for stray commas".to_string(),
                 ));
             }
             if raw != DEFAULT_GROUP && raw != ALL_GROUP && !config.groups.contains_key(raw) {
-                return Err(usage(format!("unknown group '{raw}' in --group filter")));
+                return Err(CliRefusal::UnknownGroup(format!(
+                    "unknown group '{raw}' in --group filter"
+                )));
             }
         }
         Some(expand_all_keyword(groups, config))
@@ -284,7 +281,9 @@ pub(crate) fn select_touched(
 
     for name in names {
         if !matched.contains(name) {
-            return Err(usage(format!("binding '{name}' not found in the selected groups")));
+            return Err(CliRefusal::BindingNotSelected(format!(
+                "binding '{name}' not found in the selected groups"
+            )));
         }
     }
 
@@ -369,7 +368,7 @@ mod tests {
         (group.to_string(), name.to_string())
     }
 
-    fn exit_code(err: &CommandError) -> Option<ocx_exit::ExitCode> {
+    fn exit_code(err: &CliRefusal) -> Option<ocx_exit::ExitCode> {
         use ocx_exit::ClassifyExitCode as _;
         err.classify()
     }

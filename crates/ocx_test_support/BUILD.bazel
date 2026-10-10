@@ -150,7 +150,7 @@ rust_test(
         "--skip=internal_crates_block_is_complete_and_sorted",
         "--skip=manifests_inherit_lints_and_never_publish",
         "--skip=needle_liveness_and_the_absence_exemption_discriminate",
-        "--skip=no_hand_written_classification_impl_outside_command_error",
+        "--skip=no_hand_written_classification_impl",
         "--skip=no_log_shim",
         "--skip=no_module_path_in_output",
         "--skip=oci_identifier_mint_ratchet",

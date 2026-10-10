@@ -10,7 +10,7 @@ use clap::Parser;
 use ocx_package_manager::activation::ProjectIdentity;
 use ocx_project::consent::{self, Recorded};
 
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 use crate::app::project_context::resolve_project_paths;
 
 /// The `ocx shell allow` arguments; its help text lives on `Shell::Allow`.
@@ -56,13 +56,10 @@ impl ShellAllow {
                 context.ui().success(format!("consented to {} - {when}", dir.display()));
                 Ok(ExitCode::SUCCESS)
             }
-            Recorded::OcxHomeNeedsNoStamp => Err(CommandError::new(
-                format!(
-                    "{} is the ocx home; the global toolchain is always active and carries no consent stamp",
-                    dir.display()
-                ),
-                ocx_exit::ExitCode::UsageError,
-            )
+            Recorded::OcxHomeNeedsNoStamp => Err(CliRefusal::OcxHomeNeedsNoConsent(format!(
+                "{} is the ocx home; the global toolchain is always active and carries no consent stamp",
+                dir.display()
+            ))
             .into()),
         }
     }

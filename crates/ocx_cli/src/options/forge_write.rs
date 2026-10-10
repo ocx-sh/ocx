@@ -4,13 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use ocx_console::UserInterface;
-use ocx_exit::ExitCode;
 
 use crate::command::deprecated;
 use crate::error::UsageError;
 use ocx_announce::forge::{ForgeCredentials, ForgeError, ForgeKind, RepoCoordinate, WriteTransport};
 
-use crate::app::CommandError;
+use crate::app::CliRefusal;
 
 /// Why a GitLab job pushing with `OCX_ANNOUNCE_TOKEN` authors the merge request
 /// as that token's owner rather than as the pipeline.
@@ -147,19 +146,16 @@ impl ForgeWriteOptions {
     ///
     /// # Errors
     ///
-    /// [`crate::app::CommandError`] at [`ocx_exit::ExitCode::AuthError`].
+    /// [`CliRefusal::ForgeCredentialMissing`] at [`ocx_exit::ExitCode::AuthError`].
     pub fn require_credential(&self, credentials: &ForgeCredentials) -> anyhow::Result<()> {
         if self.output().is_some() || credentials.api_is_present() {
             return Ok(());
         }
-        Err(CommandError::new(
-            // The declaration's name, never a local copy, so the refusal names the variable the ladder reads.
-            format!(
-                "a forge write needs a credential in {}; use --output to write the entry locally instead",
-                ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name
-            ),
-            ExitCode::AuthError,
-        )
+        // The declaration's name, never a local copy, so the refusal names the variable the ladder reads.
+        Err(CliRefusal::ForgeCredentialMissing(format!(
+            "a forge write needs a credential in {}; use --output to write the entry locally instead",
+            ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name
+        ))
         .into())
     }
 

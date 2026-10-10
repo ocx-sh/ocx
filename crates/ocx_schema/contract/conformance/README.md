@@ -36,3 +36,4 @@ Captured: `captured_*`. Synthetic mutation cases:
 | `synthetic_schema_version_mismatch` | `captured_about` | `schema_version` set to 2 |
 | `synthetic_report_then_fail` | `captured_update_unchanged` | a pin change added, exit 65 |
 | `synthetic_unknown_error_detail` | `captured_error_lock_stale` | `error.kind` and `error.detail` set to unregistered values |
+| `synthetic_error_without_detail` | `captured_error_invalid_command_line` | `error.detail` removed; some failures (an I/O error) carry no discriminant |
