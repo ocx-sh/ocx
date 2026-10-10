@@ -76,6 +76,7 @@ const OCX_METHODS: &[&str] = &[
     "call",
     "call_empty",
     "call_outcome",
+    "call_passthrough",
     "call_raw",
     "discover",
     "handshake",
@@ -1135,12 +1136,15 @@ impl Generator<'_> {
                     .map(|root| format!("{root:?}"))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // A child that owns stdout also owns the exit, so only an error document fails the call.
+                let method = if command.outputs.contains(&Output::Passthrough) {
+                    "call_passthrough"
+                } else {
+                    "call_raw"
+                };
                 (
                     "Raw".to_owned(),
-                    call_expression(
-                        "call_raw",
-                        &[format!("{path:?}"), format!("&[{list}]"), "argv".to_owned()],
-                    ),
+                    call_expression(method, &[format!("{path:?}"), format!("&[{list}]"), "argv".to_owned()]),
                 )
             }
         };
