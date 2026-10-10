@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ocx.sh/schemas/reports/v2.json",
+  "$id": "https://ocx.sh/schemas/reports/v1.json",
   "reports": {
     "About": {
       "$ref": "#/$defs/AboutRoot"
@@ -6944,7 +6944,7 @@
         "version",
         "contract"
       ],
-      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 2, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
+      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 1, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
     },
     "ContractVersions": {
       "type": "object",
@@ -7017,7 +7017,7 @@
         "version",
         "contract"
       ],
-      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 2, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
+      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 1, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
     },
     "WarmedPaths": {
       "type": "object",
@@ -9334,7 +9334,7 @@
         "version",
         "contract"
       ],
-      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 2, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
+      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 1, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
     },
     "VersionDataRoot": {
       "type": "object",
@@ -9378,7 +9378,7 @@
         "version",
         "contract"
       ],
-      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 2, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
+      "description": "Version information reported by `ocx version`.\n\n`version` is always present. Every other key appears only when its source\ndata was available at build time, so a tarball-source, no-CI build emits\n`version` alone. `cargo_pkg_version` appears only when it differs from\n`version` (dev-deploy builds overriding it via `__OCX_BUILD_VERSION`).\n\n```json\n{\n  \"version\":            \"0.3.2-dev+20260528143045\",\n  \"cargo_pkg_version\":  \"0.3.1\",\n  \"channel\":            \"dev\",\n  \"commit\":             { ... },\n  \"build\":              { ... },\n  \"ci\":                 { ... },\n  \"contract\":           { \"errors\": 1, \"commands\": { ... }, \"reports\": { ... } }\n}\n```"
     },
     "WarmedPathsRoot": {
       "type": "object",

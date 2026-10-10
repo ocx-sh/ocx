@@ -5,7 +5,7 @@
 //!
 //! ```json
 //! {
-//!   "schema_version": 2,
+//!   "schema_version": 1,
 //!   "command": "package sign",
 //!   "exit_code": 80,
 //!   "error": {
@@ -24,9 +24,10 @@ use serde::Serialize;
 /// Version of the error document's shape; bump only on a rename, removal or re-nesting.
 ///
 /// New keys, new [`ErrorCategory`] variants and renames of a slug no release emitted do not bump.
-/// Version 2 removed five `error.kind` values and gave exit 82 a new meaning
-/// (`adr_exit_code_taxonomy.md`).
-pub const ERRORS_SCHEMA_VERSION: u32 = 2;
+/// The document stays at 1 until the contract baseline exists: the five `error.kind` values
+/// removed and the new meaning of exit 82 (`adr_exit_code_taxonomy.md`) are announced through
+/// the commit subject, not a bump.
+pub const ERRORS_SCHEMA_VERSION: u32 = 1;
 
 /// The document a failed invocation prints on stdout under `--format json`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -135,8 +136,8 @@ mod tests {
     use ocx_exit::ExitCode;
 
     #[test]
-    fn schema_version_is_two() {
-        assert_eq!(ERRORS_SCHEMA_VERSION, 2);
+    fn schema_version_is_one() {
+        assert_eq!(ERRORS_SCHEMA_VERSION, 1);
     }
 
     #[test]
@@ -157,7 +158,7 @@ mod tests {
         };
         let actual = serde_json::to_string(&document).unwrap();
         let expected = concat!(
-            r#"{"schema_version":2,"command":"package sign","exit_code":80,"#,
+            r#"{"schema_version":1,"command":"package sign","exit_code":80,"#,
             r#""error":{"kind":"auth_error","detail":"oidc_token_rejected","#,
             r#""message":"Fulcio rejected OIDC token: issuer not in trust root","#,
             r#""context":{"identifier":"ocx.sh/cmake:3.28"}}}"#,
@@ -234,7 +235,7 @@ mod tests {
         let err = anyhow::anyhow!("synthetic error for document probe");
         let json = render_error_document("package sign", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 1);
         assert_eq!(parsed["command"], "package sign");
         assert_eq!(parsed["exit_code"], 1);
         assert_eq!(parsed["error"]["kind"], "internal");
@@ -257,7 +258,7 @@ mod tests {
         let rendered = render_error_document("", &err).expect("render ok");
         let expected = concat!(
             "{\n",
-            "  \"schema_version\": 2,\n",
+            "  \"schema_version\": 1,\n",
             "  \"command\": \"\",\n",
             "  \"exit_code\": 1,\n",
             "  \"error\": {\n",

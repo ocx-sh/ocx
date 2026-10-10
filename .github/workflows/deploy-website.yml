@@ -68,7 +68,7 @@ jobs:
       - name: Install lld
         run: sudo apt-get update && sudo apt-get install -y lld
       # `task schema` generates every published schema (metadata, config,
-      # project, project-lock, patch, reports, execution-record) — the
+      # project, project-lock, patch, reports, errors, execution-record) — the
       # `#:schema` directive `ocx init` writes and the `taplo.toml` rules both
       # point at these URLs, so a metadata-only generation step leaves editors
       # staring at a 404.

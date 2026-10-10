@@ -10,7 +10,7 @@
 - [x] No new tool or dependency; `ocx_exit` stays the one exit-code enum for every OCX binary.
 **Domain Tags:** api, integration
 **Supersedes:** [`research_exit_codes.md`](./research_exit_codes.md) § Direct Recommendation's "private range for tool-specific codes" (a research artifact, not an ADR).
-**Amends:** [`adr_ocx_interface_contract.md`](./adr_ocx_interface_contract.md) § Enum policy (the error document goes to v2); [`adr_typed_contract_registries.md`](./adr_typed_contract_registries.md) Decision Driver "Zero wire change"; the exit-code rows of `adr_oci_referrers_signing_v1.md`, `adr_index_claim_command.md`, `adr_snapshot_lifecycle.md`, `adr_self_setup.md`, `adr_self_update_handoff.md`, `adr_managed_config_tier.md`, `adr_key_reference_grammar.md` and `design_spec_cosign_parity.md`.
+**Amends:** [`adr_ocx_interface_contract.md`](./adr_ocx_interface_contract.md) § Enum policy (the error document stays at v1; see its "Contract documents stay at v1" note); [`adr_typed_contract_registries.md`](./adr_typed_contract_registries.md) Decision Driver "Zero wire change"; the exit-code rows of `adr_oci_referrers_signing_v1.md`, `adr_index_claim_command.md`, `adr_snapshot_lifecycle.md`, `adr_self_setup.md`, `adr_self_update_handoff.md`, `adr_managed_config_tier.md`, `adr_key_reference_grammar.md` and `design_spec_cosign_parity.md`.
 **Superseded By:** —
 
 ## Context
@@ -125,7 +125,7 @@ After the move, 82 carries four distinct slugs: `referrers_unsupported`, `unsupp
 IC-16 forbids changing a value's meaning under the same name. 82 changes from "dirty shell-profile block" to "unsupported" once, before the baseline. This is acceptable because:
 
 - No contract baseline exists yet, so no published contract version is broken behind a consumer's back.
-- The error document moves to v2. Removing kinds (§ Enum policy) and reusing 82 (IC-16) each require it on their own.
+- The error document stays at v1 (owner decision 2026-10-10: no baseline exists, so hardening edits v1 in place). Removing kinds (§ Enum policy) and reusing 82 (IC-16) would each require a bump once a baseline is cut.
 - The changelog subject (`feat!: …`) names the break, and its body maps each old code to its new one.
 - A v0.6.x script keyed on 82 for a dirty profile now reads "unsupported". `ocx self setup` never exits 82 again, so a `case` arm scoped to that command goes dead rather than misfiring.
 
@@ -165,7 +165,7 @@ The chosen option is the collapse above. Rejected:
 | 85 to 78 | The key reference is valid configuration; 78 tells the caller to fix config, but the fix is another build or another backend. |
 | One kind per code | `error.kind` is the coarse layer. 77 and 81 both mean "refused, do not retry", and the code already separates them; a new kind adds wire vocabulary without a new next action. |
 | Rename `permission_denied` for 81 | Breaks the most-matched kind for a naming gain, when the code already separates policy from permission. |
-| Fresh 88 for `Unsupported`, retire 82 too | No reuse at all is the safer reading of IC-16, but it leaves a gap at 82 in a set no baseline has frozen yet. The owner chose the reuse; the error document v2 and the changelog subject signal it. |
+| Fresh 88 for `Unsupported`, retire 82 too | No reuse at all is the safer reading of IC-16, but it leaves a gap at 82 in a set no baseline has frozen yet. The owner chose the reuse; the changelog subject signals it. |
 | Reuse 83 instead of 82 | 83 is equally a shipped number, with more scripted consumers (`rules_ocx` hints, the SDK's `IntEnum`). 82's old meaning had one producer, on a success path. |
 | Move the `forge_transport_*` slugs to 82 | `forge_transport_unsupported` and `forge_transport_operation_unsupported` are pre-flight argv rejections (64, fix the flag). `forge_transport_transient` and `forge_transport_failed` are reachability failures (75, 69). None is a capability gap. |
 

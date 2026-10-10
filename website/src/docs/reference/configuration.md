@@ -2134,8 +2134,8 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 | `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v3.json`][schema-project-lock] |
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
 | Patch descriptor (`ocx patch publish --descriptor`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
-| `--format json` output (every command) | [`https://ocx.sh/schemas/reports/v2.json`][schema-reports] |
-| Error document (`--format json` on failure) | [`https://ocx.sh/schemas/errors/v2.json`][schema-errors] |
+| `--format json` output (every command) | [`https://ocx.sh/schemas/reports/v1.json`][schema-reports] |
+| Error document (`--format json` on failure) | [`https://ocx.sh/schemas/errors/v1.json`][schema-errors] |
 | Execution record (`[records]` sink) | [`https://ocx.sh/schemas/execution-record/v1.json`][schema-execution-record] |
 
 `ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. A patch descriptor is plain JSON, so add a `"$schema": "https://ocx.sh/schemas/patch/v1.json"` key to get the same autocompletion and validation while authoring it. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
@@ -2186,8 +2186,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [schema-project-lock]: https://ocx.sh/schemas/project-lock/v3.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
-[schema-reports]: https://ocx.sh/schemas/reports/v2.json
-[schema-errors]: https://ocx.sh/schemas/errors/v2.json
+[schema-reports]: https://ocx.sh/schemas/reports/v1.json
+[schema-errors]: https://ocx.sh/schemas/errors/v1.json
 [schema-execution-record]: https://ocx.sh/schemas/execution-record/v1.json
 
 <!-- in-depth -->

@@ -211,7 +211,7 @@ mod tests {
         let roots = documents.reports["reports"].as_object().expect("root list").len();
         assert!(roots >= 54, "read {roots} roots");
         assert_eq!(versions.reports.len(), roots);
-        assert_eq!(versions.errors, 2);
+        assert_eq!(versions.errors, 1);
         assert_eq!(versions.commands.get("package push"), Some(&1));
     }
 }

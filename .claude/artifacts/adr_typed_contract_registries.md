@@ -20,8 +20,8 @@ The machine-interface contract work (PR #580) declares its registries as strings
 ## Decision Drivers
 
 - A drift between two copies of one fact must fail `cargo check`, not a later test — and never be possible to express at all where a type can prevent it.
-- **Zero wire change.** Every published byte stays: `website/src/public/schemas/errors/v1.json`, `reports/v2.json`, `cli.json`, the schema goldens under `crates/ocx_schema/tests/golden/`, every slug, exit code, flag spelling and env name.
-  *Amended 2026-10-07 by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (owner decision): exit codes 83–87 and their `error.kind` values are retired, 82 becomes `Unsupported`, and the error document moves to v2. This driver holds for everything else.*
+- **Zero wire change.** Every published byte stays: `website/src/public/schemas/errors/v1.json`, `reports/v1.json`, `cli.json`, the schema goldens under `crates/ocx_schema/tests/golden/`, every slug, exit code, flag spelling and env name.
+  *Amended 2026-10-07 by [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md) (owner decision): exit codes 83–87 and their `error.kind` values are retired, 82 becomes `Unsupported`, and the error document is unchanged at v1 until a contract baseline exists (owner decision 2026-10-10). This driver holds for everything else.*
 - Crates are self-contained: a tier crate's error type carries its own classification.
 - Delete the test scaffolding a type now makes redundant; keep only tests that check what no type can (filesystem paths, the live clap tree, the wire goldens).
 

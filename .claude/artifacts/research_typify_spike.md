@@ -7,7 +7,7 @@
 
 ## Question
 
-Can `typify` generate the Rust SDK's type layer from the published `reports/v2` and `errors/v1` schemas (Option E), or must OCX own a Rust backend (Option D)? Four measurements: pinned version; tagged-union dispatch with the unknown arms stripped and present; every `::crate` path against the SDK dependency budget; post-pass LOC to reach open enums.
+Can `typify` generate the Rust SDK's type layer from the published `reports/v1` and `errors/v1` schemas (Option E), or must OCX own a Rust backend (Option D)? Four measurements: pinned version; tagged-union dispatch with the unknown arms stripped and present; every `::crate` path against the SDK dependency budget; post-pass LOC to reach open enums.
 
 ## Setup
 
@@ -16,7 +16,7 @@ Can `typify` generate the Rust SDK's type layer from the published `reports/v2` 
 | typify | **`=0.8.0`** (latest stable; `0.10.0-alpha.1` is the newest release and is a pre-release, `0.9.x` does not exist, alpha not measured) | `cargo add typify` resolved `0.8.0`; `cargo info typify` shows `0.10.0-alpha.1`; `cargo info typify@0.9` → "could not find" |
 | schema crate for typify input | `schemars =0.8.22` (typify 0.8 uses it) | `cargo tree -i schemars` in `.tmp/typify-spike` |
 | formatter | `prettyplease 0.2.37`, `syn 2` | `.tmp/typify-spike/Cargo.lock` |
-| Input schemas | `crates/ocx_schema/tests/golden/reports.json` (`https://ocx.sh/schemas/reports/v2.json`, 276 `$defs`) and `errors.json` (`errors/v1.json`, 6 `$defs`). These are the golden files `golden_schemas.rs` asserts equal to the generated schemas (the test was not re-run here) | `sha256sum crates/ocx_schema/tests/golden/{reports,errors}.json` → `8b75fa44…81cb2b` / `1a7622d5…4962c2` at HEAD `72405b0fb` |
+| Input schemas | `crates/ocx_schema/tests/golden/reports.json` (`https://ocx.sh/schemas/reports/v1.json`, 276 `$defs`) and `errors.json` (`errors/v1.json`, 6 `$defs`). These are the golden files `golden_schemas.rs` asserts equal to the generated schemas (the test was not re-run here) | `sha256sum crates/ocx_schema/tests/golden/{reports,errors}.json` → `8b75fa44…81cb2b` / `1a7622d5…4962c2` at HEAD `72405b0fb` |
 | Jobs | `CARGO_BUILD_JOBS=4` | |
 
 Schema shapes in `reports.json`, counted with a Python walk (`json.load` + recursive search for the key): 13 `oneOf` unions, each with one `x-ocx-unknown-variant` arm (`type` is `not: {enum: [known…]}`); 45 `x-ocx-enum` nodes (44 `string`, 1 `integer`) and **no** `enum` keyword. `errors.json`: 3 `x-ocx-enum` (`ErrorDetail`, `ErrorCategory` strings; `ExitCode` integer).

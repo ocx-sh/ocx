@@ -23,7 +23,7 @@ use crate::app::build_info::Provenance;
 ///   "commit":             { ... },
 ///   "build":              { ... },
 ///   "ci":                 { ... },
-///   "contract":           { "errors": 2, "commands": { ... }, "reports": { ... } }
+///   "contract":           { "errors": 1, "commands": { ... }, "reports": { ... } }
 /// }
 /// ```
 #[derive(Serialize, schemars::JsonSchema)]

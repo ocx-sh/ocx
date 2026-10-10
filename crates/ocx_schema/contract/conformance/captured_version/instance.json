@@ -9,7 +9,7 @@
     "timestamp": "2026-10-04T15:37:02.000000000Z"
   },
   "contract": {
-    "errors": 2,
+    "errors": 1,
     "commands": {
       "about": 1,
       "add": 1,

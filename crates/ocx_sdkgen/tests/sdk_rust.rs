@@ -722,7 +722,7 @@ mod fake_child {
     fn an_error_document_is_the_typed_error_whatever_the_command() {
         let directory = TempDir::new().expect("temp dir");
         let document = json!({
-            "schema_version": 2,
+            "schema_version": contract::ERRORS,
             "command": "package sign",
             "exit_code": 79,
             "error": { "kind": "not_found", "message": "gone", "context": {} },

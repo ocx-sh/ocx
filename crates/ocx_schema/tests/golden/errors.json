@@ -2756,5 +2756,5 @@
       ]
     }
   },
-  "$id": "https://ocx.sh/schemas/errors/v2.json"
+  "$id": "https://ocx.sh/schemas/errors/v1.json"
 }

@@ -61,7 +61,7 @@ pub trait Printable: serde::Serialize {
     /// The `schema_version` this root is published under; raised only for a breaking change to its shape.
     const SCHEMA_VERSION: u32;
 
-    /// The name `cli.json` output modes and `reports/v2.json` publish this root under.
+    /// The name `cli.json` output modes and `reports/v1.json` publish this root under.
     const ROOT: &'static str;
 
     fn print_plain(&self, data: &DataInterface);

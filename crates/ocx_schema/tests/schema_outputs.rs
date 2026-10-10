@@ -623,8 +623,8 @@ fn every_schema_kind_the_binary_prints_carries_its_canonical_id() {
         ("project", "https://ocx.sh/schemas/project/v1.json"),
         ("project-lock", "https://ocx.sh/schemas/project-lock/v3.json"),
         ("execution-record", "https://ocx.sh/schemas/execution-record/v1.json"),
-        ("reports", "https://ocx.sh/schemas/reports/v2.json"),
-        ("errors", "https://ocx.sh/schemas/errors/v2.json"),
+        ("reports", "https://ocx.sh/schemas/reports/v1.json"),
+        ("errors", "https://ocx.sh/schemas/errors/v1.json"),
         ("cli-schema", "https://ocx.sh/schemas/cli/v1.json"),
     ] {
         let output = run_binary(kind);

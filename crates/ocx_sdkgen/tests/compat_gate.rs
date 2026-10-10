@@ -456,9 +456,9 @@ fn an_errors_description_change_bumps_nothing_and_a_break_bumps_both_version_spe
         &mut current,
         Kind::Errors,
         "/$id",
-        json!("https://ocx.sh/schemas/errors/v3.json"),
+        json!("https://ocx.sh/schemas/errors/v2.json"),
     );
-    set(&mut current, Kind::Errors, "/properties/schema_version/const", json!(3));
+    set(&mut current, Kind::Errors, "/properties/schema_version/const", json!(2));
     assert_eq!(compat::gate(&base, &current, &ledger), []);
 }
 
