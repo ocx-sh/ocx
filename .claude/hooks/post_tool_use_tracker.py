@@ -75,15 +75,6 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "the website Taskfile",
     ),
     (
-        "website/src/components/*",
-        (
-            "- .claude/rules/subsystem-website.md (Custom Components section)\n"
-            "- .claude/rules/docs-style.md (Components Available section)\n"
-            "- .claude/skills/docs/SKILL.md (Components section)"
-        ),
-        "a site component — update props/slots in AI config if the component API changed",
-    ),
-    (
         "website/astro.config.mjs",
         "- .claude/rules/subsystem-website.md (Astro Configuration section)",
         "the Astro config",
