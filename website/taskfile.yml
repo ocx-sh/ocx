@@ -103,6 +103,8 @@ tasks:
       # Schemas are a second tree at the site root, not under `/docs/`.
       - rm -rf dist/schemas
       - mv dist/docs/schemas dist/schemas
+      # The deploy refuses a tree without a root index.html; list what was built.
+      - node scripts/schemas-index.mjs dist/schemas
 
   bazel:build:
     desc: Render the site through the coarse Bazel rule (//website:site) and unpack it
