@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use super::Shell;
-use super::escape::{fish_single_quoted, posix_single_quoted, single_quoted_doubled};
+use super::escape::{elvish_single_quoted, fish_single_quoted, posix_single_quoted, powershell_single_quoted};
 use ocx_config::shell::GRANT_SIGNALS;
 
 /// The temp-file template the emitted body hands `mktemp` for its stamp.
@@ -111,7 +111,7 @@ pub fn redefinition(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Opt
         Shell::Zsh => Some(posix_redefinition(&binary, "zsh", watch_paths)),
         Shell::Fish => Some(fish_hook_function(&fish_single_quoted(&binary), watch_paths)),
         Shell::PowerShell => Some(power_shell_reconcile_function(
-            &single_quoted_doubled(&binary),
+            &powershell_single_quoted(&binary),
             watch_paths,
         )),
         Shell::Elvish | Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Nushell | Shell::Batch => None,
@@ -392,7 +392,7 @@ fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
     // `Continue` preferences in the hook's own scope plus the `catch`, so a hook error never fails a prompt.
     // `Remove-Variable -Scope Local` restores them; reading the PS 5.1-absent preference throws under StrictMode.
     // `$?` and `$LASTEXITCODE` are captured on entry and restored, `$?` by the final statement's outcome.
-    let quoted = single_quoted_doubled(binary);
+    let quoted = powershell_single_quoted(binary);
     // Probe the live `prompt` body, not a marker variable a clobber leaves behind, so a clobber is re-wrapped.
     // `"$(…)"`, not `.ToString()`, which throws on `$null` under StrictMode.
     // ponytail: an owner that *wraps* ours makes a re-source re-wrap, so reconcile runs twice.
@@ -446,7 +446,7 @@ fn power_shell_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String
         .map(|path| {
             format!(
                 " -or [System.IO.File]::GetLastWriteTimeUtc('{path}') -gt $global:__ocxStamp",
-                path = single_quoted_doubled(&path.to_string_lossy())
+                path = powershell_single_quoted(&path.to_string_lossy())
             )
         })
         .collect();
@@ -473,7 +473,7 @@ fn power_shell_apply(quoted_binary: &str) -> String {
 fn power_shell_wrapper(binary: &str) -> String {
     // `$?` is replayed with `Write-Error -ErrorAction Ignore`, or it reads true after a failed `ocx`.
     // The `finally` reconciles even when the caller's `Stop` preferences make the call throw.
-    let quoted = single_quoted_doubled(binary);
+    let quoted = powershell_single_quoted(binary);
     // Workaround for PowerShell/PowerShell#21208: the binder eats a function call's first bare `--`.
     // Re-insert it from `$MyInvocation.Line` (PS 5.1 has no `.Statement`), matching this call by column,
     // or a nested or `;`-joined `ocx` is taken for it; `-x:1` binds as two `$args`.
@@ -580,7 +580,7 @@ fn elvish_hook_closure(quoted_binary: &str) -> String {
 fn elvish_registration(binary: &str) -> String {
     // No watch-set term: elvish has no in-shell mtime, and an external `test -nt` would exec every prompt.
     // So an in-place `ocx.toml` edit reconciles only at the next `cd` or `ocx` call.
-    let quoted = single_quoted_doubled(binary);
+    let quoted = elvish_single_quoted(binary);
     // The marker lives in `$edit:before-readline`, never the env: `exec elvish` keeps both and would skip registering.
     let body = format!(
         "if (not {probe}) {{\n\
@@ -589,19 +589,19 @@ fn elvish_registration(binary: &str) -> String {
         probe = elvish_already_registered("$edit:before-readline"),
         closure = elvish_hook_closure(&quoted),
     );
-    format!("try {{ eval '{}' }} catch e {{ }}", single_quoted_doubled(&body))
+    format!("try {{ eval '{}' }} catch e {{ }}", elvish_single_quoted(&body))
 }
 
 // Clears the recorded directory instead of reconciling: with no watch term a call would reconcile after every `ocx`.
 // So elvish gives up same-line chaining; `ocx add --global foo && foo` sees the change a prompt later.
 fn elvish_wrapper(binary: &str) -> String {
     // `edit:add-var`, not `fn`: a `fn` defined inside `eval` never escapes it.
-    let quoted = single_quoted_doubled(binary);
+    let quoted = elvish_single_quoted(binary);
     // `defer` clears even when the binary raises, and the exception propagates unchanged.
     let body = format!(
         "edit:add-var ocx~ {{|@__ocx_args| defer {{ set-env {ELVISH_PWD_KEY} '' }}; '{quoted}' $@__ocx_args }}"
     );
-    format!("try {{ eval '{}' }} catch e {{ }}", single_quoted_doubled(&body))
+    format!("try {{ eval '{}' }} catch e {{ }}", elvish_single_quoted(&body))
 }
 
 #[cfg(test)]
@@ -2812,7 +2812,7 @@ mod live_power_shell_wrapper_tests {
 
         let mut script = format!(
             "{wrapper}\n$echo = '{echo}'\n$v = 'VAL'; $arr = @('p', 'q'); $h = @('s1', 's2')\n",
-            echo = single_quoted_doubled(&echo.to_string_lossy())
+            echo = powershell_single_quoted(&echo.to_string_lossy())
         );
         for (name, wrapped, oracle) in CASES {
             script.push_str(&format!(
