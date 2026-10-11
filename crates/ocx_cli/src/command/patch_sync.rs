@@ -44,7 +44,7 @@ fn platforms_or_concrete_matrix(explicit: Option<ocx_oci::Platform>) -> Vec<ocx_
     }
 }
 
-/// The five OS/architecture pairs OCX ships; keep in sync with `product-context.md` "Platform support".
+/// The six OS/architecture pairs OCX ships; keep in sync with `product-context.md` "Platform support".
 fn concrete_ship_platforms() -> Vec<ocx_oci::Platform> {
     [
         "linux/amd64",
@@ -52,6 +52,7 @@ fn concrete_ship_platforms() -> Vec<ocx_oci::Platform> {
         "darwin/amd64",
         "darwin/arm64",
         "windows/amd64",
+        "windows/arm64",
     ]
     .iter()
     .map(|platform| {
@@ -72,14 +73,28 @@ mod tests {
     #[test]
     fn absent_platform_covers_full_concrete_matrix() {
         let resolved = platforms_or_concrete_matrix(None);
-        assert_eq!(resolved.len(), 5, "must cover all five concrete platforms");
+        assert_eq!(resolved.len(), 6, "must cover all six concrete platforms");
         let displayed: Vec<String> = resolved.iter().map(ToString::to_string).collect();
-        for expected in ["darwin/arm64", "windows/amd64"] {
+        for expected in ["darwin/arm64", "windows/amd64", "windows/arm64"] {
             assert!(
                 displayed.iter().any(|p| p == expected),
                 "resolved platform set must include non-host platform '{expected}'; got {displayed:?}"
             );
         }
+    }
+
+    /// The ship matrix is `SUPPORTED_PAIRS` minus the wasm labels (explicit `--platform` only), so a
+    /// pair added there is a pair this fan-out must decide on.
+    #[test]
+    fn concrete_matrix_is_supported_pairs_minus_wasm() {
+        let matrix: std::collections::BTreeSet<String> =
+            concrete_ship_platforms().iter().map(ToString::to_string).collect();
+        let expected: std::collections::BTreeSet<String> = ocx_oci::platform::SUPPORTED_PAIRS
+            .iter()
+            .filter(|(_, arch)| *arch != ocx_oci::Architecture::Wasm)
+            .map(|(os, arch)| format!("{os}/{arch}"))
+            .collect();
+        assert_eq!(matrix, expected);
     }
 
     /// An explicit `--platform` value narrows the fan-out to that single
