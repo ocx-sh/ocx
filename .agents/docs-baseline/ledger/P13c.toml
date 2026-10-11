@@ -1,0 +1,71 @@
+[[row]]
+item = "announcing"
+page = "docs/authoring/announcing.md"
+action = "moved"
+home = "publishing/announce.md"
+
+[[row]]
+item = "building-and-pushing"
+page = "docs/authoring/building-pushing.md"
+action = "moved"
+home = "publishing/build-and-push.mdx"
+
+[[row]]
+item = "signing-after-push"
+page = "docs/authoring/building-pushing.md"
+action = "moved"
+home = "publishing/sign-a-release.md#supply-chain-signing"
+
+[[row]]
+item = "bundle-anatomy"
+page = "docs/authoring/bundle-anatomy.md"
+action = "moved"
+home = "publishing/bundle-anatomy.mdx"
+
+[[row]]
+item = "declaring-dependencies"
+page = "docs/authoring/dependencies.md"
+action = "moved"
+home = "publishing/declare-dependencies.md"
+
+[[row]]
+item = "env-surface"
+page = "docs/authoring/env-surface.md"
+action = "moved"
+home = "publishing/env-surface.md"
+
+[[row]]
+item = "authoring"
+page = "docs/authoring/index.md"
+action = "moved"
+home = "publishing/index.mdx"
+
+[[row]]
+item = "migration-patterns"
+page = "docs/authoring/migration.md"
+action = "moved"
+home = "publishing/repackage-releases.mdx"
+
+[[row]]
+item = "multi-platform-packages"
+page = "docs/authoring/multi-platform.md"
+action = "moved"
+home = "publishing/multi-platform.mdx"
+
+[[row]]
+item = "testing-locally"
+page = "docs/authoring/testing.md"
+action = "moved"
+home = "publishing/test-locally.mdx"
+
+[[row]]
+item = "scripted-tests-ocx-api"
+page = "docs/authoring/testing.md"
+action = "moved"
+home = "reference/script-host-api.md#ocx-fns"
+
+[[row]]
+item = "scripted-tests-expect-api"
+page = "docs/authoring/testing.md"
+action = "moved"
+home = "reference/script-host-api.md#expect-fns"

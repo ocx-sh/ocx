@@ -101,10 +101,10 @@ pub struct PackageTest {
     /// The value `-` reads the script SOURCE from stdin (parsed with the
     /// filename label `<stdin>`). This is independent of the per-call
     /// `ocx.run(stdin=...)` kwarg, which feeds a *child* process's stdin.
-    #[clap(long, conflicts_with = "command")]
+    #[clap(long, conflicts_with = "command", value_name = "PATH|-")]
     script: Option<PathBuf>,
 
-    /// Write a JUnit XML report for the scripted run to PATH.
+    /// Write a JUnit XML report for the scripted run to PATH, truncating an existing file, even on a red run; needs `--script`, and an unwritable path exits 74.
     ///
     /// Requires `--script`; cannot be combined with a trailing command. Parent
     /// directories are created; an existing file is truncated, never merged -
@@ -113,7 +113,7 @@ pub struct PackageTest {
     /// GitLab's `artifacts:reports:junit` keeps results from different jobs in
     /// separate suites; a glob gathers only what one job wrote. Every per-leg
     /// entry carries the same package identifier as its label, so see the
-    /// [one path per platform](https://ocx.sh/docs/authoring/testing#scripted-tests-junit-per-platform)
+    /// [one path per platform](https://ocx.sh/docs/publishing/script-tests/#scripted-tests-junit-per-platform)
     /// documentation for the shape to design for.
     ///
     /// Written whenever the scripted run is reached, including a red run and an

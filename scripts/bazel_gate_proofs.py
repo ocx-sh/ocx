@@ -90,11 +90,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #
 #   kind(rust_library, //crates/...)          22
 #   kind(rust_proc_macro, //crates/...)        1   (`ocx_exit_derive`)
-#   kind(rust_test, //crates/...)             42
+#   kind(rust_test, //crates/...)             43
 #   kind(rust_binary, //crates/...)            4   (`ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
 #                                                  `ocx_sdkgen:ocx_sdkgen_bin`, `ocx_shim:ocx_shim`)
 #   kind(rust_doc_test, //crates/...)         22
-#   kind("^rust_.*rule$", //crates/...)       91
+#   kind("^rust_.*rule$", //crates/...)       92
 #   kind(filegroup, //crates/...)              6
 #   kind(rule, //crates/...)                  99   (floor 97: the `sh_test` seam twin and
 #                                                  the `ocx_schema:schemas` genrule are not
@@ -142,7 +142,7 @@ CRATES_PROC_MACRO_TARGETS = 1
 """`ocx_exit_derive:ocx_exit_derive`, a `rust_proc_macro`. It has no unit-test or doctest target of its own:
 its expansions are tested by `ocx_exit:derive_test` and the `compile_fail` doctests on `ocx_exit`."""
 
-CRATES_TEST_TARGETS = 42
+CRATES_TEST_TARGETS = 43
 """22 lib unit-test targets + 18 `crates/<name>/tests/*.rs` integration targets
 + 2 `[[bin]]` unit-test targets (`ocx_cli:ocx_cli_bin_test`,
 `ocx_shim:ocx_shim_bin_test`).
@@ -199,12 +199,12 @@ CRATES_RULE_TARGETS = (
     + CRATES_TEST_TARGETS
     + CRATES_BINARY_TARGETS
     + CRATES_DOC_TEST_TARGETS
-)  # 91
+)  # 92
 """Every **Rust** rule target under `//crates/...` — the stage-1 tag-guard
 floor, which reads `kind("^rust_.*rule$", ...)` and so does not see filegroups."""
 
 DRIFT_PACKAGE_FLOOR = CRATE_PACKAGES + EXTERNAL_PACKAGES  # 24
-DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 97
+DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 98
 """`bazel:build:drift` reads `kind(rule, //crates/...)`, which is every rule
 target of every kind, so its target floor counts the filegroups too. The
 package floor keeps `+ EXTERNAL_PACKAGES` rather than dropping the term: the
@@ -1645,7 +1645,7 @@ def prove_counts() -> int:
     expect(CRATE_PACKAGES == 24, f"crate packages is {CRATE_PACKAGES}, the tree has 24")
     expect(EXTERNAL_PACKAGES == 0, f"external packages is {EXTERNAL_PACKAGES}, the tree has 0")
     expect(CRATES_LIB_TARGETS == 22, f"crates lib targets is {CRATES_LIB_TARGETS}, the tree has 22")
-    expect(CRATES_TEST_TARGETS == 42, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 42")
+    expect(CRATES_TEST_TARGETS == 43, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 43")
     expect(CRATES_BINARY_TARGETS == 4, f"crates binaries is {CRATES_BINARY_TARGETS}, the tree has 4")
     expect(
         CRATES_DOC_TEST_TARGETS == CRATES_LIB_TARGETS == 22,
@@ -1656,9 +1656,9 @@ def prove_counts() -> int:
         CRATES_FILEGROUP_TARGETS == 6,
         f"crates filegroups is {CRATES_FILEGROUP_TARGETS}, the tree has 6",
     )
-    expect(CRATES_RULE_TARGETS == 91, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 91")
+    expect(CRATES_RULE_TARGETS == 92, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 92")
     expect(DRIFT_PACKAGE_FLOOR == 24, f"package floor is {DRIFT_PACKAGE_FLOOR}, the tree has 24")
-    expect(DRIFT_TARGET_FLOOR == 97, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 97")
+    expect(DRIFT_TARGET_FLOOR == 98, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 98")
     expect(
         CAST_GENRULE_TARGETS == 40,
         f"cast genrules is {CAST_GENRULE_TARGETS}, the tree has 40 (39 casts + manifest_drift)",
@@ -1674,8 +1674,8 @@ def prove_counts() -> int:
     expect(GIF_SUPPORT_TARGETS == 3, f"gif support targets is {GIF_SUPPORT_TARGETS}, the tree has 3")
     expect(GIF_RULE_TARGETS == 42, f"gif rule targets is {GIF_RULE_TARGETS}, the tree has 42")
     expect(
-        STAGE_FLOORS["stage-3"].minimum == 184,
-        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 184",
+        STAGE_FLOORS["stage-3"].minimum == 185,
+        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 185",
     )
     expect(
         ACCEPTANCE_MODULE_TARGETS == 178,
@@ -1686,8 +1686,8 @@ def prove_counts() -> int:
         f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 187",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 379,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 379",
+        STAGE_FLOORS["stage-4"].minimum == 380,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 380",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1696,8 +1696,8 @@ def prove_counts() -> int:
         "read the acceptance modules and nothing else would clear it",
     )
     print(
-        "counts  OK : 24 = 24 + 0, 91 = 22 + 1 + 42 + 4 + 22, 97 = 91 + 6, 45 = 40 + 5, 42 = 39 + 3, "
-        "184 = 97 + 45 + 42, 187 = 178 + 9, 379 = 184 + 187 + 8 — internal consistency only; "
+        "counts  OK : 24 = 24 + 0, 92 = 22 + 1 + 43 + 4 + 22, 98 = 92 + 6, 45 = 40 + 5, 42 = 39 + 3, "
+        "185 = 98 + 45 + 42, 187 = 178 + 9, 380 = 185 + 187 + 8 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )

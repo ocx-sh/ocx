@@ -1,0 +1,208 @@
+---
+title: "Route traffic through a corporate mirror"
+description: "Send registry traffic through an Artifactory, Nexus or Harbor mirror."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Send OCX registry traffic through your organization's artifact manager, without changing any package identity or digest.<a id="mirrors"></a>
+
+Many corporate and air-gapped networks firewall-block external registries such as `ghcr.io`, `docker.io`, `quay.io` and `ocx.sh`. The organization runs an artifact manager ([JFrog Artifactory][artifactory], [Sonatype Nexus][nexus] or [Harbor][harbor]) with proxy repositories that cache those upstreams. OCX routes its registry traffic to the mirror, and the canonical package identity and the content-addressed digest stay unchanged.
+
+## Map a host to its mirror \{#mirrors-config\}
+
+The `[mirrors]` config table maps each host to its mirror endpoint. OCX appends the upstream repository path after the mirror's repo-key prefix and contacts only the mirror. There is no origin fallback: in a firewall-controlled network, falling through to the internet is the opposite of intent.
+
+```toml
+# ~/.ocx/config.toml  (or $XDG_CONFIG_HOME/ocx/config.toml)
+[mirrors]
+"ghcr.io" = "https://artifactory.example.com/ghcr-remote"
+"docker.io" = "https://artifactory.example.com/dockerhub-remote"
+```
+
+With this config, `ocx package install ghcr.io/owner/tool:1.2` fetches the manifest and blobs from `artifactory.example.com/ghcr-remote/owner/tool`. The canonical identifier `ghcr.io/owner/tool:1.2` never changes.
+
+To confirm the traffic goes through the mirror, block `ghcr.io` on the machine, or watch the mirror's access log, and run the install again. It succeeds only when the mirror answers.
+
+A plain string, as above, redirects every kind of traffic OCX sends that host. A host that also serves an [ocx-index][in-depth-indices-public] can be split per role instead. See [Route index traffic through a mirror][in-depth-indices-mirroring].
+
+## Relation to the default registry \{#mirrors-default-registry\}
+
+[`[registry] default`][config-registry-default] and `[mirrors]` are independent and compose. Default injection expands a registry-less identifier (for example `kitware/cmake:3.28` to `ocx.sh/kitware/cmake:3.28`) at parse time, before any mirror rewrite. If you also configure a `[mirrors]` entry for `ocx.sh`, OCX mirrors that default-injected identifier. A fully air-gapped setup can mirror every registry the project uses, including the default one.
+
+Pinning `ocx.sh` at a mirror's **registry** endpoint has one deliberate side effect. It suppresses the [compiled-in index][config-registries-index] for that namespace, which then resolves as a plain OCI registry through the mirror. A site that routes `ocx.sh` to its own artifact manager should not start dialling `index.ocx.sh`, a host it never allow-listed. OCX logs a warning naming the namespace it dropped, because the index's digest verification and yank gate go with it.
+
+Two limits keep the suppression from firing where it was not meant to:
+
+- It applies only to a config file you control: the compiled defaults, the discovered chain, `--config` and `OCX_CONFIG`. A `[mirrors]` entry arriving through the [`[managed]`][config-managed] tier or [`OCX_MIRRORS`][env-mirrors] redirects traffic but cannot suppress the index. Neither a remotely published payload nor an inherited variable may drop a namespace off the verified resolution path and its yank gate.
+- It applies only to the `registry` role. The `index` role is keyed on the index endpoint's own host, so `"ocx.sh" = { index = ... }` redirects nothing for the `ocx.sh` namespace.
+
+To keep the verified index path *and* pin the physical registry, name the index explicitly. A written `index` outranks the compiled-in one and is never suppressed. Redirect the index endpoint itself with the `index` role on its own host:
+
+```toml
+[registries."ocx.sh"]
+index = "https://index.ocx.sh"                     # explicit: survives the mirror entry
+
+[mirrors]
+"ocx.sh" = "https://artifactory.corp/ocx-remote"
+"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }
+```
+
+## Lockfile portability \{#mirrors-lockfile\}
+
+OCX stores the **canonical upstream host and digest** in `ocx.lock`, never the mirror host. A lock file produced behind a corporate mirror is valid on a machine with direct internet egress, and the reverse holds too. The mirror is a transport detail, and the identity of the content is unchanged.
+
+:::note[Why the mirror host never appears in the lock]
+OCX derives every on-disk path from the canonical identifier: blob store, package store, local index and symlinks. The mirror only changes which server is contacted, and the local object store is keyed the same way with or without a mirror configured. That is what makes the lock portable, because `sha256:abc123...` identifies the same bytes regardless of which server served them.
+:::
+
+## Unpinned tags and the trust model \{#mirrors-trust\}
+
+Installing with an unpinned tag such as `kitware/cmake:3.28` makes OCX trust the mirror's tag to digest resolution. It extends the same trust it gives the origin registry. The mirror could, in principle, map the tag to different content. After resolution, OCX verifies the blob digest against the manifest, so it rejects a tampered blob. The manifest itself still came from the mirror's tag resolution.
+
+For tamper-proof installs, pin with [`ocx lock`][cmd-lock]. Once a digest is recorded in `ocx.lock`, OCX never re-resolves the tag, and the mirror cannot substitute a different manifest undetected.
+
+Publisher-signature verification validates the publisher's identity independent of the mirror. See [Verify what you install](./verify-installs.mdx#supply-chain-verification).
+
+## Auth for the mirror \{#mirrors-auth\}
+
+Authenticate against the **mirror** host, not the upstream. Set `OCX_AUTH_<mirror_slug>_*`, replacing non-alphanumeric characters with underscores, or run `ocx login <mirror-host>`. OCX never uses the upstream's credentials on the read path. [Authenticate with a private registry](./authenticate.mdx) covers both methods.
+
+```sh
+export OCX_AUTH_artifactory_example_com_TYPE=bearer
+export OCX_AUTH_artifactory_example_com_TOKEN="<artifactory-token>"
+```
+
+## Set mirrors in CI via `OCX_MIRRORS` \{#mirrors-env\}
+
+For CI or container setups where the command line is not controlled, set mirrors via `OCX_MIRRORS` instead of a config file. The value is a JSON object:
+
+```sh
+export OCX_MIRRORS='{"ghcr.io":"https://artifactory.example.com/ghcr-remote"}'
+```
+
+Each key is a host being redirected. Each value takes the same union as `[mirrors]` in the config file. A plain string redirects both the `registry` and `index` roles for that host. An object `{"registry"?: "...", "index"?: "..."}` splits them. A role's value has the form `scheme://host[/repo-key-prefix]`.
+
+```sh
+export OCX_MIRRORS='{"ghcr.io":"https://artifactory.example.com/ghcr-remote","index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}'
+```
+
+`OCX_MIRRORS` wins over `[mirrors]` on a per-host, per-role basis. A role present in a host's entry replaces the config entry for that role only. Roles and hosts it omits still come from `[mirrors]`. OCX forwards the variable to every subprocess it spawns, so nested invocations such as generated launchers and `ocx exec` see the same mirror map.
+
+A malformed value is a hard startup error, never an empty mirror map. Falling back to no mirrors would silently route reads to the firewall-blocked origin, which is the failure replace semantics exist to prevent. OCX aborts and names the problem when:
+
+- the value is not valid JSON,
+- a per-host value is neither a string URL nor an object with only `registry` and `index` string fields, or
+- a mirror value starts with `http://` and the mirror host is not plaintext-eligible, as described under [plain HTTP](#mirrors-value).
+
+## Mirror values \{#mirrors-value\}
+
+A `[mirrors]` value is a string, which redirects both roles for the host, or an object with optional `registry` and `index` string fields. A role left out of the object means no redirect for that role, with no fallthrough to the other form. Each role's value is `scheme://host[/repo-key-prefix]`, and OCX builds the registry pull path as `<mirror-host>/<prefix>/<upstream-repo>`:
+
+```toml
+# Artifactory path-based routing (repository-path method):
+# ghcr.io/owner/tool:1.2  →  artifactory.example.com/ghcr-remote/owner/tool:1.2
+[mirrors]
+"ghcr.io" = "https://artifactory.example.com/ghcr-remote"
+
+# Subdomain / host-only form (empty prefix):
+# ghcr.io/owner/tool:1.2  →  ghcr-remote.artifactory.example.com/owner/tool:1.2
+[mirrors]
+"ghcr.io" = "https://ghcr-remote.artifactory.example.com"
+```
+
+- **Artifactory.** The registry-role value is the Docker/OCI *pull* path, `<host>/<repo-key>`. It is not the admin REST path (`/artifactory/api/docker/<repo-key>`), which is not a valid pull URL. Use what you would give `docker pull` or `oras pull`.
+- **Nexus 3.83+** path routing uses the same `<host>/<repo-key>` shape with the repo key alone: `"ghcr.io" = "https://nexus.corp/docker-proxy"`. The legacy `/repository/<name>` form is not used. Deployments that expose each repository on its own port use the host-only form (`https://nexus.corp:8082`).
+- **Harbor** follows `<host>/<project-name>/<image>` for its project-level proxy caches.
+- **Docker Hub `library/` images.** OCX appends the repository path verbatim and does not expand short names. Use the fully qualified form (`docker.io/library/alpine`) so the mirror URL resolves to `<mirror>/<prefix>/library/alpine`.
+- **Index role.** The same `scheme://host[/path-prefix]` shape applies to `index`, which covers every root, index-object and catalog fetch of a namespace resolved through the [ocx-index protocol][in-depth-indices-public]. A project resolving packages through [index.ocx.sh][index-ocx-sh] sets it on that host: `"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }`. The two roles are path-disjoint, so one object entry can point both at the same host. See [Route index traffic through a mirror][in-depth-indices-mirroring].
+- **Scheme default.** A value with no `scheme://` prefix (`"nexus.corp/docker-proxy"`) defaults to `https`.
+- **Plain HTTP.** A role value starting with `http://` needs the mirror host to be plaintext-eligible. Set [`insecure = true`](#mirrors-registries) on its own `[registries.<name>]` entry, or list the host in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. The gate applies to both roles, and OCX never silently downgrades TLS. If the host is in neither, OCX exits before any network activity, and the error names both ways to allow it.
+- **Malformed values.** An empty string, or an object whose present fields are all empty, is a hard error when the mirror map is resolved. A role with a non-string value (`{ registry = 5 }`) is a parse error naming the host and field. An entry left with no recognized role contributes no mirror.
+
+Tiers merge `[mirrors]` **field-wise**. OCX normalizes every value to its two roles first. A higher tier that sets only `index` for a host leaves a lower tier's `registry` role untouched, and a plain string sets both. `OCX_MIRRORS` overrides on the same per-host, per-role basis. A `[mirrors]` entry at the system scope locks per role (see [system locks][in-depth-configuration-locks]).
+
+| Concern | Behavior |
+|---------|----------|
+| `--offline` | No network activity at all, and mirrors are not consulted |
+| `--remote` | Mutable lookups (tag list, tag to digest resolution) hit the **mirror**, not the origin |
+| `push` | Not mirror-redirected. The canonical upstream host is contacted, because proxy repositories are read-only and redirecting a push would fail confusingly |
+| `ocx index catalog`, `ocx index update` | For a namespace resolved through the ocx-index protocol, every fetch honors that host's **index** role only. Against a plain OCI registry mirror, the catalog lists only repositories a proxy-type mirror has cached, which is a registry-side constraint |
+
+A fetch routed through a mirror that fails names both the physical reference it fetched and the upstream host the mirror is configured for. You can diagnose the error without cross-referencing `[mirrors]` by hand.
+
+OCX refuses any mirror answer to a manifest request that is not a manifest. Examples are an HTML portal page and a login redirect from a dead proxy repository. It does so before digest verification, with a [data error][exit-codes] naming the response's content type. Without that check, the HTML body would reach the digest comparison and report a digest mismatch for a problem that was never about digests.
+
+## Per-registry settings \{#mirrors-registries\}
+
+Two more tables shape how a registry is reached. `[registry] default` (default `ocx.sh`, overridden by [`OCX_DEFAULT_REGISTRY`][env-default-registry]) is the literal identifier prefix prepended to bare identifiers: `kitware/cmake:3.28` becomes `<default>/kitware/cmake:3.28`. It is a literal prefix, the same string used as a `[registries.<name>]` key, and OCX never dereferences it through another field.
+
+`[registries.<name>]` holds per-registry settings. The key is the registry's identifier prefix, matched exactly. It is the same `host[:port]` string package identifiers carry, such as `ocx.sh`, `ghcr.io` or `registry.corp:5000`. The plural form mirrors [Cargo's convention][cargo-registries] and avoids a TOML collision with the singular `[registry]`. Three fields are defined (`index`, `trusted_hosts` and `insecure`), and OCX ignores unknown fields in an entry.
+
+:::caution[The key is the package name's domain, not the host the bytes live on]
+A package named `ocx.corp.example/tools/adrs` whose index root points at `oci://gitlab.corp.example:5050/...` is configured under `[registries."ocx.corp.example"]`. An entry keyed on `gitlab.corp.example:5050` matches no package name and configures nothing, so its `trusted_hosts` never applies.
+:::
+
+**`index`** selects the resolution protocol for the namespace (reference). An entry that sets it resolves through the ocx-index protocol against that base URL. An entry without it, or no entry, resolves as a plain OCI registry.
+
+- There is exactly one protocol per namespace, and the index is [authoritative for the whole registry][in-depth-indices-declared-names]. OCX never falls back from the index protocol to plain OCI tags, or the reverse.
+- A name the index has no root for fails with an error naming that index. An `index.ocx.sh` outage blocks `ocx.sh/...` resolution, while other namespaces are unaffected.
+- The compiled defaults ship `[registries."ocx.sh"] index = "https://index.ocx.sh"`. A higher tier can restate it with another base URL, and `index = ""` is the off-switch that resolves the namespace as a plain OCI registry.
+- `index` needs no `<dialect>+` URL-scheme prefix, because OCX has one index wire dialect. Omitting `index` does not clear an inherited value, since tiers merge field-wise. Only an explicit `index = ""` does.
+- A `file://` base reads the index straight off disk. See [Serving and consuming the tree][in-depth-indices-servable].
+
+:::note[Why the resolved physical pointer uses `oci://`, never `http(s)`]
+A [derived index's][in-depth-indices-dispatch] local root document records the package's physical location as `oci://<host>/<repository>`. That scheme marks the reference *kind*, an OCI registry repository, and not a transport to dial. Transport is a host-side decision: a `[mirrors]` entry's own scheme for that host, or the plain-HTTP allowance the host carries. If the pointer carried `http://` or `https://`, a publisher able to write that shared identity data could force every consumer down to plaintext.
+:::
+
+**`trusted_hosts`** (array of hostnames or CIDR blocks) is the SSRF escape hatch for the namespace's physical hosts ([reference][config-registries-trusted-hosts]). Before OCX follows an index root's `oci://<host>/<repository>` pointer, it refuses any host that resolves to a private, loopback, link-local or cloud-metadata address. The pointer is remote-controlled data, so the guard is default-on and needs no configuration for public registries. Listing a private registry's host or network here restores access for exactly this namespace.
+
+```toml
+[registries."ocx.corp.example"]                 # the domain in the package name
+index = "https://ocx.corp.example"
+trusted_hosts = ["gitlab.corp.example"]          # where the roots point; no port
+```
+
+Hostnames match without a port, so `"registry.corp:5000"` never matches. Write `"registry.corp"`. A refusal names the key: `list it (bare host, no port) under [registries."ocx.corp.example"].trusted_hosts`. No command-line flag widens the trust set, so a lower tier or a CLI override cannot broaden a system-locked entry's `trusted_hosts`. The managed tier can distribute the entry ([reference][config-registries-trusted-hosts]). Behind a configured [HTTP proxy][env-external-proxies], OCX judges the list by name alone, because only the proxy can resolve the physical host.
+
+**`insecure`** (boolean, default `false`) contacts the registry over plain HTTP. It is the per-registry spelling of `OCX_INSECURE_REGISTRIES`, and the two are a **union**: a host named in either is plaintext-eligible.
+
+```toml
+[registries."registry.corp:5000"]
+insecure = true
+```
+
+- Matching is exact on `host[:port]` and case-sensitive, so an entry for `registry.corp` does not cover `registry.corp:5001`. Write the resolved registry host. `docker.io` resolves to `index.docker.io` and is never served over plain HTTP, so OCX accepts no spelling of it.
+- `insecure = false` below the system tier restates the default and does not revoke a host the environment granted. A system-scope `insecure = false` locks the host shut against the environment list too. The [managed tier][config-managed] can distribute the entry ([reference][config-registries-insecure]).
+- The allowance covers transport and nothing else. OCX still refuses an HTTPS registry that answers with a plaintext token-service realm, and an HTTPS request redirected to `http://`. A token service on another host or port needs its own entry.
+
+Plain HTTP sends credentials in the clear. Use the entry for a lab or an isolated network, never for reaching a registry across the public internet.
+
+:::tip[Learn more]
+[Environment reference: `OCX_MIRRORS`][env-mirrors] covers JSON encoding, per-host per-role precedence and subprocess forwarding.
+If the artifact manager in front of your mirror also intercepts TLS with an internal CA, see [Ship a corporate CA][managed-config-ca]. That beats installing the CA system-wide.
+:::
+
+[artifactory]: https://jfrog.com/artifactory/
+[nexus]: https://www.sonatype.com/products/sonatype-nexus-repository
+[harbor]: https://goharbor.io/
+[index-ocx-sh]: https://index.ocx.sh
+[cmd-lock]: ../reference/command-line/commands.md#lock
+[config-registry-default]: ../reference/configuration.md#keys-registry-default
+[config-managed]: ../reference/configuration.md#keys-managed
+[config-registries-trusted-hosts]: ../reference/configuration.md#keys-registries-trusted-hosts
+[config-registries-insecure]: ../reference/configuration.md#keys-registries-insecure
+[env-mirrors]: ../reference/environment.md#ocx-mirrors
+[managed-config-ca]: ../integration/proxy-and-ca.md
+[config-registries-index]: ../reference/configuration.md#keys-registries-index
+[in-depth-indices-dispatch]: ../explanation/local-index.md#local-dispatch
+[in-depth-indices-public]: ../explanation/public-index.md#public-index
+[in-depth-indices-mirroring]: #mirrors-value
+[in-depth-configuration-locks]: ../explanation/managed-configuration.md#managed-locks
+[cargo-registries]: https://doc.rust-lang.org/cargo/reference/registries.html
+[env-default-registry]: ../reference/environment.md#ocx-default-registry
+[env-insecure-registries]: ../reference/environment.md#ocx-insecure-registries
+[env-external-proxies]: ../integration/proxy-and-ca.md#proxy
+[in-depth-indices-declared-names]: ../explanation/public-index.md#public-index-declared-names
+[in-depth-indices-servable]: serve-an-index.md#servable-consuming
+[exit-codes]: ../reference/exit-codes.md

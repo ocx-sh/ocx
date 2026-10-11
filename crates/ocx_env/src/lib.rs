@@ -380,7 +380,7 @@ pub fn all() -> impl Iterator<Item = &'static EnvVar> {
 ///
 /// Adding one, in the same change: declare it `secret, child = Scrub` in `vars.rs`; if a sibling
 /// stays inherited, say why on both declarations; add its row to the credential table in
-/// `.claude/rules/subsystem-cli.md`; and state in `website/src/docs/reference/environment.md`
+/// `.claude/rules/subsystem-cli.md`; and state in `website/src/content/docs/reference/environment.md`
 /// that it is never forwarded to child processes.
 pub fn credential_keys() -> impl Iterator<Item = &'static str> {
     all().filter(|var| var.child == Child::Scrub).map(|var| var.name)

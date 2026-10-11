@@ -13,15 +13,17 @@ use crate::options;
 
 /// Show description metadata (title, description, keywords) for one or more
 /// packages.
-///
-/// Reads each description from the `__ocx.desc` tag in the registry. With
-/// multiple packages, JSON output is an object keyed by the requested
-/// identifier (`{"<id>": {...}|null}`); plain output prints a header line per
-/// package.
-///
-/// `--save-readme` / `--save-logo` write a fixed filename and so require
-/// exactly one package.
 #[derive(Parser)]
+#[command(long_about = "\
+    Show description metadata (title, description, keywords) for one or more packages.\n\n\
+    Reads each description from the `__ocx.desc` tag in the registry. JSON output carries a \
+    `descriptions` object keyed by the requested identifier, even for a single package. Each \
+    value has `published` and, when it is true, the `title`, `description` and `keywords` the \
+    repository publishes.\n\n\
+    Plain output prints a `== <id> ==` header line per package, even for one, followed by its \
+    description fields. A package in a namespace a configured index serves is read from the \
+    registry that index points it to. The output stays keyed by the identifier as given.\n\n\
+    `--save-readme` / `--save-logo` write a fixed filename and so require exactly one package.")]
 pub struct PackageDescriptionPull {
     /// Save the README to this file or directory (single package only).
     #[clap(long)]

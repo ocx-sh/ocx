@@ -11,32 +11,36 @@ use crate::{api, options};
 pub struct ContextOptions {
     /// Path to the ocx configuration file.
     ///
-    /// Can also be set via the `OCX_CONFIG` environment variable.
+    /// Can also be set via the `OCX_CONFIG` environment variable. The file must exist, or the command exits 79.
     /// To disable config discovery entirely, set `OCX_NO_CONFIG=1`.
+    ///
+    /// The file layers on top of the discovered system, user and `$OCX_HOME` files and of the
+    /// managed tier; it does not replace them.
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 
     /// Project directory, or the project file itself (project-tier toolchain
     /// config).
     ///
-    /// A directory resolves to the `ocx.toml` inside it, so `--project .` and
-    /// `--project /path/to/repo` both work; a file may have any name (like Cargo
-    /// `--manifest-path`). Equivalent env var: `OCX_PROJECT`; `OCX_NO_PROJECT=1`
-    /// disables project discovery. Paths given here or via `OCX_PROJECT` are
-    /// trusted and followed through symlinks. The CWD walk looks for the literal
-    /// name `ocx.toml`, rejects symlinks and continues upward, so a writer with
-    /// control over an intermediate directory cannot redirect discovery.
+    /// A directory resolves to the `ocx.toml` inside it, so `--project .` and `--project
+    /// /path/to/repo` both work; a file may have any name (like Cargo `--manifest-path`).
+    /// Equivalent env var: `OCX_PROJECT`; `OCX_NO_PROJECT=1` disables project discovery.
+    ///
+    /// A path that does not exist exits 79, a directory with no `ocx.toml` exits 64, and an
+    /// unreadable path exits 74.
     #[arg(long, value_name = "PATH")]
     pub project: Option<std::path::PathBuf>,
 
     /// Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project
     /// file in effect, instead of discovering a project by CWD walk.
     ///
-    /// Mutually exclusive with `--project` (both pick a project file).
-    /// Resolution-affecting: forwarded to child ocx processes via
-    /// `OCX_GLOBAL`. Equivalent env var: `OCX_GLOBAL`. The global
-    /// toolchain never composes into project resolution; `ocx exec` and
-    /// `ocx package exec` stay hermetic and never read it.
+    /// Mutually exclusive with `--project`. Resolution-affecting: forwarded to child ocx processes via `OCX_GLOBAL`.
+    ///
+    /// Equivalent env var: `OCX_GLOBAL`. The global toolchain never composes into project
+    /// resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
+    ///
+    /// Before the subcommand `-g` means `--global`; after it, `-g` means `--group`. Nothing
+    /// selects the global toolchain implicitly.
     // `-g` is `--group` after a subcommand (`options/group_selection.rs`); position disambiguates, do not unify.
     #[arg(short = 'g', long, conflicts_with = "project")]
     pub global: bool,
@@ -44,35 +48,37 @@ pub struct ContextOptions {
     /// Route mutable lookups (tag list, catalog, tag->manifest) to the
     /// remote registry instead of the local index.
     ///
-    /// Pure queries (`index list`, `index catalog`, `package description pull`) do
-    /// **not** persist the result to the local index - use
-    /// `ocx index update` to refresh the local index explicitly. Implies
-    /// network access. Combined with `--offline` the result is
-    /// "pinned-only mode": no source contact, and any tag-addressed
-    /// resolution that cannot be satisfied locally errors instead of
-    /// silently falling back. Equivalent env var: `OCX_REMOTE`.
+    /// Pure queries (`index list`, `index catalog`, `package description pull`) do **not** persist
+    /// the result to the local index - use `ocx index update` to refresh the local index
+    /// explicitly. Implies network access.
+    ///
+    /// Combined with `--offline` the result is "pinned-only mode": no source contact. Any
+    /// tag-addressed resolution that cannot be satisfied locally errors instead of silently falling
+    /// back. Equivalent env var: `OCX_REMOTE`.
     #[arg(short = 'r', long)]
     pub remote: bool,
 
     /// Disable all network access.
     ///
-    /// Tag->digest resolution must be satisfied by the local index or a
-    /// digest-pinned identifier; unpinned tags missing from the local
-    /// index will error. Useful for hermetic CI runs and air-gapped
-    /// environments. Equivalent env var: `OCX_OFFLINE`.
+    /// Tag->digest resolution must be satisfied by the local index or a digest-pinned identifier;
+    /// unpinned tags missing from the local index exit 81. Run `ocx index update` online first,
+    /// or switch to a digest-pinned identifier. Useful for hermetic CI runs and air-gapped
+    /// environments.
+    ///
+    /// Equivalent env var: `OCX_OFFLINE`.
     #[arg(long)]
     pub offline: bool,
 
     /// Freeze tag resolution to the local index; never fetch an unknown tag.
     ///
-    /// A tag in the local index resolves from cache and a digest-pinned
-    /// reference (`repo@sha256:...`, or a tag `ocx.lock` pins) still fetches its
-    /// content, but an unpinned tag missing from the index errors instead of
-    /// being fetched. Populate the index first with `ocx index update`, without
-    /// this flag (a frozen index update is refused, exit 81). Scoped to
-    /// packages: patch companions and managed configuration still resolve live.
-    /// Unlike `--offline` and Cargo's `--frozen`, the network stays reachable
-    /// for known content. Conflicts with `--remote`. Env var: `OCX_FROZEN`.
+    /// A tag in the local index resolves from cache. A digest-pinned reference (or a tag
+    /// `ocx.lock` pins) still fetches its content. An unpinned tag missing from the index
+    /// errors. Populate the index first with `ocx index update` (refused under this flag, exit 81).
+    ///
+    /// Scoped to packages: patch companions and managed configuration still resolve live. Unlike
+    /// `--offline` and Cargo's `--frozen`, the network stays reachable for known content.
+    ///
+    /// Conflicts with `--remote`. Env var: `OCX_FROZEN`.
     #[arg(long, conflicts_with = "remote")]
     pub frozen: bool,
 
@@ -89,10 +95,10 @@ pub struct ContextOptions {
 
     /// Maximum number of root packages to pull concurrently.
     ///
-    /// `0` means "use all logical cores" (GNU Parallel convention). Omitting
-    /// the flag falls back to the `OCX_JOBS` environment variable; when
-    /// neither is set, pulls run unbounded. Negative values
-    /// are rejected at parse time.
+    /// `0` means "use all logical cores" (GNU Parallel convention). Omitting the flag falls back to
+    /// the `OCX_JOBS` environment variable; when neither is set, pulls run unbounded.
+    ///
+    /// Negative values are rejected at parse time.
     ///
     /// Caps only the outer dispatch - transitive dependency and layer
     /// extraction stay unbounded.
@@ -102,23 +108,29 @@ pub struct ContextOptions {
 
     /// Overrides the local index home directory.
     ///
-    /// The local index is a collection of per-source subtrees, one per
-    /// configured registry or index, each holding tag roots plus their
-    /// manifest data - so resolution can work fully offline once populated.
-    /// This flag redirects the whole collection, replacing the default at
-    /// `$OCX_HOME/index`. Digest-addressed lookups still consult the local
-    /// index even under `--remote`; only tag listings and tag->manifest
-    /// lookups route to the remote registry there. Can also be set via the
-    /// `OCX_INDEX` environment variable.
+    /// The local index is a collection of per-source subtrees, one per configured registry or
+    /// index, each holding tag roots plus their manifest data. Resolution can work fully
+    /// offline once it is populated. This flag redirects the whole collection, replacing the default at
+    /// `$OCX_HOME/index`.
+    ///
+    /// Digest-addressed lookups still consult the local index even under `--remote`; only tag
+    /// listings and tag->manifest lookups route to the remote registry there. Can also be set via
+    /// the `OCX_INDEX` environment variable.
     #[arg(long, value_name = "PATH")]
     pub index: Option<std::path::PathBuf>,
 
-    /// The log level to use
+    /// The log level to use.
+    ///
+    /// Default `info`. Logs go to stderr, never stdout. At `info` and below a line reads `error: message` or `warning: message`;
+    /// `debug` and `trace` add a timestamp and level. Can also be set via the `OCX_LOG_LEVEL` environment variable.
     #[arg(short, long, value_enum)]
     pub log_level: Option<crate::tracing_init::LogLevel>,
 
     // Read early by `ColorMode::from_args` in `App::run`; declared so clap accepts `--color` and lists it.
     /// When to use ANSI colors in output.
+    ///
+    /// Default `auto`: color only on a terminal. An explicit `--color` outranks `NO_COLOR`,
+    /// `CLICOLOR` and `CLICOLOR_FORCE`.
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = Default::default())]
     pub color: ColorMode,
 }

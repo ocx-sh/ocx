@@ -87,11 +87,11 @@ pub struct PackageCreate {
         Linux target or `--platform any`. Anywhere else the check inspects nothing, so the flag \
         suppresses nothing and says nothing. Nothing else changes - the same metadata and the same \
         layers are written either way. See \
-        https://ocx.sh/docs/reference/command-line#package-create-libc-check for what the check \
+        https://ocx.sh/docs/publishing/build-and-push/#create-libc-check for what the check \
         does.")]
     #[clap(long)]
     no_libc_lint: bool,
-    /// Treat PATH as an archive and bundle what it extracts to
+    /// Treat PATH as an archive (tar, gzip, xz, zstd, bzip2 or zip, read from the file name) and bundle what it extracts to
     #[arg(long_help = "\
         Treat PATH as an archive and bundle what it extracts to\n\n\
         The format is taken from the file name - tar, tar with gzip, xz, zstd or bzip2 compression, \

@@ -153,7 +153,7 @@ distinguishably from a clean build. Three floors, all loud:
 * every invocation must yield a `started.uuid` and at least one
   `TargetComplete`;
 * the invocations together must reach `--min-targets`, default
-  `CRATES_RULE_TARGETS` — **91** — imported from `bazel_gate_proofs` rather
+  `CRATES_RULE_TARGETS` — **92** — imported from `bazel_gate_proofs` rather
   than restated, so the number has one home. 89 is `bazel query 'kind("rust_.*
   rule", //crates/...)'` on this tree today (22 `rust_library` + 41
   `rust_test` + 4 `rust_binary`: `ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
@@ -1773,12 +1773,12 @@ def prove_bep_not_persisted() -> int:
 def prove_counts() -> int:
     """The floor has one home, and this asserts it is still that tree's answer."""
     expect(
-        CRATES_RULE_TARGETS == 91,
-        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 91 today",
+        CRATES_RULE_TARGETS == 92,
+        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 92 today",
     )
     print(
-        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 91, imported from "
-        "bazel_gate_proofs (22 rust_library + 41 rust_test + 4 rust_binary + 22 "
+        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 92, imported from "
+        "bazel_gate_proofs (22 rust_library + 42 rust_test + 4 rust_binary + 22 "
         "rust_doc_test) — "
         "bazel_gate_proofs.prove_counts is what re-checks the number"
     )

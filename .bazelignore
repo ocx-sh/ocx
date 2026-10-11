@@ -38,6 +38,8 @@ test/manual/.ocx-home
 # Node and Python environments.
 node_modules
 website/node_modules
+website/dist
+website/.astro
 test/.venv
 
 # Windows cross-compile SDK cache.

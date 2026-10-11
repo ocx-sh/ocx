@@ -48,6 +48,7 @@ macro_rules! execution_record_version {
 }
 
 pub mod cli;
+pub mod docs;
 pub mod errors;
 pub mod reports;
 

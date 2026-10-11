@@ -1,0 +1,109 @@
+---
+title: "Embed a stable path in your IDE or shell"
+description: "Give an editor, script or shell a package path that survives upgrades."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Use this page to give an editor, script or shell a package path that survives upgrades.
+
+## Pick a path mode \{#stable-paths\}
+
+Package-store paths are content-addressed and change on every upgrade, so never embed them in an IDE config or shell profile. Embed a [symlink][in-depth-storage-symlinks] instead. Four modes cover every case:
+
+| Mode | Flag | Path | Auto-install | Use case |
+|---|---|---|---|---|
+| Package store *(default)* | *(none)* | `~/.ocx/packages/…/<digest>/` | **no** (run `ocx package install` or `ocx package pull` first) | CI, scripts, one-shot queries |
+| Candidate symlink | `--candidate` | `~/.ocx/symlinks/…/candidates/<tag>` | **no** | Pin a specific tag in editor or IDE config |
+| Current symlink | `--current` | `~/.ocx/symlinks/…/current` | **no** | "Always selected" path in shell profiles or IDE settings |
+| Your own link | `--link <PATH>` | `<PATH>` | **no** | A path your build or repository chooses, such as `./.tools/cmake` |
+
+All three symlink modes target the [package root][in-depth-storage-packages] directly. Consumers traverse one level in: `…/content/` for files, `…/entrypoints/` for launchers, or `…/metadata.json` to read the metadata. The `current` symlink exists only after you run `ocx package install --select kitware/cmake:3.32` once, and `--current` fails until then.
+
+```jsonc
+// .vscode/settings.json: path survives every upgrade
+{ "cmake.cmakePath": "~/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin/cmake" }
+```
+
+```sh
+# ~/.bashrc: always resolves to the selected version
+export PATH="$HOME/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin:$PATH"
+```
+
+When `ocx package install --select kitware/cmake:3.32` runs later, `current` is re-pointed. The IDE and the shell pick up the new version with no config edits.
+
+## Write the link where a tool expects it \{#stable-paths-link\}
+
+When a build tool wants the package at a path of its own, let ocx write the link there:
+
+\<\<\< @/_scripts/user-guide/install-link.sh\{sh\}
+
+The link keeps the package safe from [`ocx clean`][cmd-clean] for as long as it exists. A link you create yourself with `ln -s` does not. `ocx clean` may remove the package behind it. Delete the link when you no longer need the package, and the next `ocx clean` reclaims it.
+
+:::tip[Prefer `ocx env` for shells]
+The hand-written `export PATH=…/current/content/bin` above is an escape hatch for tools that cannot evaluate shell at startup, such as IDEs and JSON config files. For interactive shells and project environments, prefer [`ocx env`][cmd-env-root] (toolchain tier) or [`ocx package env`][cmd-package-env] (per package). They compose the full environment, not just `PATH`, and they keep working if a package adds environment entries on upgrade.
+:::
+
+For automation, [`ocx package which`][cmd-which] prints the resolved package root directly:
+
+\<\<\< @/_scripts/user-guide/stable-paths-which.sh\{sh\}
+
+`--candidate`, `--current` and `--link` fail immediately if the required symlink is absent. They never auto-install, and neither does the default package-store mode: `ocx package which` locates a package and downloads nothing. A digest component in the identifier is rejected.
+
+## Run an installed binary on Windows \{#stable-paths-windows\}
+
+On Windows, `ocx package install` and `ocx package select` generate two files per entrypoint in the package's `entrypoints/` directory:
+
+| File | Role |
+|------|------|
+| `<name>.exe` | Native launcher, the sole Windows entry point for all callers |
+| `<name>.shim` | One-line sidecar carrying the absolute package root |
+
+There is no `.cmd` launcher. `.EXE` is always present in the default Windows [`PATHEXT`][windows-pathext]. Bare-name resolution in `cmd.exe`, [PowerShell][powershell-docs] and [Git Bash][git-bash] therefore finds `<name>.exe` with no `PATHEXT` configuration.
+
+The `.exe` shim reads `<name>.shim` at invocation time. It then calls `CreateProcessW` directly to spawn `ocx launcher exec`, and it does not route through `cmd.exe`. Caller arguments never pass through a second `cmd.exe` parse, which closes the [BatBadBut / CVE-2024-24576][batbadbut-advisory] class of argument-injection vulnerability.
+
+:::note[How the shim reaches `ocx`]
+The shim resolves `ocx` using `OCX_BINARY_PIN` if the variable is **defined** in the environment, even if empty. It falls back to `PATH`-resolved `ocx` only when the variable is completely unset. See [`OCX_BINARY_PIN`][env-ocx-binary-pin] for details.
+:::
+
+The committed shim blobs (about 333 KiB for x86_64 and 239 KiB for aarch64) are unsigned in this release. [Authenticode][authenticode] signing via [SignPath Foundation][signpath] is a documented follow-on step. The unsigned shim is fully functional for backend automation such as CI, Bazel and devcontainers. SmartScreen friction applies only to interactive end-user downloads.
+
+:::tip[Learn more]
+[Entry Points In Depth][in-depth-entry-points] covers the launcher ABI, the `launcher exec` wire protocol and clean-env execution.
+The [`OCX_BINARY_PIN` reference][env-ocx-binary-pin] explains how to pin a specific `ocx` binary for nested invocations.
+:::
+
+## Activate tools with direnv \{#stable-paths-direnv\}
+
+For [direnv][direnv]-driven projects, [`ocx direnv init`][cmd-direnv-init] writes an `.envrc` file that calls [`ocx direnv export`][cmd-direnv-export] on each `cd`. The stateless export block is re-evaluated by direnv whenever `ocx.toml` or `ocx.lock` changes.
+
+\<\<\< @/_scripts/user-guide/direnv.sh\{sh\}
+
+This routes through the [project toolchain][in-depth-project], so the binaries on `$PATH` match the digests locked in `ocx.lock`. You need no ambient installs and no manual `export` statements.
+
+:::tip[Learn more]
+[Storage In Depth, Symlinks][in-depth-storage-symlinks] covers the candidate and current design and package-root versus content traversal.
+[Entry Points In Depth][in-depth-entry-points] covers generated launchers, the synthesized PATH and cross-platform shell scripting.
+[Environments In Depth][in-depth-environments] defines what "clean environment" means.
+:::
+
+[windows-pathext]: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/set
+[powershell-docs]: https://learn.microsoft.com/en-us/powershell/
+[git-bash]: https://git-scm.com/downloads
+[batbadbut-advisory]: https://github.com/rust-lang/rust/security/advisories/GHSA-q455-m56c-85mh
+[authenticode]: https://learn.microsoft.com/en-us/windows-hardware/drivers/install/authenticode
+[signpath]: https://about.signpath.io/
+[direnv]: https://direnv.net/
+[cmd-clean]: ../reference/command-line/commands.md#clean
+[cmd-which]: ../reference/command-line/package-consuming.md#which
+[cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
+[cmd-env-root]: ../reference/command-line/commands.md#env-root
+[cmd-direnv-export]: ../reference/command-line/direnv.md#direnv-export
+[cmd-direnv-init]: ../reference/command-line/direnv.md#direnv-init
+[env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin
+[in-depth-storage-packages]: ../explanation/storage.mdx#packages
+[in-depth-storage-symlinks]: ../explanation/storage.mdx#symlinks
+[in-depth-environments]: ../explanation/environments.mdx
+[in-depth-entry-points]: ../explanation/entry-points.md
+[in-depth-project]: ../explanation/project-toolchain.md

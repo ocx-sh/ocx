@@ -75,6 +75,27 @@ def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
     }
 
 
+def cmake_versions(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """CMake in two minor lines, for the first-steps tutorials' version switching."""
+    cmake_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    banner = "\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."
+    return {
+        "kitware/cmake": [
+            make_package(
+                ocx, f"{prefix}kitware/cmake", "3.31", tmp_path, bins=["cmake"], env=cmake_env,
+                outputs={"cmake": {"--version": "cmake version 3.31.12\n" + banner}},
+            ),
+            make_package(
+                ocx, f"{prefix}kitware/cmake", "4.0", tmp_path, bins=["cmake"], env=cmake_env,
+                outputs={"cmake": {"--version": "cmake version 4.0.7\n" + banner}},
+            ),
+        ],
+    }
+
+
 def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Multiple packages for index/catalog demos."""
     uv_env = [
@@ -949,6 +970,7 @@ SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 SETUPS: dict[str, SetupFn] = {
     "basic": basic,
     "multi-version": multi_version,
+    "cmake-versions": cmake_versions,
     "full-catalog": full_catalog,
     "variants": variants,
     "dependencies": dependencies,

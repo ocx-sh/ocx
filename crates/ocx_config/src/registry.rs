@@ -12,37 +12,30 @@ use serde::Deserialize;
 /// Unknown keys are ignored, like in every other `config.toml` table.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RegistryConfig {
-    /// Base URL of the `index.ocx.sh`-protocol index this namespace resolves
-    /// through, e.g. `"https://index.ocx.sh"`.
+    /// Base URL of the `index.ocx.sh`-protocol index this namespace resolves through, e.g.
+    /// `"https://index.ocx.sh"`, or `file:///absolute/path` for a local index read with no server.
     ///
-    /// **Field presence is the kind marker**: a `[registries."<ns>"]` entry
-    /// that carries `index` resolves via the ocx-index protocol; an entry
-    /// without `index` (or no entry at all) resolves as plain OCI, with no
-    /// fallback from one protocol to the other.
+    /// **Field presence is the kind marker.** An entry that carries `index` resolves via the
+    /// ocx-index protocol; one without it, or no entry at all, resolves as plain OCI, with no
+    /// fallback. A `file://` base is checked at startup: a relative path or a remote authority is refused.
+    ///
+    /// `index = ""` resolves the namespace as plain OCI. A `[mirrors]` registry entry for the
+    /// namespace in a config file you control suppresses the compiled-in index; the managed tier
+    /// and `OCX_MIRRORS` cannot.
     // Protocol selector design: `adr_index_indirection.md`.
     pub index: Option<String>,
 
-    /// SSRF escape hatch for this namespace's physical registry hosts: exact
-    /// hostnames or CIDR blocks whose resolved addresses skip the default-on
-    /// private/loopback/link-local/metadata refusal.
-    ///
-    /// Listing a private corporate registry here (e.g. `["10.0.0.0/8", "registry.corp"]`)
-    /// restores access for exactly that namespace without disabling the guard
-    /// globally. Distributable by the managed tier and locked by a SYSTEM-scope
-    /// entry — there is no CLI flag to widen a locked trust set.
+    /// SSRF escape hatch for this namespace's physical registry hosts. Each
+    /// entry is an exact hostname or a CIDR block whose resolved addresses skip
+    /// the default-on private/loopback/link-local/metadata refusal.
     // An index root's `repository` pointer is remote-controlled, so the refusal runs before any fetch.
     pub trusted_hosts: Option<Vec<String>>,
 
     /// Contact this registry over plain HTTP instead of HTTPS.
     ///
-    /// Unioned with `OCX_INSECURE_REGISTRIES` — declaring a host in either adds it — except that a
-    /// SYSTEM-scope entry stating `insecure = false` locks that host shut against the env list too.
-    /// Distributable by the managed tier and locked by a SYSTEM-scope entry. Matching is exact on
-    /// `host[:port]` as references carry it: `registry.corp` does not cover `registry.corp:5001`.
-    /// Beyond the registry's own traffic it reaches one thing, the **authentication realm**: a
-    /// cleartext credential only ever goes to a host the operator declared plaintext, so a
-    /// plain-HTTP registry whose **token service sits on a different host or port** needs that host
-    /// declared plain HTTP too, or the probe is refused.
+    /// Unioned with `OCX_INSECURE_REGISTRIES`, except that a SYSTEM-scope entry stating
+    /// `insecure = false` locks that host shut against the env list too.
+    #[schemars(extend("default" = false))]
     pub insecure: Option<bool>,
 
     /// Set by the loader when declared at SYSTEM scope; no lower tier can override this entry.

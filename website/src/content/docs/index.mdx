@@ -1,0 +1,51 @@
+---
+title: "Get started with ocx"
+description: "Install ocx, run your first package and pin the tools of a project, then find the guide for what you do next."
+---
+{/* doc_type: landing */}
+{/* doc_tier: first-steps */}
+
+ocx fetches pre-built tools from any OCI registry and runs them in a clean, reproducible environment.
+
+```sh
+curl -fsSL https://setup.ocx.sh/sh | sh
+```
+
+That installs ocx. Other shells and a download-only route are on the [install page][install].
+
+## Start here \{#start-here\}
+
+Three short pages take you from an empty machine to a pinned project.
+
+- [Install ocx][install] puts the binary on your `PATH` and checks it.
+- [Install your first package][first-package] runs a tool, installs two versions and switches between them.
+- [Pin your first project's tools][first-project] locks a repository's tools so everyone runs the same builds.
+
+## Use ocx every day \{#everyday\}
+
+- [Choose a version][choose-versions] of a tool, by tag or by digest.
+- [Set up a project toolchain][project-toolchain] for a repository.
+- [Configure ocx][configure] for a private registry, a mirror or an offline machine.
+
+## Publish and integrate \{#publish\}
+
+- [Publish a package][publishing] to your own registry.
+- [Use ocx in CI][integration], in containers and from scripts.
+
+## Look things up \{#look-up\}
+
+The [command line][cmd-ref], [environment variables][env-ref] and [project file][project-file] pages list every flag, variable and key. The [concepts][storage] pages explain how ocx stores and resolves packages.
+
+
+[install]: ./getting-started/install-ocx.mdx
+[first-package]: ./getting-started/first-package.mdx
+[first-project]: ./getting-started/first-project.mdx
+[choose-versions]: ./guides/choose-versions.mdx
+[project-toolchain]: guides/project-toolchain.mdx
+[configure]: guides/configure-ocx.mdx
+[publishing]: ./publishing/index.mdx
+[integration]: ./integration/index.md
+[cmd-ref]: ./reference/command-line/index.md
+[env-ref]: ./reference/environment.md
+[project-file]: ./reference/project-file.md
+[storage]: ./explanation/storage.mdx

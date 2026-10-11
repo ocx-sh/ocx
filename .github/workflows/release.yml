@@ -344,15 +344,6 @@ jobs:
       "contents": "read"
       "packages": "write"
 
-  custom-deploy-website-release:
-    needs:
-      - plan
-      - announce
-    uses: ./.github/workflows/deploy-website-release.yml
-    with:
-      plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit
-
   custom-docker-publish:
     needs:
       - plan

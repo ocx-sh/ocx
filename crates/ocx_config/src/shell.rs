@@ -143,14 +143,14 @@ impl ShellConfig {
 pub struct ShellConsent {
     /// Directories that activate unconditionally, modelled on git's `safe.directory`.
     ///
-    /// An entry is one exact directory, or — with a trailing `/*` — that directory and everything
-    /// beneath it, matched component-wise (unlike git, `/*` covers the named directory too). A bare `*`
-    /// grants nothing: there is no trust-this-machine token. Entries are compared **literally**, after
-    /// separator and trailing-slash normalization, against the canonical project directory, so an
-    /// entry naming a symlinked checkout never matches; `ocx shell state` shows a near-miss when an
-    /// entry differs only by ASCII case. A **leading** `~` expands against the home directory at match
-    /// time, textually, resolving no symlink and never rewritten into the stored entry; `~user` is not
-    /// supported. A `paths` grant is drift-blind and writes no stamp, so revoking it is immediate.
+    /// An entry is one exact directory, or with a trailing `/*` that directory and everything
+    /// beneath it, matched component-wise. A bare `*` grants nothing.
+    ///
+    /// Entries are compared **literally**, after separator and trailing-slash normalization,
+    /// against the canonical project directory; an entry naming a symlinked checkout never matches.
+    /// A **leading** `~` expands textually against the home directory.
+    ///
+    /// A `paths` grant is drift-blind and writes no stamp, so revoking it is immediate.
     #[serde(default)]
     pub paths: Vec<PathBuf>,
 
@@ -316,9 +316,44 @@ impl schemars::JsonSchema for ConsentScopeSpec {
         std::borrow::Cow::Borrowed("ConsentScopeSpec")
     }
 
-    /// Delegated to [`ScopeSpec`]; only the deserializer is strict.
+    /// [`ScopeSpec`]'s shape with the catch-all wording replaced: here an empty `include` or pattern is refused.
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <ScopeSpec as schemars::JsonSchema>::json_schema(generator)
+        let mut value = <ScopeSpec as schemars::JsonSchema>::json_schema(generator).to_value();
+        reword_consent_descriptions(&mut value);
+        schemars::Schema::try_from(value)
+            .unwrap_or_else(|_| <ScopeSpec as schemars::JsonSchema>::json_schema(generator))
+    }
+}
+
+/// The `ScopeSpec` descriptions that call an empty pattern or `include` a catch-all, with their consent wording.
+const REWORDED: &[(&str, &str)] = &[
+    (
+        "Patterns the policy covers. Empty is a catch-all.",
+        "Patterns the policy covers. Required in the table form; an empty list drops the `[shell.consent]` table with a warning.",
+    ),
+    (
+        "One scope pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string is a catch-all.",
+        "One consent pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string drops the `[shell.consent]` table with a warning.",
+    ),
+    (
+        "Patterns to cover, minus patterns to carve back out. A target matches when it matches at least one `include` (an empty `include` is a catch-all) and no `exclude`.",
+        "Patterns to cover, minus patterns to carve back out. A source matches when it matches at least one `include` and no `exclude`.",
+    ),
+];
+
+/// Replaces every `description` that calls an empty pattern or `include` a catch-all.
+fn reword_consent_descriptions(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(text)) = map.get_mut("description")
+                && let Some((_, reworded)) = REWORDED.iter().find(|(old, _)| old == text)
+            {
+                *text = (*reworded).to_owned();
+            }
+            map.values_mut().for_each(reword_consent_descriptions);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(reword_consent_descriptions),
+        _ => {}
     }
 }
 
@@ -711,6 +746,21 @@ mod tests {
             .as_ref()
             .map(|spec| spec.include().to_vec())
             .unwrap_or_default()
+    }
+
+    /// `reword_consent_descriptions` matches by exact text: if `ScopeSpec`'s doc comments drift it
+    /// rewrites nothing and the published schema calls an empty `include` a catch-all again.
+    #[test]
+    fn the_consent_schema_carries_every_reworded_description_and_no_original() {
+        let schema = schemars::generate::SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<ConsentScopeSpec>()
+            .to_value()
+            .to_string();
+        for (original, reworded) in REWORDED {
+            assert!(!schema.contains(original), "the schema still carries `{original}`");
+            assert!(schema.contains(reworded), "the schema lost the reworded `{reworded}`");
+        }
     }
 
     // ── the deny_unknown_fields split ───────────────────────────────────────

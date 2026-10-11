@@ -1,0 +1,4 @@
+/* asciinema-player's own sheet, loaded with the player JS (never on initial page load).
+ * Nested under ocx: every unnested `@layer ocx` rule (the ocx terminal theme in
+ * Terminal.astro) beats it, whatever the vendor selector's specificity. */
+@import 'asciinema-player/dist/bundle/asciinema-player.css' layer(ocx.vendor);

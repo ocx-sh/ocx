@@ -1,0 +1,317 @@
+[[row]]
+item = "Semantic Versioning uses plus for build metadata, but OCI tags reject plus, which is an unresolved ecosystem issue. [L10]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "A plus sign also encodes as a space in URL query strings, which makes it unsafe even where registries accept it. [L10]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "OCX uses an underscore as the build separator so every version string is a valid OCI tag. [L12]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "The version grammar is major, minor and patch, with an optional prerelease after a dash and build metadata after an underscore. [L15]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "The grammar is unambiguous: dots separate components, dashes introduce prereleases and underscores introduce build metadata. [L18]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "Helm adopted the same plus-to-underscore normalization when it moved charts to OCI registries. [L20]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "Typing a plus sign works, because it normalizes to an underscore in the identifier parser before any downstream code runs. [L24]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "An install with a plus build suffix installs the underscore tag instead. [L24]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "The self setup command accepts a version as a tag, a content digest, or a tag with digest. [L30]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "The three examples show a tag install, a digest install and a tag with digest assertion. [L34]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "The tag-at-digest form exits 65 and names both digests when the tag points to different content. [L45]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "A digest pin is platform-specific, so pin by tag in CI matrices. [L45]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "The example captures a platform's digest from the JSON output of a previous run. [L47]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "Re-running a digest pin exits 0 with already_present when that version is installed and current, without downloading. [L53]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "Self setup on an already-installed version is a no-op, and shims and profile blocks are rewritten only when they drift. [L55]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "A digest-only pin works under the frozen flag when blobs are cached, while a tag-only pin needs the tag in the local index. [L58]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "If the tag is missing from the index under frozen, the command exits 81, so run an index update without frozen first. [L58]"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "Use exec when an ocx.toml exists and package exec otherwise. [L64]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "The package exec command takes an OCI identifier, never reads ocx.toml or ocx.lock, and suits CI and Bazel rules. [L66]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "The exec command takes binding names from ocx.toml, resolves them through ocx.lock, and treats a missing ocx.toml as exit 64. [L68]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "Both commands auto-install missing packages, compose the declared environment, accept clean, and forward the child's exit code. [L73]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "Both accept a per-invocation environment override, or a bare name to carry one of the caller's variables through. [L75]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "Only package exec accepts the self flag, which leaves a package's entrypoints off PATH. [L79]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "Neither command is deprecated, since they cover different use cases. [L81]"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "Dependencies are pinned by OCI digest, so the same bytes always give the same fingerprint and no version ranges exist. [L89]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-no-version-ranges"
+
+[[row]]
+item = "Version ranges depend on index state at resolution time, which would break reproducibility. [L91]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-no-version-ranges"
+
+[[row]]
+item = "Minimum version selection still needs an index, while ocx dependencies work offline because the digest is the pin. [L93]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-no-version-ranges"
+
+[[row]]
+item = "A security fix needs the publisher to release a new version with an updated digest, because ocx never substitutes a newer build. [L99]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-security-patches"
+
+[[row]]
+item = "This matches the Nix model, except that the publisher re-pins the digest and pushes a new tag, since ocx has no build system. [L101]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-security-patches"
+
+[[row]]
+item = "A dependency shared at the same digest is stored once, and it stays until every dependent is removed. [L105]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-shared"
+
+[[row]]
+item = "Two different digests of one package cannot both appear in one environment, so composition fails and names the versions. [L107]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-shared"
+
+[[row]]
+item = "Tags that resolve to the same digest never conflict. [L107]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-shared"
+
+[[row]]
+item = "The deps command shows evaluation order and traces conflicting paths, reporting conflicts as non-fatal warnings. [L107]"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-shared"
+
+[[row]]
+item = "versioning"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "versioning-build-separator"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/versioning.mdx#versioning-build-separator"
+
+[[row]]
+item = "installation-faq"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "install-specific-version"
+page = "docs/faq.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "project"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "exec-vs-package-exec"
+page = "docs/faq.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec-vs-package-exec"
+
+[[row]]
+item = "dependencies"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-no-version-ranges"
+
+[[row]]
+item = "dependencies-no-version-ranges"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-no-version-ranges"
+
+[[row]]
+item = "dependencies-security-patches"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-security-patches"
+
+[[row]]
+item = "dependencies-shared"
+page = "docs/faq.md"
+action = "moved"
+home = "explanation/dependencies.mdx#dependencies-shared"
+
+[[row]]
+item = "faq"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#linux-gcompat"
+
+[[row]]
+item = "linux"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#linux-gcompat"
+
+[[row]]
+item = "linux-namespace-gap"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#linux-non-fhs"
+
+[[row]]
+item = "macos"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#macos-codesign"
+
+[[row]]
+item = "macos-codesign-disable"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#macos-codesign"
+
+[[row]]
+item = "macos-codesign-manual"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#macos-codesign"
+
+[[row]]
+item = "windows"
+page = "docs/faq.md"
+action = "moved"
+home = "troubleshooting/platforms.mdx#windows-exec-resolution"
+
+[[row]]
+item = "The default filename is a UTC millisecond timestamp, the owning pid, and an 8-character random suffix. [L338]"
+page = "docs/reference/execution-records.md"
+action = "moved"
+home = "reference/execution-records.md#execution-records-filename"
+
+[[row]]
+item = "changelog"
+page = "docs/changelog.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "contributing-bazel"
+page = "docs/contributing/bazel.md"
+action = "deleted"
+reason = "obsolete"

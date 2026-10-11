@@ -1,0 +1,470 @@
+{
+  "/docs/authoring/announcing/": {
+    "fragments": {
+      "announcing-claim": "/docs/publishing/announce/#announcing-claim",
+      "announcing-consumers": "/docs/publishing/announce/#announcing-consumers",
+      "announcing-entry": "/docs/publishing/announce/#announcing-entry",
+      "announcing-owners": "/docs/publishing/announce/#announcing-owners",
+      "announcing-review": "/docs/publishing/announce/#announcing-review",
+      "announcing-snapshots": "/docs/publishing/announce/#announcing-snapshots",
+      "announcing-tags": "/docs/publishing/announce/#announcing-tags",
+      "announcing-troubleshooting": "/docs/publishing/announce/#announcing-troubleshooting"
+    }
+  },
+  "/docs/authoring/building-pushing/": {
+    "fragments": {
+      "byo-archives": "/docs/publishing/build-and-push/#byo-archives",
+      "cascade": "/docs/publishing/build-and-push/#cascade",
+      "default-variant": "/docs/publishing/build-and-push/#default-variant",
+      "dependency-pins": "/docs/publishing/build-and-push/#dependency-pins",
+      "first-push": "/docs/publishing/build-and-push/#first-push",
+      "layer-reuse": "/docs/publishing/build-and-push/#layer-reuse",
+      "redirect-refusals": "/docs/publishing/build-and-push/#redirect-refusals",
+      "see-also": "/docs/publishing/build-and-push/#see-also",
+      "source-annotation": "/docs/publishing/build-and-push/#source-annotation",
+      "source-annotation-ci": "/docs/publishing/build-and-push/#source-annotation-ci"
+    }
+  },
+  "/docs/authoring/bundle-anatomy/": {
+    "fragments": {
+      "compression": "/docs/publishing/bundle-anatomy/#compression",
+      "see-also": "/docs/publishing/bundle-anatomy/#see-also",
+      "sidecars": "/docs/publishing/bundle-anatomy/#sidecars",
+      "stable": "/docs/publishing/bundle-anatomy/#stable",
+      "strip-components": "/docs/publishing/bundle-anatomy/#strip-components",
+      "what-goes-in": "/docs/publishing/bundle-anatomy/#what-goes-in"
+    }
+  },
+  "/docs/authoring/dependencies/": {
+    "fragments": {
+      "edge-visibility": "/docs/publishing/declare-dependencies/#edge-visibility",
+      "name-field": "/docs/publishing/declare-dependencies/#name-field",
+      "ordering": "/docs/publishing/declare-dependencies/#ordering",
+      "pinning": "/docs/publishing/declare-dependencies/#pinning",
+      "pinning-per-platform": "/docs/publishing/declare-dependencies/#pinning-per-platform",
+      "see-also": "/docs/publishing/declare-dependencies/#see-also",
+      "when": "/docs/publishing/declare-dependencies/#when"
+    }
+  },
+  "/docs/authoring/entry-points/": {
+    "fragments": {
+      "dispatch": "/docs/publishing/entry-points/#dispatch",
+      "naming": "/docs/publishing/entry-points/#naming",
+      "see-also": "/docs/publishing/entry-points/#see-also",
+      "target-python-example": "/docs/publishing/entry-points/#target-python-example",
+      "when": "/docs/publishing/entry-points/#when",
+      "why": "/docs/publishing/entry-points/#why"
+    }
+  },
+  "/docs/authoring/env-surface/": {
+    "fragments": {
+      "last-wins": "/docs/publishing/env-surface/#last-wins",
+      "lists": "/docs/publishing/env-surface/#lists",
+      "lists-consumer-semantics": "/docs/publishing/env-surface/#lists-consumer-semantics",
+      "migrating": "/docs/publishing/env-surface/#migrating",
+      "migrating-decision": "/docs/publishing/env-surface/#migrating-decision",
+      "migrating-diff": "/docs/publishing/env-surface/#migrating-diff",
+      "see-also": "/docs/publishing/env-surface/#see-also",
+      "templates": "/docs/publishing/env-surface/#templates",
+      "types": "/docs/publishing/env-surface/#types",
+      "visibility": "/docs/publishing/env-surface/#visibility"
+    }
+  },
+  "/docs/authoring/index/": {
+    "fragments": {
+      "decisions": "/docs/publishing/#decisions",
+      "journey": "/docs/publishing/#journey",
+      "see-also": "/docs/publishing/#see-also",
+      "tldr": "/docs/publishing/#tldr"
+    }
+  },
+  "/docs/authoring/migration/": {
+    "fragments": {
+      "describe": "/docs/publishing/repackage-releases/#describe",
+      "github-releases": "/docs/publishing/repackage-releases/#github-releases",
+      "github-releases-extract": "/docs/publishing/repackage-releases/#github-releases-extract",
+      "homebrew": "/docs/publishing/repackage-releases/#homebrew",
+      "mirror": "/docs/publishing/repackage-releases/#mirror",
+      "see-also": "/docs/publishing/repackage-releases/#see-also"
+    }
+  },
+  "/docs/authoring/multi-platform/": {
+    "fragments": {
+      "concept": "/docs/publishing/multi-platform/#concept",
+      "dependency-platforms": "/docs/publishing/multi-platform/#dependency-platforms",
+      "dependency-platforms-any-deps": "/docs/publishing/multi-platform/#dependency-platforms-any-deps",
+      "dependency-platforms-digest-pin-prohibition": "/docs/publishing/multi-platform/#dependency-platforms-digest-pin-prohibition",
+      "dependency-platforms-snapshot": "/docs/publishing/multi-platform/#dependency-platforms-snapshot",
+      "metadata": "/docs/publishing/multi-platform/#metadata",
+      "pattern": "/docs/publishing/multi-platform/#pattern",
+      "see-also": "/docs/publishing/multi-platform/#see-also",
+      "stability": "/docs/publishing/multi-platform/#stability",
+      "wasm": "/docs/publishing/multi-platform/#wasm"
+    }
+  },
+  "/docs/authoring/testing/": {
+    "fragments": {
+      "basic": "/docs/publishing/test-locally/#basic",
+      "basic-resolution": "/docs/publishing/test-locally/#basic-resolution",
+      "clean": "/docs/publishing/test-locally/#clean",
+      "digest-layers": "/docs/publishing/test-locally/#digest-layers",
+      "exit-codes": "/docs/publishing/test-locally/#exit-codes",
+      "identifier": "/docs/publishing/test-locally/#identifier",
+      "keep": "/docs/publishing/test-locally/#keep",
+      "motivation": "/docs/publishing/test-locally/#motivation",
+      "output": "/docs/publishing/test-locally/#output",
+      "see-also": "/docs/publishing/test-locally/#see-also",
+      "self": "/docs/publishing/test-locally/#self",
+      "workflow": "/docs/publishing/test-locally/#workflow"
+    }
+  },
+  "/docs/docker/": {
+    "fragments": {
+      "build-auth": "/docs/integration/docker/#build-auth",
+      "copy-from": "/docs/integration/docker/#copy-from",
+      "docker": "/docs/integration/docker/",
+      "frozen": "/docs/integration/docker/#frozen",
+      "mini-project": "/docs/integration/docker/#mini-project",
+      "project-toolchain": "/docs/integration/docker/#project-toolchain",
+      "tags": "/docs/integration/docker/#tags"
+    }
+  },
+  "/docs/faq/": {
+    "fragments": {
+      "linux-gcompat": "/docs/troubleshooting/platforms/#linux-gcompat",
+      "linux-non-fhs": "/docs/troubleshooting/platforms/#linux-non-fhs",
+      "macos-codesign": "/docs/troubleshooting/platforms/#macos-codesign",
+      "windows-exec-resolution": "/docs/troubleshooting/platforms/#windows-exec-resolution"
+    }
+  },
+  "/docs/getting-started/": {
+    "fragments": {
+      "environment": "/docs/getting-started/first-package/#environment",
+      "installing": "/docs/getting-started/first-package/#installing",
+      "next-steps": "/docs/getting-started/first-package/#next-steps",
+      "quick-start": "/docs/getting-started/first-package/#quick-start",
+      "switching-versions": "/docs/getting-started/first-package/#switching-versions",
+      "uninstalling": "/docs/getting-started/first-package/#uninstalling"
+    }
+  },
+  "/docs/in-depth/ci/": {
+    "fragments": {
+      "ci-github-actions": "/docs/integration/github-actions/#ci-github-actions",
+      "ci-github-actions-oci": "/docs/integration/github-actions/#ci-github-actions-oci",
+      "ci-github-actions-toolchain": "/docs/integration/github-actions/#ci-github-actions-toolchain"
+    }
+  },
+  "/docs/in-depth/configuration/": {
+    "fragments": {
+      "examples": "/docs/explanation/configuration/#examples",
+      "examples-ci": "/docs/explanation/configuration/#examples-ci",
+      "examples-docker": "/docs/explanation/configuration/#examples-docker",
+      "examples-private-registry": "/docs/explanation/configuration/#examples-private-registry",
+      "explicit": "/docs/explanation/configuration/#explicit",
+      "kill-switch": "/docs/explanation/configuration/#kill-switch",
+      "managed": "/docs/explanation/configuration/#managed",
+      "merge-rules": "/docs/explanation/configuration/#merge-rules",
+      "precedence": "/docs/explanation/configuration/#precedence",
+      "see-also": "/docs/explanation/configuration/#see-also",
+      "tier-ocx-home": "/docs/explanation/configuration/#tier-ocx-home",
+      "tier-system": "/docs/explanation/configuration/#tier-system",
+      "tier-user": "/docs/explanation/configuration/#tier-user",
+      "tiers": "/docs/explanation/configuration/#tiers",
+      "why": "/docs/explanation/configuration/#why"
+    }
+  },
+  "/docs/in-depth/cosign-parity/": {
+    "fragments": {
+      "addressing": "/docs/explanation/cosign-parity/#addressing",
+      "attached-sboms": "/docs/explanation/cosign-parity/#attached-sboms",
+      "attestations": "/docs/explanation/cosign-parity/#attestations",
+      "cosign-to-ocx": "/docs/explanation/cosign-parity/#cosign-to-ocx",
+      "divergences": "/docs/explanation/cosign-parity/#divergences",
+      "evidence": "/docs/explanation/cosign-parity/#evidence",
+      "gaps": "/docs/explanation/cosign-parity/#gaps",
+      "interop-matrix": "/docs/explanation/cosign-parity/#interop-matrix",
+      "ocx-to-cosign": "/docs/explanation/cosign-parity/#ocx-to-cosign",
+      "see-also": "/docs/explanation/cosign-parity/#see-also",
+      "sidecar-tlog": "/docs/explanation/cosign-parity/#sidecar-tlog"
+    }
+  },
+  "/docs/in-depth/dependencies/": {
+    "fragments": {
+      "composition": "/docs/explanation/dependencies/#composition",
+      "create-push-split": "/docs/explanation/dependencies/#create-push-split",
+      "dependencies": "/docs/explanation/dependencies/",
+      "gc": "/docs/explanation/dependencies/#gc",
+      "manifest-pins": "/docs/explanation/dependencies/#manifest-pins",
+      "resolution": "/docs/explanation/dependencies/#resolution",
+      "scope": "/docs/explanation/dependencies/#scope",
+      "see-also": "/docs/explanation/dependencies/#see-also",
+      "visibility": "/docs/explanation/dependencies/#visibility"
+    }
+  },
+  "/docs/in-depth/entry-points/": {
+    "fragments": {
+      "collisions": "/docs/explanation/entry-points/#collisions",
+      "cross-platform": "/docs/explanation/entry-points/#cross-platform",
+      "declaring": "/docs/explanation/entry-points/#declaring",
+      "entry-points": "/docs/explanation/entry-points/",
+      "example": "/docs/explanation/entry-points/#example",
+      "git-bash": "/docs/explanation/entry-points/#git-bash",
+      "interface-only": "/docs/explanation/entry-points/#interface-only",
+      "multi-owner": "/docs/explanation/entry-points/#multi-owner",
+      "path": "/docs/explanation/entry-points/#path",
+      "powershell": "/docs/explanation/entry-points/#powershell",
+      "runtime": "/docs/explanation/entry-points/#runtime",
+      "synth-path": "/docs/explanation/entry-points/#synth-path",
+      "unix": "/docs/explanation/entry-points/#unix",
+      "windows": "/docs/explanation/entry-points/#windows"
+    }
+  },
+  "/docs/in-depth/environments/": {
+    "fragments": {
+      "commands": "/docs/explanation/environments/#commands",
+      "composition-order": "/docs/explanation/environments/#composition-order",
+      "conflicting-constants": "/docs/explanation/environments/#conflicting-constants",
+      "cross-refs": "/docs/explanation/environments/#cross-refs",
+      "edge-filter": "/docs/explanation/environments/#edge-filter",
+      "last-wins": "/docs/explanation/environments/#last-wins",
+      "migration": "/docs/explanation/environments/#migration",
+      "truth-table": "/docs/explanation/environments/#truth-table",
+      "two-surfaces": "/docs/explanation/environments/#two-surfaces",
+      "view-consumer": "/docs/explanation/environments/#view-consumer",
+      "view-self": "/docs/explanation/environments/#view-self",
+      "visibility-views": "/docs/explanation/environments/#visibility-views",
+      "worked-example": "/docs/explanation/environments/#worked-example"
+    }
+  },
+  "/docs/in-depth/indices/": {
+    "fragments": {
+      "active": "/docs/explanation/indices/#active",
+      "bundled": "/docs/explanation/indices/#bundled",
+      "format": "/docs/explanation/indices/#format",
+      "keep-tags": "/docs/explanation/indices/#keep-tags",
+      "remote": "/docs/explanation/indices/#remote",
+      "see-also": "/docs/explanation/indices/#see-also",
+      "update-family": "/docs/explanation/indices/#update-family",
+      "writing": "/docs/explanation/indices/#writing"
+    }
+  },
+  "/docs/in-depth/lazy-loading/": {
+    "fragments": {
+      "deferred-tools": "/docs/explanation/deferred-packages/",
+      "deferred-tools-advisories": "/docs/explanation/deferred-packages/#deferred-tools-advisories",
+      "deferred-tools-compose": "/docs/explanation/deferred-packages/#deferred-tools-compose",
+      "deferred-tools-gc": "/docs/explanation/deferred-packages/#deferred-tools-gc",
+      "deferred-tools-ladder": "/docs/explanation/deferred-packages/#deferred-tools-ladder",
+      "deferred-tools-materialize": "/docs/explanation/deferred-packages/#deferred-tools-materialize",
+      "deferred-tools-report": "/docs/explanation/deferred-packages/#deferred-tools-report",
+      "deferred-tools-windows": "/docs/explanation/deferred-packages/#deferred-tools-windows"
+    }
+  },
+  "/docs/in-depth/project/": {
+    "fragments": {
+      "activation": "/docs/explanation/project-toolchain/#activation",
+      "global-toolchain": "/docs/explanation/project-toolchain/#global-toolchain",
+      "lock": "/docs/explanation/project-toolchain/#lock",
+      "lock-concurrency": "/docs/explanation/project-toolchain/#lock-concurrency",
+      "lock-format": "/docs/explanation/project-toolchain/#lock-format",
+      "lock-platforms-lifecycle": "/docs/explanation/project-toolchain/#lock-platforms-lifecycle",
+      "multi-project-retention": "/docs/explanation/project-toolchain/#multi-project-retention",
+      "pin-preservation": "/docs/explanation/project-toolchain/#pin-preservation",
+      "pull-exec": "/docs/explanation/project-toolchain/#pull-exec",
+      "reproducibility": "/docs/explanation/project-toolchain/#reproducibility",
+      "running": "/docs/explanation/project-toolchain/#running",
+      "running-composition-order": "/docs/explanation/project-toolchain/#running-composition-order",
+      "running-layer-purity": "/docs/explanation/project-toolchain/#running-layer-purity",
+      "running-path-precedence": "/docs/explanation/project-toolchain/#running-path-precedence",
+      "running-project-env": "/docs/explanation/project-toolchain/#running-project-env",
+      "see-also": "/docs/explanation/project-toolchain/#see-also",
+      "toml": "/docs/explanation/project-toolchain/#toml"
+    }
+  },
+  "/docs/in-depth/self-hosted-sigstore/": {
+    "fragments": {
+      "authorization": "/docs/guides/self-hosted-sigstore/#authorization",
+      "components": "/docs/guides/self-hosted-sigstore/#components",
+      "coverage": "/docs/guides/self-hosted-sigstore/#coverage",
+      "distribution": "/docs/guides/self-hosted-sigstore/#distribution",
+      "distribution-convention": "/docs/guides/self-hosted-sigstore/#distribution-convention",
+      "distribution-flag": "/docs/guides/self-hosted-sigstore/#distribution-flag",
+      "distribution-managed": "/docs/guides/self-hosted-sigstore/#distribution-managed",
+      "distribution-system": "/docs/guides/self-hosted-sigstore/#distribution-system",
+      "issuers": "/docs/guides/self-hosted-sigstore/#issuers",
+      "issuers-fulcio": "/docs/guides/self-hosted-sigstore/#issuers-fulcio",
+      "issuers-policies": "/docs/guides/self-hosted-sigstore/#issuers-policies",
+      "issuers-read": "/docs/guides/self-hosted-sigstore/#issuers-read",
+      "see-also": "/docs/guides/self-hosted-sigstore/#see-also",
+      "trusted-root": "/docs/guides/self-hosted-sigstore/#trusted-root",
+      "verify-setup": "/docs/guides/self-hosted-sigstore/#verify-setup"
+    }
+  },
+  "/docs/in-depth/shell-integration/": {
+    "fragments": {
+      "activation": "/docs/explanation/shell-integration/#activation",
+      "activation-nested-projects": "/docs/explanation/shell-integration/#activation-nested-projects",
+      "activation-state-carrier": "/docs/explanation/shell-integration/#activation-state-carrier",
+      "consent": "/docs/explanation/shell-integration/#consent",
+      "residual": "/docs/explanation/shell-integration/#residual",
+      "session-path": "/docs/explanation/shell-integration/#session-path",
+      "session-path-bin-gate": "/docs/explanation/shell-integration/#session-path-bin-gate",
+      "session-path-order": "/docs/explanation/shell-integration/#session-path-order",
+      "session-path-unconditional": "/docs/explanation/shell-integration/#session-path-unconditional",
+      "shell-integration": "/docs/explanation/shell-integration/"
+    }
+  },
+  "/docs/in-depth/signing/": {
+    "fragments": {
+      "bundle-storage": "/docs/explanation/signing/#bundle-storage",
+      "current-limitations": "/docs/explanation/signing/#current-limitations",
+      "deferred-future-work": "/docs/explanation/signing/#deferred-future-work",
+      "deployments": "/docs/explanation/signing/#deployments",
+      "identity-matching": "/docs/explanation/signing/#identity-matching",
+      "key-mode": "/docs/explanation/signing/#key-mode",
+      "key-mode-rekor": "/docs/explanation/signing/#key-mode-rekor",
+      "public-good": "/docs/explanation/signing/#public-good",
+      "referrers-cache": "/docs/explanation/signing/#referrers-cache",
+      "referrers-write": "/docs/explanation/signing/#referrers-write",
+      "see-also": "/docs/explanation/signing/#see-also",
+      "signing-flow": "/docs/explanation/signing/#signing-flow",
+      "slice-boundary": "/docs/explanation/signing/#slice-boundary",
+      "trust-root": "/docs/explanation/signing/#trust-root"
+    }
+  },
+  "/docs/in-depth/storage/": {
+    "fragments": {
+      "gc": "/docs/explanation/storage/#gc",
+      "generated-launchers": "/docs/explanation/storage/#generated-launchers",
+      "index": "/docs/explanation/storage/#index",
+      "layers": "/docs/explanation/storage/#layers",
+      "multi-layer": "/docs/explanation/storage/#multi-layer",
+      "packages": "/docs/explanation/storage/#packages",
+      "see-also": "/docs/explanation/storage/#see-also",
+      "storage": "/docs/explanation/storage/",
+      "stores": "/docs/explanation/storage/#stores",
+      "symlinks": "/docs/explanation/storage/#symlinks"
+    }
+  },
+  "/docs/in-depth/versioning/": {
+    "fragments": {
+      "cascades": "/docs/explanation/versioning/#cascades",
+      "locking": "/docs/explanation/versioning/#locking",
+      "platform-fields": "/docs/explanation/versioning/#platform-fields",
+      "platforms": "/docs/explanation/versioning/#platforms",
+      "see-also": "/docs/explanation/versioning/#see-also",
+      "tags": "/docs/explanation/versioning/#tags",
+      "variants": "/docs/explanation/versioning/#variants",
+      "versioning": "/docs/explanation/versioning/"
+    }
+  },
+  "/docs/installation/": {
+    "fragments": {
+      "dev-builds": "/docs/getting-started/install-ocx/#dev-builds",
+      "manual": "/docs/getting-started/install-ocx/#manual",
+      "manual-pinned": "/docs/getting-started/install-ocx/#manual-pinned",
+      "next-steps": "/docs/getting-started/install-ocx/#next-steps",
+      "script-options": "/docs/getting-started/install-ocx/#script-options",
+      "shells": "/docs/getting-started/install-ocx/#shells",
+      "with-script": "/docs/getting-started/install-ocx/#with-script"
+    }
+  },
+  "/docs/user-guide/": {
+    "fragments": {
+      "tags-variants-digests": "/docs/guides/choose-versions/#tags-variants-digests",
+      "user-guide": "/docs/guides/choose-versions/",
+      "versions": "/docs/guides/choose-versions/#versions"
+    }
+  },
+  "/docs/user-guide/attestations/": {
+    "fragments": {
+      "attestations-attach": "/docs/publishing/attest-and-sbom/#attestations-attach",
+      "attestations-attach-signed": "/docs/publishing/attest-and-sbom/#attestations-attach-signed",
+      "attestations-attach-unsigned": "/docs/publishing/attest-and-sbom/#attestations-attach-unsigned",
+      "attestations-read": "/docs/publishing/attest-and-sbom/#attestations-read",
+      "attestations-types": "/docs/publishing/attest-and-sbom/#attestations-types",
+      "attestations-verification": "/docs/publishing/attest-and-sbom/#attestations-verification"
+    }
+  },
+  "/docs/user-guide/patches/": {
+    "fragments": {
+      "patches": "/docs/guides/patch-packages/",
+      "patches-config": "/docs/guides/patch-packages/#patches-config",
+      "patches-consumer": "/docs/guides/patch-packages/#patches-consumer",
+      "patches-enforcement": "/docs/guides/patch-packages/#patches-enforcement",
+      "patches-no-patches": "/docs/guides/patch-packages/#patches-no-patches",
+      "patches-offline": "/docs/guides/patch-packages/#patches-offline"
+    }
+  },
+  "/docs/user-guide/promoting-packages/": {
+    "fragments": {
+      "promoting": "/docs/publishing/promote-packages/#promoting",
+      "promoting-dry-run": "/docs/publishing/promote-packages/#promoting-dry-run",
+      "promoting-how": "/docs/publishing/promote-packages/#promoting-how",
+      "promoting-in-depth": "/docs/publishing/promote-packages/#promoting-in-depth",
+      "promoting-platform": "/docs/publishing/promote-packages/#promoting-platform",
+      "promoting-scope": "/docs/publishing/promote-packages/#promoting-scope",
+      "promoting-walkthrough": "/docs/publishing/promote-packages/#promoting-walkthrough"
+    }
+  },
+  "/docs/user-guide/snapshot-tracks/": {
+    "fragments": {
+      "snapshot-tracks-build-ids": "/docs/publishing/snapshot-tracks/#snapshot-tracks-build-ids",
+      "snapshot-tracks-canary": "/docs/publishing/snapshot-tracks/#snapshot-tracks-canary",
+      "snapshot-tracks-ci": "/docs/publishing/snapshot-tracks/#snapshot-tracks-ci",
+      "snapshot-tracks-ci-github": "/docs/publishing/snapshot-tracks/#snapshot-tracks-ci-github",
+      "snapshot-tracks-ci-gitlab": "/docs/publishing/snapshot-tracks/#snapshot-tracks-ci-gitlab",
+      "snapshot-tracks-in-depth": "/docs/publishing/snapshot-tracks/#snapshot-tracks-in-depth",
+      "snapshot-tracks-keep-tag": "/docs/publishing/snapshot-tracks/#snapshot-tracks-keep-tag",
+      "snapshot-tracks-lazy": "/docs/publishing/snapshot-tracks/#snapshot-tracks-lazy",
+      "snapshot-tracks-limits": "/docs/publishing/snapshot-tracks/#snapshot-tracks-limits",
+      "snapshot-tracks-push": "/docs/publishing/snapshot-tracks/#snapshot-tracks-push",
+      "snapshot-tracks-recover": "/docs/publishing/snapshot-tracks/#snapshot-tracks-recover",
+      "snapshot-tracks-refusals": "/docs/publishing/snapshot-tracks/#snapshot-tracks-refusals",
+      "snapshot-tracks-registries": "/docs/publishing/snapshot-tracks/#snapshot-tracks-registries",
+      "snapshot-tracks-rerun": "/docs/publishing/snapshot-tracks/#snapshot-tracks-rerun",
+      "snapshot-tracks-serialize": "/docs/publishing/snapshot-tracks/#snapshot-tracks-serialize",
+      "snapshot-tracks-teardown": "/docs/publishing/snapshot-tracks/#snapshot-tracks-teardown"
+    }
+  },
+  "/docs/changelog/": {
+    "fragments": {
+      "changelog": "/docs/changelog/"
+    }
+  },
+  "/docs/contributing/bazel/": {
+    "fragments": {
+      "contributing-bazel": "/docs/contributing/bazel/"
+    }
+  },
+  "/docs/reference/env-composition/": {
+    "fragments": {
+      "environment-composition": "/docs/reference/env-composition/"
+    }
+  },
+  "/docs/reference/execution-records/": {
+    "fragments": {
+      "execution-records": "/docs/reference/execution-records/"
+    }
+  },
+  "/docs/reference/machine-interface/": {
+    "fragments": {
+      "machine-interface": "/docs/reference/machine-interface/"
+    }
+  },
+  "/docs/reference/platforms/": {
+    "fragments": {
+      "platforms": "/docs/reference/platforms/"
+    }
+  },
+  "/docs/reference/script-host-api/": {
+    "fragments": {
+      "script-host-api": "/docs/reference/script-host-api/"
+    }
+  },
+  "/docs/reference/dependencies/": {
+    "fragments": {
+      "dependencies": "/docs/reference/dependencies/#components-by-license"
+    }
+  }
+}

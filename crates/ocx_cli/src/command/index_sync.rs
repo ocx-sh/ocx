@@ -17,10 +17,10 @@ pub struct IndexSync {
     #[clap(required = true, num_args = 1.., value_name = "REGISTRY")]
     registries: Vec<String>,
 
-    /// Print the packages this would refresh, and refresh none of them
+    /// Print the packages this would refresh and refresh none; nothing is written, not even `config.json`, and no `[patches]` sync runs
     ///
-    /// Enumeration still runs, so this contacts the source, and `--offline` and
-    /// `--frozen` still refuse it.
+    /// Enumeration still runs, so this contacts the source, and `--offline` and `--frozen` still
+    /// refuse it.
     #[clap(long)]
     dry_run: bool,
 }

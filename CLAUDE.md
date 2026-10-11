@@ -61,7 +61,7 @@ Before plan/research/architectural decision, scan "By concern" in catalog. Auto-
 
 Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify:scoped --force` (per task / review-fix iteration — T0 lint + rows check, then routed/scoped checks; escalates to full `task verify` when a path demands it), `task verify` (full gate — required at finalize, on `main` and for `release:`), `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit. Verification level is the agent's call (`workflow-git.md` § Verification Levels). Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
-**Project toolchain.** `ocx.toml` lists `actionlint`, `bazel`, `bun`, `cosign`, `git-cliff`, `go-task`, `lychee`, `prek`, `python` (CPython 3.14, which uv prefers through the root `uv.toml` and the Bazel acceptance runner pins), `shellcheck`, `shfmt`, `uv`. `ocx self setup` wires a per-prompt hook that puts them on `PATH` when you `cd` in and takes them off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [getting-started.md](./website/src/docs/getting-started.md) § Project Toolchain.
+**Project toolchain.** `ocx.toml` lists `actionlint`, `bazel`, `cosign`, `git-cliff`, `go-task`, `lychee`, `node`, `pnpm`, `prek`, `python` (CPython 3.14, which uv prefers through the root `uv.toml` and the Bazel acceptance runner pins), `shellcheck`, `shfmt`, `uv`. `ocx self setup` wires a per-prompt hook that puts them on `PATH` when you `cd` in and takes them off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [project-toolchain.mdx](./website/src/content/docs/guides/project-toolchain.mdx) § Shell activation.
 
 Single acceptance test:
 ```sh
@@ -114,19 +114,19 @@ Subsystem rules auto-load on path match. Read relevant one before work on that a
 | Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_package_manager/src/**` |
 | CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
 | Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_script/src/**` |
-| Machine interface | [subsystem-interface-contract.md](./.claude/rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, CLI report/command/option/exit modules, `environment.md`, `command-line.md` |
+| Machine interface | [subsystem-interface-contract.md](./.claude/rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, CLI report/command/option/exit modules, `reference/environment.md`, `reference/command-line/**` |
 | Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 | Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
 
 ## Environment Variables
 
-Canonical reference → [`website/src/docs/reference/environment.md`](./website/src/docs/reference/environment.md).
+Canonical reference → [`website/src/content/docs/reference/environment.md`](./website/src/content/docs/reference/environment.md).
 
 ## Deep Context
 
 - [`product-context.md`](./.claude/rules/product-context.md) — vision, competitors, use cases
 - [`arch-principles.md`](./.claude/rules/arch-principles.md) — design principles, glossary, ADR index (auto-loads on Rust)
-- [`website/src/docs/user-guide.md`](./website/src/docs/user-guide.md) — three-store architecture, versioning, locking, auth
+- [`website/src/content/docs/explanation/storage.mdx`](./website/src/content/docs/explanation/storage.mdx) — three-store architecture; versioning, locking and auth live in `explanation/versioning.mdx`, `guides/lock-and-reproduce.mdx` and `guides/authenticate.mdx`
 
 ## Core Principles
 

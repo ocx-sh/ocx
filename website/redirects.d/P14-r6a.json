@@ -1,0 +1,41 @@
+{
+  "/docs/reference/command-line/package/": {
+    "to": "/docs/reference/command-line/package-publishing/",
+    "fragments": {
+      "package": "/docs/reference/command-line/package-publishing/#package",
+      "package-announce": "/docs/reference/command-line/package-publishing/#package-announce",
+      "package-attest": "/docs/reference/command-line/package-publishing/#package-attest",
+      "package-cascade": "/docs/reference/command-line/package-publishing/#package-cascade",
+      "package-cascade-check": "/docs/reference/command-line/package-publishing/#package-cascade-check",
+      "package-cascade-repair": "/docs/reference/command-line/package-publishing/#package-cascade-repair",
+      "package-claim": "/docs/reference/command-line/package-publishing/#package-claim",
+      "package-copy": "/docs/reference/command-line/package-publishing/#package-copy",
+      "package-create": "/docs/reference/command-line/package-publishing/#package-create",
+      "deps": "/docs/reference/command-line/package-consuming/#deps",
+      "package-description": "/docs/reference/command-line/package-publishing/#package-description",
+      "package-description-pull": "/docs/reference/command-line/package-publishing/#package-description-pull",
+      "package-description-push": "/docs/reference/command-line/package-publishing/#package-description-push",
+      "package-deselect": "/docs/reference/command-line/package-consuming/#package-deselect",
+      "package-env": "/docs/reference/command-line/package-consuming/#package-env"
+    }
+  },
+  "/docs/reference/command-line/package-2/": {
+    "to": "/docs/reference/command-line/package-consuming/",
+    "fragments": {
+      "package-exec": "/docs/reference/command-line/package-consuming/#package-exec",
+      "package-inspect": "/docs/reference/command-line/package-consuming/#package-inspect",
+      "package-install": "/docs/reference/command-line/package-consuming/#package-install",
+      "package-prune": "/docs/reference/command-line/package-consuming/#package-prune",
+      "package-pull": "/docs/reference/command-line/package-consuming/#package-pull",
+      "package-push": "/docs/reference/command-line/package-publishing/#package-push",
+      "package-receipt": "/docs/reference/command-line/package-consuming/#package-receipt",
+      "package-sbom": "/docs/reference/command-line/package-consuming/#package-sbom",
+      "package-select": "/docs/reference/command-line/package-consuming/#package-select",
+      "package-sign": "/docs/reference/command-line/package-publishing/#package-sign",
+      "package-test": "/docs/reference/command-line/package-publishing/#package-test",
+      "package-uninstall": "/docs/reference/command-line/package-consuming/#package-uninstall",
+      "package-verify": "/docs/reference/command-line/package-consuming/#package-verify",
+      "which": "/docs/reference/command-line/package-consuming/#which"
+    }
+  }
+}

@@ -7,7 +7,7 @@ paths:
 
 > **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The taxonomy below reflects the signed handshake. Commands listed as **Deleted** in "Deleted vs Deprecated Commands" do NOT exist; any description of them in older ADRs or rules is superseded. Do not implement deleted commands.
 
-Concise index of all `ocx` CLI commands. User-facing per-command docs live in `website/src/docs/reference/command-line.md`. Implementation under `crates/ocx_cli/src/command/`.
+Concise index of all `ocx` CLI commands. User-facing per-command docs are generated from clap help into `website/src/content/docs/reference/command-line/` (`task website:reference:generate`; never hand-edit). Implementation under `crates/ocx_cli/src/command/`.
 
 ---
 

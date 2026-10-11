@@ -40,7 +40,7 @@ COPY ocx /usr/local/bin/ocx
 # `<ns>` parses fine and then never matches — zero index sources get built and
 # ocx falls back to plain-OCI against `ocx.sh/v2/` with no error, which reads
 # as "the index did not serve". Field name/shape per
-# website/src/docs/reference/configuration.md § [registries.<name>] / index.
+# website/src/content/docs/reference/configuration.md § [registries.<name>] / index.
 RUN mkdir -p /root/.ocx \
     && printf '[registries."%s"]\nindex = "%s"\n' "$E2E_INDEX_PREFIX" "$INDEX_SITE" \
     > /root/.ocx/config.toml

@@ -2895,7 +2895,7 @@ def prove_predicate() -> int:
     module = "test/tests/test_planted.py"
     named = {
         "multi-segment join": ('X = PROJECT_ROOT / "target" / "release" / "ocx_schema"\n', "target/release/ocx_schema"),
-        "single 'a/b' literal": ('X = PROJECT_ROOT / "website/src/index.md"\n', "website/src/index.md"),
+        "single 'a/b' literal": ('X = PROJECT_ROOT / "website/src/content/docs/faq.md"\n', "website/src/content/docs/faq.md"),
         "parents[2] base": ('X = Path(__file__).resolve().parents[2] / "crates" / "x"\n', "crates/x"),
         "parent chain base": ('X = Path(__file__).parent.parent.parent / ".github" / "w.yml"\n', ".github/w.yml"),
         "parents[1] onto the subpackage": ('X = Path(__file__).parents[1] / "doc_scripts"\n', "test/doc_scripts"),
@@ -2939,7 +2939,7 @@ def prove_predicate() -> int:
     # root-shaped literal that only ever appears in a message string.
     controls = {
         "tmp_path join": 'def test_x(tmp_path):\n    d = tmp_path / "website" / "src"\n',
-        "message string": 'def test_x():\n    assert ok, "website/src/docs is stale; see target/release"\n',
+        "message string": 'def test_x():\n    assert ok, "website/src/content/docs is stale; see target/release"\n',
         # An absolute literal is no repository path, wherever the runner is.
         "Path of an absolute literal": 'X = Path("/etc") / "hosts"\n',
     }
@@ -3075,14 +3075,14 @@ def prove_uncached(scratch: Path, live: list[dict]) -> int:
     victim = ACCEPTANCE_PACKAGE + "test_install"
     expect(victim_module not in live_list, f"{victim_module} is listed, pick another victim")
     planted_sources = dict(sources)
-    planted_sources[victim_module] += '\nPLANTED = PROJECT_ROOT / "website" / "src" / "index.md"\n'
+    planted_sources[victim_module] += '\nPLANTED = PROJECT_ROOT / "website" / "src" / "content" / "docs" / "faq.md"\n'
     planted = named_paths_by_module(planted_sources)
-    expect("website/src/index.md" in planted[victim_module], "the planted read did not land")
+    expect("website/src/content/docs/faq.md" in planted[victim_module], "the planted read did not land")
 
     # (a) an undeclared-root module, unlisted.
     findings = _judge(path, live, undeclared=planted, uncached=live_list)
     unlisted = _only(findings, "tag-uncached-unlisted")
-    expect(victim in unlisted.message and "website/src/index.md" in unlisted.message, "(a) names neither")
+    expect(victim in unlisted.message and "website/src/content/docs/faq.md" in unlisted.message, "(a) names neither")
     print(f"C-019 (a) RED  : {unlisted.message}")
     checks += 1
 
@@ -3136,9 +3136,9 @@ def prove_uncached(scratch: Path, live: list[dict]) -> int:
     checks += 1
 
     # The way off the list (WP-08b): the read, declared as an input, is covered.
-    declared = _mutate(live, victim, add_inputs={"//website:src/index.md"})
+    declared = _mutate(live, victim, add_inputs={"//website:src/content/docs/faq.md"})
     findings = _judge(path, declared, undeclared=planted, uncached=live_list)
-    expect("//website:src/index.md" in _landed(path, victim).inputs, "the declaration did not land")
+    expect("//website:src/content/docs/faq.md" in _landed(path, victim).inputs, "the declaration did not land")
     expect(uncached_codes(findings) == [], f"a declared read must be silent, got {uncached_codes(findings)}")
     print("C-019 GREEN: the same read, declared as an input of the target, needs no listing")
     checks += 1

@@ -1,0 +1,82 @@
+{
+  "/docs/authoring/": {
+    "fragments": {
+      "authoring": "/docs/publishing/"
+    }
+  },
+  "/docs/authoring/announcing/": {
+    "fragments": {
+      "announcing": "/docs/publishing/announce/",
+      "announcing-github": "/docs/publishing/announce-from-ci/#announcing-github",
+      "announcing-gitlab-job-token": "/docs/publishing/announce-from-ci/#announcing-gitlab-job-token",
+      "announcing-gitlab-token": "/docs/publishing/announce-from-ci/#announcing-gitlab-token",
+      "announcing-postures": "/docs/publishing/announce-from-ci/#announcing-postures",
+      "announcing-runner": "/docs/publishing/announce-from-ci/#announcing-runner",
+      "announcing-split": "/docs/publishing/announce-from-ci/#announcing-split",
+      "announcing-transport": "/docs/publishing/announce-from-ci/#announcing-transport"
+    }
+  },
+  "/docs/authoring/building-pushing/": {
+    "fragments": {
+      "building-and-pushing": "/docs/publishing/build-and-push/",
+      "signing-after-push": "/docs/publishing/sign-a-release/#supply-chain-signing"
+    }
+  },
+  "/docs/authoring/bundle-anatomy/": {
+    "fragments": {
+      "bundle-anatomy": "/docs/publishing/bundle-anatomy/"
+    }
+  },
+  "/docs/authoring/dependencies/": {
+    "fragments": {
+      "declaring-dependencies": "/docs/publishing/declare-dependencies/"
+    }
+  },
+  "/docs/authoring/entry-points/": {
+    "fragments": {
+      "entry-points": "/docs/publishing/entry-points/"
+    }
+  },
+  "/docs/authoring/env-surface/": {
+    "fragments": {
+      "env-surface": "/docs/publishing/env-surface/"
+    }
+  },
+  "/docs/authoring/index/": {
+    "fragments": {
+      "authoring": "/docs/publishing/"
+    },
+    "to": "/docs/publishing/"
+  },
+  "/docs/authoring/migration/": {
+    "fragments": {
+      "migration-patterns": "/docs/publishing/repackage-releases/"
+    }
+  },
+  "/docs/authoring/multi-platform/": {
+    "fragments": {
+      "libc": "/docs/publishing/libc-variants/#libc",
+      "libc-auto-resolution": "/docs/publishing/libc-variants/#libc-auto-resolution",
+      "libc-debug": "/docs/publishing/libc-variants/#libc-debug",
+      "libc-publishing": "/docs/publishing/libc-variants/#libc-publishing",
+      "libc-selection": "/docs/publishing/libc-variants/#libc-selection",
+      "libc-static": "/docs/publishing/libc-variants/#libc-static",
+      "multi-platform-packages": "/docs/publishing/multi-platform/"
+    }
+  },
+  "/docs/authoring/testing/": {
+    "fragments": {
+      "scripted-tests": "/docs/publishing/script-tests/#scripted-tests",
+      "scripted-tests-exit-codes": "/docs/publishing/script-tests/#scripted-tests-exit-codes",
+      "scripted-tests-expect-api": "/docs/reference/script-host-api/#expect-fns",
+      "scripted-tests-ide": "/docs/publishing/script-tests/#scripted-tests-ide",
+      "scripted-tests-invocation": "/docs/publishing/script-tests/#scripted-tests-invocation",
+      "scripted-tests-junit": "/docs/publishing/script-tests/#scripted-tests-junit",
+      "scripted-tests-junit-per-platform": "/docs/publishing/script-tests/#scripted-tests-junit-per-platform",
+      "scripted-tests-ocx-api": "/docs/reference/script-host-api/#ocx-fns",
+      "scripted-tests-output": "/docs/publishing/script-tests/#scripted-tests-output",
+      "scripted-tests-sandbox": "/docs/publishing/script-tests/#scripted-tests-sandbox",
+      "testing-locally": "/docs/publishing/test-locally/"
+    }
+  }
+}

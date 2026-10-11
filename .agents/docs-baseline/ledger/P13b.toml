@@ -1,0 +1,137 @@
+[[row]]
+item = "Publisher signature verification through cosign or Notation is deferred to a post-v1 release. [L930]"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "snapshot-tracks"
+page = "docs/user-guide/snapshot-tracks.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "install"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/first-package.mdx#installing"
+
+[[row]]
+item = "install-bare-binary"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual"
+
+[[row]]
+item = "install-bare-binary-options"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#install-bare-binary-what"
+
+[[row]]
+item = "install-bare-binary-pin"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual-pinned"
+
+[[row]]
+item = "install-bare-binary-posix"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual"
+
+[[row]]
+item = "install-bare-binary-what"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#install-bare-binary-what"
+
+[[row]]
+item = "install-bare-binary-windows"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual"
+
+[[row]]
+item = "global-toolchain-ci-path"
+page = "docs/user-guide.md"
+action = "moved"
+home = "integration/github-actions.md#global-toolchain-ci-path"
+
+[[row]]
+item = "managed-config-ca"
+page = "docs/user-guide.md"
+action = "moved"
+home = "integration/proxy-and-ca.md#ca-fleet"
+
+[[row]]
+item = "supply-chain-signing"
+page = "docs/user-guide.md"
+action = "moved"
+home = "publishing/sign-a-release.md#supply-chain-signing"
+
+[[row]]
+item = "A Restricted PowerShell execution policy stops env.ps1 from running; setup reports a non-fatal advisory. [L82]"
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#manual"
+
+[[row]]
+item = "publish"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "migration-atomic-mutators"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "migration-project-flag"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "migration-shell-profile"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "project-toolchain-migration"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "user-guide"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx shell env"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx shell hook"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx shell init"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx uninstall"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"

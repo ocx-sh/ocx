@@ -16,7 +16,7 @@ use ocx_setup::VersionSpec;
 /// 7 days; with VERSION it pauses only after the sync succeeds, and any update
 /// without it clears the pause. `--check` only reports, locally when offline.
 ///
-/// Exit codes: <https://ocx.sh/docs/reference/command-line#config-update>
+/// Exit codes: <https://ocx.sh/docs/reference/command-line/config/#config-update>
 #[derive(Parser)]
 pub struct ConfigUpdateArgs {
     /// Version to sync: tag, `sha256:<hex>`, or `tag@sha256:<hex>`.
@@ -35,7 +35,7 @@ pub struct ConfigUpdateArgs {
     #[arg(long, conflicts_with_all = ["pause", "resume"])]
     check: bool,
 
-    /// Pause the background refresh for a duration (e.g. `4h`, `3d`; max `7d`).
+    /// Pause the background refresh for a duration (e.g. `4h`, `3d`; max `7d`); an update without `--pause` clears it.
     ///
     /// Without a VERSION, freezes the on-disk state as-is (no fetch). With a
     /// VERSION, syncs the pin first and records the pause only on success.

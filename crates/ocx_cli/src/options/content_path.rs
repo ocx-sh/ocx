@@ -12,7 +12,7 @@ use crate::error::UsageError;
 /// Used by `package which`, `package env` and `package exec`. Without any flag the
 /// content-addressed object store path is used (default). `--candidate`, `--current` and
 /// `--link` are mutually exclusive and yield a stable link path instead - see the
-/// [path resolution](https://ocx.sh/docs/reference/command-line#path-resolution)
+/// [path resolution](https://ocx.sh/docs/guides/stable-paths/#stable-paths)
 /// documentation for details.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct ContentPath {

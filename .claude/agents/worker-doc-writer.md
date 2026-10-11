@@ -21,7 +21,7 @@ Key requirements from [docs-style.md](../rules/docs-style.md) (fire at attention
 - **No marketing language** — let examples make case
 - **Reference-style links** — never inline `[text](url)`, definitions at file bottom grouped by category
 - **Every external tool hyperlinked** — every occurrence
-- **Analogies in `:::info` callout boxes**, not inline
+- **Analogies in `:::note` callout boxes**, not inline
 - **Custom anchors** on every heading: `{#parent-subsection}`
 
 ## Before Writing
@@ -30,7 +30,7 @@ Key requirements from [docs-style.md](../rules/docs-style.md) (fire at attention
 2. **Grep existing patterns** — match style of adjacent sections
 3. **Identify Diátaxis type** — reference, explanation, how-to, tutorial
 4. **Search internet** for real examples before writing analogies or comparisons
-5. **Read [subsystem-website.md](../rules/subsystem-website.md)** for component APIs and VitePress patterns
+5. **Read [subsystem-website.md](../rules/subsystem-website.md)** for component imports and Astro/Starlight patterns
 
 ## Writing Standards by Documentation Type
 
@@ -38,13 +38,15 @@ Key requirements from [docs-style.md](../rules/docs-style.md) (fire at attention
 
 Reference docs for user working, needs lookup fact.
 
+The five generated pages (`reference/command-line/**`, `environment.md`, `configuration.md`, `project-file.md`, `exit-codes.md`) are never hand-edited: change the source in `ocx_schema` and run `task website:reference:generate`. Every page carries a `doc_type` declaration and follows the shape for that type ([docs-quality.md](../rules/docs-quality.md)).
+
 - **Command reference**: purpose sentence + flags table (Name | Short | Description | Default) + behavioral notes + error conditions
 - **Environment variables**: name + purpose + valid values (explicit list) + default + example
 - **Metadata fields**: name + type + description + constraints + example
 - Edge cases explicit (e.g., "combining `--offline` with `--remote` produces an error")
 - No tutorials, no narrative — facts only
 
-### Narrative Pages (`user-guide.md`, `getting-started.md`)
+### Narrative Pages (`getting-started/`, `guides/`, `explanation/`, `publishing/`, `integration/`, `troubleshooting/`, `contributing/`)
 
 Narrative docs for user who want understand how things work.
 
@@ -55,9 +57,7 @@ Narrative docs for user who want understand how things work.
 
 ### Changelog (`changelog.md`)
 
-- Format: `### [version] - YYYY-MM-DD` with `#### Added/Changed/Fixed/Removed` sections
-- Breaking changes marked **Breaking:** prefix
-- Each entry links to relevant doc sections
+The page includes the generated root `CHANGELOG.md`. Never edit either; the entry is the commit subject.
 
 ## OCX Precision Rules
 
@@ -68,16 +68,16 @@ Accuracy requirements from past reviews. Verify every time:
 - **Content-addressed = universally lockable** — any package pinnable with digest
 - **Cascade is convention, not enforced** — publishers maintain manually
 
-## Vue Components Available
+## Components Available
 
-Use directly in `.md` files (globally registered):
+A page using a component is `.mdx` and imports it (imports and props → `subsystem-website.md`):
 
 - `<Tooltip term="label">explanation</Tooltip>` — inline term popup
 - `<Tree>` / `<Node>` / `<Description>` — file structure trees
-- `<Steps>` / `<Step>` / `<Description>` — progress steppers
+- `<Steps>` — numbered procedure
+- `<Tabs>` / `<TabItem>` — tabbed alternatives (ocx vs other tools)
 - `<Terminal src="/casts/file.cast" />` — terminal recordings
-- `::: code-group` — tabbed code blocks (ocx vs other tools)
-- `::: info | tip | warning | details` — callout boxes
+- `:::note | tip | caution | danger` — callout boxes
 
 ## Quality Checklist Before Completion
 
@@ -86,7 +86,7 @@ Use directly in `.md` files (globally registered):
 - [ ] Every external tool hyperlinked at every occurrence
 - [ ] Custom anchors on all `##` headings: `{#parent-subsection}`
 - [ ] No marketing language ("powerful", "seamlessly", "revolutionary")
-- [ ] Analogies in `:::info` boxes, not inline prose
+- [ ] Analogies in `:::note` boxes, not inline prose
 - [ ] Short paragraphs, one idea each
 - [ ] Headers short and TOC-readable
 - [ ] Internal links resolve to sections with prose

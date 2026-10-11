@@ -5,16 +5,21 @@
 /// signatures, SBOMs, attestations.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Referrers {
-    /// Carry the signatures, SBOMs and attestations anchored to each manifest
-    /// (default).
-    ///
-    /// Requires the OCI 1.1 Referrers API at both ends; a registry without it
-    /// fails rather than silently moving an artifact whose signature stayed
-    /// behind.
+    /// Carry the signatures, SBOMs and attestations anchored to each manifest, plus the cosign `.sig`, `.att` and `.sbom` sidecar tags (default). A sidecar tag the target holds under a different manifest is reported, never overwritten, and the exit is 65. A target without the OCI 1.1 Referrers API exits 82.
+    #[arg(long_help = "\
+        Carry the signatures, SBOMs and attestations anchored to each manifest (default).\n\n\
+        Requires the OCI 1.1 Referrers API at both ends; a registry without it fails rather than \
+        silently moving an artifact whose signature stayed behind.\n\n\
+        Cosign's `sha256-<hex>.sig`, `.att` and `.sbom` sidecar tags are ordinary tags, not \
+        referrers, so they are probed by name and copied verbatim under the same tag with their \
+        blobs. That sweep runs whether or not the target serves the Referrers API; a target \
+        without it exits 82.")]
     #[clap(long = "referrers", overrides_with = "no_referrers")]
     referrers: bool,
 
     /// Leave the signatures, SBOMs and attestations behind.
+    ///
+    /// Promotes the package alone, sidecar tags included.
     #[clap(long = "no-referrers", overrides_with = "referrers")]
     no_referrers: bool,
 }

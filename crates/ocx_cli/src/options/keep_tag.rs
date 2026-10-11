@@ -7,6 +7,11 @@
 pub struct KeepTag {
     /// Write a `__ocx.keep.sha256-<hex>` tag for each platform manifest
     /// published (default).
+    ///
+    /// A registry-side deletion safety net: the keep tag keeps the manifest
+    /// reachable, so a stray delete of another tag cannot orphan a digest a
+    /// lock still pins. A digest whose keep tag would exceed the OCI
+    /// 128-character tag limit (`sha512`) gets none.
     #[clap(long = "keep-tag", overrides_with = "no_keep_tag")]
     keep_tag: bool,
 

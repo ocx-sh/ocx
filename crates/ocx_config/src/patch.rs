@@ -24,6 +24,7 @@ pub struct PatchConfig {
     /// outside `[a-zA-Z0-9._-]` become `_`); `{repository}` — the base identifier's repository path.
     // The expansion must stay two-or-more segments, or it collides with the reserved single-segment
     // `global` repository holding the global descriptor (`<registry>/global:__ocx.patch`).
+    #[schemars(extend("default" = "{registry}/{repository}"))]
     pub path: Option<String>,
 
     /// Fail posture when a matched companion is unavailable.
@@ -33,6 +34,7 @@ pub struct PatchConfig {
     /// - `false` — fail open: skip with a warning (suitable for non-security
     ///   companions like a license-server URL or metrics endpoint).
     // Default stays fail-closed: a tool run without its CA overlay does TLS to untrusted endpoints.
+    #[schemars(extend("default" = true))]
     pub required: Option<bool>,
 
     /// Set by the loader on a SYSTEM-scope tier whose effective `required` is true; no lower tier

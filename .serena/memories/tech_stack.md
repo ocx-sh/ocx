@@ -23,9 +23,9 @@ Single source of truth: `.claude/rules/product-tech-strategy.md`. Latest stable 
 
 ## TypeScript / Website (`website/`)
 
-- Runtime + pkg manager: Bun.
-- Build: Vite via VitePress (`vitepress ^2.0.0-alpha.16`).
-- Deps: `@vueuse/core`, `reka-ui`, `asciinema-player`, `vitepress-plugin-group-icons`.
+- Runtime: Node; pkg manager: pnpm 11 (via ocx).
+- Build: Astro 7 + Starlight 0.42 with `@ocx-sh/theme` 0.1.1; `website/dist/{docs,schemas}`.
+- Deps: `asciinema-player`, `unist-util-visit`; remark plugins in `website/plugins/`.
 
 ## Bash (tasks, hooks)
 
@@ -39,5 +39,5 @@ Single source of truth: `.claude/rules/product-tech-strategy.md`. Latest stable 
 ## Infra / CI
 
 - GitHub Actions (`.github/workflows/`), OIDC auth, Trivy security scans.
-- Static frontend on Cloudflare Pages (owner nginx proxies ocx.sh/dev.ocx.sh; /v2 stays local), secrets via GitHub Secrets.
+- Static frontend on Bunny storage (`deploy-docs.yml`; owner nginx fronts ocx.sh/dev.ocx.sh), secrets via GitHub Secrets.
 - Release tooling: `cargo-dist` (`dist-workspace.toml`), `git-cliff` (`cliff.toml`).

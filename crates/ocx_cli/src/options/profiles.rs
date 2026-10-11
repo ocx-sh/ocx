@@ -13,7 +13,7 @@ pub struct Profiles {
     /// the file name. Omit to auto-detect the usual profile files for the
     /// current shell.
     ///
-    /// https://ocx.sh/docs/reference/command-line#self-setup
+    /// https://ocx.sh/docs/reference/command-line/self/#self-setup
     #[clap(long = "profile", value_name = "PATH", overrides_with = "no_profile")]
     profile: Vec<PathBuf>,
 
@@ -24,7 +24,7 @@ pub struct Profiles {
     /// still written. Combine with an explicit `--profile` and the one typed
     /// last wins, POSIX style.
     ///
-    /// https://ocx.sh/docs/reference/command-line#self-setup
+    /// https://ocx.sh/docs/reference/command-line/self/#self-setup
     #[clap(long = "no-profile", overrides_with = "profile")]
     no_profile: bool,
 }

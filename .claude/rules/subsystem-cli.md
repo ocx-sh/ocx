@@ -395,7 +395,7 @@ Three checks ride along with a command: the self update check, the `[managed]` r
 
 The drift probe reads leaf digests through `index().remote_view()` and never runs `resolve_lock`. A project toolchain is probed only when `ocx_project::consent::evaluate` reports it consented, so a freshly cloned `ocx.lock` cannot make every command contact its registries. The per-prompt hook never runs any of these checks.
 
-User-facing surface: `website/src/docs/reference/configuration.md` `[update]`, and `reference/environment.md` `OCX_SELF_UPDATE`, `OCX_TOOLCHAIN_UPDATE`, `OCX_UPDATE_CHECK_INTERVAL`, `OCX_NO_UPDATE_CHECK`.
+User-facing surface: the generated `website/src/content/docs/reference/configuration.md` `[update]`, and `reference/environment.md` `OCX_SELF_UPDATE`, `OCX_TOOLCHAIN_UPDATE`, `OCX_UPDATE_CHECK_INTERVAL`, `OCX_NO_UPDATE_CHECK`.
 
 ## Cross-Cutting: Plugin Dispatch
 
@@ -403,7 +403,7 @@ The `External(Vec<OsString>)` variant on `Command` routes unknown subcommand nam
 
 ## Cross-Cutting: OCX Configuration Forwarding
 
-Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env and before `Command::envs()`. Resolution-affecting `ContextOptions` fields MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
+Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env and before `Command::envs()`. Resolution-affecting `ContextOptions` fields MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/content/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
 
 ### Credential exemption
 
@@ -426,7 +426,7 @@ Two variables meet the bar and are **deliberately not** on the list; a third is 
 | `OCX_AUTH_<slug>_TOKEN` | `auth.rs::get_env_auth` | **Known-open, mechanism gap.** A name *pattern*, so a fixed `&[&str]` cannot hold it at all. `script/ocx_module.rs::is_reserved_env_key` already masks this family from Starlark **by prefix** — two credential masks, one of which handles patterns. Closing it means teaching `ocx_env::credential_keys()` prefixes too. |
 | `OCX_ANNOUNCE_GIT_USERNAME` | `forge/credentials.rs::ForgeCredentials::resolve` | **Not open — a decided no.** The user half of the HTTP Basic pair (default `gitlab-ci-token`). It does not meet the bar at all: holding it authenticates nobody, and listing it would say that it did. |
 
-Reviewers: read these through their `ocx_env` declaration (a `secret` one yields `Sensitive`). Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** declare it in `crates/ocx_env/src/vars.rs` with `secret, child = Scrub` (that set is `ocx_env::credential_keys()`, whose doc comment carries the membership rule and the four-edit checklist) **and** in `website/src/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
+Reviewers: read these through their `ocx_env` declaration (a `secret` one yields `Sensitive`). Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** declare it in `crates/ocx_env/src/vars.rs` with `secret, child = Scrub` (that set is `ocx_env::credential_keys()`, whose doc comment carries the membership rule and the four-edit checklist) **and** in `website/src/content/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
 
 ### Secret-bearing values: the `env://` convention
 

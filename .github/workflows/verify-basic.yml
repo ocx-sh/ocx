@@ -191,12 +191,13 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       # test_contract_baseline.py walks HEAD's ancestry to its newest vX.Y.Z
       # tag; the depth-1 checkout has neither, and its tag floor reds without
-      # them. Release tags only, plus the history that reaches them.
-      - name: Fetch release tags
+      # them. Release tags only, plus the history that reaches them. `main`
+      # too: test_docs_quality_gate.py diffs against `origin/main`.
+      - name: Fetch release tags and main
         run: |
           unshallow=()
           if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then unshallow=(--unshallow); fi
-          git fetch --no-tags --recurse-submodules=no "${unshallow[@]}" origin '+refs/tags/v*:refs/tags/v*'
+          git fetch --no-tags --recurse-submodules=no "${unshallow[@]}" origin '+refs/tags/v*:refs/tags/v*' '+refs/heads/main:refs/remotes/origin/main'
       - name: Lint tier
         run: task test:lint:structure
       # The C-021 parity matrix drives all nine hook shells, but no runner image
@@ -408,6 +409,12 @@ jobs:
       # take away.
       - name: Build
         run: task rust:build
+      # The committed reference pages match what the generator renders; it reuses
+      # the build above, so it costs one cached Bazel invocation.
+      - name: Reference drift
+        id: refcheck
+        run: task website:reference:check
+        continue-on-error: true
       - name: Upload Binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -553,8 +560,8 @@ jobs:
       - name: Check lint results
         if: ${{ !cancelled() }}
         run: |
-          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" || "${{ steps.docratchet.outcome }}" == "failure" ]]; then
-            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }}, docratchet=${{ steps.docratchet.outcome }})"
+          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" || "${{ steps.docratchet.outcome }}" == "failure" || "${{ steps.refcheck.outcome }}" == "failure" ]]; then
+            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }}, docratchet=${{ steps.docratchet.outcome }}, refcheck=${{ steps.refcheck.outcome }})"
             exit 1
           fi
       # C-015's caller half, which a composite action cannot carry itself: the

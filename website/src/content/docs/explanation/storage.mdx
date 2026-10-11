@@ -1,0 +1,358 @@
+---
+title: "Storage"
+description: "How OCX splits its data directory into independent stores for packages, layers, blobs, the index and install symlinks, and why each store exists."
+---
+{/* doc_type: explanation */}
+
+import Tooltip from '@ocx-sh/theme/components/Tooltip.astro'
+
+import Tree from '@ocx-sh/theme/components/Tree.astro'
+
+import Node from '@ocx-sh/theme/components/TreeNode.astro'
+
+import Description from '@ocx-sh/theme/components/TreeDescription.astro'
+
+This page explains how OCX lays out its data directory as independent stores, and why each store exists.
+
+Most package managers keep everything in a single mutable tree. Installing a new version silently replaces the old one, breaking anything that referenced the old path. They also hit the network on every operation, making offline use and reproducible CI awkward.
+
+OCX takes the opposite approach. The data directory under `~/.ocx/` (configurable via [`OCX_HOME`][env-ocx-home]) is split into independent stores. Each owns one concern, each is content-addressed where it matters, and each can be reasoned about in isolation.
+
+The user-facing surface lives in the [Storage section of the user guide][user-storage]. It covers what `ocx package install` produces, where to find binaries, and which paths are safe to embed.
+
+## Stores \{#stores\}
+
+Content-addressed storage, a local index, persistent state, stable symlinks, and download staging each get their own store under `$OCX_HOME`:
+
+<Tree>
+  <Node name="~/.ocx/" icon="🏠" open>
+    <Node name="packages/" icon="📦">
+      <Description slot="description">immutable, content-addressed assembled packages</Description>
+    </Node>
+    <Node name="layers/" icon="🗂️">
+      <Description slot="description">extracted OCI layers, shared across packages that reference the same layer</Description>
+    </Node>
+    <Node name="blobs/" icon="📋">
+      <Description slot="description">raw OCI blobs: manifests, image indexes, referrers</Description>
+    </Node>
+    <Node name="index/" icon="🏷️">
+      <Description slot="description">local index collection, one subtree per source (see Index below)</Description>
+    </Node>
+    <Node name="toolchain/" icon="🧰">
+      <Description slot="description">the global tier's rendered toolchain tree, described on the Toolchain Tree page</Description>
+    </Node>
+    <Node name="projects/" icon="📁">
+      <Description slot="description">the GC project ledger read by <code>ocx clean</code>: one symlink per registered project, pointing at its directory. Distinct from <code>state/projects/&lt;key&gt;/</code></Description>
+    </Node>
+    <Node name="state/" icon="🗄️">
+      <Description slot="description">persistent runtime state, one subdirectory per concern</Description>
+      <Node name="projects/" icon="📁">
+        <Description slot="description">one subdirectory per project key: shell-activation consent and the render stamp</Description>
+      </Node>
+      <Node name="update-check/" icon="⏱️">
+        <Description slot="description">throttle markers for the background update-check probe</Description>
+      </Node>
+      <Node name="managed-config/" icon="🗂️">
+        <Description slot="description">the managed-config tier's own snapshot pin</Description>
+      </Node>
+      <Node name="patch-descriptors/" icon="📄">
+        <Description slot="description">per-repository record of whether a patch descriptor was found, re-checked by install, pull, lock, add, update and package test</Description>
+      </Node>
+      <Node name="patch-companions/" icon="📌">
+        <Description slot="description">per-repository companion tag→digest pins, never in the local index</Description>
+      </Node>
+      <Node name="host/" icon="🖥️">
+        <Description slot="description">the host-capability record, <code>capabilities.json</code></Description>
+      </Node>
+      <Node name="referrers/" icon="🔗">
+        <Description slot="description">per-registry cache of whether the registry supports the referrers API</Description>
+      </Node>
+      <Node name="trust_root/" icon="🔏">
+        <Description slot="description">per-Rekor-host trust-root cache for offline verification</Description>
+      </Node>
+    </Node>
+    <Node name="symlinks/" icon="🔀">
+      <Description slot="description">stable symlinks safe to embed in shell profiles and configs</Description>
+    </Node>
+    <Node name="temp/" icon="🧪">
+      <Description slot="description">download staging, cleaned on successful install</Description>
+    </Node>
+    <Node name="shims/" icon="🪄">
+      <Description slot="description">generated launcher directories for lazy-mode packages, described under <a href="/docs/explanation/deferred-packages/#deferred-tools-compose">Deferred packages</a></Description>
+    </Node>
+    <Node name=".bin/" icon="⚙️">
+      <Description slot="description"><code>ocx-shim</code>, the shared shim executable blob</Description>
+    </Node>
+    <Node name="locks/" icon="🔒">
+      <Description slot="description">cross-process lock files, content-keyed and safe to delete when no ocx process is running. Also holds the project mutation mutex for every ocx.toml this machine has written to, scoped under project-mutate/</Description>
+    </Node>
+  </Node>
+</Tree>
+
+Each store has a single responsibility. Upgrading a package updates symlinks in `symlinks/` and adds an entry to `packages/`, but never touches `index/`. The stores can be understood one at a time. The global tier's `toolchain/` directory is the rendered view of a toolchain, described on [Toolchain Tree][toolchain-tree].
+
+<details>
+<summary>Path component encoding</summary>
+
+Registry names, repository names, and tags that appear as directory or file names are <Tooltip term="slugified">Characters outside `[a-zA-Z0-9._-]` are replaced with underscores. For example, `localhost:5000` becomes `localhost_5000`. This prevents the POSIX `PATH` separator (`:`) from corrupting environment variables that embed these paths.</Tooltip> before they become filesystem path components. Dots and hyphens are preserved so domain names (`ghcr.io`) and semantic versions (`3.28.1`) stay readable on disk.
+
+Digest-addressed directories use a two-level shard (`sha256/{2hex}/{30hex}/`). Only 32 hex characters are encoded in the path. The full digest is written to a sibling `digest` file inside each entry and is the source of truth for identity.
+
+</details>
+
+## Packages \{#packages\}
+
+When OCX installs a package, the actual files land in `packages/`. The critical design decision: the path comes from the content's <Tooltip term="SHA-256 digest">A 64-character hex fingerprint of the exact bytes in a file or archive. The same bytes always produce the same digest.</Tooltip>, not from the package name or tag.
+
+<Tree>
+  <Node name="~/.ocx/packages/" icon="📦" open>
+    <Node name="{registry}/" icon="📁" open-icon="📂" open>
+      <Node name="sha256/ab/c123…/" icon="📁" open-icon="📂" open>
+        <Description slot="description">one directory per unique package build</Description>
+        <Node name="content/" icon="📂">
+          <Description slot="description">package files: binaries, libraries, headers</Description>
+        </Node>
+        <Node name="entrypoints/" icon="🚀">
+          <Description slot="description">generated launchers for declared entry points, one script per name</Description>
+        </Node>
+        <Node name="metadata.json" icon="📋">
+          <Description slot="description">declared env vars and extraction options</Description>
+        </Node>
+        <Node name="refs/" icon="🔗">
+          <Description slot="description">back-references to install symlinks, which guard against deletion</Description>
+        </Node>
+      </Node>
+    </Node>
+  </Node>
+</Tree>
+
+This <Tooltip term="content-addressed layout">A storage scheme where every item's address is derived from a cryptographic hash of its contents. The same bytes always map to the same address, so accidental duplication is impossible and silent corruption is detectable.</Tooltip> has two consequences:
+
+- **Automatic deduplication.** If `kitware/cmake:3.28` and `kitware/cmake:latest` resolve to the same binary build, they share one directory on disk. Storage scales with the number of *distinct builds*, not the number of tags that reference them.
+- **Immutability.** A path under `sha256/<shard>/` never changes its contents. It is safe to reference directly from scripts or cache layers that need a known, stable binary.
+
+:::note[Similar to the Nix store and Git objects]
+The [Nix package manager][nix] stores every package at `/nix/store/{hash}-name/` using the same principle: the path is a function of the content. This is what makes Nix derivations reproducible across machines. The same hash always means the same files. Git's internal object store (`.git/objects/`) works identically. OCX applies this model to OCI-distributed binaries.
+:::
+
+### Generated Launchers \{#generated-launchers\}
+
+When a package's [`metadata.json`][metadata-ref] declares a non-empty [`entrypoints`][metadata-entry-points] object, OCX materializes a sibling `entrypoints/` directory at install time. It holds a launcher for each entry: a POSIX `.sh` launcher for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar.
+
+Each launcher carries the digest-addressed package root and re-enters via [`ocx launcher exec`][cmd-launcher-exec]. Every invocation therefore runs under the same clean-environment guarantee as [`ocx package exec <package>`][cmd-exec].
+
+Packages that declare no entrypoints never get an `entrypoints/` directory. See the [entry points guide][in-depth-entry-points] for the publisher workflow.
+
+### Garbage Collection \{#gc\}
+
+The `refs/symlinks/` subdirectory inside each package tracks every install symlink that points to it. That directory is the GC root signal. [`ocx clean`][cmd-clean] starts a reachability walk from every package with a live `refs/symlinks/` entry and follows forward-refs through all three tiers.
+
+<details>
+<summary>How back-references work</summary>
+
+When `ocx package install kitware/cmake:3.28` creates the symlink `symlinks/…/kitware/cmake/candidates/3.28 → packages/…/sha256/ab/c123…/`, it simultaneously writes a back-reference entry inside the package's `refs/symlinks/` directory. The link targets the package root, not `content/`, because consumers traverse `<symlink>/content` themselves. Removing the symlink via [`ocx package uninstall`][cmd-uninstall] removes that back-reference entry.
+
+[`ocx clean`][cmd-clean] then builds a reachability graph across all three tiers. Packages with live `refs/symlinks/` entries (and any profile content-mode references) are roots. A single BFS pass follows each package's forward-refs in `refs/deps/`, `refs/layers/`, and `refs/blobs/`. Packages, layers, and blobs that remain unreachable across all three tiers are deleted in one sweep.
+
+</details>
+
+A dependency is protected by the liveness of its dependents, not by a back-reference inside itself. OCX records each dependency as a forward-ref inside the dependent package's `refs/deps/` directory, pointing at the dependency's `content/`. Nothing is written into the dependency's own `refs/symlinks/`. The same `ocx clean` sweep that removes the last dependent therefore also collects the unreachable dependency.
+
+## Layers \{#layers\}
+
+A package on disk looks monolithic, with one `content/` directory under one digest. The bytes inside can still come from more than one upstream archive. Each archive is a <Tooltip term="layer">An OCI image layer: a single tar archive (gzip or xz compressed) addressed in the registry by its own SHA-256 digest. On pull, OCX extracts each layer once into the shared layer store and assembles the package's `content/` directory from them via hardlinks.</Tooltip> It is stored once in `~/.ocx/layers/` and shared across every package that references it.
+
+<Tree>
+  <Node name="~/.ocx/layers/" icon="🗂️" open>
+    <Node name="{registry}/" icon="📁" open-icon="📂" open>
+      <Node name="sha256/ab/c123…/" icon="📁" open-icon="📂" open>
+        <Description slot="description">one directory per unique layer blob</Description>
+        <Node name="content/" icon="📂">
+          <Description slot="description">extracted layer files, the hardlink source for assembled packages</Description>
+        </Node>
+      </Node>
+    </Node>
+  </Node>
+</Tree>
+
+The layer store enables a different kind of dedup than the package store. The package store dedups whole builds: two tags pointing at the exact same binary share one directory. The layer store dedups *parts* of builds. A 200 MB shared base layer used by ten packages is downloaded, extracted, and stored exactly once.
+
+Each package's `content/` is then assembled by hardlinking files from one or more layer directories. The package looks complete even though no bytes were copied.
+
+:::note[Similar to Docker image layers and pnpm's content store]
+[Docker image layers][docker-layers] are the same concept at the registry level. An image is a stack of layers, each addressed by digest and downloaded only when missing from the local cache. OCX applies this to binary packages instead of containers. [pnpm][pnpm] uses a comparable trick on the install side. It stores every package version once in a content-addressed store and hardlinks them into individual `node_modules/` trees.
+:::
+
+### Multi-Layer Packages \{#multi-layer\}
+
+When you call [`ocx package push`][cmd-package-push], every positional argument after the identifier is a layer, and there can be zero or more. Each layer is either a path to a local archive file or a digest reference to a layer that already exists in the target registry. A push with zero layers is valid too. It produces a config-only OCI artifact, useful for referrer-only or description-only manifests. It requires `--metadata`, because there is no file layer to sniff a sibling metadata path from.
+
+```shell
+# Two-layer package: shared base + package-specific top
+ocx package push -p linux/amd64 acme/mytool:1.2.3 base.tar.gz tool.tar.gz
+
+# Re-publish with the base layer reused by digest — no re-upload.
+# The digest ref must spell out the original archive extension
+# (`.tar.gz` / `.tgz` / `.tar.xz` / `.txz`) — OCI blob HEADs do not
+# carry the media type, so OCX refuses to guess.
+ocx package push -p linux/amd64 acme/mytool:1.2.4 sha256:<hex>.tar.gz newtool.tar.gz
+```
+
+The order matters for the manifest descriptor list, but assembled content must not overlap. Two layers cannot contain the same file path. Overlap is rejected at install time with a clear error.
+
+:::note[Digest verification on pull]
+Every layer downloaded by `ocx package install` or `ocx package pull` is verified in-stream. Bytes are hashed as they arrive and compared against the digest declared in the manifest before extraction completes. A mismatch means the registry served different bytes for the same digest ([CWE-345][cwe-345]), and it fails the command.
+
+Zero-layer pulls are valid. A config-only package, produced by `ocx package push` with no file layers and `--metadata`, installs into an empty `content/` directory. That is the expected shape for referrer-only or description-only artifacts.
+
+The manifest itself is checked earlier still. OCX rejects a manifest fetch whose response is not JSON before any digest comparison runs. A non-manifest response, such as an HTML page from a [misconfigured mirror][config-mirrors], is reported as exactly that rather than surfacing as a digest mismatch.
+:::
+
+:::caution[Bring your own archives]
+[`ocx package push`][cmd-package-push] does **not** bundle a directory for you. Each layer must be a pre-built archive (`.tar.gz` / `.tgz` or `.tar.xz` / `.txz`). This is intentional. Archive creation is non-deterministic (timestamps, compression entropy, file ordering), so re-bundling the same content yields a different digest and defeats layer reuse.
+
+Use [`ocx package create`][cmd-package-create] if you need to bundle a directory. That command produces a stable archive once, which you can then push and reference by digest from any number of subsequent packages.
+
+If a file in your current directory is literally named like a digest reference (e.g. `sha256:abc….tar.gz`), prefix it with `./` to force file interpretation. Bare `sha256:…` tokens are always parsed as digest refs.
+:::
+
+:::tip[Designing for reuse]
+Layer reuse is most valuable when many packages share a large common base, such as a runtime library, a vendored toolchain, or a fixed dataset. Push the base once, record its digest, and reference it from every dependent package's push command. The registry stores it once. OCX downloads it once. Every package gets a fresh `content/` view assembled from the same shared layer.
+:::
+
+:::caution[Layer reuse is per-repository]
+Reusing a layer by digest works only when that blob already lives in the **target repository**. OCX does not mount blobs across repositories, and an OCI registry does not share them implicitly. The same layer used by two repositories, say `ocx/cli` and `ocx/mirror`, is two separate uploads unless you push it to each or [cross-mount it][oci-blob-mount] explicitly. Dedup is automatic *within* a repository and in the local [package store][fs-packages], never *across* registry repositories.
+:::
+
+## Index \{#index\}
+
+When you run `ocx package install kitware/cmake:3.28`, how does OCX know which binary to fetch? It looks up the tag `3.28` in the local index and finds the corresponding <Tooltip term="digest">The content fingerprint stored in the OCI registry manifest. A tag like `3.28` is a human-readable alias for the digest of the exact binary build behind it.</Tooltip>. Unlike the other stores on this page, the index's home is not fixed to `$OCX_HOME`. [`--index` / `OCX_INDEX`][env-ocx-index] can point it at an entirely different collection, and it defaults to `index/` when neither is set.
+
+<Tree>
+  <Node name="~/.ocx/index/" icon="🏷️" open>
+    <Node name="ocx.sh/" icon="📁" open-icon="📂" open>
+      <Description slot="description">one subtree per source, the local index collection</Description>
+      <Node name="c/index.json" icon="📄">
+        <Description slot="description">catalog: <code>ns/pkg → sha256(root)</code></Description>
+      </Node>
+      <Node name="p/{ns}/{pkg}.json" icon="📄">
+        <Description slot="description">root document: repository pointer, tags, publisher status</Description>
+      </Node>
+      <Node name="p/{ns}/{pkg}/o/sha256/{hex}.json" icon="📄">
+        <Description slot="description">dispatch object: the filename is the object's own digest, never a leaf manifest</Description>
+      </Node>
+    </Node>
+  </Node>
+</Tree>
+
+The index is a *collection*. Each source's subtree reflects the state of that remote registry (or the [public index][public-index]) at the last time you refreshed it. It is dispatch-only: a leaf platform manifest is never copied into the index. The index holds only the tag → digest pointer and the platform → digest dispatch object it names, each verified against its own digest. A package's *version choice* therefore resolves offline from the index alone, with no other store or network access required.
+
+When the tag names a manifest directly (a single-platform package), OCX checks the [package store][fs-packages] before the registry. An already-installed package's leaf manifest was cached there at install time, so re-resolving it needs no network. Only a genuinely cold digest reaches the registry. The full design lives in [Indices][in-depth-indices], [Local index][local-index] and [Public index][public-index].
+
+The index is never walked by [`ocx clean`][cmd-clean]. See [Garbage Collection](#gc) above.
+
+### Shared digests \{#shared-digests\}
+
+Two distinct platform keys pointing at the same manifest digest is legitimate, and OCX never rejects it. The canonical case is [Rosetta 2][rosetta-2]. A publisher who ships only a `darwin/amd64` build can also list that manifest under `darwin/arm64`. Apple Silicon hosts then install it and run it through x86-64 translation instead of finding no arm64 build.
+
+The two keys differ. One names the binary's native architecture and the other a host that can run it by translation, but both may point at the same bytes. [OCI Image Index][oci-image-index] entries are content-addressed. The digest identifies the *bytes*, and neither the spec nor OCX requires a one-to-one mapping between platform descriptors and content. A generic OCI client that deduplicates identical layers across platform entries relies on the same property.
+
+## Symlinks \{#symlinks\}
+
+Package paths embed the digest: `~/.ocx/packages/ocx.sh/sha256/ab/c123…/`. That path changes on every upgrade. You cannot put it in a shell profile, an IDE config, or a build file and expect it to still work next month.
+
+`symlinks/` solves this with <Tooltip term="stable symlinks">A symbolic link (symlink) is a filesystem entry that points to another path. The link's own path never changes. Only its target can be updated. Tools that reference the link path continue to work transparently after the target is re-pointed to a new version.</Tooltip> whose paths never change. Only their targets are re-pointed when you install or select a new version.
+
+<Tree>
+  <Node name="~/.ocx/symlinks/" icon="🔀" open>
+    <Node name="{registry}/" icon="📁" open-icon="📂" open>
+      <Node name="{namespace}/" icon="📁" open-icon="📂" open>
+        <Description slot="description">a repository is two segments, so it is two directories: <code>kitware/</code> then <code>cmake/</code></Description>
+        <Node name="{package}/" icon="📁" open-icon="📂" open>
+          <Node name="current" icon="➡️" open>
+            <Description slot="description">active package root, set by ocx package select</Description>
+            <Node name="content/" icon="📂" />
+            <Node name="entrypoints/" icon="🚀" />
+            <Node name="metadata.json" icon="📋" />
+          </Node>
+          <Node name="candidates/" icon="📁" open-icon="📂" open>
+            <Node name="3.28" icon="➡️">
+              <Description slot="description">pinned package root, created by ocx package install kitware/cmake:3.28</Description>
+            </Node>
+            <Node name="3.30" icon="➡️">
+              <Description slot="description">pinned package root, created by ocx package install kitware/cmake:3.30</Description>
+            </Node>
+          </Node>
+        </Node>
+      </Node>
+    </Node>
+  </Node>
+</Tree>
+
+Two symlink entries cover every use case. Both target the **package root** (`packages/{registry}/{algorithm}/{2hex}/{30hex}/`) rather than the `content/` subdirectory. Consumers traverse into `…/content/` for files and `…/entrypoints/` for launcher scripts, or read `…/metadata.json` directly.
+
+**`candidates/{tag}`**: pinned to a specific version. Created by [`ocx package install`][cmd-install] and pointed at the exact digest that tag resolved to at install time. Several versions can coexist. The candidates for cmake 3.28 and 3.30 both remain until you explicitly uninstall one. Even if the registry re-pushes the `3.28` tag with a different binary, your candidate still points to the build you installed.
+
+This slot is **host-only**. Installing a foreign platform (`-p windows/amd64` on a non-Windows host, or `--select` of one) populates the object store but leaves both `candidates/{tag}` and `current` untouched. A platformless resolver therefore never hands you a package the host cannot run. Reference a foreign-platform install by its digest instead.
+
+**`current`**: a floating pointer to whichever candidate you last declared active. Set by [`ocx package select`][cmd-select] (or `ocx package install --select` in one step). It is never updated automatically, not when you install a newer version and not when you refresh the local index. This is intentional: tools referencing `current` should only change behavior when *you* decide they should.
+
+When the selected package declares [`entrypoints`][metadata-entry-points], the composed environment emits a `PATH` export for `{repo}/current/entrypoints`. The environment comes from [`ocx package env`][cmd-package-env] or from the global toolchain activation `eval "$(ocx --global env --shell=sh)"`. Every declared launcher becomes a top-level command. See [Entry Points][in-depth-entry-points] for how launchers, PATH, and clean-env execution compose.
+
+:::note[Inspired by SDKMAN and Homebrew]
+[SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.
+:::
+
+## See Also
+
+- [Storage section in the user guide][user-storage]: install, switch versions, embed stable paths
+- [Toolchain Tree][toolchain-tree]: how a rendered toolchain links, launches and stamps its tools
+- [Toolchain activation][env-composition-activation]: the `activate` × `pinned` matrix and what a trampoline composes
+- [Indices][in-depth-indices]: the local index collection, `index.ocx.sh`, locking, offline behavior
+- [Entry Points][in-depth-entry-points]: generated launchers, synth-PATH, clean-env execution
+- [Dependencies][in-depth-dependencies]: `refs/deps/` forward-refs and reachability across the GC walk
+- [`ocx clean`][cmd-clean]: reference for the GC command
+
+
+[nix]: https://nixos.org/
+[docker-layers]: https://docs.docker.com/get-started/docker-concepts/building-images/understanding-image-layers/
+[pnpm]: https://pnpm.io/motivation#saving-disk-space
+[sdkman]: https://sdkman.io/
+[homebrew]: https://brew.sh/
+[oci-blob-mount]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#mounting-a-blob-from-another-repository
+
+
+[cmd-install]: ../reference/command-line/package-consuming.md#package-install
+[cmd-select]: ../reference/command-line/package-consuming.md#package-select
+[cmd-uninstall]: ../reference/command-line/package-consuming.md#package-uninstall
+[cmd-clean]: ../reference/command-line/commands.md#clean
+[cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
+[cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
+[cmd-launcher-exec]: ./launcher-forwarding.md#launcher-embedding
+[cmd-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
+
+
+[env-ocx-home]: ../reference/environment.md#ocx-home
+[env-ocx-index]: ../reference/environment.md#ocx-index
+
+
+[metadata-ref]: ../reference/metadata/index.md
+[metadata-entry-points]: ../reference/metadata/entry-points.md#entry-points
+[config-mirrors]: ../reference/configuration.md#keys-mirrors
+[env-composition-activation]: ../reference/env-composition.md#toolchain-activation
+
+
+[cwe-345]: https://cwe.mitre.org/data/definitions/345.html
+[rosetta-2]: https://support.apple.com/en-us/HT211861
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+
+
+[fs-packages]: #packages
+[user-storage]: ../guides/stable-paths.mdx#stable-paths
+[in-depth-indices]: ./indices.md
+[public-index]: ./public-index.md
+[local-index]: ./local-index.md
+[toolchain-tree]: ./toolchain-tree.md
+[in-depth-entry-points]: ./entry-points.md
+[in-depth-dependencies]: ./dependencies.mdx

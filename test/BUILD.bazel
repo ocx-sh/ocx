@@ -298,7 +298,6 @@ acceptance_suite(
         "tests/test_purge.py": ["tests/test_assembly.py"],
         "tests/test_scenarios_smoke.py": [":scenario_scripts"],
         "tests/test_schema.py": ["//website:src/public/schemas/metadata/v1.json"],
-        "tests/test_shell_reconcile.py": ["//website:src/docs/reference/command-line.md"],
         "tests/test_state_providers.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
         "tests/test_state_registry_characterization.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
         "tests/test_taplo_project_toolchain.py": ["//:taplo.toml"],

@@ -1,0 +1,37 @@
+# P13a first-steps cluster: install, first package, first project.
+
+[[row]]
+item = "getting-started"
+page = "docs/getting-started.md"
+action = "moved"
+home = "getting-started/first-package.mdx"
+
+[[row]]
+item = "next-steps-config"
+page = "docs/getting-started.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "docker"
+page = "docs/installation.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "updating"
+page = "docs/installation.md"
+action = "moved"
+home = "guides/update-ocx.mdx#updating"
+
+[[row]]
+item = "uninstalling"
+page = "docs/installation.md"
+action = "moved"
+home = "guides/update-ocx.mdx#uninstalling"
+
+[[row]]
+item = "ci"
+page = "docs/installation.md"
+action = "moved"
+home = "integration/github-actions.md#ci"

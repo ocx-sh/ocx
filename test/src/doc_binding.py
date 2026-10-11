@@ -6,7 +6,7 @@ Checks that:
   containing an ``ocx`` *invocation* that are NOT ``<<<`` transclusion
   references — i.e., every demonstrated ``ocx`` invocation is backed by a
   tested script.  Detection is structural (not a bare ``ocx `` substring),
-  and fences with a VitePress code-group label (`` ```sh [label] ``) are
+  and fences with a code-group label (`` ```sh [label] ``) are
   treated as shell fences.  Two exemptions apply — see
   ``find_inline_ocx_blocks`` docstring and §6b of the design spec.
 - NC2: Every ``<<< @/_scripts/<file>.sh`` transclusion reference in a
@@ -21,7 +21,7 @@ Checks that:
   ``@/_scripts/foo.sh#cast{sh}``) fails the gate — under ADR H-2 the
   published file is the pre-rendered region body, so a correct doc-author
   ``<<<`` never names a region.  A ``#region`` in a ``<<<`` is the exact
-  shape that triggers the VitePress GH #4625 silent whole-file fallback.
+  shape that triggers the former site generator's silent whole-file fallback (upstream issue 4625).
 - RG3: Any displayed (``# doc:`` present) script under ``test/doc_scripts/``
   that contains a ``# region <x>`` / ``# endregion <x>`` where ``<x>`` is
   not ``cast`` fails the gate — only ``cast`` regions are supported (ADR
@@ -44,46 +44,27 @@ from src.doc_scripts import DocScriptExportEntry
 from src.helpers import PROJECT_ROOT
 
 # ---------------------------------------------------------------------------
-# Walkthrough pages in scope (§7.2)
-# ---------------------------------------------------------------------------
-
-WALKTHROUGH_PAGES: tuple[Path, ...] = (
-    PROJECT_ROOT / "website" / "src" / "docs" / "getting-started.md",
-    PROJECT_ROOT / "website" / "src" / "docs" / "user-guide.md",
-    PROJECT_ROOT / "website" / "src" / "docs" / "faq.md",
-    PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "environments.md",
-    PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "entry-points.md",
-    PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "lazy-loading.md",
-)
-"""The six walkthrough pages subject to NC1–NC3 checks.
-
-Relative to ``PROJECT_ROOT``; paths are resolved at module import time via
-``src.helpers.PROJECT_ROOT``.  These are the prose pages whose inline code
-blocks must all be ``<<<`` transclusions backed by tested doc scripts.
-"""
-
-# ---------------------------------------------------------------------------
 # Regexes
 # ---------------------------------------------------------------------------
 
-# Matches a VitePress code-include line: <<< @/_scripts/<file>.sh{...}
-# The file stem is captured (without the .sh suffix, optional #region fragment,
-# and optional language spec).  Supports nested slug paths (``a/b``) and legacy
-# flat forms (``a__b``).
+# Matches a code-include line: <<< @/_scripts/<file>.sh{...}, or its MDX-escaped
+# spelling \<\<\< @/_scripts/<file>.sh\{...\} (the include plugin reads both).
+# The file stem is captured (no .sh suffix, #region fragment or language spec).
+# Supports nested slug paths (``a/b``) and legacy flat forms (``a__b``).
 _TRANSCLUSION_RE: re.Pattern[str] = re.compile(
-    r"<<<\s+@/_scripts/([^.{}\s]+)\.sh"
+    r"(?:\\?<){3}\s+@/_scripts/([^.{}\\\s]+)\.sh"
 )
 
-# Matches a VitePress code-include line that also names a region fragment:
+# Matches a `<<<` code-include line that also names a region fragment:
 # <<< @/_scripts/<file>.sh#<region>{...}
 # Used by NC4 to detect forbidden #region references.
 # Group 1: the file stem; group 2: the region name (without the leading '#').
 _TRANSCLUSION_REGION_RE: re.Pattern[str] = re.compile(
-    r"<<<\s+@/_scripts/[^.{}\s]+\.sh#([^\s{]+)"
+    r"(?:\\?<){3}\s+@/_scripts/[^.{}\\\s]+\.sh#([^\s{\\]+)"
 )
 
 # Matches a fenced code block opening with bash or sh language specifier,
-# optionally followed by a VitePress code-group label (e.g. ```sh [label]).
+# optionally followed by a code-group label (e.g. ```sh [label]).
 # Non-shell languages (python, bat, etc.) do NOT match.
 _FENCE_OPEN_RE: re.Pattern[str] = re.compile(r"^```(?:bash|sh)(?:\s+\S.*)?\s*$")
 
@@ -118,6 +99,31 @@ _OCX_CMD_RE: re.Pattern[str] = re.compile(
 )
 
 # ---------------------------------------------------------------------------
+# Walkthrough pages in scope (§7.2)
+# ---------------------------------------------------------------------------
+
+DOCS_ROOT: Path = PROJECT_ROOT / "website" / "src" / "content" / "docs"
+
+TUTORIAL_PAGES: tuple[Path, ...] = tuple(sorted((DOCS_ROOT / "getting-started").glob("*.md*")))
+"""The first-steps tutorials: their commands must be tested doc scripts even
+before a page transcludes one."""
+
+
+def _transcluding_pages() -> tuple[Path, ...]:
+    return tuple(
+        page
+        for page in sorted(DOCS_ROOT.rglob("*.md*"))
+        if _TRANSCLUSION_RE.search(page.read_text(encoding="utf-8"))
+    )
+
+
+WALKTHROUGH_PAGES: tuple[Path, ...] = tuple(dict.fromkeys((*TUTORIAL_PAGES, *_transcluding_pages())))
+"""The pages subject to NC1–NC4: the tutorials plus every page that carries a
+``<<< @/_scripts/`` transclusion, so a page that adopts a tested script is
+checked from that commit on.  Resolved at import time under
+``website/src/content/docs``."""
+
+# ---------------------------------------------------------------------------
 # NC1 — inline ocx blocks
 # ---------------------------------------------------------------------------
 
@@ -127,7 +133,7 @@ def find_inline_ocx_blocks(page: Path) -> list[str]:
     NOT ``<<<`` transclusions (NC1).
 
     **What counts as a shell fence:**  the opening fence is `` ```bash `` or
-    `` ```sh ``, optionally followed by a VitePress code-group label
+    `` ```sh ``, optionally followed by a code-group label
     (e.g. `` ```sh [Single binary] ``).  Non-shell languages are ignored.
 
     **What counts as an ocx invocation (structural detection — §6b):**
@@ -155,7 +161,7 @@ def find_inline_ocx_blocks(page: Path) -> list[str]:
 
     (b) *Installer block-marker exemption* — a fenced block that contains
     both ``# BEGIN ocx`` and ``# END ocx`` is the OCX-installer-written
-    shell-profile fragment (shown in ``user-guide.md``).  It is
+    shell-profile fragment (shown in ``reference/command-line/self.md``).  It is
     documentation of an on-disk artifact the installer manages, not a
     command a reader types.
 
@@ -183,7 +189,7 @@ def find_inline_ocx_blocks(page: Path) -> list[str]:
         line = lines[i]
         stripped = line.rstrip("\n\r")
 
-        # Check if this line is a VitePress transclusion — skip it
+        # Check if this line is a `<<<` transclusion — skip it
         if _TRANSCLUSION_RE.search(stripped):
             i += 1
             continue
@@ -239,7 +245,7 @@ def find_inline_ocx_blocks(page: Path) -> list[str]:
 def find_script_transclusions(page: Path) -> list[str]:
     """Return the file stem for every ``<<< @/_scripts/<file>.sh`` reference.
 
-    Scans the Markdown source for VitePress code-include syntax::
+    Scans the Markdown source for `<<<` code-include syntax::
 
         <<< @/_scripts/<file>.sh{sh}
 
@@ -350,7 +356,7 @@ def unresolved_transclusions(
 # ---------------------------------------------------------------------------
 
 # Regex to detect a ``# region <x>`` / ``# endregion <x>`` line in a script,
-# capturing the region name ``<x>``.  Matches the recognised VitePress region
+# capturing the region name ``<x>``.  Matches the recognised region
 # marker pattern ``#\s*#?(end)?region`` followed by an optional name token.
 # Used by RG3 to flag any region name other than ``cast``.
 _REGION_MARKER_RE: re.Pattern[str] = re.compile(
@@ -362,7 +368,7 @@ def find_region_fragment_transclusions(page: Path) -> list[tuple[str, str]]:
     """Return ``(stem, region_name)`` for every ``<<<`` reference carrying a
     ``#region`` fragment (NC4).
 
-    Scans the Markdown source for VitePress code-include syntax that includes
+    Scans the Markdown source for `<<<` code-include syntax that includes
     a region selector::
 
         <<< @/_scripts/<file>.sh#<region>{sh}
@@ -370,7 +376,7 @@ def find_region_fragment_transclusions(page: Path) -> list[tuple[str, str]]:
     Under ADR H-2 the published file is already the pre-rendered region body,
     so a correct doc-author ``<<<`` reference never names a region.  Any
     ``#region`` fragment is by definition wrong and is the exact shape that
-    triggers the VitePress GH #4625 silent whole-file fallback.
+    triggers the former site generator's silent whole-file fallback (upstream issue 4625).
 
     Args:
         page: Absolute path to a Markdown file.
@@ -409,7 +415,7 @@ def find_unrecognised_region_markers(script_path: Path) -> list[tuple[int, str]]
     ``# doc:`` slug.  Only the ``cast`` region name is supported (ADR H-3);
     any other name — e.g. ``# region cats`` (typo) — is flagged by RG3.
 
-    Lines inside the script that match the VitePress region-marker pattern
+    Lines inside the script that match the region-marker pattern
     (``^#\\s*#?(end)?region``) but whose region name is not ``cast`` are
     returned.  The ``# region cast`` / ``# endregion cast`` lines themselves
     are **not** flagged.

@@ -1,0 +1,141 @@
+---
+title: "Update the pinned tools"
+description: "Move pinned tools to later releases while keeping the pins you want fixed."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Move the tools declared in `ocx.toml` to later releases, review what moved, and keep every other pin where it is. Four commands cover the cycle: [`ocx status`][cmd-status], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update] and [`ocx upgrade`][cmd-upgrade].
+
+## Read what is pinned \{#update-status\}
+
+[`ocx status`][cmd-status] shows what `ocx.toml` and `ocx.lock` declare before you change anything. It is offline and read-only, and it exits 0 even when the lock is missing or stale. Add `--verbose` to see each binding's host digest and the number of locked platforms.
+
+```shell
+ocx status
+ocx status --verbose
+```
+
+For what the declarations resolve to on this host, see [Read the project state][project-state].
+
+## Re-lock after editing ocx.toml \{#lifecycle-commands\}
+
+[`ocx lock`][cmd-lock] resolves every tag to per-platform leaf digests and writes `ocx.lock`. The lock records every platform the publisher ships for each binding. Later runs of [`ocx pull`][cmd-pull] and [`ocx exec`][cmd-run] read the lock for the host platform and never the registry. Two machines on the same commit get the same bytes.
+
+The lock carries a hash of the canonicalized `ocx.toml`. If you edit `ocx.toml` and forget `ocx lock`, dependent commands refuse to run with stale digests and exit 65. Read paths never re-resolve silently, so CI cannot drift behind a stray editor save.
+
+```shell
+ocx lock          # reconcile ocx.lock with ocx.toml
+ocx lock --check  # exit 0 when current, 65 when stale, 78 when the lock is missing
+```
+
+:::tip[Edited `ocx.toml` by hand? Run `ocx lock`.]
+[`ocx add`][cmd-add] and [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. Adding or removing a binding never updates the others. Both commands carry every untouched lock entry forward unchanged, and only [`ocx update`][cmd-update] re-resolves surviving tags.
+:::
+
+:::caution[Commit your `ocx.lock`]
+Without it, every contributor and CI runner re-resolves advisory tags against whatever the registry surfaces on the day. To keep merge conflicts manageable on busy projects, add a [`.gitattributes`][gitattributes] entry that lets `git` union sibling lock entries:
+
+```text
+ocx.lock merge=union
+```
+:::
+
+## Move versions \{#project-versions\}
+
+Three commands move a pin, and each moves a different thing.
+
+| Command | What it moves | Registry contact | Edits `ocx.toml` |
+|---|---|---|---|
+| [`ocx lock`][cmd-lock] | Nothing when the lock is current. A drifted config re-resolves every declared tag. | Local index | No |
+| [`ocx update`][cmd-update] | The lock, to where a declared tag points today. | Every run | No |
+| [`ocx upgrade`][cmd-upgrade] | The declared tag itself, then the lock for the retagged bindings only. | Tag listing every run | Yes |
+
+`ocx update` talks to the registry every time, because its purpose is to see where a moving tag such as `:latest` or `:3` points today. With no arguments it re-resolves every declared tag, even when the lock is current. A resolution failure writes nothing.
+
+By default `ocx update` also installs the versions it re-resolved. Pass `--no-pull` to write the lock only, and let `ocx pull` or the next `ocx exec` fetch them.
+
+`ocx upgrade` rewrites the tag in `ocx.toml`, so `cmake:3.28` becomes `cmake:3.29`. Each binding keeps its variant and its precision. A `debug-3.28` binding considers only `debug-*` tags, and a two-component tag moves to a two-component tag. Comments and formatting in `ocx.toml` survive the edit.
+
+A binding stays within its current major unless `--major` is given. The candidate must be strictly later, with no prerelease or build suffix.
+
+:::tip[A moving tag is the case for update, a pinned tag the case for upgrade]
+A binding on `:3` follows the tag with `ocx update`. A binding pinned to `:3.28` stays there until `ocx upgrade` rewrites it.
+:::
+
+```shell
+ocx update                # re-resolve every declared tag against the registry
+ocx update ripgrep        # advance just ripgrep
+ocx update -g ci          # advance the ci group, freezing the rest
+ocx upgrade --check       # see which tags would move, write nothing
+ocx upgrade --major cmake # let cmake cross to a new major
+ocx upgrade -g ci --verbose
+```
+
+A scoped `ocx update` and every `ocx upgrade` need an existing `ocx.lock` (exit 78). Both refuse a drifted `ocx.toml` (exit 65), so run `ocx lock` first when either happens.
+
+## Keep other pins fixed \{#update-pins\}
+
+Name bindings, pass `-g/--group`, or do both to advance only part of the toolchain. Every other pin is carried forward verbatim. An unknown name or group exits 64.
+
+```shell
+ocx update ripgrep shellcheck   # two bindings
+ocx update -g release           # one group
+ocx upgrade -g ci cmake         # one group and one extra binding
+```
+
+Under `--frozen`, `ocx update` resolves against the local index snapshot only, and a tag missing from the snapshot exits 81. Under `--offline` it forbids network access. `ocx upgrade` is refused under either flag (exit 81), because its tag listings come from the registry every time.
+
+[Project Toolchain In Depth → Pin preservation][in-depth-pin-preservation] explains why `ocx add`, `ocx remove` and `ocx lock` never move a pin they were not asked to move.
+
+## Preview before you write \{#update-check\}
+
+`--check` on [`ocx update`][cmd-update] or [`ocx upgrade`][cmd-upgrade] prints the report and writes nothing. It exits 65 when something would move, which makes it the CI gate for stale pins. When nothing would move, both commands write neither file.
+
+## Read the update report \{#project-update-report\}
+
+`ocx update` reports what moved, not only what is pinned. It is the one command that holds both the predecessor lock and the candidate at the same moment. Plain output is one row per tool that moved, with the release it moves from and to:
+
+```text
+Binding      From      To
+bun:1        1.4.0  →  1.4.2
+git-cliff:2  2.14.1 →  2.14.2
+python:3.14  ?      →  3.14.8
+3 tools would move; run `ocx update` to apply
+```
+
+`Binding` is `name:tag` as declared, or the bare name when digest-pinned. A `Group` column appears only when the moved tools span more than one group. `?` marks a release that could not be named, and `-` marks a pin that did not exist on that side. When a tool's platforms moved to different releases, the row shows the host platform's release. If the host is not among them, it shows the release most platforms share.
+
+A trailing hint summarises the tools that held still, such as `2 unchanged tools not shown; re-run with --verbose to list them`. `--verbose` prints one row per platform under `Binding | Group | Platform | From | To`. `From` and `To` are `sha256:` plus the first 12 hex digits, with the release in parentheses when known. It also lists the pins that held still.
+
+A scoped run lists only the bindings it examined as unchanged, because a pin outside the scope was never re-resolved. The closing line goes to stderr. Under `--check` it is the verdict behind exit 65, and no error is logged.
+
+`ocx --format json update` emits `{ "changes": [...], "unchanged": [...], "metadata_changed": bool }`, identical at both verbosities. Release names (`from_version`, `to_version`, `version`) are omitted whenever no release can be named. That happens for a digest-pinned binding, for a run under `--offline` or `--frozen`, and for a pin that no recent release matches. An omitted version never changes the exit code. `--format json update --check` on drift prints the same report and exits 65 with no error document, because the report is the verdict.
+
+## Read the upgrade report \{#project-upgrade-report\}
+
+Plain output is one table, `Binding | Group | From | To`, with one row per moved tag. `From` and `To` are the tags as declared. Under `--verbose`, skipped bindings join the table with `skipped: <reason>` in the `To` column. Otherwise a hint names their count. A later major that `--major` was not asked to cross is listed as a hint with the newest tag at the same precision.
+
+A binding that cannot move is a report row, never an error. Each carries one reason:
+
+| Reason | Meaning |
+|---|---|
+| `digest_pinned` | The binding is pinned to a digest. |
+| `latest` | The tag is `latest`, or the binding declares no tag. |
+| `not_a_version` | The tag is not a version, such as `nightly`. |
+| `prerelease_or_build` | The tag carries a prerelease or build suffix, such as `1.0.0-rc1`. |
+| `up_to_date` | No later tag exists at that precision within the allowed major. |
+
+`ocx --format json upgrade` emits `{ "upgrades": [...], "skipped": [...], "beyond_major": [...], "lock": {...} }`, ordered by group and then name. `--check` prints the same report and exits 65 with no error document.
+
+[gitattributes]: https://git-scm.com/docs/gitattributes
+[cmd-run]: ../reference/command-line/commands.md#exec
+[cmd-add]: ../reference/command-line/commands.md#add
+[cmd-remove]: ../reference/command-line/commands.md#remove
+[cmd-lock]: ../reference/command-line/commands.md#lock
+[cmd-update]: ../reference/command-line/commands.md#update
+[cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-upgrade]: ../reference/command-line/commands.md#upgrade
+[cmd-status]: ../reference/command-line/commands.md#status
+[project-state]: ./project-toolchain.mdx#project-state
+[in-depth-pin-preservation]: ../explanation/project-toolchain.md#pin-preservation

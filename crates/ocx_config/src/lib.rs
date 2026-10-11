@@ -82,18 +82,21 @@ pub struct Config {
     /// Named per-registry configuration tables (`[registries.<name>]`).
     ///
     /// Every key is an identifier prefix, always — `[registry] default`
-    /// never dereferences through this table.
+    /// never dereferences through this table. The key is the package name's
+    /// domain, not the host serving the bytes: an entry keyed on the host
+    /// matches no package, so its `trusted_hosts` never applies.
     pub registries: Option<HashMap<String, RegistryConfig>>,
 
     /// Per-traffic-host mirrors (`[mirrors."<host>"]`).
     ///
     /// Maps a canonical upstream traffic host (e.g. `"ghcr.io"`, `"index.ocx.sh"`) to replacement
-    /// endpoint(s), so read traffic goes to a corporate mirror instead of the firewall-blocked
-    /// origin. A bare string rewrites both traffic roles for that host; a `{registry?, index?}`
-    /// table splits per role — `registry` rewrites OCI distribution traffic only, `index`
-    /// index-tree traffic only. Replace semantics: no origin fallback. The canonical identifier
-    /// and content-addressed digest stay unchanged, so an `ocx.lock` produced behind the mirror
-    /// remains valid with direct egress and vice versa.
+    /// endpoint(s), so read traffic goes to a corporate mirror instead of a blocked origin. A bare
+    /// string rewrites both traffic roles for that host; a `{registry?, index?}` table splits per
+    /// role — `registry` rewrites OCI distribution traffic only, `index` index-tree traffic only.
+    ///
+    /// Replace semantics: no origin fallback. The canonical identifier and content-addressed digest
+    /// stay unchanged, so an `ocx.lock` produced behind the mirror remains valid with direct egress
+    /// and vice versa.
     // Hand-rolled deserializer so a malformed entry names its host, not an opaque untagged mismatch.
     #[serde(default, deserialize_with = "mirror::deserialize_mirrors_table")]
     pub mirrors: Option<HashMap<String, MirrorConfig>>,
@@ -101,8 +104,8 @@ pub struct Config {
     /// Site-tier patch configuration (`[patches]`).
     ///
     /// Points at an operator-controlled patch registry that provides companion
-    /// packages (CA bundles, proxy env vars, license-server endpoints) layered
-    /// onto unmodified upstream packages at compose time.
+    /// packages, such as CA bundles, proxy env vars and license-server endpoints.
+    /// They are layered onto unmodified upstream packages at compose time.
     ///
     /// Absent → no patch tier configured (opt-in, not required).
     pub patches: Option<PatchConfig>,
@@ -110,9 +113,9 @@ pub struct Config {
     /// Corporate managed-configuration tier (`[managed]`).
     ///
     /// Points at an operator-controlled OCI artifact that supplies a plain
-    /// `config.toml` payload — mirrors, patches pointer, default registry —
-    /// synced into local state and merged above the user config every
-    /// invocation.
+    /// `config.toml` payload, such as mirrors, a patches pointer and a default
+    /// registry. The payload is synced into local state and merged above the
+    /// user config every invocation.
     ///
     /// Absent → no managed tier configured (opt-in, seeded by
     /// `ocx self setup --managed-config`).
@@ -128,11 +131,11 @@ pub struct Config {
 
     /// Identity-pinned verification policies (`[[trust.policy]]`).
     ///
-    /// Unlike every other section, trust policies **array-append** across the
-    /// `config.toml` tiers rather than replace — the operator trust set is the
-    /// union of system, user and `$OCX_HOME`. At verify time this operator set
-    /// takes precedence over the project `ocx.toml`. Consumed by
-    /// `ocx package verify`.
+    /// Unlike every other section, trust policies **array-append** across the `config.toml` tiers
+    /// rather than replace — the operator trust set is the union of system, user and `$OCX_HOME`.
+    /// At verify time this operator set takes precedence over the project `ocx.toml`.
+    ///
+    /// Consumed by `ocx package verify`.
     pub trust: Option<ocx_trust::TrustConfig>,
 
     /// Shell-integration settings (`[shell]`) — the per-prompt hook and
@@ -158,38 +161,23 @@ pub struct Config {
     // Reach a home root only through `ToolchainRoot::resolve`; using the field directly skips every refusal.
     /// Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.
     ///
-    /// The global toolchain home ignores this key: it is always `$OCX_HOME/toolchain`. Settable in
-    /// every tier, a managed payload included. Only a leading `~` expands, against the home directory;
-    /// a `%VAR%` reference stays literal on every platform. The value must be absolute with no `..`
-    /// component, and must resolve inside the home directory or `$OCX_HOME` — not either of those
-    /// itself, not inside `$OCX_HOME/toolchain`, and not a filesystem root or a system location such
-    /// as `/usr`, `/etc`, `/var/lib` or `C:\Program Files`. On Linux and macOS it must be owned by the
-    /// invoking user and writable by neither group nor world; Windows checks no ownership. ocx exits
-    /// 78 when any of that fails. It need not exist yet: the first toolchain render creates it.
+    /// The global toolchain home ignores this key, and the directory need not exist yet.
     #[serde(default)]
     pub toolchain_dir: Option<PathBuf>,
 
     /// Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge
     /// traffic in addition to the platform trust store.
     ///
-    /// A bundle of one or more concatenated `CERTIFICATE` blocks is accepted. A relative path
-    /// resolves against the directory of the `config.toml` that declared it, so the same value
-    /// means the same file regardless of the process working directory. Mutually exclusive with
-    /// `extra_ca_certs_pem`: declaring both in one file is refused. A managed payload never carries
-    /// this form: a path on the publisher's disk means nothing on a consumer's, so the managed tier
-    /// drops it with a warning — publish with `ocx config push`, which inlines the file as
-    /// `extra_ca_certs_pem`.
+    /// A relative path resolves against the directory of the `config.toml` that declared it.
+    ///
+    /// Overridden by the `OCX_EXTRA_CA_CERTS` environment variable, which outranks every
+    /// `config.toml` tier unless the pair is declared at system scope.
     #[serde(default)]
     pub extra_ca_certs: Option<PathBuf>,
 
     /// The extra CA certificate bundle inlined verbatim (PEM text).
     ///
-    /// This is the form a fleet receives: `ocx config push` reads a
-    /// path-form `extra_ca_certs` at publish time and inlines it here.
-    /// Mutually exclusive with `extra_ca_certs`. From the managed tier it is
-    /// honoured for registry, index and forge traffic as published; Sigstore
-    /// traffic honours a managed-tier root set only behind a digest-pinned
-    /// `[managed] source`.
+    /// This is the form a fleet receives; `ocx config push` inlines a path-form `extra_ca_certs` here.
     #[serde(default)]
     pub extra_ca_certs_pem: Option<String>,
 
@@ -219,6 +207,7 @@ pub struct RegistryDefaults {
     /// Overridden by the `OCX_DEFAULT_REGISTRY` environment variable. Always a
     /// literal prefix (e.g. `"ghcr.io"`, `"ocx.sh"`) — never resolved through
     /// the `[registries.<name>]` table.
+    #[schemars(extend("default" = "ocx.sh"))]
     pub default: Option<String>,
 
     /// Runtime provenance marker: this tier was declared at the SYSTEM config

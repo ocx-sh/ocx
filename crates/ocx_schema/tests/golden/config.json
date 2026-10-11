@@ -16,7 +16,7 @@
       ]
     },
     "registries": {
-      "description": "Named per-registry configuration tables (`[registries.<name>]`).\n\nEvery key is an identifier prefix, always — `[registry] default`\nnever dereferences through this table.",
+      "description": "Named per-registry configuration tables (`[registries.<name>]`).\n\nEvery key is an identifier prefix, always — `[registry] default`\nnever dereferences through this table. The key is the package name's\ndomain, not the host serving the bytes: an entry keyed on the host\nmatches no package, so its `trusted_hosts` never applies.",
       "type": [
         "object",
         "null"
@@ -26,7 +26,7 @@
       }
     },
     "mirrors": {
-      "description": "Per-traffic-host mirrors (`[mirrors.\"<host>\"]`).\n\nMaps a canonical upstream traffic host (e.g. `\"ghcr.io\"`, `\"index.ocx.sh\"`) to replacement\nendpoint(s), so read traffic goes to a corporate mirror instead of the firewall-blocked\norigin. A bare string rewrites both traffic roles for that host; a `{registry?, index?}`\ntable splits per role — `registry` rewrites OCI distribution traffic only, `index`\nindex-tree traffic only. Replace semantics: no origin fallback. The canonical identifier\nand content-addressed digest stay unchanged, so an `ocx.lock` produced behind the mirror\nremains valid with direct egress and vice versa.",
+      "description": "Per-traffic-host mirrors (`[mirrors.\"<host>\"]`).\n\nMaps a canonical upstream traffic host (e.g. `\"ghcr.io\"`, `\"index.ocx.sh\"`) to replacement\nendpoint(s), so read traffic goes to a corporate mirror instead of a blocked origin. A bare\nstring rewrites both traffic roles for that host; a `{registry?, index?}` table splits per\nrole — `registry` rewrites OCI distribution traffic only, `index` index-tree traffic only.\n\nReplace semantics: no origin fallback. The canonical identifier and content-addressed digest\nstay unchanged, so an `ocx.lock` produced behind the mirror remains valid with direct egress\nand vice versa.",
       "type": [
         "object",
         "null"
@@ -36,7 +36,7 @@
       }
     },
     "patches": {
-      "description": "Site-tier patch configuration (`[patches]`).\n\nPoints at an operator-controlled patch registry that provides companion\npackages (CA bundles, proxy env vars, license-server endpoints) layered\nonto unmodified upstream packages at compose time.\n\nAbsent → no patch tier configured (opt-in, not required).",
+      "description": "Site-tier patch configuration (`[patches]`).\n\nPoints at an operator-controlled patch registry that provides companion\npackages, such as CA bundles, proxy env vars and license-server endpoints.\nThey are layered onto unmodified upstream packages at compose time.\n\nAbsent → no patch tier configured (opt-in, not required).",
       "anyOf": [
         {
           "$ref": "#/$defs/PatchConfig"
@@ -47,7 +47,7 @@
       ]
     },
     "managed": {
-      "description": "Corporate managed-configuration tier (`[managed]`).\n\nPoints at an operator-controlled OCI artifact that supplies a plain\n`config.toml` payload — mirrors, patches pointer, default registry —\nsynced into local state and merged above the user config every\ninvocation.\n\nAbsent → no managed tier configured (opt-in, seeded by\n`ocx self setup --managed-config`).",
+      "description": "Corporate managed-configuration tier (`[managed]`).\n\nPoints at an operator-controlled OCI artifact that supplies a plain\n`config.toml` payload, such as mirrors, a patches pointer and a default\nregistry. The payload is synced into local state and merged above the\nuser config every invocation.\n\nAbsent → no managed tier configured (opt-in, seeded by\n`ocx self setup --managed-config`).",
       "anyOf": [
         {
           "$ref": "#/$defs/ManagedConfig"
@@ -69,7 +69,7 @@
       ]
     },
     "trust": {
-      "description": "Identity-pinned verification policies (`[[trust.policy]]`).\n\nUnlike every other section, trust policies **array-append** across the\n`config.toml` tiers rather than replace — the operator trust set is the\nunion of system, user and `$OCX_HOME`. At verify time this operator set\ntakes precedence over the project `ocx.toml`. Consumed by\n`ocx package verify`.",
+      "description": "Identity-pinned verification policies (`[[trust.policy]]`).\n\nUnlike every other section, trust policies **array-append** across the `config.toml` tiers\nrather than replace — the operator trust set is the union of system, user and `$OCX_HOME`.\nAt verify time this operator set takes precedence over the project `ocx.toml`.\n\nConsumed by `ocx package verify`.",
       "anyOf": [
         {
           "$ref": "#/$defs/TrustConfig"
@@ -102,7 +102,7 @@
       ]
     },
     "toolchain_dir": {
-      "description": "Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.\n\nThe global toolchain home ignores this key: it is always `$OCX_HOME/toolchain`. Settable in\nevery tier, a managed payload included. Only a leading `~` expands, against the home directory;\na `%VAR%` reference stays literal on every platform. The value must be absolute with no `..`\ncomponent, and must resolve inside the home directory or `$OCX_HOME` — not either of those\nitself, not inside `$OCX_HOME/toolchain`, and not a filesystem root or a system location such\nas `/usr`, `/etc`, `/var/lib` or `C:\\Program Files`. On Linux and macOS it must be owned by the\ninvoking user and writable by neither group nor world; Windows checks no ownership. ocx exits\n78 when any of that fails. It need not exist yet: the first toolchain render creates it.",
+      "description": "Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.\n\nThe global toolchain home ignores this key, and the directory need not exist yet.",
       "type": [
         "string",
         "null"
@@ -110,7 +110,7 @@
       "default": null
     },
     "extra_ca_certs": {
-      "description": "Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge\ntraffic in addition to the platform trust store.\n\nA bundle of one or more concatenated `CERTIFICATE` blocks is accepted. A relative path\nresolves against the directory of the `config.toml` that declared it, so the same value\nmeans the same file regardless of the process working directory. Mutually exclusive with\n`extra_ca_certs_pem`: declaring both in one file is refused. A managed payload never carries\nthis form: a path on the publisher's disk means nothing on a consumer's, so the managed tier\ndrops it with a warning — publish with `ocx config push`, which inlines the file as\n`extra_ca_certs_pem`.",
+      "description": "Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge\ntraffic in addition to the platform trust store.\n\nA relative path resolves against the directory of the `config.toml` that declared it.\n\nOverridden by the `OCX_EXTRA_CA_CERTS` environment variable, which outranks every\n`config.toml` tier unless the pair is declared at system scope.",
       "type": [
         "string",
         "null"
@@ -118,7 +118,7 @@
       "default": null
     },
     "extra_ca_certs_pem": {
-      "description": "The extra CA certificate bundle inlined verbatim (PEM text).\n\nThis is the form a fleet receives: `ocx config push` reads a\npath-form `extra_ca_certs` at publish time and inlines it here.\nMutually exclusive with `extra_ca_certs`. From the managed tier it is\nhonoured for registry, index and forge traffic as published; Sigstore\ntraffic honours a managed-tier root set only behind a digest-pinned\n`[managed] source`.",
+      "description": "The extra CA certificate bundle inlined verbatim (PEM text).\n\nThis is the form a fleet receives; `ocx config push` inlines a path-form `extra_ca_certs` here.",
       "type": [
         "string",
         "null"
@@ -136,7 +136,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": "ocx.sh"
         }
       }
     },
@@ -145,14 +146,14 @@
       "type": "object",
       "properties": {
         "index": {
-          "description": "Base URL of the `index.ocx.sh`-protocol index this namespace resolves\nthrough, e.g. `\"https://index.ocx.sh\"`.\n\n**Field presence is the kind marker**: a `[registries.\"<ns>\"]` entry\nthat carries `index` resolves via the ocx-index protocol; an entry\nwithout `index` (or no entry at all) resolves as plain OCI, with no\nfallback from one protocol to the other.",
+          "description": "Base URL of the `index.ocx.sh`-protocol index this namespace resolves through, e.g.\n`\"https://index.ocx.sh\"`, or `file:///absolute/path` for a local index read with no server.\n\n**Field presence is the kind marker.** An entry that carries `index` resolves via the\nocx-index protocol; one without it, or no entry at all, resolves as plain OCI, with no\nfallback. A `file://` base is checked at startup: a relative path or a remote authority is refused.\n\n`index = \"\"` resolves the namespace as plain OCI. A `[mirrors]` registry entry for the\nnamespace in a config file you control suppresses the compiled-in index; the managed tier\nand `OCX_MIRRORS` cannot.",
           "type": [
             "string",
             "null"
           ]
         },
         "trusted_hosts": {
-          "description": "SSRF escape hatch for this namespace's physical registry hosts: exact\nhostnames or CIDR blocks whose resolved addresses skip the default-on\nprivate/loopback/link-local/metadata refusal.\n\nListing a private corporate registry here (e.g. `[\"10.0.0.0/8\", \"registry.corp\"]`)\nrestores access for exactly that namespace without disabling the guard\nglobally. Distributable by the managed tier and locked by a SYSTEM-scope\nentry — there is no CLI flag to widen a locked trust set.",
+          "description": "SSRF escape hatch for this namespace's physical registry hosts. Each\nentry is an exact hostname or a CIDR block whose resolved addresses skip\nthe default-on private/loopback/link-local/metadata refusal.",
           "type": [
             "array",
             "null"
@@ -162,11 +163,12 @@
           }
         },
         "insecure": {
-          "description": "Contact this registry over plain HTTP instead of HTTPS.\n\nUnioned with `OCX_INSECURE_REGISTRIES` — declaring a host in either adds it — except that a\nSYSTEM-scope entry stating `insecure = false` locks that host shut against the env list too.\nDistributable by the managed tier and locked by a SYSTEM-scope entry. Matching is exact on\n`host[:port]` as references carry it: `registry.corp` does not cover `registry.corp:5001`.\nBeyond the registry's own traffic it reaches one thing, the **authentication realm**: a\ncleartext credential only ever goes to a host the operator declared plaintext, so a\nplain-HTTP registry whose **token service sits on a different host or port** needs that host\ndeclared plain HTTP too, or the probe is refused.",
+          "description": "Contact this registry over plain HTTP instead of HTTPS.\n\nUnioned with `OCX_INSECURE_REGISTRIES`, except that a SYSTEM-scope entry stating\n`insecure = false` locks that host shut against the env list too.",
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "default": false
         }
       }
     },
@@ -206,14 +208,16 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": "{registry}/{repository}"
         },
         "required": {
           "description": "Fail posture when a matched companion is unavailable.\n\n- `true` (default) — fail closed: abort launch if a required companion\n  cannot be resolved.\n- `false` — fail open: skip with a warning (suitable for non-security\n  companions like a license-server URL or metrics endpoint).",
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "default": true
         }
       }
     },
@@ -222,7 +226,7 @@
       "type": "object",
       "properties": {
         "source": {
-          "description": "OCI reference for the managed-config artifact, e.g.\n`\"internal.company.com/ocx-config:user\"`.\n\nAbsent → no managed tier configured.",
+          "description": "OCI reference for the managed-config artifact, e.g.\n`\"internal.company.com/ocx-config:user\"`.\n\nAbsent → no managed tier configured. The `OCX_MANAGED_CONFIG` environment variable\noverrides it for one invocation.",
           "type": [
             "string",
             "null"
@@ -233,10 +237,11 @@
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "default": true
         },
         "refresh": {
-          "description": "Background refresh posture. Defaults to `notify`.\n\n`apply` swaps in a drifted snapshot, `notify` advises `ocx config update`, `manual`\nrefreshes only on `ocx config update`. CI never runs the background check. An unknown\nvalue is ignored with a warning, so the default applies.",
+          "description": "Background refresh posture. Defaults to `notify`.\n\n`apply` swaps in a drifted snapshot, `notify` advises `ocx config update`, `manual`\nrefreshes only on `ocx config update`. CI never runs the background check.\n\nAn unknown value is ignored with a warning, so the default applies.",
           "anyOf": [
             {
               "$ref": "#/$defs/RefreshPolicy"
@@ -245,14 +250,15 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": "notify"
         },
         "interval": {
           "description": "Background refresh throttle interval, `\\d+[smhd]?` (bare = seconds).\nDefaults to `\"1d\"`.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": "1d"
         }
       }
     },
@@ -260,12 +266,12 @@
       "description": "What a background check does when it finds drift.",
       "oneOf": [
         {
-          "description": "Drift is applied without asking, by the background check only, which runs only on an\ninteractive terminal, outside CI, and online.",
+          "description": "A change is applied without asking, by the background check only, which runs only on an\ninteractive terminal, outside CI, and online.",
           "type": "string",
           "const": "apply"
         },
         {
-          "description": "Drift prints a stderr advisory naming the command that applies it; nothing is fetched.",
+          "description": "A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.",
           "type": "string",
           "const": "notify"
         },
@@ -281,7 +287,7 @@
       "type": "object",
       "properties": {
         "self": {
-          "description": "What ocx does when a newer ocx is published: `apply` installs it after the command\nfinishes, `notify` (default) prints a notice, `manual` never checks.",
+          "description": "What ocx does when a newer ocx is published: `apply` installs it after the command\nfinishes, `notify` (default) prints a notice, `manual` never checks.\nOverridden by the `OCX_SELF_UPDATE` environment variable.",
           "anyOf": [
             {
               "$ref": "#/$defs/RefreshPolicy"
@@ -290,26 +296,43 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": "notify"
         },
         "toolchain": {
-          "description": "What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice,\n`manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.",
+          "description": "What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice,\n`manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.\nOverridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.",
           "anyOf": [
             {
-              "$ref": "#/$defs/RefreshPolicy"
+              "oneOf": [
+                {
+                  "description": "Read as `notify`: only `ocx update` moves a pin.",
+                  "type": "string",
+                  "const": "apply"
+                },
+                {
+                  "description": "A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.",
+                  "type": "string",
+                  "const": "notify"
+                },
+                {
+                  "description": "The background check is skipped entirely; only an explicit command refreshes.",
+                  "type": "string",
+                  "const": "manual"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": "notify"
         },
         "interval": {
-          "description": "Minimum time between two checks, `\\d+[smhd]?` (bare digits = seconds); `\"0\"` checks on\nevery command. Defaults to `\"1d\"`.",
+          "description": "Minimum time between two checks, `\\d+[smhd]?` (bare digits = seconds); `\"0\"` checks on\nevery command. Defaults to `\"1d\"`. Overridden by the `OCX_UPDATE_CHECK_INTERVAL`\nenvironment variable.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": "1d"
         }
       }
     },
@@ -344,7 +367,7 @@
       "type": "object",
       "properties": {
         "scope": {
-          "description": "Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.\n\nA pattern with no `*` matches the target's canonical `registry/repository` on `/`-separated\npath-segment boundaries: `ghcr.io/acme/tool` matches that exact repo and any sub-path under it\n(`ghcr.io/acme/tool/plugin`), but **not** a sibling that merely shares the prefix text, such as\n`ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string `*` is a literal-prefix\nsubstring glob.\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```\n\nAbsent reads exactly like `\"\"`: a catch-all, as is an empty `include` with no `exclude`.",
+          "description": "Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.\n\nA pattern matches on `/`-separated path-segment boundaries, and an absent scope is a catch-all.\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```",
           "anyOf": [
             {
               "$ref": "#/$defs/ScopeSpec"
@@ -364,7 +387,7 @@
           "default": null
         },
         "signers": {
-          "description": "The signers this policy accepts: an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"`.\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every entry added here widens what verifies**: a new signer is a new way to pass, never a new\ncondition to satisfy. Absent reads as empty, and an empty set is a **configuration error**, not a\ncatch-all. A mis-spelled entry leaves no signer behind and fails closed the same way.",
+          "description": "The signers this policy accepts: an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"`.\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every added entry widens what verifies**, and an empty set is a configuration error, not a\ncatch-all.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/SignerSpec"
@@ -494,7 +517,7 @@
       "type": "object",
       "properties": {
         "key": {
-          "description": "A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.\n\nMutually exclusive with `key_pem`. Unrestricted in a local tier (project, operator or user\nconfig on the author's own disk), where a relative reference resolves against the directory of\nthe config file that declared it. Refused in a managed-config payload: publishing fails with an\nerror naming `key_pem` as the fix, and a payload an older ocx published anyway has this field\ndropped at load time rather than read.",
+          "description": "A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.\n\nMutually exclusive with `key_pem`, and refused in a managed-config payload.",
           "type": [
             "string",
             "null"
@@ -516,7 +539,7 @@
       "type": "object",
       "properties": {
         "trusted_root": {
-          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it — rewritten to absolute at load time, so the same\nvalue means the same file regardless of the process working directory.\nMutually exclusive with `trusted_root_json`.",
+          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it. It is rewritten to absolute at load time, so the same\nvalue names the same file whatever the working directory.\nMutually exclusive with `trusted_root_json`.",
           "type": [
             "string",
             "null"
@@ -548,7 +571,7 @@
           "default": null
         },
         "rekor_upload": {
-          "description": "Fleet-wide default for uploading a **key-mode** signature to the\ntransparency log, when neither `--rekor-upload` nor `--no-rekor-upload`\nis given.\n\nAbsent means off. **Key mode only**: keyless signing always uploads, and ignores this\nfield without a warning. `rekor_url` defaults to the **public** Rekor, where an upload\npublishes the artifact's digest and signer to a world-readable log.",
+          "description": "Fleet-wide default for uploading a key-mode signature to the transparency log, when neither\n`--rekor-upload` nor `--no-rekor-upload` is given.\n\nAbsent means off; keyless signing always uploads and ignores this field.",
           "type": [
             "boolean",
             "null"
@@ -610,7 +633,7 @@
       "type": "object",
       "properties": {
         "paths": {
-          "description": "Directories that activate unconditionally, modelled on git's `safe.directory`.\n\nAn entry is one exact directory, or — with a trailing `/*` — that directory and everything\nbeneath it, matched component-wise (unlike git, `/*` covers the named directory too). A bare `*`\ngrants nothing: there is no trust-this-machine token. Entries are compared **literally**, after\nseparator and trailing-slash normalization, against the canonical project directory, so an\nentry naming a symlinked checkout never matches; `ocx shell state` shows a near-miss when an\nentry differs only by ASCII case. A **leading** `~` expands against the home directory at match\ntime, textually, resolving no symlink and never rewritten into the stored entry; `~user` is not\nsupported. A `paths` grant is drift-blind and writes no stamp, so revoking it is immediate.",
+          "description": "Directories that activate unconditionally, modelled on git's `safe.directory`.\n\nAn entry is one exact directory, or with a trailing `/*` that directory and everything\nbeneath it, matched component-wise. A bare `*` grants nothing.\n\nEntries are compared **literally**, after separator and trailing-slash normalization,\nagainst the canonical project directory; an entry naming a symlinked checkout never matches.\nA **leading** `~` expands textually against the home directory.\n\nA `paths` grant is drift-blind and writes no stamp, so revoking it is immediate.",
           "type": "array",
           "items": {
             "type": "string"
@@ -634,15 +657,15 @@
     "ConsentScopeSpec": {
       "oneOf": [
         {
-          "description": "One scope pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string is a catch-all.",
+          "description": "One consent pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string drops the `[shell.consent]` table with a warning.",
           "type": "string"
         },
         {
-          "description": "Patterns to cover, minus patterns to carve back out. A target matches when it matches at least one `include` (an empty `include` is a catch-all) and no `exclude`.",
+          "description": "Patterns to cover, minus patterns to carve back out. A source matches when it matches at least one `include` and no `exclude`.",
           "type": "object",
           "properties": {
             "include": {
-              "description": "Patterns the policy covers. Empty is a catch-all.",
+              "description": "Patterns the policy covers. Required in the table form; an empty list drops the `[shell.consent]` table with a warning.",
               "type": "array",
               "items": {
                 "type": "string"
@@ -676,21 +699,22 @@
       "type": "object",
       "properties": {
         "dir": {
-          "description": "Directory records are written to. Absent → recording is off.",
+          "description": "Directory records are written to. Absent → recording is off.\n\nOverridden by the `--records-dir` flag and the `OCX_RECORDS_DIR` environment variable.",
           "type": [
             "string",
             "null"
           ]
         },
         "name": {
-          "description": "Name template for each record file, e.g. `{time}-{host}-{pid}-{rand}.json`.\n\nMust contain a component that varies per record, or two frames sharing a\nsink resolve to one path.",
+          "description": "Name template for each record file, e.g. `{time}-{host}-{pid}-{rand}.json`.\n\nMust contain a component that varies per record, or two frames sharing a\nsink resolve to one path. Defaults to `{time}-{pid}-{rand}.json`.\nOverridden by the `--records-name` flag and the `OCX_RECORDS_NAME` environment variable.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": "{time}-{pid}-{rand}.json"
         },
         "required": {
-          "description": "Fail posture when a record cannot be written.\n\n`true` aborts the launch; `false` warns and proceeds. **Config-file only\nat every tier** — never settable from the environment or a flag.\nDefaults `false` unlocked, `true` when SYSTEM-locked.",
+          "description": "Fail posture when a record cannot be written.\n\n`true` aborts the launch; `false` warns and proceeds. **Config-file only at every tier** —\nnever settable from the environment or a flag.\n\nDefaults `false` unlocked, `true` when SYSTEM-locked.",
           "type": [
             "boolean",
             "null"

@@ -66,7 +66,7 @@ Two new env vars introduced:
 
 Both must add to:
 - `CLAUDE.md` environment variable table
-- `website/src/docs/reference/environment.md`
+- `ocx_env` doc blocks, then `task website:reference:generate` (never hand-edit `website/src/content/docs/reference/environment.md`)
 - Env var parsing use same truthy-value logic as `OCX_OFFLINE` and `OCX_REMOTE`
 
 ### Installers live in ocx-sh/www-setup
@@ -96,7 +96,7 @@ Release creation during normal ceremony driven by cargo-dist in CI — do not in
 - **CI workflow patterns**: See `.claude/rules/subsystem-ci.md` for design principles, cost factors, authoring workflow, review checklist
 - **CLI API patterns**: See `.claude/rules/subsystem-cli-api.md` for new report types
 - **CLI commands reference**: See `.claude/rules/subsystem-cli-commands.md` — update when adding new behavior
-- **Environment variables**: See `website/src/docs/reference/environment.md` for canonical env var docs
+- **Environment variables**: The generated `website/src/content/docs/reference/environment.md` is the canonical env var page; edit the `ocx_env` doc blocks and run `task website:reference:generate`
 
 ## Workflow: Release Ceremony
 

@@ -1,0 +1,93 @@
+---
+title: "Consent Grammar"
+description: "Where a shell consent grant can live, and how path and namespace entries are parsed, matched and merged across configuration tiers."
+---
+{/* doc_type: explanation */}
+
+This page explains where a shell consent grant can live and how `[shell.consent]` entries are parsed, matched and merged. [Shell Integration](./shell-integration.mdx#consent) explains what the three grants are and why a project is inert without one.
+
+## Where a grant can live \{#consent-tiers\}
+
+Path and namespace grants share the same `[shell.consent]` table wherever OCX reads [configuration][config-ref] from. Those are the system, user, and home tiers, an explicit [`--config`][arg-config] / [`OCX_CONFIG`][env-ocx-config] file, and the [managed tier][config-managed]. The managed tier counts only when its source is digest-pinned. An unpinned managed tag has `[shell.consent]` stripped with a warning. OCX already applies the same rule to Sigstore trust roots. Two environment variables reach the same table without a file: [`OCX_CONSENT_PATHS`][env-ocx-consent-paths] and [`OCX_CONSENT_NAMESPACES`][env-ocx-consent-namespaces]. Every source unions — nothing in a lower tier overrides a higher one, only adds to it.
+
+**`ocx.toml` cannot carry `[shell.consent]`.** The project's own config file rejects an unknown `[shell]` section outright. That is a hard parse error, not a silent skip, because a project-writable consent grant would let a clone consent to itself.
+
+```toml
+# config.toml (system, user, or home tier — never ocx.toml)
+[shell]
+hook        = true
+completions = true
+
+[shell.consent]
+paths      = ["/workspaces/acme-monorepo"]
+namespaces = "ocx.sh/acme-corp"
+
+# or the carve-out form, for withdrawing one namespace another tier granted:
+# namespaces = { include = ["ocx.sh/acme-corp", "ocx.sh/acme-labs"], exclude = ["ocx.sh/acme-labs"] }
+```
+
+:::caution[What consent grants — and what they cannot buy back]
+None of the three grants above authenticate *who* published the bytes a consented namespace resolves to. See [What consent does not cover](./shell-integration.mdx#residual) for the honest boundary and the control that actually answers that question.
+:::
+
+## Grammar and merging \{#consent-grammar\}
+
+**`[shell.consent]` is the one table in the configuration tree with strict parsing.** Every other section ignores an unknown key. A key here that an older ocx does not recognize could only ever *narrow* a grant, so silently dropping it would *widen* trust. An unrecognized key inside `[shell.consent]`, or inside a `namespaces` table, drops the whole `[shell.consent]` table from that file with a warning rather than applying it partially. Every other section in the same file (`[registries]`, `[mirrors]`, `[[trust.policy]]`, `[shell] hook`) still applies.
+
+Every tier's contribution **accumulates** rather than overriding:
+
+| Field | Type | Merge across tiers | Also unions with |
+|-------|------|---------------------|------------------|
+| `paths` | array of strings, default `[]` | appends, deduplicated | [`OCX_CONSENT_PATHS`][env-ocx-consent-paths] |
+| `namespaces` | string, or a table with a required `include` and an optional `exclude`; unset by default | `include` ∪ `include`, `exclude` ∪ `exclude` | [`OCX_CONSENT_NAMESPACES`][env-ocx-consent-namespaces] |
+
+Both fields only grow. No tier can override the union another tier established, and `exclude` beats `include` wherever both match, whichever tier contributed either half. That is what makes a carve-out expressible: a lower tier can withdraw one namespace a higher tier granted without touching the grant itself.
+
+**`paths` entries.** The grant is modelled on [git][git-safe-directory]'s `safe.directory`, with one difference. The subtree form grants the named directory itself as well as everything beneath it. Git's `/*` covers only repositories nested under it.
+
+| Entry | Grants |
+|-------|--------|
+| `/workspaces/acme` | that directory, and nothing else |
+| `/workspaces/acme/*` | that directory and every project beneath it, at any depth |
+
+The subtree form matches **component-wise**, never as a string prefix, so `/workspaces/acme/*` covers `/workspaces/acme/tools` and never the attacker-planted sibling `/workspaces/acme-evil`. A `*` that names no directory (a bare `*`, or `/*`) grants nothing. OCX has no "trust every project on this machine" token, for the same reason `namespaces` has no whole-registry one.
+
+Write the entry as the canonical, absolute path. A leading `~` expands against the current user's home directory; `%(prefix)` is not interpolated and there is no `~user/…` form. The expansion is **textual, not a symlink resolution**, and entries are otherwise compared literally after separator and trailing-slash normalization. The entry itself is never canonicalized, so a grant never silently follows a symlink an attacker controls on the parent. That cuts both ways. `~/dev/*` where `dev` is a symlink onto another mount still misses the project's canonical directory. An entry naming a symlinked route to a project never matches either. The path to write is the one [`ocx shell state`][cmd-shell-state] prints as the project directory.
+
+ASCII case folds on Windows and nowhere else, because that is where the filesystem folds it. `C:\w\Acme` and `C:\w\acme` are one entry, in the exact form and the subtree form alike. Both separators are accepted there. On Linux and macOS every component is compared byte-exactly, so a case-only mismatch is inert and surfaces in `ocx shell state` as a near-miss row. A `\` is a legal directory-name character on Unix and is compared as one. The fold is ASCII-only, because a full Unicode fold is locale- and version-dependent and this comparison is a trust boundary. A trailing `/*` is the grammar's only wildcard: `?`, `[…]` and every other glob metacharacter is an ordinary filename byte, so `/w/acm?` grants a directory literally named `acm?` and never `/w/acm3`. Quote the value wherever `OCX_CONSENT_PATHS` appears as a command word, as in `env OCX_CONSENT_PATHS='/workspaces/acme/*' ocx …`. The shell expands an unquoted `*` there before OCX sees it, and zsh refuses the command with `no matches found`. An `export` assignment, a Dockerfile `ENV` and a devcontainer or CI declaration pass the `*` through untouched.
+
+An entry that can **never** match earns its own diagnostic row in `ocx shell state` naming the defect. It does not sit inert beside an ordinary "no matching grant" verdict. None is rejected at parse, because a `paths` entry is a plain TOML string with no load-time grammar. That command is the one place the defect surfaces:
+
+| Entry shape | Why it can never match |
+|-------------|-------------------------|
+| `/w/*/tools` | a `*` is a wildcard only as the entry's last component |
+| `/w/acme*` | a `*` is a whole component, never part of one |
+| `*`, `/*`, `C:\*` | a `*` with no directory before it would grant every directory on the machine, which has no spelling |
+| `/w/acme/..` | a canonical directory never carries a `..` component |
+| a leading `~` with no resolvable home directory | the expansion needs a home directory |
+| `~user/x` | `~user` is never expanded |
+| a relative entry (`dev/acme`) | a canonical project directory is always absolute |
+
+The one reading that defeats these classes is a directory literally named `*` (`mkdir '*'` is legal on Unix), for which `/w/acme*` or `/w/*/tools` would be a legitimate exact entry. A path grant is deliberately drift-blind: it writes no consent stamp, so removing the entry takes effect on the next prompt. And a subtree entry reaches further than it reads. It activates a directory that does not exist yet. A repository cloned into a granted `/*` root next month therefore activates the moment you `cd` into it. A `paths` grant, subtree or exact, opens the project's own [`[env]`](../guides/project-toolchain.mdx#project-env) table too, since that table has no publisher to hold accountable. That is deliberate: it is what makes the CI-image and devcontainer case work.
+
+**`namespaces` entries** are OCI source namespaces (`<host>[:<port>]/<org>`) that activate a project whose whole lock resolved inside them. A trailing `/*` is accepted and equivalent. `ocx.sh/acme-corp` and `ocx.sh/acme-corp/*` name the identical set. In a `paths` entry the same suffix is the entire difference between one directory and its subtree. Every pattern is validated at parse, and the first violation is reported with a reason naming its class:
+
+| Rejected | Because |
+|----------|---------|
+| the empty string, or `*` alone | grants nothing; there is no catch-all spelling |
+| a bare `<host>` or `<host>/*` | **no whole-registry grant exists**: it would drop the organization half of the bound, on any host anyone can register on; name the organization |
+| any uppercase byte | no source is ever uppercase, so the pattern could never match |
+| `@` anywhere | a consent pattern names a source, never a digest-pinned reference |
+| `*` anywhere but a single trailing `/*` | matching is segment-bounded, not a substring glob |
+| an empty path segment, or three or more segments | a source is exactly two components, `<host>/<org>` |
+
+The table form's `include` is required: an empty one is a parse error, not a catch-all, so `namespaces = { exclude = [...] }` alone does not compile. Write the withdrawal alongside the grant it narrows, as in the carve-out example above. The match is against the package store's own record of the coordinate each locked digest was fetched under on this machine. It is never matched against the text of `ocx.lock`. See [What consent does not cover](./shell-integration.mdx#residual).
+
+[git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
+[cmd-shell-state]: ../reference/command-line/shell.md#shell-state
+[config-ref]: ../reference/configuration.md
+[config-managed]: ../reference/configuration.md#keys-managed
+[arg-config]: ../reference/command-line/index.md#arg-config
+[env-ocx-config]: ../reference/environment.md#ocx-config
+[env-ocx-consent-paths]: ../reference/environment.md#ocx-consent-paths
+[env-ocx-consent-namespaces]: ../reference/environment.md#ocx-consent-namespaces

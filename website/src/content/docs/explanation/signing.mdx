@@ -1,0 +1,349 @@
+---
+title: "Signing"
+---
+{/* doc_type: explanation */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+
+This page explains how OCX signs a package manifest, where verification gets its trust material, and which signatures it accepts.
+
+Checksums answer "did the file change in transit?" They do not answer "who built this?" A checksum tells you the bytes match a known digest. It cannot tell you whether an attacker replaced both the binary and the checksum file on a compromised mirror.
+
+OCX attaches a [Sigstore][sigstore] keyless signature to each package manifest at publish time. The signature binds a cryptographic identity to the exact manifest digest. That identity is a GitHub Actions workflow URL or an email address.
+
+At verify time, OCX checks that the identity matches what you specified and that the cryptographic proof is valid. There is no key management. The signing key is ephemeral, and [Fulcio][fulcio] issues the certificate with an audit trail in [Rekor][rekor].
+
+The user-facing steps are in [Verify what you install][user-supply-chain]. The CI recipes and the signing credential variables are in [Sign a release][guide-sign-ci].
+
+The recording below signs a published package, verifies it against a pinned identity, then verifies it again offline. It runs against the self-hosted Sigstore stack this repository's acceptance suite uses.
+
+<Terminal src="/casts/in-depth/signing.cast" title="Signing a package and verifying it against a pinned identity" collapsed />
+
+## Trust Root \{#trust-root\}
+
+OCX verifies [Fulcio][fulcio] certificates against a trust root. It verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. Against public Sigstore this needs no configuration, because the material arrives over [TUF][sigstore-tuf].
+
+Against a self-hosted stack the material has to come from somewhere you control. OCX resolves it through six rungs, and the first hit wins:
+
+1. **`--sigstore-trusted-root <PATH>`** on `ocx package verify`. It names a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`, by a bare path or a `file://` one.
+2. **[`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]** holds the same value as an environment variable. The flag wins.
+3. **[`[trust.sigstore]`][config-trust-sigstore]** in the operator `config.toml` sets `trusted_root` or `trusted_root_json`. `trusted_root` is a bare path or a `file://` one, relative to that config file. `trusted_root_json` is the document inlined. A fleet uses this rung, because a `config.toml` can itself be distributed.
+4. **`$OCX_HOME/sigstore/trusted-root.json`** is a convention path. Drop the file there and nothing needs configuring.
+5. **The trust-root cache.** A successful online verify writes the Fulcio CA, the CT log keys and the Rekor key it used to `$OCX_HOME/state/trust_root/<rekor-authority>.json`, with a 24-hour TTL. A later verify against the same Rekor instance reuses them, including under [`--offline`][env-offline]. See [Air-gapped verification][guide-verify-offline].
+6. **The public-good root over TUF.** With no override, no configured root and no cache, `TrustRoot::load_embedded` fetches and verifies the [Sigstore TUF][sigstore-tuf] trust root. It uses the `tough`-backed client in [sigstore-rs][sigstore-rs], dialed over OCX's shared Sigstore HTTP client with extra CA roots. The TUF metadata caches under `$OCX_HOME/state/tuf/`. This is the default for public Sigstore, and it needs network, so `--offline` never reaches it.
+
+Rungs 1 to 3 are operator-named. A file that does not exist is an error, not a fall-through. Rung 4 is a convention. Absent, it falls through to the cache, but present and unreadable, it fails.
+
+Rung 6 dials `tuf-repo-cdn.sigstore.dev` through the shared Sigstore client and its address guard. A split-horizon DNS that answers that public name with a private address is refused (exit 78) rather than dialed. Pin a `trusted_root` (rung 3) on such a host.
+
+Offline verify requires a pinned Rekor key. That is why the trust material has to be a full trusted-root JSON and not a bare CA certificate. With no cached or supplied trust material offline, verify fails with exit 81 (`PolicyBlocked`, slug `offline_mode`) and names the remedy. It never silently skips verification.
+
+`ocx package sign` stays online-only because it needs live Fulcio and Rekor round-trips. It rejects `--offline` with exit 81 (`PolicyBlocked`).
+
+Which rung to use is a deployment decision. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for the trade-offs.
+
+:::caution[A bare CA certificate is not a trust root]
+A Fulcio certificate carries an embedded Signed Certificate Timestamp, and the verifier checks that SCT against the CT log's public key. Trust material with CA anchors and no log key would fail the SCT check for every real certificate. OCX refuses it up front with exit 78 (`ConfigError`) and the message `trust root carries no CT log key`, rather than surfacing it later as a signature failure.
+
+A Sigstore trusted-root JSON carries the anchors, the CT log keys and the pinned Rekor key together. That is the only shape any rung accepts. Produce one for a self-hosted stack with `cosign trusted-root create`, or with `test/sigstore/generate-trusted-root.py` in this repository.
+:::
+
+## Referrers Capability Cache \{#referrers-cache\}
+
+[OCI Referrers][oci-referrers-spec] discovery requires the registry to implement `GET /v2/{repo}/referrers/{digest}`. OCX probes once per registry and caches the result, so repeated sign or verify calls pay no extra round-trip.
+
+Cache location: `$OCX_HOME/state/referrers/{registry_slug}.json`
+
+The `{registry_slug}` is the registry hostname with any character outside `[a-zA-Z0-9._-]` replaced by an underscore (`_`). Dots are preserved, so `ghcr.io` stays `ghcr.io` (cache file `ghcr.io.json`). A hostname with a port such as `localhost:5000` becomes `localhost_5000`, because the `:` is replaced.
+
+Each cache file is a JSON object with four fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `registry` | string | Registry hostname |
+| `supported` | `"supported"` \| `"unsupported"` | Result of the last probe (snake_case) |
+| `probed_at` | object `{ "secs_since_epoch", "nanos_since_epoch" }` | Wall-clock time of the probe, serialized as a serde `SystemTime` (seconds + nanoseconds since the UNIX epoch), not a bare integer |
+| `ttl_seconds` | integer | Seconds after `probed_at` the entry remains valid |
+
+The cache is advisory and fail-open. A missing or corrupt file triggers a fresh probe, and the result then overwrites the file atomically (temp-file rename, mode `0600` on Unix). Entries are valid for **6 hours** (`TTL_SECS = 6 * 3600`). After that, the next sign or verify invocation re-probes automatically. Pass `--no-cache` to bypass the cache for a single invocation.
+
+## Publishing a Referrer \{#referrers-write\}
+
+A signature is an OCI referrer of the manifest it signs. The distribution spec gives a registry two ways to hold one. One is the OCI 1.1 Referrers API (`GET /v2/{repo}/referrers/{digest}`). The other is the `sha256-<digest>` tag-schema fallback index, defined for registries that do not implement the API.
+
+OCX writes through whichever the registry offers. Where the API is present, OCX pushes the referrer manifest and the registry indexes it. Where it is absent, OCX pushes the same referrer manifest and names it in the fallback index itself. Absence means the endpoint answers HTTP 404, or a `NOT_FOUND` / `NAME_UNKNOWN` envelope. Signing succeeds either way, and `ocx package verify` reads both shapes with no flag.
+
+Exit 82 (`referrers_unsupported`) is reserved for a registry that offers neither. That means no Referrers API **and** a fallback-index write it refused. Only a registry that understood the document and declined it earns that code.
+
+An auth failure, a 429 or a 5xx keeps its own exit code. For those a rerun is the right move, and for 82 it never is.
+
+:::note[Which registries implement OCI 1.1 Referrers?]
+
+The list decides how a signature is discovered, not whether it can be published. As of May 2026:
+
+- **Referrers API:** [Zot][zot], [Harbor][harbor] 2.9+, JFrog Artifactory 7.90+ (including `ocx.sh`), Amazon ECR, Azure ACR, Google Artifact Registry, Red Hat Quay 3.12+.
+- **Fallback index:** CNCF Distribution `registry:2` / `registry:3`, [GHCR][ghcr] (GitHub Container Registry), [Docker Hub][docker-hub].
+
+Prefer the first list where you can. Treat it as a threat-model difference rather than a compatibility one. The fallback index is an ordinary mutable tag. Anyone with push access to the repository can rewrite it, which a registry-maintained Referrers response does not allow.
+:::
+
+The `sha256-<digest>.sig` sidecar that [cosign][cosign] writes is a third shape, and a separate choice from either of the above. `--signature-format simplesigning` (or `both`) publishes it explicitly, on any registry. See [cosign Parity][in-depth-cosign-parity].
+
+## Sigstore Bundle Format and Storage \{#bundle-storage\}
+
+A signature is a [Sigstore bundle v0.3][sigstore-bundle], a JSON envelope carrying:
+
+- The [Fulcio][fulcio]-issued short-lived signing certificate, the **leaf alone**, in the bundle's `verificationMaterial.certificate` field. Bundle v0.3 replaced the `x509CertificateChain` of v0.2 with a single leaf. The intermediates come from the trust root, so a chain would carry nothing the verifier does not already have.
+- The ECDSA P-256 signature over the subject manifest's SHA-256 digest.
+- The [Rekor][rekor] transparency-log entry: the Signed Entry Timestamp (inclusion promise) and the Merkle inclusion proof.
+
+Both parts of the log entry are mandatory in either direction. `ocx package sign` refuses to publish a bundle whose log entry carries no inclusion proof (exit 65, `rekor_set_malformed`). `ocx package verify` refuses one it receives (`rekor_inclusion_proof_absent`, exit 65).
+
+The promise is only a signed statement that the entry *will* be included. The proof is the evidence that it is, in a tree whose root the log signed. Bundle profiles v0.1 and v0.2 leave the proof optional at the schema level. Accepting a promise-only bundle would verify on weaker evidence than the format allows for.
+
+OCX pushes the bundle as an OCI referrer of the subject manifest. The referrer artifact's media type is `application/vnd.dev.sigstore.bundle.v0.3+json`. The raw blob lands in `$OCX_HOME/blobs/` alongside other OCI blobs. It is identified by its own SHA-256 digest and referenced in the subject manifest's referrers index.
+
+No candidate or current symlink references the blob. OCX finds it through the [OCI Referrers API][oci-referrers-spec] at verify time, not through the install symlink tree.
+
+## Keyless or a Key \{#key-mode\}
+
+`sign`, `verify` and `attest` support two signing models. Everything above this section describes keyless. There is no key to generate, store or rotate, because [Fulcio][fulcio] issues a certificate against your OIDC identity for each signature. `--key <REF>` swaps that model for an ordinary key pair, the one [cosign][cosign] calls `cosign sign --key`.
+
+A CI pipeline with an OIDC step has nothing to gain from a key. Keyless is less to manage and leaves an identity-bound audit trail for free. A key pair earns its place when there is no OIDC step to detect. It also fits an operator who wants signatures independent of any identity provider or public transparency log. The private key stays in their custody, and the matching public key verifies it instead of a certificate chain.
+
+`--key` takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://` one, names a file. For `sign` and `attest` that is the private key, encrypted, with the password from `OCX_KEY_PASSWORD`. For `verify` it is the public key, a plain SPKI PEM.
+
+`env://VAR` reads the same PEM out of the environment variable `VAR` itself, for a runner with no writable disk. See [`OCX_SIGNING_KEY`][env-ocx-signing-key], a secret OCX removes from the environment of plugin-dispatched children and from any environment it writes for a child.
+
+The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and refused **by name** (exit 82, `unsupported_key_backend`). They are not implemented yet, but they are reserved so a script can already branch on the vocabulary. A reference OCX cannot parse at all is a usage error (exit 64, `key_reference_invalid`). That covers an unrecognised scheme, or nothing after the scheme. It has a distinct code because the remedy is to fix the reference, not to wait for a backend.
+
+### The Rekor rule \{#key-mode-rekor\}
+
+Keyless and key mode diverge on one thing: whether the signature is recorded in [Rekor][rekor].
+
+- **Keyless** is always recorded. `--no-rekor-upload` here is a usage error (exit 64, `rekor_upload_required_for_keyless`) rather than a silent no-op. A Fulcio certificate is valid for about ten minutes. The Rekor timestamp is the only lasting proof the signature happened inside that window. Skipping it would leave a signature that nothing can show was made while the certificate was live.
+- **A key** is off by default. Pass `--rekor-upload` to record it. To opt a fleet in once, set `rekor_upload = true` under `[trust.sigstore]` in `config.toml`. That config key applies to key mode only, since keyless recording is not optional in the first place.
+
+This is a deliberate divergence from [cosign][cosign], which uploads to Rekor by default under `cosign sign --key` too. `rekor_url` defaults to the *public* Rekor either way.
+
+An on-by-default key path would publish a private artifact's digest and signer identity to a world-readable log. That would happen the first time `ocx package sign --key` ran. Someone who picks a private key pair over keyless usually wants the opposite.
+
+## Identity Matching \{#identity-matching\}
+
+The certificate [Fulcio][fulcio] issues encodes the signer's identity in two fields:
+
+- **Subject Alternative Name (SAN)** is the signer's OIDC-derived identity. For GitHub Actions this is the workflow run URL, such as `https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main`. For human sign flows it is an email address.
+- **Fulcio OIDC issuer extension** is the "Issuer (V2)" OID `1.3.6.1.4.1.57264.1.8`. It contains the OIDC issuer URL, such as `https://token.actions.githubusercontent.com`. OCX does not read the v1 `.1.1` encoding.
+
+At verify time, the accepted SAN and issuer come from one of two sources. Passed as `--certificate-identity` / `--certificate-oidc-issuer` flags, both checks are exact-match. Resolved instead from a [`[[trust.policy]]`][config-trust] entry whose scope covers the target, the SAN check also accepts an anchored regex form (`identity_regexp`). The issuer check stays exact-match either way.
+
+The policy schema and scope matching are in [Pin the signer identity][guide-trust-policy]. How competing policies resolve is below.
+
+A concrete GitHub Actions identity looks like this:
+
+```
+--certificate-identity https://github.com/<org>/<repo>/.github/workflows/<file>.yml@refs/heads/main
+--certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The `@refs/heads/main` suffix is the ref the workflow ran on, so pin to the exact ref you publish from. The `<file>.yml` is the path inside `.github/workflows/` of the workflow file that signed.
+
+### The most specific policy wins \{#identity-matching-specificity\}
+
+When more than one policy's scope matches a target, the policy with the **longest literal prefix** wins outright. Take `scope = "ghcr.io/acme/*"` (literal prefix `ghcr.io/acme/`, 13 characters) and a second policy at `scope = "ghcr.io/acme/secret-tool"` (24 characters). Verifying `ghcr.io/acme/secret-tool:1.0` accepts only the narrower policy's signer. The broader policy still governs every other package under its prefix.
+
+Among policies tied at the **same** winning specificity, evaluation is ANY-of. The signature passes if it satisfies any one of them. That is what makes signer rotation possible without a downtime window. Declare the old and the new identity at the same scope, and either one verifies until the old entry is removed:
+
+```toml
+[[trust.policy]]                          # both scopes tie at "ghcr.io/acme/" (13 chars)
+scope = "ghcr.io/acme/*"
+
+signers = [
+  { kind = "keyless", identity = "old-ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+signers = [
+  { kind = "keyless", identity = "new-ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+```
+
+A policy whose scope is an `{ include, exclude }` table ranks by the longest literal prefix among the includes that matched *this* target. It is measured per target, because one table can cover two packages through two different patterns. `exclude` patterns never contribute. They subtract coverage, so a long carve-out string cannot buy a policy a higher rank than the packages it governs. An `include`-free carve-all ranks 0, exactly like `scope = ""`.
+
+### Regex identities \{#identity-matching-regex\}
+
+`identity_regexp` compiles to an anchored, full-string match, not a substring search. A pattern must match the entire certificate SAN, start to end. This mirrors the `--certificate-identity-regexp` flag of [cosign][cosign]. It rules out a pattern like `acme` accidentally matching `evil-acme-lookalike`.
+
+A regex is useful when the SAN embeds a variable component. A [GitHub Actions][github-actions-docs] workflow SAN carries the git ref it ran on (`.../release.yml@refs/heads/main`). Pinning one exact ref with `identity` locks out every other branch or tag the same workflow signs from.
+
+```toml
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+signers = [
+  { kind = "keyless", identity_regexp = "^https://github\\.com/acme/.*/\\.github/workflows/release\\.yml@refs/tags/v[0-9.]+$",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+```
+
+The issuer has no regex form, because issuer URLs are stable. Scopes have none either, in either spelling. A scope decides which packages a pin covers, and an over-broad pattern silently widens trust rather than failing loudly.
+
+### Operator policy outranks project policy \{#identity-matching-tiers\}
+
+Most config sections are replaced by a higher-precedence tier. `[[trust.policy]]` is the one exception. Across the system, user and `$OCX_HOME` tiers, policies **array-append**. The pooled result is the **operator trust set**.
+
+The project `ocx.toml`'s policies are not pooled into it. They sit behind it:
+
+- If any operator policy matches the target package, only the operator trust set is evaluated. The project `ocx.toml` is ignored for that package, however specific its scope is.
+- Only when no operator policy matches does the project `ocx.toml` apply.
+
+A project can therefore add trust for scopes the operator has not governed. It can never step in front of a scope the operator already pins. Within whichever set is chosen, most-specific-wins and ANY-of still apply. Rotation works within the operator set and, separately, within the project set, but the two never mix for one target.
+
+This is a deliberate security property. A compromised or careless project file cannot narrow an operator-pinned identity by declaring a more specific scope.
+
+### System-locked policies \{#identity-matching-lock\}
+
+Pooling makes the three `config.toml` tiers peers on storage, not on authority. A policy declared at the system scope is locked, per entry. For every scope it matches, it **governs alone**. Entries from the user, `$OCX_HOME` and [managed](./configuration.mdx#managed) tiers are refused for those scopes. A narrower scope cannot take over, and an equally specific one cannot join the accepted set.
+
+Suppose the system tier locks `ghcr.io/acme/*` to `ci@acme.example`. A lower-tier entry at `ghcr.io/acme/tool` (17 characters) would win by specificity without the lock. With the lock, every lower-tier entry matching the pinned scope is discarded, whether longer, shorter (`ghcr.io/*`) or an exact tie.
+
+Rotation therefore happens in the system tier. Declare the outgoing and incoming identities as two locked entries at the same scope, and both are accepted for the overlap window.
+
+The lock is per scope, not fleet-wide. A lower tier is still free to pin any scope the system tier never mentions (`ghcr.io/other/*`), and does so with full authority there. Within a locked scope no lower tier can add a signer, narrow the scope to carve one package out, or displace the operator's identity. A refused entry is reported at debug level, naming the pin that discarded it.
+
+### No matching policy \{#identity-matching-no-match\}
+
+`--certificate-identity` and `--certificate-oidc-issuer` on `ocx package verify` are optional exactly when a `[[trust.policy]]` scope matches the target. Passing both always overrides any policy, as an exact-match pair, unchanged from flag-only verification. Passing neither with no matching scope, or passing only one of the two, is a usage error.
+
+## Choosing a Sigstore Deployment \{#deployments\}
+
+There are two deployments with one command surface. What changes between them is where the trust material comes from, and whether the endpoint flags appear at all.
+
+### Public Sigstore \{#public-good\}
+
+This is the default, and the case that needs no configuration. [Fulcio][fulcio] and [Rekor][rekor] run as the [Sigstore public-good instance][sigstore-public-good]. The trust root arrives over [TUF][sigstore-tuf] on first use and caches under `$OCX_HOME/state/tuf/`. You pass neither `--fulcio-url`, nor `--rekor-url`, nor `--sigstore-trusted-root`:
+
+```sh
+ocx package sign -p linux/amd64 registry.example.com/acme/mytool:1.0.0
+ocx package verify -p linux/amd64 registry.example.com/acme/mytool:1.0.0 \
+  --certificate-identity you@example.com \
+  --certificate-oidc-issuer https://github.com/login/oauth
+```
+
+Public Sigstore writes every certificate it issues, and every entry it logs, to a world-readable transparency log. That is the property the whole model rests on. It is also why a private artifact often wants the self-hosted path. The *identity* that signed an internal tool, and the times it was signed, are otherwise public even though the artifact is not.
+
+### Self-hosted Sigstore
+
+A self-hosted stack runs Fulcio and Rekor plus what they depend on. That is a certificate-transparency log, [Trillian][trillian] behind it, and an OIDC provider to mint identities.
+
+Three things change relative to public Sigstore. The endpoints are addressed with `--fulcio-url` and `--rekor-url`. The trust root has to be produced once, because a self-hosted CA is in no TUF root. The identity comes from your issuer rather than `oauth2.sigstore.dev`.
+
+The stack, the trust-root distribution rungs, the issuer matrix and the end-to-end check are in [Self-hosted Sigstore][in-depth-self-hosted-sigstore]. That page also covers the endpoint rules for `--fulcio-url` and `--rekor-url`.
+
+## Slice Boundary \{#slice-boundary\}
+
+**This release** wires the complete keyless pipeline:
+
+- OIDC token acquisition and ephemeral ECDSA P-256 keypair generation.
+- The [Fulcio][fulcio] certificate request and the [Rekor][rekor] log entry.
+- [Sigstore bundle v0.3][sigstore-bundle] assembly and the referrer push.
+- The full five-check verify path: certificate chain against the trust root, Rekor SET, signature over the subject digest, identity match, issuer match.
+
+Sign and verify run end-to-end, and their exit-code and flag contracts are stable.
+
+The cryptography is [sigstore-rs][sigstore-rs]'s, not OCX's. Certificate-chain building, SCT verification, the ECDSA signature check, the transparency-log body binding and the certificate-validity-versus-integrated-time check all run inside `sigstore::bundle::verify::Verifier`. OCX owns the Rekor Signed Entry Timestamp and the Merkle inclusion proof, which sigstore-rs 0.14 leaves unimplemented. Those are computed with sigstore-rs's own primitives. No X.509, ASN.1, Merkle, SCT or signature code is hand-written anywhere in OCX.
+
+The acceptance suite runs against a real Sigstore deployment, not a fake. That deployment is Fulcio, Rekor, TesseraCT and dex under the `sigstore` Docker Compose profile (`test/sigstore/README.md`). Hostile artifacts are made the way an attacker would make them: take a genuine signed bundle off the registry, change one field, put it back.
+
+## Current Limitations \{#current-limitations\}
+
+- **Rekor v1 only.** [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client, so OCX targets Rekor v1 transparency-log entries. Those are `hashedrekord` for signatures and `dsse` for attestations. A bundle from a Rekor v2 instance carries an RFC 3161 TSA timestamp instead of a SET. OCX rejects it with exit 65 (`rekor_set_absent_tsa_present`) rather than treating it as unsigned. Tracked as [#107][gh-107].
+
+  This is a dated dependency, not a static gap. It holds only while the log you sign against speaks v1. The moment an instance serves v2, every **new** signature or attestation it issues verifies as exit 65 here. That applies to the public-good deployment and to your own.
+
+  Entries already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107]. Pin the Rekor URL you verify against rather than following an instance through a migration.
+- **An attached `.sbom` sidecar can be listed but never verified.** OCX reads all three cosign sidecar tags: `sha256-<digest>.sig`, `.att` and `.sbom`. The third is unsigned by construction. `cosign attach sbom` writes the document and signs nothing, and no cosign command signs that tag afterwards.
+
+  So [`ocx package sbom --no-verify`][cmd-package-sbom] lists it `verified: false`, and `--verify` refuses it (`unsigned_rejected_by_policy`, exit 77). This is a property of the shape, not of the reader, because a signed SBOM is an attestation. See [Attached SBOMs][in-depth-cosign-parity-sbom].
+
+:::tip[Automatic verification at install time]
+Everything above describes the standalone `ocx package verify` command. Once a [`[[trust.policy]]`][config-trust] covers a package, [`install`][cmd-package-install], [`pull`][cmd-package-pull] and every command that auto-installs on demand run the same check automatically. See [Verify by default][guide-auto-verify].
+
+That gate has its own scope limitations, distinct from the cryptographic ones above. A covered root's transitive dependencies are verified only if a policy also covers each dependency's own `registry/repository` scope. The automatic check reads the operator `config.toml` tier only, so a project `ocx.toml` policy never gates it.
+:::
+
+## Deferred to Future Work \{#deferred-future-work\}
+
+- **Rekor v2** ([#107][gh-107]) is a tiles-based transparency log with RFC 3161 timestamps in place of the SET. It is blocked on a Rekor v2 client in [sigstore-rs][sigstore-rs].
+
+## Signing Flow Summary \{#signing-flow\}
+
+1. OCX resolves the OIDC identity token using the [token precedence order][cmd-package-sign-token-precedence]: `--identity-token-file`, then `--identity-token-stdin`, then [`OCX_IDENTITY_TOKEN`][env-identity-token], then ambient CI detection, then interactive browser OAuth.
+2. An ephemeral ECDSA P-256 keypair is generated in memory.
+3. The ephemeral public key is sent to [Fulcio][fulcio] with the OIDC token. Fulcio issues a short-lived certificate binding the key to the OIDC identity.
+4. The subject manifest's SHA-256 digest is signed with the ephemeral private key. The key is zeroized immediately after signing.
+5. The log entry is posted to [Rekor][rekor], and the response contains the SET and the Merkle inclusion proof. A log that returns no usable proof fails the sign with exit 65 (`rekor_set_malformed`), rather than publishing a bundle OCX itself would refuse to verify.
+6. The leaf certificate, the signature, and the log entry (SET plus inclusion proof) are assembled into a [Sigstore bundle v0.3][sigstore-bundle]. OCX pushes it to the registry as a referrer of the subject manifest.
+
+## See Also \{#see-also\}
+
+- [`package sign` reference][cmd-package-sign]: flags, token-source precedence, exit codes, CI example
+- [`package verify` reference][cmd-package-verify]: flags, identity matching options, exit codes
+- [Configuration reference, `[[trust.policy]]`][config-trust]: schema, scope matching, most-specific-wins resolution, operator-vs-project tier precedence
+- [cosign Parity][in-depth-cosign-parity]: the full interop matrix in both directions, the deliberate divergences, and what backs each claim
+- [cosign Interoperability][in-depth-cosign-interop]: the cosign 3.0 floor and the blob-level commands
+- [Keyless or a Key](#key-mode): `--key`, the key-reference grammar, and [the Rekor rule](#key-mode-rekor)
+- [Deferred to Future Work](#deferred-future-work): Rekor v2 ([#107][gh-107])
+
+[sigstore]: https://www.sigstore.dev/
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[cosign]: https://github.com/sigstore/cosign
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[sigstore-bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
+[sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
+[sigstore-rs]: https://github.com/sigstore/sigstore-rs
+[oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
+[ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+[docker-hub]: https://hub.docker.com/
+[harbor]: https://goharbor.io/
+[zot]: https://zotregistry.dev/
+[sigstore-public-good]: https://docs.sigstore.dev/about/public-deployment/
+[trillian]: https://github.com/google/trillian
+
+
+[cmd-package-sign]: ../reference/command-line/package-publishing.md#package-sign
+[env-ocx-signing-key]: ../reference/environment.md#ocx-signing-key
+[cmd-package-sign-token-precedence]: ../reference/command-line/package-publishing.md#package-sign
+[cmd-package-verify]: ../reference/command-line/package-consuming.md#package-verify
+[cmd-package-sbom]: ../reference/command-line/package-consuming.md#package-sbom
+[cmd-package-install]: ../reference/command-line/package-consuming.md#package-install
+[cmd-package-pull]: ../reference/command-line/package-consuming.md#package-pull
+
+
+[config-trust]: ../reference/configuration.md#keys-trust
+
+
+[gh-107]: https://github.com/ocx-sh/ocx/issues/107
+
+
+[env-identity-token]: ../reference/environment.md#ocx-identity-token
+[env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
+[config-trust-sigstore]: ../reference/configuration.md#keys-trust-sigstore
+[in-depth-self-hosted-sigstore]: ../guides/self-hosted-sigstore.md
+[in-depth-cosign-parity]: ./cosign-parity.mdx
+[in-depth-cosign-interop]: ./cosign-parity.mdx#cosign-interop
+[in-depth-cosign-parity-sbom]: ./cosign-parity.mdx#attached-sboms
+[env-offline]: ../reference/environment.md#ocx-offline
+
+
+[user-supply-chain]: ../guides/verify-installs.mdx
+[guide-auto-verify]: ../guides/verify-installs.mdx
+[guide-trust-policy]: ../guides/pin-signer-identity.mdx
+[guide-verify-offline]: ../guides/verify-installs.mdx#supply-chain-offline
+[guide-sign-ci]: ../publishing/sign-a-release.md#ci

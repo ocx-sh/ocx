@@ -1,0 +1,23 @@
+[[row]]
+item = "The toolchain_dir root need not exist; OCX creates it on first render, and resolving the key writes nothing. [L103]"
+page = "docs/reference/configuration.md"
+action = "moved"
+home = "guides/project-toolchain.mdx#project-toolchain_dir"
+
+[[row]]
+item = "System-locked registry entries lock index and trusted_hosts absolutely, and insecure only through an explicit false. [L478]"
+page = "docs/reference/configuration.md"
+action = "moved"
+home = "guides/corporate-mirror.mdx"
+
+[[row]]
+item = "The glob ocx.sh/java star also matches ocx.sh/javafx, a name that merely shares the prefix. [L69]"
+page = "docs/user-guide/patches.md"
+action = "moved"
+home = "explanation/patches.mdx"
+
+[[row]]
+item = "primer"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "reference/environment.md"

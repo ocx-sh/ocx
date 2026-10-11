@@ -24,7 +24,7 @@ written to whatever makes it green:
     ``crates/ocx_cli/src/command/package_cascade_repair.rs``, and catches
     format strings, shell scripts, YAML and markdown code fences alike.  Scope
     is **repo-wide**, excluding ``.git``, ``target``, ``external``,
-    ``.agents``, ``node_modules``, ``website/.vitepress/dist`` (build output,
+    ``.agents``, ``node_modules``, ``website/dist`` (build output,
     gitignored) and ``.claude/artifacts/**`` + ``.claude/state/**``
     (historical records that must not be rewritten).  Exactly one dedicated
     test retains the hidden ``--package`` form and is the check's sole allowed
@@ -64,7 +64,7 @@ _EXCLUDED_PATHS: tuple[str, ...] = (".claude/artifacts",)
 the command lines of the day -- which must not be rewritten to match today's
 grammar.  They are *tracked*, so nothing else drops them.
 
-The other four exclusions C-062 named (``website/.vitepress/dist``,
+The other four exclusions C-062 named (``website/dist``,
 ``.claude/state``, ``.tmp``, ``out``) are gitignored build output and scratch,
 and are gone from this tuple because :func:`_scan_files` no longer sees them --
 verified, not assumed.  ``.tmp`` and ``out`` were the subtle two: this check's

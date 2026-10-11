@@ -1,0 +1,5 @@
+/* A `text` fence has no grammar, so Shiki leaves its tokens the theme's unset default
+   (#bbbbbb), which fails contrast on the light code frame. Give them the code foreground. */
+.expressive-code .ec-line .code span[style*='--0:#bbbbbb'] {
+  --0: var(--ocx-color-code-fg) !important;
+}

@@ -1,0 +1,442 @@
+{
+ "changelog.md": {
+  "must": 0,
+  "should": 0
+ },
+ "contributing/bazel.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/configuration.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/cosign-parity.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/deferred-packages.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/dependencies.mdx": {
+  "must": 0,
+  "should": 1
+ },
+ "explanation/entry-points.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/environments.mdx": {
+  "must": 0,
+  "should": 52
+ },
+ "explanation/execution-records.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/indices.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/integrations.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/launcher-forwarding.md": {
+  "must": 0,
+  "should": 5
+ },
+ "explanation/local-index.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/managed-configuration.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/patches.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/project-groups.md": {
+  "must": 0,
+  "should": 6
+ },
+ "explanation/project-toolchain.md": {
+  "must": 0,
+  "should": 56
+ },
+ "explanation/public-index.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/records-and-sbom.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/records-launcher-frames.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/shell-consent.mdx": {
+  "must": 0,
+  "should": 7
+ },
+ "explanation/shell-integration.mdx": {
+  "must": 0,
+  "should": 50
+ },
+ "explanation/signing.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/storage.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/toolchain-activation.md": {
+  "must": 0,
+  "should": 5
+ },
+ "explanation/toolchain-render.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/toolchain-tree.md": {
+  "must": 0,
+  "should": 0
+ },
+ "explanation/versioning.mdx": {
+  "must": 0,
+  "should": 1
+ },
+ "getting-started/first-package.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "getting-started/first-project.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "getting-started/install-ocx.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/authenticate.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/choose-versions.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/clean-up.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/configure-ocx.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/corporate-mirror.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/find-packages.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/global-toolchain.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/lock-and-reproduce.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/manage-config-centrally.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/patch-packages.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/pin-signer-identity.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/project-toolchain.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/run-project-tools.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/run-with-dependencies.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/self-hosted-sigstore.md": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/serve-an-index.md": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/stable-paths.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/update-ocx.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/update-tools.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/verify-installs.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "guides/work-offline.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "index.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/bazel.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/devcontainers-and-editors.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/docker.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/github-actions.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/gitlab-ci.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/index.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/proxy-and-ca.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/publisher-ci.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/python.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/registry-auth-recipes.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/scripts-and-json.md": {
+  "must": 0,
+  "should": 0
+ },
+ "integration/unattended-ci.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/announce-from-ci.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/announce.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/attest-and-sbom.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/build-and-push.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/bundle-anatomy.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/declare-dependencies.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/entry-points.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/env-surface.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/index.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/libc-variants.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/maintain-patches.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/multi-platform.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/promote-packages.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/repackage-releases.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/script-tests.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/sign-a-release.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/snapshot-tracks.md": {
+  "must": 0,
+  "should": 0
+ },
+ "publishing/test-locally.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/command-line/commands.md": {
+  "must": 27,
+  "should": 34
+ },
+ "reference/command-line/config.md": {
+  "must": 6,
+  "should": 4
+ },
+ "reference/command-line/direnv.md": {
+  "must": 2,
+  "should": 4
+ },
+ "reference/command-line/index-commands.md": {
+  "must": 13,
+  "should": 10
+ },
+ "reference/command-line/index.md": {
+  "must": 3,
+  "should": 9
+ },
+ "reference/command-line/package-2.md": {
+  "must": 34,
+  "should": 38
+ },
+ "reference/command-line/package.md": {
+  "must": 46,
+  "should": 32
+ },
+ "reference/command-line/patch.md": {
+  "must": 5,
+  "should": 6
+ },
+ "reference/command-line/self.md": {
+  "must": 15,
+  "should": 15
+ },
+ "reference/command-line/shell.md": {
+  "must": 7,
+  "should": 6
+ },
+ "reference/configuration.md": {
+  "must": 10,
+  "should": 36
+ },
+ "reference/env-composition.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/environment.md": {
+  "must": 13,
+  "should": 107
+ },
+ "reference/execution-records.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/exit-codes.md": {
+  "must": 0,
+  "should": 3
+ },
+ "reference/machine-interface.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/metadata/dependencies.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/metadata/entry-points.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/metadata/env.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/metadata/index.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/metadata/integrations.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/platforms.md": {
+  "must": 0,
+  "should": 0
+ },
+ "reference/project-file.md": {
+  "must": 2,
+  "should": 16
+ },
+ "reference/script-host-api.md": {
+  "must": 0,
+  "should": 0
+ },
+ "roadmap.md": {
+  "must": 0,
+  "should": 0
+ },
+ "troubleshooting/platforms.mdx": {
+  "must": 0,
+  "should": 0
+ },
+ "troubleshooting/shell.mdx": {
+  "must": 0,
+  "should": 30
+ }
+}

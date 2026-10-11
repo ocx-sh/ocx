@@ -33,7 +33,7 @@ For each `subsystem-*.md` rule file:
 | `subsystem-package-manager.md` | `PackageManager`, `PackageError`, `PackageErrorKind` variants (NotFound, SelectionAmbiguous, etc.), task method names |
 | `subsystem-cli.md` | `Context`, `Command` enum variants, `Printable` trait, `Api` struct |
 | `subsystem-tests.md` | Fixture names in conftest.py, test file names, `OcxRunner` methods, `make_package` params |
-| `subsystem-website.md` | Vue component names/props in `theme/index.mts`, VitePress config, task commands, generated content paths |
+| `subsystem-website.md` | component imports in `src/content/docs`, `astro.config.mjs` (sidebar, plugins), task commands, generated content paths |
 
 ## Verification Commands
 

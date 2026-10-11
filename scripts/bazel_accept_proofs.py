@@ -2333,7 +2333,7 @@ def prove_selection(scratch: Path) -> int:
     )
     checks += 1
 
-    docs = ["website/src/docs/reference/environment.md", "README.md", "CLAUDE.md"]
+    docs = ["website/src/content/docs/reference/environment.md", "README.md", "CLAUDE.md"]
     crate_change = ["crates/crate03/src/lib.rs"]
     docs_selected, docs_notes = select_targets(
         docs, rows=rows, modules=modules, crate_of_dir=crate_of_dir
@@ -2963,7 +2963,7 @@ def run_check_s004(*, docs_bep: Path, crate_bep: Path, entry_taskfile: Path | No
 
     workspace = parse_workspace(cargo_metadata(REPO_ROOT))
     crate_of_dir = workspace.crate_of_dir
-    docs_change = ["website/src/docs/reference/environment.md"]
+    docs_change = ["website/src/content/docs/reference/environment.md"]
     # The control is the alphabetically first member directory, chosen so the
     # probe is deterministic across checkouts rather than pinned to a crate
     # name that a later split could retire. Any member works: what the control

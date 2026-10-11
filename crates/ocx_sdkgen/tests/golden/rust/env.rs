@@ -43,19 +43,19 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_AUTH_{REGISTRY}_TOKEN",
         value: "string",
-        summary: "Registry token for one registry; `{REGISTRY}` is the registry slug.",
+        summary: "Registry token for one registry; `<REGISTRY>` is the registry slug.",
         secret: true,
     },
     EnvVar {
         name: "OCX_AUTH_{REGISTRY}_TYPE",
         value: "choice",
-        summary: "Authentication type for one registry; `{REGISTRY}` is the registry slug.",
+        summary: "Authentication type for one registry.",
         secret: false,
     },
     EnvVar {
         name: "OCX_AUTH_{REGISTRY}_USER",
         value: "string",
-        summary: "User name for one registry; `{REGISTRY}` is the registry slug.",
+        summary: "User name for one registry; `<REGISTRY>` is the registry slug.",
         secret: false,
     },
     EnvVar {
@@ -181,7 +181,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_LOG_LEVEL",
         value: "string",
-        summary: "Log level, as `--log-level` accepts it; the flag wins.",
+        summary: "Log level, as `--log-level` accepts it; the flag wins. Defaults to `info`.",
         secret: false,
     },
     EnvVar {
@@ -271,7 +271,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_PATCH_SNAPSHOT",
         value: "path",
-        summary: "Path to the active patch snapshot file, whose pinned digests win over live tag lookups.",
+        summary: "Path to the patch snapshot file `ocx patch freeze` writes, whose pinned digests win over live tag lookups.",
         secret: false,
     },
     EnvVar {

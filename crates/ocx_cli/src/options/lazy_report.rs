@@ -16,7 +16,7 @@ pub struct LazyReport {
     /// `ocx.toml` (the package entry, then the top-level `lazy-report` key),
     /// then `OCX_LAZY_REPORT`, else `silent`; the flag overrides all of them. No
     /// per-group setting: it resolves when the download happens, when no group
-    /// is in scope. https://ocx.sh/docs/reference/command-line#arg-lazy-report
+    /// is in scope. https://ocx.sh/docs/explanation/deferred-packages/#deferred-tools-report
     #[clap(long = "lazy-report", value_enum, value_name = "MODE")]
     lazy_report: Option<lazy::LazyReport>,
 }

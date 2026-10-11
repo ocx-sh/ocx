@@ -1,0 +1,22 @@
+{
+ "anchors": [],
+ "commands": [],
+ "flags": [],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [],
+ "fences": [],
+ "facts": [
+  "The page uses the page layout in its front matter. [L2]",
+  "The members list holds two entries, Michael Herwig and Katherine Draheim, each with avatar, name, title and links. [L12]",
+  "Michael Herwig is titled Creator and Maintainer and uses his GitHub avatar image. [L14]",
+  "Icon names in the link entries come from Simple Icons, as the code comment states. [L17]",
+  "Michael Herwig's links cover LinkedIn, GitHub, GitLab and Spotify. [L19]",
+  "Katherine Draheim uses a local avatar image and is titled Marketing and Community Lead. [L26]",
+  "Katherine Draheim's links cover LinkedIn and GitHub. [L30]",
+  "The page renders a team page with the title Team and a members component bound to the list. [L37]"
+ ],
+ "lines": 45
+}

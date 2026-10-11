@@ -1,0 +1,84 @@
+{
+ "anchors": [
+  "machine-interface",
+  "machine-interface-error-document",
+  "machine-interface-exit-codes",
+  "machine-interface-open-values",
+  "machine-interface-outcomes",
+  "machine-interface-roots",
+  "machine-interface-schemas",
+  "machine-interface-versions"
+ ],
+ "commands": [
+  "ocx exec",
+  "ocx version"
+ ],
+ "flags": [
+  "--format",
+  "--frozen",
+  "--json",
+  "--offline",
+  "--quiet"
+ ],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [
+  "64",
+  "78"
+ ],
+ "slugs": [
+  "auth_error",
+  "exit_code",
+  "not_found",
+  "usage_error"
+ ],
+ "links": [
+  "#machine-interface-error-document",
+  "#machine-interface-open-values",
+  "#machine-interface-schemas",
+  "../changelog.md",
+  "./command-line.md",
+  "./command-line.md#arg-quiet",
+  "./command-line.md#exec",
+  "./command-line.md#exit-codes",
+  "./command-line.md#json-documents",
+  "./environment.md",
+  "https://man.freebsd.org/cgi/man.cgi?sysexits",
+  "https://ocx.sh/schemas/errors/v1.json",
+  "https://ocx.sh/schemas/reports/v1.json"
+ ],
+ "fences": [
+  "json:500273ac: {",
+  "json:811cbb72: {"
+ ],
+ "facts": [
+  "The machine interface is everything a program observes when calling ocx: JSON documents, the error document, exit codes, OCX variables and command grammar. [L9]",
+  "Every document written by --format json has one object shape at its top level, never a bare array, string or number. [L15]",
+  "A root is an object, and its schema_version comes first as an integer naming that root's shape. [L17]",
+  "Absent means unset: an optional field without a value is left out, and null never stands for unset. [L20]",
+  "Under --format json, stdout holds exactly one pretty-printed JSON document per invocation, including after a usage error. [L24]",
+  "schema_version appears in every report root and the error document, while contract reports every document and command version in one object. [L39]",
+  "A program can read contract once and refuse to run any command whose version it does not support. [L42]",
+  "A version increases when a property, root, enum value or variant is removed, renamed, retyped, or a flag or exit code changes. [L44]",
+  "Additions such as new properties, roots, enum values, commands or flags do not change a version. [L51]",
+  "A contract ledger records each break, and a gate refuses a break missing from the ledger or from the version bump. [L53]",
+  "Enum values and union variants are open, so a later release may emit a value the program has never seen. [L57]",
+  "An unknown status is not success, so checks compare against known success values and fail closed. [L60]",
+  "An unknown union variant is skipped rather than guessed, based on its type key. [L61]",
+  "Every invocation ends in a report with exit 0, a report followed by non-zero exit with no error document, or an error document. [L67]",
+  "A batch with one missing package writes its full report and exits with the decisive failure code, never two concatenated JSON values. [L75]",
+  "A zero exit code with a status that is not a known success value is still a failure for the program. [L77]",
+  "A command that fails without a report prints one error document, including refused command lines and invalid OCX variables or config. [L81]",
+  "error.message is human-readable text that is not stable, so a program must never match on it. [L104]",
+  "Branch on error.kind for the family and error.detail for the cause, since a detail slug is stable once a release emits it. [L107]",
+  "Under --quiet a failure still prints the error document, and a --format json after a bare double dash belongs to the child. [L109]",
+  "Exit codes follow sysexits for the standard categories 64 to 78, with 79 to 82 for ocx-specific cases, and are stable across releases. [L113]",
+  "Exit 75 means a rerun may succeed while exit 69 means it will not, so a wrapper can loop on one and stop on the other. [L117]",
+  "Exit 81 is a deliberate local refusal from offline, frozen or user-edited shell profiles, not a fault. [L118]",
+  "Exit 82 means the registry, forge or build lacks the capability, so rerunning never helps. [L119]",
+  "A child process run by ocx exec forwards its own exit code unchanged. [L121]",
+  "Each document is described by a JSON Schema published on the site for validation or type generation. [L125]",
+  "Published schemas allow unknown properties and encode open values as strings with a documented list of known values. [L132]"
+ ],
+ "lines": 155
+}

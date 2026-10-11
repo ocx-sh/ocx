@@ -1,0 +1,12 @@
+{
+  "/docs/in-depth/ci/": {
+    "fragments": {
+      "ci-gitlab": "/docs/integration/gitlab-ci/#ci-gitlab",
+      "ci-gitlab-oci": "/docs/integration/gitlab-ci/#ci-gitlab-oci",
+      "ci-gitlab-stdout": "/docs/integration/gitlab-ci/#ci-gitlab-stdout",
+      "ci-gitlab-toolchain": "/docs/integration/gitlab-ci/#ci-gitlab-toolchain",
+      "ci-integration": "/docs/integration/github-actions/",
+      "ci-variables": "/docs/integration/unattended-ci/#ci-variables"
+    }
+  }
+}

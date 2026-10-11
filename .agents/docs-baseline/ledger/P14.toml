@@ -1,0 +1,203 @@
+[[row]]
+item = "docker"
+page = "docs/docker.md"
+action = "moved"
+home = "integration/docker.md"
+
+[[row]]
+item = "versioning"
+page = "docs/in-depth/versioning.md"
+action = "moved"
+home = "explanation/versioning.mdx"
+
+[[row]]
+item = "installation"
+page = "docs/installation.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx"
+
+[[row]]
+item = "arg-lazy-mode"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/deferred-packages.mdx#deferred-tools-ladder"
+
+[[row]]
+item = "arg-lazy-report"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/deferred-packages.mdx#deferred-tools-report"
+
+[[row]]
+item = "arg-pinned"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "reference/project-file.md#project-config-pinned"
+
+[[row]]
+item = "arg-pinned-degrade"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#pinned"
+
+[[row]]
+item = "arg-pinned-ladder"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#pinned"
+
+[[row]]
+item = "arg-pinned-package-tier"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#pinned"
+
+[[row]]
+item = "arg-pinned-pull"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#pinned"
+
+[[row]]
+item = "arg-pinned-roots-only"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#pinned"
+
+[[row]]
+item = "path-resolution"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/stable-paths.mdx#stable-paths"
+
+[[row]]
+item = "pinned-only-mode"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/work-offline.mdx#offline-modes"
+
+[[row]]
+item = "ocx shell env"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx shell hook"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx shell init"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx uninstall"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "A repeated copy is idempotent in effect, re-PUTting manifests and indexes without re-uploading blob bodies."
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "reference/command-line/package-publishing.md#package-copy"
+
+[[row]]
+item = "--rm forces spawn and wait on Unix, so ocx stays resident and the pre-exec record guarantee weakens to spawn-and-wait ordering."
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "reference/command-line/package-consuming.md#package-exec"
+
+[[row]]
+item = "Exit 74 covers read failures other than not-found or permission-denied, including non-regular files such as FIFOs or devices, which are refused before opening."
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/project-toolchain.mdx#project-discovery"
+
+[[row]]
+item = "The pause duration takes a number with an s, m, h or d suffix, with a maximum of 7d."
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "reference/command-line/config.md"
+
+[[row]]
+item = "OCX_QUIET sets the same toggle; the flag wins when both are set."
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "reference/command-line/index.md"
+
+[[row]]
+item = "keys-mirrors-system-lock"
+page = "docs/reference/configuration.md"
+action = "moved"
+home = "explanation/managed-configuration.md#managed-locks"
+
+[[row]]
+item = "keys-registries-system-lock"
+page = "docs/reference/configuration.md"
+action = "moved"
+home = "explanation/managed-configuration.md#managed-locks"
+
+[[row]]
+item = "keys-registry-system-lock"
+page = "docs/reference/configuration.md"
+action = "moved"
+home = "explanation/managed-configuration.md#managed-locks"
+
+[[row]]
+item = "mirrors.registry-1.docker.io"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "ocx shell hook"
+page = "docs/reference/env-composition.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--define"
+page = "docs/reference/env-composition.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "MANAGED_CONFIG is suppressed entirely when NO_CONFIG is set."
+page = "docs/reference/environment.md"
+action = "moved"
+home = "reference/environment.md#ocx-managed-config"
+
+[[row]]
+item = "NO_CODESIGN has no effect on non-macOS systems."
+page = "docs/reference/environment.md"
+action = "moved"
+home = "reference/environment.md#ocx-no-codesign"
+
+[[row]]
+item = "XDG_CONFIG_HOME locates the user-tier config file on Linux, falling back to the standard config home."
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/configuration.mdx#tier-user"
+
+[[row]]
+item = "The guide covers everyday OCX tasks, each section task-named and self-contained."
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "Teams managing their own PATH should pass no-modify-path and add both directories themselves, toolchain bin first."
+page = "docs/user-guide.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#session-path"
+
+[[row]]
+item = "A datetime build timestamp appends an underscore and a YYYYMMDDhhmmss stamp to the tag."
+page = "docs/user-guide/snapshot-tracks.md"
+action = "moved"
+home = "publishing/snapshot-tracks.md"

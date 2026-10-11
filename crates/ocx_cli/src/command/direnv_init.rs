@@ -19,7 +19,7 @@ use crate::app::CliRefusal;
 /// using different interactive shells.
 #[derive(Parser, Default)]
 pub struct DirenvInit {
-    /// Overwrite an existing `.envrc` in the current directory.
+    /// Overwrite an existing `.envrc` in the current directory. Without it, an existing file exits 78 and is left untouched
     #[clap(long)]
     force: bool,
 }

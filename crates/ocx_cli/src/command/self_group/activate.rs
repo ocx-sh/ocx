@@ -27,7 +27,7 @@ use crate::options;
 // Rustdoc only: clap renders `ocx self activate --help` from the `SelfGroup::Activate` variant.
 #[derive(Parser)]
 pub struct SelfActivate {
-    /// Target shell for activation output.
+    /// Target shell for activation output (`sh` is `dash`, `pwsh` is `powershell`, `nu` is `nushell`).
     ///
     /// Legal values: `bash`, `zsh`, `fish`, `ash`, `dash`, `ksh`, `sh`,
     /// `pwsh`, `elvish`, `nushell`, `batch` (`sh` == `dash`, POSIX alias).

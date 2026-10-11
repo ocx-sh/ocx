@@ -1,0 +1,280 @@
+---
+title: "Publish a package to a registry"
+description: "Bundle a directory, push it to an OCI registry, and keep rolling tags, annotations and shared layers correct."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+By the end of this page you have pushed a package from a local directory to an OCI registry. You need a directory with the files to ship, a `metadata.json` next to it, and write access to the destination registry. The page covers bundling, the push, rolling tags, source annotations and layer reuse. [Sign a release][authoring-sign] covers signing after the push.
+
+## The first push \{#first-push\}
+
+[`ocx package create`][cmd-package-create] bundles the directory and records the platform and identifier in a build receipt. [`ocx package push`][cmd-package-push] uploads the archive as one layer under one image manifest for that single platform. Flags you pass win. The receipt only fills in what you left out.
+
+```sh
+ocx login ghcr.io
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64 -i ghcr.io/acme/mytool:1.0.0
+ocx package push mytool-1.0.0.tar.xz
+```
+
+Replace `ghcr.io/acme` with your registry and namespace. A bare `mytool:1.0.0` would target the default registry. [Authenticate with a private registry][guides-authenticate] covers token and CI logins.
+
+<Terminal src="/casts/authoring/package-push.cast" title="Publishing a package for the first time" collapsed />
+
+To publish more platforms under the same tag, run `create` and `push` once per platform. The [multi-platform guide][authoring-multi-platform] explains how OCX assembles the [OCI Image Index][oci-image-index]. [Sign a release][authoring-sign] covers signing, and [Announce a package][authoring-announce] lists it in an index.
+
+:::tip[Test before you push]
+[`ocx package test`][authoring-testing] runs the install pipeline in a temp directory with no registry round-trip. It forwards the exit code of the command you run, so CI can gate on it.
+:::
+
+## Redirect refusals \{#redirect-refusals\}
+
+An upload session hands control to the registry mid-request. The registry names the next chunk or commit URL in a `Location` header, as the [OCI Distribution Specification][oci-dist-spec] allows. OCX did not choose that header. A compromised registry or an on-path party can point it anywhere.
+
+OCX checks four handoffs before the next request goes out. A failed check aborts the push with exit [65 (DataError)][exit-codes], and a rerun reaches the same answer.
+
+- **A different registry.** The session's `Location` names another host. Following it would send that host your credentials and the blob body ([CWE-918][cwe-918]).
+- **A plaintext credential realm.** OCX sends Basic or Bearer credentials only to a `WWW-Authenticate` realm that is `https://`, shares the registry's host, or is declared plaintext-eligible. Anything else is refused with the realm URL ([CWE-319][cwe-319]).
+- **A downgraded redirect.** Any request, not only the upload session, is redirected from `https://` to `http://`. OCX follows redirects such as CDN hand-offs, but never one that drops TLS.
+- **A redirected upload request.** Chunk and commit requests never follow a redirect, not even to the same host. A `3xx` answer is refused. Registries do not redirect upload writes, so this should not fire against a healthy one. Blob pulls still follow redirects.
+
+The first and last checks belong to the push flow. The realm and downgrade checks run in the transport layer, so `pull`, `install` and `login` meet them too. A redirect no client can act on (a missing or unparseable `Location`, or a body it cannot replay) also exits 65 on any request. It marks a broken response, not an attack.
+
+A plain-HTTP allowance ([`insecure = true`][config-registries-insecure] or [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]) only changes which registries OCX dials over HTTP. It does not reopen the cross-host, redirected-upload or downgrade refusals. The realm check does consult it, for the realm's own host.
+
+:::note[Reporting it]
+The first, third and fourth refusals mean the registry, or a proxy in front of it, is misconfigured or compromised. Do not route around them client-side. A refused realm on a plain-HTTP registry is your own config missing that host. Declare it under [`insecure`][config-registries-insecure].
+:::
+
+## Bring your own archives \{#byo-archives\}
+
+[`ocx package push`][cmd-package-push] does not bundle a directory. Every file layer must be a pre-built `.tar.gz`, `.tar.xz` or `.tar.zst` archive. The aliases `.tgz`, `.txz`, `.tzst` and `.tar.zstd` also work. Bundling the same content twice gives different digests (timestamps, compression entropy), and the registry treats each digest as a new layer. Bundle once with [`ocx package create`][cmd-package-create] (see [Bundle anatomy][authoring-bundle-anatomy]), then reuse that archive in every push.
+
+:::caution[Zero-layer pushes need explicit `--metadata`]
+A push with no file layers is valid. It produces a config-only OCI artifact, the shape behind the `__ocx.desc` tag that [`ocx package description push`][cmd-package-describe] writes. With no layer to sit beside, `--metadata` is mandatory. The same holds when every layer is a `sha256:...` digest reference.
+:::
+
+## Creating the archive \{#create\}
+
+[`ocx package create`][cmd-package-create] bundles a directory into the archive that `push` uploads. It validates the [declared dependencies][authoring-dependencies] for cycles, so a cycle fails here and never reaches the registry.
+
+With `--metadata`, `create` compiles [dependency pins][reference-manifest-pins]. It rewrites the sidecar in canonical form next to the bundle. `--platform` is then required, or the command exits 64.
+
+The platform states what the artifact demands, not what the build host supplies. A static musl binary cross-built on a glibc host demands neither that libc nor that architecture. That platform is also the label the package is published under.
+
+### Build receipt \{#create-receipt\}
+
+When you pass `--platform` or `--identifier`, `create` writes `<stem>-receipt.json` beside the bundle. It holds `{"version": 1, "platform": "...", "identifier": "..."}`, and each field is present only if you gave the matching flag. The receipt has no JSON Schema and is never uploaded.
+
+Read it with [`ocx package receipt`][cmd-package-receipt] instead of parsing the file. [`push`][cmd-package-push] uses it for an omitted `--platform` or `--identifier`, and [`test`][cmd-package-test] uses it for an omitted `--platform`. A flag you pass is never overridden. The [`package create` reference][cmd-package-create] has the full fallback rules.
+
+### Checking the declared libc \{#create-libc-check\}
+
+With `--metadata` and a Linux or `any` target, `create` compares the [`os.features`][reference-platforms] you declare with what the binaries need. An empty feature list claims the artifact needs nothing from the host. A glibc binary published without `libc.glibc` then resolves on a musl-only host and fails with a bare `No such file or directory`. [Libc variants][authoring-multi-platform-libc] explains how feature tags select a manifest.
+
+The check reads the ELF `PT_INTERP` header of every regular file the package puts on an interface `PATH` directory. It runs even without `--bin-scan`, which governs only the `binaries` claim.
+
+| Condition | Result |
+|---|---|
+| Statically linked (no `PT_INTERP`) | Needs no declaration |
+| Needs a libc the declared platform requires | Passes |
+| Needs a libc the platform does not require | Exit 65, naming the file, the loader and a paste-ready `--platform` |
+| Dynamically linked, but the platform is `any` | Exit 65, because `any` claims every host can run it |
+| ELF header that will not parse, or an unrecognised loader | Exit 65, because an unknown need is never read as "needs nothing" |
+| Not an ELF object (scripts, data, docs) | Not checked |
+
+The check reads only the dynamic loader. A binary that needs `libicu` or a glibc version above the host's still passes, since `os.features` carries the libc family, not its version. Other targets are not checked.
+
+Pass `--no-libc-lint` only when the check itself refuses a binary incorrectly. It is an escape hatch, not a routine flag. It skips the check, including its scan-scope refusal, and leaves `os.features` unverified. It warns on stderr wherever the check would have run, so passing it on every leg of a platform matrix stays quiet elsewhere.
+
+## Resolving dependency pins \{#dependency-pins\}
+
+A package that [declares dependencies][authoring-dependencies] needs each one pinned to a manifest digest before `push` publishes it. An unpinned dependency exits 65. Never pin a dependency's [OCI Image Index][oci-image-index] digest. A tag's index is rewritten on every platform push, so the old digest is garbage-collected and the pin returns 404. [Manifest pins, never index pins][reference-manifest-pins] has the full hazard.
+
+Write each dependency tag-only in `metadata.json`, then let `create` resolve it:
+
+```sh
+ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
+```
+
+`create` leaves your `metadata.json` unchanged and writes the resolved manifest pins to `mytool-1.0.0-linux-amd64-metadata.json` beside the archive. Push that file, not your hand-written one. Resolution follows [`--remote`][arg-remote], [`--offline`][arg-offline] and [`--frozen`][arg-frozen] like every other lookup.
+
+`push` makes no resolution decisions. It checks that every dependency carries a manifest pin for the published platform and that each pin resolves in its registry. The [`package push` reference][cmd-package-push] lists each failure and its exit code (64, 65, 79, 80).
+
+A package with no dependencies, or a sidecar that is already fully pinned, skips all of this without touching the network.
+
+With `--platform any`, a dependency must itself offer an `any` build, or `create` fails naming it. `push` re-checks that pin against the dependency's own image index. See [Multi-platform packages][authoring-multi-platform].
+
+## Cascading rolling tags \{#cascade\}
+
+Publishers ship versioned releases (`1.0.0`, `1.0.1`) and want users to pin rolling aliases (`1.0`, `1`, `latest`). `--cascade` maintains them at push time. Pushing `acme/mytool:1.0.1` re-points each ancestor tag to the new digest, but only where `1.0.1` is the highest version at that level. A backport `0.9.5` pushed after `1.0.1` leaves `latest` alone.
+
+```shell
+ocx package push --cascade -p linux/amd64 \
+  -i ghcr.io/acme/tools/mytool:1.0.1 mytool-1.0.1-linux-amd64.tar.xz
+```
+
+When `1.0.1` is the highest release, that push writes `1.0.1`, `1.0`, `1` and `latest`, all pointing at the same manifest.
+
+Cascade is a publisher convention. The registry only sees tag-to-digest writes. Decisions are made per platform, so a backport that leads on `linux/amd64` but trails on `darwin/arm64` moves only the tags it leads. [Versioning in depth][in-depth-versioning-cascades] has the full alias model.
+
+<Terminal src="/casts/authoring/package-cascade.cast" title="Cascading rolling tags across releases" collapsed />
+
+### Naming a default variant \{#default-variant\}
+
+A [variant][in-depth-versioning-variants] is a tag prefix such as `full-1.2.3`, and each variant cascades in its own track. If every build is a named variant, no bare `1.2.3` exists, and `ocx package install acme/mytool` resolves nothing. `--default` lets the pushed variant also own the un-prefixed track:
+
+```shell
+ocx package push --cascade -p linux/amd64 --default \
+  -i ghcr.io/acme/tools/mytool:full-1.2.3 mytool-full-1.2.3-linux-amd64.tar.xz
+```
+
+That push writes `full-1.2.3`, `full-1.2`, `full-1` and `full`, plus `1.2.3`, `1.2`, `1` and `latest` pointing at the same manifest. Only each extra tag's index is written, so no blob or manifest uploads twice. Without `--cascade`, only the bare version is written.
+
+The bare track behaves like any track. A published bare `2.0.0` keeps this push off `latest`, and a `slim-2.0.0` push has no say over it. The tag must carry a variant, or `--default` is a usage error (exit 64). In a pipeline that pushes every variant, pass `--default` only on the build that should own the bare track. `--tags-file` receives both tag sets, and `--format json` reports the bare track as `aliases_written`.
+
+## Linking the source repository \{#source-annotation\}
+
+A registry cannot tell where a package came from. The path `ghcr.io/acme/tools/widget` names a package, not a repository, and a mirror publishes someone else's software under its own namespace. The [OCI image spec][oci-annotations] reserves `org.opencontainers.image.source` for the answer. [GHCR][ghcr-repo-link] reads it, shows the repository link and gives the package that repository's permissions. State it with `--annotation`:
+
+```shell
+ocx package push --cascade -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
+  --annotation org.opencontainers.image.source=https://github.com/acme/widget \
+  widget-1.2.3-linux-amd64.tar.xz
+```
+
+The annotation lands on the [image index][oci-image-index] of every tag the push writes, cascade tags included. Repeat the flag for other keys, such as `org.opencontainers.image.revision` or `org.opencontainers.image.licenses`. It splits at the first `=` and keeps the last value of a repeated key. An empty key, or an argument with no `=`, is a usage error (exit 64). Values are written verbatim.
+
+Leaving the flag off writes nothing and keeps annotations from earlier pushes. Supplying a key overwrites only that key.
+
+### Stamping from CI \{#source-annotation-ci\}
+
+In CI the values are already in the environment, and `--ci-annotations` reads them:
+
+```shell
+ocx package push --cascade --ci-annotations=gitlab -i $CI_REGISTRY_IMAGE/widget:1.2.3 \
+  widget-1.2.3-linux-amd64.tar.xz
+```
+
+| Annotation | [GitHub Actions][github-actions-docs] | [GitLab CI/CD][gitlab-ci-variables] |
+| --- | --- | --- |
+| `org.opencontainers.image.source` | `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` | `$CI_PROJECT_URL` |
+| `org.opencontainers.image.revision` | `$GITHUB_SHA` | `$CI_COMMIT_SHA` |
+| `org.opencontainers.image.created` | the push clock | `$CI_PIPELINE_CREATED_AT` |
+| `org.opencontainers.image.version` | the version the push resolved | same |
+
+When `$SOURCE_DATE_EPOCH` is set it decides `created` on either provider, so a [reproducible build][reproducible-builds-sde] stamps one instant. `created` is always stamped. A `source` or `revision` variable that is unset or blank writes no annotation, and an explicit `--annotation` on the same key wins. `version` drops the variant prefix, so `full-1.2.3` annotates `1.2.3`. A tag that is not a version writes no `.version` key, which is not an error.
+
+The flag stays opt-in. A package built outside the forge you assumed would otherwise claim provenance it lacks. Bare `--ci-annotations` autodetects the provider and exits 64 when it finds none.
+
+`version` is the row that earns the flag. Without `--identifier`, the tag comes from the [build receipt][cmd-package-create-receipt], so a pipeline cannot know the version before the push resolves it.
+
+## Reusing layers across packages \{#layer-reuse\}
+
+A package is the union of its layers: a base, optional middle layers and a top layer with the binary. Re-uploading a layer the registry already holds wastes upload bandwidth and costs consumers a download. Reference any layer already in the target registry by digest:
+
+```text
+<algo>:<hex>.<ext>
+```
+
+`<algo>` is `sha256`, `sha384` or `sha512`, with a hex string of 64, 96 or 128 characters. The extension (`tar.gz`, `tar.xz`, `tar.zst` or an alias) is mandatory, because OCI blob HEADs do not carry the media type. A bare `<algo>:<hex>` is rejected. OCX HEADs the registry to confirm the digest exists, then records the layer in the manifest without uploading it. This is the base of the [three-tier storage model][in-depth-storage-layers].
+
+The [`ocx_mirror`][mirror-pipeline] tool always uploads file layers, so digest reuse is a hand-publisher pattern:
+
+1. **Bundle the base archive once and capture its digest.** Bundles are not byte-reproducible across runs (see [stable archives][authoring-bundle-anatomy-stable]). Run `sha256sum base.tar.xz` after creating the file. The local file digest equals the layer digest the registry stores.
+2. **Push the first release with the file layer.** OCX uploads it under that digest.
+3. **Push later releases by digest.** Reference `sha256:<hex>.<ext>`. Nothing is re-bundled, re-uploaded or re-downloaded.
+
+<Terminal src="/casts/authoring/package-layer-reuse.cast" title="Reusing a base layer across two releases" collapsed />
+
+:::caution[Pathological filenames]
+A file literally named `sha256:abc....tar.gz` needs a `./` prefix to be read as a file. Bare `<algo>:<hex>.<ext>` tokens always parse as digest references.
+:::
+
+## Layer layout \{#layer-layout\}
+
+Any layer argument to [`push`][cmd-package-push] or [`test`][cmd-package-test] takes an optional suffix. It overrides [`strip_components`][metadata-strip-components] for that layer, places the layer under a prefix, or asks for a cross-repository blob mount:
+
+```text
+<ref>:strip=<N>,prefix=<P>,from=<REPO>
+```
+
+All three fields are optional and may come in any order. `<N>` is a `u8`. `<P>` is a relative path with no leading `/`, no `..`, no drive or UNC prefix, and at most 32 components and 4096 bytes. The layer's stripped tree lands under it in `content/`. `<REPO>` names a repository in the same registry, from which `push` tries a registry-side blob mount before uploading.
+
+```sh
+# base.tar.gz ships wrapped in a `1.2.3/` directory: strip it, place the rest under `share/`.
+ocx package push -p linux/amd64 -i ghcr.io/acme/mytool:1.0.0 \
+  base.tar.gz:strip=1,prefix=share \
+  tool.tar.gz
+```
+
+The resolved values travel in the layer descriptor's annotations `sh.ocx.layer.strip-components` and `sh.ocx.layer.prefix`, never in `metadata.json`. Each field falls back on its own at read time. A missing `strip` uses the package-wide `strip_components`, then `0`. A missing `prefix` uses the package root. A push with no suffix writes no `sh.ocx.layer.*` annotations.
+
+- Layers are a flat merge, not an overlay. OCI whiteout entries (`.wh.*`, `.wh..wh..opq`) from a foreign layer pass through as ordinary files.
+- A deep `prefix` can approach the legacy Windows `MAX_PATH` limit, so keep it shallow for packages that install on Windows.
+- `<P>` cannot contain a comma, since the suffix is an unescaped comma-separated list.
+- A filename that literally contains `:strip=`, `:prefix=` or `:from=` cannot be pushed as a plain path, and no escape exists.
+- `from=REPO` is push-only and never reaches the manifest.
+
+Malformed syntax at publish is a usage error (exit 64). That covers a `strip` that is not a `u8`. It also covers an unknown or duplicate key, an empty value, an escaping or oversized `prefix`, and a bad `from`. Readers re-validate `prefix` because manifests are third-party-writable. A malformed annotation there is a data error (exit 65).
+
+## See also \{#see-also\}
+
+- [`ocx package push` reference][cmd-package-push] and its [annotation flags][cmd-package-push-annotations]
+- [Sign a release][authoring-sign] for signing after the push
+- [Announce a package][authoring-announce] to list it in an index
+- [Test locally][authoring-testing] before you push
+- [Versioning in depth: cascades][in-depth-versioning-cascades] and [storage in depth: layers][in-depth-storage-layers]
+- [Declaring dependencies][authoring-dependencies]
+- [Multi-platform packages][authoring-multi-platform] and [libc variants][authoring-multi-platform-libc]
+- [Bundle anatomy][authoring-bundle-anatomy]
+
+
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[gitlab-ci-variables]: https://docs.gitlab.com/ci/variables/predefined_variables/
+[reproducible-builds-sde]: https://reproducible-builds.org/docs/source-date-epoch/
+[oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[oci-dist-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
+[ghcr-repo-link]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[mirror-pipeline]: https://github.com/ocx-sh/ocx-mirror
+[cwe-918]: https://cwe.mitre.org/data/definitions/918.html
+[cwe-319]: https://cwe.mitre.org/data/definitions/319.html
+
+
+[cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
+[cmd-package-create-receipt]: #create-receipt
+[cmd-package-receipt]: ../reference/command-line/package-consuming.md#package-receipt
+[cmd-package-test]: ../reference/command-line/package-publishing.md#package-test
+[reference-platforms]: ../reference/platforms.md
+[metadata-strip-components]: ../reference/metadata/index.md#extraction-strip-components
+[cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
+[cmd-package-push-annotations]: #source-annotation
+[cmd-package-describe]: ../reference/command-line/package-publishing.md#package-description-push
+[arg-remote]: ../reference/command-line/index.md#arg-remote
+[arg-offline]: ../reference/command-line/index.md#arg-offline
+[arg-frozen]: ../reference/command-line/index.md#arg-frozen
+
+
+[reference-manifest-pins]: ../explanation/dependencies.mdx#manifest-pins
+[config-registries-insecure]: ../reference/configuration.md#keys-registries-insecure
+[env-insecure-registries]: ../reference/environment.md#ocx-insecure-registries
+[exit-codes]: ../reference/exit-codes.md
+
+
+[in-depth-storage-layers]: ../explanation/storage.mdx#layers
+[in-depth-versioning-cascades]: ../explanation/versioning.mdx#cascades
+[in-depth-versioning-variants]: ../explanation/versioning.mdx#variants
+
+
+[authoring-bundle-anatomy]: ./bundle-anatomy.mdx
+[authoring-bundle-anatomy-stable]: ./bundle-anatomy.mdx#stable
+[authoring-dependencies]: ./declare-dependencies.md
+[authoring-multi-platform]: ./multi-platform.mdx
+[authoring-multi-platform-libc]: ./libc-variants.md#libc
+[authoring-sign]: ./sign-a-release.md#supply-chain-signing
+[authoring-announce]: ./announce.md
+[authoring-testing]: ./test-locally.mdx
+[guides-authenticate]: ../guides/authenticate.mdx

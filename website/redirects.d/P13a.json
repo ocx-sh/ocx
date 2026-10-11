@@ -1,0 +1,18 @@
+{
+  "/docs/getting-started/": {
+    "fragments": {
+      "getting-started": "/docs/getting-started/first-package/",
+      "next-steps-config": "/docs/guides/configure-ocx/",
+      "project-toolchain": "/docs/getting-started/first-project/#project-toolchain"
+    }
+  },
+  "/docs/installation/": {
+    "fragments": {
+      "ci": "/docs/integration/github-actions/#ci",
+      "docker": "/docs/integration/docker/",
+      "installation": "/docs/getting-started/install-ocx/",
+      "uninstalling": "/docs/guides/update-ocx/#uninstalling",
+      "updating": "/docs/guides/update-ocx/#updating"
+    }
+  }
+}

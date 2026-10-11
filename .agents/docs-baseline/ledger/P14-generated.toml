@@ -1,0 +1,11 @@
+[[row]]
+item = "ocx deselect"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx deselect"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"

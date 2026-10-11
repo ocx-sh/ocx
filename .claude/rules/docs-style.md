@@ -61,7 +61,7 @@ When introducing design concept, compare to something reader know:
 - Candidate/current symlinks → SDKMAN, Homebrew Cellar + opt, Linux `update-alternatives`
 - Rolling tags → Docker official images (`ubuntu:24.04`, `nginx:latest`), Semantic Versioning
 
-Analogies go in `:::info` callout, not inline prose. Keep main prose clean.
+Analogies go in `:::note` callout, not inline prose. Keep main prose clean.
 
 ---
 
@@ -87,16 +87,16 @@ Use `<Tooltip term="short label">explanation</Tooltip>` to hide technical detail
 
 ---
 
-## Callout Boxes (VitePress)
+## Callout Boxes
 
 | Type | When to use |
 |---|---|
-| `:::info` | Analogies to other systems, background context |
+| `:::note` | Analogies to other systems, background context |
 | `:::tip` | Actionable advice, example usage, recommended patterns |
-| `:::warning` | Important caveats, commonly misunderstood things |
-| `:::details` | Optional technical depth, spec references, implementation details |
+| `:::caution` | Important caveats, commonly misunderstood things |
+| `:::danger` | Data loss, security or other irreversible consequences |
 
-Details blocks hide content by default — use for material correct and relevant but not required for main explanation.
+Optional technical depth (spec references, implementation details) goes in a plain `<details>` element, not a callout.
 
 ---
 
@@ -127,11 +127,11 @@ Collect all link definitions at **bottom of file**, grouped with comments:
 ...
 
 <!-- commands -->
-[cmd-install]: ./reference/command-line.md#install
+[cmd-exec]: ./reference/command-line/commands.md#exec
 ...
 
 <!-- environment -->
-[env-auth-type]: ./reference/environment.md#ocx-auth-registry-type
+[env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
 ...
 
 <!-- internal -->
@@ -141,17 +141,17 @@ Collect all link definitions at **bottom of file**, grouped with comments:
 
 ---
 
-## Vue Components Available
+## Components Available
 
-All components globally registered — use directly in `.md` files without imports. See `subsystem-website.md` for full props reference, usage examples, VNode introspection pattern.
+A page using a component is `.mdx` and imports it; props → `subsystem-website.md` § Components and Markup.
 
-- `<Tooltip term="label">popup text</Tooltip>` — inline term with hover popup
-- `<Tree>` / `<Node>` / `<Description>` — collapsible filesystem trees with annotations
-- `<Steps>` / `<Step>` / `<Description>` — vertical progress indicator with detail panels
-- `<Terminal>` / `<Frame>` — animated terminal sessions (inline frames or `.cast` files)
-- `<DependencyExplorer>` — SBOM viewer (rendered from generated dependency data)
-- VitePress `::: code-group` — tabbed code blocks for side-by-side alternatives
-- VitePress `::: info | tip | warning | details` — callout boxes
+- `<Tooltip term="label">popup text</Tooltip>` — inline term with hover popup (`@ocx-sh/theme/components/Tooltip.astro`)
+- `<Tree>` / `<Node>` / `<Description>` — filesystem trees with annotations (`Tree.astro`, `TreeNode.astro`, `TreeDescription.astro`)
+- `<Tabs>` / `<TabItem>` — tabbed alternatives (`Tabs.astro`, `TabItem.astro`)
+- `<Steps>` — numbered procedure (`@astrojs/starlight/components`)
+- `<Terminal>` — recorded `.cast` session (local `website/src/components/Terminal.astro`)
+- `<PlatformIcons>` — OS glyph lists (`PlatformIcons.astro`)
+- `:::note | tip | caution | danger` — callout boxes
 
 ---
 
@@ -159,13 +159,30 @@ All components globally registered — use directly in `.md` files without impor
 
 Never record a `.cast` — or write a `test/doc_scripts/*.sh` to back one — whose output is a
 `--help` dump, a usage line, or a list of argv refusals. That duplicates
-`reference/command-line.md`, which is written against the clap definitions and is the one
-place a reader should look for grammar. Link the reference section instead.
+`reference/command-line/`, which `task website:reference:generate` builds from the clap
+definitions and is the one place a reader should look for grammar. Link the reference section instead.
 
 A cast earns its place only when it shows a command **doing** something whose output the
 reader could not predict from the flag list: an install that resolves a version, an env that
 composes, a push that reuses a layer. If the recording's value is "here is what the flags
 are", delete it and write a sentence with a link.
+
+---
+
+## Reference Pages
+
+A `doc_type: reference` page is an optional intro of at most two sentences, then entries. An entry is
+a heading with an explicit `{#kebab-id}` followed only by:
+
+- a description of at most two sentences,
+- fact tables or `key: value` lists (type, default, env, flag),
+- at most one fenced block,
+- at most one `See [x](...)` link line.
+
+No asides, rationale, conventions or sub-sections that are not entries. Explanation moves to the
+explanation page that owns it; `test/lint/test_reference_shape.py` reports `page:line rule`
+(`paragraph`, `aside`, `fences`, `anchor`) and `test/lint/test_docs_quality_gate.py` fails on
+any finding, with no exemption list.
 
 ---
 

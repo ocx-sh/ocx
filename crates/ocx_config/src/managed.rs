@@ -18,7 +18,8 @@ pub struct ManagedConfig {
     /// OCI reference for the managed-config artifact, e.g.
     /// `"internal.company.com/ocx-config:user"`.
     ///
-    /// Absent → no managed tier configured.
+    /// Absent → no managed tier configured. The `OCX_MANAGED_CONFIG` environment variable
+    /// overrides it for one invocation.
     pub source: Option<String>,
 
     /// Fail posture when the snapshot is required but absent.
@@ -28,18 +29,22 @@ pub struct ManagedConfig {
     /// - `false` — the tier contributes nothing until synced; a throttle-gated
     ///   stderr hint only.
     // An unsynced optional tier is a benign state: never a per-invocation WARN.
+    #[schemars(extend("default" = true))]
     pub required: Option<bool>,
 
     /// Background refresh posture. Defaults to `notify`.
     ///
     /// `apply` swaps in a drifted snapshot, `notify` advises `ocx config update`, `manual`
-    /// refreshes only on `ocx config update`. CI never runs the background check. An unknown
-    /// value is ignored with a warning, so the default applies.
+    /// refreshes only on `ocx config update`. CI never runs the background check.
+    ///
+    /// An unknown value is ignored with a warning, so the default applies.
     #[serde(default, deserialize_with = "deserialize_refresh")]
+    #[schemars(extend("default" = "notify"))]
     pub refresh: Option<RefreshPolicy>,
 
     /// Background refresh throttle interval, `\d+[smhd]?` (bare = seconds).
     /// Defaults to `"1d"`.
+    #[schemars(extend("default" = "1d"))]
     pub interval: Option<String>,
 
     /// Set by the loader on a SYSTEM-scope tier whose effective `required` is true.

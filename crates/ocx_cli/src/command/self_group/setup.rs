@@ -96,6 +96,7 @@ pub struct SelfSetup {
     /// Omit to install the latest published release. A tag installs that exact
     /// release. A digest installs the exact content. A `tag@digest` form
     /// verifies the tag resolves to the given digest (immutability assertion).
+    /// A mismatch names both digests and exits 65.
     ///
     /// The literal `latest` resolves only if the registry publishes such a tag;
     /// omitting VERSION is the recommended way to request the latest release.
@@ -112,6 +113,9 @@ pub struct SelfSetup {
     profiles: Profiles,
 
     /// Report the intended actions without writing anything.
+    ///
+    /// Resolves the version and reports `WouldPull` with the resolved digest.
+    /// Never exits 81 for a dirty profile.
     #[arg(long)]
     dry_run: bool,
 
@@ -119,13 +123,12 @@ pub struct SelfSetup {
     #[arg(long)]
     force: bool,
 
-    /// Adopt (or clear) the corporate managed-config tier.
+    /// Adopt the corporate managed-config tier; an empty value (`--managed-config ""`) clears the seed and deletes the snapshot.
     #[arg(long_help = "\
-        Adopt (or clear) the corporate managed-config tier.\n\n\
+        Adopt the corporate managed-config tier; an empty value (`--managed-config \"\"`) clears the seed and deletes the snapshot.\n\n\
         Resolves an OCI reference to a managed-config artifact, synchronously fetches and persists \
         a snapshot, and only then writes the `[managed]` seed fence in `$OCX_HOME/config.toml` - a \
-        fetch failure leaves no partial state. Pass an empty string (`--managed-config \"\"`) to \
-        clear an existing seed and delete the snapshot.\n\n\
+        fetch failure leaves no partial state.\n\n\
         Precedence when omitted: `OCX_MANAGED_CONFIG` env var, then the existing seed. Omit \
         entirely to leave the managed-config tier untouched.\n\n\
         Every run reconciles an already-adopted seed against the registry, so a newer published \

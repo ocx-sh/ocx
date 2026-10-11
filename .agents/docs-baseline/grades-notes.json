@@ -1,0 +1,523 @@
+{
+ "docs/authoring/announcing.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 53,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 43
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x43"
+ },
+ "docs/authoring/building-pushing.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 61,
+   "DOC-PLAIN-11": 6,
+   "DOC-PLAIN-02": 39
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x39"
+ },
+ "docs/authoring/bundle-anatomy.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 22,
+   "DOC-PLAIN-02": 12
+  },
+  "note": "MUST = DOC-PLAIN-02 x12 and DOC-TYPE-01 x1 (no doc_type declaration). No heuristic findings read by hand."
+ },
+ "docs/authoring/dependencies.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 35,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 10
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x10"
+ },
+ "docs/authoring/entry-points.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 39,
+   "DOC-PLAIN-11": 2,
+   "DOC-PLAIN-02": 19
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x19"
+ },
+ "docs/authoring/env-surface.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 40,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 17
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x17"
+ },
+ "docs/authoring/index.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 22,
+   "DOC-PLAIN-11": 2,
+   "DOC-PLAIN-02": 10
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x10"
+ },
+ "docs/authoring/migration.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 13,
+   "DOC-PLAIN-02": 10
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x10"
+ },
+ "docs/authoring/multi-platform.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 58,
+   "DOC-PLAIN-02": 39,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-PLAIN-02x39, DOC-TYPE-01x1"
+ },
+ "docs/authoring/testing.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 44,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 15
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x15"
+ },
+ "docs/changelog.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1
+  },
+  "note": "DOC-TYPE-01 x1 (no doc_type declaration)"
+ },
+ "docs/contributing/bazel.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 59,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 42,
+   "DOC-PLAIN-03": 6
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x42"
+ },
+ "docs/docker.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 21,
+   "DOC-PLAIN-11": 2,
+   "DOC-PLAIN-02": 10
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x10"
+ },
+ "docs/faq.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 58,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 24,
+   "DOC-PLAIN-03": 2
+  },
+  "note": "DOC-PLAIN-02x24, DOC-TYPE-01x1"
+ },
+ "docs/getting-started.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 36,
+   "DOC-PLAIN-02": 8
+  },
+  "note": "DOC-PLAIN-02x8, DOC-TYPE-01x1"
+ },
+ "docs/in-depth/ci.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 18,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 6
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x6"
+ },
+ "docs/in-depth/configuration.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 78,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 34
+  },
+  "note": "DOC-PLAIN-02x34, DOC-TYPE-01x1"
+ },
+ "docs/in-depth/cosign-parity.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 60,
+   "DOC-PLAIN-11": 2,
+   "DOC-PLAIN-02": 36
+  },
+  "note": "DOC-PLAIN-02x36, DOC-TYPE-01x1"
+ },
+ "docs/in-depth/dependencies.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 50,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 17,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x17"
+ },
+ "docs/in-depth/entry-points.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 50,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 30,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x30"
+ },
+ "docs/in-depth/environments.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 60,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 19
+  },
+  "note": "DOC-PLAIN-02x19, DOC-TYPE-01x1"
+ },
+ "docs/in-depth/indices.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 193,
+   "DOC-PLAIN-11": 11,
+   "DOC-PLAIN-02": 109,
+   "DOC-PLAIN-03": 3
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x109"
+ },
+ "docs/in-depth/lazy-loading.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 30,
+   "DOC-PLAIN-02": 19
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x19"
+ },
+ "docs/in-depth/project.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 88,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 36
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x36"
+ },
+ "docs/in-depth/self-hosted-sigstore.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 42,
+   "DOC-PLAIN-02": 18
+  },
+  "note": "DOC-PLAIN-02x18, DOC-TYPE-01x1"
+ },
+ "docs/in-depth/shell-integration.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 129,
+   "DOC-PLAIN-11": 5,
+   "DOC-PLAIN-02": 99,
+   "DOC-PLAIN-03": 6
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x99"
+ },
+ "docs/in-depth/signing.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 118,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 55,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x55"
+ },
+ "docs/in-depth/storage.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 95,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 40,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x40"
+ },
+ "docs/in-depth/versioning.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 46,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 9
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x9"
+ },
+ "docs/installation.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-PLAIN-11": 4,
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 37,
+   "DOC-PLAIN-02": 16
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x16"
+ },
+ "docs/reference/command-line.md": {
+  "consider": 1,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 1017,
+   "DOC-PLAIN-11": 31,
+   "DOC-PLAIN-12": 1,
+   "DOC-PLAIN-02": 454,
+   "DOC-PLAIN-03": 30,
+   "DOC-PLAIN-13": 290
+  },
+  "note": "top MUST findings are DOC-PLAIN-02 x454, DOC-PLAIN-13 x290 and DOC-TYPE-01 x1; heuristic set to 0 because I did not read the page by hand."
+ },
+ "docs/reference/configuration.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 390,
+   "DOC-PLAIN-11": 16,
+   "DOC-PLAIN-02": 209,
+   "DOC-PLAIN-03": 4
+  },
+  "note": "MUST = DOC-PLAIN-02 x209 (sentences over 25 words) and DOC-TYPE-01 x1 (no doc_type declaration, so page_type.py skipped the page). No heuristic findings read by hand."
+ },
+ "docs/reference/dependencies.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1
+  },
+  "note": "DOC-TYPE-01 x1"
+ },
+ "docs/reference/env-composition.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 110,
+   "DOC-PLAIN-02": 69,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x69"
+ },
+ "docs/reference/environment.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 337,
+   "DOC-PLAIN-11": 5,
+   "DOC-PLAIN-02": 179,
+   "DOC-PLAIN-03": 8
+  },
+  "note": "DOC-PLAIN-02 x179, DOC-TYPE-01 x1 (no doc_type declaration)"
+ },
+ "docs/reference/execution-records.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 101,
+   "DOC-PLAIN-11": 2,
+   "DOC-PLAIN-02": 89,
+   "DOC-PLAIN-03": 3
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x89"
+ },
+ "docs/reference/machine-interface.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-PLAIN-01": 1
+  },
+  "note": "none"
+ },
+ "docs/reference/metadata.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 175,
+   "DOC-PLAIN-11": 6,
+   "DOC-PLAIN-02": 83,
+   "DOC-PLAIN-03": 1,
+   "DOC-PLAIN-13": 1
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x83, DOC-PLAIN-13x1"
+ },
+ "docs/reference/platforms.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 31,
+   "DOC-PLAIN-02": 16
+  },
+  "note": "DOC-TYPE-01 x1, DOC-PLAIN-02 x16"
+ },
+ "docs/reference/script-host-api.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 24,
+   "DOC-PLAIN-02": 6,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "DOC-PLAIN-02x6, DOC-TYPE-01x1"
+ },
+ "docs/roadmap.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1
+  },
+  "note": "DOC-TYPE-01 x1"
+ },
+ "docs/user-guide.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 373,
+   "DOC-PLAIN-11": 24,
+   "DOC-PLAIN-02": 147,
+   "DOC-PLAIN-03": 3
+  },
+  "note": "DOC-PLAIN-02 x147, DOC-TYPE-01 x1 (no doc_type declaration)"
+ },
+ "docs/user-guide/attestations.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 62,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 39
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x39"
+ },
+ "docs/user-guide/patches.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 42,
+   "DOC-PLAIN-11": 3,
+   "DOC-PLAIN-02": 31,
+   "DOC-PLAIN-03": 1
+  },
+  "note": "MUST = DOC-PLAIN-02 x31 and DOC-TYPE-01 x1 (no doc_type declaration). No heuristic findings read by hand."
+ },
+ "docs/user-guide/promoting-packages.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 21,
+   "DOC-PLAIN-02": 13
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x13"
+ },
+ "docs/user-guide/snapshot-tracks.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-PLAIN-11": 6
+  },
+  "note": "none"
+ },
+ "index.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1,
+   "DOC-PLAIN-01": 13,
+   "DOC-PLAIN-11": 1,
+   "DOC-PLAIN-02": 1
+  },
+  "note": "DOC-TYPE-01x1, DOC-PLAIN-02x1"
+ },
+ "team.md": {
+  "consider": 0,
+  "heuristic": 0,
+  "by_id": {
+   "DOC-TYPE-01": 1
+  },
+  "note": "DOC-TYPE-01 x1 (no doc_type declaration)"
+ }
+}

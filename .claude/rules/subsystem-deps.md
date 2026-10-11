@@ -120,7 +120,7 @@ Each submodule is also in the root `[workspace] exclude` (so cargo can run each 
 
 The starlark family (`starlark`, `starlark_syntax`, `starlark_map`, `starlark_derive`, `allocative`) is sourced from crates.io — no fork. The embedded evaluator (`ocx package test --script`) uses stock starlark; the former `ocx-sh/starlark-rust` fork existed only for an LSP server (`ocx lsp`) that has since been removed.
 
-**Path-patch lint gotcha.** Cargo applies `--cap-lints allow` only to registry/git deps, **not path deps**. A blanket `RUSTFLAGS=-D warnings` (e.g. `actions-rust-lang/setup-rust-toolchain`'s default) therefore promotes a vendored fork's upstream warnings to hard errors. OCX scopes warning-denial to `[workspace.lints.rust] warnings = "deny"` (members only) and sets `rustflags: ""` on the `setup-rust-toolchain` steps that compile the path-vendored forks (`verify-basic`, `build-windows-shims` gate, `deploy-website`). Adding another path-patched fork with warnings = same fix.
+**Path-patch lint gotcha.** Cargo applies `--cap-lints allow` only to registry/git deps, **not path deps**. A blanket `RUSTFLAGS=-D warnings` (e.g. `actions-rust-lang/setup-rust-toolchain`'s default) therefore promotes a vendored fork's upstream warnings to hard errors. OCX scopes warning-denial to `[workspace.lints.rust] warnings = "deny"` (members only) and sets `rustflags: ""` on the `setup-rust-toolchain` steps that compile the path-vendored forks (`verify-basic`, `build-windows-shims` gate, `deploy-docs`). Adding another path-patched fork with warnings = same fix.
 
 ## Detecting Unused Dependencies
 

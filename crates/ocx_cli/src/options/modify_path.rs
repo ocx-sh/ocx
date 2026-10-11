@@ -14,7 +14,7 @@ pub struct ModifyPath {
     /// setup that `ocx self update` performs. Remove that key to resume
     /// writing both.
     ///
-    /// https://ocx.sh/docs/reference/command-line#self-setup
+    /// https://ocx.sh/docs/reference/command-line/self/#self-setup
     #[clap(long = "no-modify-path")]
     no_modify_path: bool,
 }

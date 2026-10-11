@@ -249,6 +249,11 @@ crate = "ocx_schema"
 cases = 3
 
 [[target]]
+label = "//crates/ocx_schema:docs_generator"
+crate = "ocx_schema"
+cases = 18
+
+[[target]]
 label = "//crates/ocx_schema:golden_schemas"
 crate = "ocx_schema"
 cases = 10

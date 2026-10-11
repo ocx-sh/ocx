@@ -13,14 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert a CycloneDX JSON SBOM to a Markdown page and JSON data file for the website."""
+"""Convert a CycloneDX JSON SBOM to a Markdown page for the website."""
 
 import argparse
 import json
 import re
 import sys
-from collections import Counter
-from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -29,7 +27,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, help="CycloneDX JSON file")
     parser.add_argument("--output", required=True, type=Path, help="Output Markdown file")
-    parser.add_argument("--json-output", type=Path, help="Output JSON data file for the Vue component")
     return parser.parse_args()
 
 
@@ -95,52 +92,30 @@ def build_component(comp: dict) -> dict:
     }
 
 
-def build_summary(components: list[dict]) -> dict:
-    license_counts: Counter = Counter()
-    scope_counts: Counter = Counter()
+def generate_markdown(components: list[dict]) -> str:
+    """One table row per license, the components listed in the last cell.
+
+    A row per component would exceed the per-page DOM budget (`website/scripts/check_budget.py`).
+    """
+    by_license: dict[str, list[str]] = {}
     for c in components:
-        if c["license"]:
-            license_counts[c["license"]] += 1
-        scope_counts[c["scope"] or "unknown"] += 1
-
-    return {
-        "total": len(components),
-        "required": scope_counts.get("required", 0),
-        "excluded": scope_counts.get("excluded", 0),
-        "uniqueLicenses": len(license_counts),
-        "licenses": dict(license_counts.most_common()),
-    }
-
-
-def extract_target(bom: dict) -> str:
-    """Extract the Rust target triple from SBOM metadata properties."""
-    for prop in bom.get("metadata", {}).get("properties", []):
-        if prop.get("name") == "cdx:rustc:sbom:target:triple":
-            return prop.get("value", "")
-    return ""
-
-
-def extract_binary_info(bom: dict) -> dict:
-    """Extract binary name, version, and license from the top-level metadata component."""
-    meta_comp = bom.get("metadata", {}).get("component", {})
-    return {
-        "name": meta_comp.get("name", "unknown"),
-        "version": meta_comp.get("version", ""),
-        "license": extract_license(meta_comp),
-    }
-
-
-def generate_markdown() -> str:
-    return """---
+        by_license.setdefault(c["license"] or "unknown", []).append(f"{c['name']} {c['version']}".strip())
+    rows = "\n".join(
+        f"| {lic.replace('|', '\\|')} | {len(names)} | {', '.join(sorted(names))} |"
+        for lic, names in sorted(by_license.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    )
+    return f"""---
 title: Dependencies
 ---
+<!-- doc_type: reference -->
 
-# Dependencies {#dependencies}
+Third-party dependencies compiled into the `ocx` binary, generated from the [CycloneDX][cyclonedx] SBOM at build time.
 
-Third-party dependencies compiled into the `ocx` binary,
-generated from the [CycloneDX][cyclonedx] SBOM at build time.
+## Components by license {{#components-by-license}}
 
-<DependencyExplorer />
+| License | Count | Components |
+|---|---|---|
+{rows}
 
 [cyclonedx]: https://cyclonedx.org/
 """
@@ -157,35 +132,10 @@ def main() -> None:
     raw_components = sorted(bom.get("components", []), key=lambda c: c.get("name", ""))
     components = [build_component(c) for c in raw_components]
 
-    now = datetime.now(UTC).strftime("%Y-%m-%d")
-
     # Generate markdown page
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(generate_markdown())
+    args.output.write_text(generate_markdown(components))
     print(f"Generated {args.output}")
-
-    # Generate JSON data if requested
-    if args.json_output:
-        binary = extract_binary_info(bom)
-        target = extract_target(bom)
-        summary = build_summary(components)
-
-        data = {
-            "generated": now,
-            "binaries": {
-                binary["name"]: {
-                    "version": binary["version"],
-                    "license": binary["license"],
-                    "target": target,
-                    "summary": summary,
-                    "components": components,
-                }
-            },
-        }
-
-        args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"Generated {args.json_output} ({len(components)} components)")
 
 
 if __name__ == "__main__":

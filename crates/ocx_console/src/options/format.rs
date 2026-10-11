@@ -10,7 +10,8 @@ pub struct Format {
     /// Output format for stdout reports: `plain` (default) or `json`.
     ///
     /// Applies to every command; there is no per-command `--format`. The
-    /// `--shell[=NAME]` output of `env` / `package env` is unaffected.
+    /// `--shell[=NAME]` output of `env` / `package env` is unaffected. Each report's fields are
+    /// in the reports schema, <https://ocx.sh/schemas/reports/v1.json>.
     #[clap(long, value_enum, value_name = "FORMAT", overrides_with = "json")]
     format: Option<FormatMode>,
 

@@ -1,0 +1,293 @@
+---
+title: "Configuration"
+description: "How OCX assembles its configuration from layered optional files, and why each tier exists."
+---
+{/* doc_type: explanation */}
+
+import Tabs from '@ocx-sh/theme/components/Tabs.astro'
+import TabItem from '@ocx-sh/theme/components/TabItem.astro'
+
+This page explains how OCX assembles its configuration chain and why each tier exists. The strict surface (every key, every path, every error string) lives at the [Configuration reference][config-ref].
+
+Most package managers couple configuration to the system they are installed on. Homebrew bakes its prefix into the binary, apt scatters config under `/etc/apt`, and pip relies on per-Python-version site files. Each works for its own scope. Each breaks when the *same* install must behave differently on a laptop, a CI runner or an air-gapped image.
+
+OCX takes the opposite approach. Configuration is a layered chain of optional TOML files. The binary ships sensible defaults, and every layer above is opt-in. Explicit paths win over ambient ones. Environment variables and CLI flags win over any file, except the five toolchain and lazy variables named under [Discovery and merge precedence](#precedence).
+
+## Why Configuration Files Exist \{#why\}
+
+OCX works without any config file, using compiled-in defaults. Most users never write one. The file format earns its keep in three cases:
+
+- A team needs every machine to default to a private registry (`registry.company.com`) without exporting an env var in every shell.
+- A CI image needs to describe itself. The registry default sits in a checked-in `config.toml` that humans can read and review.
+- A portable OCX install (a zipped `$OCX_HOME` carried between machines) needs settings that travel with the data, not with the host OS.
+
+Each case is a different *scope*, and each is served by a different tier in the discovery chain.
+
+## The Three Discovery Tiers \{#tiers\}
+
+OCX looks for config files in three tiers. None has to exist, and OCX silently skips missing files. The tiers match the **scope of effect** to the **scope of the file location**. A system-tier setting affects every user on the machine, and a user-tier setting affects only that user. A setting in `$OCX_HOME` travels with the OCX install.
+
+### System tier \{#tier-system\}
+
+`/etc/ocx/config.toml` holds machine-wide defaults set by sysadmins, Dockerfiles or provisioning tools. It is the only tier the OS treats as privileged, and production environments lock it down with file permissions. The most common use is baking a private default registry into a base image:
+
+```dockerfile
+RUN mkdir -p /etc/ocx
+COPY config.toml /etc/ocx/config.toml
+```
+
+Missing files are skipped at every tier, but an unreadable *system* file is not. Operator policy lives in `/etc/ocx/config.toml`, including the locked sections no lower tier can override. A system file that exists but cannot be consulted aborts the invocation with exit 78. Typical causes are a symlink, a permission error or a stale mount.
+
+Dropping that file would drop every locked section with it, on every invocation, behind a warning. The user and `$OCX_HOME` tiers stay best-effort. An unreadable candidate there is skipped with a warning, and discovery continues.
+
+### User tier \{#tier-user\}
+
+The user tier follows the OS convention for per-user app configuration. On Linux, OCX honors the [XDG Base Directory specification][xdg-basedir]. It reads `$XDG_CONFIG_HOME/ocx/config.toml` and falls back to `~/.config/ocx/config.toml`. On macOS, [Apple's directory conventions][apple-dirs] put config at `~/Library/Application Support/ocx/config.toml`. macOS ignores `XDG_CONFIG_HOME` even when set, like every other native macOS tool.
+
+The user tier sits apart from the OCX *data* directory (`~/.ocx/`) by design. Settings live with the user, and data lives where the user pointed `$OCX_HOME`. The two scale independently. A user can delete the data directory without losing config preferences, and the reverse holds too.
+
+### OCX home tier \{#tier-ocx-home\}
+
+`$OCX_HOME/config.toml` (default `~/.ocx/config.toml`) sits beside the OCX data directory. It is the *only* tier that moves with the data when you relocate `$OCX_HOME`. Use it for settings that must survive a zip-and-move of a whole OCX install. Examples are a portable bundle or an air-gapped install.
+
+The system and user tiers live under OS-specific locations that do not travel with the data. A portable install that wrote to the user tier on machine A would silently lose those settings once you copied `$OCX_HOME` to machine B.
+
+## Explicit Additions \{#explicit\}
+
+Two mechanisms add an extra file *on top of* the discovery chain. They do not replace it. This supports the common "refine ambient config with a targeted override" case:
+
+- **`--config FILE`** is a CLI flag, passed before the subcommand. It suits one-off overrides.
+- **`OCX_CONFIG=/path/to/file.toml`** is an environment variable. It suits CI and Docker, where env vars are more practical than flags.
+
+The specified file layers at the top of the file-tier chain. A missing file is an error, because explicit paths represent deliberate intent, not ambient discovery. Both can coexist, and `--config` layers on top of `OCX_CONFIG`.
+
+To disable an ambient `OCX_CONFIG` for one invocation, set it to the empty string. This helps when a shell profile exports it:
+
+```sh
+OCX_CONFIG= ocx package install kitware/cmake:3.28
+```
+
+An empty `OCX_CONFIG` is treated as unset, not as an error.
+
+## The Managed-Configuration Tier \{#managed\}
+
+The three discovery tiers are files a human or a provisioning script writes once, when a machine is set up. That stops working when a setting must change *after* the fleet is provisioned. Examples are rotating the corporate mirror, redirecting the patch registry to a new host or retiring an old default registry. Re-running a Dockerfile or a playbook against every running CI runner and laptop is the fleet-wide chore OCX aims to spare you.
+
+The `[managed]` tier turns the corporate config into an ordinary OCX package whose content is one `config.toml`. It uses the same distribution channel as [`[mirrors]`][config-mirrors] and [`[patches]`][config-patches], and you publish it with [`ocx config push`][cmd-config-push].
+
+A small pointer (`source`, `required`, `refresh`, `interval`) lives in `$OCX_HOME/config.toml`. Adopt it with [`ocx config setup`][cmd-config-setup], or with `ocx self setup --managed-config`, which runs the same adoption during a full install. The pointer resolves to the payload in the operator's registry. OCX syncs the payload into local state and merges it above the user config on every invocation.
+
+Push a new version once, and every host that adopted the pointer converges on its own schedule. No re-provisioning is needed. Versioned tags, cascades and rollbacks come along because the config travels the package machinery.
+
+:::note[Pull-based convergence]
+This is a small version of the pull-based configuration model [Puppet][puppet] and [Chef][chef] popularized for server fleets. An agent periodically checks a central manifest and converges local state to it, instead of an operator pushing changes to every host. OCX keeps it small: one OCI package, one config file, no daemon, no console. The shape (pull, converge, never block ordinary use) is the same.
+
+Fleet visibility is the pull-based complement. `ocx --format json config update --check` on any host reports source, digest, tracked tag, drift and pause state for your existing inventory tooling.
+:::
+
+The sibling page [Managed configuration in depth][managed-page] covers the tier's place in the chain and why refresh never blocks. It also covers forward compatibility, offline behavior, the seed fields, system locks and publishing.
+
+:::tip[Learn more]
+[Managed-configuration walkthrough][user-guide-managed-config]: corporate onboarding, CI recipe, publisher recipe, staged rollout.
+[`[managed]` reference][config-managed]: every field, type, default and error condition.
+[`ocx config test` reference][cmd-config-test]: local validation and merge preview before publishing.
+[`ocx config update` reference][cmd-config-update]: exit codes, JSON shape and `--check`.
+:::
+
+## Discovery and Merge Precedence \{#precedence\}
+
+OCX resolves settings from lowest to highest precedence, and higher sources override lower ones. This is the same shape as [Cargo's config][cargo-config] and [uv's config][uv-config]. Start with conservative defaults, then layer the user's intent on top.
+
+The full stack runs from compiled defaults at the bottom to CLI flags at the top:
+
+| Priority | Source | Notes |
+|----------|--------|-------|
+| 1 (lowest) | Compiled defaults | Built into the binary: the `ocx.sh` index entry under `[registries."ocx.sh"]` |
+| 2 | System config, `/etc/ocx/config.toml` | Discovered tier |
+| 3 | User config | Discovered tier |
+| 4 | OCX home config, `$OCX_HOME/config.toml` | Discovered tier |
+| 5 | [`[managed]`](#managed) snapshot | Local and identity-gated, see [Where it sits in the chain][managed-position] |
+| 6 | `OCX_CONFIG` | Layered on top of the discovered chain and the managed snapshot |
+| 7 | `--config FILE` | Layered on top of `OCX_CONFIG` |
+| 8 | Environment variables (`OCX_*`) | Win over any config file, except the five ladder variables below |
+| 9 (highest) | CLI flags | Per-invocation, always win |
+
+Five variables invert row 8 and are the only ones that do. They are [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate], [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned], [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain-dir], [`OCX_LAZY_MODE`][env-ocx-lazy-mode] and [`OCX_LAZY_REPORT`][env-ocx-lazy-report]. Each is the **weakest** tier of its own resolution ladder. A file that states the key wins over an exported value, and the variable decides only where no file speaks. The reasoning is in [Toolchain activation](toolchain-activation.md#ladders).
+
+Three principles drove the order:
+
+- **Explicit beats ambient.** A `--config` flag the user just typed beats a `~/.config/ocx/config.toml` they wrote months ago.
+- **Per-invocation beats persistent.** Env vars and CLI flags are per-invocation, so they always win over any file.
+- **Inner tiers beat outer tiers.** A setting in `$OCX_HOME/config.toml` (which travels with the data) wins over one in `/etc/ocx/config.toml` (which is machine-global).
+
+### Environment overrides \{#env-overrides\}
+
+Most settings also have an `OCX_*` spelling. An environment you control, such as CI or a container image, can then set them without touching the command line. Boolean variables read case-insensitively. The values `1`, `y`, `yes`, `on` and `true` enable the option, and `0`, `n`, `no`, `off` and `false` disable it. The `--offline` flag, for example, is the same as `OCX_OFFLINE=1`.
+
+A value outside both lists depends on the variable. For [`OCX_OFFLINE`][env-offline], [`OCX_FROZEN`][env-ocx-frozen], [`OCX_NO_CONSENT`][env-ocx-no-consent] and [`OCX_NO_VERIFY`][env-ocx-no-verify], a bad value would silently change what OCX does, so it is refused. The variables ban the network (`OCX_OFFLINE`), refuse unpinned tags missing from the local index (`OCX_FROZEN`), suppress consent-stamp writes (`OCX_NO_CONSENT`) and skip auto-verify (`OCX_NO_VERIFY`). The invocation exits 78 and names the variable. Every other boolean variable logs a warning and uses its default.
+
+### Merge rules \{#merge-rules\}
+
+- **Scalars** (strings): the nearest (highest-precedence) value wins.
+- **Tables** (for example `[registries.<name>]`): merged key by key across tiers, and inner keys use nearest-wins.
+- **Layering**: OCX loads every file in the chain in precedence order and merges them. Explicit paths (`OCX_CONFIG`, `--config`) layer on top of the discovered tiers and do not replace them.
+
+Tables merge the same way inside `[mirrors]` (field-wise per host and role) and `[registries.<name>]` (field-wise per entry). The sections that deviate from nearest-wins are listed under [system locks][managed-locks] and in the [trust policy tier rule](./signing.mdx#identity-matching-tiers).
+
+A `[registries.company]` entry in `/etc/ocx/config.toml` and a `[registries.private]` entry in `~/.config/ocx/config.toml` both end up in the resolved config. The user file does not erase the system entry. Each layer contributes, and precedence resolves only conflicting *values* on the same key.
+
+**Unknown keys and sections are ignored.** OCX skips an unknown top-level section and an unknown key inside any known section. The file still loads and every setting this ocx understands takes effect. The rationale is the [managed tier][managed-forward-compat], where every ocx version in a fleet reads the same `config.toml`. A file written for a recent ocx must therefore degrade to "the parts I understand" on an earlier binary.
+
+The cost is that a typo silently does nothing. For example, `[registries."ocx.sh"] indx = "..."` sets no index. Two things blunt that cost:
+
+- A typo never becomes the field it resembles and never widens anything. An unknown key cannot populate `trusted_hosts` or any other setting.
+- The [config schema][config-schema] lists every key OCX knows, so an editor pointed at it flags a typo as you write.
+
+Two places stay strict. An unknown key in `[shell.consent]` drops that table with a warning and fails closed, because an unknown key could only narrow a grant. The rest of the file still applies. A `scope` table in a trust policy rejects them too.
+
+## The Kill Switch \{#kill-switch\}
+
+`OCX_NO_CONFIG=1` skips the **discovered chain** (the system, user and `$OCX_HOME` tiers). It also skips the [managed-configuration snapshot](#managed) candidate, including the `OCX_MANAGED_CONFIG` env-override read. Hermetic means hermetic. Explicit paths (`--config` and `OCX_CONFIG`) still load, because they represent deliberate intent rather than ambient environment.
+
+The compiled defaults (tier 1) still load, because they are part of the binary and not ambient host state. A section locked at the system scope also survives the flag. The system file still loads, filtered to its locked sections. A hermetic CI job cannot use the flag to drop operator policy, such as a corporate CA or an execution-record sink (see [system locks][managed-locks]).
+
+This separation gives all four common modes from two orthogonal primitives:
+
+| Goal | Invocation |
+|------|-----------|
+| Default: use ambient config | _(no flags)_ |
+| Layer an override on ambient config | `--config extra.toml` |
+| Hermetic with a specific file | `OCX_NO_CONFIG=1 --config ci.toml` |
+| Hermetic, no files at all | `OCX_NO_CONFIG=1` |
+
+:::tip[CI reproducibility]
+Set `OCX_NO_CONFIG=1` in CI where you must guarantee that no ambient config file on the runner silently changes behavior. Pair it with `--config` or `OCX_CONFIG` if you still need a checked-in CI config.
+:::
+
+`OCX_NO_PROJECT=1` is the same switch for the project tier. It prunes the working-directory walk for `ocx.toml` and ignores `OCX_PROJECT`. An explicit `--project` path still loads, because it is deliberate intent:
+
+```sh
+OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
+```
+
+Like `OCX_NO_CONFIG`, it exists only as an environment variable. A `--no-project` flag would add surface without solving a new problem, since CI already injects policy through the environment.
+
+OCX forwards `OCX_NO_PROJECT` to every subprocess it spawns. Generated launchers and nested `ocx exec` calls therefore skip project discovery too, instead of adopting a project the parent deliberately had none of. The one exception is the example above. When the invocation also carries an explicit `--project`, OCX forwards the path and not the variable. A child reads the prune before it reads `OCX_PROJECT` and would discard the path.
+
+## Worked Examples \{#examples\}
+
+### Private default registry \{#examples-private-registry\}
+
+Teams hosting packages on an internal registry can set it as the default, so bare identifiers resolve there:
+
+```toml
+# ~/.ocx/config.toml
+[registry]
+default = "registry.company.com"
+```
+
+Any package without an explicit registry prefix resolves to `registry.company.com`. Examples are `kitware/cmake:3.28` and `acme/myapp:1.0`. Put the setting in the user tier (`~/.config/ocx/config.toml`) or the OCX home tier (`~/.ocx/config.toml`). The choice depends on whether it should travel with the data when `$OCX_HOME` is relocated.
+
+### Docker image with system-wide config \{#examples-docker\}
+
+Provision the default registry in a Dockerfile, so all users on the image share it:
+
+```dockerfile
+RUN mkdir -p /etc/ocx
+COPY config.toml /etc/ocx/config.toml
+```
+
+```toml
+# config.toml (mounted to /etc/ocx/config.toml)
+[registry]
+default = "registry.company.com"
+```
+
+The system tier is the natural home here. Every user inside the container shares the default, and the file lives at a path the build pipeline already controls.
+
+### CI with explicit config file \{#examples-ci\}
+
+In CI, pair `OCX_CONFIG` with `OCX_NO_CONFIG=1` for a hermetic run. The ambient discovery chain is suppressed, and only the checked-in CI config loads:
+
+<Tabs syncKey="shell">
+
+<TabItem label={"GitHub Actions"}>
+
+```yaml
+env:
+  OCX_NO_CONFIG: "1"
+  OCX_CONFIG: ${{ github.workspace }}/.ocx-ci.toml
+```
+
+
+</TabItem>
+
+<TabItem label={".ocx-ci.toml"}>
+
+```toml
+[registry]
+default = "ghcr.io"
+```
+
+</TabItem>
+
+</Tabs>
+
+
+Alternatively, skip the file and rely on env vars:
+
+```yaml
+env:
+  OCX_NO_CONFIG: "1"
+  OCX_DEFAULT_REGISTRY: "ghcr.io"
+```
+
+Either form is hermetic. Choose the file form when humans on the team need to read what the CI run does without leaving the repository. Choose the env-var form when the CI configuration already lives in the workflow file.
+
+:::caution[Always set the registry explicitly in automation]
+For scripts, CI pipelines and programmatic tools, include the registry in every package identifier (for example `ghcr.io/cmake:3.28`) rather than relying on the config default. Explicit identifiers are immune to ambient config and survive across machines and environments.
+:::
+
+## See Also
+
+- [Managed configuration in depth][managed-page]: the managed tier's position, refresh, locks and publishing
+- [Configuration reference][config-ref]: every key, type, default, error string
+- [Environment variable reference][env-ref]: the `OCX_*` variables that override config keys
+- [Command-line `--config` flag][arg-config]: invocation-level explicit config
+- [Managed-configuration walkthrough][user-guide-managed-config]: corporate onboarding, CI recipe, publisher recipe
+- [`ocx config update` reference][cmd-config-update]: exit codes, JSON shape, `--check`
+
+
+[xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/latest/
+[apple-dirs]: https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/MacOSXDirectories/MacOSXDirectories.html
+[cargo-config]: https://doc.rust-lang.org/cargo/reference/config.html
+[uv-config]: https://docs.astral.sh/uv/configuration/files/
+[puppet]: https://www.puppet.com/
+[chef]: https://www.chef.io/
+
+
+[managed-page]: managed-configuration.md
+[managed-position]: managed-configuration.md#managed-position
+[managed-locks]: managed-configuration.md#managed-locks
+[managed-forward-compat]: managed-configuration.md#managed-forward-compat
+[config-ref]: ../reference/configuration.md
+[config-mirrors]: ../reference/configuration.md#keys-mirrors
+[config-patches]: ../reference/configuration.md#keys-patches
+[config-managed]: ../reference/configuration.md#keys-managed
+[config-schema]: https://ocx.sh/schemas/config/v1.json
+[env-ref]: ../reference/environment.md
+[env-ocx-toolchain-activate]: ../reference/environment.md#ocx-toolchain-activate
+[env-ocx-toolchain-pinned]: ../reference/environment.md#ocx-toolchain-pinned
+[env-ocx-toolchain-dir]: ../reference/environment.md#ocx-toolchain_dir
+[env-ocx-lazy-mode]: ../reference/environment.md#ocx-lazy-mode
+[env-ocx-lazy-report]: ../reference/environment.md#ocx-lazy-report
+[env-offline]: ../reference/environment.md#ocx-offline
+[env-ocx-frozen]: ../reference/environment.md#ocx-frozen
+[env-ocx-no-consent]: ../reference/environment.md#ocx-no-consent
+[env-ocx-no-verify]: ../reference/environment.md#ocx-no-verify
+[arg-config]: ../reference/command-line/index.md#arg-config
+[cmd-config-setup]: ../reference/command-line/config.md#config-setup
+[cmd-config-test]: ../reference/command-line/config.md#config-test
+[cmd-config-update]: ../reference/command-line/config.md#config-update
+[cmd-config-push]: ../reference/command-line/config.md#config-push
+[user-guide-managed-config]: ../guides/manage-config-centrally.mdx#managed-config

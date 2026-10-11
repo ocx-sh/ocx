@@ -1,0 +1,108 @@
+---
+title: "Pin your first project's tools"
+description: "Declare the tools a repository needs, lock them to exact digests and run a command with exactly those tools."
+---
+{/* doc_type: tutorial */}
+{/* doc_tier: first-steps */}
+
+By the end of this page a repository pins CMake in `ocx.toml`, locks it in `ocx.lock` and runs it with `ocx exec`. Every teammate and CI runner then gets the same binary. It assumes ocx is [installed][installation], including the shell hook that `ocx self setup` wires.
+
+## Pin the tools \{#project-toolchain\}
+
+Create a project directory and write an empty `ocx.toml` into it:
+
+\<\<\< @/_scripts/first-project/init.sh\{sh\}
+
+```text
+created /home/you/my-project/ocx.toml
+```
+
+Add CMake. The command resolves the tag to a digest for each platform, writes `ocx.lock` and downloads the package:
+
+\<\<\< @/_scripts/first-project/add.sh\{sh\}
+
+```text
+Binding  Group    Digest
+cmake    default  sha256:...
+```
+
+Look at the file `ocx add` changed:
+
+```sh
+cat ocx.toml
+```
+
+```toml
+#:schema https://ocx.sh/schemas/project/v1.json
+
+[tools]
+cmake = "ocx.sh/kitware/cmake:3.31"
+```
+
+The left side is the binding name. The right side is the full package identifier, including the registry.
+
+## Run a command with the pinned tools \{#run\}
+
+`ocx exec` reads `ocx.lock` and runs the command with the locked tools on `PATH`. The `--` before the command is required:
+
+\<\<\< @/_scripts/first-project/exec.sh\{sh\}
+
+```text
+cmake version 3.31.12
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+```
+
+The tool came from the lock, not from your machine. A change to the tag in `ocx.toml` makes the lock stale, and `ocx exec` then fails with exit code 65 until you run `ocx lock`.
+
+## Share the pin \{#share\}
+
+Commit both files. The rendered tools live in `.ocx/toolchain/`, which carries its own `.gitignore`, so `git status` stays clean:
+
+```sh
+git add ocx.toml ocx.lock
+```
+
+A teammate who clones the repository downloads the locked packages with one command, then runs the tool:
+
+\<\<\< @/_scripts/first-project/pull.sh\{sh\}
+
+They get the same build you did.
+
+## Get the tools in your shell \{#shell\}
+
+`ocx add` also recorded this project's consent stamp. Leave the directory and enter it again:
+
+```sh
+cd .. && cd my-project
+cmake --version
+```
+
+```text
+cmake version 3.31.12
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+```
+
+At the next prompt the locked tools are on `PATH`. When you leave the directory they disappear again.
+
+## Next steps \{#next-steps\}
+
+- [Set up a project toolchain][project-guide] covers groups, updates and lifecycle commands.
+- [Run project tools][run-guide] explains `ocx exec` with named bindings and groups.
+- [Shell integration][shell-integration] lists which shells need extra setup, such as nushell and the strict-POSIX family, and how [direnv][direnv] fills the gap.
+- [GitHub Actions][github-actions] installs the same pinned toolchain in CI.
+- The [OCX VS Code extension][vscode-ext], also on [Open VSX][openvsx-ext], brings the project toolchain into your editor. Its terminal and tasks then resolve the same locked binaries.
+- Flags and exit codes are in the [`ocx exec` reference][cmd-exec] and the [project file reference][project-file].
+
+
+[installation]: ./install-ocx.mdx
+[project-guide]: ../guides/project-toolchain.mdx
+[run-guide]: ../guides/run-project-tools.mdx
+[shell-integration]: ../explanation/shell-integration.mdx
+[github-actions]: ../integration/github-actions.md
+[cmd-exec]: ../reference/command-line/commands.md#exec
+[project-file]: ../reference/project-file.md
+[direnv]: https://direnv.net/
+[vscode-ext]: https://marketplace.visualstudio.com/items?itemName=ocx-sh.ocx
+[openvsx-ext]: https://open-vsx.org/extension/ocx-sh/ocx

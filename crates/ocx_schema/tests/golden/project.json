@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "tools": {
-      "description": "Tools in the reserved `default` group (the top-level `[tools]` table in\n`ocx.toml`). Values are fully-qualified package references.",
+      "description": "Tools in the reserved `default` group (the top-level `[tools]` table in\n`ocx.toml`). Values are fully-qualified package references.\n\nA binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/PackageRef"
@@ -13,11 +13,11 @@
       "default": {}
     },
     "env": {
-      "description": "Environment variables for the default group; `[env]` in TOML.\n\nStands to `[group.<name>.env]` as `[tools]` does to\n`[group.<name>.tools]`. It does not change which packages resolve, so an\nedit never forces a re-lock.",
+      "description": "Environment variables for the default group; `[env]` in TOML.\n\nA key is a POSIX name and must not start with `OCX_` or `__OCX_`; either is a parse error (exit 78).\n\nStands to `[group.<name>.env]` as `[tools]` does to\n`[group.<name>.tools]`. It does not change which packages resolve, so an\nedit never forces a re-lock.",
       "$ref": "#/$defs/ProjectEnv"
     },
     "group": {
-      "description": "Named additive groups; `[group.<name>]` in TOML. `default` is reserved:\na literal `[group.default]` declaration is a parse error.",
+      "description": "Named additive groups; `[group.<name>]` in TOML. A name matches\n`^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes. `default` and `all` are reserved,\nignoring case: declaring `[group.default]` or `[group.all]` is a parse error.\n\nUnder `[group.<name>]` only `tools`, `env` and `lazy-mode` are accepted. Anything else,\nincluding a binding written directly there, is a parse error (exit 78).",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/Group"
@@ -33,7 +33,7 @@
       "default": {}
     },
     "lazy-mode": {
-      "description": "Toolchain-tier `lazy-mode`, the least specific config tier: outranked by\n`[group.<g>]`, `[package.\"<id>\"]` and the CLI flag. Absent falls through\nto `OCX_LAZY_MODE`; it does not mean `never`. An edit never invalidates\n`ocx.lock`.",
+      "description": "Toolchain-tier `lazy-mode`, the least specific config tier: outranked by `[group.<g>]`,\n`[package.\"<id>\"]` and the CLI flag. Absent falls through to `OCX_LAZY_MODE`; it does not\nmean `never`.\n\nAn edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/LazyMode"
@@ -44,7 +44,7 @@
       ]
     },
     "lazy-report": {
-      "description": "Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`,\nthen to `silent`. An edit never invalidates `ocx.lock`.",
+      "description": "Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.\n\nAn edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/LazyReport"
@@ -55,7 +55,7 @@
       ]
     },
     "activate": {
-      "description": "Toolchain-tier `activate` mode: how a project's rendered toolchain\nreaches a shell — per-prompt environment composition (`env`, the\ndefault), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or\nneither (`none`). Absent falls through to `OCX_TOOLCHAIN_ACTIVATE`, then\nto `env`. An unrecognized value is a parse error (exit 78). An edit\nnever invalidates `ocx.lock`.",
+      "description": "Toolchain-tier `activate` mode: how a project's rendered toolchain reaches a shell —\nper-prompt environment composition (`env`, the default), a `PATH` entry for\n`<home>/toolchain/active/bin` (`bin`), or neither (`none`). Absent falls through to\n`OCX_TOOLCHAIN_ACTIVATE`, then to `env`.\n\nAn unrecognized value is a parse error (exit 78). An edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/ActivateMode"
@@ -63,17 +63,19 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "default": "env"
     },
     "pinned": {
-      "description": "Toolchain-tier `pinned`: whether composed paths follow the rendered\n`links/<group>/<entry>` links (`false`, the default) or pin to digest\nroots (`true`). Absent falls through to `OCX_TOOLCHAIN_PINNED`. An edit\nnever invalidates `ocx.lock`.",
+      "description": "Toolchain-tier `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`\nlinks (`false`, the default) or pin to digest roots (`true`). Absent falls through to\n`OCX_TOOLCHAIN_PINNED`.\n\nAn edit never invalidates `ocx.lock`.",
       "type": [
         "boolean",
         "null"
-      ]
+      ],
+      "default": false
     },
     "trust": {
-      "description": "Identity-pinned verification policies; `[[trust.policy]]` in TOML.\n\nConsumed by `ocx package verify`, where it pools (array-append) with the\n`config.toml` tiers. Resolve-time policy, not a tool binding: a policy\nedit never invalidates `ocx.lock`.",
+      "description": "Identity-pinned verification policies; `[[trust.policy]]` in TOML.\n\nConsumed by `ocx package verify`. A project policy applies only to targets that no\n`config.toml` policy matches; it never pools with them. Resolve-time policy, not a tool\nbinding: a policy edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/TrustConfig"
@@ -107,11 +109,11 @@
                 "$ref": "#/$defs/ModifierKind"
               },
               "separator": {
-                "description": "For `list` only: the string this contribution is joined to the variable's existing value with. Omit it to inherit whatever separator another contributor to the same key declared, or a single space if none did.",
+                "description": "For `list` only: the string this contribution is joined to the variable's existing value with. Omit it to inherit whatever separator another contributor to the same key declared, or a single space if none did. It must be non-empty and free of `=`, newline and carriage return. A separator on a non-list entry, an unusable one, or a list value that starts or ends with it is a parse error (exit 78).",
                 "type": "string"
               },
               "value": {
-                "description": "The literal value. For `path`, a relative value resolves against the project root; an absolute one passes through.",
+                "description": "The literal value. For `path`, a relative value resolves against the project root; an absolute one passes through. A `path` value containing the platform path separator is a data error (exit 65): declare one directory per entry.",
                 "type": "string"
               }
             },
@@ -145,22 +147,22 @@
       ]
     },
     "Group": {
-      "description": "A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.\n\nExactly two optional sub-tables, nothing else: a tool binding written\ndirectly under `[group.<name>]` is a parse error. A tool may still be named\n`env` or `tools`; it is just a key inside `tools`.",
+      "description": "A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.\n\nOnly `tools`, `env` and `lazy-mode` are accepted: a tool binding written\ndirectly under `[group.<name>]` is a parse error. A tool may still be named\n`env` or `tools`; it is just a key inside `tools`.",
       "type": "object",
       "properties": {
         "tools": {
-          "description": "Tool bindings for this group. Values are fully-qualified package\nreferences, validated exactly as `[tools]` is.",
+          "description": "Tool bindings for this group. Values are fully-qualified package\nreferences, validated exactly as `[tools]` is.\n\nA binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/PackageRef"
           }
         },
         "env": {
-          "description": "Environment variables applied when this group is selected.",
+          "description": "Environment variables applied when this group is selected.\n\nA key is a POSIX name and must not start with `OCX_` or `__OCX_`; either is a parse error (exit 78).",
           "$ref": "#/$defs/ProjectEnv"
         },
         "lazy-mode": {
-          "description": "Group-tier `lazy-mode` override: outranks the toolchain tier and is\noutranked by `[package.\"<id>\"]` and the CLI flag. Absent inherits from\nthe toolchain tier; it does not mean `never`. An edit never invalidates\n`ocx.lock`.",
+          "description": "Group-tier `lazy-mode` override: outranks the toolchain tier and is outranked by\n`[package.\"<id>\"]` and the CLI flag. Absent inherits from the toolchain tier; it does not\nmean `never`.\n\nAn edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyMode"
@@ -198,7 +200,7 @@
           "default": false
         },
         "lazy-mode": {
-          "description": "Package-tier `lazy-mode` override, the most specific config tier: only\nthe CLI flag outranks it. Absent inherits from the group and toolchain\ntiers; it does not mean `never`. An edit never invalidates `ocx.lock`.",
+          "description": "Package-tier `lazy-mode` override, the most specific config tier: only the CLI flag outranks\nit. Absent inherits from the group and toolchain tiers; it does not mean `never`.\n\nAn edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyMode"
@@ -209,7 +211,7 @@
           ]
         },
         "lazy-report": {
-          "description": "Package-tier `lazy-report` override. Absent inherits from the toolchain\ntier. An edit never invalidates `ocx.lock`.",
+          "description": "Package-tier `lazy-report` override. Absent inherits from the toolchain tier.\n\nAn edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyReport"
@@ -288,7 +290,7 @@
       "type": "object",
       "properties": {
         "scope": {
-          "description": "Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.\n\nA pattern with no `*` matches the target's canonical `registry/repository` on `/`-separated\npath-segment boundaries: `ghcr.io/acme/tool` matches that exact repo and any sub-path under it\n(`ghcr.io/acme/tool/plugin`), but **not** a sibling that merely shares the prefix text, such as\n`ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string `*` is a literal-prefix\nsubstring glob.\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```\n\nAbsent reads exactly like `\"\"`: a catch-all, as is an empty `include` with no `exclude`.",
+          "description": "Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.\n\nA pattern matches on `/`-separated path-segment boundaries, and an absent scope is a catch-all.\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```",
           "anyOf": [
             {
               "$ref": "#/$defs/ScopeSpec"
@@ -308,7 +310,7 @@
           "default": null
         },
         "signers": {
-          "description": "The signers this policy accepts: an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"`.\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every entry added here widens what verifies**: a new signer is a new way to pass, never a new\ncondition to satisfy. Absent reads as empty, and an empty set is a **configuration error**, not a\ncatch-all. A mis-spelled entry leaves no signer behind and fails closed the same way.",
+          "description": "The signers this policy accepts: an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"`.\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every added entry widens what verifies**, and an empty set is a configuration error, not a\ncatch-all.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/SignerSpec"
@@ -438,7 +440,7 @@
       "type": "object",
       "properties": {
         "key": {
-          "description": "A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.\n\nMutually exclusive with `key_pem`. Unrestricted in a local tier (project, operator or user\nconfig on the author's own disk), where a relative reference resolves against the directory of\nthe config file that declared it. Refused in a managed-config payload: publishing fails with an\nerror naming `key_pem` as the fix, and a payload an older ocx published anyway has this field\ndropped at load time rather than read.",
+          "description": "A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.\n\nMutually exclusive with `key_pem`, and refused in a managed-config payload.",
           "type": [
             "string",
             "null"
@@ -460,7 +462,7 @@
       "type": "object",
       "properties": {
         "trusted_root": {
-          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it — rewritten to absolute at load time, so the same\nvalue means the same file regardless of the process working directory.\nMutually exclusive with `trusted_root_json`.",
+          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it. It is rewritten to absolute at load time, so the same\nvalue names the same file whatever the working directory.\nMutually exclusive with `trusted_root_json`.",
           "type": [
             "string",
             "null"
@@ -492,7 +494,7 @@
           "default": null
         },
         "rekor_upload": {
-          "description": "Fleet-wide default for uploading a **key-mode** signature to the\ntransparency log, when neither `--rekor-upload` nor `--no-rekor-upload`\nis given.\n\nAbsent means off. **Key mode only**: keyless signing always uploads, and ignores this\nfield without a warning. `rekor_url` defaults to the **public** Rekor, where an upload\npublishes the artifact's digest and signer to a world-readable log.",
+          "description": "Fleet-wide default for uploading a key-mode signature to the transparency log, when neither\n`--rekor-upload` nor `--no-rekor-upload` is given.\n\nAbsent means off; keyless signing always uploads and ignores this field.",
           "type": [
             "boolean",
             "null"

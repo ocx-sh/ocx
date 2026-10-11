@@ -2,13 +2,16 @@
 # state: setup:full-catalog
 # doc: user-guide/ci-project
 # title: CI with a project toolchain
-# description: Pre-warm the package store from ocx.lock and run the locked toolchain in CI.
+# description: Check the lock, pre-warm the package store from ocx.lock and run the locked toolchain in CI.
 set -euo pipefail
 
 cd "$SCENARIO_TMP"
-# region cast
+mkdir my-project
+cd my-project
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
-ocx pull
+ocx add --no-pull "$PKG_KITWARE_CMAKE"
+# region cast
+ocx lock --check
+ocx --frozen pull
 ocx exec -- cmake --version
 # endregion cast

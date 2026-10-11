@@ -16,10 +16,10 @@ wire_words! {
     /// What a background check does when it finds drift.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
     pub enum RefreshPolicy {
-        /// Drift is applied without asking, by the background check only, which runs only on an
+        /// A change is applied without asking, by the background check only, which runs only on an
         /// interactive terminal, outside CI, and online.
         Apply = "apply",
-        /// Drift prints a stderr advisory naming the command that applies it; nothing is fetched.
+        /// A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.
         Notify = "notify",
         /// The background check is skipped entirely; only an explicit command refreshes.
         Manual = "manual",

@@ -13,7 +13,7 @@ pub struct Consent {
     /// write as a side effect, and `ocx shell revoke` takes back. Pass this
     /// to stamp anyway where OCX_NO_CONSENT is set.
     ///
-    /// https://ocx.sh/docs/in-depth/shell-integration
+    /// https://ocx.sh/docs/explanation/shell-integration/
     #[clap(long = "consent", overrides_with = "no_consent")]
     consent: bool,
 

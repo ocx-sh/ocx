@@ -27,6 +27,9 @@ pub struct Login {
     username: Option<String>,
 
     /// Read password/token from stdin. Required in non-interactive contexts.
+    ///
+    /// There is no `--password VALUE` flag: a secret in argv leaks through `ps`
+    /// and shell history.
     #[clap(long = "password-stdin")]
     password_stdin: bool,
 

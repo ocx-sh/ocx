@@ -11,26 +11,27 @@ tasks:
     status:
       - cargo set-version --version
 
-  # Guard: the website embeds CHANGELOG.md via a VitePress @include, so the file
-  # is compiled as a Vue template. A raw `<tag>` from a commit subject (e.g.
-  # "ocx-<name>") breaks the build with "Element is missing end tag". cliff.toml
-  # HTML-escapes angle brackets; this fails loudly if that escaping ever regresses.
+  # Guard: the website embeds CHANGELOG.md via an `<!--@include:-->` directive, so
+  # the file is rendered as page Markdown. A raw `<tag>` from a commit subject (e.g.
+  # "ocx-<name>") is emitted as an HTML element and swallows the text after it.
+  # cliff.toml HTML-escapes angle brackets; this fails loudly if that escaping
+  # ever regresses.
   changelog:validate:
     internal: true
     cmds:
       - |
         if grep -nE '<[A-Za-z/]' CHANGELOG.md; then
-          echo "ERROR: CHANGELOG.md contains raw HTML/Vue tags (lines above)." >&2
-          echo "git-cliff escaping regressed; the website (VitePress) build will fail." >&2
+          echo "ERROR: CHANGELOG.md contains raw HTML tags (lines above)." >&2
+          echo "git-cliff escaping regressed; the website build will fail." >&2
           exit 1
         fi
       # Same @include, second failure mode: a repo-root-relative doc link resolves
-      # against src/docs/changelog.md and dies as a dead link. cliff.toml rewrites
+      # against the changelog page and dies as a dead link. cliff.toml rewrites
       # these to absolute ocx.sh URLs; this fails loudly if that rewrite regresses.
       - |
-        if grep -n 'website/src/docs/' CHANGELOG.md; then
+        if grep -nE 'website/src/(content/)?docs/' CHANGELOG.md; then
           echo "ERROR: CHANGELOG.md contains repo-root-relative doc links (lines above)." >&2
-          echo "git-cliff link rewriting regressed; the website (VitePress) build will fail." >&2
+          echo "git-cliff link rewriting regressed; the website build will fail." >&2
           exit 1
         fi
 

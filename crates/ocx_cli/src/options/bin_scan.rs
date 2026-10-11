@@ -12,7 +12,7 @@ pub struct BinScan {
     /// fill (exit 64). An undeclared `binaries` is filled from the scan, as by
     /// default; a declared one is verified against it, failing (exit 65) if a
     /// scanned executable is missing from the list or a declared name exists
-    /// but is not executable. See https://ocx.sh/docs/reference/metadata#executables.
+    /// but is not executable. See https://ocx.sh/docs/reference/metadata/entry-points/#executables.
     #[clap(long = "bin-scan", overrides_with = "no_bin_scan")]
     bin_scan: bool,
 
@@ -21,7 +21,7 @@ pub struct BinScan {
     ///
     /// Use this to skip scan cost, or when content a later `push` layer
     /// adds makes a create-time scan meaningless. See
-    /// https://ocx.sh/docs/reference/metadata#executables for what
+    /// https://ocx.sh/docs/reference/metadata/entry-points/#executables for what
     /// `binaries` means.
     #[clap(long = "no-bin-scan", overrides_with = "bin_scan")]
     no_bin_scan: bool,

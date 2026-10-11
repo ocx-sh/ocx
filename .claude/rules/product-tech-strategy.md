@@ -22,9 +22,9 @@
 
 | Component | Choice |
 |-----------|--------|
-| Runtime | Bun |
-| Build | Vite (VitePress) |
-| Package Manager | Bun |
+| Runtime | Node 24 |
+| Build | Astro 7 + Starlight 0.42 (`@ocx-sh/theme`) |
+| Package Manager | pnpm 11 |
 
 ### Python (Acceptance Tests)
 
@@ -38,8 +38,8 @@
 
 | Component | Choice |
 |-----------|--------|
-| Static/Frontend | Cloudflare Pages (behind owner nginx: ocx.sh, dev.ocx.sh) |
-| Edge/CDN | Cloudflare |
+| Static/Frontend | Bunny (behind owner nginx: ocx.sh, dev.ocx.sh) |
+| Edge/CDN | Bunny |
 | Secrets | GitHub Secrets |
 
 ## CI/CD

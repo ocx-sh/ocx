@@ -16,16 +16,55 @@ use crate::options;
 #[command(long_about = "\
     Claim a package in the index so its tags can be announced.\n\n\
     Renders the package's index entry and opens a pull or merge request against the index \
-    repository, or writes the entry to a local directory with `--output`. Claiming an already-claimed \
-    package adds your owners to the entry and leaves everything else as committed; run it again \
-    with nothing new to say and it reports `unchanged` and opens no request.\n\n\
-    The entry carries the package description the registry serves at `__ocx.desc`, refreshed on \
-    every claim. Publish one with `ocx package description push`.\n\n\
+    repository, or writes the entry to a local directory with `--output`. Claiming an \
+    already-claimed package adds your owners to the entry and leaves everything else as \
+    committed. Run it again with nothing new to say and it reports `unchanged` and opens no \
+    request.\n\n\
+    The entry carries the package description the registry serves at `__ocx.desc`, refreshed \
+    on every claim. Publish one with `ocx package description push`.\n\n\
     Owners default to the CI environment's user variables, else to the identity behind the \
-    credential. Name them explicitly with `--owner`, which replaces the detected list rather than \
-    adding to it.\n\n\
+    credential. Name them explicitly with `--owner`, which replaces the detected list rather \
+    than adding to it.\n\n\
     Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under \
-    `--transport git` inside a GitLab job. Writing to `--output` works without one.")]
+    `--transport git` inside a GitLab job. Writing to `--output` works without one.\n\n\
+    The claimed unit is the package, not the namespace prefix: the entry is \
+    `p/<namespace>/<package>.json`, so a second package under a claimed namespace needs its \
+    own `claim`. `claim` writes `owners`, `repository`, `name`, `upstream` and `desc`; \
+    `announce` publishes `tags` into an entry that already exists, and neither writes the \
+    other's fields.\n\n\
+    A re-claim adds your resolved owners to the committed list (a union, committed owners \
+    first). It carries every other committed field through: `status`, `deprecated_message`, \
+    `created` and `tags` survive verbatim, and `desc` is re-observed. `--upstream-org` \
+    replaces the committed `upstream` when given and carries it when omitted. A committed \
+    `name` that disagrees with the identifier you typed, or a committed `repository` other \
+    than `--repository`, is refused rather than silently repointed.\n\n\
+    Nothing new to add reports `unchanged` and opens no request in every mode, `--output` \
+    included, because the comparison reads the index's base branch. Every claim reads the \
+    committed root, so a curated host's `trusted_hosts` refusal applies as under `announce`.\n\n\
+    A re-claim that moves the description drops the README and logo blobs the previous entry \
+    named. A package with no description claims without a `desc` field, and `--output` writes \
+    the description's blobs beside the entry. `--index-repo`, `--forge`, `--fork` and \
+    `--output` are one grammar shared with `announce`, including forge selection, nested \
+    GitLab groups and self-hosted instances.\n\n\
+    An owner is a `login:id` pair, and the numeric id is what matters, since logins get \
+    renamed. Without `--owner`, ocx takes the CI user variables (`GITLAB_USER_LOGIN` with \
+    `GITLAB_USER_ID`, or `GITHUB_ACTOR` with `GITHUB_ACTOR_ID`, both halves required), else \
+    the identity behind the credential.\n\n\
+    A bot account is refused at exit 64. The report's `owner_identity_source` says which rule \
+    produced the list. `resolved` means the forge's users API answered. `ci_environment` means CI \
+    variables named it and the API was unreachable. `asserted` means a `LOGIN:ID` was taken on your \
+    word, which is reachable on GitLab only under a job token, whose users API is closed.\n\n\
+    A bare `LOGIN` with an unreachable users API is a usage error naming the `LOGIN:ID` form. A guessed id would write the wrong account into a governance field.\n\n\
+    `--transport git` clones the index repository into a temporary directory, builds the \
+    commit there and creates the request from a single authenticated push. That is the only \
+    way a GitLab job token can open a merge request. The credential can push and read \
+    the API, but not open one through it. It is GitLab-only and refused (exit 64) against \
+    GitHub, `--fork` and `--output`.\n\n\
+    A split credential pair checks that the index project allows job-token pushes and that an \
+    allowlist admits the publisher, before anything is written. It exits 82 when job-token pushes are \
+    disabled and 77 when the allowlist does not admit the publisher. A bare job token cannot read either \
+    setting, so it pushes and lets GitLab's own rejection decide, with exit 82. Only an \
+    administrator of the index project can grant access.")]
 pub struct PackageClaim {
     /// Where the request is written, and how it gets there.
     #[command(flatten)]

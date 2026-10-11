@@ -99,7 +99,7 @@ Every new typed value gets, in the same change:
 
 ## Documentation
 
-User-facing reference for the host API lives at `website/src/docs/reference/script-host-api.md`. When a host function or typed value is added, updated, or renamed, the reference page is updated in the **same commit** — it is the canonical user-facing surface for the host API, and drift is a Block-tier finding in code review.
+User-facing reference for the host API lives at `website/src/content/docs/reference/script-host-api.md`. When a host function or typed value is added, updated, or renamed, the reference page is updated in the **same commit** — it is the canonical user-facing surface for the host API, and drift is a Block-tier finding in code review.
 
 ## Bazel Style Clauses Adopted Verbatim
 

@@ -28,14 +28,13 @@ use crate::{
 
 /// Emit the composed environment for the in-scope toolchain.
 ///
-/// Reads `ocx.toml` + `ocx.lock` (CWD walk, `--project` or `OCX_PROJECT`), or
-/// the global toolchain's offline `current` set under `--global`. The default
-/// output is a report in the root `--format` and is not eval-safe;
-/// `--shell[=NAME]` is the only sourceable form. Missing tools are installed
-/// first unless `--no-pull`. The global tier never installs and is lenient (no
-/// lock, a corrupt lock or an unknown group yields an empty env) except for a
-/// patch fail-closed failure, which still exits non-zero.
-/// Exit codes: <https://ocx.sh/docs/reference/command-line#env-root>
+/// Reads `ocx.toml` + `ocx.lock`, or the global toolchain's offline `current` set under
+/// `--global`. The default output is a report in the root `--format` and is not eval-safe;
+/// `--shell[=NAME]` is the only sourceable form. Missing tools are installed first unless
+/// `--no-pull`, which never contacts the registry: an unmaterialized package is warned about
+/// on stderr and omitted, and the exit code stays 0. The global tier never installs and is
+/// lenient: an unconfigured or corrupt toolchain yields an empty env.
+/// Exit codes: <https://ocx.sh/docs/reference/command-line/commands/#env-root>
 #[derive(Parser)]
 pub struct ToolchainEnv {
     #[clap(flatten)]
@@ -44,13 +43,9 @@ pub struct ToolchainEnv {
     #[clap(flatten)]
     pub env: options::EnvOverride,
 
-    /// Target shell for eval-safe export lines.
+    /// Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or the parent process and exits 64 when undetectable.
     ///
-    /// Must be supplied with `=` (`--shell=bash`).  Bare `--shell` (no `=`)
-    /// triggers autodetection from `$SHELL`/parent process; exit 64 if
-    /// undetectable.
-    ///
-    /// `--shell=sh` is an alias for `--shell=dash` (POSIX strict).
+    /// Must be supplied with `=` (`--shell=bash`). `--shell=sh` is an alias for `--shell=dash` (POSIX strict).
     #[arg(
         long,
         value_enum,
@@ -60,9 +55,9 @@ pub struct ToolchainEnv {
     )]
     shell: Option<Option<ocx_shell::shell::Shell>>,
 
-    /// Write the composed environment into a CI system's persistence channel.
+    /// Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found.
     #[arg(long_help = "\
-        Write the composed environment into a CI system's persistence channel.\n\n\
+        Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found.\n\n\
         `--ci=github` appends tool dirs and vars to `$GITHUB_PATH` / `$GITHUB_ENV`; `--ci=gitlab` \
         writes JSON-lines to `--export-file` (or stdout). Bare `--ci` autodetects the provider from \
         CI environment variables; exit 64 if none is detected. Must be supplied with `=` \

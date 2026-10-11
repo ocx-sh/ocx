@@ -285,7 +285,7 @@ AI config tests validate **structural invariants** (paths exist, counts match, c
 PostToolUse hook (`post-tool-use-tracker.sh`) fire on every `Edit|Write` and output AI config update reminders when infrastructure files change. Two reminder types:
 
 1. **`context_reminder`** — source subsystem changes (e.g., edit `crates/ocx_sign/`) → remind to update match `subsystem-*.md` rule
-2. **`config_reminder`** — infrastructure changes (Taskfiles, Vue components, VitePress config, CI workflows, Cargo.toml, deny.toml, mirror configs) → list specific AI config files need update
+2. **`config_reminder`** — infrastructure changes (Taskfiles, website components, Astro config, CI workflows, Cargo.toml, deny.toml, mirror configs) → list specific AI config files need update
 
 **When add new infrastructure dependency** (new Taskfile, new component library, new CI tool), add corresponding `config_reminder` entry to `post-tool-use-tracker.sh` that map file pattern to all AI config files that reference it. Ensure future changes trigger update reminders auto.
 
@@ -297,7 +297,7 @@ PostToolUse hook (`post-tool-use-tracker.sh`) fire on every `Edit|Write` and out
 | Codebase pattern changed | Update affected subsystem rules |
 | New tool integrated | Add to relevant skills, `quality-core.md`, and `config_reminder` in hook |
 | Taskfile changed | Update CLAUDE.md, quality-core.md, relevant skill Task Runner sections |
-| Vue component added/changed | Update `subsystem-website.md`, `docs-style.md`, documentation skill |
+| Website component added/changed | Update `subsystem-website.md`, `docs-style.md`, documentation skill |
 | CI workflow changed | Update `subsystem-ci.md` rule |
 | Claude Code new release | Run `/meta-maintain-config research "Claude Code features"` |
 | Directory renamed | Verify `paths:` globs in scoped rules still match |

@@ -265,4 +265,4 @@ Each path-scoped — loads automatically when editing files of that language:
 - `quality-python.md` — Python-specific quality (type hints, async, modern tooling)
 - `quality-typescript.md` — TypeScript-specific quality (strict mode, ESM, narrowing)
 - `quality-bash.md` — Bash script safety (`set -euo pipefail`, quoting, shellcheck)
-- `quality-vite.md` — Vite build-tool opinions (Vite 7/8, VitePress, Rolldown)
+- `quality-vite.md` — Vite build-tool opinions (Vite 7/8, Astro, Rolldown)

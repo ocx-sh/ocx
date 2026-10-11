@@ -259,6 +259,10 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
         # versions[0].short — "first version wins" (DE6 guards ordering)
         "amazon/corretto": "amazon/corretto:21.0.0",
     },
+    "setup:cmake-versions": {
+        # versions[0].short — "first version wins" (DE6 guards ordering)
+        "kitware/cmake": "kitware/cmake:3.31",
+    },
     "setup:full-catalog": {
         "astral-sh/uv": "astral-sh/uv:0.10.0",
         "kitware/cmake": "kitware/cmake:4.2.0",

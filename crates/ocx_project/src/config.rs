@@ -20,7 +20,7 @@ use ocx_package::metadata::slug::SLUG_MAX_LEN;
 
 /// A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.
 ///
-/// Exactly two optional sub-tables, nothing else: a tool binding written
+/// Only `tools`, `env` and `lazy-mode` are accepted: a tool binding written
 /// directly under `[group.<name>]` is a parse error. A tool may still be named
 /// `env` or `tools`; it is just a key inside `tools`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -28,18 +28,23 @@ use ocx_package::metadata::slug::SLUG_MAX_LEN;
 pub struct Group {
     /// Tool bindings for this group. Values are fully-qualified package
     /// references, validated exactly as `[tools]` is.
+    ///
+    /// A binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, PackageRef>,
 
     /// Environment variables applied when this group is selected.
+    ///
+    /// A key is a POSIX name and must not start with `OCX_` or `__OCX_`; either is a parse error (exit 78).
     // Skipped when empty, or `ocx add -g ci` writes a bare `[group.ci.env]` into a file declaring none.
     #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
     pub env: ProjectEnv,
 
-    /// Group-tier `lazy-mode` override: outranks the toolchain tier and is
-    /// outranked by `[package."<id>"]` and the CLI flag. Absent inherits from
-    /// the toolchain tier; it does not mean `never`. An edit never invalidates
-    /// `ocx.lock`.
+    /// Group-tier `lazy-mode` override: outranks the toolchain tier and is outranked by
+    /// `[package."<id>"]` and the CLI flag. Absent inherits from the toolchain tier; it does not
+    /// mean `never`.
+    ///
+    /// An edit never invalidates `ocx.lock`.
     // Precedence: adr_lazy_package_loading.md.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
@@ -64,14 +69,16 @@ pub struct PackageSettings {
     #[serde(default, rename = "no-patches")]
     pub no_patches: bool,
 
-    /// Package-tier `lazy-mode` override, the most specific config tier: only
-    /// the CLI flag outranks it. Absent inherits from the group and toolchain
-    /// tiers; it does not mean `never`. An edit never invalidates `ocx.lock`.
+    /// Package-tier `lazy-mode` override, the most specific config tier: only the CLI flag outranks
+    /// it. Absent inherits from the group and toolchain tiers; it does not mean `never`.
+    ///
+    /// An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
 
-    /// Package-tier `lazy-report` override. Absent inherits from the toolchain
-    /// tier. An edit never invalidates `ocx.lock`.
+    /// Package-tier `lazy-report` override. Absent inherits from the toolchain tier.
+    ///
+    /// An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
 }
@@ -94,10 +101,14 @@ pub struct PackageSettings {
 pub struct ProjectConfig {
     /// Tools in the reserved `default` group (the top-level `[tools]` table in
     /// `ocx.toml`). Values are fully-qualified package references.
+    ///
+    /// A binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.
     #[serde(default)]
     pub tools: BTreeMap<String, PackageRef>,
 
     /// Environment variables for the default group; `[env]` in TOML.
+    ///
+    /// A key is a POSIX name and must not start with `OCX_` or `__OCX_`; either is a parse error (exit 78).
     ///
     /// Stands to `[group.<name>.env]` as `[tools]` does to
     /// `[group.<name>.tools]`. It does not change which packages resolve, so an
@@ -105,8 +116,12 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
     pub env: ProjectEnv,
 
-    /// Named additive groups; `[group.<name>]` in TOML. `default` is reserved:
-    /// a literal `[group.default]` declaration is a parse error.
+    /// Named additive groups; `[group.<name>]` in TOML. A name matches
+    /// `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes. `default` and `all` are reserved,
+    /// ignoring case: declaring `[group.default]` or `[group.all]` is a parse error.
+    ///
+    /// Under `[group.<name>]` only `tools`, `env` and `lazy-mode` are accepted. Anything else,
+    /// including a binding written directly there, is a parse error (exit 78).
     // Renaming the wire key breaks every `ocx.toml` that declares a group.
     #[serde(default, rename = "group")]
     pub groups: BTreeMap<String, Group>,
@@ -120,43 +135,48 @@ pub struct ProjectConfig {
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, PackageSettings>,
 
-    /// Toolchain-tier `lazy-mode`, the least specific config tier: outranked by
-    /// `[group.<g>]`, `[package."<id>"]` and the CLI flag. Absent falls through
-    /// to `OCX_LAZY_MODE`; it does not mean `never`. An edit never invalidates
-    /// `ocx.lock`.
+    /// Toolchain-tier `lazy-mode`, the least specific config tier: outranked by `[group.<g>]`,
+    /// `[package."<id>"]` and the CLI flag. Absent falls through to `OCX_LAZY_MODE`; it does not
+    /// mean `never`.
+    ///
+    /// An edit never invalidates `ocx.lock`.
     // Precedence: adr_lazy_package_loading.md.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
 
-    /// Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`,
-    /// then to `silent`. An edit never invalidates `ocx.lock`.
+    /// Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.
+    ///
+    /// An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
 
-    /// Toolchain-tier `activate` mode: how a project's rendered toolchain
-    /// reaches a shell — per-prompt environment composition (`env`, the
-    /// default), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or
-    /// neither (`none`). Absent falls through to `OCX_TOOLCHAIN_ACTIVATE`, then
-    /// to `env`. An unrecognized value is a parse error (exit 78). An edit
-    /// never invalidates `ocx.lock`.
+    /// Toolchain-tier `activate` mode: how a project's rendered toolchain reaches a shell —
+    /// per-prompt environment composition (`env`, the default), a `PATH` entry for
+    /// `<home>/toolchain/active/bin` (`bin`), or neither (`none`). Absent falls through to
+    /// `OCX_TOOLCHAIN_ACTIVATE`, then to `env`.
+    ///
+    /// An unrecognized value is a parse error (exit 78). An edit never invalidates `ocx.lock`.
     // Ladders for `activate` and `pinned`: adr_toolchain_activation.md § Resolution ladders.
     // Never default to `ACTIVATE_FLOOR` here, or the `OCX_TOOLCHAIN_ACTIVATE` tier is skipped.
     #[serde(default, rename = "activate", skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("default" = "env"))]
     pub activate: Option<ActivateMode>,
 
-    /// Toolchain-tier `pinned`: whether composed paths follow the rendered
-    /// `links/<group>/<entry>` links (`false`, the default) or pin to digest
-    /// roots (`true`). Absent falls through to `OCX_TOOLCHAIN_PINNED`. An edit
-    /// never invalidates `ocx.lock`.
+    /// Toolchain-tier `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`
+    /// links (`false`, the default) or pin to digest roots (`true`). Absent falls through to
+    /// `OCX_TOOLCHAIN_PINNED`.
+    ///
+    /// An edit never invalidates `ocx.lock`.
     // `Option<bool>`: a bare `false` default would shadow `OCX_TOOLCHAIN_PINNED`.
     #[serde(default, rename = "pinned", skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("default" = false))]
     pub pinned: Option<bool>,
 
     /// Identity-pinned verification policies; `[[trust.policy]]` in TOML.
     ///
-    /// Consumed by `ocx package verify`, where it pools (array-append) with the
-    /// `config.toml` tiers. Resolve-time policy, not a tool binding: a policy
-    /// edit never invalidates `ocx.lock`.
+    /// Consumed by `ocx package verify`. A project policy applies only to targets that no
+    /// `config.toml` policy matches; it never pools with them. Resolve-time policy, not a tool
+    /// binding: a policy edit never invalidates `ocx.lock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<ocx_trust::TrustConfig>,
 

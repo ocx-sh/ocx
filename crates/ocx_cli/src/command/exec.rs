@@ -34,7 +34,7 @@ pub struct Exec {
         Expose the package's full env, including its private (self-only) entries. Off by default: \
         only public + interface entries are loaded (the consumer view). Generated launchers use \
         `ocx launcher exec` which enables self-view internally.\n\n\
-        See https://ocx.sh/docs/in-depth/environments#visibility-views for the full view semantics.\n\n\
+        See https://ocx.sh/docs/explanation/environments/#visibility-views for the full view semantics.\n\n\
         Cannot be combined with `--lazy-mode always`: a generated shim is a launcher, launchers are \
         consumer-facing, and a package's private view bypasses them, so those two ask for \
         contradictory things (exit 64). `--lazy-mode never` agrees with this view and is accepted, \

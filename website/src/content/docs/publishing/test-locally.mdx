@@ -1,0 +1,189 @@
+---
+title: "Test a package before you push it"
+description: "Run the real install pipeline on a package in a temporary directory, with no registry round trip, using ocx package test."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+Run the real install pipeline on a package in a temporary directory, without pushing it to a registry. You need a built archive from [`ocx package create`][cmd-package-create] and its metadata sidecar. By the end you will have run your package's binary in its composed environment and know how to inspect the result.
+
+## The problem with push-debug-push \{#motivation\}
+
+The fastest way to find out whether a package works is to push it and install it. That loop has a cost. Every push bakes a digest into the registry, forces a re-download on every consumer, and leaves half-finished tags in the cascade. A typo in `metadata.json` can mean three push-install cycles before the env surface looks right.
+
+`ocx package test` cuts that loop. It runs the install pipeline consumers see: dependency resolution, layer extraction and env composition. The result goes to a temp directory instead of the registry. There is no network round trip and no digest, and the temp directory disappears when the command exits.
+
+:::note[Analogy]
+[`npm pack`][npm-pack] plus `npm install ./pkg.tgz` is the closest analogue: materialize locally, run the thing, throw away the scratch directory. [`cargo publish --dry-run`][cargo-publish] rebuilds from scratch instead of reusing the archive. `ocx package test` uses the archive you already have.
+:::
+
+## Basic usage \{#basic\}
+
+The argument shape mirrors [`ocx package push`][cmd-package-push]: identifier as `-i/--identifier`, then layers, then an optional `--platform`. Like `push`, `--platform` defaults to the platform [`ocx package create`][cmd-package-create] recorded in the [build receipt][cmd-package-create-receipt]. Pass it explicitly only to assert it matches, because a mismatch is rejected.
+
+```sh
+ocx package test -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool --version
+```
+
+The `--` separator marks the end of package arguments and the start of the command to run. Everything after `--` is passed verbatim to the child process. To run scripted assertions instead of a single command, use `--script` and see [Write script tests for a package][script-tests]. The two forms are mutually exclusive.
+
+OCX will:
+
+1. Read `metadata.json` (inferred from the layer filename or supplied via `-m`).
+2. Auto-install any declared dependencies into the regular package store.
+3. Assemble the package in a temp directory under `$OCX_HOME/temp/test/`.
+4. Compose the env exactly as [`ocx package exec`][cmd-exec] would.
+5. Exec the trailing command in that env.
+6. Delete the temp directory on exit, whether the command succeeds or fails.
+
+The child's exit code is forwarded unchanged. A failing test command (`exit 7`) gives you exit code 7.
+
+When a [patch tier][ug-patches] is configured, the companions that match `--identifier` are composed onto the bundle under test, as an install would. `package test` needs no flag for this, and a required companion that cannot be installed fails the run.
+
+### What the command name resolves to \{#basic-resolution\}
+
+A bare command name is resolved against the package's own directories before the host `PATH`. The package's copy of a name is never quietly passed over. The point of `package test` is to test what you are about to publish. A name your package ships has to be the thing that runs.
+
+That matters most when the file is there but cannot be executed. A binary can lose its executable bit through `zip`, a `COPY` in a build image, or a checkout on a filesystem that drops the bit. It then fails with exit code 65, naming the path and its mode. It is not passed over in favour of a same-named host binary. Doing so would test something the package does not contain, and report a pass for a package nobody can run.
+
+Names your package does not ship are unaffected. `sh`, `grep`, `curl` and the rest still resolve on the host `PATH`, with a warning on stderr naming the package directories that were searched. A typo in a binary name is therefore visible in the log rather than silently testing a host binary. A name carrying a path separator (`./tool`, an absolute path) addresses a file directly and skips this entirely.
+
+To catch a missing executable bit earlier, pass `--bin-scan` to [`ocx package create`][cmd-package-create]. It verifies the `binaries` claim against the content tree at authoring time.
+
+## Identifier constraints \{#identifier\}
+
+The identifier must be in tag form: `repo:tag` or `registry/repo:tag`. An explicit `@digest` suffix is rejected with a usage error (exit 64). The digest is computed locally from the layers you supply and would conflict with any pre-committed value.
+
+```sh
+# good
+ocx package test -p linux/amd64 -i acme/mytool:1.0.0 mytool.tar.xz -- true
+
+# bad — digest rejected
+ocx package test -p linux/amd64 -i acme/mytool:1.0.0@sha256:abc… mytool.tar.xz -- true
+```
+
+## Keeping the build dir for inspection \{#keep\}
+
+When a command fails you often want to inspect the materialized layout. Check which files landed where, whether entrypoints were generated, and whether `resolve.json` is correct. Pass `--keep` to preserve the temp directory. OCX prints its path to stderr just before executing the command:
+
+```sh
+ocx package test -p linux/amd64 --keep -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
+# stderr: kept at /home/user/.ocx/temp/test/test-a1b2c3d4
+```
+
+The directory persists whether the command succeeds or fails. Without `--keep`, the temp directory is deleted in both cases.
+
+## Writing to a specific directory \{#output\}
+
+`--output DIR` materializes the package to a directory you control instead of an auto-managed temp dir. The directory must not exist or must be empty. OCX creates it.
+
+```sh
+ocx package test -p linux/amd64 --output ./build -i acme/mytool:1.0.0 mytool.tar.xz -- mytool --version
+```
+
+The directory is never deleted by OCX. `--output` implies keep. Omitting `--keep` is fine, and combining them is an error.
+
+:::caution[Same filesystem required]
+`--output DIR` must reside on the same filesystem as `$OCX_HOME/layers/`. OCX assembles packages via hardlinks from the layer store, so copying across filesystem boundaries is not supported. Passing a path on a different filesystem exits with code 74 (`IoError`) and a clear message. An example is `/tmp/…` when `$OCX_HOME` is on a separate partition.
+:::
+
+:::caution[Windows: `--output` must be under `$OCX_HOME`]
+On Windows, `--output` must point to a directory under `$OCX_HOME/`. Placing the output on a different volume, such as a separate drive letter, is not supported.
+:::
+
+## Testing the private env surface \{#self\}
+
+By default, `ocx package test` composes the interface surface, the env vars marked `public` or `interface` that consumers see. To compose the private surface (what the package sees when its own launchers run), pass `--self`:
+
+```sh
+ocx package test -p linux/amd64 --self -i acme/mytool:1.0.0 mytool.tar.xz \
+  -- sh -c 'echo $MY_PRIVATE_VAR'
+```
+
+The `--self` flag mirrors the same flag on [`ocx package exec`][cmd-exec] and [`ocx package env`][cmd-env].
+
+## Stripping the parent env \{#clean\}
+
+By default the composed env inherits the parent shell's variables. Pass `--clean` to strip everything except the `OCX_*` config keys and the package-declared vars:
+
+```sh
+ocx package test -p linux/amd64 --clean -i acme/mytool:1.0.0 mytool.tar.xz \
+  -- sh -c 'env | sort'
+```
+
+Useful when you want to verify the package supplies all required env on its own, without relying on ambient values from the developer's shell.
+
+## Digest layer references \{#digest-layers\}
+
+Layer arguments can be file paths or digest references, exactly like [`ocx package push`][cmd-package-push]:
+
+```sh
+# base layer already in registry; only the top layer is local
+ocx package test -p linux/amd64 -i acme/mytool:1.0.1 \
+  sha256:<hex>.tar.xz ./newtool.tar.xz -- mytool --version
+```
+
+Digest layers are fetched from the registry on demand when not already cached locally. In `--offline` mode, a missing digest layer exits with code 81 (`PolicyBlocked`).
+
+## The inner pre-push loop \{#workflow\}
+
+A typical authoring session looks like this:
+
+```sh
+# 1. Build the archive — --platform is recorded in the build receipt for the
+#    steps below to read back.
+ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
+
+# 2. Test it locally — no registry involved.
+ocx package test -i acme/mytool:1.0.0 \
+  mytool-1.0.0.tar.xz -- mytool --version
+
+# 3. Something wrong? Keep the dir and inspect.
+ocx package test --keep -i acme/mytool:1.0.0 \
+  mytool-1.0.0.tar.xz -- mytool --version
+ls "${OCX_HOME:-$HOME/.ocx}/temp/test/"*/
+
+# 4. Happy with it? Push.
+ocx package push -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
+```
+
+<Terminal src="/casts/authoring/package-test.cast" title="Testing a package locally before pushing" collapsed />
+
+## Exit codes \{#exit-codes\}
+
+| Code | Meaning |
+|------|---------|
+| Child's exit code | The command ran, and its code is forwarded unchanged |
+| 64 | Usage error: bad identifier, conflicting flags, or missing or extra arguments |
+| 65 | Data error: malformed metadata or script syntax error |
+| 74 | I/O error: `--output` on the wrong filesystem, filesystem failure, or stdin read failure |
+| 81 | Policy blocked: a local policy (`--offline` or `--frozen`) refused the operation, for example a missing digest layer with `--offline` set |
+
+A script run reports its own codes. They are listed under [script test exit codes][script-exit-codes].
+
+## See also \{#see-also\}
+
+- [Write script tests for a package][script-tests]: assert on behavior with a Starlark script
+- [`ocx package test` reference][cmd-package-test]: full flag table
+- [Building and pushing][authoring-building-pushing]: push workflow
+- [`ocx package exec` reference][cmd-exec]: same env composition, different trigger
+- [Env surface][authoring-env-surface]: visibility levels `private`, `public` and `interface`
+
+[npm-pack]: https://docs.npmjs.com/cli/v10/commands/npm-pack
+[cargo-publish]: https://doc.rust-lang.org/cargo/commands/cargo-publish.html
+
+[cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
+[cmd-package-test]: ../reference/command-line/package-publishing.md#package-test
+[cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
+[cmd-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-env]: ../reference/command-line/package-consuming.md#package-env
+
+[authoring-building-pushing]: ./build-and-push.mdx
+[cmd-package-create-receipt]: ./build-and-push.mdx#create-receipt
+[authoring-env-surface]: ./env-surface.md
+[script-tests]: ./script-tests.md
+[script-exit-codes]: ./script-tests.md#scripted-tests-exit-codes
+
+[ug-patches]: ../guides/patch-packages.mdx

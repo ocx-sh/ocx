@@ -861,11 +861,11 @@ class TestFindInlineOcxBlocks:
         assert "ocx" in result[0]
 
     def test_labelled_fence_with_ocx_is_flagged(self, tmp_path: Path) -> None:
-        """NC1 tightened fences: a ``\\`\\`\\`sh [label]`` (VitePress code-group) fence
+        """NC1 tightened fences: a ``\\`\\`\\`sh [label]`` (code-group) fence
         containing an ocx invocation is treated as a shell fence and flagged.
 
         Previously only ``\\`\\`\\`sh`` with no label was recognised as a shell fence;
-        VitePress code-group label syntax must also be covered.
+        Code-group label syntax must also be covered.
         """
         page = tmp_path / "page.md"
         page.write_text(
@@ -887,7 +887,7 @@ class TestFindInlineOcxBlocks:
         """§6b exemption (b): the OCX-installer shell-profile fragment is NOT flagged.
 
         A fenced block containing both ``# BEGIN ocx`` and ``# END ocx`` is the
-        installer-written shell-profile fragment shown in ``user-guide.md``.  It is
+        installer-written shell-profile fragment shown in ``reference/command-line/self.md``.  It is
         documentation of an on-disk artifact, not a command a reader types.
         The block contains a path-qualified ``"$HOME/.ocx/ocx"`` invocation, which
         would be flagged without the exemption.  DAMP: the exact block from the page

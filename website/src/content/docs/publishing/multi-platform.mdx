@@ -1,0 +1,178 @@
+---
+title: "Publish for several platforms"
+description: "Publish one tag that resolves to the right build on Linux, macOS, Windows and WebAssembly, on amd64 and arm64."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+By the end of this page, one tag such as `acme/mytool:1.0.0` resolves to the right build on every platform you publish. That covers linux, darwin and windows on amd64 and arm64, plus WebAssembly. You need one built [bundle per platform][authoring-bundle-sidecars] and write access to a registry.
+
+## One tag, many manifests \{#concept\}
+
+The naive approach is one tag per platform, such as `acme/mytool:1.0.0-linux-amd64`. That pushes platform resolution onto every consumer's install script. OCX uses [OCI Image Indexes][oci-image-index] instead: one tag, several manifests, and OCX picks the right one at install time.
+
+An image index is a manifest of manifests, with one descriptor per platform. When a consumer runs `ocx package install acme/mytool:1.0.0`, OCX fetches the index and finds the manifest for the consumer's platform. It pulls only that manifest's layers.
+
+You do not assemble the index yourself. Push each platform separately under the same tag. When [`ocx package push`][cmd-package-push] sees a tag that already has a manifest, it merges the new platform into the existing index rather than replacing it.
+
+## Push one platform at a time \{#pattern\}
+
+The [`ocx_mirror`][mirror-pipeline] tool runs the same pattern from a YAML spec. By hand, the flow has three steps.
+
+1. **Bundle each platform with [`ocx package create`][cmd-package-create].** Pass `-i acme/mytool:1.0.0 -p <platform>` and let `-o .` infer the output name. Each call drops a `<name>-<tag>-<os>-<arch>.tar.xz` archive, where `<name>` is the last segment of the OCI repository. It also drops a sibling `<...>-metadata.json` sidecar, which [`ocx package push`][cmd-package-push] picks up automatically. [Bundle anatomy][authoring-bundle-sidecars] explains the sidecar and the inferred name.
+2. **Push the first platform with `--cascade`.** The flag keeps your rolling aliases (`1.0`, `1`, `latest`) in sync. Omit `-m`, because push reads the sidecar next to the layer.
+3. **Push every other platform with `--cascade` too.** OCX detects the existing manifest and merges the platform into the image index. It re-points the tag at the index digest and updates each rolling alias.
+
+```sh
+ocx package create build -i acme/mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
+ocx package create build -i acme/mytool:1.0.0 -p linux/arm64 -m metadata.json -o .
+
+ocx package push --cascade -p linux/amd64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64.tar.xz
+ocx package push --cascade -p linux/arm64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
+```
+
+After both pushes, `acme/mytool:1.0.0` resolves to an image index with two platform descriptors. Any rolling alias points at the same index digest. A consumer on Linux/arm64 fetches only the arm64 manifest's layers, and an amd64 runner fetches only the amd64 ones. Add `-p darwin/arm64`, `-p darwin/amd64` or `-p windows/amd64` the same way for the rest of the matrix.
+
+<Terminal src="/casts/authoring/package-multi-platform.cast" title="Publishing a multi-platform package" collapsed />
+
+The recording also runs [`ocx index update`][cmd-index-update] and [`ocx package install`][cmd-install] after the second push. It shows the consumer side: one tag, the right platform's layers fetched, and the binary on the candidate symlink ready for `ocx package exec`.
+
+If your Linux builds differ by C library, [publish glibc and musl variants][libc-variants] under the same tag. The selection rules and the `libc.glibc` and `libc.musl` tags live on that page.
+
+## Share one metadata file \{#metadata\}
+
+The recommended pattern is one `metadata.json` that covers every platform. Env entries, dependencies and entrypoints apply uniformly, and the platform-specific bits live in the archive.
+
+When platforms genuinely diverge, a different metadata file per platform is possible. Windows might need different env keys, or a platform might use different entry-point names. Hand-driven publishers pass `--metadata <path>` per push. The [`ocx_mirror`][in-tree-mirror-spec] spec accepts a per-platform override, where the `metadata` block names the default plus the overrides:
+
+```yaml
+metadata:
+  default: metadata.json
+  platforms:
+    darwin/amd64: metadata-darwin.json
+    darwin/arm64: metadata-darwin.json
+    windows/amd64: metadata-windows.json
+    windows/arm64: metadata-windows.json
+```
+
+## Rely on a stable index \{#stability\}
+
+Each per-platform manifest's digest depends only on its own bytes. Pushing the *same archive bytes* twice gives the same manifest digest, so there is no platform-side rebuild churn. Re-running `ocx package create` produces a different archive each time, and [stable archives][authoring-bundle-anatomy-stable] explains why.
+
+The index digest is a function of its descriptors. It changes only when you add a platform or push a new build for an existing one. That stability lets [`--cascade`][authoring-building-pushing-cascade] work across multi-platform releases. The rolling tag points at the index, the index points at per-platform manifests, and every layer caches independently.
+
+## Publish WebAssembly \{#wasm\}
+
+A `.wasm` file is not a native executable. It needs a runtime, and the same bytes run unchanged on every host that has one. That makes it a poor fit for `any`, which claims no platform requirement at all. A WASI 0.1 module and a WASI 0.2 component target different ABIs, so a consumer must say which one it wants.
+
+OCX gives each [WASI][wasi] ABI its own platform, so the choice is expressed like any other platform choice:
+
+| Platform | Artifact |
+|---|---|
+| `wasip1/wasm` | A module targeting the WASI 0.1 (Preview 1) ABI |
+| `wasip2/wasm` | A component targeting the WASI 0.2 (Preview 2) ABI |
+
+Publishing is the ordinary per-platform push. Nothing about the flow is wasm-specific:
+
+```sh
+ocx package create -i my/tool:1.0.0 -p wasip1/wasm -m metadata.json -o tool.tar.xz ./dist
+ocx package push -p wasip1/wasm -i my/tool:1.0.0 tool.tar.xz
+```
+
+Consuming one always names the platform explicitly. No machine reports `wasip1` or `wasip2` as its host. An omitted `--platform` therefore resolves to the native host platform and will not find a wasm manifest:
+
+```sh
+ocx package install -p wasip1/wasm my/tool:1.0.0
+```
+
+:::caution[No binaries are scanned for a wasm target]
+For native targets, [`ocx package create`][cmd-package-create] scans the interface-visible `PATH` directories and fills the `binaries` claim from what it finds. A wasm target is skipped. OCX never executes a `.wasm` file, so neither the executable bit nor a filename extension says what a consumer should invoke. The claim comes back empty even when the content tree carries executable files. A package that needs a named entry point declares one explicitly in its metadata.
+:::
+
+## Depend on platform-specific builds \{#dependency-platforms\}
+
+A package built once with `--platform any` can still depend on a package that ships different manifests per platform. A shell script or Python entry point that wraps a native binary is the usual case. A dependency identifier carries only one digest, so which platform's build does that digest name?
+
+[`ocx package create`][cmd-package-create] resolves the dependency against the single `--platform` you declared for the bundle. It uses the [directed compatibility relation][reference-platforms-compatibility] that every platform decision in OCX routes through. A concrete `--platform` pins each dependency to the one compatible manifest digest. The `any` case needs two extra rules.
+
+### The any-deps rule \{#dependency-platforms-any-deps\}
+
+An `any`-targeted package performs no platform-specific resolution, so it can only depend on packages that themselves offer an `any` manifest. This follows from the [compatibility relation][reference-platforms-compatibility]: an `any` requirement is satisfied only by an `any` offer.
+
+```json
+{ "dependencies": [{ "identifier": "ocx.sh/acme/mytool:1.0" }] }
+```
+
+`ocx package create --platform any` resolves this to a single manifest digest, bare on the identifier:
+
+```json
+{
+  "dependencies": [
+    { "identifier": "ocx.sh/acme/mytool:1.0@sha256:aaaa..." }
+  ]
+}
+```
+
+Suppose `ocx.sh/acme/mytool:1.0` ships only platform-specific manifests (`linux/amd64`, `darwin/arm64` and so on) and no `any` build. Then `create` fails with exit 65, naming the dependency and listing what it does offer. There is no partial coverage to derive. A platform-agnostic package either leans on a platform-agnostic dependency, or it cannot depend on that package under `--platform any`.
+
+### Digest pins under any \{#dependency-platforms-digest-pin-prohibition\}
+
+A leaf manifest carries no platform descriptor of its own. The platform lives in the *image index entry* one level up. A dependency pinned by a bare `@digest` therefore cannot be verified as `any`-offered from the digest alone.
+
+`ocx package create --platform any` refuses that verification job. It resolves against an index, so a digest it did not resolve itself carries no evidence either way. It rejects a direct digest pin anywhere in an `any`-targeted bundle's dependency list (exit 65), including one present before `create` ran. Pin the dependency through `create`, as in [the any-deps rule](#dependency-platforms-any-deps), instead of writing a digest by hand.
+
+[`ocx package push`][cmd-package-push] has the registry in hand, so it checks the stronger claim directly. It re-fetches the dependency's image index by its advisory tag. It accepts the pin only if that index advertises the pinned digest as `any`. That means a flat manifest whose digest matches, or an index entry declaring platform `any`. Otherwise the push fails (exit 65), naming the dependency and the digest.
+
+:::caution[A tag-less pin loses its own evidence]
+The provenance check re-fetches the dependency by its **advisory tag**, the one `ocx package create` leaves on the identifier beside the digest. A dependency pinned with no tag is fetched at `latest` instead, which usually fails closed. The tag names the index stream the digest was resolved against. Without it there is nothing to re-derive provenance from. Keep the advisory tag on every dependency identifier your sidecar pins.
+:::
+
+Concrete-targeted bundles are unaffected by either check. A direct digest pin is fine there, because the platform being published is known and an `any` claim was never in question.
+
+### Snapshot semantics \{#dependency-platforms-snapshot\}
+
+A pin is a snapshot of the dependency's platform coverage when `create` ran, or `push` for the provenance check. It is not a live query. Suppose the publisher of `ocx.sh/acme/mytool:1.0` later adds an `any` manifest. Your published package does not pick it up. Re-run `ocx package create --platform any` against a refreshed index, then `ocx package push`, to re-resolve.
+
+## See also \{#see-also\}
+
+- [Publish glibc and musl variants][libc-variants]
+- [`ocx about` reference][cmd-about]
+- [`ocx package push` reference][cmd-package-push]
+- [Storage in depth: multi-layer packages][in-depth-storage-multi-layer]
+- [Versioning in depth: platforms][in-depth-versioning-platforms]
+- [Build and push][authoring-building-pushing]: cascade, layer reuse, BYO archives, dependency pin resolution
+- [Declaring dependencies][authoring-dependencies]: when to depend, visibility, `name` overrides
+- [Platforms reference][reference-platforms]: the grammar and the compatibility relation this page builds on
+- [Dependencies reference][reference-dependencies]: sidecar field shapes, manifest-pin rule
+- [`ocx package create` build receipt][cmd-package-create-receipt]: the fallback `push` and `test` read for a platform their own flags did not state
+- [Repackage releases][authoring-migration]: `ocx_mirror` per-platform spec
+
+
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[wasi]: https://wasi.dev/
+[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx-mirror
+[mirror-pipeline]: https://github.com/ocx-sh/ocx-mirror
+
+[cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
+[cmd-package-create-receipt]: build-and-push.mdx#create-receipt
+[cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
+[cmd-index-update]: ../reference/command-line/index-commands.md#index-update
+[cmd-install]: ../reference/command-line/package-consuming.md#package-install
+[cmd-about]: ../reference/command-line/commands.md#about
+
+[reference-dependencies]: ../reference/metadata/dependencies.md#dependencies
+[reference-platforms]: ../reference/platforms.md
+[reference-platforms-compatibility]: ../reference/platforms.md#compatibility
+
+[in-depth-storage-multi-layer]: ../explanation/storage.mdx#multi-layer
+[in-depth-versioning-platforms]: ../explanation/versioning.mdx#platforms
+
+[authoring-building-pushing]: ./build-and-push.mdx
+[authoring-building-pushing-cascade]: ./build-and-push.mdx#cascade
+[authoring-bundle-anatomy-stable]: ./bundle-anatomy.mdx#stable
+[authoring-bundle-sidecars]: ./bundle-anatomy.mdx#sidecars
+[authoring-dependencies]: ./declare-dependencies.md
+[authoring-migration]: ./repackage-releases.mdx
+[libc-variants]: ./libc-variants.md

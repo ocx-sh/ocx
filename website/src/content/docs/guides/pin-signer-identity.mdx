@@ -1,0 +1,177 @@
+---
+title: "Pin the signer identity"
+description: "Require packages from a registry namespace to be signed by an identity you trust."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Require every package under a registry namespace to be signed by an identity you trust, with no flags on the command line.
+
+## Declare a trust policy \{#supply-chain-trust-policy\}
+
+Passing `--certificate-identity` and `--certificate-oidc-issuer` on every call works for a one-off check. A CI pipeline verifies the same package against the same signer on every run. Repeating both flags in each workflow step is one more place for a copy-paste error to widen who the pipeline trusts. It also leaves no way to accept a signer during a rotation window.
+
+A [`[[trust.policy]]`][config-trust] entry declares the accepted signer once, for every package under a scope:
+
+```toml
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+```
+
+Declare it in a [`config.toml` tier](./configure-ocx.mdx#configuration-files) (system, user or `$OCX_HOME`) or in the project's `ocx.toml`. Then `ocx package verify` resolves the identity for any package under `ghcr.io/acme/`. You pass no identity flags. Install and pull verify only from a `config.toml` tier. An `ocx.toml` policy gates `ocx package verify` alone, as [Verify installs](./verify-installs.mdx#supply-chain-auto-verify) explains. The trust-root requirement from [Verify a package](./verify-installs.mdx#supply-chain-verification) still applies:
+
+```shell
+ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
+```
+
+Exit 0 means the policy accepted the signer. Any other exit code is a failure from the exit-code table in [Verify a package](./verify-installs.mdx#supply-chain-verification).
+
+:::caution[`signers` is ANY-of, so adding an entry widens acceptance]
+A policy's `signers` array can hold several entries, keyless or key-mode. Any one of them is enough to verify a signature. An extra entry is one more way in, never a stricter check. See [Signers](#supply-chain-trust-policy-signers) for the mechanics.
+:::
+
+## Carve out an unsigned namespace \{#supply-chain-trust-policy-exclude\}
+
+A scope can name several patterns and carve some back out. Use this when one namespace under a governed registry is deliberately unsigned:
+
+```toml
+# Everything under ghcr.io/acme/ must be signed by CI, except the
+# experimental namespace, which stays ungoverned.
+[[trust.policy]]
+scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
+
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+```
+
+An empty or omitted `include` is a catch-all, so `exclude` alone governs the whole fleet minus the listed subtrees. An excluded package is not denied. This policy simply does not cover it, so it installs unverified unless another policy does. See [Scope matching](#supply-chain-trust-policy-scope).
+
+## Choose where the policy lives \{#supply-chain-trust-policy-tiers\}
+
+The two locations are not interchangeable. An operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even when the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator has not pinned. It can never override or narrow an operator's pin. See [Operator policy outranks project policy][in-depth-signing-tiers].
+
+## Rotate the signer \{#supply-chain-trust-policy-rotation\}
+
+The signing workflow may move through a renamed workflow file, a new repository or a rotated identity. When it does, add a second entry at the same scope in the **same file**. Do not replace the first. OCX accepts both until you remove the old one, so CI never fails mid-rotation.
+
+Rotation by addition works only within one tier. An old entry in `config.toml` and a new entry in `ocx.toml` do not combine.
+
+```toml
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release-v2.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
+```
+
+## Policy fields \{#supply-chain-trust-policy-fields\}
+
+`[[trust.policy]]` is an array of tables, one entry per scope. It is valid in every `config.toml` tier and in the project `ocx.toml`. Reading it from `ocx.toml` is a deliberate exception. Every other OCI-tier command ignores that file, but a trust policy is a security posture the checkout owner controls.
+
+The [configuration reference][config-trust] lists the fields: [`scope`][config-trust-scope], [`builder`][config-trust-builder] and [`signers`][config-trust-signers].
+
+An omitted `scope` is a catch-all that governs every package. `builder` is the expected SLSA provenance `builder.id`, compared byte-equal. OCX consults it only for `ocx package verify --attestation` on SLSA provenance, and a mismatch is `builder_mismatch` (exit 65). Unknown keys are ignored like everywhere else in `config.toml`. A file written for a future ocx release still loads on a release that predates a key.
+
+:::caution[A dropped `scope` key widens the policy]
+An absent `scope` is a catch-all, so the tolerance cuts both ways. A policy whose `scope` key is misspelled loses its scope and governs **every** package rather than none. The one place the tolerance stops is inside a `scope` table.
+:::
+
+## Signers \{#supply-chain-trust-policy-signers\}
+
+`signers` is an array of tables, each tagged `kind = "keyless"` or `kind = "key"`. An absent or empty array is a configuration error and fails closed. The list is ANY-of. To narrow a policy, remove entries or declare a [system-locked policy][in-depth-signing-lock] at the operator tier, which displaces the lower tiers.
+
+| `kind = "keyless"` field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | string | XOR with `identity_regexp` | Exact expected certificate SAN, byte-equal |
+| `identity_regexp` | string | XOR with `identity` | Regex the SAN must match in full, see [Regex identities][in-depth-signing-regex] |
+| `oidc_issuer` | string | yes | Exact expected OIDC issuer URL, byte-equal. No regex form, because issuer URLs are stable |
+
+Set exactly one of `identity` and `identity_regexp`. Both or neither is a configuration error. A keyless signer without `oidc_issuer` is a parse error. OCX rejects one with neither identity field when the policy compiles, and never treats it as "trust anything".
+
+| `kind = "key"` field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | XOR with `key_pem` | A key reference, `[scheme://]<rest>` in [cosign][cosign]'s spelling. A bare path or a `file://` one names a file, and `env://VAR` holds the SPKI PEM in the environment variable `VAR` |
+| `key_pem` | string | XOR with `key` | The public key as a verbatim SPKI PEM block |
+
+Set exactly one of `key` and `key_pem`. There is no `key_regexp`, because a public key is a fixed value.
+
+```toml
+[[trust.policy]]
+scope   = "ghcr.io/acme/*"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+  { kind = "key",     key = "etc/acme-release.pub" },
+]
+```
+
+Mixing `keyless` and `key` entries in one policy is legal. It is how a fleet migrates between signing models without touching scope. A relative key reference resolves against the directory of the `config.toml` that declared it. This is plain path resolution, the same one `[trust.sigstore] trusted_root` uses, not a containment check. The failure codes follow what failed, as `ocx package sign --key` does for the same file:
+
+| Condition | Exit |
+|-----------|------|
+| The key file is absent, unreadable or not a regular file (a directory, a device) | 74, `io_error` with `error.detail` `key_unreadable` |
+| The file reads but does not hold an SPKI public key | 65, `key_malformed` |
+| An inline `key_pem` that is not a key | 78, because the config text itself is wrong |
+
+The `key_unreadable` outcome is byte-identical to the one `ocx package sign` reports for the same key path. One flag therefore means one thing in both commands.
+
+:::tip[Generating a key pair]
+OCX does not implement key generation. Run [`cosign generate-key-pair`][cosign] from an activated environment (cosign ships in the OCX index) to produce a `cosign.key` and `cosign.pub`. OCX reads an encrypted private key's password from [`OCX_KEY_PASSWORD`][env-ocx-key-password], never a flag. Unset means the empty password, which cosign permits.
+:::
+
+A `key` path means nothing on a consumer's disk. So [`ocx config push`][cmd-config-push] refuses a managed payload that declares a `kind = "key"` signer by path (exit 78) and names `key_pem` as the fix. An older payload that carries one has the field dropped at load time. Local tiers leave `key` unrestricted.
+
+A KMS reference travels with the payload. OCX refuses a backend it has not implemented as exit 82 (`unsupported_key_backend`).
+
+## Scope matching \{#supply-chain-trust-policy-scope\}
+
+A scope matches the target's canonical `registry/repository`, with tag and digest stripped, on **path-segment boundaries**. A scope with no `*` matches the exact package or one directly under it.
+
+For example, `scope = "ghcr.io/acme/tool"` matches `ghcr.io/acme/tool` and `ghcr.io/acme/tool/plugin`, but not `ghcr.io/acme/tool-cli`. `ghcr.io/acme` never matches `ghcr.io/acmecorp`. A trailing `/*` is the explicit subtree glob.
+
+:::caution[A mid-string `*` is a substring match, not segment-bounded]
+A `*` anywhere but the end globs on the literal text before it, with no `/` boundary. `scope = "ghcr.io/acme*"` matches `ghcr.io/acmecorp` and `ghcr.io/acme-evil`. Prefer `ghcr.io/acme/*` unless you mean the substring.
+:::
+
+A table scope combines the same per-pattern rules. A target matches when it matches **at least one** `include` **and no** `exclude`. The table must carry one of the two keys, and the other defaults to an empty list. `exclude` beats `include` whenever both match, and it is segment-bounded too. `exclude = ["ghcr.io/acme/tool"]` carves out `ghcr.io/acme/tool` and everything under it, but not `ghcr.io/acme/tool-cli`.
+
+`scope = {}` is a **parse error**, not a catch-all. So is a table whose only keys ocx does not recognise, such as a misspelled `includ`. This is the single exception to unknown-key tolerance. Dropping the key would leave both lists empty and turn a narrow pin into one over every package.
+
+An unknown key beside `include` or `exclude` is dropped as usual. Write `scope = ""`, or omit it, when you mean a catch-all. Scopes have no regex form in either spelling. `identity_regexp` is the only regex surface, because an over-broad pattern here silently widens trust rather than failing loudly.
+
+:::tip[Learn more]
+[Signing In Depth][in-depth-signing] covers trust root mechanics, how a referrer is published, Sigstore bundle storage, slice boundaries and offline semantics. [Identity matching][in-depth-signing-identity] covers most-specific-wins resolution, regex identities and operator-versus-project tier precedence.
+The [`package sign`][cmd-package-sign] and [`package verify`][cmd-package-verify] references list flags, exit codes and CI examples.
+:::
+
+[cosign]: https://docs.sigstore.dev/cosign/overview/
+[cmd-config-push]: ../reference/command-line/config.md#config-push
+[cmd-package-sign]: ../reference/command-line/package-publishing.md#package-sign
+[cmd-package-verify]: ../reference/command-line/package-consuming.md#package-verify
+[config-trust]: ../reference/configuration.md#keys-trust
+[config-trust-scope]: ../reference/configuration.md#keys-trust-policy-scope
+[config-trust-builder]: ../reference/configuration.md#keys-trust-policy-builder
+[config-trust-signers]: ../reference/configuration.md#keys-trust-policy-signers
+[in-depth-signing]: ../explanation/signing.mdx
+[in-depth-signing-tiers]: ../explanation/signing.mdx#identity-matching-tiers
+[in-depth-signing-lock]: ../explanation/signing.mdx#identity-matching-lock
+[in-depth-signing-regex]: ../explanation/signing.mdx#identity-matching-regex
+[in-depth-signing-identity]: ../explanation/signing.mdx#identity-matching
+[env-ocx-key-password]: ../reference/environment.md#ocx-key-password

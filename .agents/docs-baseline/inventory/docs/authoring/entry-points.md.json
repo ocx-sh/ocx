@@ -1,0 +1,77 @@
+{
+ "anchors": [
+  "dispatch",
+  "entry-points",
+  "naming",
+  "see-also",
+  "target-python-example",
+  "when",
+  "why"
+ ],
+ "commands": [
+  "ocx env",
+  "ocx package exec",
+  "ocx package select"
+ ],
+ "flags": [],
+ "env": [],
+ "config_keys": [
+  "env",
+  "tool.bat",
+  "tool.cmd"
+ ],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "../in-depth/entry-points.md",
+  "../in-depth/environments.md",
+  "../reference/command-line.md#package-exec",
+  "../reference/command-line.md#select-entry-point-collision",
+  "../reference/metadata.md#entry-points",
+  "../reference/metadata.md#executables",
+  "../reference/metadata.md#executables-vs-entry-points",
+  "./env-surface.md",
+  "https://cmake.org/",
+  "https://github.com/BurntSushi/ripgrep",
+  "https://github.com/rui314/mold",
+  "https://go.dev/",
+  "https://index.ocx.sh",
+  "https://mise.jdx.dev/",
+  "https://nodejs.org/",
+  "https://openjdk.org/",
+  "https://www.python.org/",
+  "https://www.ruby-lang.org/",
+  "https://www.rust-lang.org/"
+ ],
+ "fences": [
+  "json:2aa7bf51: {",
+  "json:a6652b69: {",
+  "json:f2f352c2: {",
+  "python:87dca8c6: #!/usr/bin/env python3"
+ ],
+ "facts": [
+  "Entrypoints are named launchers OCX generates at install time, which land on PATH as bare commands once the package is selected. [L6]",
+  "Two JavaScript and two Java packages that expose their bin directories share one ambient node or java on the consumer's PATH. [L12]",
+  "Bare-binary exposure leaks a package's private execution environment into the shell, where every package's dependencies collide. [L14]",
+  "The launcher re-enters ocx launcher exec, which composes the package's private env and then resolves the entry name against it. [L18]",
+  "A launcher runs with its dependency's pinned Node taking priority, and that pin is never exposed as a bare PATH entry. [L21]",
+  "Without entrypoints packages publish their environment; with entrypoints they publish executables and keep the environment inside. [L24]",
+  "Declare entrypoints when the package depends on a runtime that another package also depends on, such as Python or the JVM. [L29]",
+  "A toolchain with fifty binaries can expose only three as entrypoints and keep bin private. [L34]",
+  "Self-contained static binaries such as Go and Rust builds gain nothing from entrypoints. [L36]",
+  "Packages with entrypoints usually demote bin to private, and OCX prepends the entrypoints directory to PATH at exec time. [L38]",
+  "Entry names must match a lowercase alphanumeric pattern, stay under 64 characters, and may not start with an underscore. [L42]",
+  "Collisions are checked at install and at compose time and reported as an EntrypointCollision error, never silently resolved. [L44]",
+  "When wrapping one upstream binary, declare the upstream name, since that is what users expect on PATH. [L46]",
+  "The entrypoints value is an object keyed by command name, with a reserved per-entry object that is currently always empty. [L54]",
+  "A meta-package exposes a dependency's cmake without re-bundling it, by putting the dependency's bin on the composed PATH. [L69]",
+  "The binary is not checked at install, so a typo in an entry name fails only when the launcher is invoked. [L86]",
+  "Entry points are never listed in the binaries field, which claims files the publisher shipped. [L89]",
+  "The Python example declares cpython as a private dependency, declares mytool as an entrypoint and demotes bin to private. [L105]",
+  "At exec time the launcher composes the private env, so the script's shebang finds the dependency's pinned CPython. [L131]",
+  "A private dependency edge fits, since the consumer should not discover that the package happens to use Python. [L135]",
+  "A native binary has no interpreter to pin, so bare bin on PATH works and entrypoints add nothing. [L137]",
+  "One entrypoints declaration covers every platform, generating sh launchers on Unix and an exe shim on Windows. [L141]"
+ ],
+ "lines": 182
+}

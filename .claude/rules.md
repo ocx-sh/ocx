@@ -72,7 +72,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md), [python-quality.md](./rules/python-quality.md) (shareable), [python-packaging.md](./rules/python-packaging.md) (shareable) |
 | TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [typescript-quality.md](./rules/typescript-quality.md) (shareable), [typescript-packaging.md](./rules/typescript-packaging.md) (shareable) |
 | Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
-| Vue / VitePress | [quality-vite.md](./rules/quality-vite.md) | [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md) |
+| Astro / Starlight | [quality-vite.md](./rules/quality-vite.md) | [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md) |
 
 ## By subsystem
 
@@ -91,7 +91,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Dependencies | [subsystem-deps.md](./rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml` |
 | Taskfiles | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` |
-| Machine interface | [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, `crates/ocx_cli/src/{api/data,command,options,exit}/**`, `crates/ocx_cli/src/{error_document,app/context_options}.rs`, `website/src/docs/reference/{environment,command-line}.md` |
+| Machine interface | [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, `crates/ocx_cli/src/{api/data,command,options,exit}/**`, `crates/ocx_cli/src/{error_document,app/context_options}.rs`, `website/src/content/docs/reference/environment.md`, `website/src/content/docs/reference/command-line/**` |
 | Bazel workspace | [bazel-quality.md](./rules/bazel-quality.md) (shareable) | `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `.bazelversion`, `.bazelignore`, `**/BUILD.bazel`, `**/*.bzl` |
 
 ## By auto-load path — "what fires when you edit"
@@ -110,14 +110,14 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `crates/ocx_package/src/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
 | `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [quality-cli-help.md](./rules/quality-cli-help.md) |
 | `crates/ocx_cli/src/api/**`, `crates/ocx_cli/src/command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
-| `crates/ocx_env/**`, `crates/ocx_cli/src/api/data/**`, `crates/ocx_cli/src/command/**`, `crates/ocx_cli/src/options/**`, `crates/ocx_cli/src/app/context_options.rs`, `crates/ocx_cli/src/error_document.rs`, `crates/ocx_cli/src/exit/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, `website/src/docs/reference/environment.md`, `website/src/docs/reference/command-line.md` | + [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) |
+| `crates/ocx_env/**`, `crates/ocx_cli/src/api/data/**`, `crates/ocx_cli/src/command/**`, `crates/ocx_cli/src/options/**`, `crates/ocx_cli/src/app/context_options.rs`, `crates/ocx_cli/src/error_document.rs`, `crates/ocx_cli/src/exit/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, `website/src/content/docs/reference/environment.md`, `website/src/content/docs/reference/command-line/**` | + [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) |
 | `**/pyproject.toml`, `**/uv.lock` | [python-packaging.md](./rules/python-packaging.md) |
 | `website/**` | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [docs-quality.md](./rules/docs-quality.md), [product-context.md](./rules/product-context.md) |
 | `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md), [typescript-quality.md](./rules/typescript-quality.md) |
 | `**/package.json`, `**/eslint.config.*`, `**/biome.json(c)` | [typescript-packaging.md](./rules/typescript-packaging.md) |
-| `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
+| `**/vite.config.*`, `**/astro.config.*` | [quality-vite.md](./rules/quality-vite.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) — the one git hook this repository writes lives at `scripts/pre-push.sh` and is *copied* under the name git insists on, so the source keeps its suffix and stays linted |
 | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/*.scl`, `**/MODULE.bazel`, `**/MODULE.bazel.lock`, `**/REPO.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel`, `**/WORKSPACE.bzlmod`, `**/.bazelrc`, `**/*.bazelrc`, `**/.bazelrc.*`, `**/.bazelversion`, `**/.bazelignore` | [bazel-quality.md](./rules/bazel-quality.md) |
 | Source files (`**/*.rs`, `**/*.py`, `**/*.ts`, `**/*.go`, … — the rule's `paths:` list) | [code-docs.md](./rules/code-docs.md) |

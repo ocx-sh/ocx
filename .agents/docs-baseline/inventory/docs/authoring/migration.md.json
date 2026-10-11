@@ -1,0 +1,83 @@
+{
+ "anchors": [
+  "describe",
+  "github-releases",
+  "github-releases-extract",
+  "homebrew",
+  "migration-patterns",
+  "mirror",
+  "see-also"
+ ],
+ "commands": [
+  "ocx package",
+  "ocx package create",
+  "ocx package description pull",
+  "ocx package description push"
+ ],
+ "flags": [
+  "--cascade",
+  "--description",
+  "--extract",
+  "--keywords",
+  "--logo",
+  "--readme",
+  "--save-readme",
+  "--strip-components",
+  "--title"
+ ],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "#mirror",
+  "../reference/command-line.md#package-create",
+  "../reference/command-line.md#package-description-pull",
+  "../reference/command-line.md#package-description-push",
+  "../reference/metadata.md#executables",
+  "../reference/metadata.md#extraction-strip-components",
+  "./building-pushing.md",
+  "./building-pushing.md#layer-reuse",
+  "./bundle-anatomy.md#strip-components",
+  "/casts/authoring/package-describe.cast",
+  "https://brew.sh/",
+  "https://cmake.org/",
+  "https://curl.se/",
+  "https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases",
+  "https://github.com/ocx-sh/ocx-mirror",
+  "https://github.com/opencontainers/image-spec",
+  "https://index.ocx.sh",
+  "https://wiki.debian.org/DebianRepository/Format",
+  "https://www.ruby-lang.org/"
+ ],
+ "fences": [
+  "sh:04fb34b6: curl -LO https://github.com/example-org/mytool/releases/down",
+  "sh:ff711840: ocx package description push \\",
+  "yaml:905c89c8: name: cmake",
+  "yaml:c796f4e1: linux/amd64:",
+  "yaml:dece79e5: name: mytool"
+ ],
+ "facts": [
+  "Publisher work reformats existing upstream binaries into OCI image manifests without re-bundling their content. [L6]",
+  "ocx_mirror is a pipeline driven by a YAML spec that runs download, bundle and push through the ocx_lib publisher API. [L10]",
+  "ocx_mirror batches cascade resolution across platforms in one invocation and caps new releases per run with new_per_run. [L12]",
+  "Cross-release layer reuse is a hand-publisher technique; ocx_mirror always uploads each platform archive afresh. [L12]",
+  "The minimal spec wraps one GitHub release project, mapping per-platform asset patterns and stripping one archive component. [L14]",
+  "cascade defaults to true and should be set false only for repositories that must not advance rolling tags. [L42]",
+  "The CMake example adds a multi-platform asset matrix, version-range filtering and per-platform metadata overrides. [L44]",
+  "For each platform, the union of asset regexes must resolve to exactly one asset filename per release. [L56]",
+  "The version range keeps mirroring to releases from 3.31.0 onward and caps the run at ten new releases. [L79]",
+  "The github_release source reads the release feed and pushes through the same publisher API as ocx package create and push. [L90]",
+  "Ambiguous matches abort the run; two regexes matching the same filename are fine, while different filenames are an error. [L100]",
+  "GitHub release tarballs wrap content in a version-named directory, but OCX bundles need a flat surface at the root. [L104]",
+  "The example uses --extract with --strip-components 1 to bundle a downloaded release asset without unpacking it by hand. [L106]",
+  "--extract runs the metadata sidecar, binaries scan and libc check against the extracted tree, as if it were a directory. [L117]",
+  "--strip-components runs once at authoring time, unlike the metadata strip_components field, which applies at every install. [L117]",
+  "Homebrew formulae are Ruby programs with no general import path, so their URLs and checksums are migrated by hand. [L121]",
+  "Binary bottles unpack as formula, version, bin, so strip_components 2 fits and the PATH entry must be public. [L123]",
+  "Source-built formulae do not migrate cleanly without rebuilding, because OCX is a binary package manager. [L123]",
+  "description push stores README, logo, title and keywords under the __ocx.desc tag, and description pull reads them back. [L127]",
+  "The mirror pipeline does not push descriptions, so re-run description push whenever the README or logo changes. [L143]"
+ ],
+ "lines": 176
+}

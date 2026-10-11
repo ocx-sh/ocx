@@ -141,7 +141,7 @@ impl ConfigPushArgs {
 /// The arguments of `ocx config setup`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConfigSetupArgs {
-    /// Adopt (or clear) this managed-config source
+    /// Adopt this managed-config source; an empty string clears the seed and deletes the snapshot
     pub managed_config: Option<String>,
     /// Report the intended actions without writing anything
     pub dry_run: bool,
@@ -179,7 +179,8 @@ pub struct ConfigUpdateArgs {
     pub version: Option<String>,
     /// Report the managed-config tier's status without fetching or swapping
     pub check: bool,
-    /// Pause the background refresh for a duration (e.g. `4h`, `3d`; max `7d`)
+    /// Pause the background refresh for a duration (e.g. `4h`, `3d`; max `7d`); an update without
+    /// `--pause` clears it
     pub pause: Option<String>,
     /// Clear an active pause and refresh immediately
     pub resume: bool,
@@ -200,7 +201,8 @@ impl ConfigUpdateArgs {
 pub struct DirenvExportArgs {
     /// Restrict the composition to the named group(s)
     pub groups: Vec<String>,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Materialize resolved packages into the object store, installing on a local miss
     pub pull: bool,
@@ -225,7 +227,8 @@ impl DirenvExportArgs {
 /// The arguments of `ocx direnv init`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DirenvInitArgs {
-    /// Overwrite an existing `.envrc` in the current directory
+    /// Overwrite an existing `.envrc` in the current directory. Without it, an existing file exits
+    /// 78 and is left untouched
     pub force: bool,
 }
 
@@ -241,11 +244,14 @@ impl DirenvInitArgs {
 pub struct EnvArgs {
     /// Restrict the composition to the named group(s)
     pub groups: Vec<String>,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
-    /// Target shell for eval-safe export lines
+    /// Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or
+    /// the parent process and exits 64 when undetectable
     pub shell: Option<String>,
-    /// Write the composed environment into a CI system's persistence channel
+    /// Write the composed environment into a CI system's persistence channel. Bare `--ci`
+    /// autodetects the provider and exits 64 when none is found
     pub ci: Option<String>,
     /// Write the GitLab export to this file instead of stdout
     pub export_file: Option<PathBuf>,
@@ -308,7 +314,8 @@ pub struct ExecArgs {
     /// Start with a clean environment containing only the package variables, instead of inheriting
     /// the current shell environment
     pub clean: bool,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Control when a package's content downloads: now, or on first use
     pub lazy_mode: Option<String>,
@@ -409,7 +416,8 @@ impl IndexRegenerateArgs {
 pub struct IndexSyncArgs {
     /// Registries whose catalog names the packages to refresh
     pub registries: Vec<String>,
-    /// Print the packages this would refresh, and refresh none of them
+    /// Print the packages this would refresh and refresh none; nothing is written, not even
+    /// `config.json`, and no `\[patches\]` sync runs
     pub dry_run: bool,
 }
 
@@ -459,7 +467,8 @@ pub struct InspectArgs {
     pub groups: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Select this host's leaf and emit its metadata plus the OCI resolution chain
     pub resolve: bool,
@@ -661,9 +670,11 @@ impl PackageAnnounceArgs {
 pub struct PackageAttestArgs {
     /// Narrow into one platform of an image index
     pub platform: Option<String>,
-    /// Predicate document to attach (JSON)
+    /// Predicate document to attach (JSON), at most 15 MiB; on Unix a symlink at PATH is refused
     pub predicate: PathBuf,
-    /// Predicate type: an alias or a full URI
+    /// Predicate type: an alias (cyclonedx, spdx, spdxjson, slsaprovenance1, link, vuln, openvex,
+    /// custom) or a full URI. `custom` wraps the predicate in cosign's Data/Timestamp envelope;
+    /// `slsaprovenance` and `slsaprovenance02` exit 64, so pass `slsaprovenance1`
     pub predicate_type: String,
     /// Fulcio CA endpoint (the keyless certificate issuer)
     pub fulcio_url: Option<String>,
@@ -677,7 +688,8 @@ pub struct PackageAttestArgs {
     pub no_tty: bool,
     /// Bypass the referrers-capability cache for this invocation
     pub no_cache: bool,
-    /// Signature wire format: bundle (default), simplesigning, or both
+    /// Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer,
+    /// never replacing one; `attest` with no signing identity refuses it (exit 64)
     pub signature_format: Option<String>,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
@@ -823,9 +835,11 @@ impl PackageClaimArgs {
 /// The arguments of `ocx package copy`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageCopyArgs {
-    /// Rewrite only the registry host, keeping the repository path and tag
+    /// Rewrite only the registry host, keeping the repository path and tag. Conflicts with
+    /// `--identifier`
     pub to: Option<String>,
-    /// Full target reference, when the repository path or tag changes too
+    /// Full target reference, when the repository path or tag changes too; required when SOURCE
+    /// names a digest. Conflicts with `--to`
     pub identifier: Option<String>,
     /// Platform to copy. Repeatable
     pub platform: Vec<String>,
@@ -835,7 +849,10 @@ pub struct PackageCopyArgs {
     pub keep_tag: bool,
     /// Skip the keep tag
     pub no_keep_tag: bool,
-    /// Carry the signatures, SBOMs and attestations anchored to each manifest (default)
+    /// Carry the signatures, SBOMs and attestations anchored to each manifest, plus the cosign
+    /// `.sig`, `.att` and `.sbom` sidecar tags (default). A sidecar tag the target holds under a
+    /// different manifest is reported, never overwritten, and the exit is 65. A target without the
+    /// OCI 1.1 Referrers API exits 82
     pub referrers: bool,
     /// Leave the signatures, SBOMs and attestations behind
     pub no_referrers: bool,
@@ -843,7 +860,8 @@ pub struct PackageCopyArgs {
     pub with_description: bool,
     /// Record an OCI annotation on the target's image index. Repeatable
     pub annotation: Vec<String>,
-    /// Report what would be copied and write nothing
+    /// Report what would be copied and write nothing. The cascade and keep-tag moves are not
+    /// computed, so those report fields stay empty
     pub dry_run: bool,
     /// Package to copy: `registry/repository:tag` or `registry/repository@sha256:...`
     pub source: String,
@@ -894,7 +912,8 @@ pub struct PackageCreateArgs {
     pub no_bin_scan: bool,
     /// Skip the libc check on the packaged binaries
     pub no_libc_lint: bool,
-    /// Treat PATH as an archive and bundle what it extracts to
+    /// Treat PATH as an archive (tar, gzip, xz, zstd, bzip2 or zip, read from the file name) and
+    /// bundle what it extracts to
     pub extract: bool,
     /// Drop the leading N path components of every extracted entry
     pub strip_components: Option<i64>,
@@ -992,11 +1011,14 @@ impl PackageDescriptionPullArgs {
 /// The arguments of `ocx package description push`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageDescriptionPushArgs {
-    /// Copy the whole description from another package repository
+    /// Copy the whole description from another package repository; a source with no description or
+    /// no repository exits 79 and leaves the target untouched
     pub from: Option<String>,
-    /// Path to the README markdown file
+    /// Path to the README markdown file; required on the first push to a repository with no
+    /// description
     pub readme: Option<PathBuf>,
-    /// Path to an optional logo image (PNG or SVG)
+    /// Path to an optional logo image (PNG or SVG); bytes that do not match the extension exit 65
+    /// and leave the published description untouched
     pub logo: Option<PathBuf>,
     /// Short title for catalog display (sets org.opencontainers.image.title)
     pub title: Option<String>,
@@ -1041,7 +1063,8 @@ pub struct PackageEnvArgs {
     /// Expose the package's full env, including private (self-only) entries. See `ocx exec --help`
     /// for full view semantics
     pub self_view: bool,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
@@ -1057,9 +1080,11 @@ pub struct PackageEnvArgs {
     pub lazy_mode: Option<String>,
     /// Package identifiers to resolve the environment for
     pub packages: Vec<String>,
-    /// Target shell for eval-safe export lines
+    /// Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or
+    /// the parent process and exits 64 when undetectable
     pub shell: Option<String>,
-    /// Write the composed environment into a CI system's persistence channel
+    /// Write the composed environment into a CI system's persistence channel. Bare `--ci`
+    /// autodetects the provider and exits 64 when none is found
     pub ci: Option<String>,
     /// Write the GitLab export to this file instead of stdout
     pub export_file: Option<PathBuf>,
@@ -1113,7 +1138,8 @@ pub struct PackageExecArgs {
     pub self_view: bool,
     /// Remove the packages from the store once the command finishes
     pub rm: bool,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
@@ -1163,7 +1189,8 @@ impl PackageExecArgs {
 pub struct PackageInspectArgs {
     /// Target platform to resolve packages against
     pub platform: Option<String>,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Platform-select through the index and emit the OCI resolution chain (pinned identifier and
     /// walk-order chain digests: index, manifest, config) alongside the metadata and layers.
@@ -1192,8 +1219,8 @@ impl PackageInspectArgs {
 pub struct PackageInstallArgs {
     /// Also set the installed version as current (creates the current symlink)
     pub select: bool,
-    /// Also link the installed package at PATH, which keeps it from `ocx clean` while the link
-    /// exists
+    /// Also link the installed package at PATH, which keeps it from `ocx clean`. PATH must be
+    /// absent or an earlier `--link`, else exit 65; takes one package
     pub link: Option<PathBuf>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
@@ -1224,11 +1251,13 @@ pub struct PackagePruneArgs {
     pub prerelease: Option<String>,
     /// With `--prerelease`: keep the newest N builds and the rolling tag (N >= 1)
     pub keep_builds: Option<i64>,
-    /// Delete tags the index does not mark ephemeral, or with no index to ask
+    /// Delete tags the index does not mark ephemeral, or with no index to ask. A forced tag's index
+    /// row stays until a reviewed announce removes it
     pub force: bool,
     /// Append each gone tag the index lists, one per line, for `ocx package announce --tags-file`.
     /// Creates the file if absent and keeps the tags already in it. Written on every run that gets
-    /// past selection, empty included, never on a dry run
+    /// past selection, empty included and even when the run then fails partway, never on a dry run.
+    /// A forced delete of a tag the index does not list writes nothing
     pub tags_file: Option<PathBuf>,
     /// Run the safeguard and report; delete nothing, write nothing
     pub dry_run: bool,
@@ -1288,7 +1317,8 @@ pub struct PackagePushArgs {
     pub default: bool,
     /// Skip the keep tag
     pub no_keep_tag: bool,
-    /// Append a UTC build-metadata segment to the published tag
+    /// Append a UTC build-metadata segment to the published tag, which must be `X.Y.Z` (variant or
+    /// pre-release allowed) with no build metadata yet
     pub build_timestamp: Option<String>,
     /// Path to the package metadata JSON file. Defaults to a sibling of the first file layer (e.g.
     /// `pkg.tar.gz` -> `pkg-metadata.json`). Required when no file layers are provided
@@ -1300,15 +1330,18 @@ pub struct PackagePushArgs {
     /// After a successful push, append the pushed tag and any cascade tags to this file, one per
     /// line (creating it if absent), so `ocx package announce --tags-file` can pick them up
     pub tags_file: Option<PathBuf>,
-    /// After the push, attest this CycloneDX SBOM against the pushed manifest
+    /// After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not
+    /// undo the push, is recorded in the report and sets the exit code
     pub sbom: Option<PathBuf>,
-    /// Sign each platform manifest this push writes, inline
+    /// Sign each platform manifest this push writes, inline. A failure does not undo the push, is
+    /// recorded in the report and sets the exit code
     pub sign: bool,
     /// Fulcio CA endpoint (the keyless certificate issuer)
     pub fulcio_url: Option<String>,
     /// Rekor transparency-log endpoint
     pub rekor_url: Option<String>,
-    /// Signature wire format: bundle (default), simplesigning, or both
+    /// Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer,
+    /// never replacing one; `attest` with no signing identity refuses it (exit 64)
     pub signature_format: Option<String>,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
@@ -1386,7 +1419,9 @@ impl PackageReceiptArgs {
 pub struct PackageSbomArgs {
     /// Narrow into one platform of an image index
     pub platform: Option<String>,
-    /// Write the SBOM document to PATH ("-" for stdout)
+    /// Write the SBOM document to PATH ("-" for stdout). Several candidates exit 65
+    /// (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names
+    /// the referrer digest
     pub output: Option<PathBuf>,
     /// Parse each SBOM and report component counts (CycloneDX 1.5-1.7 only)
     pub summary: bool,
@@ -1398,10 +1433,9 @@ pub struct PackageSbomArgs {
     pub certificate_oidc_issuer: Option<String>,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
-    /// Signature wire format: bundle (default), simplesigning, or both
-    pub signature_format: Option<String>,
     /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
-    /// trusted_root.json), named by a bare path or a file:// one
+    /// trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable
+    /// exits 74
     pub trusted_root: Option<PathBuf>,
     /// Rekor transparency-log endpoint
     pub rekor_url: Option<String>,
@@ -1409,10 +1443,13 @@ pub struct PackageSbomArgs {
     pub no_cache: bool,
     /// Require a verified signature; refuse unsigned attachments
     pub verify: bool,
-    /// List documents without verifying anything
+    /// List documents without verifying anything; `--output` still writes the document, with one
+    /// stderr warning naming the referrer digest
     pub no_verify: bool,
     /// Package identifier to read (`registry/repo:tag\[@digest\]`)
     pub identifier: String,
+    /// Signature wire format to accept: bundle or simplesigning
+    pub signature_format: Option<String>,
 }
 
 impl PackageSbomArgs {
@@ -1435,18 +1472,18 @@ impl PackageSbomArgs {
             &[],
         );
         argv.flag("key", &self.key, Presence::Optional, &[]);
-        argv.flag(
-            "signature-format",
-            &self.signature_format,
-            Presence::Optional,
-            &["bundle", "simplesigning", "both"],
-        );
         argv.flag("sigstore-trusted-root", &self.trusted_root, Presence::Optional, &[]);
         argv.flag("rekor-url", &self.rekor_url, Presence::Optional, &[]);
         argv.switch("no-cache", self.no_cache);
         argv.switch("verify", self.verify);
         argv.switch("no-verify", self.no_verify);
         argv.positional("identifier", [&self.identifier], Presence::Required, Hyphen::Refuse);
+        argv.flag(
+            "signature-format",
+            &self.signature_format,
+            Presence::Optional,
+            &["bundle", "simplesigning", "both"],
+        );
     }
 }
 
@@ -1484,7 +1521,8 @@ pub struct PackageSignArgs {
     pub no_tty: bool,
     /// Bypass the referrers-capability cache for this invocation
     pub no_cache: bool,
-    /// Signature wire format: bundle (default), simplesigning, or both
+    /// Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer,
+    /// never replacing one; `attest` with no signing identity refuses it (exit 64)
     pub signature_format: Option<String>,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
@@ -1553,7 +1591,8 @@ pub struct PackageTestArgs {
     /// Strip ambient parent env before composing - only `OCX_*` config and composed package vars
     /// reach the child. Mirrors `ocx exec --clean`
     pub clean: bool,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Identifier under which the package is materialized. Tag form (`repo:tag`) only; an explicit
     /// `@digest` is rejected (the digest is computed locally during this command and supplying one
@@ -1568,7 +1607,8 @@ pub struct PackageTestArgs {
     /// the materialized package env is interpreted by the embedded engine instead of exec'ing a
     /// command
     pub script: Option<PathBuf>,
-    /// Write a JUnit XML report for the scripted run to PATH
+    /// Write a JUnit XML report for the scripted run to PATH, truncating an existing file, even on
+    /// a red run; needs `--script`, and an unwritable path exits 74
     pub junit: Option<PathBuf>,
     /// Command to execute inside the composed env, with arguments. Required unless `--script` is
     /// given (exactly one of the two forms must be supplied)
@@ -1596,7 +1636,7 @@ impl PackageTestArgs {
 /// The arguments of `ocx package uninstall`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageUninstallArgs {
-    /// Also remove the current symlink (equivalent to also running `ocx deselect`)
+    /// Also remove the current symlink (equivalent to also running `ocx package deselect`)
     pub deselect: bool,
     /// Delete the object from the store when no references remain after uninstall
     pub purge: bool,
@@ -1624,23 +1664,24 @@ pub struct PackageVerifyArgs {
     pub certificate_oidc_issuer: Option<String>,
     /// Sign or verify with a key pair instead of keyless Sigstore
     pub key: Option<String>,
-    /// Signature wire format: bundle (default), simplesigning, or both
-    pub signature_format: Option<String>,
     /// Rekor transparency-log endpoint
     pub rekor_url: Option<String>,
     /// Verify a signed in-toto attestation instead of an artifact signature
     pub attestation: bool,
-    /// Restrict to one predicate type (for example cyclonedx or spdx)
+    /// Restrict to one predicate type (for example cyclonedx or spdx); requires `--attestation`
     pub predicate_type: Option<String>,
     /// Accept a keyless cosign sidecar that carries no transparency-log entry
     pub allow_unlogged_signature: bool,
     /// Bypass the referrers-capability cache for this invocation
     pub no_cache: bool,
     /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
-    /// trusted_root.json), named by a bare path or a file:// one
+    /// trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable
+    /// exits 74
     pub trusted_root: Option<PathBuf>,
     /// Package identifier to verify (`registry/repo:tag\[@digest\]`)
     pub identifier: String,
+    /// Signature wire format to accept: bundle or simplesigning
+    pub signature_format: Option<String>,
 }
 
 impl PackageVerifyArgs {
@@ -1660,12 +1701,6 @@ impl PackageVerifyArgs {
             &[],
         );
         argv.flag("key", &self.key, Presence::Optional, &[]);
-        argv.flag(
-            "signature-format",
-            &self.signature_format,
-            Presence::Optional,
-            &["bundle", "simplesigning", "both"],
-        );
         argv.flag("rekor-url", &self.rekor_url, Presence::Optional, &[]);
         argv.switch("attestation", self.attestation);
         argv.flag("type", &self.predicate_type, Presence::Optional, &[]);
@@ -1673,6 +1708,12 @@ impl PackageVerifyArgs {
         argv.switch("no-cache", self.no_cache);
         argv.flag("sigstore-trusted-root", &self.trusted_root, Presence::Optional, &[]);
         argv.positional("identifier", [&self.identifier], Presence::Required, Hyphen::Refuse);
+        argv.flag(
+            "signature-format",
+            &self.signature_format,
+            Presence::Optional,
+            &["bundle", "simplesigning", "both"],
+        );
     }
 }
 
@@ -1756,8 +1797,9 @@ pub struct PatchTestArgs {
     pub platform: Option<String>,
     /// Use the base's own surface, the one its launchers see, instead of its consumers'
     pub self_view: bool,
-    /// Path to a local archive for a companion package, allowing the companion to be materialized
-    /// without a registry round-trip. Repeatable
+    /// Path to a local archive for a companion package, read without a registry round-trip; needs a
+    /// `<archive-stem>-metadata.json` sidecar whose identifier names a companion the descriptor
+    /// lists. Repeatable
     pub companion_archives: Vec<PathBuf>,
     /// Base identifier to compose the descriptor onto
     pub base: String,
@@ -1766,7 +1808,8 @@ pub struct PatchTestArgs {
     /// Path to a Starlark test script to run in the composed environment. Mutually exclusive with a
     /// trailing command
     pub script: Option<PathBuf>,
-    /// Set an environment variable for this invocation, or pass one by name
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
     pub env: Vec<String>,
     /// Command to run in the composed environment, after `--`. Mutually exclusive with `--script`.
     /// When neither is given, the composed environment is printed
@@ -1860,7 +1903,8 @@ impl RemoveArgs {
 /// The arguments of `ocx self activate`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SelfActivateArgs {
-    /// Target shell for activation output
+    /// Target shell for activation output (`sh` is `dash`, `pwsh` is `powershell`, `nu` is
+    /// `nushell`)
     pub shell: Option<String>,
     /// Force shell-completion injection on, regardless of session interactivity
     pub completion: bool,
@@ -1924,7 +1968,8 @@ pub struct SelfSetupArgs {
     pub dry_run: bool,
     /// Overwrite a managed block that carries user edits (the dirty state)
     pub force: bool,
-    /// Adopt (or clear) the corporate managed-config tier
+    /// Adopt the corporate managed-config tier; an empty value (`--managed-config ""`) clears the
+    /// seed and deletes the snapshot
     pub managed_config: Option<String>,
 }
 
@@ -1984,7 +2029,8 @@ impl ShellAllowArgs {
 pub struct ShellCompletionArgs {
     /// Print nothing when completions are switched off for this session
     pub if_enabled: bool,
-    /// The shell to generate the completions for: bash, elvish, fish, powershell or zsh
+    /// The shell to generate the completions for: bash, elvish, fish, powershell or zsh. Omitted,
+    /// it is detected from the parent shell
     pub shell: Option<String>,
 }
 
@@ -2058,7 +2104,8 @@ impl StatusArgs {
 /// The arguments of `ocx update`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UpdateArgs {
-    /// Verify the candidate lock would match the predecessor and exit
+    /// Verify the candidate lock would match the predecessor and exit; exits 65 when a pin would
+    /// change
     pub check: bool,
     /// List the bindings that did not move as well as the ones that did
     pub verbose: bool,
@@ -2651,8 +2698,8 @@ impl Ocx {
 
     /// Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the current shell.
     /// Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless
-    /// `OCX_NO_COMPLETION=1`), and evaluates the global toolchain env. Safe to re-source: the PATH
-    /// updates are idempotent (move-to-front), so a re-source never duplicates an entry
+    /// `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source
+    /// never duplicates an entry
     ///
     /// Runs `ocx self activate`.
     pub fn self_activate(&self, args: &SelfActivateArgs) -> Result<Raw, Error> {
@@ -2671,7 +2718,7 @@ impl Ocx {
     }
 
     /// Update ocx itself to the latest released version. Without `--check`, downloads the newest
-    /// release and activates it. With `--check`, reports the result without installing
+    /// release and activates it; with `--check`, reports the result without installing
     ///
     /// Runs `ocx self update`.
     pub fn self_update(&self, args: &SelfUpdateArgs) -> Result<Raw, Error> {

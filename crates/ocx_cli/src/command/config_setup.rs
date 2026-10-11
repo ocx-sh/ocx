@@ -22,10 +22,10 @@ use crate::api::data::config_setup::ConfigSetupData;
 /// snapshot and still succeeds. Nothing resolved is a usage error: unlike
 /// `ocx self setup`, this command exists only to set up the tier.
 ///
-/// Exit codes: <https://ocx.sh/docs/reference/command-line#config-setup>
+/// Exit codes: <https://ocx.sh/docs/reference/command-line/config/#config-setup>
 #[derive(Parser)]
 pub struct ConfigSetupArgs {
-    /// Adopt (or clear) this managed-config source.
+    /// Adopt this managed-config source; an empty string clears the seed and deletes the snapshot.
     ///
     /// An OCI reference to a managed-config artifact (published with
     /// `ocx config push`). Pass an empty string (`--managed-config ""`) to

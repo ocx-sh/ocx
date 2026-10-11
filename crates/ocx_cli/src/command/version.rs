@@ -14,6 +14,10 @@ pub struct Version {
     /// Emit enriched build provenance - commit, dirty flag, build time,
     /// target, rustc, CI run URL. JSON output always includes the
     /// populated subset; this flag only affects plain text.
+    ///
+    /// Adds the host platform (OS/arch and detected libc). Absent fields are
+    /// suppressed: no commit row for a build without git, no CI row outside CI,
+    /// and no `host:` row when the host is outside OCX's supported platform set.
     #[arg(short, long)]
     verbose: bool,
 }

@@ -117,6 +117,23 @@ research-axes:
 
 ## Memory
 
+- **Active plan (hex-plan xhigh, 2026-10-11, plan-approved): `.claude/artifacts/plan_docs_next_level.md`** —
+  from the ratified `docs-next-level` discussion; contract wave P0 + 18 pipelines / 7 waves, critical path
+  P0 → P2 → P5 → P9 → P12 → P13b → P14. Theme pinned to npm `@ocx-sh/theme@0.1.1` (on website main); theme gaps
+  ship ocx-local, upstream patch for the owner (I4 divergence, no website push grant); production switch = repo
+  changes, Bunny acts owner-side. Research/architect/adversary skipped (ratified discussion + 5 persisted lanes).
+  Next: `/hex-execute .claude/artifacts/plan_docs_next_level.md`.
+- **Discussion (2026-10-11, handed-off → loop): `.agents/discussions/docs-next-level.md`** —
+  ocx docs to Starlight + `@ocx-sh/theme` (theme PR, SHA pin, D13 waived), generated
+  CLI/env/config reference (one page per command group), reference rule enforced via
+  docs-quality gate, `/docs-plan` task-first IA, production switch to Bunny `/docs/`,
+  phase 7 deletes everything moved to ocx-website (VitePress tree, landing/team, CF Pages
+  workflows, stale AI config). Every page reviewed vs docs-quality, non-regression
+  baseline (grade + content inventory), final parallel haiku completeness sweep until dry.
+  Fully autonomous. Research: `.agents/research/research_{reference-vs-explanation,
+  docs-reference-recon,starlight-reference-generation,theme-gap-ocx-docs,
+  docs-use-case-inventory}.md`. Next: `/hex-loop .agents/discussions/docs-next-level.md`.
+
 - **Plan (hex-plan high, 2026-10-05, plan-approved): `.claude/artifacts/plan_update_family.md`** — #405, #42, #479,
   #548, #310, #590; 6 pipelines / 2 waves, one squashed commit per issue on `goat`; critical path P2→P5. Research:
   `research_update_upgrade_ux.md`. Owner rulings: frozen push skips refresh; `ocx upgrade` same-major unless `--major`; managed tier ignores `[update]`; `[update]` never fails a command.

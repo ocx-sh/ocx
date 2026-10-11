@@ -114,7 +114,8 @@ impl PackageManager {
     /// # Errors
     /// Returns a [`PackageErrorKind`] (fail-closed) when a policy-covered
     /// package fails verification, when a matched policy is malformed (exit 78),
-    /// or when required trust material is unavailable (exit 78).
+    /// or when required trust material is unavailable (exit 78, or 81 offline
+    /// with no pinned Rekor key).
     pub async fn maybe_auto_verify(&self, resolved: &ocx_oci::PackageRef) -> Result<(), PackageErrorKind> {
         let Some(auto_verify) = self.auto_verify() else {
             return Ok(());

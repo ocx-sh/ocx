@@ -1,0 +1,100 @@
+---
+title: "Authenticate with a private registry"
+description: "Give OCX credentials for a private registry through environment variables, Docker credentials or stored logins."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Tabs from '@ocx-sh/theme/components/Tabs.astro'
+import TabItem from '@ocx-sh/theme/components/TabItem.astro'
+
+Give OCX credentials for a registry that needs a login, so that installs, pulls and pushes against it succeed.<a id="authentication"></a>
+
+OCX looks for credentials per registry, so different registries can use different credentials. It tries each method in order and the first one that succeeds wins:
+
+1. [Environment variables](#authentication-environment-variables)
+2. [Docker credentials](#authentication-docker-credentials)
+
+## Environment variables \{#authentication-environment-variables\}
+
+Set the `OCX_AUTH_*` variables for a registry:
+
+<Tabs syncKey="shell">
+
+<TabItem label={"bearer"}>
+
+```sh
+export OCX_AUTH_docker_io_TYPE=bearer
+export OCX_AUTH_docker_io_TOKEN="<token>"
+```
+
+
+</TabItem>
+
+<TabItem label={"basic"}>
+
+```sh
+export OCX_AUTH_docker_io_TYPE=basic
+export OCX_AUTH_docker_io_USER="<user>"
+export OCX_AUTH_docker_io_TOKEN="<token>"
+```
+
+</TabItem>
+
+</Tabs>
+
+
+The variables are:
+
+- [`OCX_AUTH_<REGISTRY>_TYPE`][env-auth-type] sets the type of authentication: `basic`, `token` (or `bearer`), or `anonymous`.
+- [`OCX_AUTH_<REGISTRY>_USER`][env-auth-user] sets the username. It is read for `basic` only and ignored for any other type. The password goes in `TOKEN`.
+- [`OCX_AUTH_<REGISTRY>_TOKEN`][env-auth-token] sets the bearer token, or the password for `basic`. It is ignored unless the type is `bearer` or `basic`.
+
+:::note[Registry name normalization]
+OCX normalizes the registry name in the variable by replacing every non-alphanumeric character with an underscore. For `docker.io`, it looks for `OCX_AUTH_docker_io_TYPE`. This is stricter than the [path component encoding][in-depth-storage-stores] used for filesystem paths, which preserves dots and hyphens.
+:::
+
+If `TYPE` is omitted, `USER` and `TOKEN` together mean basic and `TOKEN` alone means bearer. `USER` alone is ignored. The [environment variable reference][env-ref] lists every `OCX_AUTH_*` variant.
+
+## Docker credentials \{#authentication-docker-credentials\}
+
+If a Docker configuration is found, OCX uses the stored credentials. The configuration is typically at `~/.docker/config.json` and managed via:
+
+```sh
+docker login "<registry>"
+```
+
+Set [`DOCKER_CONFIG`][env-docker-config] to change the directory. OCX delegates to Docker's credential helper, which reads it. A credential resolves from `credHelpers[REGISTRY]`, then `credsStore`, then `auths[REGISTRY]`. Any `OCX_AUTH_*` variable for the registry wins over all of them.
+
+:::tip[Learn more]
+[Environment variable reference][env-ref]: every `OCX_AUTH_*` variant and the complete normalization rules.
+[Configuration In Depth][in-depth-configuration]: pair auth variables with per-tier config defaults.
+:::
+
+## Storing credentials \{#authentication-storing\}
+
+[`ocx login REGISTRY`][cmd-login] writes credentials to the same `~/.docker/config.json` that `docker login` and `oras login` use. The three tools interoperate, so a credential written by any of them is readable by the others.
+
+Storage tier (highest priority first):
+
+1. `credHelpers[REGISTRY]` in `~/.docker/config.json` (per-registry helper)
+2. `credsStore` (global default helper)
+3. Plaintext `auths[REGISTRY].auth` (gated by `--allow-insecure-store`)
+
+For headless CI without a native keychain daemon, pipe the token via `--password-stdin` and pass `--allow-insecure-store` to opt into the plaintext tier. `OCX_AUTH_*` environment variables still take precedence over any docker-config-stored credential at read time.
+
+\<\<\< @/_scripts/user-guide/login.sh\{sh\}
+
+After `ocx login`, confirm the credential works by pulling a package from the private registry, for example `ocx package pull registry.example.com/team/tool:1.0`. The pull succeeds when the registry accepts the credential, and fails with a non-zero exit when it does not.
+
+Remove credentials with [`ocx logout`][cmd-logout]. Logout exits 0 when the registry was never logged in, so CI cleanup scripts are safe to run unconditionally. A credential that cannot be removed exits non-zero.
+
+[cmd-login]: ../reference/command-line/commands.md#login
+[cmd-logout]: ../reference/command-line/commands.md#logout
+[env-auth-type]: ../reference/environment.md#ocx-auth-registry-type
+[env-auth-user]: ../reference/environment.md#ocx-auth-registry-user
+[env-auth-token]: ../reference/environment.md#ocx-auth-registry-token
+[env-docker-config]: ../reference/environment.md#external-docker-config
+[env-ref]: ../reference/environment.md
+[in-depth-storage-stores]: ../explanation/storage.mdx#stores
+[in-depth-configuration]: ../explanation/configuration.mdx

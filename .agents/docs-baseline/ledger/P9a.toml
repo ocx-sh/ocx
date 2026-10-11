@@ -1,0 +1,347 @@
+[[row]]
+item = "command-line"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "general-options"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "ci-export"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "shell-env"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "shell-hook"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "shell-init"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "select"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "deselect"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "uninstall"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--bogus"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--identity-token"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--interactive"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--no"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--no-interactive"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--package"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--password"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "__OCX_BUILD_VERSION"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "annotations_written"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "author_identity_source"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "capability_checks"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "cascade_tags_written"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "combined_path_value"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "config_error"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "credential_kind"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "data_error"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "from_version"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "git_helper"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "install_path_rooted_non_path_var"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "io_error"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "job_token"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "keep_tags_written"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "manifest_digest"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "metadata_changed"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "partial_failure"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::partial_failure"
+
+[[row]]
+item = "platform_digests"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "predicate_type"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "push_credential_kind"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "reason_kind"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::reason_kind"
+
+[[row]]
+item = "registry_probe_failed"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "sbom_summary_failed"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "spawn_failed"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "temp_fail"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "to_version"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "undeclared_binaries"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "env-overrides"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "errors"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "keys"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "future"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "speculative"
+
+[[row]]
+item = "future-clean"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "speculative"
+
+[[row]]
+item = "future-project"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "speculative"
+
+[[row]]
+item = "future-registries-fields"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "speculative"
+
+[[row]]
+item = "io_error"
+page = "docs/reference/configuration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "ocx-mirror-pipeline"
+page = "docs/reference/environment.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "OCX_AUTH_PASSWORD"
+page = "docs/reference/environment.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "OCX_AUTH_TOKEN"
+page = "docs/reference/environment.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "OCX_AUTH_USER"
+page = "docs/reference/environment.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "OCX_HOOK"
+page = "docs/reference/environment.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "OCX_PROXY"
+page = "docs/reference/environment.md"
+action = "deleted"
+reason = "obsolete"

@@ -1,0 +1,213 @@
+---
+title: "Repackage an upstream release"
+description: "Turn an upstream GitHub Release, Homebrew bottle or vendor archive into an OCX package, by hand or with ocx_mirror."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+By the end of this page you have an upstream release repackaged as an OCX package. Upstream projects usually ship binaries as a [Homebrew formula][homebrew], a [GitHub Release][gh-releases] zip, an [APT repository][apt-repos] or a signed installer. You reformat those artifacts into [OCI image manifests][oci-image-spec] without re-bundling content. You need the upstream asset and a `metadata.json`. The [`ocx_mirror`][in-tree-mirror-spec] tool automates the recurring steps.
+
+## The ocx_mirror pipeline \{#mirror\}
+
+[`ocx_mirror`][in-tree-mirror-spec] keeps public OCX packages in sync with their upstreams. A YAML spec says where to find releases, which assets to take per platform and how to map them onto OCX metadata. The tool then runs download, bundle and push through the same `ocx_lib` publisher API as the `ocx package` commands.
+
+Compared with running the commands by hand, the pipeline batches `--cascade` resolution across platforms in one invocation and transforms upstream archives deterministically. A `versions.new_per_run` limit (unlimited when omitted) stops one CI run from flooding the registry with a backlog. `ocx_mirror` always uploads each platform's archive afresh, so the [layer-reuse][authoring-layer-reuse] pattern applies only to hand publishing.
+
+A minimal spec that wraps one upstream project:
+
+```yaml
+name: mytool
+target:
+  registry: ocx.sh
+  repository: mytool
+
+source:
+  type: github_release
+  owner: example-org
+  repo: mytool
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "mytool-.*-linux-x86_64\\.tar\\.gz"
+  linux/arm64:
+    - "mytool-.*-linux-aarch64\\.tar\\.gz"
+
+asset_type:
+  type: archive
+  strip_components: 1
+
+metadata:
+  default: metadata.json
+```
+
+Install the tool with `ocx --global add ocx.sh/ocx/mirror`. The binary is `ocx-mirror`. Validate the spec, preview a run, then sync the newest release:
+
+```sh
+ocx-mirror package validate mirror.yml
+ocx-mirror package check mirror.yml
+ocx-mirror package sync mirror.yml --latest
+```
+
+`validate` never touches the network, and `check` lists what a real run would push without pushing it. `sync` reuses the registry credentials of `docker login` and `ocx login`. The [ocx-mirror getting-started guide][mirror-getting-started] walks through the same flow with a worked example.
+
+`cascade` defaults to `true`. Set `cascade: false` only for repositories that must not advance rolling tags. This larger example adds a multi-platform asset matrix, version-range filtering and per-platform metadata overrides:
+
+```yaml
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+# Multi-platform asset matrix: each platform lists one or more regexes;
+# the union must resolve to exactly one asset filename per release.
+assets:
+  linux/amd64:
+    - "cmake-.*-linux-x86_64\\.tar\\.gz"      # >= 3.20.0
+    - "cmake-.*-Linux-x86_64\\.tar\\.gz"      # < 3.20.0
+  darwin/arm64:
+    - "cmake-.*-macos-universal\\.tar\\.gz"   # universal fat binary
+  windows/amd64:
+    - "cmake-.*-windows-x86_64\\.zip"         # >= 3.20.0
+    - "cmake-.*-win64-x64\\.zip"              # < 3.20.0
+
+asset_type:
+  type: archive
+  strip_components: 1
+
+# Per-platform metadata overrides for a non-trivial upstream.
+metadata:
+  default: metadata.json
+  platforms:
+    darwin/arm64: metadata-darwin.json
+    windows/amd64: metadata-windows.json
+
+# Version-range filtering: only mirror releases >= 3.31.0, max 10 per run.
+versions:
+  min: "3.31.0"
+  new_per_run: 10
+
+skip_prereleases: true
+cascade: true
+```
+
+## Repackaging GitHub Releases \{#github-releases\}
+
+The `github_release` source type reads the release feed, downloads the assets that match each platform regex and pushes them through the `ocx_lib` publisher API. By hand, a few [`curl`][curl] calls and a script give the same flow. `ocx_mirror` adds deterministic ordering across runs and a digest-verification slot, `verify.github_asset_digest`.
+
+The platform regex matrix is the part publishers re-derive most often. This [CMake][cmake] excerpt handles an asset name that changed mid-history:
+
+```yaml
+linux/amd64:
+  - "cmake-.*-linux-x86_64\\.tar\\.gz"      # >= 3.20.0
+  - "cmake-.*-Linux-x86_64\\.tar\\.gz"      # < 3.20.0
+```
+
+The pipeline applies every regex and requires the matches to resolve to exactly one asset filename per release. Two regexes that match the same filename are fine. Two that match different filenames abort with `Ambiguous`. The [full CMake example](#mirror) shows the whole matrix.
+
+### Repackaging a release asset by hand \{#github-releases-extract\}
+
+A release tarball usually wraps its content in a version-named directory such as `mytool-1.2.3-linux-x86_64/bin/mytool`. OCX bundles need a flat root. [`--extract`][cmd-package-create] bundles the downloaded asset directly, so you skip unpacking, stripping the wrapper and re-tarring.
+
+```sh
+curl -LO https://github.com/example-org/mytool/releases/download/v1.2.3/mytool-1.2.3-linux-x86_64.tar.gz
+
+# Treat the downloaded release asset itself as the archive to bundle, stripping
+# its single wrapper directory on the way in.
+ocx package create mytool-1.2.3-linux-x86_64.tar.gz \
+  --extract --strip-components 1 -m metadata.json \
+  -i ghcr.io/acme/mytool:1.2.3 -p linux/amd64 \
+  -o mytool-1.2.3-linux-amd64.tar.xz
+
+# Push the bundle. The build receipt next to it supplies the identifier and platform.
+ocx package push mytool-1.2.3-linux-amd64.tar.xz
+```
+
+A successful push prints a one-row table and exits 0:
+
+```text
+Identifier                 Digest         Tags  Keep Tags  Layers
+ghcr.io/acme/mytool:1.2.3  sha256:<hex>         0          mounted=0,uploaded=1,verified=0
+```
+
+Confirm that the registry lists the platform with [`ocx index list`][cmd-index-list]:
+
+```sh
+ocx --remote index list --platforms ghcr.io/acme/mytool:1.2.3
+```
+
+[Publish a package to a registry][authoring-building-pushing] covers authentication and rolling tags for this push.
+
+`--extract` unpacks the asset into a temporary directory and bundles that tree. The metadata sidecar, the [`binaries`][reference-binaries] scan and the libc check all run against the extracted content.
+
+Extraction is capped at the larger of 100 times the compressed size and 256 MiB. The cap is not configurable. `--strip-components` runs once, on the upstream asset, at authoring time. The metadata [`strip_components`][strip-components] field is a different mechanism that applies on every consumer's install. [Two `strip_components`, two different moments][bundle-anatomy-strip-components] explains how they relate.
+
+## Repackaging Homebrew formulae \{#homebrew\}
+
+[Homebrew][homebrew] formulae are [Ruby][ruby] programs, not declarative manifests. Each one encodes its own download URL, build steps and install hook, so no general "import a formula" path exists. Read the formula's `bottle do ... root_url ... sha256 ... end` block for binary bottles, or its `url` and `sha256` for source releases. Mirror those bytes through a `github_release`-shaped pipeline or fetch them directly. Then write a `metadata.json` that covers the env entries Homebrew's post-install script would have set.
+
+Binary bottles unpack as `<formula>/<version>/bin/...`, so `strip_components: 2` fits the usual layout. Add a `PATH` env entry with `"visibility": "public"` (the default is `private`) so consumers see the binaries. Source-built formulae do not repackage without a rebuild, since OCX distributes binaries.
+
+## Attaching description metadata \{#describe\}
+
+After the package is in the registry, [`ocx package description push`][cmd-package-describe] attaches a README, logo, title, keywords and short description. The fields are stored as an OCI image manifest under the internal tag `__ocx.desc`. They travel with every registry export and feed the [package catalog][catalog]. [`ocx package description pull`][cmd-package-info] reads them back, and `--save-readme` writes the published markdown to disk for diffing.
+
+```sh
+ocx package description push \
+  --readme README.md \
+  --logo logo.svg \
+  --title "mytool" \
+  --description "A small example tool" \
+  --keywords cli,linting \
+  mytool
+ocx package description pull acme/mytool
+```
+
+<Terminal src="/casts/authoring/package-describe.cast" title="Attaching package descriptions and reading them back" collapsed />
+
+:::tip[Mirror runs do not refresh descriptions]
+The `ocx_mirror` pipeline pushes packages, not descriptions. Run `ocx package description push` yourself whenever your README or logo changes. Otherwise the registry keeps the published `__ocx.desc` manifest.
+:::
+
+## See also \{#see-also\}
+
+- [`ocx package description push` reference][cmd-package-describe]
+- [`ocx package description pull` reference][cmd-package-info]
+- [Publish a package to a registry][authoring-building-pushing] for pushing by hand
+- [Announce a package][authoring-announce] to list it in an index
+
+
+[gh-releases]: https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
+[homebrew]: https://brew.sh/
+[ruby]: https://www.ruby-lang.org/
+[curl]: https://curl.se/
+[cmake]: https://cmake.org/
+[apt-repos]: https://wiki.debian.org/DebianRepository/Format
+[oci-image-spec]: https://github.com/opencontainers/image-spec
+[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx-mirror
+[mirror-getting-started]: https://github.com/ocx-sh/ocx-mirror/blob/main/docs/getting-started.md
+[catalog]: https://index.ocx.sh
+
+
+[cmd-package-describe]: ../reference/command-line/package-publishing.md#package-description-push
+[cmd-package-info]: ../reference/command-line/package-publishing.md#package-description-pull
+[cmd-index-list]: ../reference/command-line/index-commands.md#index-list
+[cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
+
+
+[strip-components]: ../reference/metadata/index.md#extraction-strip-components
+[reference-binaries]: ../reference/metadata/entry-points.md#executables
+
+
+[authoring-building-pushing]: ./build-and-push.mdx
+[authoring-layer-reuse]: ./build-and-push.mdx#layer-reuse
+[authoring-announce]: ./announce.md
+[bundle-anatomy-strip-components]: ./bundle-anatomy.mdx#strip-components

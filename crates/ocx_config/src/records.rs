@@ -12,18 +12,23 @@ use serde::Deserialize;
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RecordsOptions {
     /// Directory records are written to. Absent → recording is off.
+    ///
+    /// Overridden by the `--records-dir` flag and the `OCX_RECORDS_DIR` environment variable.
     pub dir: Option<PathBuf>,
 
     /// Name template for each record file, e.g. `{time}-{host}-{pid}-{rand}.json`.
     ///
     /// Must contain a component that varies per record, or two frames sharing a
-    /// sink resolve to one path.
+    /// sink resolve to one path. Defaults to `{time}-{pid}-{rand}.json`.
+    /// Overridden by the `--records-name` flag and the `OCX_RECORDS_NAME` environment variable.
+    #[schemars(extend("default" = "{time}-{pid}-{rand}.json"))]
     pub name: Option<String>,
 
     /// Fail posture when a record cannot be written.
     ///
-    /// `true` aborts the launch; `false` warns and proceeds. **Config-file only
-    /// at every tier** — never settable from the environment or a flag.
+    /// `true` aborts the launch; `false` warns and proceeds. **Config-file only at every tier** —
+    /// never settable from the environment or a flag.
+    ///
     /// Defaults `false` unlocked, `true` when SYSTEM-locked.
     // No env or flag source for this: a fat-fingered `--records-dir` would then kill the build.
     pub required: Option<bool>,

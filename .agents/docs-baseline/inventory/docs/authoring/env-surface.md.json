@@ -1,0 +1,94 @@
+{
+ "anchors": [
+  "env-surface",
+  "last-wins",
+  "lists",
+  "lists-consumer-semantics",
+  "migrating",
+  "migrating-decision",
+  "migrating-diff",
+  "see-also",
+  "templates",
+  "types",
+  "visibility"
+ ],
+ "commands": [
+  "ocx ci export",
+  "ocx env",
+  "ocx package create",
+  "ocx package exec",
+  "ocx package push"
+ ],
+ "flags": [
+  "--env",
+  "--metadata"
+ ],
+ "env": [],
+ "config_keys": [
+  "env"
+ ],
+ "exit_codes": [
+  "65"
+ ],
+ "slugs": [],
+ "links": [
+  "#lists",
+  "../in-depth/entry-points.md",
+  "../in-depth/environments.md",
+  "../in-depth/environments.md#last-wins",
+  "../in-depth/environments.md#two-surfaces",
+  "../reference/command-line.md#exec",
+  "../reference/command-line.md#package-exec",
+  "../reference/configuration.md#project-config-env",
+  "../reference/metadata.md#dependencies-visibility",
+  "../reference/metadata.md#env",
+  "../reference/metadata.md#env-interpolation",
+  "../reference/metadata.md#env-interpolation-render",
+  "../reference/metadata.md#env-list-separator",
+  "./entry-points.md",
+  "https://cmake.org/",
+  "https://containers.dev/implementors/json_reference/",
+  "https://docs.astral.sh/uv/",
+  "https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html",
+  "https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/envvars002.html",
+  "https://docs.rs/env_filter/latest/env_filter/",
+  "https://github.com/nodejs/node/issues/21575",
+  "https://go.dev/doc/godebug",
+  "https://nodejs.org/",
+  "https://nodejs.org/api/cli.html#node_optionsoptions",
+  "https://www.java.com/"
+ ],
+ "fences": [
+  "json:1a6f645b: {",
+  "json:3f682972: {",
+  "json:99ba5865: {",
+  "json:fd795a19: {"
+ ],
+ "facts": [
+  "Declared env variables are the contract between a publisher and every consumer of the package, so the surface must be right. [L6]",
+  "Use path for directory lists such as PATH and MANPATH, and constant for prefix variables and version markers. [L12]",
+  "Option-list variables fit neither shape, since path prepends with a separator and constant replaces the whole value. [L16]",
+  "A list entry appends its contribution with the author's separator and removes an earlier duplicate of it first. [L18]",
+  "The separator is required in package metadata, because no human is present to be told what was assumed. [L30]",
+  "JDK_JAVA_OPTIONS, NODE_OPTIONS and GODEBUG take the last occurrence as the override. [L38]",
+  "RUST_LOG resolves to the most specific target, so a broader directive appended later does not silence a narrower one. [L39]",
+  "Content-addressed storage puts a package at a different path on each machine, so values use interpolation tokens, not hardcoded paths. [L50]",
+  "Four token bodies are recognized, and the install-path bodies accept an optional native or posix render modifier. [L52]",
+  "The deps token resolves to a declared dependency's content directory, named by its last path segment or explicit name. [L56]",
+  "A wrapper uses its cmake dependency's installPath to keep the path to its helper stable across registry layouts. [L58]",
+  "The JSON example publishes MYTOOL_HELPER as a public constant pointing at the cmake dependency's cmake-gen binary. [L63]",
+  "A resolved value is capped at 64 KiB, and a chain exceeding it is refused with exit 65 at composition time. [L73]",
+  "Each env entry's visibility field selects one or both of two surfaces, interface for consumers and private for launchers. [L78]",
+  "private is the default, reaching only the package's own launchers and not consumers. [L87]",
+  "public reaches both surfaces, which suits variables like PATH and JAVA_HOME. [L88]",
+  "interface reaches consumers only, for values such as PKG_CONFIG_PATH that the package itself does not use. [L89]",
+  "The sealed value is rejected on env entries, since an entry reaching neither surface is dead configuration. [L91]",
+  "For constants the last declaration wins silently in exec and env, replacing the earlier one in the main path. [L99]",
+  "Entry visibility arrived with the entry-points release, and before that every variable was implicitly public. [L105]",
+  "Migration is a one-time annotation pass on metadata.json, and variables added later default to private. [L107]",
+  "Variables without a visibility field now default to private, so consumers need explicit public annotations. [L141]",
+  "PATH pointing at the bin directory should be public, since consumers need it on their PATH. [L147]",
+  "With entrypoints declared, OCX prepends the entrypoints directory to PATH, so bin can become private. [L153]"
+ ],
+ "lines": 198
+}

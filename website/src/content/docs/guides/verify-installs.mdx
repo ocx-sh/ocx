@@ -1,0 +1,119 @@
+---
+title: "Verify what you install"
+description: "Check who signed a package before you install it, online or air-gapped."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Check who signed a package before you install it, online or on an air-gapped runner.
+
+## How keyless signing works \{#supply-chain\}
+
+Downloading a binary from the right registry does not prove the right person built it. Anyone with push access, or the ability to intercept traffic, could swap in a different binary under the same tag. A signature binds one binary digest to one signer identity through a public log entry, so a swap is detectable.
+
+OCX uses [Sigstore][sigstore] keyless signing, so you manage no signing keys. [Fulcio][fulcio] issues a short-lived certificate that binds an ephemeral key to an OIDC identity. [Rekor][rekor] records the entry in a public, append-only transparency log.
+
+:::note[How keyless signing compares to GPG]
+GPG signing needs a long-lived key pair that someone must generate, distribute and revoke. Organizations often skip that work. Keyless signing replaces it with short-lived OIDC credentials that your CI system already provisions. The [Rekor][rekor] log plays the role of a public key server, with an immutable audit log in place of a mutable key ring.
+:::
+
+## Verify a package \{#supply-chain-verification\}
+
+[`ocx package verify`][cmd-package-verify] checks a published signature against an expected certificate identity and OIDC issuer. Pass both as flags for a one-off check. There is no default, because verification means nothing without a statement of whose signature you trust.
+
+Against public Sigstore, that is all you need. OCX fetches the trust root and verifies it over TUF. A private or self-hosted Sigstore deployment needs one more input: where the trust root comes from. Pass [`--sigstore-trusted-root`][env-sigstore-trusted-root], or configure it once and never pass it again ([Self-hosted Sigstore][in-depth-self-hosted-sigstore]).
+
+```shell
+ocx package verify \
+  -p linux/amd64 \
+  --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.example/pkg:1.0
+```
+
+Exit 0 means the signature matched the identity and issuer you passed. Any other exit code is a failure from the table below.
+
+:::tip[Want this to happen automatically?]
+Once you [pin a signer identity](./pin-signer-identity.mdx#supply-chain-trust-policy), [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install. You pass no flags and add no step. See [Verify by default](#supply-chain-auto-verify).
+:::
+
+## Verify without network access \{#supply-chain-offline\}
+
+Verification normally reaches Sigstore's public trust services to learn the [Rekor][rekor] public key. An air-gapped or hardened runner has no such egress. It still needs to prove that the binary it will run was signed by the right identity.
+
+Verification has two separate network surfaces. One is the registry that holds the artifact and its signature. In an air-gapped setup that is a local mirror you already run. The other is the Sigstore trust services. `--offline` removes only the second surface, and the registry is still read.
+
+So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sigstore-trusted-root] carries the Fulcio CA, the certificate-transparency log keys and the pinned Rekor key together, so OCX fetches nothing:
+
+```shell
+ocx --offline package verify \
+  -p linux/amd64 \
+  --sigstore-trusted-root /etc/ocx/trusted_root.json \
+  --certificate-identity ci@example.com \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  registry.internal/pkg:1.0
+```
+
+A successful online verify also caches the trust material it used. A later [`--offline`][arg-offline] verify against the same Rekor instance reuses that cache, so you can drop `--sigstore-trusted-root`. On a fleet, nobody passes the flag. The trust root is distributed once through configuration. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
+
+:::caution[Offline verify never skips]
+With no trusted-root file and no cached material, offline verify fails with exit 81 (`PolicyBlocked`, slug `offline_mode`) and names the remedy. It never treats "cannot reach the trust service" as "verified". An unverifiable package is an error, not a pass.
+:::
+
+## Verify by default \{#supply-chain-auto-verify\}
+
+A [`[[trust.policy]]`][config-trust] entry only helps if the check it describes runs. Left as a manual step, verification is the first thing skipped when a deploy runs late.
+
+Once a policy covers a package, every command that fetches it verifies its signature. That includes [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull]. It also includes every command that installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] and [`ocx patch test`][cmd-patch-test]). You add no flag and no separate step:
+
+```shell
+# with the ghcr.io/acme/* policy from the previous section in place
+ocx package install ghcr.io/acme/tool:1.0
+```
+
+The check runs once the manifest digest resolves, before OCX downloads any layer. A tampered digest or a signer outside the pinned identity aborts the install at that point. The exit codes match [`ocx package verify`][cmd-package-verify]:
+
+| Exit code | Meaning |
+|---|---|
+| `77` | Certificate identity or issuer mismatch |
+| `78` | Trust-root or policy problem |
+| `81` | Offline with no pinned Rekor key in any trust-root rung or the cache |
+| `79` | Missing signature |
+| `65` | Tampered bundle |
+
+Nothing has reached the package store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
+
+Trust is opt-in per scope. A package outside every `[[trust.policy]]` scope installs as it always did. OCX logs an `INFO` line that no policy covered it, and nothing blocks. The same rule applies to transitive dependencies, which are verified only if a policy also covers their scope. Pin a broad scope such as `ghcr.io/acme/*` to verify a whole dependency closure, and use `exclude` to carve out any subtree that must stay unsigned.
+
+Auto-verify reads only the operator `config.toml` tier. Unlike [`ocx package verify`][cmd-package-verify], a project `ocx.toml` policy never gates an install or pull.
+
+### Skip the check \{#supply-chain-skip\}
+
+Sometimes you need to skip the check, for example for a mirror with no referrers support or a package you are debugging. Pass `--no-verify` for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out. The `--verify` flag re-enables the check for one invocation even when the variable is set, because the flag always wins. Either bypass prints one `warning:` line per invocation, so a skipped check is visible on stderr.
+
+### Verify under `--offline`
+
+Under [`--offline`][arg-offline], a policy-covered install needs its trust material locally. Supply a [Sigstore trusted-root JSON][env-sigstore-trusted-root], or rely on the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/`. Offline never reaches the TUF fetch. With neither available, the install fails closed with exit `81` (`PolicyBlocked`, slug `offline_mode`) instead of installing something it could not check. This is the same rule that [verifying without network access](#supply-chain-offline) describes for the standalone command.
+
+:::tip[Learn more]
+[Command-line reference: `package install`][cmd-package-install] and [`package pull`][cmd-package-pull] hold the full auto-verify contract, options table and exit codes.
+[Environment reference: `OCX_NO_VERIFY`][env-no-verify] covers the CI-wide opt-out, truthy and falsy values, and forwarding to subprocess children.
+:::
+
+[sigstore]: https://www.sigstore.dev/
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[cmd-run]: ../reference/command-line/commands.md#exec
+[cmd-package-verify]: ../reference/command-line/package-consuming.md#package-verify
+[cmd-package-install]: ../reference/command-line/package-consuming.md#package-install
+[cmd-package-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
+[cmd-package-pull]: ../reference/command-line/package-consuming.md#package-pull
+[cmd-env-root]: ../reference/command-line/commands.md#env-root
+[cmd-patch-why]: ../reference/command-line/patch.md#patch-why
+[cmd-patch-test]: ../reference/command-line/patch.md#patch-test
+[arg-offline]: ../reference/command-line/index.md#arg-offline
+[env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
+[env-no-verify]: ../reference/environment.md#ocx-no-verify
+[config-trust]: ../reference/configuration.md#keys-trust
+[in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.md

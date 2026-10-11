@@ -789,7 +789,7 @@ def test_a_platform_the_source_does_not_offer_is_a_usage_error(
     `review_r1_testcov_package_copy.md` finding 4): 64 is correct, the code is
     wrong — a caller naming a platform the source does not carry is an
     invocation fault, not malformed registry data. The doc
-    (`website/src/docs/reference/command-line.md`'s copy exit-code table)
+    (`website/src/content/docs/reference/command-line/package-publishing.md`'s copy exit-code table)
     already reads 64 and stays there."""
     host = current_platform()
     # A platform a single-platform `make_package(..., platform=host)` build

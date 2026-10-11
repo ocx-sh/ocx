@@ -1,0 +1,23 @@
+{
+  "/docs/faq/": {
+    "fragments": {
+      "dependencies": "/docs/explanation/dependencies/#dependencies-no-version-ranges",
+      "dependencies-no-version-ranges": "/docs/explanation/dependencies/#dependencies-no-version-ranges",
+      "dependencies-security-patches": "/docs/explanation/dependencies/#dependencies-security-patches",
+      "dependencies-shared": "/docs/explanation/dependencies/#dependencies-shared",
+      "exec-vs-package-exec": "/docs/guides/run-project-tools/#exec-vs-package-exec",
+      "faq": "/docs/troubleshooting/platforms/",
+      "install-specific-version": "/docs/getting-started/install-ocx/#manual-pinned",
+      "installation-faq": "/docs/getting-started/install-ocx/#script-options",
+      "linux": "/docs/troubleshooting/platforms/#linux-gcompat",
+      "linux-namespace-gap": "/docs/troubleshooting/platforms/#linux-non-fhs",
+      "macos": "/docs/troubleshooting/platforms/#macos-codesign",
+      "macos-codesign-disable": "/docs/troubleshooting/platforms/#macos-codesign",
+      "macos-codesign-manual": "/docs/troubleshooting/platforms/#macos-codesign",
+      "project": "/docs/guides/run-project-tools/#exec-vs-package-exec",
+      "versioning": "/docs/explanation/versioning/#versioning-build-separator",
+      "versioning-build-separator": "/docs/explanation/versioning/#versioning-build-separator",
+      "windows": "/docs/troubleshooting/platforms/#windows-exec-resolution"
+    }
+  }
+}
