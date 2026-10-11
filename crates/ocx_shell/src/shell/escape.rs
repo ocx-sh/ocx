@@ -28,11 +28,31 @@ pub fn fish_double_quoted(value: &str) -> String {
     value.replace('\\', "\\\\").replace('$', "\\$").replace('"', "\\\"")
 }
 
-/// Escape `value` for a PowerShell or elvish single-quoted literal (`'` → `''`).
+/// Escape `value` for a PowerShell **single-quoted** literal.
 ///
-/// Keep emits single-quoted: double quotes let a value start a subexpression, and elvish rejects `\$`.
+/// PowerShell's tokenizer reads U+2018..U+201B as single-quote delimiters too (Windows PowerShell 5.1 and
+/// pwsh 7 alike), so a value carrying one closes the literal and the rest runs as code. Each is doubled
+/// with itself, which PowerShell reads back as that one character; so is the ASCII `'`.
+///
+/// Keep emits single-quoted: double quotes let a value start a subexpression.
 #[must_use]
-pub fn single_quoted_doubled(value: &str) -> String {
+pub fn powershell_single_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}'..='\u{201B}') {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Escape `value` for an elvish **single-quoted** raw string (`'` → `''`).
+///
+/// Elvish treats U+2018..U+201B as ordinary text, so doubling them would corrupt the value: never swap in
+/// the PowerShell escaper. Double quotes are no option, elvish rejects `\$` there.
+#[must_use]
+pub fn elvish_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
@@ -81,9 +101,25 @@ mod tests {
     }
 
     #[test]
-    fn single_quoted_doubled_only_doubles_the_quote() {
-        assert_eq!(single_quoted_doubled("it's"), "it''s");
-        assert_eq!(single_quoted_doubled("a\\$b`c"), "a\\$b`c");
+    fn powershell_single_quoted_doubles_the_ascii_and_typographic_quotes() {
+        assert_eq!(powershell_single_quoted("it's"), "it''s");
+        for c in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            assert_eq!(powershell_single_quoted(&format!("a{c}b")), format!("a{c}{c}b"));
+        }
+        assert_eq!(
+            powershell_single_quoted("a\\$b`c\u{201C}\u{201C}"),
+            "a\\$b`c\u{201C}\u{201C}"
+        );
+    }
+
+    #[test]
+    fn elvish_single_quoted_doubles_only_the_ascii_quote() {
+        assert_eq!(elvish_single_quoted("it's"), "it''s");
+        for c in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+            let s = format!("a{c}b");
+            assert_eq!(elvish_single_quoted(&s), s);
+        }
+        assert_eq!(elvish_single_quoted("a\\$b`c"), "a\\$b`c");
     }
 
     #[test]

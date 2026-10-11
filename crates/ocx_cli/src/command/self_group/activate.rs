@@ -735,7 +735,7 @@ fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
         // Evaluate only non-empty output (`Invoke-Expression $null` throws); `Out-String` keeps the newlines
         // `Invoke-Expression` would otherwise join with spaces.
         Shell::PowerShell => {
-            let quoted = escape::single_quoted_doubled(&path);
+            let quoted = escape::powershell_single_quoted(&path);
             format!(
                 "if (Test-Path -LiteralPath '{quoted}' -PathType Leaf) {{ $__ocx_global_env = (& '{quoted}' --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
             )
@@ -747,7 +747,7 @@ fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
         // `eval` needs the output as a positional argument: piping into it raises an arity error on every start.
         Shell::Elvish => {
             // `?(test -x …)`, not `has-external`: a path test, and `?(…)` turns a non-zero exit into false.
-            let quoted = escape::single_quoted_doubled(&path);
+            let quoted = escape::elvish_single_quoted(&path);
             format!("if ?(test -x '{quoted}') {{ eval ('{quoted}' --global env --shell={shell_name} | slurp) }}")
         }
         // Nushell has no string `eval`, so its JSON output is applied as data through `NU_ENV_APPLY_LOOP`,
