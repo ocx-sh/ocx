@@ -188,7 +188,7 @@ Set `dir:` on include block when all tasks should run relative to sub-taskfile's
 
 ## OCX-Specific Task Contracts
 
-- **Generation tasks** never fingerprint Rust source lists. A generator that is a Bazel target is a Bazel action: `schema:generate` builds the `//crates/ocx_schema:schemas` genrule (`ocx exec bazel -- bazel build`, `test:.build-binaries`' `CACHE_RC`), reads its outputs with `cquery --output=files`, refuses anything but the seven expected paths before writing one, and carries no `sources:` — Bazel is the cache. It calls `bazel:bootstrap` as a nested `task -d <root>`, because `website/schema.taskfile.yml` is included at two depths and go-task resolves a leading `:` one namespace up, not at the root. A cargo-built generator (`recordings:*`) depends on the compiled binary via `deps: [build]` + `sources: [<binary>]`; cargo already tracks source deps.
+- **Generation tasks** never fingerprint Rust source lists. A generator that is a Bazel target is a Bazel action: `schema:generate` builds the `//crates/ocx_schema:schemas` genrule (`ocx exec bazel -- bazel build`, `test:.build-binaries`' `CACHE_RC`), reads its outputs with `cquery --output=files`, refuses anything but the seven expected paths before writing one, and carries no `sources:` — Bazel is the cache. It calls `bazel:bootstrap` as a nested `task -d <root>`, because `website/schema.taskfile.yml` is included at two depths and go-task resolves a leading `:` one namespace up, not at the root. The recorder (`recordings:*`) gets `test/bin/ocx` from `rust:build` (nested `task -d <root>`, `SKIP_BUILD` pinned off) and fingerprints on `sources: [<binary>]`; it never runs cargo.
 
 ## Sources
 
