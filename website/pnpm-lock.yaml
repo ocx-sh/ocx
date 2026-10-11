@@ -15,17 +15,11 @@ importers:
         specifier: 0.42.4
         version: 0.42.4(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))(supports-color@5.5.0)
       '@ocx-sh/theme':
-        specifier: 0.1.1
-        version: 0.1.1(@astrojs/starlight@0.42.4(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))
-      asciinema-player:
-        specifier: ^3.17.0
-        version: 3.17.0
+        specifier: github:ocx-sh/website#0443625f4b0a0e6a1bf393fc2205bb438d439302&path:/packages/theme
+        version: https://codeload.github.com/ocx-sh/website/tar.gz/0443625f4b0a0e6a1bf393fc2205bb438d439302#path:/packages/theme(@astrojs/starlight@0.42.4(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))
       astro:
         specifier: 7.3.5
         version: 7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1)
-      unist-util-visit:
-        specifier: ^5.1.0
-        version: 5.1.0
     devDependencies:
       '@lhci/cli':
         specifier: 0.15.1
@@ -36,18 +30,6 @@ importers:
       playwright-core:
         specifier: ^1.63.0
         version: 1.64.0
-      remark-mdx:
-        specifier: ^3.1.1
-        version: 3.1.1(supports-color@5.5.0)
-      remark-parse:
-        specifier: ^11.0.0
-        version: 11.0.0(supports-color@5.5.0)
-      unified:
-        specifier: ^11.0.5
-        version: 11.0.5
-      vfile:
-        specifier: ^6.0.3
-        version: 6.0.3
 
 packages:
 
@@ -652,8 +634,9 @@ packages:
       '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
       '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
 
-  '@ocx-sh/theme@0.1.1':
-    resolution: {integrity: sha512-TrB/v+fM3WU50GCCvimkdSSpvHUC5GXJtcphOn3P7OIWIVOj+9nTUiDj49vlCaee0c09N4DqmgJQ0CiRrIOyBw==}
+  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/0443625f4b0a0e6a1bf393fc2205bb438d439302#path:/packages/theme':
+    resolution: {gitHosted: true, integrity: sha512-96L60KvK5FCzYCTkmUp2Jk3GGb6j7tjxJCBgU///sfsCAcX1Zul1T5ZFAv2z+EoXrC6vRo3HToXmAT9KQfd9EQ==, path: /packages/theme, tarball: https://codeload.github.com/ocx-sh/website/tar.gz/0443625f4b0a0e6a1bf393fc2205bb438d439302}
+    version: 0.1.1
     engines: {node: '>=22'}
     hasBin: true
     peerDependencies:
@@ -1136,9 +1119,6 @@ packages:
 
   asciinema-player@3.15.1:
     resolution: {integrity: sha512-agVYeNlPxthLyAb92l9AS7ypW0uhesqOuQzyR58Q4Sj+MvesQztZBgx86lHqNJkB8rQ6EP0LeA9czGytQUBpYw==}
-
-  asciinema-player@3.17.0:
-    resolution: {integrity: sha512-JbjNJmA2TLIeYNaOEja+kVSzXadKoqpIzVVmfBGNj2DmdtE/vExBCnkE8NYEcpaQcDvUYg8Ltt0urT80frACmw==}
 
   ast-types@0.13.4:
     resolution: {integrity: sha512-x1FCFnFifvYDDzTaLII71vG5uvDwgtmDTEVWAxrgeiR8VjMONcCXJx7E+USjDtHlwFmt9MysbqgF9b9Vjr6w+w==}
@@ -3939,7 +3919,7 @@ snapshots:
       '@tybys/wasm-util': 0.10.4
     optional: true
 
-  '@ocx-sh/theme@0.1.1(@astrojs/starlight@0.42.4(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))':
+  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/0443625f4b0a0e6a1bf393fc2205bb438d439302#path:/packages/theme(@astrojs/starlight@0.42.4(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))':
     dependencies:
       '@fontsource/ibm-plex-mono': 5.3.0
       '@fontsource/ibm-plex-sans': 5.3.0
@@ -3971,6 +3951,7 @@ snapshots:
       '@zag-js/vanilla': 1.44.0
       asciinema-player: 3.15.1
       astro: 7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1)
+      unist-util-visit: 5.1.0
     optionalDependencies:
       '@astrojs/starlight': 0.42.4(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(astro@7.3.5(@astrojs/markdown-remark@7.3.2(supports-color@5.5.0))(@types/node@24.19.2)(yaml@2.9.1))(supports-color@5.5.0)
 
@@ -4563,12 +4544,6 @@ snapshots:
   array-iterate@2.0.1: {}
 
   asciinema-player@3.15.1:
-    dependencies:
-      '@babel/runtime': 7.29.10
-      solid-js: 1.9.17
-      solid-transition-group: 0.2.3(solid-js@1.9.17)
-
-  asciinema-player@3.17.0:
     dependencies:
       '@babel/runtime': 7.29.10
       solid-js: 1.9.17

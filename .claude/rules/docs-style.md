@@ -149,7 +149,7 @@ A page using a component is `.mdx` and imports it; props → `subsystem-website.
 - `<Tree>` / `<Node>` / `<Description>` — filesystem trees with annotations (`Tree.astro`, `TreeNode.astro`, `TreeDescription.astro`)
 - `<Tabs>` / `<TabItem>` — tabbed alternatives (`Tabs.astro`, `TabItem.astro`)
 - `<Steps>` — numbered procedure (`@astrojs/starlight/components`)
-- `<Terminal>` — recorded `.cast` session (local `website/src/components/Terminal.astro`)
+- `<Terminal>` — recorded `.cast` session (`@ocx-sh/theme/components/Terminal.astro`)
 - `<PlatformIcons>` — OS glyph lists (`PlatformIcons.astro`)
 - `:::note | tip | caution | danger` — callout boxes
 

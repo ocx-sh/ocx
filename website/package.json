@@ -12,18 +12,12 @@
   "dependencies": {
     "@astrojs/markdown-remark": "7.3.2",
     "@astrojs/starlight": "0.42.4",
-    "@ocx-sh/theme": "0.1.1",
-    "asciinema-player": "^3.17.0",
-    "astro": "7.3.5",
-    "unist-util-visit": "^5.1.0"
+    "@ocx-sh/theme": "github:ocx-sh/website#0443625f4b0a0e6a1bf393fc2205bb438d439302&path:/packages/theme",
+    "astro": "7.3.5"
   },
   "devDependencies": {
     "@lhci/cli": "0.15.1",
     "lighthouse": "12.6.1",
-    "playwright-core": "^1.63.0",
-    "remark-mdx": "^3.1.1",
-    "remark-parse": "^11.0.0",
-    "unified": "^11.0.5",
-    "vfile": "^6.0.3"
+    "playwright-core": "^1.63.0"
   }
 }
