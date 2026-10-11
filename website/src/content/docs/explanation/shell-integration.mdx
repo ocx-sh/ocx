@@ -3,7 +3,7 @@ title: "Shell Integration"
 ---
 {/* doc_type: explanation */}
 
-import Terminal from '../../../components/Terminal.astro';
+import Terminal from '@ocx-sh/theme/components/Terminal.astro';
 
 
 Every time you sit down at a shell, OCX has to answer two questions before it can put anything on `PATH`. It asks *should this project's binaries be here at all*, and *are they still the right ones*. The first question is about trust — a project's `ocx.toml` can name any OCI registry, and nothing stops a clone from naming an attacker's. The second is about staleness — an `ocx --global add` or an `ocx update` run five minutes ago should not need a fresh terminal to take effect. This page covers the mechanism that answers both: the per-prompt shell hook and the consent model that gates it. When a shell does not pick up its tools, [Troubleshoot a shell][ts-top] covers what to check.

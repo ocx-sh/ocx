@@ -5,7 +5,7 @@ paths:
 
 # Website Subsystem
 
-Astro 7 + Starlight 0.42 docs site at `website/`, served under `https://ocx.sh/docs/`. Theme `@ocx-sh/theme` 0.1.1 (pinned exact), pnpm 11 via ocx (`ocx exec pnpm node -- pnpm …`; plain `pnpm` on PATH is v10). Auto-gen content from the build tasks.
+Astro 7 + Starlight 0.42 docs site at `website/`, served under `https://ocx.sh/docs/`. Theme `@ocx-sh/theme` pinned to a commit of `ocx-sh/website` (git dependency; `allowBuilds` in `pnpm-workspace.yaml` names that exact URL, so a repin edits both), pnpm 11 via ocx (`ocx exec pnpm node -- pnpm …`; plain `pnpm` on PATH is v10). Auto-gen content from the build tasks.
 
 ## Design Rationale
 
@@ -16,11 +16,9 @@ Starlight + the shared `@ocx-sh/theme` — one theme across the ocx.sh sites; in
 | Path | Purpose |
 |------|---------|
 | `astro.config.mjs` | Astro/Starlight config (base `/docs/`, sidebar, remark plugins, theme plugin) |
-| `plugins/*.mjs` | Remark plugins: `includes` (`@/` = `src/`), `heading-ids`, `md-links`; tests beside them (`node --test plugins/`) |
-| `plugins/redirects.mjs`, `redirects.d/<owner>.json` | Old-URL redirect map, one file per owner |
+| `plugins/redirects.mjs`, `redirects.d/<owner>.json` | Old-URL redirect map, one file per owner. The remark plugins (`includes` with `@/` = `src/`, `heading-ids`, `md-links`) come from `@ocx-sh/theme/remark`, passed in `astro.config.mjs` |
 | `tests/` | Node tests (`node --test`): redirect fixtures, cluster set, `old-urls.test.mjs` (every URL in `old-urls.txt` still resolves over a built dist) |
 | `old-urls.txt` | Every URL (and `page#anchor`) the previous site served, one per line |
-| `src/components/Terminal.astro` | Local asciinema terminal component (the theme has none) |
 | `src/content/docs/**/*.{md,mdx}` | Documentation pages — the content root |
 | `src/content/docs/reference/*.md` | Reference pages (command-line, environment, metadata, ...) |
 | `src/content/docs/reference/dependencies.md` | **Generated, gitignored** — SBOM dependency table |
@@ -68,7 +66,7 @@ Pages are `.md` or `.mdx`; a page using a component is `.mdx` and imports it.
 |-----------|--------|
 | `Tabs`, `TabItem`, `Tooltip`, `Tree`, `PlatformIcons` | `@ocx-sh/theme/components/<Name>.astro` |
 | `Node` (tree node), `Description` (tree annotation) | `@ocx-sh/theme/components/TreeNode.astro`, `TreeDescription.astro` |
-| `Terminal` | `website/src/components/Terminal.astro` (relative import) |
+| `Terminal` | `@ocx-sh/theme/components/Terminal.astro` |
 | `Steps` | `@astrojs/starlight/components` |
 
 Props live in the theme package; read the component source rather than copying signatures here. `<Terminal src="/casts/x.cast" title="..." collapsed />` plays a recording (src is base-relative; the component adds `/docs/`); inline frames are not supported.

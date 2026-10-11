@@ -1,15 +1,13 @@
 // The docs section of ocx.sh: `/docs/` (a claim in the theme's nav.json).
-// Pages live under src/content/docs; `@/` in an include names src/ (plugins/includes.mjs).
+// Pages live under src/content/docs; `@/` in an include names src/ (the theme's remarkIncludes).
 import { fileURLToPath } from 'node:url';
 
 import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
+import { remarkHeadingIds, remarkIncludes, remarkMdLinks } from '@ocx-sh/theme/remark';
 import ocxTheme from '@ocx-sh/theme/starlight';
 import { defineConfig } from 'astro/config';
 
-import { remarkHeadingIds } from './plugins/heading-ids.mjs';
-import { remarkIncludes } from './plugins/includes.mjs';
-import { remarkMdLinks } from './plugins/md-links.mjs';
 import { ocxRedirects } from './plugins/redirects.mjs';
 
 const BASE = '/docs/';

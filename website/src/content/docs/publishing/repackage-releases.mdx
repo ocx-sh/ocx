@@ -5,7 +5,7 @@ description: "Turn an upstream GitHub Release, Homebrew bottle or vendor archive
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
-import Terminal from '../../../components/Terminal.astro'
+import Terminal from '@ocx-sh/theme/components/Terminal.astro'
 
 By the end of this page you have an upstream release repackaged as an OCX package. Upstream projects usually ship binaries as a [Homebrew formula][homebrew], a [GitHub Release][gh-releases] zip, an [APT repository][apt-repos] or a signed installer. You reformat those artifacts into [OCI image manifests][oci-image-spec] without re-bundling content. You need the upstream asset and a `metadata.json`. The [`ocx_mirror`][in-tree-mirror-spec] tool automates the recurring steps.
 
